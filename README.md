@@ -91,9 +91,9 @@ Power users rejoice. Everything is accessible via keyboard:
 ```bash
 # Prerequisites: Rust 1.75+, platform dependencies (see CONTRIBUTING.md)
 
-git clone https://github.com/YOUR_USERNAME/pureflow.git
-cd pureflow
-cargo run -p pureflow-app
+git clone https://github.com/hiwavebrowser/hiwave-macos.git
+cd hiwave-macos
+cargo run -p hiwave-app
 ```
 
 ---
@@ -134,21 +134,19 @@ We have strong opinions about how browsing should work, but we offer three modes
 - ✅ Flow Shield (ad blocking)
 - ✅ Flow Vault (password manager)
 - ✅ Command palette
-- 🔄 Settings page
-- 🔄 Bidirectional IPC sync
-
-### Next (Beta)
-- [ ] Find in Page (Ctrl+F)
-- [ ] Bookmarks
-- [ ] History
-- [ ] Downloads manager
-- [ ] Context menus
-- [ ] Import from Chrome/Firefox
+- ✅ Flow Shield (ad blocking)
+- ✅ Settings page
+- 🔄 Bidirectional IPC 
+- ✅ Find in Page (Ctrl+F)
+- ✅ History
+- ✅ Downloads manager
+- ✅ Context menus
+- ✅ Import from Chrome/Firefox
+- ✅ Tab audio indicators
 
 ### Future
-- [ ] Zen Sync (cross-device)
+- [ ] Workspace Sync (cross-device)
 - [ ] Reader Mode
-- [ ] Tab audio indicators
 - [ ] Themes (light mode)
 - [ ] Mobile companion
 
@@ -171,20 +169,20 @@ cargo clippy                  # Lint
 
 ---
 
-## Support Zen's Development
+## Support HiWave's Development
 
 HiWave is **free and open source**. No ads, no tracking, no data selling.
 
-If Zen helps you focus better, consider supporting its development:
+If HiWave helps you focus better, consider supporting its development:
 
 <p align="center">
-  <a href="https://github.com/sponsors/YOUR_USERNAME">
+  <a href="https://github.com/sponsors/hiwavebrowser">
     <img src="https://img.shields.io/badge/sponsor-GitHub%20Sponsors-ea4aaa" alt="GitHub Sponsors" />
   </a>
   <a href="https://ko-fi.com/YOUR_USERNAME">
     <img src="https://img.shields.io/badge/support-Ko--fi-ff5e5b" alt="Ko-fi" />
   </a>
-  <a href="https://opencollective.com/pureflow">
+  <a href="https://opencollective.com/hiwavebrowser">
     <img src="https://img.shields.io/badge/support-Open%20Collective-3385ff" alt="Open Collective" />
   </a>
 </p>
@@ -192,13 +190,13 @@ If Zen helps you focus better, consider supporting its development:
 Your support helps cover:
 - Development time
 - Infrastructure costs
-- Future features like Zen Sync
+- Future features like Workspace Sync
 
 ---
 
 ## Architecture
 
-Zen uses a **multi-WebView architecture**:
+HiWave uses a **multi-WebView architecture**:
 
 ```
 ┌─────────────────────────────────────────┐
@@ -227,14 +225,14 @@ This means:
 - ✅ Free to use, modify, and distribute
 - ✅ Source code is open
 - ✅ You can build commercial products with it
-- ⚠️ Changes to Zen's files must be shared under MPL-2.0
+- ⚠️ Changes to HiWave's files must be shared under MPL-2.0
 
 ---
 
 ## FAQ
 
 **Q: Why not just use Firefox/Brave/Arc?**  
-A: They're great browsers! But none of them have The Shelf, tab decay, or our specific philosophy around reducing cognitive load. Zen is for people who want a browser that actively helps them browse *less*.
+A: They're great browsers! But none of them have The Shelf, tab decay, or our specific philosophy around reducing cognitive load. HiWave is for people who want a browser that actively helps them browse *less*.
 
 **Q: Is this production-ready?**  
 A: Not yet. We're in alpha. Use it as a secondary browser while we iron out the kinks.
@@ -243,7 +241,7 @@ A: Not yet. We're in alpha. Use it as a secondary browser while we iron out the 
 A: Eventually! Desktop is the priority for now.
 
 **Q: How do you make money?**  
-A: We don't yet. Future plans include optional Zen Sync (paid) and possibly search partnerships. We will never sell your data or show ads.
+A: We don't yet. Future plans include optional Workspace-Sync (paid) and possibly search partnerships. We will never sell your data or show ads.
 
 ---
 
@@ -252,7 +250,7 @@ A: We don't yet. Future plans include optional Zen Sync (paid) and possibly sear
 </p>
 
 <p align="center">
-  <a href="https://zenbrowser.io">Website</a> •
-  <a href="https://github.com/YOUR_USERNAME/pureflow">GitHub</a> •
-  <a href="https://twitter.com/zenbrowser">Twitter</a>
+  <a href="https://www.hiwavebrowser.com">Website</a> •
+  <a href="https://github.com/hiwavebrowser/hiwave-macos">GitHub</a> •
+  <a href="https://twitter.com/hiwavebrowser">Twitter</a>
 </p>
