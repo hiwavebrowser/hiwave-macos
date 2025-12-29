@@ -1,0 +1,951 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HiWave Report - Your Browsing Insights</title>
+    <!-- Chart.js is injected by Rust before page load -->
+    <style>
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-tertiary: #334155;
+            --bg-elevated: #475569;
+            --accent: #06b6d4;
+            --accent-hover: #22d3ee;
+            --accent-dark: #0891b2;
+            --accent-subtle: rgba(6, 182, 212, 0.08);
+            --accent-medium: rgba(6, 182, 212, 0.15);
+            --text-primary: #f1f5f9;
+            --text-secondary: #cbd5e1;
+            --text-muted: #94a3b8;
+            --text-disabled: #64748b;
+            --border: #1f2937;
+            --border-subtle: #16213e;
+            --success: #10b981;
+            --success-subtle: rgba(16, 185, 129, 0.15);
+            --error: #ef4444;
+            --error-subtle: rgba(239, 68, 68, 0.15);
+            --warning: #f59e0b;
+            --warning-subtle: rgba(245, 158, 11, 0.15);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background: radial-gradient(circle at top right, rgba(6, 182, 212, 0.3), transparent 40%) var(--bg-primary);
+            color: var(--text-primary);
+            padding: 2rem;
+            overflow-y: auto;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            margin-bottom: 2rem;
+        }
+
+        h1 {
+            margin: 0 0 0.5rem;
+            font-size: 2rem;
+            background: linear-gradient(135deg, #06b6d4 0%, #22d3ee 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
+        .period-selector {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1.5rem;
+            flex-wrap: wrap;
+        }
+
+        .period-btn {
+            padding: 0.5rem 1rem;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+
+        .period-btn:hover {
+            background: var(--bg-tertiary);
+            border-color: var(--accent);
+        }
+
+        .period-btn.active {
+            background: var(--accent);
+            color: var(--bg-primary);
+            border-color: var(--accent);
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .stat-card {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 1.25rem;
+            border: 1px solid var(--border);
+        }
+
+        .stat-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            line-height: 1;
+        }
+
+        .stat-card.accent .stat-value {
+            color: var(--accent);
+        }
+
+        .stat-card.success .stat-value {
+            color: var(--success);
+        }
+
+        .stat-card.danger .stat-value {
+            color: #ef4444;
+        }
+
+        .stat-card.warning .stat-value {
+            color: #f59e0b;
+        }
+
+        .stat-card.info .stat-value {
+            color: #3b82f6;
+        }
+
+        .chart-section {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+            border: 1px solid var(--border);
+        }
+
+        .section-title {
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.15em;
+            color: var(--accent);
+            margin-bottom: 1rem;
+            font-weight: 600;
+        }
+
+        .chart-container {
+            position: relative;
+            height: 300px;
+            margin-top: 1rem;
+        }
+
+        .domain-list, .workspace-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            max-height: 400px;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: rgba(100, 116, 139, 0.3) transparent;
+        }
+
+        .domain-list::-webkit-scrollbar,
+        .workspace-list::-webkit-scrollbar {
+            width: 5px;
+        }
+
+        .domain-list::-webkit-scrollbar-track,
+        .workspace-list::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .domain-list::-webkit-scrollbar-thumb,
+        .workspace-list::-webkit-scrollbar-thumb {
+            background: rgba(100, 116, 139, 0.3);
+            border-radius: 999px;
+        }
+
+        .domain-list::-webkit-scrollbar-thumb:hover,
+        .workspace-list::-webkit-scrollbar-thumb:hover {
+            background: rgba(6, 182, 212, 0.4);
+        }
+
+        .domain-item, .workspace-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem;
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            transition: background 0.2s;
+        }
+
+        .domain-item:hover, .workspace-item:hover {
+            background: var(--bg-elevated);
+        }
+
+        .domain-name, .workspace-name {
+            font-weight: 500;
+            color: var(--text-primary);
+        }
+
+        .domain-stats, .workspace-stats {
+            display: flex;
+            gap: 1rem;
+            font-size: 0.875rem;
+            color: var(--text-muted);
+        }
+
+        .export-section {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 1.5rem;
+        }
+
+        .export-btn {
+            padding: 0.5rem 1rem;
+            background: var(--accent);
+            border: none;
+            border-radius: 6px;
+            color: var(--bg-primary);
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.875rem;
+            transition: all 0.2s;
+        }
+
+        .export-btn:hover {
+            background: var(--accent-hover);
+            transform: translateY(-1px);
+        }
+
+        .loading {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-muted);
+        }
+
+        .error {
+            background: var(--error-subtle);
+            border: 1px solid var(--error);
+            border-radius: 8px;
+            padding: 1rem;
+            color: var(--error);
+            margin-bottom: 1rem;
+        }
+
+        .time-format {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        /* Modal Styles */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            border: 1px solid var(--bg-tertiary);
+            max-width: 500px;
+            width: 90%;
+            max-height: 80vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--bg-tertiary);
+        }
+
+        .modal-header h3 {
+            margin: 0;
+            font-size: 1.25rem;
+            color: var(--text-primary);
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 1.5rem;
+            cursor: pointer;
+            padding: 0;
+            width: 32px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 4px;
+            transition: all 0.2s ease;
+        }
+
+        .modal-close:hover {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+
+        .modal-body {
+            padding: 1.5rem;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .share-preview {
+            background: var(--bg-primary);
+            border: 1px solid var(--bg-tertiary);
+            border-radius: 8px;
+            padding: 1.5rem;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 0.95rem;
+            line-height: 1.6;
+            color: var(--text-primary);
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .modal-footer {
+            display: flex;
+            gap: 0.75rem;
+            padding: 1.5rem;
+            border-top: 1px solid var(--bg-tertiary);
+            justify-content: flex-end;
+        }
+
+        .modal-btn {
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.95rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .modal-btn-primary {
+            background: var(--accent);
+            color: white;
+        }
+
+        .modal-btn-primary:hover {
+            background: var(--accent-hover);
+            transform: translateY(-1px);
+        }
+
+        .modal-btn-secondary {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+
+        .modal-btn-secondary:hover {
+            background: var(--bg-elevated);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>HiWave Report</h1>
+            <p class="subtitle">Your browsing insights and productivity metrics</p>
+        </div>
+
+        <div class="period-selector">
+            <button class="period-btn active" data-period="today">Today</button>
+            <button class="period-btn" data-period="weekly">Last 7 Days</button>
+            <button class="period-btn" data-period="monthly">Last 30 Days</button>
+        </div>
+
+        <div id="error-container"></div>
+        <div id="loading" class="loading">Loading analytics data...</div>
+        <div id="content" style="display: none;">
+
+            <!-- Summary Stats -->
+            <div class="stats-grid">
+                <div class="stat-card accent">
+                    <div class="stat-label">Trackers Blocked</div>
+                    <div class="stat-value" id="stat-trackers">0</div>
+                </div>
+                <div class="stat-card success">
+                    <div class="stat-label">Ads Blocked</div>
+                    <div class="stat-value" id="stat-ads">0</div>
+                </div>
+                <div class="stat-card danger">
+                    <div class="stat-label">Popups Blocked</div>
+                    <div class="stat-value" id="stat-popups">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Pages Visited</div>
+                    <div class="stat-value" id="stat-pages">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Focus Time</div>
+                    <div class="stat-value" id="stat-focus">
+                        0<span class="time-format">m</span>
+                    </div>
+                </div>
+                <div class="stat-card warning">
+                    <div class="stat-label">⏱️ Time Saved</div>
+                    <div class="stat-value" id="stat-time-saved">
+                        0<span class="time-format">m</span>
+                    </div>
+                </div>
+                <div class="stat-card info">
+                    <div class="stat-label">📦 Bandwidth Saved</div>
+                    <div class="stat-value" id="stat-bandwidth-saved">
+                        0<span class="time-format">MB</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Activity Chart -->
+            <div class="chart-section">
+                <div class="section-title">Daily Activity</div>
+                <div class="chart-container">
+                    <canvas id="activityChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Protection Stats Chart -->
+            <div class="chart-section">
+                <div class="section-title">Protection Stats</div>
+                <div class="chart-container">
+                    <canvas id="protectionChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Top Domains -->
+            <div class="chart-section">
+                <div class="section-title">Top Domains</div>
+                <div class="domain-list" id="domain-list">
+                    <!-- Populated dynamically -->
+                </div>
+            </div>
+
+            <!-- Workspace Stats -->
+            <div class="chart-section">
+                <div class="section-title">Workspace Activity</div>
+                <div class="workspace-list" id="workspace-list">
+                    <!-- Populated dynamically -->
+                </div>
+            </div>
+
+            <!-- Export Options -->
+            <div class="export-section">
+                <button class="export-btn" onclick="exportData('json')">Export as JSON</button>
+                <button class="export-btn" onclick="exportData('csv')">Export as CSV</button>
+                <button class="export-btn" onclick="shareToSocial()" style="background: linear-gradient(135deg, #1da1f2, #0891b2);">📱 Share to Social</button>
+                <button class="export-btn" onclick="resetAnalytics()" style="background: #ef4444;">🔄 Reset & Archive Data</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Share Preview Modal -->
+    <div id="shareModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Share Your Stats</h3>
+                <button class="modal-close" onclick="closeShareModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="share-preview" id="sharePreview"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-btn modal-btn-secondary" onclick="closeShareModal()">Cancel</button>
+                <button class="modal-btn modal-btn-primary" onclick="copyShareText()">📋 Copy to Clipboard</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let activityChart = null;
+        let protectionChart = null;
+        let currentPeriod = 'today';
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            setupPeriodButtons();
+            loadReport('today');
+        });
+
+        function setupPeriodButtons() {
+            document.querySelectorAll('.period-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    currentPeriod = btn.dataset.period;
+                    loadReport(currentPeriod);
+                });
+            });
+        }
+
+        async function loadReport(period) {
+            showLoading();
+            clearError();
+
+            try {
+                let data;
+                if (period === 'today') {
+                    data = await sendIpc('get_today_stats', {});
+                } else if (period === 'weekly') {
+                    const report = await sendIpc('get_weekly_report', {});
+                    data = report.total_stats;
+                    data.daily_breakdown = report.daily_breakdown;
+                    data.top_domains = report.top_domains;
+                    data.workspace_breakdown = report.workspace_breakdown;
+                } else if (period === 'monthly') {
+                    const report = await sendIpc('get_monthly_report', {});
+                    data = report.total_stats;
+                    data.daily_breakdown = report.daily_breakdown;
+                    data.top_domains = report.top_domains;
+                    data.workspace_breakdown = report.workspace_breakdown;
+                }
+
+                renderReport(data);
+                hideLoading();
+            } catch (error) {
+                showError('Failed to load analytics data: ' + error.message);
+                hideLoading();
+            }
+        }
+
+        function renderReport(data) {
+            // Update summary stats
+            document.getElementById('stat-trackers').textContent = formatNumber(data.trackers_blocked || 0);
+            document.getElementById('stat-ads').textContent = formatNumber(data.ads_blocked || 0);
+            document.getElementById('stat-popups').textContent = formatNumber(data.popups_blocked || 0);
+            document.getElementById('stat-pages').textContent = formatNumber(data.pages_visited || 0);
+
+            const focusMinutes = Math.floor((data.focus_time || 0) / 60);
+            document.getElementById('stat-focus').innerHTML =
+                formatNumber(focusMinutes) + '<span class="time-format">m</span>';
+
+            // Format time saved (seconds to hours/minutes)
+            const timeSavedSeconds = data.time_saved || 0;
+            const timeSavedHours = Math.floor(timeSavedSeconds / 3600);
+            const timeSavedMinutes = Math.floor((timeSavedSeconds % 3600) / 60);
+            let timeSavedText;
+            if (timeSavedHours > 0) {
+                timeSavedText = formatNumber(timeSavedHours) + '<span class="time-format">h</span> ' +
+                               formatNumber(timeSavedMinutes) + '<span class="time-format">m</span>';
+            } else {
+                timeSavedText = formatNumber(timeSavedMinutes) + '<span class="time-format">m</span>';
+            }
+            document.getElementById('stat-time-saved').innerHTML = timeSavedText;
+
+            // Format bandwidth saved (bytes to MB/GB)
+            const bandwidthBytes = data.bandwidth_saved || 0;
+            const bandwidthMB = bandwidthBytes / (1024 * 1024);
+            const bandwidthGB = bandwidthMB / 1024;
+            let bandwidthText;
+            if (bandwidthGB >= 1) {
+                bandwidthText = bandwidthGB.toFixed(2) + '<span class="time-format">GB</span>';
+            } else {
+                bandwidthText = bandwidthMB.toFixed(1) + '<span class="time-format">MB</span>';
+            }
+            document.getElementById('stat-bandwidth-saved').innerHTML = bandwidthText;
+
+            // Render charts
+            if (data.daily_breakdown && data.daily_breakdown.length > 0) {
+                renderActivityChart(data.daily_breakdown);
+                renderProtectionChart(data.daily_breakdown);
+            } else {
+                // Single day data
+                renderActivityChart([data]);
+                renderProtectionChart([data]);
+            }
+
+            // Render top domains
+            if (data.top_domains) {
+                renderTopDomains(data.top_domains);
+            }
+
+            // Render workspace stats
+            if (data.workspace_breakdown) {
+                renderWorkspaceStats(data.workspace_breakdown);
+            }
+        }
+
+        function renderActivityChart(dailyData) {
+            const ctx = document.getElementById('activityChart').getContext('2d');
+
+            if (activityChart) {
+                activityChart.destroy();
+            }
+
+            const labels = dailyData.map(d => d.date || 'Today');
+            const pagesData = dailyData.map(d => d.pages_visited || 0);
+            const tabsData = dailyData.map(d => d.tabs_opened || 0);
+
+            activityChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: 'Pages Visited',
+                            data: pagesData,
+                            borderColor: '#06b6d4',
+                            backgroundColor: 'rgba(6, 182, 212, 0.1)',
+                            tension: 0.4,
+                            fill: true
+                        },
+                        {
+                            label: 'Tabs Opened',
+                            data: tabsData,
+                            borderColor: '#10b981',
+                            backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                            tension: 0.4,
+                            fill: true
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            labels: { color: '#cbd5e1' }
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            ticks: { color: '#94a3b8' },
+                            grid: { color: '#1f2937' }
+                        },
+                        x: {
+                            ticks: { color: '#94a3b8' },
+                            grid: { color: '#1f2937' }
+                        }
+                    }
+                }
+            });
+        }
+
+        function renderProtectionChart(dailyData) {
+            const ctx = document.getElementById('protectionChart').getContext('2d');
+
+            if (protectionChart) {
+                protectionChart.destroy();
+            }
+
+            const labels = dailyData.map(d => d.date || 'Today');
+            const trackersData = dailyData.map(d => d.trackers_blocked || 0);
+            const adsData = dailyData.map(d => d.ads_blocked || 0);
+            const popupsData = dailyData.map(d => d.popups_blocked || 0);
+
+            protectionChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: 'Trackers',
+                            data: trackersData,
+                            backgroundColor: '#06b6d4'
+                        },
+                        {
+                            label: 'Ads',
+                            data: adsData,
+                            backgroundColor: '#10b981'
+                        },
+                        {
+                            label: 'Popups',
+                            data: popupsData,
+                            backgroundColor: '#f59e0b'
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            labels: { color: '#cbd5e1' }
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            stacked: true,
+                            ticks: { color: '#94a3b8' },
+                            grid: { color: '#1f2937' }
+                        },
+                        x: {
+                            stacked: true,
+                            ticks: { color: '#94a3b8' },
+                            grid: { color: '#1f2937' }
+                        }
+                    }
+                }
+            });
+        }
+
+        function renderTopDomains(domains) {
+            const container = document.getElementById('domain-list');
+
+            if (!domains || domains.length === 0) {
+                container.innerHTML = '<p style="color: var(--text-muted); text-align: center;">No domain data available</p>';
+                return;
+            }
+
+            container.innerHTML = domains.slice(0, 10).map(domain => `
+                <div class="domain-item">
+                    <div class="domain-name">${escapeHtml(domain.domain)}</div>
+                    <div class="domain-stats">
+                        <span>${domain.visit_count} visits</span>
+                        <span>${domain.trackers_blocked} trackers blocked</span>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderWorkspaceStats(workspaces) {
+            const container = document.getElementById('workspace-list');
+
+            if (!workspaces || workspaces.length === 0) {
+                container.innerHTML = '<p style="color: var(--text-muted); text-align: center;">No workspace data available</p>';
+                return;
+            }
+
+            container.innerHTML = workspaces.map(ws => `
+                <div class="workspace-item">
+                    <div class="workspace-name">${escapeHtml(ws.workspace_id)}</div>
+                    <div class="workspace-stats">
+                        <span>${ws.visit_count} visits</span>
+                        <span>${ws.tab_count} tabs</span>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function exportData(format) {
+            try {
+                const result = await sendIpc('export_analytics_data', { format });
+
+                // Create download
+                const blob = new Blob([result.data], {
+                    type: format === 'json' ? 'application/json' : 'text/csv'
+                });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `hiwave-analytics-${new Date().toISOString().split('T')[0]}.${format}`;
+                a.click();
+                URL.revokeObjectURL(url);
+            } catch (error) {
+                showError('Failed to export data: ' + error.message);
+            }
+        }
+
+        let currentShareText = '';
+
+        function shareToSocial() {
+            try {
+                const stats = {
+                    trackers: document.getElementById('stat-trackers').textContent,
+                    ads: document.getElementById('stat-ads').textContent,
+                    popups: document.getElementById('stat-popups').textContent,
+                    pages: document.getElementById('stat-pages').textContent,
+                    focus: document.getElementById('stat-focus').textContent,
+                    timeSaved: document.getElementById('stat-time-saved').textContent,
+                    bandwidthSaved: document.getElementById('stat-bandwidth-saved').textContent
+                };
+
+                const period = currentPeriod === 'today' ? 'Today' :
+                              currentPeriod === 'weekly' ? 'This Week' :
+                              'This Month';
+
+                currentShareText = `🌊 My HiWave Browser Stats (${period})
+
+🛡️ ${stats.trackers} trackers blocked
+🚫 ${stats.ads} ads blocked
+⛔ ${stats.popups} popups blocked
+📄 ${stats.pages} pages visited
+🎯 ${stats.focus} in focus mode
+⏱️ ${stats.timeSaved} saved
+📦 ${stats.bandwidthSaved} data saved
+
+Taking back control of my attention with @HiWaveBrowser
+
+#DigitalWellbeing #Privacy #Focus`;
+
+                // Show preview modal
+                document.getElementById('sharePreview').textContent = currentShareText;
+                document.getElementById('shareModal').classList.add('active');
+            } catch (error) {
+                showError('Failed to generate share text: ' + error.message);
+            }
+        }
+
+        function closeShareModal() {
+            document.getElementById('shareModal').classList.remove('active');
+        }
+
+        function copyShareText() {
+            copyToClipboard(currentShareText);
+            closeShareModal();
+            alert('Stats copied to clipboard! Ready to share on X/Twitter, LinkedIn, etc.');
+        }
+
+        // Clipboard helper with fallback for WebView
+        function copyToClipboard(text) {
+            try {
+                // Try modern API first
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(text).catch(() => {
+                        fallbackCopy(text);
+                    });
+                } else {
+                    fallbackCopy(text);
+                }
+            } catch (err) {
+                fallbackCopy(text);
+            }
+        }
+
+        function fallbackCopy(text) {
+            // Fallback for WebView/older browsers
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.style.position = 'fixed';
+            textarea.style.top = '0';
+            textarea.style.left = '0';
+            textarea.style.width = '1px';
+            textarea.style.height = '1px';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.focus();
+            textarea.select();
+
+            try {
+                document.execCommand('copy');
+            } catch (err) {
+                console.error('Fallback copy failed:', err);
+            }
+
+            document.body.removeChild(textarea);
+        }
+
+        async function resetAnalytics() {
+            if (!confirm('This will archive your current analytics data and start fresh. Your old data will be preserved in the archive. Continue?')) {
+                return;
+            }
+
+            try {
+                await sendIpc('reset_analytics_data', {});
+                alert('Analytics data has been archived and reset!');
+                loadReport(currentPeriod); // Reload to show empty state
+            } catch (error) {
+                showError('Failed to reset analytics: ' + error.message);
+            }
+        }
+
+        function sendIpc(cmd, data) {
+            return new Promise((resolve, reject) => {
+                const message = { cmd, ...data };
+                window.ipc.postMessage(JSON.stringify(message));
+
+                // Listen for response
+                const handler = (event) => {
+                    const response = event.detail;
+                    if (response.type === 'success') {
+                        window.removeEventListener('hiwave-response', handler);
+                        resolve(response.data);
+                    } else if (response.type === 'error') {
+                        window.removeEventListener('hiwave-response', handler);
+                        reject(new Error(response.message));
+                    }
+                };
+
+                window.addEventListener('hiwave-response', handler);
+
+                // Timeout after 5 seconds
+                setTimeout(() => {
+                    window.removeEventListener('hiwave-response', handler);
+                    reject(new Error('Request timeout'));
+                }, 5000);
+            });
+        }
+
+        function formatNumber(num) {
+            if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+            if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+            return num.toString();
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function showLoading() {
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('content').style.display = 'none';
+        }
+
+        function hideLoading() {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('content').style.display = 'block';
+        }
+
+        function showError(message) {
+            const container = document.getElementById('error-container');
+            container.innerHTML = `<div class="error">${escapeHtml(message)}</div>`;
+        }
+
+        function clearError() {
+            document.getElementById('error-container').innerHTML = '';
+        }
+    </script>
+</body>
+</html>

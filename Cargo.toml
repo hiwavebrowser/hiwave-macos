@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hiwave-core",
+    "crates/hiwave-shield",
+    "crates/hiwave-vault",
+    "crates/hiwave-shell",
+    "crates/hiwave-analytics",
+    "crates/hiwave-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["HiWave Team"]
+license = "MPL-2.0"
+repository = "https://github.com/yourusername/hiwave"
+
+[workspace.dependencies]
+# Only keep what's actually used...
+thiserror = "2.0"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.42", features = ["full"] }
+log = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-log = "0.2"
+wry = "0.49"
+tao = "0.31"
+muda = "0.15"
+adblock = "0.9"
+rusqlite = { version = "0.32", features = ["bundled"] }
+aes-gcm = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+fuzzy-matcher = "0.3"
+url = "2.5"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
+dirs = "5.0"
+rfd = "0.15"
+
+# Internal dependencies
+hiwave-core = { path = "crates/hiwave-core" }
+hiwave-shield = { path = "crates/hiwave-shield" }
+hiwave-vault = { path = "crates/hiwave-vault" }
+hiwave-shell = { path = "crates/hiwave-shell" }
+hiwave-analytics = { path = "crates/hiwave-analytics" }
+hiwave-app = { path = "crates/hiwave-app" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,1788 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings - HiWave</title>
+    <style>
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-tertiary: #334155;
+            --bg-elevated: #475569;
+            --accent: #06b6d4;
+            --accent-hover: #22d3ee;
+            --accent-dark: #0891b2;
+            --accent-subtle: rgba(6, 182, 212, 0.08);
+            --accent-medium: rgba(6, 182, 212, 0.15);
+            --text-primary: #f1f5f9;
+            --text-secondary: #cbd5e1;
+            --text-muted: #94a3b8;
+            --text-disabled: #64748b;
+            --border: #1f2937;
+            --border-subtle: #16213e;
+            --success: #10b981;
+            --success-subtle: rgba(16, 185, 129, 0.15);
+            --error: #ef4444;
+            --error-subtle: rgba(239, 68, 68, 0.15);
+            --warning: #f59e0b;
+            --warning-subtle: rgba(245, 158, 11, 0.15);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background: radial-gradient(circle at top right, rgba(6, 182, 212, 0.3), transparent 40%) var(--bg-primary);
+            color: var(--text-primary);
+            display: flex;
+            justify-content: center;
+            padding: 2rem;
+            overflow-y: auto;
+        }
+
+        .container {
+            width: min(700px, 100%);
+        }
+
+        h1 {
+            margin: 0 0 0.5rem;
+            font-size: 1.75rem;
+            background: linear-gradient(135deg, #06b6d4 0%, #22d3ee 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .subtitle {
+            color: var(--text-muted);
+            margin-bottom: 1.5rem;
+            font-size: 0.9rem;
+        }
+
+        .section {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 1.25rem;
+            margin-bottom: 1rem;
+        }
+
+        .section-title {
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.15em;
+            color: var(--accent);
+            margin-bottom: 1rem;
+            font-weight: 600;
+        }
+
+        .setting-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.75rem 0;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+
+        .setting-row:last-child {
+            border-bottom: none;
+        }
+
+        .setting-label {
+            flex: 1;
+        }
+
+        .setting-label strong {
+            display: block;
+            color: var(--text-primary);
+            font-size: 0.9rem;
+            margin-bottom: 0.2rem;
+        }
+
+        .setting-label span {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        .setting-control {
+            min-width: 140px;
+            text-align: right;
+            flex-shrink: 0;
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+        }
+
+        .decay-control {
+            gap: 6px;
+        }
+
+        .decay-control input[type="number"] {
+            width: 60px;
+        }
+
+        .decay-control select {
+            width: auto;
+            min-width: 70px;
+        }
+
+        select, input[type="number"], input[type="text"] {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 0.5rem 0.75rem;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        select:hover, input:hover {
+            border-color: var(--accent);
+        }
+
+        select:focus, input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-subtle);
+        }
+
+        input[type="number"] {
+            width: 80px;
+            text-align: center;
+        }
+
+        input[type="text"] {
+            width: 200px;
+        }
+
+        /* Toggle switch */
+        .toggle {
+            position: relative;
+            display: inline-flex;
+            width: 48px;
+            height: 26px;
+            flex-shrink: 0;
+        }
+
+        .toggle input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 26px;
+            transition: 0.2s;
+        }
+
+        .toggle-slider::before {
+            position: absolute;
+            content: "";
+            height: 20px;
+            width: 20px;
+            left: 2px;
+            bottom: 2px;
+            background: var(--text-muted);
+            border-radius: 50%;
+            transition: 0.2s;
+        }
+
+        .toggle input:checked + .toggle-slider {
+            background: var(--accent);
+            border-color: var(--accent);
+        }
+
+        .toggle input:checked + .toggle-slider::before {
+            transform: translateX(22px);
+            background: white;
+        }
+
+        /* Buttons */
+        .btn {
+            padding: 0.6rem 1rem;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            border: 1px solid transparent;
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: var(--accent-hover);
+        }
+
+        .btn-secondary {
+            background: var(--accent-subtle);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .btn-secondary:hover {
+            background: var(--accent);
+            color: white;
+        }
+
+        .btn-danger {
+            background: var(--error-subtle);
+            border-color: var(--error);
+            color: var(--error);
+        }
+
+        .btn-danger:hover {
+            background: var(--error);
+            color: white;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 0.5rem;
+        }
+
+        /* Import section */
+        .import-row {
+            display: flex;
+            gap: 0.75rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .import-row select {
+            flex: 1;
+        }
+
+        /* Status messages */
+        .status {
+            font-size: 0.85rem;
+            padding: 0.5rem 0.75rem;
+            border-radius: 6px;
+            margin-top: 0.5rem;
+            display: none;
+        }
+
+        .status.show { display: block; }
+        .status.success { background: var(--success-subtle); color: var(--success); border: 1px solid var(--success); }
+        .status.error { background: var(--error-subtle); color: var(--error); border: 1px solid var(--error); }
+        .status.loading { background: var(--accent-subtle); color: var(--accent); border: 1px solid var(--accent); }
+        .status.warning { background: var(--warning-subtle); color: var(--warning); border: 1px solid var(--warning); }
+
+        .import-info {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-top: 0.5rem;
+        }
+
+        /* Export/Import data */
+        .checkbox-group {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.9rem;
+            cursor: pointer;
+        }
+
+        .checkbox-label input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            accent-color: var(--accent);
+        }
+
+        /* Clear data */
+        .clear-options {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+            margin-bottom: 1rem;
+        }
+
+        /* Cellar */
+        .cellar-list {
+            max-height: 300px;
+            overflow-y: auto;
+            border: 1px solid var(--border-subtle);
+            border-radius: 6px;
+            background: var(--bg-tertiary);
+        }
+
+        .cellar-empty {
+            text-align: center;
+            color: var(--text-muted);
+            padding: 1.5rem;
+            font-size: 0.85rem;
+        }
+
+        .cellar-item {
+            display: flex;
+            align-items: center;
+            padding: 0.6rem 0.75rem;
+            border-bottom: 1px solid var(--border-subtle);
+            gap: 0.75rem;
+        }
+
+        .cellar-item:last-child {
+            border-bottom: none;
+        }
+
+        .cellar-item:hover {
+            background: var(--bg-elevated);
+        }
+
+        .cellar-item-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .cellar-item-title {
+            font-size: 0.85rem;
+            color: var(--text-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .cellar-item-meta {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .cellar-item-url {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 200px;
+        }
+
+        .cellar-item button {
+            padding: 0.3rem 0.6rem;
+            font-size: 0.75rem;
+            flex-shrink: 0;
+        }
+
+        /* Footer */
+        .footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 1.5rem;
+        }
+
+        .version {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        /* Animations */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .section { animation: fadeIn 0.3s ease-out backwards; }
+        .section:nth-child(1) { animation-delay: 0.05s; }
+        .section:nth-child(2) { animation-delay: 0.1s; }
+        .section:nth-child(3) { animation-delay: 0.15s; }
+        .section:nth-child(4) { animation-delay: 0.2s; }
+        .section:nth-child(5) { animation-delay: 0.25s; }
+        .section:nth-child(6) { animation-delay: 0.3s; }
+        .section:nth-child(7) { animation-delay: 0.35s; }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.01ms !important;
+                transition-duration: 0.01ms !important;
+            }
+        }
+
+        /* Blocklist styles */
+        .blocklist-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            width: 100%;
+            min-height: 36px;
+            max-height: 200px;
+            overflow-y: auto;
+            background: var(--bg-tertiary);
+            border-radius: 6px;
+            padding: 0.5rem;
+            scrollbar-width: thin;
+            scrollbar-color: rgba(100, 116, 139, 0.3) transparent;
+        }
+
+        .blocklist-container::-webkit-scrollbar {
+            width: 5px;
+        }
+
+        .blocklist-container::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .blocklist-container::-webkit-scrollbar-thumb {
+            background: rgba(100, 116, 139, 0.3);
+            border-radius: 999px;
+        }
+
+        .blocklist-container::-webkit-scrollbar-thumb:hover {
+            background: rgba(6, 182, 212, 0.4);
+        }
+
+        .blocklist-item {
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+            background: var(--bg-elevated);
+            border-radius: 4px;
+            padding: 0.25rem 0.5rem;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+
+        .blocklist-item .remove-btn {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            padding: 0 0.25rem;
+            font-size: 1rem;
+            line-height: 1;
+            transition: color 0.2s;
+        }
+
+        .blocklist-item .remove-btn:hover {
+            color: var(--error);
+        }
+
+        .blocklist-empty {
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Settings</h1>
+        <p class="subtitle">Configure HiWave to match your workflow.</p>
+
+        <!-- General Settings -->
+        <div class="section">
+            <div class="section-title">General</div>
+
+            <div class="setting-row">
+                <div class="setting-label">
+                    <strong>Theme</strong>
+                    <span>Choose your preferred appearance</span>
+                </div>
+                <div class="setting-control">
+                    <select id="theme">
+                        <option value="dark">Dark</option>
+                        <option value="light">Light</option>
+                        <option value="system">System</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="setting-row">
+                <div class="setting-label">
+                    <strong>Default Mode</strong>
+                    <span>Automation level on startup</span>
+                </div>
+                <div class="setting-control">
+                    <select id="defaultMode">
+                        <option value="essentials">Essentials</option>
+                        <option value="balanced">Balanced</option>
+                        <option value="zen">Zen</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="setting-row">
+                <div class="setting-label">
+                    <strong>Sidebar Open on Startup</strong>
+                    <span>Show sidebar when HiWave starts</span>
+                </div>
+                <div class="setting-control">
+                    <label class="toggle">
+                        <input type="checkbox" id="sidebarDefaultOpen" checked>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab Behavior -->
+        <div class="section">
+            <div class="section-title">Tab Behavior</div>
+
+            <div class="setting-row">
+                <div class="setting-label">
+                    <strong>Tab Decay</strong>
+                    <span>Time before tabs start fading</span>
+                </div>
+                <div class="setting-control decay-control">
+                    <input type="number" id="tabDecayValue" value="7" min="1" max="168">
+                    <select id="tabDecayUnit">
+                        <option value="hours">hours</option>
+                        <option value="days" selected>days</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="setting-row">
+                <div class="setting-label">
+                    <strong>Auto-Shelf (Zen Mode)</strong>
+                    <span>Days before tabs auto-move to shelf (0 = disabled)</span>
+                </div>
+                <div class="setting-control">
+                    <input type="number" id="autoShelfDays" value="0" min="0" max="90">
+                </div>
+            </div>
+
+            <div class="setting-row">
+                <div class="setting-label">
+                    <strong>New Tab URL</strong>
+                    <span>Leave empty for default new tab page</span>
+                </div>
+                <div class="setting-control">
+                    <input type="text" id="newTabUrl" placeholder="https://...">
+                </div>
+            </div>
+        </div>
+
+        <!-- Shield Settings -->
+        <div class="section">
+            <div class="section-title">Shield</div>
+
+            <div class="setting-row">
+                <div class="setting-label">
+                    <strong>Enable Shield by Default</strong>
+                    <span>Block ads and trackers automatically</span>
+                </div>
+                <div class="setting-control">
+                    <label class="toggle">
+                        <input type="checkbox" id="shieldEnabled" checked>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+        </div>
+
+        <!-- Focus Mode -->
+        <div class="section">
+            <div class="section-title">Focus Mode</div>
+
+            <div class="setting-row">
+                <div class="setting-label">
+                    <strong>Auto-trigger Focus Mode</strong>
+                    <span>Automatically enter focus mode after time on page</span>
+                </div>
+                <div class="setting-control">
+                    <label class="toggle">
+                        <input type="checkbox" id="focusAutoEnabled">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="setting-row">
+                <div class="setting-label">
+                    <strong>Auto-trigger Delay</strong>
+                    <span>Seconds on page before auto-entering focus mode</span>
+                </div>
+                <div class="setting-control">
+                    <input type="number" id="focusActivationDelay" value="60" min="10" max="600" style="width: 80px;">
+                    <span style="margin-left: 6px; color: var(--text-muted);">sec</span>
+                </div>
+            </div>
+
+            <div class="setting-row">
+                <div class="setting-label">
+                    <strong>Show Progress Bar</strong>
+                    <span>Display scroll progress indicator when in focus mode</span>
+                </div>
+                <div class="setting-control">
+                    <label class="toggle">
+                        <input type="checkbox" id="focusShowProgressBar" checked>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="setting-row">
+                <div class="setting-label">
+                    <strong>Hide Cursor</strong>
+                    <span>Automatically hide cursor after inactivity in focus mode</span>
+                </div>
+                <div class="setting-control">
+                    <label class="toggle">
+                        <input type="checkbox" id="focusHideCursor" checked>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="setting-row">
+                <div class="setting-label">
+                    <strong>Keyboard Shortcut</strong>
+                    <span id="focusShortcutDesc">Press F11 to toggle focus mode (Esc to exit)</span>
+                </div>
+                <div class="setting-control">
+                    <span id="focusShortcutKey" style="color: var(--text-muted); font-family: monospace;">F11</span>
+                </div>
+            </div>
+
+            <div class="setting-row" style="flex-direction: column; align-items: flex-start;">
+                <div class="setting-label" style="margin-bottom: 0.75rem;">
+                    <strong>Blocklist</strong>
+                    <span>Sites that will never auto-trigger focus mode</span>
+                </div>
+                <div id="focusBlocklist" class="blocklist-container">
+                    <!-- Rendered by JS -->
+                </div>
+                <div class="blocklist-add" style="margin-top: 0.5rem; display: flex; gap: 0.5rem; width: 100%;">
+                    <input type="text" id="focusBlocklistInput" placeholder="Enter domain (e.g. youtube.com)" style="flex: 1;">
+                    <button class="btn btn-secondary" id="focusBlocklistAddBtn">Add</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Import from Browser -->
+        <div class="section">
+            <div class="section-title">Import from Browser</div>
+            <div class="import-row">
+                <select id="browserSelect">
+                    <option value="">Select browser...</option>
+                    <option value="brave">Brave</option>
+                    <option value="chrome">Google Chrome</option>
+                    <option value="firefox">Mozilla Firefox</option>
+                </select>
+                <select id="profileSelect" disabled>
+                    <option value="">Select profile...</option>
+                </select>
+                <button class="btn btn-secondary" id="importBtn" disabled>Import</button>
+            </div>
+            <div class="status" id="importStatus"></div>
+            <div class="import-info">
+                Bookmarks will be converted to workspaces. Each folder becomes its own workspace.
+            </div>
+        </div>
+
+        <!-- Export/Import Data -->
+        <div class="section">
+            <div class="section-title">Backup & Restore</div>
+
+            <div class="setting-row" style="flex-direction: column; align-items: flex-start;">
+                <div class="setting-label" style="margin-bottom: 0.75rem;">
+                    <strong>Export Data</strong>
+                    <span>Download a backup of your workspaces and settings</span>
+                </div>
+                <div class="checkbox-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="exportSettings" checked>
+                        Include Settings
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="exportWorkspaces" checked>
+                        Include Workspaces
+                    </label>
+                </div>
+                <button class="btn btn-secondary" id="exportBtn">Export to File</button>
+            </div>
+
+            <div class="setting-row" style="flex-direction: column; align-items: flex-start;">
+                <div class="setting-label" style="margin-bottom: 0.75rem;">
+                    <strong>Import Data</strong>
+                    <span>Restore from a HiWave backup file</span>
+                </div>
+                <div class="checkbox-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="importReplace">
+                        Replace existing workspaces
+                    </label>
+                </div>
+                <button class="btn btn-secondary" id="importDataBtn">Import from File</button>
+            </div>
+            <div class="status" id="backupStatus"></div>
+        </div>
+
+        <!-- Clear Data -->
+        <div class="section">
+            <div class="section-title">Clear Browsing Data</div>
+
+            <div class="clear-options">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="clearHistory">
+                    Visit History
+                </label>
+                <label class="checkbox-label">
+                    <input type="checkbox" id="clearDownloads">
+                    Download History
+                </label>
+                <label class="checkbox-label">
+                    <input type="checkbox" id="clearShelf">
+                    Shelf Items
+                </label>
+            </div>
+            <button class="btn btn-danger" id="clearDataBtn" disabled>Clear Selected Data</button>
+            <div class="status" id="clearStatus"></div>
+        </div>
+
+        <!-- Vault (Password Manager) -->
+        <div class="section">
+            <div class="section-title">Vault</div>
+            <div class="setting-label" style="margin-bottom: 0.75rem;">
+                <strong>Password Manager</strong>
+                <span>Store and autofill your login credentials securely</span>
+            </div>
+
+            <!-- Vault Status -->
+            <div id="vaultStatus" class="setting-row" style="margin-bottom: 1rem;">
+                <span id="vaultStatusText">Checking vault status...</span>
+            </div>
+
+            <!-- Unlock Form (shown when locked) -->
+            <div id="vaultUnlockForm" style="display: none; margin-bottom: 1rem;">
+                <div class="setting-row" style="gap: 0.5rem;">
+                    <input type="password" id="vaultPassword" placeholder="Master password"
+                           style="flex: 1; padding: 0.5rem; border-radius: 4px; border: 1px solid #475569; background: #1e293b; color: #f1f5f9;">
+                    <button class="btn btn-primary" id="unlockVaultBtn">Unlock</button>
+                </div>
+                <div id="vaultUnlockError" style="color: #ef4444; font-size: 0.85rem; margin-top: 0.5rem;"></div>
+            </div>
+
+            <!-- Lock Button (shown when unlocked) -->
+            <div id="vaultLockForm" style="display: none; margin-bottom: 1rem;">
+                <button class="btn btn-secondary" id="lockVaultBtn">Lock Vault</button>
+            </div>
+
+            <!-- Credentials List (shown when unlocked) -->
+            <div id="vaultCredentials" style="display: none;">
+                <div class="setting-label" style="margin-bottom: 0.5rem;">
+                    <strong>Saved Credentials</strong>
+                </div>
+                <div id="credentialsList" style="max-height: 200px; overflow-y: auto; background: #0f172a; border-radius: 6px; padding: 0.5rem;">
+                    <div style="color: #64748b; text-align: center; padding: 1rem;">No credentials saved</div>
+                </div>
+
+                <!-- Add Credential Form -->
+                <div style="margin-top: 1rem; padding: 1rem; background: #0f172a; border-radius: 6px;">
+                    <div style="font-weight: 500; margin-bottom: 0.75rem;">Add New Credential</div>
+                    <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                        <input type="text" id="newCredUrl" placeholder="URL (e.g., github.com)"
+                               style="padding: 0.5rem; border-radius: 4px; border: 1px solid #475569; background: #1e293b; color: #f1f5f9;">
+                        <input type="text" id="newCredUsername" placeholder="Username or email"
+                               style="padding: 0.5rem; border-radius: 4px; border: 1px solid #475569; background: #1e293b; color: #f1f5f9;">
+                        <input type="password" id="newCredPassword" placeholder="Password"
+                               style="padding: 0.5rem; border-radius: 4px; border: 1px solid #475569; background: #1e293b; color: #f1f5f9;">
+                        <button class="btn btn-primary" id="addCredentialBtn">Save Credential</button>
+                    </div>
+                    <div id="addCredentialStatus" style="margin-top: 0.5rem; font-size: 0.85rem;"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Cellar (Recovered Items) -->
+        <div class="section">
+            <div class="section-title">Cellar</div>
+            <div class="setting-label" style="margin-bottom: 0.75rem;">
+                <strong>Recovered Items</strong>
+                <span>Shelf items that aged out are stored here for recovery</span>
+            </div>
+            <div id="cellarList" class="cellar-list">
+                <div class="cellar-empty">No items in cellar</div>
+            </div>
+            <div class="btn-group" style="margin-top: 0.75rem;">
+                <button class="btn btn-secondary" id="refreshCellarBtn">Refresh</button>
+                <button class="btn btn-danger" id="clearCellarBtn" disabled>Clear Cellar</button>
+            </div>
+            <div class="status" id="cellarStatus"></div>
+        </div>
+
+        <!-- Analytics Settings -->
+        <div class="section">
+            <div class="section-title">Analytics & Privacy</div>
+
+            <div class="setting-row">
+                <div class="setting-label">
+                    <strong>Enable Analytics</strong>
+                    <span>Track browsing activity, blocked trackers, and usage patterns (domain-only, privacy-first)</span>
+                </div>
+                <label class="toggle">
+                    <input type="checkbox" id="analyticsEnabled">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+
+            <div class="setting-row">
+                <div class="setting-label">
+                    <strong>Data Retention</strong>
+                    <span>How long to keep analytics data before automatic cleanup</span>
+                </div>
+                <select id="analyticsRetention" style="width: 140px;">
+                    <option value="7">7 days</option>
+                    <option value="14">14 days</option>
+                    <option value="30">30 days</option>
+                    <option value="60">60 days</option>
+                    <option value="90">90 days</option>
+                    <option value="180">6 months</option>
+                    <option value="365">1 year</option>
+                </select>
+            </div>
+
+            <div class="setting-row">
+                <div class="setting-label">
+                    <strong>Weekly Report</strong>
+                    <span>Generate and display a weekly summary report</span>
+                </div>
+                <label class="toggle">
+                    <input type="checkbox" id="analyticsWeeklyReport">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+
+            <div class="setting-row">
+                <div class="setting-label">
+                    <strong>Report Day</strong>
+                    <span>Day of the week to generate weekly reports</span>
+                </div>
+                <select id="analyticsReportDay" style="width: 140px;">
+                    <option value="Monday">Monday</option>
+                    <option value="Tuesday">Tuesday</option>
+                    <option value="Wednesday">Wednesday</option>
+                    <option value="Thursday">Thursday</option>
+                    <option value="Friday">Friday</option>
+                    <option value="Saturday">Saturday</option>
+                    <option value="Sunday">Sunday</option>
+                </select>
+            </div>
+
+            <div class="setting-label" style="margin-top: 1rem; margin-bottom: 0.5rem;">
+                <strong>Privacy Notice</strong>
+                <span style="font-size: 0.8rem; line-height: 1.5;">
+                    HiWave analytics are 100% local and private. We track only domain names (e.g., "github.com"),
+                    never full URLs, page titles, or search queries. All data stays on your device and is never
+                    sent to any server. You can export or clear your analytics data at any time.
+                </span>
+            </div>
+
+            <div class="btn-group" style="margin-top: 1rem;">
+                <button class="btn btn-secondary" id="viewReportBtn">View Report</button>
+                <button class="btn btn-secondary" id="exportAnalyticsBtn">Export Data</button>
+                <button class="btn btn-danger" id="clearAnalyticsBtn">Clear All Data</button>
+            </div>
+            <div class="status" id="analyticsStatus"></div>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <span class="version">HiWave v0.1.0</span>
+            <div class="btn-group">
+                <button class="btn btn-secondary" id="saveBtn">Save Settings</button>
+                <button class="btn btn-primary" id="closeBtn">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Settings state
+        let currentSettings = {};
+
+        // DOM elements
+        const elements = {
+            theme: document.getElementById('theme'),
+            defaultMode: document.getElementById('defaultMode'),
+            sidebarDefaultOpen: document.getElementById('sidebarDefaultOpen'),
+            tabDecayValue: document.getElementById('tabDecayValue'),
+            tabDecayUnit: document.getElementById('tabDecayUnit'),
+            autoShelfDays: document.getElementById('autoShelfDays'),
+            newTabUrl: document.getElementById('newTabUrl'),
+            shieldEnabled: document.getElementById('shieldEnabled'),
+            // Focus mode elements
+            focusAutoEnabled: document.getElementById('focusAutoEnabled'),
+            focusActivationDelay: document.getElementById('focusActivationDelay'),
+            focusShowProgressBar: document.getElementById('focusShowProgressBar'),
+            focusHideCursor: document.getElementById('focusHideCursor'),
+            focusBlocklist: document.getElementById('focusBlocklist'),
+            focusBlocklistInput: document.getElementById('focusBlocklistInput'),
+            focusBlocklistAddBtn: document.getElementById('focusBlocklistAddBtn'),
+            browserSelect: document.getElementById('browserSelect'),
+            profileSelect: document.getElementById('profileSelect'),
+            importBtn: document.getElementById('importBtn'),
+            importStatus: document.getElementById('importStatus'),
+            exportSettings: document.getElementById('exportSettings'),
+            exportWorkspaces: document.getElementById('exportWorkspaces'),
+            exportBtn: document.getElementById('exportBtn'),
+            importReplace: document.getElementById('importReplace'),
+            importDataBtn: document.getElementById('importDataBtn'),
+            backupStatus: document.getElementById('backupStatus'),
+            clearHistory: document.getElementById('clearHistory'),
+            clearDownloads: document.getElementById('clearDownloads'),
+            clearShelf: document.getElementById('clearShelf'),
+            clearDataBtn: document.getElementById('clearDataBtn'),
+            clearStatus: document.getElementById('clearStatus'),
+            cellarList: document.getElementById('cellarList'),
+            refreshCellarBtn: document.getElementById('refreshCellarBtn'),
+            clearCellarBtn: document.getElementById('clearCellarBtn'),
+            cellarStatus: document.getElementById('cellarStatus'),
+            // Vault elements
+            vaultStatusText: document.getElementById('vaultStatusText'),
+            vaultUnlockForm: document.getElementById('vaultUnlockForm'),
+            vaultPassword: document.getElementById('vaultPassword'),
+            unlockVaultBtn: document.getElementById('unlockVaultBtn'),
+            vaultUnlockError: document.getElementById('vaultUnlockError'),
+            vaultLockForm: document.getElementById('vaultLockForm'),
+            lockVaultBtn: document.getElementById('lockVaultBtn'),
+            vaultCredentials: document.getElementById('vaultCredentials'),
+            credentialsList: document.getElementById('credentialsList'),
+            newCredUrl: document.getElementById('newCredUrl'),
+            newCredUsername: document.getElementById('newCredUsername'),
+            newCredPassword: document.getElementById('newCredPassword'),
+            addCredentialBtn: document.getElementById('addCredentialBtn'),
+            addCredentialStatus: document.getElementById('addCredentialStatus'),
+            // Analytics elements
+            analyticsEnabled: document.getElementById('analyticsEnabled'),
+            analyticsRetention: document.getElementById('analyticsRetention'),
+            analyticsWeeklyReport: document.getElementById('analyticsWeeklyReport'),
+            analyticsReportDay: document.getElementById('analyticsReportDay'),
+            viewReportBtn: document.getElementById('viewReportBtn'),
+            exportAnalyticsBtn: document.getElementById('exportAnalyticsBtn'),
+            clearAnalyticsBtn: document.getElementById('clearAnalyticsBtn'),
+            analyticsStatus: document.getElementById('analyticsStatus'),
+            saveBtn: document.getElementById('saveBtn'),
+            closeBtn: document.getElementById('closeBtn')
+        };
+
+        // Utility functions
+        function showStatus(el, type, message) {
+            el.className = 'status show ' + type;
+            el.textContent = message;
+        }
+
+        function hideStatus(el) {
+            el.className = 'status';
+        }
+
+        function sendIpc(cmd, data = {}) {
+            if (window.ipc) {
+                window.ipc.postMessage(JSON.stringify({ cmd, ...data }));
+            }
+        }
+
+        // Load settings from backend
+        function loadSettings() {
+            sendIpc('get_settings');
+        }
+
+        // Apply settings to UI
+        function applySettingsToUI(settings) {
+            currentSettings = settings;
+            elements.theme.value = settings.theme || 'dark';
+            elements.defaultMode.value = settings.default_mode || 'balanced';
+            elements.sidebarDefaultOpen.checked = settings.sidebar_default_open !== false;
+            // Convert days to appropriate unit for display
+            const decayDays = settings.tab_decay_days || 7;
+            if (decayDays < 1) {
+                // Less than a day, show in hours
+                elements.tabDecayValue.value = Math.max(1, Math.round(decayDays * 24));
+                elements.tabDecayUnit.value = 'hours';
+            } else {
+                elements.tabDecayValue.value = decayDays;
+                elements.tabDecayUnit.value = 'days';
+            }
+            elements.autoShelfDays.value = settings.auto_shelf_days || 0;
+            elements.newTabUrl.value = settings.new_tab_url || '';
+            elements.shieldEnabled.checked = settings.shield_enabled !== false;
+        }
+
+        // Focus mode config state
+        let currentFocusConfig = {};
+
+        // Load focus mode config from backend
+        function loadFocusConfig() {
+            sendIpc('get_focus_mode_config');
+        }
+
+        // Apply focus config to UI
+        function applyFocusConfigToUI(config) {
+            currentFocusConfig = config;
+            elements.focusAutoEnabled.checked = config.auto_enabled || false;
+            elements.focusActivationDelay.value = config.activation_delay_secs || 60;
+            elements.focusShowProgressBar.checked = config.show_progress_bar !== false;
+            elements.focusHideCursor.checked = config.hide_cursor !== false;
+            renderBlocklist(config.blocklist || []);
+        }
+
+        // Render blocklist
+        function renderBlocklist(blocklist) {
+            if (!blocklist || blocklist.length === 0) {
+                elements.focusBlocklist.innerHTML = '<span class="blocklist-empty">No blocked domains</span>';
+                return;
+            }
+
+            elements.focusBlocklist.innerHTML = blocklist.map(domain => `
+                <div class="blocklist-item" data-domain="${escapeHtml(domain)}">
+                    <span>${escapeHtml(domain)}</span>
+                    <button class="remove-btn" title="Remove">&times;</button>
+                </div>
+            `).join('');
+
+            // Add remove handlers
+            elements.focusBlocklist.querySelectorAll('.remove-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const item = e.target.closest('.blocklist-item');
+                    const domain = item.dataset.domain;
+                    removeFromBlocklist(domain);
+                });
+            });
+        }
+
+        // Add domain to blocklist
+        function addToBlocklist(domain) {
+            domain = domain.trim().toLowerCase();
+            if (!domain) return;
+
+            // Remove protocol if present
+            domain = domain.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+
+            if (!currentFocusConfig.blocklist) {
+                currentFocusConfig.blocklist = [];
+            }
+
+            if (currentFocusConfig.blocklist.includes(domain)) {
+                return; // Already in list
+            }
+
+            sendIpc('add_to_focus_blocklist', { domain });
+            currentFocusConfig.blocklist.push(domain);
+            renderBlocklist(currentFocusConfig.blocklist);
+            elements.focusBlocklistInput.value = '';
+        }
+
+        // Remove domain from blocklist
+        function removeFromBlocklist(domain) {
+            sendIpc('remove_from_focus_blocklist', { domain });
+            currentFocusConfig.blocklist = (currentFocusConfig.blocklist || []).filter(d => d !== domain);
+            renderBlocklist(currentFocusConfig.blocklist);
+        }
+
+        // Collect focus config from UI
+        function collectFocusConfigFromUI() {
+            return {
+                auto_enabled: elements.focusAutoEnabled.checked,
+                activation_delay_secs: parseInt(elements.focusActivationDelay.value) || 60,
+                show_progress_bar: elements.focusShowProgressBar.checked,
+                hide_cursor: elements.focusHideCursor.checked,
+                cursor_hide_delay_secs: currentFocusConfig.cursor_hide_delay_secs || 3,
+                inactivity_exit_mins: currentFocusConfig.inactivity_exit_mins || 0,
+                shortcut: currentFocusConfig.shortcut || "F11",
+                blocklist: currentFocusConfig.blocklist || []
+            };
+        }
+
+        // Save focus config when individual settings change
+        function saveFocusConfig() {
+            const config = collectFocusConfigFromUI();
+            sendIpc('save_focus_mode_config', { config });
+        }
+
+        // Focus mode setting change handlers
+        elements.focusAutoEnabled.addEventListener('change', saveFocusConfig);
+        elements.focusActivationDelay.addEventListener('change', saveFocusConfig);
+        elements.focusShowProgressBar.addEventListener('change', saveFocusConfig);
+        elements.focusHideCursor.addEventListener('change', saveFocusConfig);
+
+        // Blocklist add button
+        elements.focusBlocklistAddBtn.addEventListener('click', () => {
+            addToBlocklist(elements.focusBlocklistInput.value);
+        });
+
+        // Blocklist input enter key
+        elements.focusBlocklistInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                addToBlocklist(elements.focusBlocklistInput.value);
+            }
+        });
+
+        // Calculate decay days from UI value and unit
+        function calculateDecayDays() {
+            const value = parseInt(elements.tabDecayValue.value) || 7;
+            const unit = elements.tabDecayUnit.value;
+            if (unit === 'hours') {
+                // Convert hours to days, minimum 1 day
+                return Math.max(1, Math.ceil(value / 24));
+            }
+            return value;
+        }
+
+        // Collect settings from UI
+        function collectSettingsFromUI() {
+            return {
+                theme: elements.theme.value,
+                default_mode: elements.defaultMode.value,
+                sidebar_default_open: elements.sidebarDefaultOpen.checked,
+                sidebar_auto_hide_secs: null,
+                url_bar_auto_hide_secs: null,
+                tab_decay_days: calculateDecayDays(),
+                auto_shelf_days: parseInt(elements.autoShelfDays.value) || null,
+                new_tab_url: elements.newTabUrl.value,
+                shield_enabled: elements.shieldEnabled.checked,
+                import_prefix_style: currentSettings.import_prefix_style || 'abbreviation',
+                devtools_enabled: currentSettings.devtools_enabled || false,
+                workspace_save_interval_secs: currentSettings.workspace_save_interval_secs || 30
+            };
+        }
+
+        // Save settings
+        elements.saveBtn.addEventListener('click', () => {
+            const settings = collectSettingsFromUI();
+            sendIpc('save_settings', { settings });
+            elements.saveBtn.textContent = 'Saving...';
+            elements.saveBtn.disabled = true;
+        });
+
+        // Close settings
+        elements.closeBtn.addEventListener('click', () => {
+            sendIpc('close_settings');
+        });
+
+        // Escape to close
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                sendIpc('close_settings');
+            }
+        });
+
+        // Browser import
+        let profilesCache = [];
+
+        elements.browserSelect.addEventListener('change', () => {
+            const browser = elements.browserSelect.value;
+            elements.profileSelect.innerHTML = '<option value="">Loading...</option>';
+            elements.profileSelect.disabled = true;
+            elements.importBtn.disabled = true;
+            hideStatus(elements.importStatus);
+
+            if (browser) {
+                sendIpc('get_browser_profiles', { browser });
+                showStatus(elements.importStatus, 'loading', 'Searching for profiles...');
+            } else {
+                elements.profileSelect.innerHTML = '<option value="">Select profile...</option>';
+            }
+        });
+
+        elements.profileSelect.addEventListener('change', () => {
+            elements.importBtn.disabled = !elements.profileSelect.value;
+        });
+
+        elements.importBtn.addEventListener('click', () => {
+            const browser = elements.browserSelect.value;
+            const profilePath = elements.profileSelect.value;
+            if (!browser || !profilePath) return;
+
+            elements.importBtn.disabled = true;
+            elements.importBtn.textContent = 'Importing...';
+            showStatus(elements.importStatus, 'loading', 'Importing bookmarks...');
+            sendIpc('import_bookmarks', { browser, profile_path: profilePath });
+        });
+
+        // Export data - uses native file save dialog
+        let pendingExportData = null;
+
+        elements.exportBtn.addEventListener('click', () => {
+            const includeSettings = elements.exportSettings.checked;
+            const includeWorkspaces = elements.exportWorkspaces.checked;
+
+            if (!includeSettings && !includeWorkspaces) {
+                showStatus(elements.backupStatus, 'warning', 'Select at least one option to export');
+                return;
+            }
+
+            elements.exportBtn.disabled = true;
+            elements.exportBtn.textContent = 'Preparing...';
+            showStatus(elements.backupStatus, 'loading', 'Preparing export data...');
+            sendIpc('export_data', { include_settings: includeSettings, include_workspaces: includeWorkspaces });
+        });
+
+        // Import data - uses native file open dialog
+        elements.importDataBtn.addEventListener('click', () => {
+            elements.importDataBtn.disabled = true;
+            elements.importDataBtn.textContent = 'Selecting...';
+            sendIpc('pick_import_file');
+        });
+
+        // Clear data
+        function updateClearButton() {
+            const anyChecked = elements.clearHistory.checked ||
+                               elements.clearDownloads.checked ||
+                               elements.clearShelf.checked;
+            elements.clearDataBtn.disabled = !anyChecked;
+        }
+
+        elements.clearHistory.addEventListener('change', updateClearButton);
+        elements.clearDownloads.addEventListener('change', updateClearButton);
+        elements.clearShelf.addEventListener('change', updateClearButton);
+
+        elements.clearDataBtn.addEventListener('click', () => {
+            if (!confirm('Are you sure you want to clear the selected data? This cannot be undone.')) {
+                return;
+            }
+
+            elements.clearDataBtn.disabled = true;
+            elements.clearDataBtn.textContent = 'Clearing...';
+            showStatus(elements.clearStatus, 'loading', 'Clearing data...');
+
+            sendIpc('clear_browsing_data', {
+                history: elements.clearHistory.checked,
+                downloads: elements.clearDownloads.checked,
+                shelf: elements.clearShelf.checked
+            });
+        });
+
+        // Cellar
+        let cellarItems = [];
+
+        function loadCellar() {
+            sendIpc('get_cellar');
+        }
+
+        function renderCellar() {
+            if (cellarItems.length === 0) {
+                elements.cellarList.innerHTML = '<div class="cellar-empty">No items in cellar</div>';
+                elements.clearCellarBtn.disabled = true;
+                return;
+            }
+
+            elements.clearCellarBtn.disabled = false;
+            elements.cellarList.innerHTML = cellarItems.map(item => {
+                const title = item.title || 'Untitled';
+                const url = item.url;
+                const workspace = item.workspace;
+                const cellaredDate = new Date(item.cellared_at * 1000).toLocaleDateString();
+                return `
+                    <div class="cellar-item" data-id="${item.id}">
+                        <div class="cellar-item-info">
+                            <div class="cellar-item-title">${escapeHtml(title)}</div>
+                            <div class="cellar-item-meta">
+                                <span class="cellar-item-url">${escapeHtml(url)}</span>
+                                <span>${workspace}</span>
+                                <span>${cellaredDate}</span>
+                            </div>
+                        </div>
+                        <button class="btn btn-secondary cellar-restore-btn">Restore</button>
+                    </div>
+                `;
+            }).join('');
+
+            // Add restore handlers
+            elements.cellarList.querySelectorAll('.cellar-restore-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const item = e.target.closest('.cellar-item');
+                    const id = item.dataset.id;
+                    btn.disabled = true;
+                    btn.textContent = 'Restoring...';
+                    sendIpc('restore_from_cellar', { id });
+                });
+            });
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        elements.refreshCellarBtn.addEventListener('click', () => {
+            loadCellar();
+        });
+
+        elements.clearCellarBtn.addEventListener('click', () => {
+            if (!confirm('Are you sure you want to clear all items from the cellar? This cannot be undone.')) {
+                return;
+            }
+            elements.clearCellarBtn.disabled = true;
+            elements.clearCellarBtn.textContent = 'Clearing...';
+            sendIpc('clear_cellar');
+        });
+
+        // Analytics functions
+        let analyticsSettings = {
+            enabled: true,
+            retention_days: 30,
+            weekly_report: false,
+            report_day: 'Monday'
+        };
+
+        function loadAnalyticsSettings() {
+            sendIpc('get_analytics_settings');
+        }
+
+        function applyAnalyticsSettings(settings) {
+            analyticsSettings = settings;
+            elements.analyticsEnabled.checked = settings.enabled;
+            elements.analyticsRetention.value = settings.retention_days.toString();
+            elements.analyticsWeeklyReport.checked = settings.weekly_report;
+            elements.analyticsReportDay.value = settings.report_day;
+        }
+
+        function saveAnalyticsSettings() {
+            const settings = {
+                enabled: elements.analyticsEnabled.checked,
+                retention_days: parseInt(elements.analyticsRetention.value),
+                weekly_report: elements.analyticsWeeklyReport.checked,
+                report_day: elements.analyticsReportDay.value
+            };
+
+            sendIpc('update_analytics_settings', settings);
+        }
+
+        // Analytics event handlers
+        elements.viewReportBtn.addEventListener('click', () => {
+            sendIpc('create_tab', { url: 'hiwave://report' });
+        });
+
+        elements.exportAnalyticsBtn.addEventListener('click', () => {
+            sendIpc('export_analytics_data', { format: 'json' });
+        });
+
+        elements.clearAnalyticsBtn.addEventListener('click', () => {
+            if (!confirm('Are you sure you want to clear all analytics data? This cannot be undone.')) {
+                return;
+            }
+            elements.clearAnalyticsBtn.disabled = true;
+            elements.clearAnalyticsBtn.textContent = 'Clearing...';
+            hideStatus(elements.analyticsStatus);
+            sendIpc('clear_analytics_data');
+        });
+
+        // Auto-save analytics settings on change
+        elements.analyticsEnabled.addEventListener('change', saveAnalyticsSettings);
+        elements.analyticsRetention.addEventListener('change', saveAnalyticsSettings);
+        elements.analyticsWeeklyReport.addEventListener('change', saveAnalyticsSettings);
+        elements.analyticsReportDay.addEventListener('change', saveAnalyticsSettings);
+
+        // Vault functions
+        let vaultCredentials = [];
+
+        function loadVaultStatus() {
+            sendIpc('get_vault_status');
+        }
+
+        function updateVaultUI(unlocked) {
+            if (unlocked) {
+                elements.vaultStatusText.textContent = '🔓 Vault is unlocked';
+                elements.vaultStatusText.style.color = 'var(--success)';
+                elements.vaultUnlockForm.style.display = 'none';
+                elements.vaultLockForm.style.display = 'block';
+                elements.vaultCredentials.style.display = 'block';
+                loadCredentials();
+            } else {
+                elements.vaultStatusText.textContent = '🔒 Vault is locked';
+                elements.vaultStatusText.style.color = 'var(--text-muted)';
+                elements.vaultUnlockForm.style.display = 'block';
+                elements.vaultLockForm.style.display = 'none';
+                elements.vaultCredentials.style.display = 'none';
+            }
+        }
+
+        function loadCredentials() {
+            sendIpc('get_all_credentials');
+        }
+
+        function renderCredentials() {
+            if (vaultCredentials.length === 0) {
+                elements.credentialsList.innerHTML = '<div style="color: #64748b; text-align: center; padding: 1rem;">No credentials saved</div>';
+                return;
+            }
+
+            elements.credentialsList.innerHTML = vaultCredentials.map(cred => `
+                <div class="credential-item" data-id="${cred.id}" style="display: flex; align-items: center; padding: 0.5rem; border-bottom: 1px solid #1e293b; gap: 0.75rem;">
+                    <div style="flex: 1; min-width: 0;">
+                        <div style="font-size: 0.85rem; color: #f1f5f9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(cred.url)}</div>
+                        <div style="font-size: 0.75rem; color: #94a3b8;">${escapeHtml(cred.username)}</div>
+                    </div>
+                    <button class="btn btn-danger delete-cred-btn" style="padding: 0.3rem 0.6rem; font-size: 0.75rem;">Delete</button>
+                </div>
+            `).join('');
+
+            // Add delete handlers
+            elements.credentialsList.querySelectorAll('.delete-cred-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const item = e.target.closest('.credential-item');
+                    const id = parseInt(item.dataset.id);
+                    if (confirm('Delete this credential?')) {
+                        btn.disabled = true;
+                        btn.textContent = 'Deleting...';
+                        sendIpc('delete_credential', { id });
+                    }
+                });
+            });
+        }
+
+        // Vault event handlers
+        elements.unlockVaultBtn.addEventListener('click', () => {
+            const password = elements.vaultPassword.value;
+            if (!password) {
+                elements.vaultUnlockError.textContent = 'Please enter your master password';
+                return;
+            }
+            elements.unlockVaultBtn.disabled = true;
+            elements.unlockVaultBtn.textContent = 'Unlocking...';
+            elements.vaultUnlockError.textContent = '';
+            sendIpc('unlock_vault', { password });
+        });
+
+        elements.vaultPassword.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                elements.unlockVaultBtn.click();
+            }
+        });
+
+        elements.lockVaultBtn.addEventListener('click', () => {
+            elements.lockVaultBtn.disabled = true;
+            elements.lockVaultBtn.textContent = 'Locking...';
+            sendIpc('lock_vault');
+        });
+
+        elements.addCredentialBtn.addEventListener('click', () => {
+            const url = elements.newCredUrl.value.trim();
+            const username = elements.newCredUsername.value.trim();
+            const password = elements.newCredPassword.value;
+
+            if (!url || !username || !password) {
+                elements.addCredentialStatus.textContent = 'Please fill in all fields';
+                elements.addCredentialStatus.style.color = 'var(--error)';
+                return;
+            }
+
+            elements.addCredentialBtn.disabled = true;
+            elements.addCredentialBtn.textContent = 'Saving...';
+            elements.addCredentialStatus.textContent = '';
+            sendIpc('save_credential', { url, username, password });
+        });
+
+        // IPC response handler
+        window.addEventListener('message', (event) => {
+            const data = event.data;
+            if (!data || !data.type) return;
+
+            switch (data.type) {
+                case 'settings_result':
+                    if (data.data) {
+                        applySettingsToUI(data.data);
+                    }
+                    break;
+
+                case 'settings_saved':
+                    elements.saveBtn.textContent = 'Save Settings';
+                    elements.saveBtn.disabled = false;
+                    showStatus(elements.backupStatus, 'success', 'Settings saved!');
+                    setTimeout(() => hideStatus(elements.backupStatus), 2000);
+                    break;
+
+                case 'profiles_result':
+                    elements.profileSelect.innerHTML = '<option value="">Select profile...</option>';
+                    hideStatus(elements.importStatus);
+
+                    if (data.error) {
+                        showStatus(elements.importStatus, 'error', data.error);
+                        elements.profileSelect.disabled = true;
+                        return;
+                    }
+
+                    profilesCache = data.profiles || [];
+                    if (profilesCache.length === 0) {
+                        elements.profileSelect.innerHTML = '<option value="">No profiles found</option>';
+                        elements.profileSelect.disabled = true;
+                        return;
+                    }
+
+                    profilesCache.forEach(profile => {
+                        const option = document.createElement('option');
+                        option.value = profile.path;
+                        option.textContent = profile.name;
+                        elements.profileSelect.appendChild(option);
+                    });
+                    elements.profileSelect.disabled = false;
+                    break;
+
+                case 'import_result':
+                    elements.importBtn.disabled = false;
+                    elements.importBtn.textContent = 'Import';
+
+                    if (data.error) {
+                        showStatus(elements.importStatus, 'error', data.error);
+                        return;
+                    }
+
+                    const stats = data.stats || {};
+                    showStatus(elements.importStatus, 'success',
+                        `Imported ${stats.workspaces_created || 0} workspaces with ${stats.tabs_created || 0} tabs`
+                    );
+                    break;
+
+                case 'export_result':
+                    if (data.error) {
+                        elements.exportBtn.disabled = false;
+                        elements.exportBtn.textContent = 'Export to File';
+                        showStatus(elements.backupStatus, 'error', data.error);
+                        return;
+                    }
+
+                    // Data ready, now show native save dialog
+                    pendingExportData = data.data;
+                    elements.exportBtn.textContent = 'Saving...';
+                    const suggestedName = `hiwave-backup-${new Date().toISOString().split('T')[0]}.json`;
+                    sendIpc('save_export_to_file', { data: pendingExportData, suggested_name: suggestedName });
+                    break;
+
+                case 'export_file_result':
+                    elements.exportBtn.disabled = false;
+                    elements.exportBtn.textContent = 'Export to File';
+                    pendingExportData = null;
+
+                    if (data.error) {
+                        showStatus(elements.backupStatus, 'error', data.error);
+                    } else if (data.cancelled) {
+                        hideStatus(elements.backupStatus);
+                    } else if (data.success) {
+                        showStatus(elements.backupStatus, 'success', `Exported to: ${data.path}`);
+                    }
+                    break;
+
+                case 'import_file_picked':
+                    if (data.error) {
+                        elements.importDataBtn.disabled = false;
+                        elements.importDataBtn.textContent = 'Import from File';
+                        showStatus(elements.backupStatus, 'error', data.error);
+                        return;
+                    }
+
+                    if (data.cancelled) {
+                        elements.importDataBtn.disabled = false;
+                        elements.importDataBtn.textContent = 'Import from File';
+                        return;
+                    }
+
+                    // File picked, now import the data
+                    elements.importDataBtn.textContent = 'Importing...';
+                    showStatus(elements.backupStatus, 'loading', 'Importing data...');
+                    const replace = elements.importReplace.checked;
+                    sendIpc('import_data', { data: data.data, replace });
+                    break;
+
+                case 'import_data_result':
+                    elements.importDataBtn.disabled = false;
+                    elements.importDataBtn.textContent = 'Import from File';
+
+                    if (data.error) {
+                        showStatus(elements.backupStatus, 'error', data.error);
+                        return;
+                    }
+
+                    showStatus(elements.backupStatus, 'success',
+                        `Imported ${data.workspaces_created || 0} workspaces, ${data.tabs_created || 0} tabs`
+                    );
+                    break;
+
+                case 'clear_data_result':
+                    elements.clearDataBtn.disabled = false;
+                    elements.clearDataBtn.textContent = 'Clear Selected Data';
+                    elements.clearHistory.checked = false;
+                    elements.clearDownloads.checked = false;
+                    elements.clearShelf.checked = false;
+                    updateClearButton();
+
+                    const cleared = data.cleared || [];
+                    showStatus(elements.clearStatus, 'success',
+                        `Cleared: ${cleared.join(', ') || 'nothing'}`
+                    );
+                    break;
+
+                case 'cellar_result':
+                    cellarItems = data.items || [];
+                    renderCellar();
+                    break;
+
+                case 'cellar_restore_result':
+                    if (data.error) {
+                        showStatus(elements.cellarStatus, 'error', data.error);
+                    } else {
+                        showStatus(elements.cellarStatus, 'success', 'Item restored to shelf');
+                        setTimeout(() => hideStatus(elements.cellarStatus), 2000);
+                        loadCellar(); // Refresh the list
+                    }
+                    break;
+
+                case 'cellar_cleared':
+                    elements.clearCellarBtn.disabled = true;
+                    elements.clearCellarBtn.textContent = 'Clear Cellar';
+                    cellarItems = [];
+                    renderCellar();
+                    showStatus(elements.cellarStatus, 'success', 'Cellar cleared');
+                    setTimeout(() => hideStatus(elements.cellarStatus), 2000);
+                    break;
+
+                // Analytics IPC responses
+                case 'analytics_settings_result':
+                    if (data.data) {
+                        applyAnalyticsSettings(data.data);
+                    }
+                    break;
+
+                case 'analytics_settings_updated':
+                    showStatus(elements.analyticsStatus, 'success', 'Settings saved');
+                    setTimeout(() => hideStatus(elements.analyticsStatus), 2000);
+                    break;
+
+                case 'analytics_data_cleared':
+                    elements.clearAnalyticsBtn.disabled = false;
+                    elements.clearAnalyticsBtn.textContent = 'Clear All Data';
+                    showStatus(elements.analyticsStatus, 'success', 'All analytics data cleared');
+                    setTimeout(() => hideStatus(elements.analyticsStatus), 3000);
+                    break;
+
+                case 'analytics_export_result':
+                    if (data.data) {
+                        // Create download
+                        const blob = new Blob([data.data], {
+                            type: data.format === 'json' ? 'application/json' : 'text/csv'
+                        });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        const date = new Date().toISOString().split('T')[0];
+                        a.download = `hiwave-analytics-${date}.${data.format}`;
+                        a.click();
+                        URL.revokeObjectURL(url);
+                        showStatus(elements.analyticsStatus, 'success', `Exported analytics data as ${data.format.toUpperCase()}`);
+                        setTimeout(() => hideStatus(elements.analyticsStatus), 3000);
+                    }
+                    break;
+
+                case 'focus_config_result':
+                    if (data.data) {
+                        applyFocusConfigToUI(data.data);
+                    }
+                    break;
+
+                case 'focus_config_saved':
+                    // Silently acknowledge save
+                    console.log('Focus config saved');
+                    break;
+
+                case 'focus_blocklist_updated':
+                    // Blocklist was updated server-side
+                    if (data.blocklist) {
+                        currentFocusConfig.blocklist = data.blocklist;
+                        renderBlocklist(data.blocklist);
+                    }
+                    break;
+
+                // Vault IPC responses
+                case 'vault_status_result':
+                    updateVaultUI(data.unlocked);
+                    break;
+
+                case 'vault_unlock_result':
+                    elements.unlockVaultBtn.disabled = false;
+                    elements.unlockVaultBtn.textContent = 'Unlock';
+                    if (data.success) {
+                        elements.vaultPassword.value = '';
+                        updateVaultUI(true);
+                    } else {
+                        elements.vaultUnlockError.textContent = data.error || 'Failed to unlock vault';
+                    }
+                    break;
+
+                case 'vault_lock_result':
+                    elements.lockVaultBtn.disabled = false;
+                    elements.lockVaultBtn.textContent = 'Lock Vault';
+                    if (data.success) {
+                        updateVaultUI(false);
+                    }
+                    break;
+
+                case 'credentials_result':
+                    if (data.error) {
+                        console.log('Failed to load credentials:', data.error);
+                        vaultCredentials = [];
+                    } else {
+                        vaultCredentials = data.credentials || [];
+                    }
+                    renderCredentials();
+                    break;
+
+                case 'credential_saved':
+                    elements.addCredentialBtn.disabled = false;
+                    elements.addCredentialBtn.textContent = 'Save Credential';
+                    if (data.success) {
+                        elements.newCredUrl.value = '';
+                        elements.newCredUsername.value = '';
+                        elements.newCredPassword.value = '';
+                        elements.addCredentialStatus.textContent = 'Credential saved!';
+                        elements.addCredentialStatus.style.color = 'var(--success)';
+                        setTimeout(() => { elements.addCredentialStatus.textContent = ''; }, 2000);
+                        loadCredentials();
+                    } else {
+                        elements.addCredentialStatus.textContent = data.error || 'Failed to save credential';
+                        elements.addCredentialStatus.style.color = 'var(--error)';
+                    }
+                    break;
+
+                case 'credential_deleted':
+                    if (data.success) {
+                        loadCredentials();
+                    }
+                    break;
+            }
+        });
+
+        // Detect macOS and update shortcut display
+        const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+        if (isMac) {
+            const shortcutDesc = document.getElementById('focusShortcutDesc');
+            const shortcutKey = document.getElementById('focusShortcutKey');
+            if (shortcutDesc) {
+                shortcutDesc.textContent = 'Press ⌘⇧↵ to toggle focus mode (Esc to exit)';
+            }
+            if (shortcutKey) {
+                shortcutKey.textContent = '⌘⇧↵';
+            }
+        }
+
+        // Initial load
+        loadSettings();
+        loadFocusConfig();
+        loadCellar();
+        loadVaultStatus();
+        loadAnalyticsSettings();
+    </script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+# Claude Code
+.claude/
+.claude/*
+
+# Environment
+.env
+.env.*
+
+# Rust build artifacts
+target/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+nul
+
+# Test artifacts
+*.db
+!schema.db
+
+# Logs
+*.log
+
+# Local config
+*.local.toml
+

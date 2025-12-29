@@ -1,0 +1,44 @@
+[package]
+name = "hiwave-app"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "HiWave browser application with WebView rendering"
+
+[[bin]]
+name = "hiwave"
+path = "src/main.rs"
+
+[dependencies]
+# WebView
+wry = { workspace = true }
+tao = { workspace = true }
+muda = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Logging
+log = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-log = { workspace = true }
+
+# URL handling
+url = { workspace = true }
+urlencoding = "2.1"
+
+# Platform
+dirs = { workspace = true }
+
+# File dialogs
+rfd = { workspace = true }
+
+# Workspace crates
+hiwave-core = { workspace = true }
+hiwave-shell = { workspace = true }
+hiwave-shield = { workspace = true }
+hiwave-vault = { workspace = true }
+hiwave-analytics = { workspace = true }
