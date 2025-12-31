@@ -523,29 +523,37 @@
         <!-- Hero -->
         <div class="hero">
             <h1 class="logo">HIWAVE</h1>
-            <p class="tagline">Freedom. Flow. Focus. Your wave, your choice.</p>
+            <p class="tagline">A browser that doesn't track you. Doesn't sell you. Doesn't belong to Google.</p>
             <span class="version" id="versionBadge">v0.1.0-alpha</span>
         </div>
 
-        <!-- Mission -->
+        <!-- Single Donation CTA -->
+        <div style="text-align: center; margin: 32px 0 48px 0;">
+            <a href="https://ko-fi.com/hiwavebrowser" class="sponsor-btn" target="_blank">
+                ☕ Support Independent Development
+            </a>
+        </div>
+
+        <!-- Why HiWave Exists -->
         <div class="card">
             <h2 class="card-title">
-                <span class="icon">🧘</span>
-                Our Mission
+                <span class="icon">🎯</span>
+                Why HiWave Exists
             </h2>
             <p>
-                HiWave was born from a simple observation: modern browsers encourage you to
-                open more tabs, not close them. The result? Digital clutter that fragments your
-                attention and drains your focus.
+                Chrome is Chromium. Edge is Chromium. Brave is Chromium. Opera is Chromium.
             </p>
             <p>
-                We're building a browser that actively helps you browse <em>less</em> — in a good way.
-                One that respects your attention, protects your privacy, and gets out of your way
-                so you can focus on what matters.
+                Chromium is Google. Google's business model is surveillance advertising.
+                Every site you visit, every click you make, every ad you see—tracked, profiled, sold.
             </p>
-            <div class="quote">
-                "The best browser is the one that helps you close tabs, not open more."
-            </div>
+            <p>
+                Even "privacy-focused" Chromium browsers inherit Google's codebase and its priorities.
+            </p>
+            <p>
+                <strong>HiWave is built from scratch on Rust.</strong> No Chromium. No Google code.
+                No ad company calling the shots.
+            </p>
         </div>
 
         <!-- Features -->
@@ -554,67 +562,64 @@
                 <span class="icon">✨</span>
                 What Makes HiWave Different
             </h2>
+            <p style="color: var(--text-secondary); margin-bottom: 16px;">
+                Every feature is designed around privacy, control, and independence.
+            </p>
             <div class="features">
                 <div class="feature">
-                    <span class="feature-icon">📚</span>
-                    <span>The Shelf</span>
-                </div>
-                <div class="feature">
-                    <span class="feature-icon">⏰</span>
-                    <span>Tab Decay</span>
-                </div>
-                <div class="feature">
-                    <span class="feature-icon">🗂️</span>
-                    <span>Workspaces</span>
-                </div>
-                <div class="feature">
                     <span class="feature-icon">🛡️</span>
-                    <span>Built-in Shield</span>
+                    <span>Shield - Native ad/tracker blocking</span>
                 </div>
                 <div class="feature">
                     <span class="feature-icon">🔐</span>
-                    <span>HiWave Vault</span>
+                    <span>Vault - Local-only password encryption</span>
+                </div>
+                <div class="feature">
+                    <span class="feature-icon">📚</span>
+                    <span>Shelf - Privacy-respecting tab management</span>
+                </div>
+                <div class="feature">
+                    <span class="feature-icon">🗂️</span>
+                    <span>Workspaces - Isolated browsing contexts</span>
+                </div>
+                <div class="feature">
+                    <span class="feature-icon">⏰</span>
+                    <span>Tab Decay - Auto-cleanup without hoarding</span>
                 </div>
                 <div class="feature">
                     <span class="feature-icon">⌨️</span>
-                    <span>Keyboard First</span>
+                    <span>Keyboard First - No telemetry tracking</span>
                 </div>
             </div>
         </div>
 
-        <!-- Support -->
+        <!-- Rust Advantage -->
         <div class="card">
             <h2 class="card-title">
-                <span class="icon">💜</span>
-                Support HiWave's Development
+                <span class="icon">⚙️</span>
+                Built on Rust, Not Chromium
             </h2>
-            <p>
-                HiWave is free, open source, and built with love. We don't show ads,
-                sell your data, or track your browsing. If HiWave helps you focus better,
-                consider supporting its development.
-            </p>
-
-            <div class="support-grid">
-                <a href="https://github.com/sponsors/YOUR_USERNAME" class="support-option" target="_blank">
-                    <span class="support-icon">💖</span>
-                    <span class="support-title">GitHub Sponsors</span>
-                    <span class="support-desc">Monthly or one-time support</span>
-                </a>
-                <a href="https://ko-fi.com/YOUR_USERNAME" class="support-option" target="_blank">
-                    <span class="support-icon">☕</span>
-                    <span class="support-title">Ko-fi</span>
-                    <span class="support-desc">Buy me a coffee</span>
-                </a>
-                <a href="https://opencollective.com/hiwave" class="support-option" target="_blank">
-                    <span class="support-icon">🌐</span>
-                    <span class="support-title">Open Collective</span>
-                    <span class="support-desc">Transparent funding</span>
-                </a>
+            <div class="features">
+                <div class="feature">
+                    <span class="feature-icon">🔒</span>
+                    <span>Memory Safety</span>
+                </div>
+                <div class="feature">
+                    <span class="feature-icon">⚡</span>
+                    <span>Low Resource Usage</span>
+                </div>
+                <div class="feature">
+                    <span class="feature-icon">🧹</span>
+                    <span>No Legacy Baggage</span>
+                </div>
+                <div class="feature">
+                    <span class="feature-icon">🆓</span>
+                    <span>Independent</span>
+                </div>
             </div>
-
-            <p style="margin-top: 20px; font-size: 0.9rem;">
-                Your support helps cover development costs, infrastructure, and the eventual
-                addition of HiWave Sync — so you can take your workspaces everywhere.
+            <p style="margin-top: 16px;">
+                Rust eliminates entire classes of security vulnerabilities that plague C++ browsers.
+                HiWave is fast, efficient, and not beholden to Google's roadmap or business model.
             </p>
         </div>
 
@@ -625,21 +630,19 @@
                 Open Source
             </h2>
             <p>
-                HiWave is open source under the Mozilla Public License 2.0.
-                You can inspect every line of code, verify there's no tracking,
-                and even contribute to make it better.
+                HiWave is open source under MPL-2.0. Verify for yourself.
             </p>
             <div class="links">
-                <a href="https://github.com/YOUR_USERNAME/hiwave" class="link" target="_blank">
+                <a href="https://github.com/hiwavebrowser/hiwave" class="link" target="_blank">
                     📂 Source Code
                 </a>
-                <a href="https://github.com/YOUR_USERNAME/hiwave/issues" class="link" target="_blank">
+                <a href="https://github.com/hiwavebrowser/hiwave/issues" class="link" target="_blank">
                     🐛 Report Issues
                 </a>
-                <a href="https://github.com/YOUR_USERNAME/hiwave/blob/main/CONTRIBUTING.md" class="link" target="_blank">
+                <a href="https://github.com/hiwavebrowser/hiwave/blob/main/CONTRIBUTING.md" class="link" target="_blank">
                     🤝 Contribute
                 </a>
-                <a href="https://github.com/YOUR_USERNAME/hiwave/releases" class="link" target="_blank">
+                <a href="https://github.com/hiwavebrowser/hiwave/releases" class="link" target="_blank">
                     📦 Releases
                 </a>
             </div>
@@ -664,12 +667,7 @@
                 <p><strong>Built With:</strong></p>
                 <p>
                     Rust • Tauri/WRY • WebKit/WebView2 •
-                    <a href="https://github.com/nickel-org/nickel.rs" target="_blank">Brave's adblock-rust</a>
-                </p>
-                <p style="margin-top: 12px;"><strong>Inspired By:</strong></p>
-                <p>
-                    Firefox • Arc Browser • Vivaldi •
-                    The Pomodoro Technique • Minimalist Design Philosophy
+                    <a href="https://github.com/brave/adblock-rust" target="_blank">Brave's adblock-rust</a>
                 </p>
             </div>
         </div>
@@ -730,12 +728,9 @@
         <!-- Footer -->
         <div class="footer">
             <p>
-                Made with 💜 for people who want to focus
-            </p>
-            <p style="margin-top: 8px;">
-                <a href="https://hiwave.io">hiwave.io</a> &nbsp;•&nbsp;
-                <a href="https://github.com/YOUR_USERNAME/hiwave">GitHub</a> &nbsp;•&nbsp;
-                <a href="https://twitter.com/hiwave">Twitter</a>
+                <a href="https://www.hiwavebrowser.com">www.hiwavebrowser.com</a> &nbsp;•&nbsp;
+                <a href="https://github.com/hiwavebrowser/hiwave">GitHub</a> &nbsp;•&nbsp;
+                <a href="https://twitter.com/hiwavebrowser">Twitter</a>
             </p>
             <p style="margin-top: 16px; font-size: 0.7rem;">
                 © 2024 HiWave. Licensed under MPL-2.0.
