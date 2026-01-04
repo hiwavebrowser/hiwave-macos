@@ -323,7 +323,7 @@ impl rustkit_html::TreeSink for DocumentSink {
         &mut self,
         name: String,
         attrs: Vec<(String, String)>,
-        _self_closing: bool,
+        self_closing: bool,
     ) -> Self::NodeId {
         let mut attributes = HashMap::new();
         for (key, value) in attrs {
@@ -344,8 +344,12 @@ impl rustkit_html::TreeSink for DocumentSink {
         let parent = self.current_parent();
         parent.append_child(node.clone());
 
-        // Push onto stack for nested elements
-        self.open_elements.push(node.clone());
+        // Push onto stack for nested elements (but not void/self-closing elements)
+        // CRITICAL: Void elements like <meta>, <br>, <img> must not stay on the stack
+        // or they will corrupt the DOM tree by becoming incorrect parents
+        if !self_closing {
+            self.open_elements.push(node.clone());
+        }
 
         node
     }
@@ -505,10 +509,22 @@ impl Document {
 
     /// Get the <body> element.
     pub fn body(&self) -> Option<Rc<Node>> {
-        self.document_element()?
-            .children()
-            .into_iter()
-            .find(|n| n.tag_name() == Some("body"))
+        // First try to find body as a direct child of the document element (html)
+        // This is the correct DOM structure per spec
+        if let Some(html_element) = self.document_element() {
+            if let Some(body) = html_element
+                .children()
+                .into_iter()
+                .find(|n| n.tag_name() == Some("body"))
+            {
+                return Some(body);
+            }
+        }
+
+        // Fallback: search the entire document for a body element
+        // This handles cases where the parser might incorrectly place the body
+        // (e.g., as a sibling of html or nested incorrectly)
+        self.get_elements_by_tag_name("body").into_iter().next()
     }
 
     /// Get element by ID.
@@ -700,5 +716,84 @@ mod tests {
                 .map(|n| n.text_content().trim().to_string()),
             Some("A".to_string())
         );
+    }
+
+    #[test]
+    fn test_void_elements_not_on_stack() {
+        // CRITICAL: Void elements like <meta>, <br>, <img> must not stay on the stack
+        // or they will corrupt the DOM tree
+        let html = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test</title>
+</head>
+<body>
+<p id="test">Hello</p>
+</body>
+</html>"#;
+
+        let doc = Document::parse_html(html).unwrap();
+
+        assert!(doc.document_element().is_some(), "should have html");
+        assert!(doc.head().is_some(), "should have head");
+        assert!(doc.body().is_some(), "should have body - void elements must not corrupt DOM");
+
+        let body = doc.body().unwrap();
+        let p = body
+            .children()
+            .into_iter()
+            .find(|n| n.tag_name() == Some("p"));
+        assert!(p.is_some(), "should have p in body");
+    }
+
+    #[test]
+    fn test_large_style_block() {
+        // Large CSS block like chrome.html has
+        let css = ".a{color:red;} ".repeat(1000);
+        let html = format!(
+            r#"<!DOCTYPE html>
+<html>
+<head>
+<style>{}</style>
+</head>
+<body>
+<p id="test">Hello</p>
+</body>
+</html>"#,
+            css
+        );
+
+        let doc = Document::parse_html(&html).unwrap();
+
+        assert!(doc.document_element().is_some(), "should have html");
+        assert!(doc.head().is_some(), "should have head");
+        assert!(doc.body().is_some(), "should have body");
+
+        let body = doc.body().unwrap();
+        let p = body
+            .children()
+            .into_iter()
+            .find(|n| n.tag_name() == Some("p"));
+        assert!(p.is_some(), "should have p in body");
+    }
+
+    #[test]
+    fn test_meta_and_title() {
+        let html = r#"<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Test</title>
+</head>
+<body>
+<p>Hello</p>
+</body>
+</html>"#;
+
+        let doc = Document::parse_html(html).unwrap();
+
+        assert!(doc.body().is_some(), "should have body with meta and title");
     }
 }

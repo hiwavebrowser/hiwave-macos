@@ -43,8 +43,6 @@ mod webview;
 #[cfg(target_os = "macos")]
 mod webview_rustkit;
 
-#[cfg(target_os = "macos")]
-mod content_webview;
 mod content_webview_trait;
 #[cfg(target_os = "macos")]
 mod content_webview_enum;
@@ -1108,7 +1106,7 @@ fn main() {
         
         let rustkit_view = RustKitView::new(&window, bounds)
             .expect("Failed to create RustKit view");
-        rustkit_view.load_html(ABOUT_HTML)
+        rustkit_view.load_html_internal(ABOUT_HTML)
             .expect("Failed to load initial HTML");
         
         UnifiedContentWebView::RustKit(Arc::new(rustkit_view))

@@ -52,4 +52,7 @@ hiwave-analytics = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 rustkit-engine = { workspace = true }
 rustkit-viewhost = { workspace = true }
+rustkit-text = { workspace = true }
+rustkit-compositor = { workspace = true }
+wgpu = "24"
 tokio = { version = "1.42", features = ["rt", "time"] }

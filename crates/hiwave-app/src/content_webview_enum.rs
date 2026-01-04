@@ -2,7 +2,7 @@
 
 #[cfg(target_os = "macos")]
 use super::webview_rustkit::RustKitView;
-use content_webview_trait::ContentWebViewOps;
+use super::content_webview_trait::ContentWebViewOps;
 use std::sync::Arc;
 use wry::Rect;
 
@@ -20,29 +20,29 @@ pub type ContentWebView = Arc<wry::WebView>;
 impl ContentWebViewOps for ContentWebView {
     fn load_url(&self, url: &str) -> Result<(), String> {
         match self {
-            ContentWebView::RustKit(v) => v.load_url(url),
-            ContentWebView::Wry(v) => v.load_url(url),
+            ContentWebView::RustKit(v) => v.wry_load_url(url),
+            ContentWebView::Wry(v) => v.load_url(url).map_err(|e| e.to_string()),
         }
     }
 
     fn load_html(&self, html: &str) -> Result<(), String> {
         match self {
-            ContentWebView::RustKit(v) => v.load_html(html),
-            ContentWebView::Wry(v) => v.load_html(html),
+            ContentWebView::RustKit(v) => v.wry_load_html(html),
+            ContentWebView::Wry(v) => v.load_html(html).map_err(|e| e.to_string()),
         }
     }
 
     fn evaluate_script(&self, script: &str) -> Result<(), String> {
         match self {
-            ContentWebView::RustKit(v) => v.evaluate_script(script),
-            ContentWebView::Wry(v) => v.evaluate_script(script),
+            ContentWebView::RustKit(v) => v.wry_evaluate_script(script),
+            ContentWebView::Wry(v) => v.evaluate_script(script).map_err(|e| e.to_string()),
         }
     }
 
     fn set_bounds(&self, rect: Rect) -> Result<(), String> {
         match self {
-            ContentWebView::RustKit(v) => v.set_bounds(rect),
-            ContentWebView::Wry(v) => v.set_bounds(rect),
+            ContentWebView::RustKit(v) => v.wry_set_bounds(rect),
+            ContentWebView::Wry(v) => v.set_bounds(rect).map_err(|e| e.to_string()),
         }
     }
 }

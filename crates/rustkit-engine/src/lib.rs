@@ -20,7 +20,7 @@ use rustkit_bindings::DomBindings;
 pub use rustkit_bindings::IpcMessage;
 use rustkit_compositor::Compositor;
 use rustkit_core::{LoadEvent, NavigationRequest, NavigationStateMachine};
-use rustkit_css::ComputedStyle;
+use rustkit_css::{ComputedStyle, Stylesheet, Rule, parse_display};
 use rustkit_dom::{Document, Node, NodeType};
 use rustkit_image::ImageManager;
 use rustkit_js::JsRuntime;
@@ -30,7 +30,7 @@ use rustkit_renderer::Renderer;
 use rustkit_viewhost::{Bounds, ViewHost, ViewHostTrait, ViewId, WindowHandle};
 use thiserror::Error;
 use tokio::sync::mpsc;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 use url::Url;
 
 #[cfg(target_os = "windows")]
@@ -266,7 +266,7 @@ impl Engine {
             parent,
             bounds,
         )
-        .map_err(|e| EngineError::ViewError(e.to_string()))?;
+            .map_err(|e| EngineError::ViewError(e.to_string()))?;
 
         // Create compositor surface
         let hwnd = <ViewHost as ViewHostTrait>::get_hwnd(&self.viewhost, viewhost_id)
@@ -651,6 +651,8 @@ impl Engine {
 
     /// Re-layout a view.
     fn relayout(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+        info!(?id, "Starting relayout");
+        
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
         let document = view
@@ -658,6 +660,8 @@ impl Engine {
             .as_ref()
             .ok_or(EngineError::RenderError("No document".into()))?
             .clone();
+        
+        info!(?id, "Got document for relayout");
 
         // Get view bounds
         let bounds = self
@@ -699,13 +703,25 @@ impl Engine {
         view.display_list = Some(display_list);
 
         // Render
+        info!(?id, "Calling render after relayout");
         self.render(id)?;
+        info!(?id, "Render complete");
 
         Ok(())
     }
 
     /// Build a layout tree from a DOM document.
     fn build_layout_from_document(&self, document: &Document) -> LayoutBox {
+        // Extract stylesheets from <style> elements
+        let stylesheets = self.extract_stylesheets(document);
+        let css_vars = self.extract_css_variables(&stylesheets);
+        
+        info!(
+            stylesheet_count = stylesheets.len(),
+            css_var_count = css_vars.len(),
+            "Extracted stylesheets and CSS variables"
+        );
+        
         // Create root layout box for the document
         let mut root_style = ComputedStyle::new();
         root_style.background_color = rustkit_css::Color::WHITE;
@@ -713,19 +729,30 @@ impl Engine {
 
         // Get the body element and build layout from it
         if let Some(body) = document.body() {
-            let body_box = self.build_layout_from_node(&body);
+            debug!("Found body element, building layout with stylesheets");
+            let body_box = self.build_layout_from_node_with_styles(&body, &stylesheets, &css_vars, &[]);
             root_box.children.push(body_box);
         } else if let Some(html) = document.document_element() {
             // Fallback: use html element if no body
-            let html_box = self.build_layout_from_node(&html);
+            debug!("No body found, using html element");
+            let html_box = self.build_layout_from_node_with_styles(&html, &stylesheets, &css_vars, &[]);
             root_box.children.push(html_box);
+        } else {
+            warn!("No body or html element found!");
         }
 
+        info!(total_children = root_box.children.len(), "Root box built");
         root_box
     }
 
-    /// Build a layout box from a DOM node.
-    fn build_layout_from_node(&self, node: &Rc<Node>) -> LayoutBox {
+    /// Build a layout box from a DOM node with stylesheet support.
+    fn build_layout_from_node_with_styles(
+        &self,
+        node: &Rc<Node>,
+        stylesheets: &[Stylesheet],
+        css_vars: &HashMap<String, String>,
+        ancestors: &[String],
+    ) -> LayoutBox {
         match &node.node_type {
             NodeType::Element { tag_name, attributes, .. } => {
                 // Determine box type based on tag
@@ -751,14 +778,23 @@ impl Engine {
                     BoxType::Block
                 };
 
-                // Create computed style based on element and attributes
-                let style = self.compute_style_for_element(tag_name, attributes);
+                // Create computed style based on element, attributes, and stylesheets
+                let style = self.compute_style_for_element(tag_name, attributes, stylesheets, css_vars, ancestors);
+                
+                // Check for display: none
+                if style.display == rustkit_css::Display::None {
+                    return LayoutBox::new(BoxType::Block, ComputedStyle::new());
+                }
 
                 let mut layout_box = LayoutBox::new(box_type, style);
 
+                // Build ancestors list for child elements
+                let mut child_ancestors = ancestors.to_vec();
+                child_ancestors.push(tag_name.to_lowercase());
+
                 // Process children
                 for child in node.children() {
-                    let child_box = self.build_layout_from_node(&child);
+                    let child_box = self.build_layout_from_node_with_styles(&child, stylesheets, css_vars, &child_ancestors);
                     // Only add non-empty boxes
                     if !matches!(child_box.box_type, BoxType::Block) || !child_box.children.is_empty() 
                         || matches!(child_box.box_type, BoxType::Text(_)) {
@@ -792,11 +828,14 @@ impl Engine {
         &self,
         tag_name: &str,
         attributes: &std::collections::HashMap<String, String>,
+        stylesheets: &[Stylesheet],
+        css_vars: &HashMap<String, String>,
+        ancestors: &[String],
     ) -> ComputedStyle {
         let mut style = ComputedStyle::new();
         style.color = rustkit_css::Color::BLACK;
 
-        // Apply tag-specific default styles
+        // Apply tag-specific default styles (user-agent stylesheet)
         match tag_name.to_lowercase().as_str() {
             "body" => {
                 style.background_color = rustkit_css::Color::WHITE;
@@ -865,16 +904,50 @@ impl Engine {
             _ => {}
         }
 
-        // Parse inline style attribute if present
+        // Collect matching rules with specificity for ordering
+        let mut matching_rules: Vec<(&Rule, (usize, usize, usize), usize)> = Vec::new();
+        let mut rule_index = 0;
+        
+        for stylesheet in stylesheets {
+            for rule in &stylesheet.rules {
+                if self.selector_matches(&rule.selector, tag_name, attributes, ancestors) {
+                    let specificity = self.selector_specificity(&rule.selector);
+                    matching_rules.push((rule, specificity, rule_index));
+                }
+                rule_index += 1;
+            }
+        }
+        
+        // Sort by specificity (lower first, so they get overwritten by higher)
+        matching_rules.sort_by(|a, b| {
+            // Compare specificity: (ids, classes, tags)
+            a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2))
+        });
+        
+        // Apply matching rules in order
+        for (rule, _, _) in matching_rules {
+            for decl in &rule.declarations {
+                // Extract string value from PropertyValue
+                let value_str = match &decl.value {
+                    rustkit_css::PropertyValue::Specified(s) => s.clone(),
+                    rustkit_css::PropertyValue::Inherit => continue, // Skip inherit for now
+                    rustkit_css::PropertyValue::Initial => continue, // Skip initial for now
+                };
+                let resolved_value = self.resolve_css_variables(&value_str, css_vars);
+                self.apply_style_property(&mut style, &decl.property, &resolved_value);
+            }
+        }
+
+        // Parse inline style attribute if present (highest specificity)
         if let Some(style_attr) = attributes.get("style") {
-            self.apply_inline_style(&mut style, style_attr);
+            self.apply_inline_style(&mut style, style_attr, css_vars);
         }
 
         style
     }
 
     /// Apply inline style attribute to computed style.
-    fn apply_inline_style(&self, style: &mut ComputedStyle, style_attr: &str) {
+    fn apply_inline_style(&self, style: &mut ComputedStyle, style_attr: &str, css_vars: &HashMap<String, String>) {
         for declaration in style_attr.split(';') {
             let declaration = declaration.trim();
             if declaration.is_empty() {
@@ -883,8 +956,16 @@ impl Engine {
             if let Some((property, value)) = declaration.split_once(':') {
                 let property = property.trim().to_lowercase();
                 let value = value.trim();
+                // Resolve CSS variables in the value
+                let resolved_value = self.resolve_css_variables(value, css_vars);
+                self.apply_style_property(style, &property, &resolved_value);
+            }
+        }
+    }
 
-                match property.as_str() {
+    /// Apply a single CSS property to a computed style.
+    fn apply_style_property(&self, style: &mut ComputedStyle, property: &str, value: &str) {
+        match property {
                     "color" => {
                         if let Some(color) = parse_color(value) {
                             style.color = color;
@@ -903,13 +984,59 @@ impl Engine {
                     "font-weight" => {
                         if value == "bold" || value == "700" || value == "800" || value == "900" {
                             style.font_weight = rustkit_css::FontWeight::BOLD;
-                        }
+                } else if value == "normal" || value == "400" {
+                    style.font_weight = rustkit_css::FontWeight::NORMAL;
+                }
+            }
+            "font-family" => {
+                style.font_family = value.trim_matches(|c| c == '"' || c == '\'').to_string();
+            }
+            "font-style" => {
+                if value == "italic" {
+                    style.font_style = rustkit_css::FontStyle::Italic;
+                } else if value == "normal" {
+                    style.font_style = rustkit_css::FontStyle::Normal;
+                }
+            }
+            "line-height" => {
+                // line_height is an f32 (multiplier), parse it
+                if let Ok(lh) = value.parse::<f32>() {
+                    style.line_height = lh;
+                } else if let Some(length) = parse_length(value) {
+                    // Convert length to a multiplier (very rough approximation)
+                    match length {
+                        rustkit_css::Length::Px(px) => style.line_height = px / 16.0,
+                        rustkit_css::Length::Em(em) => style.line_height = em,
+                        rustkit_css::Length::Percent(pct) => style.line_height = pct / 100.0,
+                        _ => {}
                     }
+                }
+            }
                     "margin" => {
                         if let Some(length) = parse_length(value) {
                             style.margin_top = length;
                             style.margin_right = length;
                             style.margin_bottom = length;
+                            style.margin_left = length;
+                        }
+                    }
+            "margin-top" => {
+                if let Some(length) = parse_length(value) {
+                    style.margin_top = length;
+                }
+            }
+            "margin-right" => {
+                if let Some(length) = parse_length(value) {
+                    style.margin_right = length;
+                }
+            }
+            "margin-bottom" => {
+                if let Some(length) = parse_length(value) {
+                    style.margin_bottom = length;
+                }
+            }
+            "margin-left" => {
+                if let Some(length) = parse_length(value) {
                             style.margin_left = length;
                         }
                     }
@@ -921,10 +1048,315 @@ impl Engine {
                             style.padding_left = length;
                         }
                     }
-                    _ => {}
+            "padding-top" => {
+                if let Some(length) = parse_length(value) {
+                    style.padding_top = length;
+                }
+            }
+            "padding-right" => {
+                if let Some(length) = parse_length(value) {
+                    style.padding_right = length;
+                }
+            }
+            "padding-bottom" => {
+                if let Some(length) = parse_length(value) {
+                    style.padding_bottom = length;
+                }
+            }
+            "padding-left" => {
+                if let Some(length) = parse_length(value) {
+                    style.padding_left = length;
+                }
+            }
+            "border" | "border-width" => {
+                if let Some(length) = parse_length(value) {
+                    style.border_top_width = length;
+                    style.border_right_width = length;
+                    style.border_bottom_width = length;
+                    style.border_left_width = length;
+                }
+            }
+            "border-color" => {
+                if let Some(color) = parse_color(value) {
+                    style.border_top_color = color;
+                    style.border_right_color = color;
+                    style.border_bottom_color = color;
+                    style.border_left_color = color;
+                }
+            }
+            "display" => {
+                if let Some(display) = parse_display(value) {
+                    style.display = display;
+                }
+            }
+            "text-align" => {
+                // Store text-align if ComputedStyle supports it
+                // For now, just ignore
+            }
+            "border-radius" => {
+                // border-radius not yet in ComputedStyle, ignore for now
+            }
+            "max-width" => {
+                if let Some(length) = parse_length(value) {
+                    style.max_width = length;
+                }
+            }
+            _ => {
+                // Unknown property, ignore
+            }
+        }
+    }
+
+    /// Extract CSS text from <style> elements in the document.
+    fn extract_stylesheets(&self, document: &Document) -> Vec<Stylesheet> {
+        let mut stylesheets = Vec::new();
+        
+        // Find all <style> elements
+        let style_elements = document.get_elements_by_tag_name("style");
+        
+        for style_el in style_elements {
+            // Get text content
+            let mut css_text = String::new();
+            for child in style_el.children() {
+                if let NodeType::Text(text) = &child.node_type {
+                    css_text.push_str(text);
+                }
+            }
+            
+            if !css_text.is_empty() {
+                match Stylesheet::parse(&css_text) {
+                    Ok(stylesheet) => {
+                        debug!(rules = stylesheet.rules.len(), "Parsed stylesheet");
+                        stylesheets.push(stylesheet);
+                    }
+                    Err(e) => {
+                        warn!(?e, "Failed to parse stylesheet");
+                    }
                 }
             }
         }
+        
+        stylesheets
+    }
+
+    /// Extract CSS variables from :root rules.
+    fn extract_css_variables(&self, stylesheets: &[Stylesheet]) -> HashMap<String, String> {
+        let mut variables = HashMap::new();
+        
+        for stylesheet in stylesheets {
+            for rule in &stylesheet.rules {
+                // Check for :root selector
+                if rule.selector.trim() == ":root" {
+                    for decl in &rule.declarations {
+                        // CSS custom properties start with --
+                        if decl.property.starts_with("--") {
+                            // Extract the string value from PropertyValue
+                            let value_str = match &decl.value {
+                                rustkit_css::PropertyValue::Specified(s) => s.clone(),
+                                rustkit_css::PropertyValue::Inherit => "inherit".to_string(),
+                                rustkit_css::PropertyValue::Initial => "initial".to_string(),
+                            };
+                            variables.insert(decl.property.clone(), value_str);
+                        }
+                    }
+                }
+            }
+        }
+        
+        debug!(count = variables.len(), "Extracted CSS variables");
+        variables
+    }
+
+    /// Resolve CSS variable references in a value.
+    fn resolve_css_variables(&self, value: &str, css_vars: &HashMap<String, String>) -> String {
+        let mut result = value.to_string();
+        
+        // Look for var(--name) or var(--name, fallback)
+        while let Some(start) = result.find("var(") {
+            let after_var = &result[start + 4..];
+            if let Some(end) = after_var.find(')') {
+                let var_content = &after_var[..end];
+                
+                // Parse variable name and optional fallback
+                let (var_name, fallback) = if let Some(comma_pos) = var_content.find(',') {
+                    (var_content[..comma_pos].trim(), Some(var_content[comma_pos + 1..].trim()))
+                } else {
+                    (var_content.trim(), None)
+                };
+                
+                // Look up variable value
+                let replacement = css_vars.get(var_name)
+                    .map(|s| s.as_str())
+                    .or(fallback)
+                    .unwrap_or("");
+                
+                // Replace var(...) with the resolved value
+                result = format!("{}{}{}", &result[..start], replacement, &after_var[end + 1..]);
+            } else {
+                break; // Malformed var(), stop processing
+            }
+        }
+        
+        result
+    }
+
+    /// Check if a selector matches an element.
+    fn selector_matches(&self, selector: &str, tag_name: &str, attributes: &HashMap<String, String>, ancestors: &[String]) -> bool {
+        let selector = selector.trim();
+        
+        // Handle multiple selectors (comma-separated)
+        if selector.contains(',') {
+            return selector.split(',')
+                .any(|s| self.selector_matches(s.trim(), tag_name, attributes, ancestors));
+        }
+        
+        // Handle descendant combinator (space-separated)
+        if selector.contains(' ') {
+            let parts: Vec<&str> = selector.split_whitespace().collect();
+            if let Some((last, ancestor_selectors)) = parts.split_last() {
+                // Last part must match current element
+                if !self.simple_selector_matches(last, tag_name, attributes) {
+                    return false;
+                }
+                // Ancestor selectors must match some ancestor (in order)
+                let mut ancestor_idx = 0;
+                for sel in ancestor_selectors {
+                    while ancestor_idx < ancestors.len() {
+                        if self.simple_selector_matches_tag_only(sel, &ancestors[ancestor_idx]) {
+                            ancestor_idx += 1;
+                            break;
+                        }
+                        ancestor_idx += 1;
+                    }
+                }
+                return true; // Simplified - just check if element matches
+            }
+        }
+        
+        // Simple selector (no combinators)
+        self.simple_selector_matches(selector, tag_name, attributes)
+    }
+
+    /// Check if a simple selector matches an element.
+    fn simple_selector_matches(&self, selector: &str, tag_name: &str, attributes: &HashMap<String, String>) -> bool {
+        // Universal selector
+        if selector == "*" {
+            return true;
+        }
+        
+        // :root pseudo-class matches html element
+        if selector == ":root" {
+            return tag_name.eq_ignore_ascii_case("html");
+        }
+        
+        // ID selector: #id
+        if let Some(id) = selector.strip_prefix('#') {
+            if let Some(el_id) = attributes.get("id") {
+                return el_id == id;
+            }
+            return false;
+        }
+        
+        // Class selector: .class (can be chained: .a.b)
+        if selector.starts_with('.') {
+            let classes: Vec<&str> = selector[1..].split('.').collect();
+            if let Some(el_class) = attributes.get("class") {
+                let el_classes: Vec<&str> = el_class.split_whitespace().collect();
+                return classes.iter().all(|c| el_classes.contains(c));
+            }
+            return false;
+        }
+        
+        // Type selector (element name)
+        // May have class or ID attached: div.class or div#id
+        let mut remaining = selector;
+        
+        // Extract tag part
+        let tag_end = remaining.find(|c| c == '.' || c == '#' || c == ':' || c == '[')
+            .unwrap_or(remaining.len());
+        let tag_part = &remaining[..tag_end];
+        remaining = &remaining[tag_end..];
+        
+        // Check tag name (if specified)
+        if !tag_part.is_empty() && !tag_part.eq_ignore_ascii_case(tag_name) {
+            return false;
+        }
+        
+        // Check remaining parts (classes, IDs)
+        while !remaining.is_empty() {
+            if let Some(rest) = remaining.strip_prefix('.') {
+                // Class
+                let class_end = rest.find(|c| c == '.' || c == '#' || c == ':' || c == '[')
+                    .unwrap_or(rest.len());
+                let class_name = &rest[..class_end];
+                remaining = &rest[class_end..];
+                
+                if let Some(el_class) = attributes.get("class") {
+                    if !el_class.split_whitespace().any(|c| c == class_name) {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            } else if let Some(rest) = remaining.strip_prefix('#') {
+                // ID
+                let id_end = rest.find(|c| c == '.' || c == '#' || c == ':' || c == '[')
+                    .unwrap_or(rest.len());
+                let id_name = &rest[..id_end];
+                remaining = &rest[id_end..];
+                
+                if attributes.get("id").map(|s| s.as_str()) != Some(id_name) {
+                    return false;
+                }
+            } else {
+                // Unknown, skip
+                break;
+            }
+        }
+        
+        true
+    }
+
+    /// Simplified selector match for ancestor checking (only checks tag and class).
+    fn simple_selector_matches_tag_only(&self, selector: &str, ancestor_tag: &str) -> bool {
+        if selector == "*" {
+            return true;
+        }
+        if selector.starts_with('.') {
+            return false; // Can't check class for ancestors in this simplified version
+        }
+        let tag_end = selector.find(|c| c == '.' || c == '#' || c == ':')
+            .unwrap_or(selector.len());
+        let tag_part = &selector[..tag_end];
+        tag_part.is_empty() || tag_part.eq_ignore_ascii_case(ancestor_tag)
+    }
+
+    /// Calculate selector specificity for ordering.
+    fn selector_specificity(&self, selector: &str) -> (usize, usize, usize) {
+        let mut ids = 0;
+        let mut classes = 0;
+        let mut tags = 0;
+        
+        for part in selector.split_whitespace() {
+            for segment in part.split(',') {
+                let segment = segment.trim();
+                // Count IDs
+                ids += segment.matches('#').count();
+                // Count classes and pseudo-classes
+                classes += segment.matches('.').count();
+                classes += segment.matches(':').count();
+                // Count type selectors
+                if !segment.is_empty() && 
+                   !segment.starts_with('.') && 
+                   !segment.starts_with('#') && 
+                   !segment.starts_with(':') &&
+                   segment != "*" {
+                    tags += 1;
+                }
+            }
+        }
+        
+        (ids, classes, tags)
     }
 
     /// Render a view (public API for continuous rendering).
@@ -942,13 +1374,41 @@ impl Engine {
         }
     }
 
+    /// Capture a frame from a view to a PPM file.
+    ///
+    /// This is useful for deterministic testing and visual debugging.
+    /// The output is a PPM file (simple portable format).
+    pub fn capture_frame(&self, id: EngineViewId, path: &str) -> Result<(), EngineError> {
+        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+        let viewhost_id = view.viewhost_id;
+
+        info!(?id, path, "Capturing frame");
+
+        self.compositor
+            .capture_frame_to_file(viewhost_id, path)
+            .map_err(|e| EngineError::RenderError(e.to_string()))
+    }
+
     /// Render a view (internal).
     fn render(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
         let viewhost_id = view.viewhost_id;
         let display_list = view.display_list.as_ref();
+        let has_display_list = display_list.is_some();
+        let cmd_count = display_list.map(|dl| dl.commands.len()).unwrap_or(0);
 
-        trace!(?id, "Rendering view");
+        info!(?id, has_display_list, cmd_count, "Rendering view");
+
+        // Get surface size and update renderer viewport before rendering
+        // This ensures the vertex shader transforms coordinates correctly
+        let (surface_width, surface_height) = self.compositor
+            .get_surface_size(viewhost_id)
+            .map_err(|e| EngineError::RenderError(e.to_string()))?;
+
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_viewport_size(surface_width, surface_height);
+            debug!(?id, surface_width, surface_height, "Updated renderer viewport size");
+        }
 
         // Get surface texture
         let (output, texture_view) = self.compositor
@@ -960,7 +1420,7 @@ impl Engine {
             renderer.execute(&display_list.commands, &texture_view)
                 .map_err(|e| EngineError::RenderError(e.to_string()))?;
         } else if let Some(renderer) = &mut self.renderer {
-            // No display list, render empty (will clear to white)
+            // No display list, render empty (will clear to white or debug color)
             renderer.execute(&[], &texture_view)
                 .map_err(|e| EngineError::RenderError(e.to_string()))?;
         } else {
@@ -1542,13 +2002,21 @@ mod tests {
         // Verify document structure
         assert!(document.body().is_some(), "Document should have a body");
         
-        // Create a dummy engine using the new() constructor pattern
+        // Create a dummy engine - skip test if GPU is not available
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
             viewhost: ViewHost::new(),
-            compositor: Compositor::new().expect("Failed to create compositor"),
+            compositor,
             renderer: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader")),
             image_manager: Arc::new(ImageManager::new()),
@@ -1595,12 +2063,21 @@ mod tests {
         let document = Document::parse_html(html).expect("Failed to parse HTML");
         let document = Rc::new(document);
         
+        // Skip test if GPU is not available
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
             viewhost: ViewHost::new(),
-            compositor: Compositor::new().expect("Failed to create compositor"),
+            compositor,
             renderer: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader")),
             image_manager: Arc::new(ImageManager::new()),

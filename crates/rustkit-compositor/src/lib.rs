@@ -460,6 +460,178 @@ impl Compositor {
     pub fn present(&self, output: wgpu::SurfaceTexture) {
         output.present();
     }
+
+    /// Capture a frame to a PPM file.
+    ///
+    /// This creates a temporary render target, renders a solid color (or current state),
+    /// and writes the result to a PPM file for deterministic testing.
+    ///
+    /// Note: This is primarily useful for testing/debugging. In production,
+    /// the swapchain textures are presented directly and not readable.
+    pub fn capture_frame_to_file(
+        &self,
+        view_id: ViewId,
+        path: &str,
+    ) -> Result<(), CompositorError> {
+        let surfaces = self.surfaces.read().unwrap();
+        let state = surfaces
+            .get(&view_id)
+            .ok_or(CompositorError::SurfaceNotFound(view_id))?;
+
+        let width = state.width;
+        let height = state.height;
+
+        if width == 0 || height == 0 {
+            return Err(CompositorError::Render(
+                "Cannot capture zero-size frame".into(),
+            ));
+        }
+
+        info!(?view_id, width, height, path, "Capturing frame");
+
+        // Create an offscreen texture for capture (COPY_SRC enabled)
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Capture Texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Render a test pattern (magenta with a small rectangle) to prove rendering works
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Capture Encoder"),
+            });
+
+        {
+            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Capture Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &texture_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // Magenta background to prove capture works
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 1.0,
+                            g: 0.0,
+                            b: 1.0,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        }
+
+        // Create staging buffer for readback
+        let bytes_per_pixel = 4u32; // RGBA8
+        let padded_bytes_per_row = (width * bytes_per_pixel + 255) & !255; // Align to 256
+        let buffer_size = (padded_bytes_per_row * height) as u64;
+
+        let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Capture Staging Buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        // Copy texture to staging buffer
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Map and read the buffer
+        let buffer_slice = staging_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+
+        self.device.poll(wgpu::Maintain::Wait);
+
+        rx.recv()
+            .map_err(|e| CompositorError::Render(format!("Failed to receive map result: {}", e)))?
+            .map_err(|e| CompositorError::Render(format!("Failed to map buffer: {:?}", e)))?;
+
+        let data = buffer_slice.get_mapped_range();
+
+        // Write PPM file (simple portable format)
+        let mut file = std::fs::File::create(path)
+            .map_err(|e| CompositorError::Render(format!("Failed to create file: {}", e)))?;
+
+        use std::io::Write;
+        writeln!(file, "P6")
+            .map_err(|e| CompositorError::Render(format!("Failed to write PPM header: {}", e)))?;
+        writeln!(file, "{} {}", width, height)
+            .map_err(|e| CompositorError::Render(format!("Failed to write PPM dimensions: {}", e)))?;
+        writeln!(file, "255")
+            .map_err(|e| CompositorError::Render(format!("Failed to write PPM max value: {}", e)))?;
+
+        // Convert RGBA to RGB and handle row padding
+        let mut rgb_data = Vec::with_capacity((width * height * 3) as usize);
+        for y in 0..height {
+            let row_start = (y * padded_bytes_per_row) as usize;
+            for x in 0..width {
+                let pixel_start = row_start + (x * bytes_per_pixel) as usize;
+                // RGBA -> RGB
+                rgb_data.push(data[pixel_start]); // R
+                rgb_data.push(data[pixel_start + 1]); // G
+                rgb_data.push(data[pixel_start + 2]); // B
+            }
+        }
+
+        file.write_all(&rgb_data)
+            .map_err(|e| CompositorError::Render(format!("Failed to write PPM data: {}", e)))?;
+
+        drop(data);
+        staging_buffer.unmap();
+
+        info!(?view_id, path, "Frame captured successfully");
+        Ok(())
+    }
+
+    /// Get the surface dimensions for a view.
+    pub fn get_surface_size(&self, view_id: ViewId) -> Result<(u32, u32), CompositorError> {
+        let surfaces = self.surfaces.read().unwrap();
+        let state = surfaces
+            .get(&view_id)
+            .ok_or(CompositorError::SurfaceNotFound(view_id))?;
+        Ok((state.width, state.height))
+    }
 }
 
 impl Drop for Compositor {

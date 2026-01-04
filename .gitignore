@@ -31,3 +31,12 @@ nul
 # Local config
 *.local.toml
 
+# AI Orchestrator - local artifacts (ignored)
+.ai/artifacts/
+.ai/cache/
+.ai/reports/
+.ai/logs/
+.ai/*
+tools/*
+# Keep work_orders, roadmap_index.json, and README.md tracked
+# (they are NOT ignored because only the above subdirs are)

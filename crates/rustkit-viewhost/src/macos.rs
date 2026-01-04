@@ -42,6 +42,20 @@ impl MacOSViewHost {
         }
     }
 
+    /// Convert top-left origin bounds to Cocoa's bottom-left origin coordinate system.
+    ///
+    /// HiWave/Wry uses top-left origin (y=0 at top, increasing downward).
+    /// Cocoa uses bottom-left origin (y=0 at bottom, increasing upward).
+    ///
+    /// Formula: y_cocoa = parent_height - bounds.y - bounds.height
+    fn convert_to_cocoa_frame(bounds: Bounds, parent_height: f64) -> cocoa::foundation::NSRect {
+        let y_cocoa = parent_height - bounds.y as f64 - bounds.height as f64;
+        cocoa::foundation::NSRect::new(
+            cocoa::foundation::NSPoint::new(bounds.x as f64, y_cocoa),
+            cocoa::foundation::NSSize::new(bounds.width as f64, bounds.height as f64),
+        )
+    }
+
     /// Create a view from a TAO window handle
     pub fn create_view_from_window(
         &self,
@@ -82,15 +96,21 @@ impl MacOSViewHost {
             ));
         }
 
+        // Get the content view's frame to get parent height for coordinate conversion
+        let parent_frame: cocoa::foundation::NSRect = unsafe { msg_send![content_view, frame] };
+        let parent_height = parent_frame.size.height;
+
+        debug!(parent_height, "Got parent content view height");
+
         // Create a new NSView for our content
+        // Convert from top-left origin (HiWave/Wry) to bottom-left origin (Cocoa)
+        let frame = Self::convert_to_cocoa_frame(bounds, parent_height);
+        debug!(?bounds, cocoa_y = frame.origin.y, "Converted bounds to Cocoa coordinates");
+
         let view: id = unsafe {
             use objc::runtime::Class;
             let view_class = Class::get("NSView").expect("NSView class not found");
             let view: id = msg_send![view_class, alloc];
-            let frame = cocoa::foundation::NSRect::new(
-                cocoa::foundation::NSPoint::new(bounds.x as f64, bounds.y as f64),
-                cocoa::foundation::NSSize::new(bounds.width as f64, bounds.height as f64),
-            );
             msg_send![view, initWithFrame: frame]
         };
 
@@ -194,10 +214,29 @@ impl MacOSViewHost {
         state.bounds = bounds;
 
         unsafe {
-            let frame = cocoa::foundation::NSRect::new(
-                cocoa::foundation::NSPoint::new(bounds.x as f64, bounds.y as f64),
-                cocoa::foundation::NSSize::new(bounds.width as f64, bounds.height as f64),
-            );
+            // Get the superview to determine parent height for coordinate conversion
+            let superview: id = msg_send![state.view, superview];
+            let parent_height = if superview != nil {
+                let parent_frame: cocoa::foundation::NSRect = msg_send![superview, frame];
+                parent_frame.size.height
+            } else {
+                // Fallback: try to get window content view height
+                let window: id = msg_send![state.view, window];
+                if window != nil {
+                    let content_view: id = msg_send![window, contentView];
+                    if content_view != nil {
+                        let content_frame: cocoa::foundation::NSRect = msg_send![content_view, frame];
+                        content_frame.size.height
+                    } else {
+                        bounds.height as f64 + bounds.y as f64 // Fallback
+                    }
+                } else {
+                    bounds.height as f64 + bounds.y as f64 // Fallback
+                }
+            };
+
+            // Convert from top-left origin to Cocoa's bottom-left origin
+            let frame = Self::convert_to_cocoa_frame(bounds, parent_height);
             let _: () = msg_send![state.view, setFrame: frame];
         }
 

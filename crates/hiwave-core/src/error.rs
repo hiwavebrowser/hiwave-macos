@@ -38,6 +38,9 @@ pub enum HiWaveError {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    #[error("WebView error: {0}")]
+    WebView(String),
+
     #[error("Not found: {0}")]
     NotFound(String),
 

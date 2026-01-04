@@ -880,6 +880,30 @@ impl Renderer {
             label: Some("Render Encoder"),
         });
 
+        // Check for debug visual mode (RUSTKIT_DEBUG_VISUAL=1)
+        // When enabled, clear to magenta to prove pixels are hitting the screen
+        let debug_visual = std::env::var("RUSTKIT_DEBUG_VISUAL")
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(false);
+
+        let clear_color = if debug_visual {
+            // Magenta - very visible, proves rendering works
+            wgpu::Color {
+                r: 1.0,
+                g: 0.0,
+                b: 1.0,
+                a: 1.0,
+            }
+        } else {
+            // Normal white background
+            wgpu::Color {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            }
+        };
+
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Main Render Pass"),
@@ -887,12 +911,7 @@ impl Renderer {
                     view: target,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 1.0,
-                            g: 1.0,
-                            b: 1.0,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(clear_color),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -900,6 +919,31 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+
+            // In debug mode, draw a test rectangle at (10,10) to prove draw commands work
+            if debug_visual && self.color_vertices.is_empty() {
+                // If no commands were issued, add a test rectangle
+                let test_rect = Rect::new(10.0, 10.0, 100.0, 100.0);
+                let test_color = Color::new(0, 255, 0, 1.0); // Green
+                let c = [
+                    test_color.r as f32 / 255.0,
+                    test_color.g as f32 / 255.0,
+                    test_color.b as f32 / 255.0,
+                    test_color.a,
+                ];
+                let x = test_rect.x;
+                let y = test_rect.y;
+                let w = test_rect.width;
+                let h = test_rect.height;
+
+                self.color_vertices.extend_from_slice(&[
+                    ColorVertex { position: [x, y], color: c },
+                    ColorVertex { position: [x + w, y], color: c },
+                    ColorVertex { position: [x + w, y + h], color: c },
+                    ColorVertex { position: [x, y + h], color: c },
+                ]);
+                self.color_indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+            }
 
             // Draw solid colors
             if !self.color_vertices.is_empty() {

@@ -438,7 +438,7 @@ impl LayoutBox {
 
     /// Perform layout within the given containing block.
     pub fn layout(&mut self, containing_block: &Dimensions) {
-        match self.box_type {
+        match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
                 // Check for flex or grid container
                 if self.style.display.is_flex() {
@@ -460,13 +460,74 @@ impl LayoutBox {
                     self.layout_block(containing_block);
                 }
             }
-            BoxType::Inline | BoxType::Text(_) => {
-                // Inline layout handled by parent
+            BoxType::Inline => {
+                // Inline boxes: position at containing block's current content area
+                self.layout_inline(containing_block);
+            }
+            BoxType::Text(text) => {
+                // Text boxes: calculate dimensions based on text content
+                self.layout_text(text.clone(), containing_block);
             }
         }
 
         // Apply positioning offsets after normal layout
         self.apply_position_offsets(containing_block);
+    }
+
+    /// Layout an inline box.
+    fn layout_inline(&mut self, containing_block: &Dimensions) {
+        // Position at containing block's content area
+        self.dimensions.content.x = containing_block.content.x;
+        self.dimensions.content.y = containing_block.content.y + containing_block.content.height;
+        
+        // Layout inline children sequentially
+        let mut cursor_x = 0.0;
+        let mut max_height = 0.0f32;
+        
+        for child in &mut self.children {
+            let mut cb = self.dimensions.clone();
+            cb.content.x = self.dimensions.content.x + cursor_x;
+            cb.content.height = 0.0;
+            
+            child.layout(&cb);
+            
+            cursor_x += child.dimensions.margin_box().width;
+            max_height = max_height.max(child.dimensions.margin_box().height);
+        }
+        
+        self.dimensions.content.width = cursor_x;
+        self.dimensions.content.height = max_height.max(self.get_line_height());
+    }
+
+    /// Layout a text box.
+    fn layout_text(&mut self, text: String, containing_block: &Dimensions) {
+        // Get font size
+        let font_size = match self.style.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        
+        // Estimate text width (rough approximation: 0.5 * font_size * char_count)
+        // In a real implementation, this would use font metrics
+        let char_count = text.chars().count() as f32;
+        let avg_char_width = font_size * 0.5; // Approximate average character width
+        let text_width = char_count * avg_char_width;
+        
+        // Position at containing block's content area
+        self.dimensions.content.x = containing_block.content.x;
+        self.dimensions.content.y = containing_block.content.y + containing_block.content.height;
+        self.dimensions.content.width = text_width.min(containing_block.content.width);
+        self.dimensions.content.height = self.get_line_height();
+    }
+
+    /// Get line height for text layout.
+    fn get_line_height(&self) -> f32 {
+        let font_size = match self.style.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        // Default line height is 1.2 * font_size
+        font_size * 1.2
     }
 
     /// Perform layout with margin collapse context.
@@ -484,12 +545,15 @@ impl LayoutBox {
             }
         }
 
-        match self.box_type {
+        match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
                 self.layout_block_with_collapse(containing_block, margin_context, float_context);
             }
-            BoxType::Inline | BoxType::Text(_) => {
-                // Inline layout handled by parent
+            BoxType::Inline => {
+                self.layout_inline(containing_block);
+            }
+            BoxType::Text(text) => {
+                self.layout_text(text.clone(), containing_block);
             }
         }
 

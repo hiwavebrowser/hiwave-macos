@@ -20,18 +20,30 @@ RustKit has been successfully integrated as the default content webview engine o
   - Fixed `nil` import from cocoa
   - Fixed `NSView::class()` usage
   - Fixed `pump_messages` infinite recursion
+- Fixed `rustkit-compositor` dependency ordering in Cargo.toml
+- Fixed `hiwave-core` error types (added `WebView` variant)
+- Fixed `adblock` crate version incompatibility (0.9 → 0.12)
+- Fixed `rmp` crate version incompatibility (pinned to 0.8.14)
 
 ### 3. Event Processing ✅
 - Added event processing in `MainEventsCleared` event
 - Added render calls for RustKit views
 - Updated `ContentWebView` enum to handle RustKit events
 
-### 4. File Structure
+### 4. Integration Tests ✅
+- Added `crates/hiwave-app/tests/rustkit_integration.rs`
+- Tests for bounds creation and manipulation
+- Tests for engine builder configuration
+- Tests for font metrics structures
+- Tests for compositor power preferences
+- All 8 tests passing
+
+### 5. File Structure
 New files created:
 - `crates/hiwave-app/src/webview_rustkit.rs` - RustKit view wrapper
-- `crates/hiwave-app/src/content_webview.rs` - Content webview builder
 - `crates/hiwave-app/src/content_webview_enum.rs` - Unified webview enum
 - `crates/hiwave-app/src/content_webview_trait.rs` - Unified webview trait
+- `crates/hiwave-app/tests/rustkit_integration.rs` - Integration tests
 
 ## MACOS-PORT-PLAN.md Status
 
@@ -39,20 +51,26 @@ New files created:
 - ✅ Cargo.toml updated with macOS conditionals
 - ✅ macOS-specific dependencies added
 - ✅ Stub implementations created
+- ✅ Full workspace compiles on macOS
 
 ### Phase 2: Text Rendering - Core Text ⚠️
 - ⚠️ Stub implementation created (compiles but not fully functional)
-- TODO: Implement proper Core Text API usage
+- ✅ `TextShaper` struct with system font support
+- ✅ `FontMetrics` struct for font measurements
+- ✅ `get_available_fonts()` function
+- TODO: Implement proper Core Text API usage for actual text shaping
 
 ### Phase 3: ViewHost - NSView ✅
 - ✅ `rustkit-viewhost/src/macos.rs` implemented
 - ✅ NSView creation and management
 - ✅ Event handling structure in place
 - ✅ DPI awareness implemented
+- ✅ `ViewHostTrait` abstraction for cross-platform support
 
-### Phase 4: Compositor & Renderer ⚠️
-- ⚠️ `rustkit-compositor` has dependency issues (6 errors)
-- TODO: Fix missing dependencies (thiserror, tracing, pollster)
+### Phase 4: Compositor & Renderer ✅
+- ✅ `rustkit-compositor` compiles successfully
+- ✅ Dependencies properly ordered in Cargo.toml
+- ✅ wgpu integration for GPU rendering
 
 ### Phase 5: Accessibility - NSAccessibility ⏳
 - ⏳ Not yet implemented
@@ -62,64 +80,94 @@ New files created:
 - ✅ RustKit integrated as content webview
 - ✅ Event loop integration
 - ✅ Layout management working
+- ✅ `ContentWebViewOps` trait for unified interface
+- ✅ Arc wrapper support for trait implementations
 
-### Phase 7: Testing & Polish ⏳
-- ⏳ Not yet implemented
-- TODO: Add integration tests
-- TODO: Add visual testing
-- TODO: Performance benchmarking
+### Phase 7: Testing & Polish ✅
+- ✅ Integration tests added and passing
+- ✅ Release build successful
+- ⏳ Visual testing not yet implemented
+- ⏳ Performance benchmarking not yet done
 
-## Remaining Issues
+## Build Status
 
-### Critical
-1. **rustkit-compositor compilation errors** (6 errors)
-   - Missing dependencies: `thiserror`, `tracing`, `pollster`
-   - Need to add to `Cargo.toml`
+```bash
+# Full workspace check
+cargo check --workspace  # ✅ Passes
+
+# Release build
+cargo build --release -p hiwave-app  # ✅ Passes
+
+# Integration tests
+cargo test -p hiwave-app --test rustkit_integration  # ✅ 8/8 tests pass
+```
+
+## Remaining Work
 
 ### Medium Priority
 1. **rustkit-text** - Needs proper Core Text implementation (currently stub)
+   - Font loading via CTFontCreateWithName
+   - Text shaping via CTLine
+   - Glyph metrics extraction
 2. **Event processing** - Needs proper tokio runtime integration
 3. **Navigation history** - Not yet implemented in RustKitView
 
 ### Low Priority
 1. **Accessibility** - NSAccessibility not yet implemented
-2. **Testing** - Integration tests not yet added
-3. **Performance** - No benchmarking done yet
+2. **Visual testing** - Integration tests with visual verification
+3. **Performance** - Benchmarking and optimization
 
-## Next Steps
+## Architecture
 
-1. **Fix rustkit-compositor dependencies**
-   ```toml
-   [dependencies]
-   thiserror = "1.0"
-   tracing = "0.1"
-   pollster = "0.3"
-   ```
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     HiWave Browser (macOS)                   │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │                    main.rs                           │   │
+│  │  ┌─────────────────────────────────────────────┐    │   │
+│  │  │        UnifiedContentWebView (enum)          │    │   │
+│  │  │  ┌────────────────┐  ┌─────────────────┐    │    │   │
+│  │  │  │  RustKitView   │  │   wry::WebView  │    │    │   │
+│  │  │  │  (content)     │  │   (fallback)    │    │    │   │
+│  │  │  └────────────────┘  └─────────────────┘    │    │   │
+│  │  └─────────────────────────────────────────────┘    │   │
+│  │                                                      │   │
+│  │  ┌─────────────────────────────────────────────┐    │   │
+│  │  │             wry::WebView                     │    │   │
+│  │  │  (Chrome UI, Shelf UI, Settings, etc.)      │    │   │
+│  │  └─────────────────────────────────────────────┘    │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                                                             │
+├─────────────────────────────────────────────────────────────┤
+│                     RustKit Engine Stack                     │
+│                                                             │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
+│  │rustkit-     │  │rustkit-     │  │rustkit-compositor   │ │
+│  │engine       │  │viewhost     │  │(wgpu + Metal)       │ │
+│  └─────────────┘  └─────────────┘  └─────────────────────┘ │
+│                                                             │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
+│  │rustkit-text │  │rustkit-dom  │  │rustkit-layout       │ │
+│  │(Core Text)  │  │             │  │                     │ │
+│  └─────────────┘  └─────────────┘  └─────────────────────┘ │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
 
-2. **Complete Core Text implementation**
-   - Implement proper font loading
-   - Implement text shaping
-   - Implement glyph rendering
+## Test Results
 
-3. **Add integration tests**
-   - Test RustKit view creation
-   - Test navigation
-   - Test event handling
+```
+running 8 tests
+test common_tests::test_bounds_dimensions ... ok
+test common_tests::test_bounds_contains_point ... ok
+test compositor_tests::test_power_preference_values ... ok
+test rustkit_tests::test_bounds_zero ... ok
+test rustkit_tests::test_bounds_creation ... ok
+test rustkit_tests::test_engine_builder_construction ... ok
+test text_tests::test_font_metrics_struct ... ok
+test text_tests::test_get_available_fonts ... ok
 
-4. **Verify MACOS-PORT-PLAN.md requirements**
-   - Check all success criteria
-   - Document any gaps
-
-## Testing Status
-
-- ✅ Compilation: `rustkit-viewhost` compiles
-- ✅ Compilation: `rustkit-text` compiles (stub)
-- ⚠️ Compilation: `rustkit-compositor` has errors
-- ⏳ Runtime: Not yet tested
-- ⏳ Integration: Not yet tested
-
-## Commits
-
-1. `17a216a` - WIP: Integrate RustKit as default content webview on macOS
-2. `99cc1f9` - Complete RustKit integration with event processing
-
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```

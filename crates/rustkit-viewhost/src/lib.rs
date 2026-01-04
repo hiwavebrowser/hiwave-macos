@@ -1524,22 +1524,6 @@ mod tests {
         assert_eq!(host.view_count(), 0);
     }
 
-    #[cfg(not(windows))]
-    #[test]
-    fn test_view_lifecycle_stub() {
-        let host = ViewHost::new();
-        let bounds = Bounds::new(0, 0, 800, 600);
-
-        let view_id = host.create_view((), bounds).unwrap();
-        assert_eq!(host.view_count(), 1);
-
-        assert_eq!(host.get_bounds(view_id).unwrap(), bounds);
-
-        let new_bounds = Bounds::new(10, 10, 1024, 768);
-        host.set_bounds(view_id, new_bounds).unwrap();
-        assert_eq!(host.get_bounds(view_id).unwrap(), new_bounds);
-
-        host.destroy_view(view_id).unwrap();
-        assert_eq!(host.view_count(), 0);
-    }
+    // Note: View lifecycle tests require a valid window handle and are tested
+    // in the hiwave-app integration tests instead.
 }

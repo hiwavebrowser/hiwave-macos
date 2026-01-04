@@ -154,7 +154,7 @@ impl GlyphCache {
         self.rasterize_glyph_fallback(queue, key)
     }
 
-    /// Fallback glyph rasterization (creates placeholder rectangles).
+    /// Rasterize a glyph using platform-specific text rendering.
     fn rasterize_glyph_fallback(
         &mut self,
         queue: &wgpu::Queue,
@@ -162,45 +162,62 @@ impl GlyphCache {
     ) -> Option<GlyphEntry> {
         let font_size = key.font_size as f32 / 10.0;
         
-        // Try real rasterization on Windows if we can map codepoint -> glyph + metrics.
-        // For now we still emit a simple placeholder bitmap (Bravo 2 goal is dependency removal).
-        // Future work: use DirectWrite glyph run analysis to rasterize into the atlas.
+        // Use platform-specific glyph rasterization
+        #[cfg(target_os = "macos")]
+        let raster_result = {
+            let rasterizer = rustkit_text::macos::GlyphRasterizer::with_size(font_size);
+            rasterizer.rasterize_char(key.codepoint)
+        };
+        
         #[cfg(windows)]
-        {
-            let _ = (key, font_size, RkFontCollection::system, RkFontWeight::from_u32, RkFontStretch::from_u32, |s| match s {
-                0 => RkFontStyle::Normal,
-                1 => RkFontStyle::Italic,
-                _ => RkFontStyle::Normal,
-            });
-        }
-
-        // Estimate glyph dimensions based on character (fallback)
-        let (glyph_width, glyph_height) = estimate_glyph_size(key.codepoint, font_size);
-
+        let raster_result = {
+            // Windows fallback - use simple placeholder
+            let (glyph_width, glyph_height) = estimate_glyph_size(key.codepoint, font_size);
+            let glyph_width = glyph_width.max(1).min(256);
+            let glyph_height = glyph_height.max(1).min(256);
+            
+            let mut bitmap = vec![0u8; (glyph_width * glyph_height) as usize];
+            if key.codepoint.is_ascii_graphic() || key.codepoint.is_alphabetic() {
+                for y in 0..glyph_height {
+                    for x in 0..glyph_width {
+                        let idx = (y * glyph_width + x) as usize;
+                        let border = x == 0 || x == glyph_width - 1 || y == 0 || y == glyph_height - 1;
+                        bitmap[idx] = if border { 255 } else { 200 };
+                    }
+                }
+            }
+            Some((bitmap, glyph_width, glyph_height, glyph_width as f32, 0.0f32, font_size * 0.8))
+        };
+        
+        #[cfg(not(any(target_os = "macos", windows)))]
+        let raster_result: Option<(Vec<u8>, u32, u32, f32, f32, f32)> = {
+            // Fallback for other platforms
+            let (glyph_width, glyph_height) = estimate_glyph_size(key.codepoint, font_size);
+            let glyph_width = glyph_width.max(1).min(256);
+            let glyph_height = glyph_height.max(1).min(256);
+            
+            let mut bitmap = vec![0u8; (glyph_width * glyph_height) as usize];
+            if key.codepoint.is_ascii_graphic() || key.codepoint.is_alphabetic() {
+                for y in 0..glyph_height {
+                    for x in 0..glyph_width {
+                        let idx = (y * glyph_width + x) as usize;
+                        let border = x == 0 || x == glyph_width - 1 || y == 0 || y == glyph_height - 1;
+                        bitmap[idx] = if border { 255 } else { 200 };
+                    }
+                }
+            }
+            Some((bitmap, glyph_width, glyph_height, glyph_width as f32, 0.0f32, font_size * 0.8))
+        };
+        
+        let (bitmap, glyph_width, glyph_height, advance, _bearing_x, bearing_y) = raster_result?;
+        
         let glyph_width = glyph_width.max(1).min(256);
         let glyph_height = glyph_height.max(1).min(256);
 
-        // Allocate space
+        // Allocate space in the atlas
         let (atlas_x, atlas_y) = self.allocate_space(glyph_width + 2, glyph_height + 2)?;
 
-        // Create simple glyph bitmap (filled rectangle for now)
-        // TODO: Use DirectWrite for proper glyph rendering
-        let mut bitmap = vec![0u8; (glyph_width * glyph_height) as usize];
-        
-        // For printable characters, create a visible shape
-        if key.codepoint.is_ascii_graphic() || key.codepoint.is_alphabetic() {
-            for y in 0..glyph_height {
-                for x in 0..glyph_width {
-                    let idx = (y * glyph_width + x) as usize;
-                    // Create a simple pattern
-                    let border = x == 0 || x == glyph_width - 1 || y == 0 || y == glyph_height - 1;
-                    bitmap[idx] = if border { 255 } else { 200 };
-                }
-            }
-        }
-        // Whitespace characters remain transparent
-
-        // Upload
+        // Upload to atlas
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.atlas,
@@ -232,8 +249,8 @@ impl GlyphCache {
 
         let entry = GlyphEntry {
             tex_coords: [u0, v0, u1, v1],
-            offset: [0.0, -font_size * 0.8], // Baseline offset
-            advance: glyph_width as f32,
+            offset: [0.0, -bearing_y], // Baseline offset
+            advance,
         };
 
         self.entries.insert(key.clone(), entry.clone());

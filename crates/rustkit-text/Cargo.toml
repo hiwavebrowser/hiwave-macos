@@ -20,6 +20,7 @@ windows = { version = "0.61", features = [
 core-text = "20.1"
 core-graphics = "0.23"
 core-foundation = "0.9"
+foreign-types-shared = "0.3"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -4,11 +4,12 @@
 //! It wraps `rustkit_engine::Engine` and provides a WRY-like interface.
 
 use super::webview::IWebContent;
-use hiwave_core::HiWaveResult;
+use hiwave_core::{HiWaveError, HiWaveResult};
 use rustkit_engine::{Engine, EngineBuilder, EngineEvent, EngineViewId};
 use rustkit_viewhost::{Bounds, ViewHostTrait, WindowHandle};
 use std::cell::RefCell;
 use tao::window::Window;
+use tao::rwh_06::HasWindowHandle;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use url::Url;
@@ -43,7 +44,9 @@ impl RustKitView {
         info!("Creating RustKit view");
 
         // Get raw window handle from TAO window
-        let raw_handle = window.raw_window_handle();
+        let raw_handle = window.window_handle()
+            .map_err(|e| HiWaveError::WebView(format!("Failed to get window handle: {}", e)))?
+            .as_raw();
 
         // Create engine for this view
         let mut engine = EngineBuilder::new()
@@ -90,7 +93,7 @@ impl RustKitView {
     }
 
     /// Load HTML content directly.
-    pub fn load_html(&self, html: &str) -> HiWaveResult<()> {
+    pub fn load_html_internal(&self, html: &str) -> HiWaveResult<()> {
         let mut engine = self.engine.borrow_mut();
         if let Some(view_id) = self.view_id {
             engine
@@ -101,7 +104,7 @@ impl RustKitView {
     }
 
     /// Set the bounds of the view.
-    pub fn set_bounds(&self, bounds: Bounds) -> HiWaveResult<()> {
+    pub fn set_bounds_internal(&self, bounds: Bounds) -> HiWaveResult<()> {
         let mut engine = self.engine.borrow_mut();
         if let Some(view_id) = self.view_id {
             engine
@@ -117,28 +120,27 @@ impl RustKitView {
     }
 
     /// Load HTML content (WRY compatibility method).
-    pub fn load_html(&self, html: &str) -> Result<(), String> {
-        self.load_html(html)
+    pub fn wry_load_html(&self, html: &str) -> Result<(), String> {
+        self.load_html_internal(html)
             .map_err(|e| format!("Failed to load HTML: {}", e))
     }
 
     /// Load URL (WRY compatibility method).
-    pub fn load_url(&self, url: &str) -> Result<(), String> {
-        let parsed = Url::parse(url)
-            .map_err(|e| format!("Invalid URL: {}", e))?;
-        self.navigate(&parsed)
-            .map_err(|e| format!("Navigation failed: {}", e))?;
+    pub fn wry_load_url(&self, url: &str) -> Result<(), String> {
+        // Update cached URL
+        *self.current_url.borrow_mut() = Some(url.to_string());
+        self.load_url_blocking(url);
         Ok(())
     }
 
     /// Evaluate script (WRY compatibility method).
-    pub fn evaluate_script(&self, script: &str) -> Result<(), String> {
+    pub fn wry_evaluate_script(&self, script: &str) -> Result<(), String> {
         self.execute_script_sync(script);
         Ok(())
     }
 
     /// Set bounds (WRY compatibility method).
-    pub fn set_bounds(&self, rect: wry::Rect) -> Result<(), String> {
+    pub fn wry_set_bounds(&self, rect: wry::Rect) -> Result<(), String> {
         use rustkit_viewhost::Bounds;
         let bounds = Bounds::new(
             rect.position.to_logical::<f64>(1.0).x as i32,
@@ -146,10 +148,9 @@ impl RustKitView {
             rect.size.to_logical::<f64>(1.0).width as u32,
             rect.size.to_logical::<f64>(1.0).height as u32,
         );
-        self.set_bounds(bounds)
+        self.set_bounds_internal(bounds)
             .map_err(|e| format!("Failed to set bounds: {}", e))
     }
-}
 
     /// Get the view ID.
     pub fn view_id(&self) -> Option<EngineViewId> {

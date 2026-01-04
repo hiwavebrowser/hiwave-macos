@@ -11,6 +11,18 @@ license = "MIT"
 wgpu = "24"
 raw-window-handle = "0.6"
 
+# ViewHost integration
+rustkit-viewhost = { path = "../rustkit-viewhost" }
+
+# Error handling
+thiserror = "1.0"
+
+# Tracing
+tracing = "0.1"
+
+# Async
+pollster = "0.4"
+
 # Windows DirectComposition (conditional)
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
@@ -21,18 +33,6 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_DirectComposition",
 ] }
-
-# ViewHost integration
-rustkit-viewhost = { path = "../rustkit-viewhost" }
-
-# Error handling
-thiserror = { workspace = true }
-
-# Tracing
-tracing = { workspace = true }
-
-# Async
-pollster = "0.4"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

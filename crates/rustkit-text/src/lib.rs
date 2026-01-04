@@ -81,7 +81,7 @@ mod win;
 pub use win::{FontCollection, FontFace, FontFamily, Font};
 
 #[cfg(target_os = "macos")]
-mod macos;
+pub mod macos;
 
 #[cfg(target_os = "macos")]
 pub use macos::{TextShaper, ShapedText, FontMetrics as MacOSFontMetrics};
