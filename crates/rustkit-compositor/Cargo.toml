@@ -26,10 +26,10 @@ windows = { version = "0.58", features = [
 rustkit-viewhost = { path = "../rustkit-viewhost" }
 
 # Error handling
-thiserror = "1.0"
+thiserror = { workspace = true }
 
 # Tracing
-tracing = "0.1"
+tracing = { workspace = true }
 
 # Async
 pollster = "0.4"
