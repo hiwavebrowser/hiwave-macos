@@ -1469,24 +1469,6 @@ impl ViewHostTrait for ViewHost {
             return Err(ViewHostError::ViewNotFound(view_id));
         }
 
-        // Log view state for debugging
-        unsafe {
-            let is_hidden: bool = msg_send![view, isHidden];
-            let superview: id = msg_send![view, superview];
-            let has_superview = superview != nil;
-            let frame: cocoa::foundation::NSRect = msg_send![view, frame];
-            info!(
-                ?view_id,
-                is_hidden,
-                has_superview,
-                frame_x = frame.origin.x,
-                frame_y = frame.origin.y,
-                frame_w = frame.size.width,
-                frame_h = frame.size.height,
-                "Getting raw window handle - view state"
-            );
-        }
-
         // Create raw window handle for raw-window-handle 0.6
         // In version 0.6, AppKitWindowHandle uses ns_view field
         use raw_window_handle::{RawWindowHandle, AppKitWindowHandle};

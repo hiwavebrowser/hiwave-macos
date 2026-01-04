@@ -693,16 +693,11 @@ impl Engine {
         // Generate display list
         let display_list = DisplayList::build(&root_box);
 
-        info!(
+        debug!(
             ?id,
             num_commands = display_list.commands.len(),
             "Generated display list"
         );
-        
-        // Log first few commands for debugging
-        for (i, cmd) in display_list.commands.iter().take(5).enumerate() {
-            info!(?id, index = i, command = ?cmd, "Display command");
-        }
 
         // Store
         let view = self.views.get_mut(&id).unwrap();
