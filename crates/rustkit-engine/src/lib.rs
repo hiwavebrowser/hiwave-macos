@@ -677,8 +677,10 @@ impl Engine {
         );
 
         // Create containing block
+        // Note: height is 0 because layout_block_children uses content.height as the cursor position
+        // Children should start at y=0, not y=viewport_height
         let containing_block = Dimensions {
-            content: Rect::new(0.0, 0.0, bounds.width as f32, bounds.height as f32),
+            content: Rect::new(0.0, 0.0, bounds.width as f32, 0.0),
             ..Default::default()
         };
 
@@ -691,11 +693,16 @@ impl Engine {
         // Generate display list
         let display_list = DisplayList::build(&root_box);
 
-        debug!(
+        info!(
             ?id,
             num_commands = display_list.commands.len(),
             "Generated display list"
         );
+        
+        // Log first few commands for debugging
+        for (i, cmd) in display_list.commands.iter().take(5).enumerate() {
+            info!(?id, index = i, command = ?cmd, "Display command");
+        }
 
         // Store
         let view = self.views.get_mut(&id).unwrap();
