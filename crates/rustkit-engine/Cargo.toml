@@ -1,0 +1,42 @@
+[package]
+name = "rustkit-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Browser engine orchestration layer for RustKit"
+authors = ["HiWave Team"]
+license = "MIT"
+
+[dependencies]
+# RustKit crates
+rustkit-viewhost = { path = "../rustkit-viewhost" }
+rustkit-compositor = { path = "../rustkit-compositor" }
+rustkit-core = { path = "../rustkit-core" }
+rustkit-dom = { path = "../rustkit-dom" }
+rustkit-css = { path = "../rustkit-css" }
+rustkit-layout = { path = "../rustkit-layout" }
+rustkit-js = { path = "../rustkit-js" }
+rustkit-bindings = { path = "../rustkit-bindings" }
+rustkit-net = { path = "../rustkit-net" }
+rustkit-image = { path = "../rustkit-image" }
+rustkit-renderer = { path = "../rustkit-renderer" }
+
+# Async runtime
+tokio = { version = "1.42", features = ["sync", "time", "rt"] }
+
+# URL handling
+url = "2.5"
+
+# Error handling
+thiserror = "1.0"
+
+# Tracing
+tracing = "0.1"
+
+# Windows (conditional)
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = ["Win32_Foundation"] }
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
+

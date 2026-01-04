@@ -1,0 +1,28 @@
+[package]
+name = "rustkit-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core engine runtime for RustKit browser engine"
+authors = ["HiWave Team"]
+license = "MIT"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.42", features = ["rt", "time", "sync", "macros"] }
+
+# Error handling
+thiserror = "1.0"
+
+# Tracing
+tracing = "0.1"
+
+# URL handling
+url = "2.5"
+
+# Channels
+crossbeam-channel = "0.5"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
+

@@ -10,6 +10,11 @@ description = "HiWave browser application with WebView rendering"
 name = "hiwave"
 path = "src/main.rs"
 
+[features]
+default = []
+# RustKit is now the default for content rendering on macOS
+# WRY is still used for Chrome and Shelf UI components
+
 [dependencies]
 # WebView
 wry = { workspace = true }
@@ -42,3 +47,9 @@ hiwave-shell = { workspace = true }
 hiwave-shield = { workspace = true }
 hiwave-vault = { workspace = true }
 hiwave-analytics = { workspace = true }
+
+# RustKit engine (default on macOS)
+[target.'cfg(target_os = "macos")'.dependencies]
+rustkit-engine = { workspace = true }
+rustkit-viewhost = { workspace = true }
+tokio = { version = "1.42", features = ["rt", "time"] }

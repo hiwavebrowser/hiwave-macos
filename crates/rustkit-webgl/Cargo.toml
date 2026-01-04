@@ -1,0 +1,14 @@
+[package]
+name = "rustkit-webgl"
+version = "0.1.0"
+edition = "2021"
+description = "WebGL API implementation for RustKit browser engine"
+authors = ["HiWave Team"]
+license = "MIT"
+
+[dependencies]
+# Core
+thiserror = "1.0"
+
+[dev-dependencies]
+

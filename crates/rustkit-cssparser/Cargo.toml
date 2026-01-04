@@ -1,0 +1,15 @@
+[package]
+name = "rustkit-cssparser"
+version = "0.1.0"
+edition = "2021"
+description = "RustKit-owned CSS tokenizer/parser (initial subset) for independence from cssparser"
+authors = ["HiWave Team"]
+license = "MIT"
+
+[dependencies]
+thiserror = "1.0"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+

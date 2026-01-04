@@ -40,6 +40,19 @@ mod ipc;
 mod state;
 mod webview;
 
+#[cfg(target_os = "macos")]
+mod webview_rustkit;
+
+#[cfg(target_os = "macos")]
+mod content_webview;
+mod content_webview_trait;
+#[cfg(target_os = "macos")]
+mod content_webview_enum;
+
+use content_webview_trait::ContentWebViewOps;
+#[cfg(target_os = "macos")]
+use content_webview_enum::ContentWebView as UnifiedContentWebView;
+
 use ipc::{IpcMessage, JS_BRIDGE};
 use state::AppState;
 use hiwave_shield::ResourceType;
@@ -238,7 +251,8 @@ enum UserEvent {
 fn apply_layout(
     window: &tao::window::Window,
     chrome: &WebView,
-    content: &WebView,
+    #[cfg(target_os = "macos")] content: &UnifiedContentWebView,
+    #[cfg(not(target_os = "macos"))] content: &WebView,
     shelf: &WebView,
     chrome_height: f64,
     shelf_height: f64,
@@ -276,7 +290,14 @@ fn apply_layout(
     };
 
     let _ = chrome.set_bounds(chrome_rect);
-    let _ = content.set_bounds(content_rect);
+    #[cfg(target_os = "macos")]
+    {
+        let _ = content.set_bounds(content_rect);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = content.set_bounds(content_rect);
+    }
     let _ = shelf.set_bounds(shelf_rect);
 }
 
@@ -441,15 +462,15 @@ fn sync_history_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
     }
 }
 
-fn load_new_tab(content: &WebView) {
+fn load_new_tab(content: &impl ContentWebViewOps) {
     let _ = content.load_html(ABOUT_HTML);
 }
 
-fn load_about_page(content: &WebView) {
+fn load_about_page(content: &impl ContentWebViewOps) {
     let _ = content.load_html(ABOUT_HTML);
 }
 
-fn load_report_page(content: &WebView) {
+fn load_report_page(content: &impl ContentWebViewOps) {
     // Embed Chart.js library inline in the report HTML
     let report_with_chartjs = REPORT_HTML.replace(
         "<!-- Chart.js is injected by Rust before page load -->",
@@ -1072,6 +1093,28 @@ fn main() {
             .map(|tab| tab.url.to_string())
             .unwrap_or_else(|| NEW_TAB_URL.to_string())
     };
+    #[cfg(target_os = "macos")]
+    let content_webview = {
+        use webview_rustkit::RustKitView;
+        use rustkit_viewhost::Bounds;
+        
+        info!("Creating RustKit content webview");
+        let bounds = Bounds::new(
+            content_bounds.position.to_logical::<f64>(1.0).x as i32,
+            content_bounds.position.to_logical::<f64>(1.0).y as i32,
+            content_bounds.size.to_logical::<f64>(1.0).width as u32,
+            content_bounds.size.to_logical::<f64>(1.0).height as u32,
+        );
+        
+        let rustkit_view = RustKitView::new(&window, bounds)
+            .expect("Failed to create RustKit view");
+        rustkit_view.load_html(ABOUT_HTML)
+            .expect("Failed to load initial HTML");
+        
+        UnifiedContentWebView::RustKit(Arc::new(rustkit_view))
+    };
+    
+    #[cfg(not(target_os = "macos"))]
     let content_webview = WebViewBuilder::new()
         .with_html(ABOUT_HTML)
         .with_devtools(cfg!(debug_assertions))
@@ -1406,14 +1449,33 @@ fn main() {
         })
         .build_as_child(&window)
         .expect("Failed to create Content WebView");
+    
+    #[cfg(not(target_os = "macos"))]
+    let content_webview = UnifiedContentWebView::Wry(Arc::new(content_webview));
 
-    if !is_new_tab_url(&initial_url) {
-        if let Err(e) = content_webview.load_url(&initial_url) {
-            error!("Failed to load initial URL: {}", e);
+    #[cfg(target_os = "macos")]
+    {
+        if !is_new_tab_url(&initial_url) {
+            if let UnifiedContentWebView::RustKit(ref v) = content_webview {
+                if let Err(e) = v.load_url(&initial_url) {
+                    error!("Failed to load initial URL: {}", e);
+                }
+            }
         }
+        info!("Content WebView created (RustKit)");
     }
-
-    info!("Content WebView created (content area)");
+    
+    #[cfg(not(target_os = "macos"))]
+    {
+        if !is_new_tab_url(&initial_url) {
+            if let UnifiedContentWebView::Wry(ref v) = content_webview {
+                if let Err(e) = v.load_url(&initial_url) {
+                    error!("Failed to load initial URL: {}", e);
+                }
+            }
+        }
+        info!("Content WebView created (WRY)");
+    }
 
     // === SHELF WEBVIEW (created third, at bottom) ===
     let shelf_proxy = proxy.clone();
@@ -1522,6 +1584,9 @@ fn main() {
 
     // Store WebViews in Arcs for event loop access
     let chrome_webview = Arc::new(chrome_webview);
+    #[cfg(target_os = "macos")]
+    let content_webview = Arc::new(content_webview);
+    #[cfg(not(target_os = "macos"))]
     let content_webview = Arc::new(content_webview);
     let shelf_webview = Arc::new(shelf_webview);
 
@@ -1637,7 +1702,10 @@ fn main() {
                     UserEvent::Navigate(url) => {
                         info!("Navigating content to: {}", url);
                         if is_new_tab_url(&url) {
-                            load_new_tab(&content_for_events);
+                            #[cfg(target_os = "macos")]
+                            load_new_tab(&*content_for_events);
+                            #[cfg(not(target_os = "macos"))]
+                            load_new_tab(&*content_for_events);
                             let _ = chrome_for_events.evaluate_script(
                                 "if(window.hiwaveChrome) { hiwaveChrome.updateUrl(''); }",
                             );
@@ -1652,7 +1720,10 @@ fn main() {
                                     }
                                 }
                             }
-                            load_about_page(&content_for_events);
+                            #[cfg(target_os = "macos")]
+                            load_about_page(&*content_for_events);
+                            #[cfg(not(target_os = "macos"))]
+                            load_about_page(&*content_for_events);
                             let _ = chrome_for_events.evaluate_script(
                                 "if(window.hiwaveChrome) { hiwaveChrome.updateUrl('hiwave://about'); }",
                             );
@@ -1665,7 +1736,10 @@ fn main() {
                                     }
                                 }
                             }
-                            load_report_page(&content_for_events);
+                            #[cfg(target_os = "macos")]
+                            load_report_page(&*content_for_events);
+                            #[cfg(not(target_os = "macos"))]
+                            load_report_page(&*content_for_events);
                             let _ = chrome_for_events.evaluate_script(
                                 "if(window.hiwaveChrome) { hiwaveChrome.updateUrl('hiwave://report'); }",
                             );
@@ -1679,8 +1753,17 @@ fn main() {
                             } else {
                                 format!("https://duckduckgo.com/?q={}", urlencoding::encode(&url))
                             };
-                            if let Err(e) = content_for_events.load_url(&full_url) {
-                                error!("Failed to navigate: {}", e);
+                            #[cfg(target_os = "macos")]
+                            {
+                                if let Err(e) = content_for_events.load_url(&full_url) {
+                                    error!("Failed to navigate: {}", e);
+                                }
+                            }
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                if let Err(e) = content_for_events.load_url(&full_url) {
+                                    error!("Failed to navigate: {}", e);
+                                }
                             }
                             let script = format!(
                                 "if(window.hiwaveChrome) {{ hiwaveChrome.updateUrl('{}'); }}",
@@ -1691,23 +1774,58 @@ fn main() {
                     }
                     UserEvent::GoBack => {
                         info!("Going back");
-                        let _ = content_for_events.evaluate_script("history.back();");
+                        #[cfg(target_os = "macos")]
+                        {
+                            // TODO: Implement history.back() in RustKit
+                            let _ = content_for_events.evaluate_script("history.back();");
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            let _ = content_for_events.evaluate_script("history.back();");
+                        }
                     }
                     UserEvent::GoForward => {
                         info!("Going forward");
-                        let _ = content_for_events.evaluate_script("history.forward();");
+                        #[cfg(target_os = "macos")]
+                        {
+                            // TODO: Implement history.forward() in RustKit
+                            let _ = content_for_events.evaluate_script("history.forward();");
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            let _ = content_for_events.evaluate_script("history.forward();");
+                        }
                     }
                     UserEvent::Reload => {
                         info!("Reloading");
-                        let _ = content_for_events.evaluate_script("location.reload();");
+                        #[cfg(target_os = "macos")]
+                        {
+                            // TODO: Implement reload in RustKit
+                            let _ = content_for_events.evaluate_script("location.reload();");
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            let _ = content_for_events.evaluate_script("location.reload();");
+                        }
                     }
                     UserEvent::Stop => {
                         info!("Stopping load");
-                        let _ = content_for_events.evaluate_script("window.stop();");
+                        #[cfg(target_os = "macos")]
+                        {
+                            // TODO: Implement stop in RustKit
+                            let _ = content_for_events.evaluate_script("window.stop();");
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            let _ = content_for_events.evaluate_script("window.stop();");
+                        }
                     }
                     UserEvent::NewTab => {
                         info!("New tab - navigating to start page");
-                        load_new_tab(&content_for_events);
+                        #[cfg(target_os = "macos")]
+                        load_new_tab(&*content_for_events);
+                        #[cfg(not(target_os = "macos"))]
+                        load_new_tab(&*content_for_events);
                         let _ = chrome_for_events.evaluate_script(
                             "if(window.hiwaveChrome) { hiwaveChrome.updateUrl(''); }",
                         );

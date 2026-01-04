@@ -1,0 +1,20 @@
+[package]
+name = "rustkit-animation"
+version = "0.1.0"
+edition = "2021"
+description = "CSS Animations and Transitions for RustKit browser engine"
+authors = ["HiWave Team"]
+license = "MIT"
+
+[dependencies]
+# RustKit crates
+rustkit-css = { path = "../rustkit-css" }
+rustkit-dom = { path = "../rustkit-dom" }
+
+# Core
+thiserror = "1.0"
+tracing = "0.1"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+

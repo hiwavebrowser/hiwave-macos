@@ -1,0 +1,31 @@
+[package]
+name = "rustkit-media"
+version = "0.1.0"
+edition = "2021"
+description = "HTML5 Audio/Video element support for RustKit browser engine"
+authors = ["HiWave Team"]
+license = "MIT"
+
+[dependencies]
+# RustKit crates
+rustkit-dom = { path = "../rustkit-dom" }
+rustkit-common = { path = "../rustkit-common" }
+
+# Audio playback
+rodio = { version = "0.19", default-features = false, features = ["wav", "mp3", "vorbis", "flac"] }
+
+# Core
+thiserror = "1.0"
+tracing = "0.1"
+url = "2.5"
+
+# Async
+tokio = { version = "1.42", features = ["sync", "time"] }
+
+# Collections
+hashbrown = "0.14"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
+

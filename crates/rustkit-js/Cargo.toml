@@ -1,0 +1,32 @@
+[package]
+name = "rustkit-js"
+version = "0.1.0"
+edition = "2021"
+description = "JavaScript engine integration for RustKit browser engine"
+authors = ["HiWave Team"]
+license = "MIT"
+
+[features]
+default = ["boa"]
+# Use Boa (pure Rust, lightweight, good for development)
+boa = ["boa_engine"]
+# Use V8 (production-ready, requires native build)
+# v8 = ["v8"]
+
+[dependencies]
+# Pure Rust JS engine (default)
+boa_engine = { version = "0.20", optional = true }
+
+# Error handling
+thiserror = "1.0"
+
+# Tracing
+tracing = "0.1"
+
+# Async
+tokio = { version = "1.42", features = ["sync", "time"] }
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
+

@@ -7,6 +7,35 @@ members = [
     "crates/hiwave-shell",
     "crates/hiwave-analytics",
     "crates/hiwave-app",
+    "crates/rustkit-common",
+    "crates/rustkit-core",
+    "crates/rustkit-viewhost",
+    "crates/rustkit-compositor",
+    "crates/rustkit-dom",
+    "crates/rustkit-css",
+    "crates/rustkit-cssparser",
+    "crates/rustkit-layout",
+    "crates/rustkit-js",
+    "crates/rustkit-bindings",
+    "crates/rustkit-net",
+    "crates/rustkit-image",
+    "crates/rustkit-engine",
+    "crates/rustkit-test",
+    "crates/rustkit-bench",
+    "crates/rustkit-html",
+    "crates/rustkit-http",
+    "crates/rustkit-codecs",
+    "crates/rustkit-animation",
+    "crates/rustkit-svg",
+    "crates/rustkit-canvas",
+    "crates/rustkit-webgl",
+    "crates/rustkit-idb",
+    "crates/rustkit-sw",
+    "crates/rustkit-worker",
+    "crates/rustkit-media",
+    "crates/rustkit-text",
+    "crates/rustkit-renderer",
+    "crates/rustkit-a11y",
 ]
 
 [workspace.package]
@@ -48,6 +77,37 @@ hiwave-vault = { path = "crates/hiwave-vault" }
 hiwave-shell = { path = "crates/hiwave-shell" }
 hiwave-analytics = { path = "crates/hiwave-analytics" }
 hiwave-app = { path = "crates/hiwave-app" }
+
+# RustKit browser engine crates
+rustkit-common = { path = "crates/rustkit-common" }
+rustkit-core = { path = "crates/rustkit-core" }
+rustkit-viewhost = { path = "crates/rustkit-viewhost" }
+rustkit-compositor = { path = "crates/rustkit-compositor" }
+rustkit-dom = { path = "crates/rustkit-dom" }
+rustkit-css = { path = "crates/rustkit-css" }
+rustkit-cssparser = { path = "crates/rustkit-cssparser" }
+rustkit-layout = { path = "crates/rustkit-layout" }
+rustkit-js = { path = "crates/rustkit-js" }
+rustkit-bindings = { path = "crates/rustkit-bindings" }
+rustkit-net = { path = "crates/rustkit-net" }
+rustkit-image = { path = "crates/rustkit-image" }
+rustkit-engine = { path = "crates/rustkit-engine" }
+rustkit-test = { path = "crates/rustkit-test" }
+rustkit-bench = { path = "crates/rustkit-bench" }
+rustkit-html = { path = "crates/rustkit-html" }
+rustkit-http = { path = "crates/rustkit-http" }
+rustkit-codecs = { path = "crates/rustkit-codecs" }
+rustkit-animation = { path = "crates/rustkit-animation" }
+rustkit-svg = { path = "crates/rustkit-svg" }
+rustkit-canvas = { path = "crates/rustkit-canvas" }
+rustkit-webgl = { path = "crates/rustkit-webgl" }
+rustkit-idb = { path = "crates/rustkit-idb" }
+rustkit-sw = { path = "crates/rustkit-sw" }
+rustkit-worker = { path = "crates/rustkit-worker" }
+rustkit-media = { path = "crates/rustkit-media" }
+rustkit-text = { path = "crates/rustkit-text" }
+rustkit-renderer = { path = "crates/rustkit-renderer" }
+rustkit-a11y = { path = "crates/rustkit-a11y" }
 
 [profile.release]
 opt-level = 3
