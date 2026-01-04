@@ -311,7 +311,7 @@ impl Compositor {
 
         self.surfaces.write().unwrap().insert(view_id, state);
 
-        info!(?view_id, "Surface created (macOS)");
+        info!(?view_id, width, height, ?format, "Surface created (macOS)");
         Ok(())
     }
 
@@ -458,6 +458,7 @@ impl Compositor {
 
     /// Present a surface texture.
     pub fn present(&self, output: wgpu::SurfaceTexture) {
+        trace!("Presenting surface texture");
         output.present();
     }
 

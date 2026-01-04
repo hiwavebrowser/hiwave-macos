@@ -120,23 +120,19 @@ impl MacOSViewHost {
             ));
         }
 
-        // Configure the view
+        // Configure the view for layer-backed rendering
+        // NOTE: Don't manually create CAMetalLayer - let wgpu manage it
+        // wgpu will create and configure its own Metal layer when the surface is created
         unsafe {
-            // Enable layer-backed rendering for Metal
+            // Enable layer-backed rendering (required for wgpu)
             let wants_layer: bool = true;
             let _: () = msg_send![view, setWantsLayer: wants_layer];
-
-            // Set up Metal layer
-            let layer_class = objc::runtime::Class::get("CAMetalLayer").ok_or_else(|| {
-                ViewHostError::WindowCreation("CAMetalLayer not available".to_string())
-            })?;
-            let layer: id = msg_send![layer_class, layer];
-            let _: () = msg_send![view, setLayer: layer];
         }
 
         // Add view to content view
         unsafe {
             let _: () = msg_send![content_view, addSubview: view];
+            debug!(?view_id, "Added RustKit view as subview");
         }
 
         // Get DPI (backing scale factor)
@@ -187,7 +183,26 @@ impl MacOSViewHost {
         // Get the window from the view
         let window: id = unsafe { msg_send![view, window] };
         if window == nil {
+            warn!(?view_id, "View has no window attached");
             return Err(ViewHostError::ViewNotFound(view_id));
+        }
+
+        // Verify view state
+        unsafe {
+            let is_hidden: bool = msg_send![view, isHidden];
+            let superview: id = msg_send![view, superview];
+            let has_superview = superview != nil;
+            let frame: cocoa::foundation::NSRect = msg_send![view, frame];
+            info!(
+                ?view_id,
+                is_hidden,
+                has_superview,
+                frame_x = frame.origin.x,
+                frame_y = frame.origin.y,
+                frame_w = frame.size.width,
+                frame_h = frame.size.height,
+                "Getting raw window handle - view state"
+            );
         }
 
         // Create raw window handle

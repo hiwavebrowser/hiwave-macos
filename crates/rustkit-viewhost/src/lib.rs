@@ -29,7 +29,7 @@ pub use macos::MacOSViewHost;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use thiserror::Error;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 #[cfg(windows)]
 use rustkit_core::{
@@ -672,13 +672,30 @@ impl ViewHost {
             ));
         }
 
+        // Get parent height for coordinate conversion
+        let parent_height: f64 = unsafe {
+            let parent_frame: cocoa::foundation::NSRect = msg_send![content_view, frame];
+            parent_frame.size.height
+        };
+
+        // Convert from top-left origin (HiWave/Wry) to bottom-left origin (Cocoa)
+        // Formula: y_cocoa = parent_height - bounds.y - bounds.height
+        let y_cocoa = parent_height - initial_bounds.y as f64 - initial_bounds.height as f64;
+        debug!(
+            ?view_id,
+            initial_y = initial_bounds.y,
+            parent_height,
+            y_cocoa,
+            "Converting coordinates from top-left to bottom-left"
+        );
+
         // Create a new NSView for our content
         let view: id = unsafe {
             use objc::runtime::Class;
             let view_class = Class::get("NSView").expect("NSView class not found");
             let view: id = msg_send![view_class, alloc];
             let frame = cocoa::foundation::NSRect::new(
-                cocoa::foundation::NSPoint::new(initial_bounds.x as f64, initial_bounds.y as f64),
+                cocoa::foundation::NSPoint::new(initial_bounds.x as f64, y_cocoa),
                 cocoa::foundation::NSSize::new(initial_bounds.width as f64, initial_bounds.height as f64),
             );
             msg_send![view, initWithFrame: frame]
@@ -690,18 +707,13 @@ impl ViewHost {
             ));
         }
 
-        // Configure the view
+        // Configure the view for layer-backed rendering
+        // NOTE: Don't manually create CAMetalLayer - let wgpu manage it
+        // wgpu will create and configure its own Metal layer when the surface is created
         unsafe {
-            // Enable layer-backed rendering for Metal
+            // Enable layer-backed rendering (required for wgpu)
             let wants_layer: bool = true;
             let _: () = msg_send![view, setWantsLayer: wants_layer];
-
-            // Set up Metal layer
-            let layer_class = objc::runtime::Class::get("CAMetalLayer").ok_or_else(|| {
-                ViewHostError::WindowCreation("CAMetalLayer not available".to_string())
-            })?;
-            let layer: id = msg_send![layer_class, layer];
-            let _: () = msg_send![view, setLayer: layer];
         }
 
         // Add view to content view
@@ -1453,7 +1465,26 @@ impl ViewHostTrait for ViewHost {
         // Get the window from the view
         let window: id = unsafe { msg_send![view, window] };
         if window == nil {
+            warn!(?view_id, "View has no window attached");
             return Err(ViewHostError::ViewNotFound(view_id));
+        }
+
+        // Log view state for debugging
+        unsafe {
+            let is_hidden: bool = msg_send![view, isHidden];
+            let superview: id = msg_send![view, superview];
+            let has_superview = superview != nil;
+            let frame: cocoa::foundation::NSRect = msg_send![view, frame];
+            info!(
+                ?view_id,
+                is_hidden,
+                has_superview,
+                frame_x = frame.origin.x,
+                frame_y = frame.origin.y,
+                frame_w = frame.size.width,
+                frame_h = frame.size.height,
+                "Getting raw window handle - view state"
+            );
         }
 
         // Create raw window handle for raw-window-handle 0.6

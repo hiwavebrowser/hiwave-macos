@@ -1397,7 +1397,7 @@ impl Engine {
         let has_display_list = display_list.is_some();
         let cmd_count = display_list.map(|dl| dl.commands.len()).unwrap_or(0);
 
-        info!(?id, has_display_list, cmd_count, "Rendering view");
+        trace!(?id, has_display_list, cmd_count, "Rendering view");
 
         // Get surface size and update renderer viewport before rendering
         // This ensures the vertex shader transforms coordinates correctly
