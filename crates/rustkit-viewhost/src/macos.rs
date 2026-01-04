@@ -145,11 +145,15 @@ impl MacOSViewHost {
 
     /// Get the NSView for a view ID
     pub fn get_view(&self, view_id: ViewId) -> Result<id, ViewHostError> {
-        let views = self.views.read().unwrap();
-        let state = views
-            .get(&view_id)
-            .ok_or(ViewHostError::ViewNotFound(view_id))?;
-        Ok(state.lock().unwrap().view)
+        let state_arc = {
+            let views = self.views.read().unwrap();
+            views
+                .get(&view_id)
+                .ok_or(ViewHostError::ViewNotFound(view_id))?
+                .clone() // Clone the Arc to extend lifetime
+        }; // views lock is released here
+        let view = state_arc.lock().unwrap().view;
+        Ok(view)
     }
 
     /// Get the raw window handle for a view
@@ -167,8 +171,13 @@ impl MacOSViewHost {
         }
 
         // Create raw window handle
+        // AppKitWindowHandle::new() expects NonNull<c_void>
+        use std::ptr::NonNull;
         let handle = RawWindowHandle::AppKit(
-            raw_window_handle::AppKitWindowHandle::new(unsafe { view as *mut std::ffi::c_void })
+            raw_window_handle::AppKitWindowHandle::new(
+                NonNull::new(unsafe { view as *mut std::ffi::c_void })
+                    .expect("View pointer is null")
+            )
         );
 
         Ok(handle)
@@ -198,11 +207,15 @@ impl MacOSViewHost {
 
     /// Get view bounds
     pub fn get_bounds(&self, view_id: ViewId) -> Result<Bounds, ViewHostError> {
-        let views = self.views.read().unwrap();
-        let state = views
-            .get(&view_id)
-            .ok_or(ViewHostError::ViewNotFound(view_id))?;
-        Ok(state.lock().unwrap().bounds)
+        let state_arc = {
+            let views = self.views.read().unwrap();
+            views
+                .get(&view_id)
+                .ok_or(ViewHostError::ViewNotFound(view_id))?
+                .clone() // Clone the Arc to extend lifetime
+        }; // views lock is released here
+        let bounds = state_arc.lock().unwrap().bounds;
+        Ok(bounds)
     }
 
     /// Set view visibility
@@ -246,21 +259,27 @@ impl MacOSViewHost {
 
     /// Get DPI for a view
     pub fn get_dpi(&self, view_id: ViewId) -> Result<u32, ViewHostError> {
-        let views = self.views.read().unwrap();
-        let state = views
-            .get(&view_id)
-            .ok_or(ViewHostError::ViewNotFound(view_id))?;
-        Ok(state.lock().unwrap().dpi)
+        let state_arc = {
+            let views = self.views.read().unwrap();
+            views
+                .get(&view_id)
+                .ok_or(ViewHostError::ViewNotFound(view_id))?
+                .clone() // Clone the Arc to extend lifetime
+        }; // views lock is released here
+        let dpi = state_arc.lock().unwrap().dpi;
+        Ok(dpi)
     }
 
     /// Destroy a view
     pub fn destroy_view(&self, view_id: ViewId) -> Result<(), ViewHostError> {
-        let views = self.views.write().unwrap();
-        let state = views
-            .remove(&view_id)
-            .ok_or(ViewHostError::ViewNotFound(view_id))?;
-
-        let view = state.lock().unwrap().view;
+        let state_arc = {
+            let mut views = self.views.write().unwrap();
+            views
+                .remove(&view_id)
+                .ok_or(ViewHostError::ViewNotFound(view_id))?
+        }; // views lock is released here
+        
+        let view = state_arc.lock().unwrap().view;
 
         unsafe {
             let _: () = msg_send![view, removeFromSuperview];

@@ -1697,6 +1697,14 @@ fn main() {
                     right_sidebar_open,
                 );
             }
+            #[cfg(target_os = "macos")]
+            Event::MainEventsCleared => {
+                // Process RustKit events and render
+                if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
+                    view.process_events();
+                    view.render();
+                }
+            }
             Event::UserEvent(user_event) => {
                 match user_event {
                     UserEvent::Navigate(url) => {

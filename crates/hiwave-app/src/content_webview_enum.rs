@@ -51,15 +51,25 @@ impl ContentWebViewOps for ContentWebView {
 impl ContentWebView {
     /// Process events (for RustKit)
     pub fn process_events(&self) {
-        if let ContentWebView::RustKit(v) = self {
-            v.process_events();
+        match self {
+            ContentWebView::RustKit(v) => {
+                v.process_events();
+            }
+            ContentWebView::Wry(_) => {
+                // WRY handles events internally
+            }
         }
     }
 
     /// Render (for RustKit)
     pub fn render(&self) {
-        if let ContentWebView::RustKit(v) = self {
-            v.render();
+        match self {
+            ContentWebView::RustKit(v) => {
+                v.render();
+            }
+            ContentWebView::Wry(_) => {
+                // WRY handles rendering internally
+            }
         }
     }
 }

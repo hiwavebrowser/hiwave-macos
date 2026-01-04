@@ -1459,9 +1459,13 @@ impl ViewHostTrait for ViewHost {
         // Create raw window handle for raw-window-handle 0.6
         // In version 0.6, AppKitWindowHandle uses ns_view field
         use raw_window_handle::{RawWindowHandle, AppKitWindowHandle};
-        // AppKitWindowHandle::new() takes a pointer to NSView
+        use std::ptr::NonNull;
+        // AppKitWindowHandle::new() expects NonNull<c_void>
         let handle = RawWindowHandle::AppKit(
-            AppKitWindowHandle::new(unsafe { view as *mut std::ffi::c_void })
+            AppKitWindowHandle::new(
+                NonNull::new(unsafe { view as *mut std::ffi::c_void })
+                    .expect("View pointer is null")
+            )
         );
 
         Ok(handle)
