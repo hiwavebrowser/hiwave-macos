@@ -256,7 +256,11 @@ impl GlyphCache {
 
         let entry = GlyphEntry {
             tex_coords: [u0, v0, u1, v1],
-            offset: [0.0, -bearing_y], // Baseline offset
+            // Draw glyph from top of content box - the y passed to draw_text is
+            // the top of the text content area, not the baseline.
+            // Adding ascent (bearing_y) would push text down below the content box,
+            // so we use 0 offset to draw from top.
+            offset: [0.0, 0.0],
             advance,
         };
 
