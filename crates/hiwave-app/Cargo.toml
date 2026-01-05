@@ -4,19 +4,23 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "HiWave browser application with WebView rendering"
+description = "HiWave browser application with RustKit engine"
 
 [[bin]]
 name = "hiwave"
 path = "src/main.rs"
 
 [features]
-default = []
-# RustKit is now the default for content rendering on macOS
-# WRY is still used for Chrome and Shelf UI components
+# Default to RustKit hybrid mode on macOS (RustKit for content, WRY for Chrome/Shelf)
+default = ["rustkit"]
+# RustKit: Pure Rust browser engine for content rendering (hybrid mode)
+# WRY is still used for Chrome UI and Shelf components
+rustkit = []
+# WebView fallback: Uses system WebKit for everything (no RustKit)
+webview-fallback = []
 
 [dependencies]
-# WebView
+# WebView (for Chrome UI, Shelf, and secondary windows)
 wry = { workspace = true }
 tao = { workspace = true }
 muda = { workspace = true }
@@ -48,11 +52,16 @@ hiwave-shield = { workspace = true }
 hiwave-vault = { workspace = true }
 hiwave-analytics = { workspace = true }
 
-# RustKit engine (default on macOS)
+# RustKit engine (macOS only)
 [target.'cfg(target_os = "macos")'.dependencies]
 rustkit-engine = { workspace = true }
 rustkit-viewhost = { workspace = true }
 rustkit-text = { workspace = true }
 rustkit-compositor = { workspace = true }
+rustkit-net = { workspace = true }
 wgpu = "24"
 tokio = { version = "1.42", features = ["rt", "time"] }
+
+# HTTP types for shield adapter tests
+[dev-dependencies]
+http = "1.0"

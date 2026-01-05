@@ -200,6 +200,14 @@ pub struct Engine {
 impl Engine {
     /// Create a new browser engine.
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
+        Self::with_interceptor(config, None)
+    }
+
+    /// Create a new browser engine with an optional request interceptor.
+    pub fn with_interceptor(
+        config: EngineConfig,
+        interceptor: Option<rustkit_net::RequestInterceptor>,
+    ) -> Result<Self, EngineError> {
         info!("Initializing RustKit Engine");
 
         // Initialize ViewHost
@@ -214,8 +222,10 @@ impl Engine {
             cookies_enabled: config.cookies_enabled,
             ..Default::default()
         };
-        let loader =
-            Arc::new(ResourceLoader::new(loader_config).map_err(EngineError::NetworkError)?);
+        let loader = Arc::new(
+            ResourceLoader::with_interceptor(loader_config, interceptor)
+                .map_err(EngineError::NetworkError)?,
+        );
 
         // Initialize ImageManager
         let image_manager = Arc::new(ImageManager::new());
@@ -2079,6 +2089,7 @@ impl Engine {
 /// Builder for Engine.
 pub struct EngineBuilder {
     config: EngineConfig,
+    interceptor: Option<rustkit_net::RequestInterceptor>,
 }
 
 impl EngineBuilder {
@@ -2086,7 +2097,14 @@ impl EngineBuilder {
     pub fn new() -> Self {
         Self {
             config: EngineConfig::default(),
+            interceptor: None,
         }
+    }
+
+    /// Set a request interceptor for filtering network requests.
+    pub fn request_interceptor(mut self, interceptor: rustkit_net::RequestInterceptor) -> Self {
+        self.interceptor = Some(interceptor);
+        self
     }
 
     /// Set the user agent.
@@ -2115,7 +2133,7 @@ impl EngineBuilder {
 
     /// Build the engine.
     pub fn build(self) -> Result<Engine, EngineError> {
-        Engine::new(self.config)
+        Engine::with_interceptor(self.config, self.interceptor)
     }
 }
 

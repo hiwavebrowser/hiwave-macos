@@ -40,8 +40,10 @@ mod ipc;
 mod state;
 mod webview;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
 mod webview_rustkit;
+#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+mod shield_adapter;
 
 mod content_webview_trait;
 #[cfg(target_os = "macos")]
@@ -1091,12 +1093,13 @@ fn main() {
             .map(|tab| tab.url.to_string())
             .unwrap_or_else(|| NEW_TAB_URL.to_string())
     };
-    #[cfg(target_os = "macos")]
+    // RustKit content webview (macOS with rustkit feature, default)
+    #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
     let content_webview = {
         use webview_rustkit::RustKitView;
         use rustkit_viewhost::Bounds;
         
-        info!("Creating RustKit content webview");
+        info!("Creating RustKit content webview (engine-level ad blocking enabled)");
         let bounds = Bounds::new(
             content_bounds.position.to_logical::<f64>(1.0).x as i32,
             content_bounds.position.to_logical::<f64>(1.0).y as i32,
@@ -1104,12 +1107,29 @@ fn main() {
             content_bounds.size.to_logical::<f64>(1.0).height as u32,
         );
         
-        let rustkit_view = RustKitView::new(&window, bounds)
+        // Create blocked counter for shield integration
+        use std::sync::atomic::AtomicU64;
+        let blocked_counter = Arc::new(AtomicU64::new(0));
+        
+        let rustkit_view = RustKitView::with_shield_counter(&window, bounds, Some(blocked_counter))
             .expect("Failed to create RustKit view");
         rustkit_view.load_html_internal(ABOUT_HTML)
             .expect("Failed to load initial HTML");
         
         UnifiedContentWebView::RustKit(Arc::new(rustkit_view))
+    };
+    
+    // WebKit fallback content webview (macOS with webview-fallback feature)
+    #[cfg(all(target_os = "macos", feature = "webview-fallback"))]
+    let content_webview: UnifiedContentWebView = {
+        info!("Creating WebKit content webview (fallback mode)");
+        Arc::new(WebViewBuilder::new()
+            .with_html(ABOUT_HTML)
+            .with_devtools(cfg!(debug_assertions))
+            .with_clipboard(true)
+            .with_bounds(content_bounds)
+            .build(&window)
+            .expect("Failed to create WebKit content webview"))
     };
     
     #[cfg(not(target_os = "macos"))]
@@ -1451,7 +1471,7 @@ fn main() {
     #[cfg(not(target_os = "macos"))]
     let content_webview = UnifiedContentWebView::Wry(Arc::new(content_webview));
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
     {
         if !is_new_tab_url(&initial_url) {
             if let UnifiedContentWebView::RustKit(ref v) = content_webview {
@@ -1461,6 +1481,16 @@ fn main() {
             }
         }
         info!("Content WebView created (RustKit)");
+    }
+    
+    #[cfg(all(target_os = "macos", feature = "webview-fallback"))]
+    {
+        if !is_new_tab_url(&initial_url) {
+            if let Err(e) = content_webview.load_url(&initial_url) {
+                error!("Failed to load initial URL: {}", e);
+            }
+        }
+        info!("Content WebView created (WebKit fallback)");
     }
     
     #[cfg(not(target_os = "macos"))]
@@ -1695,7 +1725,7 @@ fn main() {
                     right_sidebar_open,
                 );
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
             Event::MainEventsCleared => {
                 // Process RustKit events and render
                 if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {

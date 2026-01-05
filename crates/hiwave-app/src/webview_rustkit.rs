@@ -3,11 +3,14 @@
 //! This module provides the RustKit engine as the default WebView backend for content rendering.
 //! It wraps `rustkit_engine::Engine` and provides a WRY-like interface.
 
+use super::shield_adapter::create_shield_interceptor_with_counter;
 use super::webview::IWebContent;
 use hiwave_core::{HiWaveError, HiWaveResult};
 use rustkit_engine::{Engine, EngineBuilder, EngineEvent, EngineViewId};
 use rustkit_viewhost::{Bounds, ViewHostTrait, WindowHandle};
 use std::cell::RefCell;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use tao::window::Window;
 use tao::rwh_06::HasWindowHandle;
 use tokio::sync::mpsc;
@@ -36,11 +39,23 @@ pub struct RustKitView {
     loading: RefCell<bool>,
     /// Event receiver for engine events.
     event_rx: Option<mpsc::UnboundedReceiver<EngineEvent>>,
+    /// Counter for blocked requests (shared with shield).
+    #[allow(dead_code)]
+    blocked_counter: Option<Arc<AtomicU64>>,
 }
 
 impl RustKitView {
     /// Create a new RustKit view.
     pub fn new(window: &Window, bounds: Bounds) -> HiWaveResult<Self> {
+        Self::with_shield_counter(window, bounds, None)
+    }
+
+    /// Create a new RustKit view with a shared blocked request counter.
+    pub fn with_shield_counter(
+        window: &Window,
+        bounds: Bounds,
+        blocked_counter: Option<Arc<AtomicU64>>,
+    ) -> HiWaveResult<Self> {
         info!("Creating RustKit view");
 
         // Get raw window handle from TAO window
@@ -48,11 +63,21 @@ impl RustKitView {
             .map_err(|e| HiWaveError::WebView(format!("Failed to get window handle: {}", e)))?
             .as_raw();
 
-        // Create engine for this view
-        let mut engine = EngineBuilder::new()
+        // Create engine builder with shield interceptor if counter provided
+        let mut builder = EngineBuilder::new()
             .user_agent("HiWave/1.0 RustKit/1.0")
             .javascript_enabled(true)
-            .cookies_enabled(true)
+            .cookies_enabled(true);
+
+        // Add shield interceptor if counter is provided
+        let counter_clone = blocked_counter.clone();
+        if let Some(counter) = blocked_counter.clone() {
+            info!("RustKit engine with shield ad-blocking enabled");
+            let interceptor = create_shield_interceptor_with_counter(counter);
+            builder = builder.request_interceptor(interceptor);
+        }
+
+        let mut engine = builder
             .build()
             .map_err(|e| hiwave_core::HiWaveError::WebView(e.to_string()))?;
 
@@ -75,6 +100,7 @@ impl RustKitView {
             visible: RefCell::new(true),
             loading: RefCell::new(false),
             event_rx,
+            blocked_counter: counter_clone,
         })
     }
 

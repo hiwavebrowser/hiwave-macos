@@ -422,6 +422,14 @@ pub struct ResourceLoader {
 impl ResourceLoader {
     /// Create a new resource loader.
     pub fn new(config: LoaderConfig) -> Result<Self, NetError> {
+        Self::with_interceptor(config, None)
+    }
+
+    /// Create a new resource loader with an optional request interceptor.
+    pub fn with_interceptor(
+        config: LoaderConfig,
+        interceptor: Option<RequestInterceptor>,
+    ) -> Result<Self, NetError> {
         let client = HttpClient::builder()
             .user_agent(&config.user_agent)
             .timeout(config.default_timeout)
@@ -430,12 +438,16 @@ impl ResourceLoader {
             .build()
             .map_err(|e| NetError::RequestFailed(e.to_string()))?;
 
-        info!("ResourceLoader initialized");
+        if interceptor.is_some() {
+            info!("ResourceLoader initialized with request interceptor");
+        } else {
+            info!("ResourceLoader initialized");
+        }
 
         Ok(Self {
             client,
             config,
-            interceptor: None,
+            interceptor: interceptor.map(|i| Arc::new(RwLock::new(i))),
             download_manager: Arc::new(DownloadManager::new()),
         })
     }
