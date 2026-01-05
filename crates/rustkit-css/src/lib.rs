@@ -165,6 +165,7 @@ pub enum Display {
     None,
 }
 
+
 impl Display {
     /// Check if this is a flex container.
     pub fn is_flex(self) -> bool {
@@ -897,6 +898,12 @@ pub struct ComputedStyle {
     pub border_bottom_color: Color,
     pub border_left_color: Color,
 
+    // Border radius (for rounded corners)
+    pub border_top_left_radius: Length,
+    pub border_top_right_radius: Length,
+    pub border_bottom_right_radius: Length,
+    pub border_bottom_left_radius: Length,
+
     // Colors
     pub color: Color,
     pub background_color: Color,
@@ -932,6 +939,11 @@ pub struct ComputedStyle {
     
     // Box shadows (multiple shadows supported)
     pub box_shadows: Vec<BoxShadow>,
+    
+    // Image/replaced element
+    pub image_url: Option<String>,
+    pub object_fit: String,  // "fill", "contain", "cover", "none", "scale-down"
+    pub object_position: (f32, f32),
 
     // Flexbox Container
     pub flex_direction: FlexDirection,
@@ -998,6 +1010,10 @@ impl ComputedStyle {
             min_height: Length::Zero,
             max_width: Length::Auto, // No max constraint
             max_height: Length::Auto,
+            // Image/replaced element defaults
+            image_url: None,
+            object_fit: "contain".to_string(),
+            object_position: (0.5, 0.5), // center center
             ..Default::default()
         }
     }

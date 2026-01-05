@@ -187,14 +187,14 @@ run_fixture_test() {
     local golden_path="$GOLDENS_DIR/${fixture_name}.ppm"
     local current_path="$TEMP_DIR/${fixture_name}_current.ppm"
     
-    # Capture current frame
+    # Capture current frame (redirect all output to /dev/null except status)
     "$SMOKE_BIN" \
         --html-file "$fixture_path" \
         --width "$CAPTURE_WIDTH" \
         --height "$CAPTURE_HEIGHT" \
         --duration-ms "$CAPTURE_DURATION" \
         --dump-frame "$current_path" \
-        2>/dev/null || true
+        >/dev/null 2>&1 || true
     
     # Compare and report
     compare_and_report "$fixture_name" "$golden_path" "$current_path"

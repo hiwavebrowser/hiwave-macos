@@ -330,6 +330,13 @@ pub enum BoxType {
     AnonymousBlock,
     /// Text run.
     Text(String),
+    /// Replaced element (image).
+    /// Contains: (url, natural_width, natural_height)
+    Image {
+        url: String,
+        natural_width: f32,
+        natural_height: f32,
+    },
 }
 
 /// Stacking context for z-index ordering.
@@ -468,6 +475,10 @@ impl LayoutBox {
                 // Text boxes: calculate dimensions based on text content
                 self.layout_text(text.clone(), containing_block);
             }
+            BoxType::Image { natural_width, natural_height, .. } => {
+                // Replaced element: use intrinsic dimensions or explicit sizing
+                self.layout_image(*natural_width, *natural_height, containing_block);
+            }
         }
 
         // Apply positioning offsets after normal layout
@@ -520,6 +531,37 @@ impl LayoutBox {
         self.dimensions.content.height = self.get_line_height();
     }
 
+    /// Layout a replaced element (image).
+    fn layout_image(&mut self, natural_width: f32, natural_height: f32, containing_block: &Dimensions) {
+        // Calculate explicit dimensions from style
+        let explicit_width = match self.style.width {
+            Length::Px(px) => Some(px),
+            Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.width),
+            _ => None,
+        };
+        
+        let explicit_height = match self.style.height {
+            Length::Px(px) => Some(px),
+            Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.height),
+            _ => None,
+        };
+        
+        // Determine final dimensions using intrinsic size calculation
+        let (width, height) = crate::images::calculate_intrinsic_size(
+            if natural_width > 0.0 { Some(natural_width) } else { None },
+            if natural_height > 0.0 { Some(natural_height) } else { None },
+            explicit_width,
+            explicit_height,
+            containing_block.content.width,
+        );
+        
+        // Position within containing block
+        self.dimensions.content.x = containing_block.content.x;
+        self.dimensions.content.y = containing_block.content.y + containing_block.content.height;
+        self.dimensions.content.width = width;
+        self.dimensions.content.height = height;
+    }
+
     /// Get line height for text layout.
     fn get_line_height(&self) -> f32 {
         let font_size = match self.style.font_size {
@@ -554,6 +596,9 @@ impl LayoutBox {
             }
             BoxType::Text(text) => {
                 self.layout_text(text.clone(), containing_block);
+            }
+            BoxType::Image { natural_width, natural_height, .. } => {
+                self.layout_image(*natural_width, *natural_height, containing_block);
             }
         }
 
@@ -1139,11 +1184,44 @@ pub struct HitTestAncestor {
     pub position: Position,
 }
 
+/// Border radius values for each corner.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BorderRadius {
+    pub top_left: f32,
+    pub top_right: f32,
+    pub bottom_right: f32,
+    pub bottom_left: f32,
+}
+
+impl BorderRadius {
+    /// Create uniform border radius.
+    pub fn uniform(radius: f32) -> Self {
+        Self {
+            top_left: radius,
+            top_right: radius,
+            bottom_right: radius,
+            bottom_left: radius,
+        }
+    }
+    
+    /// Check if all radii are zero (no rounding).
+    pub fn is_zero(&self) -> bool {
+        self.top_left == 0.0 && self.top_right == 0.0 
+            && self.bottom_right == 0.0 && self.bottom_left == 0.0
+    }
+}
+
 /// A paint command for rendering.
 #[derive(Debug, Clone)]
 pub enum DisplayCommand {
     /// Fill a rectangle with a solid color.
     SolidColor(Color, Rect),
+    /// Fill a rounded rectangle with a solid color.
+    RoundedRect {
+        color: Color,
+        rect: Rect,
+        radius: BorderRadius,
+    },
     /// Draw a border.
     Border {
         color: Color,
@@ -1619,7 +1697,7 @@ impl DisplayList {
         }
     }
 
-    /// Render a layout box's own content (shadows, background, borders, text).
+    /// Render a layout box's own content (shadows, background, borders, text, images).
     fn render_box_content(&mut self, layout_box: &LayoutBox) {
         // Box shadows (outer) are drawn first, behind the element
         self.render_box_shadows(layout_box);
@@ -1631,6 +1709,8 @@ impl DisplayList {
         self.render_borders(layout_box);
         // Then text
         self.render_text(layout_box);
+        // Then images (replaced content)
+        self.render_replaced_content(layout_box);
     }
 
     /// Render a layout box and its children (legacy method).
@@ -1646,6 +1726,8 @@ impl DisplayList {
         self.render_borders(layout_box);
         // Then text
         self.render_text(layout_box);
+        // Then images (replaced content)
+        self.render_replaced_content(layout_box);
 
         for child in &layout_box.children {
             self.render_box(child);
@@ -1695,10 +1777,29 @@ impl DisplayList {
     fn render_background(&mut self, layout_box: &LayoutBox) {
         let color = layout_box.style.background_color;
         if color.a > 0.0 {
-            self.commands.push(DisplayCommand::SolidColor(
-                color,
-                layout_box.dimensions.border_box(),
-            ));
+            let rect = layout_box.dimensions.border_box();
+            let s = &layout_box.style;
+            
+            // Get font size for relative length calculations
+            let font_size = match s.font_size {
+                Length::Px(px) => px,
+                _ => 16.0,
+            };
+            let root_font_size = 16.0; // TODO: Pass actual root font size
+            
+            // Check if we have border-radius
+            let radius = BorderRadius {
+                top_left: s.border_top_left_radius.to_px(font_size, root_font_size, rect.width),
+                top_right: s.border_top_right_radius.to_px(font_size, root_font_size, rect.width),
+                bottom_right: s.border_bottom_right_radius.to_px(font_size, root_font_size, rect.width),
+                bottom_left: s.border_bottom_left_radius.to_px(font_size, root_font_size, rect.width),
+            };
+            
+            if radius.is_zero() {
+                self.commands.push(DisplayCommand::SolidColor(color, rect));
+            } else {
+                self.commands.push(DisplayCommand::RoundedRect { color, rect, radius });
+            }
         }
     }
 
@@ -1845,6 +1946,44 @@ impl DisplayList {
                     });
                 }
             }
+        }
+    }
+    
+    /// Render replaced content (images).
+    fn render_replaced_content(&mut self, layout_box: &LayoutBox) {
+        if let BoxType::Image { url, natural_width, natural_height } = &layout_box.box_type {
+            let dims = &layout_box.dimensions;
+            let container = Rect {
+                x: dims.content.x,
+                y: dims.content.y,
+                width: dims.content.width,
+                height: dims.content.height,
+            };
+            
+            // Parse object-fit from style
+            let object_fit = match layout_box.style.object_fit.as_str() {
+                "fill" => ObjectFit::Fill,
+                "contain" => ObjectFit::Contain,
+                "cover" => ObjectFit::Cover,
+                "none" => ObjectFit::None,
+                "scale-down" => ObjectFit::ScaleDown,
+                _ => ObjectFit::Contain,
+            };
+            
+            let (pos_x, pos_y) = layout_box.style.object_position;
+            
+            // Generate image display command
+            let cmd = crate::images::render_image(
+                url,
+                container,
+                *natural_width,
+                *natural_height,
+                object_fit,
+                (pos_x, pos_y),
+                layout_box.style.opacity,
+            );
+            
+            self.commands.push(cmd);
         }
     }
 }

@@ -865,15 +865,11 @@ impl Engine {
     ) -> LayoutBox {
         match &node.node_type {
             NodeType::Element { tag_name, attributes, .. } => {
-                // Determine box type based on tag
-                let is_inline = matches!(
-                    tag_name.to_lowercase().as_str(),
-                    "a" | "span" | "strong" | "b" | "em" | "i" | "u" | "code" | "small" | "big" | "sub" | "sup" | "abbr" | "cite" | "q" | "mark" | "label"
-                );
-
+                let tag_lower = tag_name.to_lowercase();
+                
                 // Skip rendering for certain elements
                 let is_hidden = matches!(
-                    tag_name.to_lowercase().as_str(),
+                    tag_lower.as_str(),
                     "head" | "title" | "meta" | "link" | "script" | "style" | "noscript"
                 );
 
@@ -881,12 +877,6 @@ impl Engine {
                     // Return an empty block for hidden elements
                     return LayoutBox::new(BoxType::Block, ComputedStyle::new());
                 }
-
-                let box_type = if is_inline {
-                    BoxType::Inline
-                } else {
-                    BoxType::Block
-                };
 
                 // Create computed style based on element, attributes, and stylesheets
                 let style = self.compute_style_for_element(tag_name, attributes, stylesheets, css_vars, ancestors);
@@ -896,18 +886,60 @@ impl Engine {
                     return LayoutBox::new(BoxType::Block, ComputedStyle::new());
                 }
 
+                // Handle replaced elements (images)
+                if tag_lower == "img" {
+                    let src = attributes.get("src").cloned().unwrap_or_default();
+                    
+                    // Parse explicit dimensions from attributes
+                    let explicit_width: Option<f32> = attributes.get("width")
+                        .and_then(|w| w.parse().ok());
+                    let explicit_height: Option<f32> = attributes.get("height")
+                        .and_then(|h| h.parse().ok());
+                    
+                    // For now, use explicit dimensions or defaults
+                    // Real implementation would load image to get natural size
+                    let (natural_width, natural_height) = match (explicit_width, explicit_height) {
+                        (Some(w), Some(h)) => (w, h),
+                        (Some(w), None) => (w, w),  // Assume square if only width
+                        (None, Some(h)) => (h, h),  // Assume square if only height
+                        (None, None) => (150.0, 150.0),  // Default placeholder size
+                    };
+                    
+                    return LayoutBox::new(
+                        BoxType::Image {
+                            url: src,
+                            natural_width,
+                            natural_height,
+                        },
+                        style,
+                    );
+                }
+                
+                // Determine box type based on tag for non-replaced elements
+                let is_inline = matches!(
+                    tag_lower.as_str(),
+                    "a" | "span" | "strong" | "b" | "em" | "i" | "u" | "code" | "small" | "big" | "sub" | "sup" | "abbr" | "cite" | "q" | "mark" | "label"
+                );
+
+                let box_type = if is_inline {
+                    BoxType::Inline
+                } else {
+                    BoxType::Block
+                };
+
                 let mut layout_box = LayoutBox::new(box_type, style);
 
                 // Build ancestors list for child elements
                 let mut child_ancestors = ancestors.to_vec();
-                child_ancestors.push(tag_name.to_lowercase());
+                child_ancestors.push(tag_lower);
 
                 // Process children
                 for child in node.children() {
                     let child_box = self.build_layout_from_node_with_styles(&child, stylesheets, css_vars, &child_ancestors);
                     // Only add non-empty boxes
                     if !matches!(child_box.box_type, BoxType::Block) || !child_box.children.is_empty() 
-                        || matches!(child_box.box_type, BoxType::Text(_)) {
+                        || matches!(child_box.box_type, BoxType::Text(_))
+                        || matches!(child_box.box_type, BoxType::Image { .. }) {
                         layout_box.children.push(child_box);
                     }
                 }
@@ -1211,7 +1243,33 @@ impl Engine {
                 // For now, just ignore
             }
             "border-radius" => {
-                // border-radius not yet in ComputedStyle, ignore for now
+                // Parse border-radius (shorthand: all corners same)
+                if let Some(length) = rustkit_css::parse_length(value) {
+                    style.border_top_left_radius = length;
+                    style.border_top_right_radius = length;
+                    style.border_bottom_right_radius = length;
+                    style.border_bottom_left_radius = length;
+                }
+            }
+            "border-top-left-radius" => {
+                if let Some(length) = rustkit_css::parse_length(value) {
+                    style.border_top_left_radius = length;
+                }
+            }
+            "border-top-right-radius" => {
+                if let Some(length) = rustkit_css::parse_length(value) {
+                    style.border_top_right_radius = length;
+                }
+            }
+            "border-bottom-right-radius" => {
+                if let Some(length) = rustkit_css::parse_length(value) {
+                    style.border_bottom_right_radius = length;
+                }
+            }
+            "border-bottom-left-radius" => {
+                if let Some(length) = rustkit_css::parse_length(value) {
+                    style.border_bottom_left_radius = length;
+                }
             }
             "box-shadow" => {
                 // Parse box-shadow: offset-x offset-y blur spread color [inset]

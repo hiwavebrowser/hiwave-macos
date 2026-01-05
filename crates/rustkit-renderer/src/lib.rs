@@ -43,7 +43,7 @@
 use bytemuck::{Pod, Zeroable};
 use hashbrown::HashMap;
 use rustkit_css::Color;
-use rustkit_layout::{DisplayCommand, Rect};
+use rustkit_layout::{BorderRadius, DisplayCommand, Rect};
 use std::sync::Arc;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
@@ -470,6 +470,17 @@ impl Renderer {
         match cmd {
             DisplayCommand::SolidColor(color, rect) => {
                 self.draw_solid_rect(*rect, *color);
+            }
+
+            DisplayCommand::RoundedRect { color, rect, radius } => {
+                // For now, fall back to solid rect
+                // TODO: Implement proper rounded rect rendering with bezier curves
+                if radius.is_zero() {
+                    self.draw_solid_rect(*rect, *color);
+                } else {
+                    // Draw a solid rect (rounded corners require more complex rendering)
+                    self.draw_solid_rect(*rect, *color);
+                }
             }
 
             DisplayCommand::Border {
