@@ -2,8 +2,10 @@
 # Capture golden images for all test fixtures
 #
 # Usage: ./scripts/capture_goldens.sh [fixture_name]
+#        ./scripts/capture_goldens.sh --width 1280 --height 720 [fixture_name]
 #
 # If no fixture_name is provided, captures all fixtures.
+# Use standardized sizes for deterministic comparison.
 
 set -e
 
@@ -11,6 +13,32 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FIXTURES_DIR="$PROJECT_ROOT/fixtures"
 GOLDENS_DIR="$PROJECT_ROOT/goldens"
+
+# Standardized capture dimensions for determinism
+CAPTURE_WIDTH=800
+CAPTURE_HEIGHT=600
+CAPTURE_DURATION=1000
+
+# Parse optional size arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --width)
+            CAPTURE_WIDTH="$2"
+            shift 2
+            ;;
+        --height)
+            CAPTURE_HEIGHT="$2"
+            shift 2
+            ;;
+        --duration-ms)
+            CAPTURE_DURATION="$2"
+            shift 2
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
 
 # Create goldens directory if it doesn't exist
 mkdir -p "$GOLDENS_DIR"
@@ -28,18 +56,23 @@ if [ ! -f "$SMOKE_BIN" ]; then
     SMOKE_BIN="$PROJECT_ROOT/target/debug/hiwave-smoke"
 fi
 
+echo "Capture settings: ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}, duration=${CAPTURE_DURATION}ms"
+echo ""
+
 # Function to capture a single fixture
 capture_fixture() {
     local fixture_path="$1"
     local fixture_name=$(basename "$fixture_path" .html)
     local output_path="$GOLDENS_DIR/${fixture_name}.ppm"
     
-    echo "Capturing: $fixture_name"
+    echo "Capturing: $fixture_name (${CAPTURE_WIDTH}x${CAPTURE_HEIGHT})"
     
-    # Run smoke harness with the fixture
+    # Run smoke harness with the fixture and standardized dimensions
     "$SMOKE_BIN" \
         --html-file "$fixture_path" \
-        --duration-ms 1000 \
+        --width "$CAPTURE_WIDTH" \
+        --height "$CAPTURE_HEIGHT" \
+        --duration-ms "$CAPTURE_DURATION" \
         --dump-frame "$output_path" \
         2>/dev/null || {
             echo "  Warning: Capture failed for $fixture_name"
@@ -57,6 +90,17 @@ capture_fixture() {
                 echo "  Converted: $png_path"
             }
         fi
+        
+        # Save metadata
+        cat > "$GOLDENS_DIR/${fixture_name}.meta.json" << METAEOF
+{
+    "fixture": "$fixture_name",
+    "width": $CAPTURE_WIDTH,
+    "height": $CAPTURE_HEIGHT,
+    "duration_ms": $CAPTURE_DURATION,
+    "captured_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+METAEOF
     else
         echo "  No output file created"
         return 1

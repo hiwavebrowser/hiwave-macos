@@ -37,6 +37,9 @@ fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
 struct Args {
     duration_ms: u64,
     dump_frame: Option<String>,
+    html_file: Option<String>,
+    width: u32,
+    height: u32,
 }
 
 impl Args {
@@ -44,6 +47,9 @@ impl Args {
         let mut args = std::env::args().skip(1).peekable();
         let mut duration_ms = 4000u64;
         let mut dump_frame = None;
+        let mut html_file = None;
+        let mut width = 1100u32;
+        let mut height = 640u32;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -55,6 +61,19 @@ impl Args {
                 "--dump-frame" => {
                     dump_frame = args.next();
                 }
+                "--html-file" => {
+                    html_file = args.next();
+                }
+                "--width" => {
+                    if let Some(val) = args.next() {
+                        width = val.parse().unwrap_or(1100);
+                    }
+                }
+                "--height" => {
+                    if let Some(val) = args.next() {
+                        height = val.parse().unwrap_or(640);
+                    }
+                }
                 _ => {}
             }
         }
@@ -62,112 +81,25 @@ impl Args {
         Self {
             duration_ms,
             dump_frame,
+            html_file,
+            width,
+            height,
         }
     }
-}
-
-fn spawn_scripted_flow(proxy: EventLoopProxy<UserEvent>, duration_ms: u64) {
-    std::thread::spawn(move || {
-        let start = Instant::now();
-
-        // Phase 1: sidebar drag simulation
-        for i in 0..30 {
-            let left = (i as f64) * 8.0; // 0..240
-            let right_open = i % 10 >= 5;
-            let shelf = if i % 2 == 0 { 0.0 } else { 120.0 };
-            let _ = proxy.send_event(UserEvent::Layout {
-                left,
-                right_open,
-                shelf,
-            });
-            std::thread::sleep(Duration::from_millis(30));
+    
+    /// Load HTML content from file or use default test HTML
+    fn load_html_content(&self) -> String {
+        if let Some(ref path) = self.html_file {
+            match std::fs::read_to_string(path) {
+                Ok(content) => return content,
+                Err(e) => {
+                    eprintln!("Warning: Failed to read HTML file {}: {}", path, e);
+                }
+            }
         }
-
-        // Phase 2: let engine render content
-        // (we avoid network dependency in the harness itself)
-
-        // Let UI settle
-        while start.elapsed() < Duration::from_millis(duration_ms) {
-            std::thread::sleep(Duration::from_millis(50));
-        }
-
-        let _ = proxy.send_event(UserEvent::Exit);
-    });
-}
-
-fn main() {
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .init();
-
-    let args = Args::parse();
-    info!(
-        duration_ms = args.duration_ms,
-        dump_frame = ?args.dump_frame,
-        "Starting HiWave Smoke Harness (RustKit)"
-    );
-
-    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
-    let proxy = event_loop.create_proxy();
-
-    let window = WindowBuilder::new()
-        .with_title("HiWave Smoke Harness (RustKit)")
-        .with_inner_size(tao::dpi::LogicalSize::new(1100.0, 760.0))
-        .build(&event_loop)
-        .expect("Failed to create window");
-
-    // Chrome bar (using WRY for simple UI)
-    let chrome = WebViewBuilder::new()
-        .with_html(
-            r#"<!doctype html><meta charset='utf-8'/>
-            <body style='margin:0;background:#111;color:#fff;font:16px system-ui;display:flex;align-items:center;justify-content:center;'>
-              chrome
-            </body>"#,
-        )
-        .with_bounds(rect(0.0, 0.0, 1100.0, 72.0))
-        .build_as_child(&window)
-        .expect("Failed to create chrome webview");
-
-    // Shelf (using WRY for simple UI)
-    let shelf = WebViewBuilder::new()
-        .with_html(
-            r#"<!doctype html><meta charset='utf-8'/>
-            <body style='margin:0;background:#1a0b2a;color:#f0d7ff;font:16px system-ui;display:flex;align-items:center;justify-content:center;'>
-              shelf
-            </body>"#,
-        )
-        .with_bounds(rect(0.0, 760.0, 1100.0, 0.0))
-        .build_as_child(&window)
-        .expect("Failed to create shelf webview");
-
-    // Content area (using RustKit engine)
-    let mut engine = EngineBuilder::new()
-        .build()
-        .expect("Failed to create RustKit engine");
-
-    // Get the raw window handle for creating the RustKit view
-    let window_handle = window
-        .window_handle()
-        .expect("Failed to get window handle")
-        .as_raw();
-
-    let content_bounds = Bounds {
-        x: 0,
-        y: 72,
-        width: 1100,
-        height: 568,
-    };
-
-    let content_view_id = engine
-        .create_view(window_handle, content_bounds)
-        .expect("Failed to create RustKit content view");
-
-    // Load test content into the RustKit view
-    let test_html = r#"<!DOCTYPE html>
+        
+        // Default test HTML
+        r#"<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -218,9 +150,119 @@ fn main() {
         <p>Smoke test timestamp: <span id="time">loading...</span></p>
     </div>
 </body>
-</html>"#;
+</html>"#.to_string()
+    }
+}
 
-    if let Err(e) = engine.load_html(content_view_id, test_html) {
+fn spawn_scripted_flow(proxy: EventLoopProxy<UserEvent>, duration_ms: u64) {
+    std::thread::spawn(move || {
+        let start = Instant::now();
+
+        // Phase 1: sidebar drag simulation
+        for i in 0..30 {
+            let left = (i as f64) * 8.0; // 0..240
+            let right_open = i % 10 >= 5;
+            let shelf = if i % 2 == 0 { 0.0 } else { 120.0 };
+            let _ = proxy.send_event(UserEvent::Layout {
+                left,
+                right_open,
+                shelf,
+            });
+            std::thread::sleep(Duration::from_millis(30));
+        }
+
+        // Phase 2: let engine render content
+        // (we avoid network dependency in the harness itself)
+
+        // Let UI settle
+        while start.elapsed() < Duration::from_millis(duration_ms) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let _ = proxy.send_event(UserEvent::Exit);
+    });
+}
+
+fn main() {
+    // Initialize tracing
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into()),
+        )
+        .init();
+
+    let args = Args::parse();
+    info!(
+        duration_ms = args.duration_ms,
+        dump_frame = ?args.dump_frame,
+        html_file = ?args.html_file,
+        width = args.width,
+        height = args.height,
+        "Starting HiWave Smoke Harness (RustKit)"
+    );
+
+    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    let proxy = event_loop.create_proxy();
+
+    let window = WindowBuilder::new()
+        .with_title("HiWave Smoke Harness (RustKit)")
+        .with_inner_size(tao::dpi::LogicalSize::new(1100.0, 760.0))
+        .build(&event_loop)
+        .expect("Failed to create window");
+
+    // Chrome bar (using WRY for simple UI)
+    let chrome = WebViewBuilder::new()
+        .with_html(
+            r#"<!doctype html><meta charset='utf-8'/>
+            <body style='margin:0;background:#111;color:#fff;font:16px system-ui;display:flex;align-items:center;justify-content:center;'>
+              chrome
+            </body>"#,
+        )
+        .with_bounds(rect(0.0, 0.0, 1100.0, 72.0))
+        .build_as_child(&window)
+        .expect("Failed to create chrome webview");
+
+    // Shelf (using WRY for simple UI)
+    let shelf = WebViewBuilder::new()
+        .with_html(
+            r#"<!doctype html><meta charset='utf-8'/>
+            <body style='margin:0;background:#1a0b2a;color:#f0d7ff;font:16px system-ui;display:flex;align-items:center;justify-content:center;'>
+              shelf
+            </body>"#,
+        )
+        .with_bounds(rect(0.0, 760.0, 1100.0, 0.0))
+        .build_as_child(&window)
+        .expect("Failed to create shelf webview");
+
+    // Content area (using RustKit engine)
+    let mut engine = EngineBuilder::new()
+        .build()
+        .expect("Failed to create RustKit engine");
+
+    // Get the raw window handle for creating the RustKit view
+    let window_handle = window
+        .window_handle()
+        .expect("Failed to get window handle")
+        .as_raw();
+
+    // Use standardized content bounds from args for deterministic capture
+    let chrome_height = 72u32;
+    let content_bounds = Bounds {
+        x: 0,
+        y: chrome_height as i32,
+        width: args.width,
+        height: args.height.saturating_sub(chrome_height),
+    };
+
+    let content_view_id = engine
+        .create_view(window_handle, content_bounds)
+        .expect("Failed to create RustKit content view");
+
+    // Load test content into the RustKit view (from file or default)
+    let test_html = args.load_html_content();
+
+    if let Err(e) = engine.load_html(content_view_id, &test_html) {
         error!(?e, "Failed to load HTML into RustKit view");
     }
 
