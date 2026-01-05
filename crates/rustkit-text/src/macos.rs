@@ -437,18 +437,185 @@ impl GlyphRasterizer {
     
     /// Fallback rasterization for characters without glyphs
     fn rasterize_fallback(&self, ch: char) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
+        // Try fallback fonts for the character
+        let fallback_fonts = [
+            "Apple Color Emoji",  // For emoji
+            "Apple Symbols",       // For symbols
+            "Arial Unicode MS",    // Wide Unicode coverage
+            "Helvetica Neue",      // Good general fallback
+            "Menlo",               // For code/math symbols
+        ];
+        
+        for font_name in &fallback_fonts {
+            if let Ok(fallback_font) = font::new_from_name(font_name, self.font_size as f64) {
+                // Try to get glyph with this fallback font
+                let chars: [u16; 1] = [ch as u16];
+                let mut glyphs: [u16; 1] = [0];
+                
+                unsafe {
+                    use core_text::font::CTFontRef;
+                    
+                    extern "C" {
+                        fn CTFontGetGlyphsForCharacters(
+                            font: CTFontRef,
+                            characters: *const u16,
+                            glyphs: *mut u16,
+                            count: isize,
+                        ) -> bool;
+                    }
+                    
+                    let success = CTFontGetGlyphsForCharacters(
+                        fallback_font.as_concrete_TypeRef(),
+                        chars.as_ptr(),
+                        glyphs.as_mut_ptr(),
+                        1,
+                    );
+                    
+                    if success && glyphs[0] != 0 {
+                        // Found the glyph in this fallback font - rasterize with it
+                        let fallback_rasterizer = GlyphRasterizer {
+                            font: fallback_font.clone(),
+                            font_size: self.font_size,
+                            font_weight: self.font_weight,
+                            font_italic: self.font_italic,
+                        };
+                        if let Some(result) = fallback_rasterizer.rasterize_char_with_font(&fallback_font, ch) {
+                            return Some(result);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // No fallback found - return transparent placeholder
         let (width, height) = estimate_glyph_size(ch, self.font_size);
         let width = width.max(4);
         let height = height.max(4);
-        
-        // Return transparent bitmap - don't draw placeholder boxes for unsupported characters
-        // This handles emoji, symbols, and other characters not in the font gracefully
         let bitmap = vec![0u8; (width * height) as usize];
         
         let advance = self.font_size * width_factor(ch);
         let bearing_y = self.font_size * 0.8;
         
         Some((bitmap, width, height, advance, 0.0, bearing_y))
+    }
+    
+    /// Rasterize a character using a specific font (for fallback)
+    fn rasterize_char_with_font(&self, font: &CTFont, ch: char) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
+        let chars: [u16; 1] = [ch as u16];
+        let mut glyphs: [u16; 1] = [0];
+        
+        unsafe {
+            use core_text::font::CTFontRef;
+            use std::os::raw::c_void;
+            
+            extern "C" {
+                fn CTFontGetGlyphsForCharacters(
+                    font: CTFontRef,
+                    characters: *const u16,
+                    glyphs: *mut u16,
+                    count: isize,
+                ) -> bool;
+                
+                fn CTFontGetAdvancesForGlyphs(
+                    font: CTFontRef,
+                    orientation: u32,
+                    glyphs: *const u16,
+                    advances: *mut CGSize,
+                    count: isize,
+                ) -> f64;
+                
+                fn CTFontGetBoundingRectsForGlyphs(
+                    font: CTFontRef,
+                    orientation: u32,
+                    glyphs: *const u16,
+                    bounding_rects: *mut CGRect,
+                    count: isize,
+                ) -> CGRect;
+                
+                fn CTFontDrawGlyphs(
+                    font: CTFontRef,
+                    glyphs: *const u16,
+                    positions: *const CGPoint,
+                    count: usize,
+                    context: *mut c_void,
+                );
+            }
+            
+            let font_ref = font.as_concrete_TypeRef();
+            
+            let success = CTFontGetGlyphsForCharacters(
+                font_ref,
+                chars.as_ptr(),
+                glyphs.as_mut_ptr(),
+                1,
+            );
+            
+            if !success || glyphs[0] == 0 {
+                return None;
+            }
+            
+            let mut advance_size = CGSize::new(0.0, 0.0);
+            CTFontGetAdvancesForGlyphs(
+                font_ref,
+                0,
+                glyphs.as_ptr(),
+                &mut advance_size,
+                1,
+            );
+            
+            let mut bounds = CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(0.0, 0.0));
+            CTFontGetBoundingRectsForGlyphs(
+                font_ref,
+                0,
+                glyphs.as_ptr(),
+                &mut bounds,
+                1,
+            );
+            
+            let padding = 2.0;
+            let width = (bounds.size.width.ceil() + padding * 2.0).max(4.0) as u32;
+            let height = (bounds.size.height.ceil() + padding * 2.0).max(4.0) as u32;
+            
+            let color_space = CGColorSpace::create_device_gray();
+            let mut context = CGContext::create_bitmap_context(
+                None,
+                width as usize,
+                height as usize,
+                8,
+                width as usize,
+                &color_space,
+                0,
+            );
+            
+            context.set_allows_antialiasing(true);
+            context.set_should_antialias(true);
+            context.set_should_smooth_fonts(true);
+            context.set_gray_fill_color(1.0, 1.0);
+            
+            let draw_x = padding - bounds.origin.x;
+            let draw_y = padding - bounds.origin.y;
+            
+            let position = CGPoint::new(draw_x, draw_y);
+            CTFontDrawGlyphs(
+                font_ref,
+                glyphs.as_ptr(),
+                &position,
+                1,
+                context.as_ptr() as *mut c_void,
+            );
+            
+            let data = context.data();
+            let bitmap: Vec<u8> = std::slice::from_raw_parts(
+                data.as_ptr() as *const u8,
+                (width * height) as usize,
+            ).to_vec();
+            
+            let advance = advance_size.width as f32;
+            let bearing_x = bounds.origin.x as f32;
+            let bearing_y = (bounds.origin.y + bounds.size.height) as f32;
+            
+            Some((bitmap, width, height, advance, bearing_x, bearing_y))
+        }
     }
     
     /// Get glyph ID for a character
