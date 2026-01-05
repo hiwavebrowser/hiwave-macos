@@ -571,6 +571,14 @@ impl Renderer {
                 );
             }
 
+            DisplayCommand::LinearGradient { rect, direction, stops } => {
+                self.draw_linear_gradient(*rect, *direction, stops);
+            }
+
+            DisplayCommand::RadialGradient { rect, shape, size, center, stops } => {
+                self.draw_radial_gradient(*rect, *shape, *size, *center, stops);
+            }
+
             DisplayCommand::PushClip(rect) => {
                 self.push_clip(*rect);
             }
@@ -854,6 +862,198 @@ impl Renderer {
             // No blur - just draw solid shadow
             self.draw_solid_rect(shadow_rect, color);
         }
+    }
+
+    /// Draw a linear gradient.
+    fn draw_linear_gradient(
+        &mut self,
+        rect: Rect,
+        direction: rustkit_css::GradientDirection,
+        stops: &[rustkit_css::ColorStop],
+    ) {
+        if stops.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+        
+        // Convert direction to angle in radians
+        let angle_deg = direction.to_degrees();
+        let angle_rad = angle_deg.to_radians();
+        
+        // Calculate gradient line length based on angle
+        let (dx, dy) = (angle_rad.sin(), -angle_rad.cos());
+        
+        // Determine number of steps based on gradient length
+        let gradient_length = (rect.width * dx.abs() + rect.height * dy.abs()).max(1.0);
+        let step_count = (gradient_length / 2.0).max(2.0) as usize;
+        
+        // Normalize color stop positions
+        let mut normalized_stops: Vec<(f32, Color)> = Vec::with_capacity(stops.len());
+        for (i, stop) in stops.iter().enumerate() {
+            let pos = stop.position.unwrap_or_else(|| {
+                if stops.len() == 1 {
+                    0.5
+                } else {
+                    i as f32 / (stops.len() - 1) as f32
+                }
+            });
+            normalized_stops.push((pos, stop.color));
+        }
+        
+        // Draw gradient as multiple thin rectangles
+        let step_size = 1.0 / step_count as f32;
+        for i in 0..step_count {
+            let t = (i as f32 + 0.5) * step_size;
+            
+            // Find the two color stops surrounding this position
+            let color = Self::interpolate_color(&normalized_stops, t);
+            
+            // Calculate the strip position based on angle
+            let strip_rect = if (angle_deg - 90.0).abs() < 0.1 || (angle_deg - 270.0).abs() < 0.1 {
+                // Horizontal gradient (left to right or right to left)
+                let strip_width = rect.width / step_count as f32;
+                let x_pos = if angle_deg < 180.0 {
+                    rect.x + i as f32 * strip_width
+                } else {
+                    rect.x + rect.width - (i + 1) as f32 * strip_width
+                };
+                Rect::new(x_pos, rect.y, strip_width + 0.5, rect.height)
+            } else if angle_deg.abs() < 0.1 || (angle_deg - 180.0).abs() < 0.1 {
+                // Vertical gradient (top to bottom or bottom to top)
+                let strip_height = rect.height / step_count as f32;
+                let y_pos = if angle_deg < 90.0 || angle_deg > 270.0 {
+                    rect.y + rect.height - (i + 1) as f32 * strip_height
+                } else {
+                    rect.y + i as f32 * strip_height
+                };
+                Rect::new(rect.x, y_pos, rect.width, strip_height + 0.5)
+            } else {
+                // Diagonal gradient - simplified as vertical strips
+                let strip_width = rect.width / step_count as f32;
+                let x_pos = rect.x + i as f32 * strip_width;
+                Rect::new(x_pos, rect.y, strip_width + 0.5, rect.height)
+            };
+            
+            self.draw_solid_rect(strip_rect, color);
+        }
+    }
+    
+    /// Draw a radial gradient.
+    fn draw_radial_gradient(
+        &mut self,
+        rect: Rect,
+        shape: rustkit_css::RadialShape,
+        size: rustkit_css::RadialSize,
+        center: (f32, f32),
+        stops: &[rustkit_css::ColorStop],
+    ) {
+        if stops.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+        
+        // Calculate center position in pixels
+        let cx = rect.x + rect.width * center.0;
+        let cy = rect.y + rect.height * center.1;
+        
+        // Calculate radius based on size keyword
+        let (rx, ry) = match size {
+            rustkit_css::RadialSize::ClosestSide => {
+                let dx = center.0.min(1.0 - center.0) * rect.width;
+                let dy = center.1.min(1.0 - center.1) * rect.height;
+                match shape {
+                    rustkit_css::RadialShape::Circle => (dx.min(dy), dx.min(dy)),
+                    rustkit_css::RadialShape::Ellipse => (dx, dy),
+                }
+            }
+            rustkit_css::RadialSize::FarthestSide => {
+                let dx = center.0.max(1.0 - center.0) * rect.width;
+                let dy = center.1.max(1.0 - center.1) * rect.height;
+                match shape {
+                    rustkit_css::RadialShape::Circle => (dx.max(dy), dx.max(dy)),
+                    rustkit_css::RadialShape::Ellipse => (dx, dy),
+                }
+            }
+            rustkit_css::RadialSize::ClosestCorner | rustkit_css::RadialSize::FarthestCorner => {
+                // Simplified: use diagonal distance
+                let dx = rect.width * 0.5;
+                let dy = rect.height * 0.5;
+                ((dx * dx + dy * dy).sqrt(), (dx * dx + dy * dy).sqrt())
+            }
+            rustkit_css::RadialSize::Explicit(r1, r2) => (r1, r2),
+        };
+        
+        // Normalize color stops
+        let mut normalized_stops: Vec<(f32, Color)> = Vec::with_capacity(stops.len());
+        for (i, stop) in stops.iter().enumerate() {
+            let pos = stop.position.unwrap_or_else(|| {
+                if stops.len() == 1 { 0.5 } else { i as f32 / (stops.len() - 1) as f32 }
+            });
+            normalized_stops.push((pos, stop.color));
+        }
+        
+        // Draw as concentric rings
+        let max_radius = rx.max(ry);
+        let ring_count = (max_radius / 4.0).max(8.0) as usize;
+        
+        for i in (0..ring_count).rev() {
+            let t = i as f32 / ring_count as f32;
+            let color = Self::interpolate_color(&normalized_stops, t);
+            
+            let ring_rx = rx * (t + 1.0 / ring_count as f32);
+            let ring_ry = ry * (t + 1.0 / ring_count as f32);
+            
+            // Draw as an axis-aligned ellipse (approximated as rect for now)
+            let ring_rect = Rect::new(
+                cx - ring_rx,
+                cy - ring_ry,
+                ring_rx * 2.0,
+                ring_ry * 2.0,
+            );
+            
+            // Clip to original rect
+            let clipped = Rect::new(
+                ring_rect.x.max(rect.x),
+                ring_rect.y.max(rect.y),
+                (ring_rect.x + ring_rect.width).min(rect.x + rect.width) - ring_rect.x.max(rect.x),
+                (ring_rect.y + ring_rect.height).min(rect.y + rect.height) - ring_rect.y.max(rect.y),
+            );
+            
+            if clipped.width > 0.0 && clipped.height > 0.0 {
+                self.draw_solid_rect(clipped, color);
+            }
+        }
+    }
+    
+    /// Interpolate between color stops.
+    fn interpolate_color(stops: &[(f32, Color)], t: f32) -> Color {
+        if stops.is_empty() {
+            return Color::TRANSPARENT;
+        }
+        if stops.len() == 1 || t <= stops[0].0 {
+            return stops[0].1;
+        }
+        if t >= stops[stops.len() - 1].0 {
+            return stops[stops.len() - 1].1;
+        }
+        
+        // Find the two stops surrounding t
+        for i in 0..stops.len() - 1 {
+            let (pos0, color0) = stops[i];
+            let (pos1, color1) = stops[i + 1];
+            if t >= pos0 && t <= pos1 {
+                let local_t = if (pos1 - pos0).abs() < 0.0001 {
+                    0.0
+                } else {
+                    (t - pos0) / (pos1 - pos0)
+                };
+                return Color::new(
+                    ((1.0 - local_t) * color0.r as f32 + local_t * color1.r as f32) as u8,
+                    ((1.0 - local_t) * color0.g as f32 + local_t * color1.g as f32) as u8,
+                    ((1.0 - local_t) * color0.b as f32 + local_t * color1.b as f32) as u8,
+                    (1.0 - local_t) * color0.a + local_t * color1.a,
+                );
+            }
+        }
+        stops[stops.len() - 1].1
     }
 
     /// Draw text.

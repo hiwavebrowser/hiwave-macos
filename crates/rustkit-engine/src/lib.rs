@@ -1116,13 +1116,17 @@ impl Engine {
                             style.color = color;
                         }
                     }
-                    "background-color" | "background" => {
-                        debug!(value = value, "Applying background color");
-                        if let Some(color) = parse_color(value) {
+                    "background-color" | "background" | "background-image" => {
+                        debug!(value = value, "Applying background");
+                        // Check for gradient first
+                        if let Some(gradient) = parse_gradient(value) {
+                            debug!("Parsed gradient background");
+                            style.background_gradient = Some(gradient);
+                        } else if let Some(color) = parse_color(value) {
                             debug!(?color, "Parsed background color");
                             style.background_color = color;
                         } else {
-                            debug!("Failed to parse background color");
+                            debug!("Failed to parse background");
                         }
                     }
                     "font-size" => {
@@ -2262,6 +2266,213 @@ fn parse_color(value: &str) -> Option<rustkit_css::Color> {
     }
 
     None
+}
+
+/// Parse a CSS gradient value (linear-gradient or radial-gradient).
+fn parse_gradient(value: &str) -> Option<rustkit_css::Gradient> {
+    let value = value.trim();
+    
+    if value.starts_with("linear-gradient(") && value.ends_with(')') {
+        return parse_linear_gradient(value);
+    }
+    
+    if value.starts_with("radial-gradient(") && value.ends_with(')') {
+        return parse_radial_gradient(value);
+    }
+    
+    None
+}
+
+/// Parse a linear-gradient CSS function.
+fn parse_linear_gradient(value: &str) -> Option<rustkit_css::Gradient> {
+    // Strip "linear-gradient(" and ")"
+    let inner = value
+        .strip_prefix("linear-gradient(")?
+        .strip_suffix(')')?
+        .trim();
+    
+    // Split by commas, being careful about nested parentheses
+    let parts = split_by_comma(inner);
+    if parts.is_empty() {
+        return None;
+    }
+    
+    let mut direction = rustkit_css::GradientDirection::ToBottom; // default
+    let mut stops_start = 0;
+    
+    // Check if first part is a direction
+    let first = parts[0].trim();
+    if first.starts_with("to ") {
+        direction = parse_gradient_direction(first)?;
+        stops_start = 1;
+    } else if first.ends_with("deg") {
+        if let Ok(deg) = first.strip_suffix("deg").unwrap().trim().parse::<f32>() {
+            direction = rustkit_css::GradientDirection::Angle(deg);
+            stops_start = 1;
+        }
+    }
+    
+    // Parse color stops
+    let mut stops = Vec::new();
+    for part in &parts[stops_start..] {
+        if let Some(stop) = parse_color_stop(part) {
+            stops.push(stop);
+        }
+    }
+    
+    if stops.is_empty() {
+        return None;
+    }
+    
+    Some(rustkit_css::Gradient::Linear(rustkit_css::LinearGradient::new(direction, stops)))
+}
+
+/// Parse a radial-gradient CSS function.
+fn parse_radial_gradient(value: &str) -> Option<rustkit_css::Gradient> {
+    // Strip "radial-gradient(" and ")"
+    let inner = value
+        .strip_prefix("radial-gradient(")?
+        .strip_suffix(')')?
+        .trim();
+    
+    let parts = split_by_comma(inner);
+    if parts.is_empty() {
+        return None;
+    }
+    
+    let mut shape = rustkit_css::RadialShape::Ellipse;
+    let mut size = rustkit_css::RadialSize::FarthestCorner;
+    let mut center = (0.5, 0.5);
+    let mut stops_start = 0;
+    
+    // Check for shape/size/position in first part
+    let first = parts[0].trim().to_lowercase();
+    if first.contains("circle") || first.contains("ellipse") || first.contains("at ") {
+        if first.contains("circle") {
+            shape = rustkit_css::RadialShape::Circle;
+        }
+        // Parse "at" position
+        if let Some(at_idx) = first.find(" at ") {
+            let pos_str = &first[at_idx + 4..];
+            let pos_parts: Vec<&str> = pos_str.split_whitespace().collect();
+            if pos_parts.len() >= 2 {
+                center.0 = parse_position_value(pos_parts[0]);
+                center.1 = parse_position_value(pos_parts[1]);
+            } else if pos_parts.len() == 1 {
+                center.0 = parse_position_value(pos_parts[0]);
+                center.1 = center.0;
+            }
+        }
+        stops_start = 1;
+    }
+    
+    // Parse color stops
+    let mut stops = Vec::new();
+    for part in &parts[stops_start..] {
+        if let Some(stop) = parse_color_stop(part) {
+            stops.push(stop);
+        }
+    }
+    
+    if stops.is_empty() {
+        return None;
+    }
+    
+    Some(rustkit_css::Gradient::Radial(rustkit_css::RadialGradient::new(shape, size, center, stops)))
+}
+
+/// Parse a gradient direction keyword.
+fn parse_gradient_direction(value: &str) -> Option<rustkit_css::GradientDirection> {
+    match value.trim().to_lowercase().as_str() {
+        "to top" => Some(rustkit_css::GradientDirection::ToTop),
+        "to bottom" => Some(rustkit_css::GradientDirection::ToBottom),
+        "to left" => Some(rustkit_css::GradientDirection::ToLeft),
+        "to right" => Some(rustkit_css::GradientDirection::ToRight),
+        "to top left" | "to left top" => Some(rustkit_css::GradientDirection::ToTopLeft),
+        "to top right" | "to right top" => Some(rustkit_css::GradientDirection::ToTopRight),
+        "to bottom left" | "to left bottom" => Some(rustkit_css::GradientDirection::ToBottomLeft),
+        "to bottom right" | "to right bottom" => Some(rustkit_css::GradientDirection::ToBottomRight),
+        _ => None,
+    }
+}
+
+/// Parse a color stop (color with optional position).
+fn parse_color_stop(value: &str) -> Option<rustkit_css::ColorStop> {
+    let value = value.trim();
+    
+    // Try to find where the color ends and position begins
+    // This is tricky because colors can be rgb(), rgba(), etc.
+    let mut paren_depth = 0;
+    let mut last_space = None;
+    
+    for (i, ch) in value.char_indices() {
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => paren_depth -= 1,
+            ' ' if paren_depth == 0 => last_space = Some(i),
+            _ => {}
+        }
+    }
+    
+    let (color_str, position) = if let Some(space_idx) = last_space {
+        let pos_str = &value[space_idx + 1..];
+        let pos = if pos_str.ends_with('%') {
+            pos_str.strip_suffix('%').and_then(|s| s.parse::<f32>().ok()).map(|p| p / 100.0)
+        } else if pos_str.ends_with("px") {
+            // Ignore pixel positions for now, they require container size
+            None
+        } else {
+            None
+        };
+        (&value[..space_idx], pos)
+    } else {
+        (value, None)
+    };
+    
+    let color = parse_color(color_str)?;
+    Some(rustkit_css::ColorStop::new(color, position))
+}
+
+/// Split a string by commas, respecting parentheses.
+fn split_by_comma(value: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut paren_depth = 0;
+    
+    for (i, ch) in value.char_indices() {
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => paren_depth -= 1,
+            ',' if paren_depth == 0 => {
+                parts.push(&value[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    
+    if start < value.len() {
+        parts.push(&value[start..]);
+    }
+    
+    parts
+}
+
+/// Parse a position value (percentage, keyword, or length).
+fn parse_position_value(value: &str) -> f32 {
+    let value = value.trim().to_lowercase();
+    match value.as_str() {
+        "left" | "top" => 0.0,
+        "center" => 0.5,
+        "right" | "bottom" => 1.0,
+        _ if value.ends_with('%') => {
+            value.strip_suffix('%')
+                .and_then(|s| s.parse::<f32>().ok())
+                .map(|p| p / 100.0)
+                .unwrap_or(0.5)
+        }
+        _ => 0.5,
+    }
 }
 
 /// Parse a length value from CSS.

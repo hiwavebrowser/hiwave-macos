@@ -1294,6 +1294,20 @@ pub enum DisplayCommand {
         /// Whether this is an inset shadow
         inset: bool,
     },
+    /// Draw a linear gradient.
+    LinearGradient {
+        rect: Rect,
+        direction: rustkit_css::GradientDirection,
+        stops: Vec<rustkit_css::ColorStop>,
+    },
+    /// Draw a radial gradient.
+    RadialGradient {
+        rect: Rect,
+        shape: rustkit_css::RadialShape,
+        size: rustkit_css::RadialSize,
+        center: (f32, f32),
+        stops: Vec<rustkit_css::ColorStop>,
+    },
     /// Push a clip rect (for overflow handling).
     PushClip(Rect),
     /// Pop clip rect.
@@ -1775,18 +1789,42 @@ impl DisplayList {
     
     /// Render background.
     fn render_background(&mut self, layout_box: &LayoutBox) {
-        let color = layout_box.style.background_color;
+        let rect = layout_box.dimensions.border_box();
+        let s = &layout_box.style;
+        
+        // Get font size for relative length calculations
+        let font_size = match s.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let root_font_size = 16.0; // TODO: Pass actual root font size
+        
+        // Check if we have a gradient background
+        if let Some(gradient) = &s.background_gradient {
+            match gradient {
+                rustkit_css::Gradient::Linear(linear) => {
+                    self.commands.push(DisplayCommand::LinearGradient {
+                        rect,
+                        direction: linear.direction,
+                        stops: linear.stops.clone(),
+                    });
+                }
+                rustkit_css::Gradient::Radial(radial) => {
+                    self.commands.push(DisplayCommand::RadialGradient {
+                        rect,
+                        shape: radial.shape,
+                        size: radial.size,
+                        center: radial.center,
+                        stops: radial.stops.clone(),
+                    });
+                }
+            }
+            return; // Gradient takes precedence over solid color
+        }
+        
+        // Solid color background
+        let color = s.background_color;
         if color.a > 0.0 {
-            let rect = layout_box.dimensions.border_box();
-            let s = &layout_box.style;
-            
-            // Get font size for relative length calculations
-            let font_size = match s.font_size {
-                Length::Px(px) => px,
-                _ => 16.0,
-            };
-            let root_font_size = 16.0; // TODO: Pass actual root font size
-            
             // Check if we have border-radius
             let radius = BorderRadius {
                 top_left: s.border_top_left_radius.to_px(font_size, root_font_size, rect.width),
