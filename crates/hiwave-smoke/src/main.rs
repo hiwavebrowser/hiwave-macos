@@ -8,6 +8,8 @@ use raw_window_handle::HasWindowHandle;
 use rustkit_engine::EngineBuilder;
 use rustkit_viewhost::Bounds;
 use serde_json::json;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
@@ -15,6 +17,63 @@ use tao::window::WindowBuilder;
 use tracing::{error, info};
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebViewBuilder};
+
+/// Performance timing collector for tracking operation durations.
+struct PerfTiming {
+    timings: RefCell<HashMap<&'static str, Vec<Duration>>>,
+}
+
+impl PerfTiming {
+    fn new() -> Self {
+        Self {
+            timings: RefCell::new(HashMap::new()),
+        }
+    }
+
+    fn record(&self, operation: &'static str, duration: Duration) {
+        self.timings
+            .borrow_mut()
+            .entry(operation)
+            .or_insert_with(Vec::new)
+            .push(duration);
+    }
+
+    fn summary(&self) -> serde_json::Value {
+        let timings = self.timings.borrow();
+        let mut summary = serde_json::Map::new();
+
+        for (op, durations) in timings.iter() {
+            if durations.is_empty() {
+                continue;
+            }
+
+            let count = durations.len();
+            let total_ms: f64 = durations.iter().map(|d| d.as_secs_f64() * 1000.0).sum();
+            let avg_ms = total_ms / count as f64;
+            let min_ms = durations
+                .iter()
+                .map(|d| d.as_secs_f64() * 1000.0)
+                .fold(f64::INFINITY, f64::min);
+            let max_ms = durations
+                .iter()
+                .map(|d| d.as_secs_f64() * 1000.0)
+                .fold(f64::NEG_INFINITY, f64::max);
+
+            summary.insert(
+                op.to_string(),
+                json!({
+                    "count": count,
+                    "total_ms": (total_ms * 100.0).round() / 100.0,
+                    "avg_ms": (avg_ms * 100.0).round() / 100.0,
+                    "min_ms": (min_ms * 100.0).round() / 100.0,
+                    "max_ms": (max_ms * 100.0).round() / 100.0,
+                }),
+            );
+        }
+
+        serde_json::Value::Object(summary)
+    }
+}
 
 #[derive(Debug, Clone)]
 enum UserEvent {
@@ -40,6 +99,7 @@ struct Args {
     html_file: Option<String>,
     width: u32,
     height: u32,
+    perf_output: Option<String>,
 }
 
 impl Args {
@@ -50,6 +110,7 @@ impl Args {
         let mut html_file = None;
         let mut width = 1100u32;
         let mut height = 640u32;
+        let mut perf_output = None;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -74,6 +135,9 @@ impl Args {
                         height = val.parse().unwrap_or(640);
                     }
                 }
+                "--perf-output" => {
+                    perf_output = args.next();
+                }
                 _ => {}
             }
         }
@@ -84,6 +148,7 @@ impl Args {
             html_file,
             width,
             height,
+            perf_output,
         }
     }
     
@@ -235,10 +300,16 @@ fn main() {
         .build_as_child(&window)
         .expect("Failed to create shelf webview");
 
+    // Performance timing collector
+    let perf = PerfTiming::new();
+    let perf_output = args.perf_output.clone();
+
     // Content area (using RustKit engine)
+    let engine_start = Instant::now();
     let mut engine = EngineBuilder::new()
         .build()
         .expect("Failed to create RustKit engine");
+    perf.record("engine_init", engine_start.elapsed());
 
     // Get the raw window handle for creating the RustKit view
     let window_handle = window
@@ -255,21 +326,27 @@ fn main() {
         height: args.height.saturating_sub(chrome_height),
     };
 
+    let view_start = Instant::now();
     let content_view_id = engine
         .create_view(window_handle, content_bounds)
         .expect("Failed to create RustKit content view");
+    perf.record("view_create", view_start.elapsed());
 
     // Load test content into the RustKit view (from file or default)
     let test_html = args.load_html_content();
 
+    let load_start = Instant::now();
     if let Err(e) = engine.load_html(content_view_id, &test_html) {
         error!(?e, "Failed to load HTML into RustKit view");
     }
+    perf.record("html_load", load_start.elapsed());
 
     // Initial render
+    let render_start = Instant::now();
     if let Err(e) = engine.render_view(content_view_id) {
         error!(?e, "Failed to render RustKit view");
     }
+    perf.record("render", render_start.elapsed());
 
     spawn_scripted_flow(proxy, args.duration_ms);
 
@@ -277,6 +354,7 @@ fn main() {
     let start = Instant::now();
     let dump_frame_path = args.dump_frame.clone();
     let mut frame_dumped = false;
+    let mut render_count = 0u32;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -355,8 +433,12 @@ fn main() {
                 }
 
                 // Re-render after resize
+                let render_start = Instant::now();
                 if let Err(e) = engine.render_view(content_view_id) {
                     error!(?e, "Failed to render RustKit view");
+                } else {
+                    perf.record("render", render_start.elapsed());
+                    render_count += 1;
                 }
             }
             Event::UserEvent(UserEvent::Exit) => {
@@ -364,8 +446,10 @@ fn main() {
                 if let Some(ref path) = dump_frame_path {
                     if !frame_dumped {
                         info!(?path, "Dumping frame to file");
+                        let capture_start = Instant::now();
                         match engine.capture_frame(content_view_id, path) {
                             Ok(_) => {
+                                perf.record("frame_capture", capture_start.elapsed());
                                 info!("Frame captured successfully");
                                 frame_dumped = true;
                             }
@@ -373,6 +457,20 @@ fn main() {
                                 error!(?e, "Failed to capture frame");
                             }
                         }
+                    }
+                }
+
+                // Write perf summary if requested
+                if let Some(ref perf_path) = perf_output {
+                    let perf_json = json!({
+                        "timings": perf.summary(),
+                        "render_count": render_count,
+                        "total_elapsed_ms": start.elapsed().as_millis()
+                    });
+                    if let Err(e) = std::fs::write(perf_path, perf_json.to_string()) {
+                        error!(?e, "Failed to write perf output");
+                    } else {
+                        info!(?perf_path, "Perf summary written");
                     }
                 }
 
@@ -385,13 +483,16 @@ fn main() {
                         "right_sidebar_open": right_open,
                         "shelf_height": shelf_h
                     },
-                    "frame_dumped": frame_dumped
+                    "frame_dumped": frame_dumped,
+                    "render_count": render_count,
+                    "perf": perf.summary()
                 });
                 println!("{}", result);
                 *control_flow = ControlFlow::Exit;
             }
             Event::MainEventsCleared => {
                 // Periodically re-render (at least once per frame)
+                let render_start = Instant::now();
                 if let Err(e) = engine.render_view(content_view_id) {
                     // Only log first few errors to avoid spam
                     static RENDER_ERROR_COUNT: std::sync::atomic::AtomicU32 =
@@ -400,6 +501,9 @@ fn main() {
                     if count < 3 {
                         error!(?e, "Failed to render RustKit view");
                     }
+                } else {
+                    perf.record("render", render_start.elapsed());
+                    render_count += 1;
                 }
             }
             _ => {}
