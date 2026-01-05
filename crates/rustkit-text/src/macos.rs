@@ -380,18 +380,9 @@ impl GlyphRasterizer {
         let width = width.max(4);
         let height = height.max(4);
         
-        let mut bitmap = vec![0u8; (width * height) as usize];
-        
-        // For visible characters, draw a placeholder box
-        if !ch.is_whitespace() {
-            let pad = 1u32.min(width / 4).min(height / 4);
-            for y in pad..(height - pad) {
-                for x in pad..(width - pad) {
-                    let idx = (y * width + x) as usize;
-                    bitmap[idx] = 200;
-                }
-            }
-        }
+        // Return transparent bitmap - don't draw placeholder boxes for unsupported characters
+        // This handles emoji, symbols, and other characters not in the font gracefully
+        let bitmap = vec![0u8; (width * height) as usize];
         
         let advance = self.font_size * width_factor(ch);
         let bearing_y = self.font_size * 0.8;
