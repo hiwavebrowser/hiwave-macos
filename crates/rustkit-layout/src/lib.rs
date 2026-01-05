@@ -568,8 +568,18 @@ impl LayoutBox {
 
     /// Layout a block-level box.
     fn layout_block(&mut self, containing_block: &Dimensions) {
+        tracing::trace!(
+            containing_width = containing_block.content.width,
+            "layout_block called"
+        );
+        
         // Calculate width first (depends on containing block)
         self.calculate_block_width(containing_block);
+
+        tracing::trace!(
+            calculated_width = self.dimensions.content.width,
+            "After calculate_block_width"
+        );
 
         // Position the box
         self.calculate_block_position(containing_block);

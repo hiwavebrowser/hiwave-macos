@@ -991,6 +991,13 @@ impl ComputedStyle {
             text_decoration_thickness: Length::Auto,
             // Flexbox item defaults
             flex_shrink: 1.0, // Default is 1, not 0
+            // Width/height defaults to auto (fill available space)
+            width: Length::Auto,
+            height: Length::Auto,
+            min_width: Length::Zero,
+            min_height: Length::Zero,
+            max_width: Length::Auto, // No max constraint
+            max_height: Length::Auto,
             ..Default::default()
         }
     }

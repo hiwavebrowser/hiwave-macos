@@ -735,6 +735,12 @@ impl Engine {
             content: Rect::new(0.0, 0.0, bounds.width as f32, 0.0),
             ..Default::default()
         };
+        
+        debug!(
+            containing_width = containing_block.content.width,
+            containing_height = containing_block.content.height,
+            "Created containing block"
+        );
 
         // Build layout tree from DOM with tracing
         let root_box = {
@@ -749,6 +755,27 @@ impl Engine {
             root_box.layout(&containing_block);
         }
 
+        // Debug: log the layout box tree AFTER layout
+        fn debug_layout_box(box_: &LayoutBox, depth: usize) {
+            if depth > 5 { return; } // Limit depth
+            let indent = "  ".repeat(depth);
+            let bg = box_.style.background_color;
+            let dims = &box_.dimensions;
+            tracing::debug!(
+                "{}[{:?}] bg=rgba({},{},{},{:.1}) dims=({:.0}x{:.0} @ {:.0},{:.0}) children={}",
+                indent,
+                box_.box_type,
+                bg.r, bg.g, bg.b, bg.a,
+                dims.content.width, dims.content.height,
+                dims.content.x, dims.content.y,
+                box_.children.len()
+            );
+            for child in &box_.children {
+                debug_layout_box(child, depth + 1);
+            }
+        }
+        debug_layout_box(&root_box, 0);
+
         // Generate display list
         let display_list = {
             let _display_list_span = tracing::info_span!("build_display_list").entered();
@@ -760,6 +787,11 @@ impl Engine {
             num_commands = display_list.commands.len(),
             "Generated display list"
         );
+        
+        // Debug: log first 10 display commands
+        for (i, cmd) in display_list.commands.iter().take(10).enumerate() {
+            trace!("DisplayCmd[{}]: {:?}", i, cmd);
+        }
         
         // Update max scroll offset based on content size
         let content_height = root_box.dimensions.margin_box().height;
@@ -1002,6 +1034,9 @@ impl Engine {
                     rustkit_css::PropertyValue::Initial => continue, // Skip initial for now
                 };
                 let resolved_value = self.resolve_css_variables(&value_str, css_vars);
+                if value_str != resolved_value {
+                    trace!(property = decl.property.as_str(), original = value_str.as_str(), resolved = resolved_value.as_str(), "Resolved CSS variable");
+                }
                 self.apply_style_property(&mut style, &decl.property, &resolved_value);
             }
         }
@@ -1040,8 +1075,12 @@ impl Engine {
                         }
                     }
                     "background-color" | "background" => {
+                        debug!(value = value, "Applying background color");
                         if let Some(color) = parse_color(value) {
+                            debug!(?color, "Parsed background color");
                             style.background_color = color;
+                        } else {
+                            debug!("Failed to parse background color");
                         }
                     }
                     "font-size" => {

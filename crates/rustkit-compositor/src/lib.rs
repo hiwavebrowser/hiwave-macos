@@ -52,7 +52,10 @@ impl Default for CompositorConfig {
     fn default() -> Self {
         Self {
             vsync: true,
-            format: wgpu::TextureFormat::Bgra8UnormSrgb,
+            // Use linear format to avoid double sRGB gamma correction.
+            // CSS colors are already in sRGB space, so we don't want the GPU
+            // to apply sRGB encoding when writing to the texture.
+            format: wgpu::TextureFormat::Bgra8Unorm,
             power_preference: wgpu::PowerPreference::HighPerformance,
         }
     }
@@ -431,7 +434,7 @@ impl Compositor {
 
     /// Get the surface format.
     pub fn surface_format(&self) -> wgpu::TextureFormat {
-        wgpu::TextureFormat::Bgra8UnormSrgb
+        self.config.format
     }
 
     /// Get GPU adapter info.
@@ -503,7 +506,7 @@ impl Compositor {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            format: wgpu::TextureFormat::Rgba8Unorm, // Linear format to match surface
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
@@ -665,7 +668,7 @@ impl Compositor {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Bgra8UnormSrgb,
+            format: wgpu::TextureFormat::Bgra8Unorm, // Linear format to match surface
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
@@ -795,7 +798,7 @@ mod tests {
     fn test_compositor_config_default() {
         let config = CompositorConfig::default();
         assert!(config.vsync);
-        assert_eq!(config.format, wgpu::TextureFormat::Bgra8UnormSrgb);
+        assert_eq!(config.format, wgpu::TextureFormat::Bgra8Unorm);
     }
 
     // Note: GPU tests require a display and are typically run manually
