@@ -44,6 +44,8 @@ mod webview;
 mod webview_rustkit;
 #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
 mod shield_adapter;
+#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+mod webview_rustkit_chrome;
 
 mod content_webview_trait;
 #[cfg(target_os = "macos")]
