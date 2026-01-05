@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Border Test</title>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            margin: 20px;
+            background: #f0f0f0;
+        }
+        .box {
+            width: 100px;
+            height: 100px;
+            margin: 20px;
+            background: white;
+        }
+        .border-all {
+            border: 5px solid #333;
+        }
+        .border-sides {
+            border-top: 3px solid red;
+            border-right: 3px solid green;
+            border-bottom: 3px solid blue;
+            border-left: 3px solid orange;
+        }
+        .border-thick {
+            border: 10px solid #666;
+        }
+    </style>
+</head>
+<body>
+    <h1>Border Tests</h1>
+    <div class="box border-all">All sides</div>
+    <div class="box border-sides">Different sides</div>
+    <div class="box border-thick">Thick border</div>
+</body>
+</html>
+

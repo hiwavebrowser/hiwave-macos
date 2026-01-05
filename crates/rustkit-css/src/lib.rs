@@ -109,6 +109,48 @@ impl Length {
     }
 }
 
+/// A CSS box-shadow value.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct BoxShadow {
+    /// Horizontal offset (positive = right).
+    pub offset_x: f32,
+    /// Vertical offset (positive = down).
+    pub offset_y: f32,
+    /// Blur radius (0 = sharp edge).
+    pub blur_radius: f32,
+    /// Spread radius (positive = larger shadow).
+    pub spread_radius: f32,
+    /// Shadow color.
+    pub color: Color,
+    /// Whether this is an inset shadow.
+    pub inset: bool,
+}
+
+impl BoxShadow {
+    /// Create a new box shadow with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    /// Create a simple drop shadow.
+    pub fn drop_shadow(offset_x: f32, offset_y: f32, blur: f32, color: Color) -> Self {
+        Self {
+            offset_x,
+            offset_y,
+            blur_radius: blur,
+            spread_radius: 0.0,
+            color,
+            inset: false,
+        }
+    }
+    
+    /// Check if this shadow is visible (non-zero offset, blur, or spread with non-transparent color).
+    pub fn is_visible(&self) -> bool {
+        self.color.a > 0.0 && 
+        (self.offset_x != 0.0 || self.offset_y != 0.0 || self.blur_radius > 0.0 || self.spread_radius != 0.0)
+    }
+}
+
 /// Display property values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Display {
@@ -887,6 +929,9 @@ pub struct ComputedStyle {
     pub opacity: f32,
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
+    
+    // Box shadows (multiple shadows supported)
+    pub box_shadows: Vec<BoxShadow>,
 
     // Flexbox Container
     pub flex_direction: FlexDirection,

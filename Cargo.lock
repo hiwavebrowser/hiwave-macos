@@ -5087,6 +5087,8 @@ version = "0.1.0"
 dependencies = [
  "pollster",
  "raw-window-handle",
+ "rustkit-layout",
+ "rustkit-renderer",
  "rustkit-viewhost",
  "thiserror 1.0.69",
  "tracing",

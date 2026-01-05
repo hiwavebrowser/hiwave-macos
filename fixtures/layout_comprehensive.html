@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Comprehensive Layout Test</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: Helvetica, Arial, sans-serif;
+            padding: 20px;
+            margin: 0;
+            background-color: #1a1a2e;
+            color: #eee;
+        }
+        
+        h1 {
+            color: #00d4ff;
+            text-align: center;
+        }
+        
+        .grid-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+        
+        .box {
+            padding: 20px;
+            min-width: 150px;
+            text-align: center;
+        }
+        
+        .box-1 { background-color: #16213e; border: 2px solid #0f3460; }
+        .box-2 { background-color: #0f3460; border: 2px solid #e94560; }
+        .box-3 { background-color: #e94560; border: 2px solid #fff; color: white; }
+        .box-4 { background-color: #533483; border: 2px solid #e94560; }
+        
+        .shadow-demo {
+            box-shadow: 5px 5px 15px rgba(0, 212, 255, 0.3);
+            background-color: #16213e;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        
+        .inset-shadow {
+            box-shadow: inset 0 0 10px rgba(233, 69, 96, 0.5);
+            background-color: #0f3460;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        
+        .multi-shadow {
+            box-shadow: 
+                3px 3px 5px rgba(0, 0, 0, 0.3),
+                -3px -3px 5px rgba(255, 255, 255, 0.1);
+            background-color: #1a1a2e;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        
+        .border-styles {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            margin: 20px 0;
+        }
+        
+        .border-solid { border: 3px solid #00d4ff; padding: 15px; }
+        .border-dashed { border: 3px dashed #e94560; padding: 15px; }
+        .border-double { border: 4px double #00ff88; padding: 15px; }
+        
+        .mixed-borders {
+            border-top: 4px solid #00d4ff;
+            border-right: 4px dashed #e94560;
+            border-bottom: 4px solid #00ff88;
+            border-left: 4px dashed #ffcc00;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        
+        .nested-layout {
+            background-color: #16213e;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        
+        .nested-inner {
+            background-color: #0f3460;
+            padding: 15px;
+            margin: 10px;
+            border-left: 4px solid #e94560;
+        }
+        
+        .nested-deep {
+            background-color: #533483;
+            padding: 10px;
+            margin: 10px;
+        }
+        
+        .size-tests {
+            margin: 20px 0;
+        }
+        
+        .size-tests > div {
+            margin: 10px 0;
+            background-color: #0f3460;
+            padding: 10px;
+        }
+        
+        .min-width { min-width: 300px; }
+        .max-width { max-width: 200px; }
+        .min-height { min-height: 80px; }
+        .max-height { max-height: 50px; overflow: hidden; }
+        
+        .absolute-container {
+            position: relative;
+            height: 150px;
+            background-color: #16213e;
+            margin: 20px 0;
+        }
+        
+        .absolute-child {
+            position: absolute;
+            background-color: #e94560;
+            padding: 10px;
+        }
+        
+        .top-left { top: 10px; left: 10px; }
+        .top-right { top: 10px; right: 10px; }
+        .bottom-left { bottom: 10px; left: 10px; }
+        .bottom-right { bottom: 10px; right: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Comprehensive Layout Test</h1>
+    
+    <h2 style="color: #00d4ff;">Grid/Flex Layout</h2>
+    <div class="grid-container">
+        <div class="box box-1">Box 1</div>
+        <div class="box box-2">Box 2</div>
+        <div class="box box-3">Box 3</div>
+        <div class="box box-4">Box 4</div>
+    </div>
+    
+    <h2 style="color: #00d4ff;">Box Shadows</h2>
+    <div class="shadow-demo">Outer shadow (cyan glow)</div>
+    <div class="inset-shadow">Inset shadow (red inner glow)</div>
+    <div class="multi-shadow">Multi-layer shadow</div>
+    
+    <h2 style="color: #00d4ff;">Border Styles</h2>
+    <div class="border-styles">
+        <div class="border-solid">Solid</div>
+        <div class="border-dashed">Dashed</div>
+        <div class="border-double">Double</div>
+    </div>
+    <div class="mixed-borders">Mixed border styles (each side different)</div>
+    
+    <h2 style="color: #00d4ff;">Nested Layout</h2>
+    <div class="nested-layout">
+        <p>Outer container</p>
+        <div class="nested-inner">
+            <p>Inner container</p>
+            <div class="nested-deep">
+                <p>Deep nested content</p>
+            </div>
+        </div>
+    </div>
+    
+    <h2 style="color: #00d4ff;">Size Constraints</h2>
+    <div class="size-tests">
+        <div class="min-width">min-width: 300px</div>
+        <div class="max-width">max-width: 200px (text may wrap)</div>
+        <div class="min-height">min-height: 80px</div>
+        <div class="max-height">max-height: 50px with overflow hidden</div>
+    </div>
+    
+    <h2 style="color: #00d4ff;">Absolute Positioning</h2>
+    <div class="absolute-container">
+        <div class="absolute-child top-left">Top Left</div>
+        <div class="absolute-child top-right">Top Right</div>
+        <div class="absolute-child bottom-left">Bottom Left</div>
+        <div class="absolute-child bottom-right">Bottom Right</div>
+    </div>
+</body>
+</html>
+

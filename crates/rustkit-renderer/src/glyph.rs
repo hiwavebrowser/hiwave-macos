@@ -165,7 +165,14 @@ impl GlyphCache {
         // Use platform-specific glyph rasterization
         #[cfg(target_os = "macos")]
         let raster_result = {
-            let rasterizer = rustkit_text::macos::GlyphRasterizer::with_size(font_size);
+            let italic = key.font_style == 1;
+            let family = if key.font_family.is_empty() { "Helvetica" } else { &key.font_family };
+            let rasterizer = rustkit_text::macos::GlyphRasterizer::with_style(
+                family,
+                font_size,
+                key.font_weight,
+                italic,
+            );
             rasterizer.rasterize_char(key.codepoint)
         };
         

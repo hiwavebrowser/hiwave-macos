@@ -126,10 +126,67 @@ pub fn create_font(family: &str, size: f64) -> Result<CTFont, TextError> {
         .map_err(|_| TextError::FontNotFound(family.to_string()))
 }
 
+/// Create a font with specific weight and style traits
+fn create_font_with_traits(
+    family: &str,
+    size: f64,
+    weight: u16,
+    italic: bool,
+) -> Result<CTFont, TextError> {
+    // Map CSS font-weight to Core Text weight trait
+    // CSS: 100-900, Core Text: -1.0 to 1.0
+    // 400 = normal (0.0), 700 = bold (~0.4)
+    let weight_trait = match weight {
+        0..=199 => -0.8,      // Thin
+        200..=299 => -0.6,    // ExtraLight
+        300..=399 => -0.4,    // Light
+        400..=499 => 0.0,     // Normal
+        500..=599 => 0.23,    // Medium
+        600..=699 => 0.3,     // SemiBold
+        700..=799 => 0.4,     // Bold
+        800..=899 => 0.56,    // ExtraBold
+        _ => 0.62,            // Black
+    };
+    
+    // First try to find a font with the exact traits
+    // For bold, try appending "-Bold" or "Bold" to the family name
+    let bold_family = if weight >= 700 {
+        format!("{}-Bold", family)
+    } else {
+        family.to_string()
+    };
+    
+    let italic_family = if italic {
+        format!("{}-Italic", bold_family)
+    } else {
+        bold_family
+    };
+    
+    // Try the specific variant first
+    if let Ok(f) = font::new_from_name(&italic_family, size) {
+        return Ok(f);
+    }
+    
+    // Try bold variant
+    if weight >= 700 {
+        if let Ok(f) = font::new_from_name(&format!("{}-Bold", family), size) {
+            return Ok(f);
+        }
+        if let Ok(f) = font::new_from_name(&format!("{}Bold", family), size) {
+            return Ok(f);
+        }
+    }
+    
+    // Fall back to base font
+    create_font(family, size)
+}
+
 /// Rasterize glyphs to bitmaps using Core Text/Core Graphics
 pub struct GlyphRasterizer {
     font: CTFont,
     font_size: f32,
+    font_weight: u16,
+    font_italic: bool,
 }
 
 impl GlyphRasterizer {
@@ -139,6 +196,8 @@ impl GlyphRasterizer {
         Ok(Self { 
             font,
             font_size: size as f32,
+            font_weight: 400,
+            font_italic: false,
         })
     }
     
@@ -150,7 +209,32 @@ impl GlyphRasterizer {
         Self { 
             font,
             font_size: size,
+            font_weight: 400,
+            font_italic: false,
         }
+    }
+    
+    /// Create with specific weight and style
+    pub fn with_style(family: &str, size: f32, weight: u16, italic: bool) -> Self {
+        let font = create_font_with_traits(family, size as f64, weight, italic)
+            .or_else(|_| create_font_with_traits("Helvetica", size as f64, weight, italic))
+            .unwrap_or_else(|_| font::new_from_name("Helvetica", size as f64).unwrap());
+        Self {
+            font,
+            font_size: size,
+            font_weight: weight,
+            font_italic: italic,
+        }
+    }
+    
+    /// Get font weight
+    pub fn weight(&self) -> u16 {
+        self.font_weight
+    }
+    
+    /// Get whether font is italic
+    pub fn is_italic(&self) -> bool {
+        self.font_italic
     }
     
     /// Rasterize a character to an alpha bitmap using Core Graphics

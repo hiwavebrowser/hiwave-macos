@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Image Gallery Test</title>
+    <style>
+        body {
+            font-family: Helvetica, Arial, sans-serif;
+            padding: 20px;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: white;
+            min-height: 100vh;
+            margin: 0;
+        }
+        
+        h1 {
+            text-align: center;
+            color: #00d4ff;
+        }
+        
+        .gallery {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            justify-content: center;
+            margin-top: 30px;
+        }
+        
+        .gallery-item {
+            background-color: #0f3460;
+            border: 2px solid #e94560;
+            padding: 15px;
+            text-align: center;
+            max-width: 250px;
+        }
+        
+        .gallery-item img {
+            max-width: 100%;
+            height: auto;
+            display: block;
+            margin: 0 auto 10px;
+        }
+        
+        .caption {
+            font-size: 14px;
+            color: #aaa;
+        }
+        
+        .svg-demo {
+            background-color: #16213e;
+            padding: 20px;
+            margin: 30px auto;
+            max-width: 400px;
+            text-align: center;
+        }
+        
+        .placeholder {
+            width: 200px;
+            height: 150px;
+            background: linear-gradient(45deg, #533483, #e94560);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 10px auto;
+            font-size: 14px;
+        }
+        
+        .loading-animation {
+            width: 100px;
+            height: 100px;
+            background: conic-gradient(#00d4ff, #e94560, #00ff88, #00d4ff);
+            border-radius: 50%;
+            margin: 20px auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>Image Gallery Test</h1>
+    
+    <div class="gallery">
+        <div class="gallery-item">
+            <div class="placeholder">Image 1</div>
+            <p class="caption">Gradient placeholder</p>
+        </div>
+        
+        <div class="gallery-item">
+            <div class="placeholder" style="background: linear-gradient(135deg, #00d4ff, #0f3460);">Image 2</div>
+            <p class="caption">Blue gradient</p>
+        </div>
+        
+        <div class="gallery-item">
+            <div class="placeholder" style="background: linear-gradient(90deg, #ff6b6b, #feca57);">Image 3</div>
+            <p class="caption">Warm gradient</p>
+        </div>
+        
+        <div class="gallery-item">
+            <div class="placeholder" style="background: linear-gradient(180deg, #2d3436, #636e72);">Image 4</div>
+            <p class="caption">Grayscale</p>
+        </div>
+    </div>
+    
+    <div class="svg-demo">
+        <h2 style="color: #00d4ff;">CSS Shapes</h2>
+        <div class="loading-animation"></div>
+        <p>CSS conic gradient (simulates loading)</p>
+    </div>
+    
+    <div class="gallery">
+        <div class="gallery-item" style="border-color: #00ff88;">
+            <!-- Base64 encoded tiny test image -->
+            <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFklEQVQYlWNgGFGgqKjo/6FDhygCAHLrBNhklD5dAAAAAElFTkSuQmCC" 
+                 width="100" height="100" 
+                 alt="Test Image">
+            <p class="caption">Base64 PNG</p>
+        </div>
+        
+        <div class="gallery-item" style="border-color: #00d4ff;">
+            <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect fill='%23e94560' width='100' height='100'/%3E%3Ccircle fill='%2300d4ff' cx='50' cy='50' r='30'/%3E%3C/svg%3E"
+                 width="100" height="100"
+                 alt="SVG Image">
+            <p class="caption">Inline SVG</p>
+        </div>
+    </div>
+</body>
+</html>
+

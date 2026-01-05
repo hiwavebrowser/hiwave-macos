@@ -154,6 +154,10 @@ struct ViewState {
     focused_node: Option<rustkit_dom::NodeId>,
     /// Whether the view itself has focus.
     view_focused: bool,
+    /// Current scroll offset (x, y) in pixels.
+    scroll_offset: (f32, f32),
+    /// Maximum scroll offset based on content size.
+    max_scroll_offset: (f32, f32),
 }
 
 /// Engine configuration.
@@ -296,6 +300,8 @@ impl Engine {
             nav_event_rx: nav_rx,
             focused_node: None,
             view_focused: false,
+            scroll_offset: (0.0, 0.0),
+            max_scroll_offset: (0.0, 0.0),
         };
 
         self.views.insert(id, view_state);
@@ -342,6 +348,8 @@ impl Engine {
             nav_event_rx: nav_rx,
             focused_node: None,
             view_focused: false,
+            scroll_offset: (0.0, 0.0),
+            max_scroll_offset: (0.0, 0.0),
         };
 
         let id = view_state.id;
@@ -412,6 +420,51 @@ impl Engine {
             height: bounds.height,
         });
 
+        Ok(())
+    }
+
+    /// Scroll a view by the given delta.
+    /// 
+    /// Returns true if the scroll caused a change (and thus needs a re-render).
+    pub fn scroll_view(&mut self, id: EngineViewId, delta_x: f32, delta_y: f32) -> Result<bool, EngineError> {
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        
+        let old_offset = view.scroll_offset;
+        
+        // Apply scroll delta (negative delta_y means scroll down in most UIs)
+        let new_x = (view.scroll_offset.0 + delta_x)
+            .max(0.0)
+            .min(view.max_scroll_offset.0);
+        let new_y = (view.scroll_offset.1 - delta_y) // Invert Y for natural scrolling
+            .max(0.0)
+            .min(view.max_scroll_offset.1);
+        
+        view.scroll_offset = (new_x, new_y);
+        
+        let changed = view.scroll_offset != old_offset;
+        if changed {
+            debug!(?id, ?old_offset, new_offset = ?view.scroll_offset, "View scrolled");
+        }
+        
+        Ok(changed)
+    }
+    
+    /// Get the current scroll offset of a view.
+    pub fn get_scroll_offset(&self, id: EngineViewId) -> Result<(f32, f32), EngineError> {
+        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+        Ok(view.scroll_offset)
+    }
+    
+    /// Set the scroll offset directly.
+    pub fn set_scroll_offset(&mut self, id: EngineViewId, x: f32, y: f32) -> Result<(), EngineError> {
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        
+        view.scroll_offset = (
+            x.max(0.0).min(view.max_scroll_offset.0),
+            y.max(0.0).min(view.max_scroll_offset.1),
+        );
+        
+        debug!(?id, offset = ?view.scroll_offset, "Scroll offset set");
         Ok(())
     }
 
@@ -650,8 +703,9 @@ impl Engine {
     }
 
     /// Re-layout a view.
+    #[tracing::instrument(skip(self), fields(view_id = ?id))]
     fn relayout(&mut self, id: EngineViewId) -> Result<(), EngineError> {
-        info!(?id, "Starting relayout");
+        let _span = tracing::info_span!("relayout", ?id).entered();
         
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
@@ -660,8 +714,6 @@ impl Engine {
             .as_ref()
             .ok_or(EngineError::RenderError("No document".into()))?
             .clone();
-        
-        info!(?id, "Got document for relayout");
 
         // Get view bounds
         let bounds = self
@@ -684,30 +736,44 @@ impl Engine {
             ..Default::default()
         };
 
-        // Build layout tree from DOM
-        let mut root_box = self.build_layout_from_document(&document);
-
-        // Layout
-        root_box.layout(&containing_block);
+        // Build layout tree from DOM with tracing
+        let root_box = {
+            let _build_span = tracing::info_span!("build_layout_tree").entered();
+            self.build_layout_from_document(&document)
+        };
+        
+        // Layout computation
+        let mut root_box = root_box;
+        {
+            let _layout_span = tracing::info_span!("layout_compute").entered();
+            root_box.layout(&containing_block);
+        }
 
         // Generate display list
-        let display_list = DisplayList::build(&root_box);
+        let display_list = {
+            let _display_list_span = tracing::info_span!("build_display_list").entered();
+            DisplayList::build(&root_box)
+        };
 
         debug!(
             ?id,
             num_commands = display_list.commands.len(),
             "Generated display list"
         );
+        
+        // Update max scroll offset based on content size
+        let content_height = root_box.dimensions.margin_box().height;
+        let viewport_height = bounds.height as f32;
+        let max_scroll_y = (content_height - viewport_height).max(0.0);
 
         // Store
         let view = self.views.get_mut(&id).unwrap();
         view.layout = Some(root_box);
         view.display_list = Some(display_list);
+        view.max_scroll_offset = (0.0, max_scroll_y); // Update max scroll
 
         // Render
-        info!(?id, "Calling render after relayout");
         self.render(id)?;
-        info!(?id, "Render complete");
 
         Ok(())
     }
@@ -1098,9 +1164,139 @@ impl Engine {
             "border-radius" => {
                 // border-radius not yet in ComputedStyle, ignore for now
             }
+            "box-shadow" => {
+                // Parse box-shadow: offset-x offset-y blur spread color [inset]
+                // Simple parser for common formats
+                if let Some(shadow) = parse_box_shadow(value) {
+                    style.box_shadows.push(shadow);
+                }
+            }
             "max-width" => {
                 if let Some(length) = parse_length(value) {
                     style.max_width = length;
+                }
+            }
+            "opacity" => {
+                if let Ok(opacity) = value.parse::<f32>() {
+                    style.opacity = opacity.clamp(0.0, 1.0);
+                }
+            }
+            "text-decoration" | "text-decoration-line" => {
+                match value.trim().to_lowercase().as_str() {
+                    "none" => style.text_decoration_line = rustkit_css::TextDecorationLine::NONE,
+                    "underline" => style.text_decoration_line = rustkit_css::TextDecorationLine::UNDERLINE,
+                    "overline" => style.text_decoration_line = rustkit_css::TextDecorationLine::OVERLINE,
+                    "line-through" => style.text_decoration_line = rustkit_css::TextDecorationLine::LINE_THROUGH,
+                    _ => {
+                        // Handle combined values like "underline line-through"
+                        let mut decoration = rustkit_css::TextDecorationLine::NONE;
+                        for part in value.split_whitespace() {
+                            match part.to_lowercase().as_str() {
+                                "underline" => decoration.underline = true,
+                                "overline" => decoration.overline = true,
+                                "line-through" => decoration.line_through = true,
+                                _ => {}
+                            }
+                        }
+                        style.text_decoration_line = decoration;
+                    }
+                }
+            }
+            "text-decoration-color" => {
+                if let Some(color) = parse_color(value) {
+                    style.text_decoration_color = Some(color);
+                }
+            }
+            "text-decoration-style" => {
+                style.text_decoration_style = match value.trim().to_lowercase().as_str() {
+                    "solid" => rustkit_css::TextDecorationStyle::Solid,
+                    "double" => rustkit_css::TextDecorationStyle::Double,
+                    "dotted" => rustkit_css::TextDecorationStyle::Dotted,
+                    "dashed" => rustkit_css::TextDecorationStyle::Dashed,
+                    "wavy" => rustkit_css::TextDecorationStyle::Wavy,
+                    _ => rustkit_css::TextDecorationStyle::Solid,
+                };
+            }
+            "letter-spacing" => {
+                if let Some(length) = parse_length(value) {
+                    style.letter_spacing = length;
+                }
+            }
+            "word-spacing" => {
+                if let Some(length) = parse_length(value) {
+                    style.word_spacing = length;
+                }
+            }
+            "text-transform" => {
+                style.text_transform = match value.trim().to_lowercase().as_str() {
+                    "uppercase" => rustkit_css::TextTransform::Uppercase,
+                    "lowercase" => rustkit_css::TextTransform::Lowercase,
+                    "capitalize" => rustkit_css::TextTransform::Capitalize,
+                    _ => rustkit_css::TextTransform::None,
+                };
+            }
+            "white-space" => {
+                style.white_space = match value.trim().to_lowercase().as_str() {
+                    "pre" => rustkit_css::WhiteSpace::Pre,
+                    "nowrap" => rustkit_css::WhiteSpace::Nowrap,
+                    "pre-wrap" => rustkit_css::WhiteSpace::PreWrap,
+                    "pre-line" => rustkit_css::WhiteSpace::PreLine,
+                    _ => rustkit_css::WhiteSpace::Normal,
+                };
+            }
+            "border-top-width" => {
+                if let Some(length) = parse_length(value) {
+                    style.border_top_width = length;
+                }
+            }
+            "border-right-width" => {
+                if let Some(length) = parse_length(value) {
+                    style.border_right_width = length;
+                }
+            }
+            "border-bottom-width" => {
+                if let Some(length) = parse_length(value) {
+                    style.border_bottom_width = length;
+                }
+            }
+            "border-left-width" => {
+                if let Some(length) = parse_length(value) {
+                    style.border_left_width = length;
+                }
+            }
+            "border-top-color" => {
+                if let Some(color) = parse_color(value) {
+                    style.border_top_color = color;
+                }
+            }
+            "border-right-color" => {
+                if let Some(color) = parse_color(value) {
+                    style.border_right_color = color;
+                }
+            }
+            "border-bottom-color" => {
+                if let Some(color) = parse_color(value) {
+                    style.border_bottom_color = color;
+                }
+            }
+            "border-left-color" => {
+                if let Some(color) = parse_color(value) {
+                    style.border_left_color = color;
+                }
+            }
+            "min-width" => {
+                if let Some(length) = parse_length(value) {
+                    style.min_width = length;
+                }
+            }
+            "min-height" => {
+                if let Some(length) = parse_length(value) {
+                    style.min_height = length;
+                }
+            }
+            "max-height" => {
+                if let Some(length) = parse_length(value) {
+                    style.max_height = length;
                 }
             }
             _ => {
@@ -1378,21 +1574,50 @@ impl Engine {
 
     /// Capture a frame from a view to a PPM file.
     ///
+    /// This renders the current display list to an offscreen texture and saves it.
     /// This is useful for deterministic testing and visual debugging.
     /// The output is a PPM file (simple portable format).
-    pub fn capture_frame(&self, id: EngineViewId, path: &str) -> Result<(), EngineError> {
+    pub fn capture_frame(&mut self, id: EngineViewId, path: &str) -> Result<(), EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
         let viewhost_id = view.viewhost_id;
+        let display_list = view.display_list.clone();
 
         info!(?id, path, "Capturing frame");
 
-        self.compositor
-            .capture_frame_to_file(viewhost_id, path)
-            .map_err(|e| EngineError::RenderError(e.to_string()))
+        // Get surface size
+        let (width, height) = self.compositor
+            .get_surface_size(viewhost_id)
+            .map_err(|e| EngineError::RenderError(e.to_string()))?;
+
+        if width == 0 || height == 0 {
+            return Err(EngineError::RenderError("Cannot capture zero-size frame".into()));
+        }
+
+        // If we have a display list and renderer, render to offscreen texture
+        match (&display_list, &mut self.renderer) {
+            (Some(display_list), Some(renderer)) => {
+                // Update viewport size for correct coordinate transforms
+                renderer.set_viewport_size(width, height);
+
+                // Capture with actual display list rendering
+                self.compositor
+                    .capture_frame_with_renderer(viewhost_id, path, renderer, &display_list.commands)
+                    .map_err(|e| EngineError::RenderError(e.to_string()))
+            }
+            _ => {
+                // Fallback to magenta test pattern if no display list
+                self.compositor
+                    .capture_frame_to_file(viewhost_id, path)
+                    .map_err(|e| EngineError::RenderError(e.to_string()))
+            }
+        }
     }
 
     /// Render a view (internal).
+    #[tracing::instrument(skip(self), fields(view_id = ?id))]
     fn render(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+        let _span = tracing::info_span!("render", ?id).entered();
+        
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
         let viewhost_id = view.viewhost_id;
         let display_list = view.display_list.as_ref();
@@ -1402,36 +1627,43 @@ impl Engine {
         trace!(?id, has_display_list, cmd_count, "Rendering view");
 
         // Get surface size and update renderer viewport before rendering
-        // This ensures the vertex shader transforms coordinates correctly
-        let (surface_width, surface_height) = self.compositor
-            .get_surface_size(viewhost_id)
-            .map_err(|e| EngineError::RenderError(e.to_string()))?;
+        let (surface_width, surface_height) = {
+            let _surface_span = tracing::debug_span!("get_surface_size").entered();
+            self.compositor
+                .get_surface_size(viewhost_id)
+                .map_err(|e| EngineError::RenderError(e.to_string()))?
+        };
 
         if let Some(renderer) = &mut self.renderer {
             renderer.set_viewport_size(surface_width, surface_height);
-            debug!(?id, surface_width, surface_height, "Updated renderer viewport size");
         }
 
         // Get surface texture
-        let (output, texture_view) = self.compositor
-            .get_surface_texture(viewhost_id)
-            .map_err(|e| EngineError::RenderError(e.to_string()))?;
+        let (output, texture_view) = {
+            let _texture_span = tracing::debug_span!("get_surface_texture").entered();
+            self.compositor
+                .get_surface_texture(viewhost_id)
+                .map_err(|e| EngineError::RenderError(e.to_string()))?
+        };
 
         // Render using display list if available, otherwise just clear to background
-        if let (Some(renderer), Some(display_list)) = (&mut self.renderer, display_list) {
-            renderer.execute(&display_list.commands, &texture_view)
-                .map_err(|e| EngineError::RenderError(e.to_string()))?;
-        } else if let Some(renderer) = &mut self.renderer {
-            // No display list, render empty (will clear to white or debug color)
-            renderer.execute(&[], &texture_view)
-                .map_err(|e| EngineError::RenderError(e.to_string()))?;
-        } else {
-            // Fallback to compositor solid color (shouldn't normally happen)
-            drop(output); // Release the texture
-            self.compositor
-                .render_solid_color(viewhost_id, self.config.background_color)
-                .map_err(|e| EngineError::RenderError(e.to_string()))?;
-            return Ok(());
+        {
+            let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
+            if let (Some(renderer), Some(display_list)) = (&mut self.renderer, display_list) {
+                renderer.execute(&display_list.commands, &texture_view)
+                    .map_err(|e| EngineError::RenderError(e.to_string()))?;
+            } else if let Some(renderer) = &mut self.renderer {
+                // No display list, render empty (will clear to white or debug color)
+                renderer.execute(&[], &texture_view)
+                    .map_err(|e| EngineError::RenderError(e.to_string()))?;
+            } else {
+                // Fallback to compositor solid color (shouldn't normally happen)
+                drop(output); // Release the texture
+                self.compositor
+                    .render_solid_color(viewhost_id, self.config.background_color)
+                    .map_err(|e| EngineError::RenderError(e.to_string()))?;
+                return Ok(());
+            }
         }
 
         // Present
@@ -1956,6 +2188,90 @@ fn parse_length(value: &str) -> Option<rustkit_css::Length> {
     }
 
     None
+}
+
+/// Parse a box-shadow value from CSS.
+/// Supports: offset-x offset-y [blur [spread]] color [inset]
+fn parse_box_shadow(value: &str) -> Option<rustkit_css::BoxShadow> {
+    let value = value.trim();
+    if value.is_empty() || value == "none" {
+        return None;
+    }
+    
+    let mut shadow = rustkit_css::BoxShadow::new();
+    
+    // Check for "inset" keyword
+    let (value, inset) = if value.starts_with("inset") {
+        (value.strip_prefix("inset").unwrap().trim(), true)
+    } else if value.ends_with("inset") {
+        (value.strip_suffix("inset").unwrap().trim(), true)
+    } else {
+        (value, false)
+    };
+    shadow.inset = inset;
+    
+    // Split into tokens, being careful about rgba() which contains commas
+    let mut parts: Vec<&str> = Vec::new();
+    let mut current_start = 0;
+    let mut paren_depth = 0;
+    
+    for (i, ch) in value.char_indices() {
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => paren_depth -= 1,
+            ' ' if paren_depth == 0 => {
+                let part = value[current_start..i].trim();
+                if !part.is_empty() {
+                    parts.push(part);
+                }
+                current_start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    // Don't forget the last part
+    let last_part = value[current_start..].trim();
+    if !last_part.is_empty() {
+        parts.push(last_part);
+    }
+    
+    // Parse parts: expect at least 2 lengths + 1 color
+    // Format: offset-x offset-y [blur [spread]] color
+    let mut lengths: Vec<f32> = Vec::new();
+    let mut color_value = None;
+    
+    for part in parts {
+        // Try as length first
+        if let Some(length) = parse_length(part) {
+            lengths.push(length.to_px(16.0, 16.0, 0.0));
+        } else {
+            // Must be a color
+            if let Some(c) = parse_color(part) {
+                color_value = Some(c);
+            }
+        }
+    }
+    
+    // Assign lengths
+    if lengths.len() >= 2 {
+        shadow.offset_x = lengths[0];
+        shadow.offset_y = lengths[1];
+    } else {
+        return None; // Need at least offset-x and offset-y
+    }
+    
+    if lengths.len() >= 3 {
+        shadow.blur_radius = lengths[2].max(0.0);
+    }
+    
+    if lengths.len() >= 4 {
+        shadow.spread_radius = lengths[3];
+    }
+    
+    // Set color
+    shadow.color = color_value.unwrap_or(rustkit_css::Color::new(0, 0, 0, 0.5));
+    
+    Some(shadow)
 }
 
 #[cfg(test)]

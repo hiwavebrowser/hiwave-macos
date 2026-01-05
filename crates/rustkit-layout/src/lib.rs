@@ -1189,6 +1189,23 @@ pub enum DisplayCommand {
         /// Background repeat
         repeat: BackgroundRepeat,
     },
+    /// Draw a box shadow.
+    BoxShadow {
+        /// Shadow offset X
+        offset_x: f32,
+        /// Shadow offset Y
+        offset_y: f32,
+        /// Blur radius
+        blur_radius: f32,
+        /// Spread radius
+        spread_radius: f32,
+        /// Shadow color
+        color: Color,
+        /// Box rectangle (shadow is drawn outside this box, or inside if inset)
+        rect: Rect,
+        /// Whether this is an inset shadow
+        inset: bool,
+    },
     /// Push a clip rect (for overflow handling).
     PushClip(Rect),
     /// Pop clip rect.
@@ -1485,7 +1502,7 @@ impl PaintItem {
 }
 
 /// A display list of paint commands.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct DisplayList {
     pub commands: Vec<DisplayCommand>,
 }
@@ -1592,18 +1609,32 @@ impl DisplayList {
         }
     }
 
-    /// Render a layout box's own content (background, borders, text).
+    /// Render a layout box's own content (shadows, background, borders, text).
     fn render_box_content(&mut self, layout_box: &LayoutBox) {
+        // Box shadows (outer) are drawn first, behind the element
+        self.render_box_shadows(layout_box);
+        // Then background
         self.render_background(layout_box);
+        // Then inset shadows (on top of background, inside the box)
+        self.render_inset_shadows(layout_box);
+        // Then borders
         self.render_borders(layout_box);
+        // Then text
         self.render_text(layout_box);
     }
 
     /// Render a layout box and its children (legacy method).
     #[allow(dead_code)]
     fn render_box(&mut self, layout_box: &LayoutBox) {
+        // Box shadows (outer) are drawn first, behind the element
+        self.render_box_shadows(layout_box);
+        // Then background
         self.render_background(layout_box);
+        // Then inset shadows (on top of background, inside the box)
+        self.render_inset_shadows(layout_box);
+        // Then borders
         self.render_borders(layout_box);
+        // Then text
         self.render_text(layout_box);
 
         for child in &layout_box.children {
@@ -1611,6 +1642,45 @@ impl DisplayList {
         }
     }
 
+    /// Render box shadows (must be called before background).
+    fn render_box_shadows(&mut self, layout_box: &LayoutBox) {
+        let box_rect = layout_box.dimensions.border_box();
+        
+        // Render outer shadows first (in order, first shadow is top-most)
+        for shadow in &layout_box.style.box_shadows {
+            if shadow.is_visible() && !shadow.inset {
+                self.commands.push(DisplayCommand::BoxShadow {
+                    offset_x: shadow.offset_x,
+                    offset_y: shadow.offset_y,
+                    blur_radius: shadow.blur_radius,
+                    spread_radius: shadow.spread_radius,
+                    color: shadow.color,
+                    rect: box_rect,
+                    inset: false,
+                });
+            }
+        }
+    }
+    
+    /// Render inset box shadows (called after background).
+    fn render_inset_shadows(&mut self, layout_box: &LayoutBox) {
+        let box_rect = layout_box.dimensions.border_box();
+        
+        for shadow in &layout_box.style.box_shadows {
+            if shadow.is_visible() && shadow.inset {
+                self.commands.push(DisplayCommand::BoxShadow {
+                    offset_x: shadow.offset_x,
+                    offset_y: shadow.offset_y,
+                    blur_radius: shadow.blur_radius,
+                    spread_radius: shadow.spread_radius,
+                    color: shadow.color,
+                    rect: box_rect,
+                    inset: true,
+                });
+            }
+        }
+    }
+    
     /// Render background.
     fn render_background(&mut self, layout_box: &LayoutBox) {
         let color = layout_box.style.background_color;

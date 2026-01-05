@@ -50,10 +50,12 @@ use wgpu::util::DeviceExt;
 
 mod glyph;
 mod pipeline;
+pub mod screenshot;
 mod shaders;
 
 pub use glyph::*;
 pub use pipeline::*;
+pub use screenshot::*;
 
 // ==================== Errors ====================
 
@@ -272,6 +274,11 @@ impl TextureCache {
     /// Clear all cached textures.
     pub fn clear(&mut self) {
         self.textures.clear();
+    }
+    
+    /// Remove a specific texture.
+    pub fn remove(&mut self, key: &str) {
+        self.textures.remove(key);
     }
 }
 
@@ -533,6 +540,26 @@ impl Renderer {
                 self.draw_image(url, *rect);
             }
 
+            DisplayCommand::BoxShadow {
+                offset_x,
+                offset_y,
+                blur_radius,
+                spread_radius,
+                color,
+                rect,
+                inset,
+            } => {
+                self.draw_box_shadow(
+                    *rect,
+                    *offset_x,
+                    *offset_y,
+                    *blur_radius,
+                    *spread_radius,
+                    *color,
+                    *inset,
+                );
+            }
+
             DisplayCommand::PushClip(rect) => {
                 self.push_clip(*rect);
             }
@@ -735,6 +762,88 @@ impl Renderer {
             );
         }
     }
+    
+    /// Draw a box shadow.
+    /// 
+    /// For now, this uses a simplified approach:
+    /// - Outer shadows: Draw multiple semi-transparent rectangles with increasing offsets
+    /// - Inset shadows: Draw gradient-like rectangles inside the box
+    fn draw_box_shadow(
+        &mut self,
+        rect: Rect,
+        offset_x: f32,
+        offset_y: f32,
+        blur_radius: f32,
+        spread_radius: f32,
+        color: Color,
+        inset: bool,
+    ) {
+        if color.a == 0.0 {
+            return;
+        }
+        
+        // Calculate shadow rectangle
+        let shadow_rect = if inset {
+            // Inset shadow is inside the box
+            Rect::new(
+                rect.x + offset_x.max(0.0),
+                rect.y + offset_y.max(0.0),
+                rect.width - spread_radius * 2.0 - offset_x.abs(),
+                rect.height - spread_radius * 2.0 - offset_y.abs(),
+            )
+        } else {
+            // Outer shadow is outside the box
+            Rect::new(
+                rect.x + offset_x - spread_radius,
+                rect.y + offset_y - spread_radius,
+                rect.width + spread_radius * 2.0,
+                rect.height + spread_radius * 2.0,
+            )
+        };
+        
+        if shadow_rect.width <= 0.0 || shadow_rect.height <= 0.0 {
+            return;
+        }
+        
+        // For blur, we draw multiple layers with decreasing opacity
+        // This is a simplified approximation - real blur would use GPU shaders
+        if blur_radius > 0.0 {
+            let steps = (blur_radius / 2.0).ceil().max(1.0) as u32;
+            let step_size = blur_radius / steps as f32;
+            
+            for i in 0..steps {
+                let layer = steps - i; // Draw outer layers first
+                let expansion = step_size * layer as f32;
+                let layer_alpha = color.a / (steps as f32 * 1.5); // Fade out
+                
+                let layer_rect = if inset {
+                    // Inset shadows shrink inward
+                    Rect::new(
+                        shadow_rect.x + expansion,
+                        shadow_rect.y + expansion,
+                        shadow_rect.width - expansion * 2.0,
+                        shadow_rect.height - expansion * 2.0,
+                    )
+                } else {
+                    // Outer shadows expand outward
+                    Rect::new(
+                        shadow_rect.x - expansion,
+                        shadow_rect.y - expansion,
+                        shadow_rect.width + expansion * 2.0,
+                        shadow_rect.height + expansion * 2.0,
+                    )
+                };
+                
+                if layer_rect.width > 0.0 && layer_rect.height > 0.0 {
+                    let layer_color = Color::new(color.r, color.g, color.b, layer_alpha);
+                    self.draw_solid_rect(layer_rect, layer_color);
+                }
+            }
+        } else {
+            // No blur - just draw solid shadow
+            self.draw_solid_rect(shadow_rect, color);
+        }
+    }
 
     /// Draw text.
     fn draw_text(
@@ -847,6 +956,47 @@ impl Renderer {
             ]);
         }
         // If image not loaded, skip (async loading handled elsewhere)
+    }
+    
+    /// Upload an image to the texture cache.
+    /// 
+    /// Call this to upload decoded image data (RGBA format) to the GPU.
+    /// Once uploaded, the image can be drawn using its URL as the key.
+    pub fn upload_image(
+        &mut self,
+        url: &str,
+        width: u32,
+        height: u32,
+        rgba_data: &[u8],
+    ) -> Result<(), RendererError> {
+        if rgba_data.len() != (width * height * 4) as usize {
+            return Err(RendererError::TextureUpload(format!(
+                "Invalid image data size: expected {} bytes, got {}",
+                width * height * 4,
+                rgba_data.len()
+            )));
+        }
+        
+        self.texture_cache.get_or_create(
+            &self.device,
+            &self.queue,
+            url,
+            width,
+            height,
+            rgba_data,
+        );
+        
+        Ok(())
+    }
+    
+    /// Check if an image is already uploaded.
+    pub fn has_image(&self, url: &str) -> bool {
+        self.texture_cache.contains(url)
+    }
+    
+    /// Remove an image from the cache.
+    pub fn remove_image(&mut self, url: &str) {
+        self.texture_cache.remove(url);
     }
 
 

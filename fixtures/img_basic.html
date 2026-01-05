@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Image Test</title>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            margin: 20px;
+            background: #f0f0f0;
+        }
+        .container {
+            margin: 20px 0;
+            padding: 10px;
+            background: white;
+            border: 1px solid #ccc;
+        }
+        img {
+            display: block;
+            margin: 10px;
+            border: 1px solid #ddd;
+        }
+        .contain-box {
+            width: 200px;
+            height: 150px;
+            background: #eee;
+        }
+        .contain-box img {
+            object-fit: contain;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <h1>Image Tests</h1>
+    
+    <div class="container">
+        <h2>Natural Size</h2>
+        <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFklEQVQoU2NkYGD4z8DAQBYGTcgAAAAIEQD+B0CyAwAAAABJRU5ErkJggg==" alt="Red 10x10 square">
+    </div>
+    
+    <div class="container">
+        <h2>Explicit Size (100x100)</h2>
+        <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAF0lEQVQoU2NkYPjP8J+BgYEBJQGkAwAABhAA/RDh7ssAAAAASUVORK5CYII=" width="100" height="100" alt="Blue 10x10 square">
+    </div>
+    
+    <div class="container">
+        <h2>Object-fit: contain</h2>
+        <div class="contain-box">
+            <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAKCAYAAAC0VX7mAAAAGklEQVQoU2P4////fwYGBgYGdICixYAAEO0FALEjAP9xp3qdAAAAAElFTkSuQmCC" alt="Wide rectangle">
+        </div>
+    </div>
+</body>
+</html>
+

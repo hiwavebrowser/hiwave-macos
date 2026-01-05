@@ -14,6 +14,10 @@ raw-window-handle = "0.6"
 # ViewHost integration
 rustkit-viewhost = { path = "../rustkit-viewhost" }
 
+# Layout and renderer (for frame capture with display list)
+rustkit-layout = { path = "../rustkit-layout" }
+rustkit-renderer = { path = "../rustkit-renderer" }
+
 # Error handling
 thiserror = "1.0"
 
