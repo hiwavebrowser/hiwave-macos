@@ -518,11 +518,15 @@ impl LayoutBox {
             _ => 16.0,
         };
         
-        // Estimate text width (rough approximation: 0.5 * font_size * char_count)
-        // In a real implementation, this would use font metrics
-        let char_count = text.chars().count() as f32;
-        let avg_char_width = font_size * 0.5; // Approximate average character width
-        let text_width = char_count * avg_char_width;
+        // Use proper text measurement for width
+        let metrics = measure_text_advanced(
+            &text,
+            &self.style.font_family,
+            font_size,
+            self.style.font_weight,
+            self.style.font_style,
+        );
+        let text_width = metrics.width;
         
         // Position at containing block's content area
         self.dimensions.content.x = containing_block.content.x;
@@ -568,8 +572,13 @@ impl LayoutBox {
             Length::Px(px) => px,
             _ => 16.0,
         };
-        // Default line height is 1.2 * font_size
-        font_size * 1.2
+        // Use line_height from style (which is a multiplier), or default to 1.2
+        let line_height_multiplier = if self.style.line_height > 0.0 {
+            self.style.line_height
+        } else {
+            1.2
+        };
+        font_size * line_height_multiplier
     }
 
     /// Perform layout with margin collapse context.
