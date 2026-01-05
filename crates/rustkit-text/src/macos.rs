@@ -53,29 +53,90 @@ impl TextShaper {
 
     /// Shape text and return glyph information
     pub fn shape(&self, text: &str) -> Result<ShapedText, TextError> {
-        // Simple character-to-position mapping
-        // For proper shaping, Core Text's CTLine/CTFrame API should be used
-        let chars: Vec<char> = text.chars().collect();
-        let mut glyphs: Vec<u16> = Vec::with_capacity(chars.len());
-        let mut positions: Vec<(f32, f32)> = Vec::with_capacity(chars.len());
-        let mut advances: Vec<f32> = Vec::with_capacity(chars.len());
+        // Convert text to UTF-16 for Core Text
+        let utf16_chars: Vec<u16> = text.encode_utf16().collect();
+        let char_count = utf16_chars.len();
         
-        let mut x_pos: f32 = 0.0;
-        let font_size = self.font.pt_size() as f32;
-        
-        for ch in &chars {
-            // Use character code as glyph ID (simplified)
-            let glyph = *ch as u16;
-            
-            // Estimate advance based on character type
-            let advance = font_size * width_factor(*ch);
-            
-            glyphs.push(glyph);
-            positions.push((x_pos, 0.0));
-            advances.push(advance);
-            
-            x_pos += advance;
+        if char_count == 0 {
+            return Ok(ShapedText {
+                glyphs: vec![],
+                positions: vec![],
+                advances: vec![],
+                font: self.font.clone(),
+            });
         }
+        
+        // Allocate space for glyphs
+        let mut glyphs: Vec<core_graphics::font::CGGlyph> = vec![0; char_count];
+        
+        // Get glyph IDs using Core Text
+        unsafe {
+            extern "C" {
+                fn CTFontGetGlyphsForCharacters(
+                    font: core_text::font::CTFontRef,
+                    characters: *const u16,
+                    glyphs: *mut core_graphics::font::CGGlyph,
+                    count: isize,
+                ) -> bool;
+            }
+            
+            let success = CTFontGetGlyphsForCharacters(
+                self.font.as_concrete_TypeRef(),
+                utf16_chars.as_ptr(),
+                glyphs.as_mut_ptr(),
+                char_count as isize,
+            );
+            
+            // Some glyphs may not be available, but continue silently
+            let _ = success;
+        }
+        
+        // Get advances for each glyph
+        let mut glyph_advances: Vec<CGSize> = vec![CGSize::new(0.0, 0.0); char_count];
+        unsafe {
+            extern "C" {
+                fn CTFontGetAdvancesForGlyphs(
+                    font: core_text::font::CTFontRef,
+                    orientation: u32, // kCTFontOrientationDefault = 0
+                    glyphs: *const core_graphics::font::CGGlyph,
+                    advances: *mut CGSize,
+                    count: isize,
+                ) -> f64;
+            }
+            
+            let _total_advance = CTFontGetAdvancesForGlyphs(
+                self.font.as_concrete_TypeRef(),
+                0, // kCTFontOrientationDefault
+                glyphs.as_ptr(),
+                glyph_advances.as_mut_ptr(),
+                char_count as isize,
+            );
+        }
+        
+        // Calculate positions from advances
+        let mut positions: Vec<(f32, f32)> = Vec::with_capacity(char_count);
+        let mut advances: Vec<f32> = Vec::with_capacity(char_count);
+        let mut x_pos: f64 = 0.0;
+        
+        for (i, glyph_advance) in glyph_advances.iter().enumerate() {
+            positions.push((x_pos as f32, 0.0));
+            advances.push(glyph_advance.width as f32);
+            x_pos += glyph_advance.width;
+            
+            // Handle missing glyphs (glyph ID 0)
+            if glyphs[i] == 0 {
+                // Use a fallback advance for missing glyphs
+                let fallback_advance = self.font.pt_size() * 0.5;
+                if advances.last().map(|a| *a == 0.0).unwrap_or(false) {
+                    if let Some(last) = advances.last_mut() {
+                        *last = fallback_advance as f32;
+                    }
+                }
+            }
+        }
+        
+        // Convert CGGlyph to u16
+        let glyphs: Vec<u16> = glyphs.into_iter().map(|g| g as u16).collect();
         
         Ok(ShapedText {
             glyphs,
