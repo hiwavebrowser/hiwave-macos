@@ -254,13 +254,19 @@ impl GlyphCache {
         let u1 = (atlas_x + 1 + glyph_width) as f32 / self.atlas_size as f32;
         let v1 = (atlas_y + 1 + glyph_height) as f32 / self.atlas_size as f32;
 
+        // The y passed to draw_text is the top of the content box.
+        // We need to position glyphs so they align on a common baseline.
+        // Baseline is typically at y + ascent (about 0.75-0.8 * font_size).
+        // Each glyph's top should be at baseline - bearing_y.
+        // So glyph_y = (y + ascent) - bearing_y = y + (ascent - bearing_y)
+        // For most glyphs, ascent ≈ bearing_y, so offset ≈ 0
+        // But we need the actual bearing_y per glyph for proper alignment.
+        let ascent = font_size * 0.8; // Approximate font ascent
+        let y_offset = ascent - bearing_y; // Position glyph relative to baseline
+        
         let entry = GlyphEntry {
             tex_coords: [u0, v0, u1, v1],
-            // Draw glyph from top of content box - the y passed to draw_text is
-            // the top of the text content area, not the baseline.
-            // Adding ascent (bearing_y) would push text down below the content box,
-            // so we use 0 offset to draw from top.
-            offset: [0.0, 0.0],
+            offset: [0.0, y_offset],
             advance,
         };
 
