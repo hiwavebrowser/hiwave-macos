@@ -100,6 +100,8 @@ struct Args {
     width: u32,
     height: u32,
     perf_output: Option<String>,
+    multisurface: bool,
+    dump_chrome_frame: Option<String>,
 }
 
 impl Args {
@@ -111,6 +113,8 @@ impl Args {
         let mut width = 1100u32;
         let mut height = 640u32;
         let mut perf_output = None;
+        let mut multisurface = false;
+        let mut dump_chrome_frame = None;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -138,6 +142,12 @@ impl Args {
                 "--perf-output" => {
                     perf_output = args.next();
                 }
+                "--multisurface" => {
+                    multisurface = true;
+                }
+                "--dump-chrome-frame" => {
+                    dump_chrome_frame = args.next();
+                }
                 _ => {}
             }
         }
@@ -149,6 +159,8 @@ impl Args {
             width,
             height,
             perf_output,
+            multisurface,
+            dump_chrome_frame,
         }
     }
     

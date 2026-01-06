@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>RustKit Content Area</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: white;
+        }
+        .hero {
+            text-align: center;
+            padding: 40px;
+        }
+        h1 {
+            font-size: 3em;
+            font-weight: 700;
+            margin-bottom: 16px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+        p {
+            font-size: 1.2em;
+            opacity: 0.9;
+            max-width: 600px;
+            line-height: 1.6;
+        }
+        .cards {
+            display: flex;
+            gap: 20px;
+            margin-top: 40px;
+        }
+        .card {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 16px;
+            padding: 24px;
+            width: 200px;
+            text-align: center;
+        }
+        .card h3 {
+            font-size: 1.2em;
+            margin-bottom: 8px;
+        }
+        .card p {
+            font-size: 0.9em;
+            opacity: 0.8;
+        }
+        .icon {
+            font-size: 2em;
+            margin-bottom: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="hero">
+        <h1>Welcome to HiWave</h1>
+        <p>The next-generation browser built with RustKit — fast, private, and beautiful.</p>
+        
+        <div class="cards">
+            <div class="card">
+                <div class="icon">🚀</div>
+                <h3>Fast</h3>
+                <p>Built in Rust for maximum performance</p>
+            </div>
+            <div class="card">
+                <div class="icon">🔒</div>
+                <h3>Private</h3>
+                <p>Your data stays on your device</p>
+            </div>
+            <div class="card">
+                <div class="icon">✨</div>
+                <h3>Beautiful</h3>
+                <p>Modern UI with smooth animations</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+
