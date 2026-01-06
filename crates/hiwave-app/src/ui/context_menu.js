@@ -89,6 +89,47 @@
     let menuVisible = false;
     let currentContext = null;
 
+    // Helper to get unique selector path for element (for Inspect Element)
+    function getElementPath(element) {
+        if (!element || element === document.body) return 'body';
+        if (element === document.documentElement) return 'html';
+        if (element.nodeType !== Node.ELEMENT_NODE) return '';
+
+        const parts = [];
+        let current = element;
+
+        while (current && current !== document.body && current.nodeType === Node.ELEMENT_NODE) {
+            let selector = current.tagName.toLowerCase();
+
+            if (current.id) {
+                selector += '#' + CSS.escape(current.id);
+                parts.unshift(selector);
+                break;
+            } else {
+                const classes = Array.from(current.classList).slice(0, 2);
+                if (classes.length > 0) {
+                    selector += '.' + classes.map(c => CSS.escape(c)).join('.');
+                }
+
+                const parent = current.parentElement;
+                if (parent) {
+                    const siblings = Array.from(parent.children).filter(
+                        el => el.tagName === current.tagName
+                    );
+                    if (siblings.length > 1) {
+                        const index = siblings.indexOf(current) + 1;
+                        selector += ':nth-child(' + index + ')';
+                    }
+                }
+            }
+
+            parts.unshift(selector);
+            current = current.parentElement;
+        }
+
+        return 'body > ' + parts.join(' > ');
+    }
+
     const handler = {
         detectContext(event) {
             const target = event.target;
@@ -110,7 +151,8 @@
                 imageUrl: imageUrl,
                 selectedText: selectedText,
                 pageUrl: location.href,
-                pageTitle: document.title
+                pageTitle: document.title,
+                elementPath: getElementPath(target)
             };
         },
 
@@ -158,7 +200,9 @@
             // Always show these
             items.push(
                 { label: 'Copy Page URL', icon: '\uD83D\uDD17', action: 'copy_page_url' },
-                { label: 'Add to Shelf', icon: '\uD83D\uDCE5', action: 'shelf_active' }
+                { label: 'Add to Shelf', icon: '\uD83D\uDCE5', action: 'shelf_active' },
+                { type: 'divider' },
+                { label: 'Inspect Element', icon: '\uD83D\uDD0D', action: 'inspect_element' }
             );
 
             return items;
@@ -254,6 +298,11 @@
                     break;
                 case 'shelf_active':
                     this.sendIpc('add_to_shelf', { tab_id: 'active' });
+                    break;
+                case 'inspect_element':
+                    if (ctx && ctx.elementPath) {
+                        this.sendIpc('inspect_element', { path: ctx.elementPath });
+                    }
                     break;
             }
         },

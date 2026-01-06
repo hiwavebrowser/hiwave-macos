@@ -79,7 +79,16 @@ const FIND_IN_PAGE_HELPER: &str = include_str!("ui/find_in_page.js");
 const CONTEXT_MENU_HELPER: &str = include_str!("ui/context_menu.js");
 const AUDIO_DETECTOR: &str = include_str!("ui/audio_detector.js");
 const AUTOFILL_HELPER: &str = include_str!("ui/autofill.js");
+const CONSOLE_INJECT: &str = include_str!("ui/console_inject.js");
 const CHART_JS: &str = include_str!("ui/chart.umd.min.js");
+/// The HTML content for the inspector panel
+const INSPECTOR_HTML: &str = include_str!("ui/inspector.html");
+/// The JavaScript to inject into content WebView for DOM inspection
+const INSPECTOR_INJECT: &str = include_str!("ui/inspector_inject.js");
+/// Default height of the inspector (hidden)
+const INSPECTOR_HEIGHT_DEFAULT: u32 = 0;
+/// Expanded height when inspector is open
+const INSPECTOR_HEIGHT_EXPANDED: u32 = 300;
 
 fn create_window_icon() -> Option<Icon> {
     const SIZE: u32 = 32;
@@ -250,6 +259,24 @@ enum UserEvent {
     UpdateAnalyticsSettings { enabled: bool, retention_days: i32, weekly_report: bool, report_day: String },
     ClearAnalyticsData,
     ExportAnalyticsData { format: String },
+    // Inspector events
+    OpenInspector,
+    CloseInspector,
+    ToggleInspector,
+    InspectorSendDomTree(String),
+    InspectorSendElementStyles(String),
+    InspectorElementPicked { path: String, styles: serde_json::Value },
+    InspectorPickerStopped,
+    InspectorHighlightElement { path: String },
+    InspectorClearHighlight,
+    InspectorStartPicker,
+    InspectorStopPicker,
+    InspectorScrollToElement { path: String },
+    InspectElement { path: String },
+    // Console events
+    InspectorConsoleMessage(String),
+    InspectorConsoleClear,
+    InspectorConsoleEval { code: String },
 }
 
 fn apply_layout(
@@ -258,8 +285,10 @@ fn apply_layout(
     #[cfg(target_os = "macos")] content: &UnifiedContentWebView,
     #[cfg(not(target_os = "macos"))] content: &WebView,
     shelf: &WebView,
+    inspector: &WebView,
     chrome_height: f64,
     shelf_height: f64,
+    inspector_height: f64,
     sidebar_width: f64,
     right_sidebar_open: bool,
 ) {
@@ -276,7 +305,8 @@ fn apply_layout(
         0.0
     };
     let content_width = (width - sidebar_width - right_sidebar_width).max(0.0);
-    let content_height = (height - chrome_height - shelf_height).max(0.0);
+    // Content height now accounts for inspector height as well
+    let content_height = (height - chrome_height - shelf_height - inspector_height).max(0.0);
 
     let chrome_rect = Rect {
         position: LogicalPosition::new(0, 0).into(),
@@ -288,20 +318,20 @@ fn apply_layout(
         size: LogicalSize::new(content_width, content_height).into(),
     };
 
+    // Inspector appears below content, above shelf
+    let inspector_rect = Rect {
+        position: LogicalPosition::new(sidebar_width as i32, (chrome_height + content_height) as i32).into(),
+        size: LogicalSize::new(content_width, inspector_height).into(),
+    };
+
     let shelf_rect = Rect {
         position: LogicalPosition::new(sidebar_width as i32, (height - shelf_height) as i32).into(),
         size: LogicalSize::new(content_width, shelf_height).into(),
     };
 
     let _ = chrome.set_bounds(chrome_rect);
-    #[cfg(target_os = "macos")]
-    {
-        let _ = content.set_bounds(content_rect);
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = content.set_bounds(content_rect);
-    }
+    let _ = content.set_bounds(content_rect);
+    let _ = inspector.set_bounds(inspector_rect);
     let _ = shelf.set_bounds(shelf_rect);
 }
 
@@ -611,6 +641,7 @@ fn main() {
     // Track current heights (will be modified dynamically)
     let chrome_height = Arc::new(Mutex::new(CHROME_HEIGHT_DEFAULT as f64));
     let shelf_height = Arc::new(Mutex::new(SHELF_HEIGHT_DEFAULT as f64));
+    let inspector_height = Arc::new(Mutex::new(INSPECTOR_HEIGHT_DEFAULT as f64));
     // Sidebar width: 0.0 = closed, >0 = open with that width
     let sidebar_width_state = Arc::new(Mutex::new(0.0_f64));
     let right_sidebar_open = Arc::new(Mutex::new(false));
@@ -637,6 +668,16 @@ fn main() {
         )
         .into(),
         size: LogicalSize::new(content_width, SHELF_HEIGHT_DEFAULT as f64).into(),
+    };
+
+    // Inspector starts hidden (0 height)
+    let inspector_bounds = Rect {
+        position: LogicalPosition::new(
+            sidebar_width as i32,
+            (height - SHELF_HEIGHT_DEFAULT as f64 - INSPECTOR_HEIGHT_DEFAULT as f64) as i32,
+        )
+        .into(),
+        size: LogicalSize::new(content_width, INSPECTOR_HEIGHT_DEFAULT as f64).into(),
     };
 
     // === CHROME WEBVIEW (created first, at top) ===
@@ -1465,6 +1506,35 @@ fn main() {
                         );
                         let _ = content_proxy_ipc.send_event(UserEvent::EvaluateContentScript(script));
                     }
+                    // Inspector IPC handlers from content webview
+                    IpcMessage::InspectorDomTreeResult { tree } => {
+                        let json = serde_json::to_string(&tree).unwrap_or_else(|_| "null".to_string());
+                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorSendDomTree(json));
+                    }
+                    IpcMessage::InspectorElementStylesResult { styles } => {
+                        let json = serde_json::to_string(&styles).unwrap_or_else(|_| "null".to_string());
+                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorSendElementStyles(json));
+                    }
+                    IpcMessage::InspectorElementPicked { path, styles } => {
+                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorElementPicked {
+                            path: path.clone(),
+                            styles: styles.clone(),
+                        });
+                    }
+                    IpcMessage::InspectorPickerStopped => {
+                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorPickerStopped);
+                    }
+                    IpcMessage::InspectElement { path } => {
+                        let _ = content_proxy_ipc.send_event(UserEvent::InspectElement { path: path.clone() });
+                    }
+                    // Console IPC handlers
+                    IpcMessage::InspectorConsoleMessage { entry } => {
+                        let json = serde_json::to_string(&entry).unwrap_or_else(|_| "null".to_string());
+                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorConsoleMessage(json));
+                    }
+                    IpcMessage::InspectorConsoleClear => {
+                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorConsoleClear);
+                    }
                     _ => {}
                 }
             }
@@ -1606,7 +1676,121 @@ fn main() {
         .expect("Failed to create Shelf WebView");
 
     info!("Shelf WebView created (bottom, starts hidden)");
-    info!("Three-WebView architecture initialized");
+
+    // === INSPECTOR WEBVIEW (created fourth, between content and shelf) ===
+    let inspector_proxy = proxy.clone();
+    let _inspector_state = Arc::clone(&state);
+    let inspector_webview = WebViewBuilder::new()
+        .with_html(INSPECTOR_HTML)
+        .with_devtools(cfg!(debug_assertions))
+        .with_clipboard(true)
+        .with_initialization_script(JS_BRIDGE)
+        .with_bounds(inspector_bounds)
+        .with_ipc_handler(move |message| {
+            let body = message.body();
+            info!("Inspector IPC: {}", body);
+
+            match serde_json::from_str::<IpcMessage>(body) {
+                Ok(msg) => {
+                    match &msg {
+                        IpcMessage::CloseInspector => {
+                            let _ = inspector_proxy.send_event(UserEvent::CloseInspector);
+                        }
+                        IpcMessage::InspectorGetDomTree => {
+                            // This will be handled by evaluating script on content webview
+                            // and sending result back to inspector
+                            let script = r#"
+                                (function() {
+                                    if (window.__hiwaveInspector) {
+                                        const tree = window.__hiwaveInspector.getDomTree(10);
+                                        window.ipc.postMessage(JSON.stringify({
+                                            cmd: 'inspector_dom_tree_result',
+                                            tree: tree
+                                        }));
+                                    }
+                                })();
+                            "#;
+                            // Send event to evaluate on content
+                            let _ = inspector_proxy.send_event(UserEvent::EvaluateContentScript(script.to_string()));
+                        }
+                        IpcMessage::InspectorGetElementStyles { path } => {
+                            let script = format!(r#"
+                                (function() {{
+                                    if (window.__hiwaveInspector) {{
+                                        const styles = window.__hiwaveInspector.getElementStyles('{}');
+                                        window.ipc.postMessage(JSON.stringify({{
+                                            cmd: 'inspector_element_styles_result',
+                                            styles: styles
+                                        }}));
+                                    }}
+                                }})();
+                            "#, path.replace("'", "\\'").replace("\\", "\\\\"));
+                            let _ = inspector_proxy.send_event(UserEvent::EvaluateContentScript(script));
+                        }
+                        IpcMessage::InspectorHighlightElement { path } => {
+                            let _ = inspector_proxy.send_event(UserEvent::InspectorHighlightElement { path: path.clone() });
+                        }
+                        IpcMessage::InspectorClearHighlight => {
+                            let _ = inspector_proxy.send_event(UserEvent::InspectorClearHighlight);
+                        }
+                        IpcMessage::InspectorStartPicker => {
+                            let _ = inspector_proxy.send_event(UserEvent::InspectorStartPicker);
+                        }
+                        IpcMessage::InspectorStopPicker => {
+                            let _ = inspector_proxy.send_event(UserEvent::InspectorStopPicker);
+                        }
+                        IpcMessage::InspectorScrollToElement { path } => {
+                            let _ = inspector_proxy.send_event(UserEvent::InspectorScrollToElement { path: path.clone() });
+                        }
+                        IpcMessage::InspectorConsoleEval { code } => {
+                            let _ = inspector_proxy.send_event(UserEvent::InspectorConsoleEval { code: code.clone() });
+                        }
+                        IpcMessage::InspectorRefresh => {
+                            // Refresh DOM tree by evaluating script on content
+                            let script = r#"
+                                (function() {
+                                    if (window.__hiwaveInspector) {
+                                        const tree = window.__hiwaveInspector.getDomTree(10);
+                                        window.ipc.postMessage(JSON.stringify({
+                                            cmd: 'inspector_dom_tree_result',
+                                            tree: tree
+                                        }));
+                                    }
+                                })();
+                            "#;
+                            let _ = inspector_proxy.send_event(UserEvent::EvaluateContentScript(script.to_string()));
+                        }
+                        IpcMessage::InspectorSelectElement { path } => {
+                            // Get styles for the selected element
+                            let script = format!(r#"
+                                (function() {{
+                                    if (window.__hiwaveInspector) {{
+                                        const styles = window.__hiwaveInspector.getElementStyles('{}');
+                                        window.ipc.postMessage(JSON.stringify({{
+                                            cmd: 'inspector_element_styles_result',
+                                            styles: styles
+                                        }}));
+                                    }}
+                                }})();
+                            "#, path.replace("\\", "\\\\").replace("'", "\\'"));
+                            let _ = inspector_proxy.send_event(UserEvent::EvaluateContentScript(script));
+                        }
+                        IpcMessage::InspectorClose => {
+                            let _ = inspector_proxy.send_event(UserEvent::CloseInspector);
+                        }
+                        _ => {}
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to parse Inspector IPC: {}", e);
+                }
+            }
+        })
+        .build_as_child(&window)
+        .expect("Failed to create Inspector WebView");
+
+    info!("Inspector WebView created (between content and shelf, starts hidden)");
+    info!("Four-WebView architecture initialized");
 
     // Check for debug mode via environment variable
     if std::env::var("HIWAVE_DEBUG").map(|v| v == "1").unwrap_or(false) {
@@ -1621,13 +1805,16 @@ fn main() {
     #[cfg(not(target_os = "macos"))]
     let content_webview = Arc::new(content_webview);
     let shelf_webview = Arc::new(shelf_webview);
+    let inspector_webview = Arc::new(inspector_webview);
 
     let chrome_for_events = Arc::clone(&chrome_webview);
     let content_for_events = Arc::clone(&content_webview);
     let shelf_for_events = Arc::clone(&shelf_webview);
+    let inspector_for_events = Arc::clone(&inspector_webview);
     let state_for_events = Arc::clone(&state);
     let chrome_height_for_events = Arc::clone(&chrome_height);
     let shelf_height_for_events = Arc::clone(&shelf_height);
+    let inspector_height_for_events = Arc::clone(&inspector_height);
     let sidebar_width_for_events = Arc::clone(&sidebar_width_state);
     let right_sidebar_open_for_events = Arc::clone(&right_sidebar_open);
     let focus_state_for_events = Arc::clone(&state);
@@ -1716,6 +1903,7 @@ fn main() {
             } => {
                 let ch = *chrome_height_for_events.lock().unwrap();
                 let sh = *shelf_height_for_events.lock().unwrap();
+                let ih = *inspector_height_for_events.lock().unwrap();
                 let sw = *sidebar_width_for_events.lock().unwrap();
                 let right_sidebar_open = *right_sidebar_open_for_events.lock().unwrap();
                 apply_layout(
@@ -1723,8 +1911,10 @@ fn main() {
                     &chrome_for_events,
                     &content_for_events,
                     &shelf_for_events,
+                    &inspector_for_events,
                     ch,
                     sh,
+                    ih,
                     sw,
                     right_sidebar_open,
                 );
@@ -1947,6 +2137,8 @@ fn main() {
                             let _ = content_for_events.evaluate_script(AUDIO_DETECTOR);
                             info!("Injecting autofill helper into content webview");
                             let _ = content_for_events.evaluate_script(AUTOFILL_HELPER);
+                            info!("Injecting console interceptor into content webview");
+                            let _ = content_for_events.evaluate_script(CONSOLE_INJECT);
                         }
                     }
                     UserEvent::RecordVisit { url } => {
@@ -2045,6 +2237,7 @@ fn main() {
                         *chrome_height_for_events.lock().unwrap() = CHROME_HEIGHT_EXPANDED as f64;
                         let ch = CHROME_HEIGHT_EXPANDED as f64;
                         let sh = *shelf_height_for_events.lock().unwrap();
+                        let ih = *inspector_height_for_events.lock().unwrap();
                         let sidebar_open = *sidebar_width_for_events.lock().unwrap();
                         let right_sidebar_open = *right_sidebar_open_for_events.lock().unwrap();
                         apply_layout(
@@ -2052,8 +2245,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             &shelf_for_events,
+                            &inspector_for_events,
                             ch,
                             sh,
+                            ih,
                             sidebar_open,
                             right_sidebar_open,
                         );
@@ -2063,6 +2258,7 @@ fn main() {
                         *chrome_height_for_events.lock().unwrap() = CHROME_HEIGHT_SMALL as f64;
                         let ch = CHROME_HEIGHT_SMALL as f64;
                         let sh = *shelf_height_for_events.lock().unwrap();
+                        let ih = *inspector_height_for_events.lock().unwrap();
                         let sidebar_open = *sidebar_width_for_events.lock().unwrap();
                         let right_sidebar_open = *right_sidebar_open_for_events.lock().unwrap();
                         apply_layout(
@@ -2070,8 +2266,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             &shelf_for_events,
+                            &inspector_for_events,
                             ch,
                             sh,
+                            ih,
                             sidebar_open,
                             right_sidebar_open,
                         );
@@ -2081,6 +2279,7 @@ fn main() {
                         *chrome_height_for_events.lock().unwrap() = CHROME_HEIGHT_DEFAULT as f64;
                         let ch = CHROME_HEIGHT_DEFAULT as f64;
                         let sh = *shelf_height_for_events.lock().unwrap();
+                        let ih = *inspector_height_for_events.lock().unwrap();
                         let sidebar_open = *sidebar_width_for_events.lock().unwrap();
                         let right_sidebar_open = *right_sidebar_open_for_events.lock().unwrap();
                         apply_layout(
@@ -2088,8 +2287,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             &shelf_for_events,
+                            &inspector_for_events,
                             ch,
                             sh,
+                            ih,
                             sidebar_open,
                             right_sidebar_open,
                         );
@@ -2100,6 +2301,7 @@ fn main() {
                         // Update shelf height
                         *shelf_height_for_events.lock().unwrap() = SHELF_HEIGHT_EXPANDED as f64;
                         let sh = SHELF_HEIGHT_EXPANDED as f64;
+                        let ih = *inspector_height_for_events.lock().unwrap();
                         let sidebar_open = *sidebar_width_for_events.lock().unwrap();
                         let right_sidebar_open = *right_sidebar_open_for_events.lock().unwrap();
                         apply_layout(
@@ -2107,8 +2309,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             &shelf_for_events,
+                            &inspector_for_events,
                             ch,
                             sh,
+                            ih,
                             sidebar_open,
                             right_sidebar_open,
                         );
@@ -2134,6 +2338,7 @@ fn main() {
                         // Update shelf height
                         *shelf_height_for_events.lock().unwrap() = SHELF_HEIGHT_DEFAULT as f64;
                         let sh = SHELF_HEIGHT_DEFAULT as f64;
+                        let ih = *inspector_height_for_events.lock().unwrap();
                         let sidebar_open = *sidebar_width_for_events.lock().unwrap();
                         let right_sidebar_open = *right_sidebar_open_for_events.lock().unwrap();
                         apply_layout(
@@ -2141,8 +2346,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             &shelf_for_events,
+                            &inspector_for_events,
                             ch,
                             sh,
+                            ih,
                             sidebar_open,
                             right_sidebar_open,
                         );
@@ -2153,14 +2360,17 @@ fn main() {
                         *sidebar_width_for_events.lock().unwrap() = new_width;
                         let ch = *chrome_height_for_events.lock().unwrap();
                         let sh = *shelf_height_for_events.lock().unwrap();
+                        let ih = *inspector_height_for_events.lock().unwrap();
                         let right_sidebar_open = *right_sidebar_open_for_events.lock().unwrap();
                         apply_layout(
                             &window,
                             &chrome_for_events,
                             &content_for_events,
                             &shelf_for_events,
+                            &inspector_for_events,
                             ch,
                             sh,
+                            ih,
                             new_width,
                             right_sidebar_open,
                         );
@@ -2170,14 +2380,17 @@ fn main() {
                         *sidebar_width_for_events.lock().unwrap() = width;
                         let ch = *chrome_height_for_events.lock().unwrap();
                         let sh = *shelf_height_for_events.lock().unwrap();
+                        let ih = *inspector_height_for_events.lock().unwrap();
                         let right_sidebar_open = *right_sidebar_open_for_events.lock().unwrap();
                         apply_layout(
                             &window,
                             &chrome_for_events,
                             &content_for_events,
                             &shelf_for_events,
+                            &inspector_for_events,
                             ch,
                             sh,
+                            ih,
                             width,
                             right_sidebar_open,
                         );
@@ -2187,14 +2400,17 @@ fn main() {
                         *right_sidebar_open_for_events.lock().unwrap() = open;
                         let ch = *chrome_height_for_events.lock().unwrap();
                         let sh = *shelf_height_for_events.lock().unwrap();
+                        let ih = *inspector_height_for_events.lock().unwrap();
                         let sw = *sidebar_width_for_events.lock().unwrap();
                         apply_layout(
                             &window,
                             &chrome_for_events,
                             &content_for_events,
                             &shelf_for_events,
+                            &inspector_for_events,
                             ch,
                             sh,
+                            ih,
                             sw,
                             open,
                         );
@@ -2211,8 +2427,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             &shelf_for_events,
+                            &inspector_for_events,
                             10.0, // Minimal chrome height for reveal zone hover detection
                             0.0,  // No shelf height
+                            0.0,  // No inspector height in focus mode
                             0.0,  // Sidebar hidden (width = 0)
                             false, // Right sidebar hidden
                         );
@@ -2237,6 +2455,7 @@ fn main() {
                         // Restore normal layout
                         let ch = *chrome_height_for_events.lock().unwrap();
                         let sh = *shelf_height_for_events.lock().unwrap();
+                        let ih = *inspector_height_for_events.lock().unwrap();
                         let sidebar_open = *sidebar_width_for_events.lock().unwrap();
                         let right_sidebar_open = *right_sidebar_open_for_events.lock().unwrap();
                         apply_layout(
@@ -2244,8 +2463,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             &shelf_for_events,
+                            &inspector_for_events,
                             ch,
                             sh,
+                            ih,
                             sidebar_open,
                             right_sidebar_open,
                         );
@@ -2300,8 +2521,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             &shelf_for_events,
+                            &inspector_for_events,
                             peek_height,
                             0.0,  // No shelf in peek mode
+                            0.0,  // No inspector in peek mode
                             0.0,  // No sidebar in peek mode (width = 0)
                             false,  // No right sidebar in peek mode
                         );
@@ -2314,8 +2537,10 @@ fn main() {
                             &chrome_for_events,
                             &content_for_events,
                             &shelf_for_events,
+                            &inspector_for_events,
                             0.0,  // No chrome
                             0.0,  // No shelf
+                            0.0,  // No inspector
                             0.0,  // No sidebar (width = 0)
                             false,  // No right sidebar
                         );
@@ -3547,6 +3772,216 @@ fn main() {
                         );
                         let _ = content_for_events.evaluate_script(&script);
                     }
+                    // Inspector event handlers
+                    UserEvent::OpenInspector => {
+                        info!("Opening inspector panel");
+                        // Close shelf if open
+                        *shelf_height_for_events.lock().unwrap() = SHELF_HEIGHT_DEFAULT as f64;
+                        // Open inspector
+                        *inspector_height_for_events.lock().unwrap() = INSPECTOR_HEIGHT_EXPANDED as f64;
+                        let ch = *chrome_height_for_events.lock().unwrap();
+                        let sh = SHELF_HEIGHT_DEFAULT as f64;
+                        let ih = INSPECTOR_HEIGHT_EXPANDED as f64;
+                        let sw = *sidebar_width_for_events.lock().unwrap();
+                        let right_sidebar_open = *right_sidebar_open_for_events.lock().unwrap();
+                        apply_layout(
+                            &window,
+                            &chrome_for_events,
+                            &content_for_events,
+                            &shelf_for_events,
+                            &inspector_for_events,
+                            ch,
+                            sh,
+                            ih,
+                            sw,
+                            right_sidebar_open,
+                        );
+                        // Inject inspector script into content webview if not already injected
+                        let inject_script = format!(
+                            "if (!window.__hiwaveInspector) {{ {} }}",
+                            INSPECTOR_INJECT
+                        );
+                        let _ = content_for_events.evaluate_script(&inject_script);
+                        // Trigger DOM tree refresh
+                        let _ = content_for_events.evaluate_script(r#"
+                            setTimeout(() => {
+                                if (window.__hiwaveInspector) {
+                                    const tree = window.__hiwaveInspector.getDomTree(10);
+                                    window.ipc.postMessage(JSON.stringify({
+                                        cmd: 'inspector_dom_tree_result',
+                                        tree: tree
+                                    }));
+                                }
+                            }, 100);
+                        "#);
+                    }
+                    UserEvent::CloseInspector => {
+                        info!("Closing inspector panel");
+                        *inspector_height_for_events.lock().unwrap() = INSPECTOR_HEIGHT_DEFAULT as f64;
+                        let ch = *chrome_height_for_events.lock().unwrap();
+                        let sh = *shelf_height_for_events.lock().unwrap();
+                        let ih = INSPECTOR_HEIGHT_DEFAULT as f64;
+                        let sw = *sidebar_width_for_events.lock().unwrap();
+                        let right_sidebar_open = *right_sidebar_open_for_events.lock().unwrap();
+                        apply_layout(
+                            &window,
+                            &chrome_for_events,
+                            &content_for_events,
+                            &shelf_for_events,
+                            &inspector_for_events,
+                            ch,
+                            sh,
+                            ih,
+                            sw,
+                            right_sidebar_open,
+                        );
+                        // Clear highlight in content
+                        let _ = content_for_events.evaluate_script(
+                            "if (window.__hiwaveInspector) { window.__hiwaveInspector.clearHighlight(); }"
+                        );
+                    }
+                    UserEvent::ToggleInspector => {
+                        let current_height = *inspector_height_for_events.lock().unwrap();
+                        if current_height > 0.0 {
+                            let _ = proxy.send_event(UserEvent::CloseInspector);
+                        } else {
+                            let _ = proxy.send_event(UserEvent::OpenInspector);
+                        }
+                    }
+                    UserEvent::InspectorSendDomTree(json) => {
+                        // Send DOM tree to inspector panel
+                        let script = format!(
+                            "if (window.hiwaveInspector) {{ window.hiwaveInspector.setDomTree({}); }}",
+                            json
+                        );
+                        let _ = inspector_for_events.evaluate_script(&script);
+                    }
+                    UserEvent::InspectorSendElementStyles(json) => {
+                        // Send element styles to inspector panel
+                        let script = format!(
+                            "if (window.hiwaveInspector) {{ window.hiwaveInspector.setElementStyles({}); }}",
+                            json
+                        );
+                        let _ = inspector_for_events.evaluate_script(&script);
+                    }
+                    UserEvent::InspectorElementPicked { path, styles } => {
+                        // Element was picked in content webview, update inspector
+                        let styles_json = serde_json::to_string(&styles).unwrap_or_else(|_| "null".to_string());
+                        let script = format!(
+                            "if (window.hiwaveInspector) {{ window.hiwaveInspector.selectElementByPath('{}'); window.hiwaveInspector.setElementStyles({}); window.hiwaveInspector.setPickerActive(false); }}",
+                            path.replace("'", "\\'"),
+                            styles_json
+                        );
+                        let _ = inspector_for_events.evaluate_script(&script);
+                    }
+                    UserEvent::InspectorPickerStopped => {
+                        let _ = inspector_for_events.evaluate_script(
+                            "if (window.hiwaveInspector) { window.hiwaveInspector.setPickerActive(false); }"
+                        );
+                    }
+                    UserEvent::InspectorHighlightElement { path } => {
+                        let script = format!(
+                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.highlightElement('{}'); }}",
+                            path.replace("'", "\\'")
+                        );
+                        let _ = content_for_events.evaluate_script(&script);
+                    }
+                    UserEvent::InspectorClearHighlight => {
+                        let _ = content_for_events.evaluate_script(
+                            "if (window.__hiwaveInspector) { window.__hiwaveInspector.clearHighlight(); }"
+                        );
+                    }
+                    UserEvent::InspectorStartPicker => {
+                        let _ = content_for_events.evaluate_script(
+                            "if (window.__hiwaveInspector) { window.__hiwaveInspector.startPicker(); }"
+                        );
+                        let _ = inspector_for_events.evaluate_script(
+                            "if (window.hiwaveInspector) { window.hiwaveInspector.setPickerActive(true); }"
+                        );
+                    }
+                    UserEvent::InspectorStopPicker => {
+                        let _ = content_for_events.evaluate_script(
+                            "if (window.__hiwaveInspector) { window.__hiwaveInspector.stopPicker(); }"
+                        );
+                        let _ = inspector_for_events.evaluate_script(
+                            "if (window.hiwaveInspector) { window.hiwaveInspector.setPickerActive(false); }"
+                        );
+                    }
+                    UserEvent::InspectorScrollToElement { path } => {
+                        let script = format!(
+                            "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.scrollToElement('{}'); }}",
+                            path.replace("'", "\\'")
+                        );
+                        let _ = content_for_events.evaluate_script(&script);
+                    }
+                    UserEvent::InspectElement { path } => {
+                        // Open inspector and select the element
+                        let _ = proxy.send_event(UserEvent::OpenInspector);
+                        // Delay the selection to allow inspector to initialize
+                        let path_escaped = path.replace("'", "\\'");
+                        let script = format!(r#"
+                            setTimeout(() => {{
+                                if (window.__hiwaveInspector) {{
+                                    const styles = window.__hiwaveInspector.getElementStyles('{}');
+                                    window.ipc.postMessage(JSON.stringify({{
+                                        cmd: 'inspector_element_picked',
+                                        path: '{}',
+                                        styles: styles
+                                    }}));
+                                }}
+                            }}, 200);
+                        "#, path_escaped, path_escaped);
+                        let _ = content_for_events.evaluate_script(&script);
+                    }
+                    // Console events
+                    UserEvent::InspectorConsoleMessage(json) => {
+                        // Forward console message to inspector panel
+                        let script = format!(
+                            "if (window.hiwaveInspector) {{ window.hiwaveInspector.addConsoleEntry({}); }}",
+                            json
+                        );
+                        let _ = inspector_for_events.evaluate_script(&script);
+                    }
+                    UserEvent::InspectorConsoleClear => {
+                        // Clear console in inspector panel
+                        let _ = inspector_for_events.evaluate_script(
+                            "if (window.hiwaveInspector) { window.hiwaveInspector.clearConsole(); }"
+                        );
+                    }
+                    UserEvent::InspectorConsoleEval { code } => {
+                        // Execute JavaScript in content webview
+                        let escaped_code = code.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r");
+                        let script = format!(r#"
+                            (function() {{
+                                try {{
+                                    const result = eval('{}');
+                                    const serialized = typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result);
+                                    window.ipc.postMessage(JSON.stringify({{
+                                        cmd: 'inspector_console_message',
+                                        entry: {{
+                                            id: Date.now(),
+                                            level: 'result',
+                                            message: serialized,
+                                            timestamp: Date.now(),
+                                            stack: []
+                                        }}
+                                    }}));
+                                }} catch (e) {{
+                                    window.ipc.postMessage(JSON.stringify({{
+                                        cmd: 'inspector_console_message',
+                                        entry: {{
+                                            id: Date.now(),
+                                            level: 'error',
+                                            message: e.name + ': ' + e.message,
+                                            timestamp: Date.now(),
+                                            stack: []
+                                        }}
+                                    }}));
+                                }}
+                            }})();
+                        "#, escaped_code);
+                        let _ = content_for_events.evaluate_script(&script);
+                    }
                 }
             }
             _ => {}
@@ -3590,6 +4025,9 @@ fn main() {
                 }
                 id if id == menu_ids::GO_FORWARD => {
                     let _ = proxy.send_event(UserEvent::GoForward);
+                }
+                id if id == menu_ids::TOGGLE_INSPECTOR => {
+                    let _ = proxy.send_event(UserEvent::ToggleInspector);
                 }
                 _ => {}
             }

@@ -1,0 +1,1491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inspector</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-primary: #1e1e1e;
+            --bg-secondary: #252526;
+            --bg-tertiary: #2d2d30;
+            --bg-hover: #3c3c3c;
+            --bg-selected: #094771;
+            --border-color: #3c3c3c;
+            --text-primary: #cccccc;
+            --text-secondary: #9d9d9d;
+            --text-muted: #6d6d6d;
+            --accent: #569cd6;
+            --tag-color: #569cd6;
+            --attr-name: #9cdcfe;
+            --attr-value: #ce9178;
+            --text-content: #d4d4d4;
+            --property-name: #9cdcfe;
+            --property-value: #ce9178;
+            --number-color: #b5cea8;
+            --unit-color: #b5cea8;
+            --keyword-color: #c586c0;
+            --highlight-bg: rgba(255, 213, 79, 0.15);
+            --highlight-border: #ffd54f;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', Monaco, 'Cascadia Code', monospace;
+            font-size: 12px;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            height: 100vh;
+            overflow: hidden;
+            user-select: none;
+        }
+
+        .inspector-container {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+        }
+
+        .inspector-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 8px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            min-height: 32px;
+        }
+
+        .toolbar-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 28px;
+            height: 24px;
+            background: transparent;
+            border: none;
+            border-radius: 4px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .toolbar-btn:hover {
+            background: var(--bg-hover);
+            color: var(--text-primary);
+        }
+
+        .toolbar-btn.active {
+            background: var(--bg-selected);
+            color: var(--text-primary);
+        }
+
+        .toolbar-btn svg {
+            width: 16px;
+            height: 16px;
+        }
+
+        .toolbar-divider {
+            width: 1px;
+            height: 20px;
+            background: var(--border-color);
+        }
+
+        .toolbar-tabs {
+            display: flex;
+            gap: 2px;
+        }
+
+        .toolbar-tab {
+            padding: 4px 12px;
+            background: transparent;
+            border: none;
+            border-radius: 4px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.15s;
+        }
+
+        .toolbar-tab:hover {
+            background: var(--bg-hover);
+            color: var(--text-primary);
+        }
+
+        .toolbar-tab.active {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+
+        .toolbar-spacer {
+            flex: 1;
+        }
+
+        .search-box {
+            display: flex;
+            align-items: center;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 0 8px;
+            width: 200px;
+        }
+
+        .search-box:focus-within {
+            border-color: var(--accent);
+        }
+
+        .search-box input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: var(--text-primary);
+            font-size: 12px;
+            padding: 4px 0;
+            outline: none;
+        }
+
+        .search-box input::placeholder {
+            color: var(--text-muted);
+        }
+
+        .search-box svg {
+            width: 14px;
+            height: 14px;
+            color: var(--text-muted);
+            margin-right: 6px;
+        }
+
+        .inspector-main {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        .panel {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .elements-panel {
+            flex: 1;
+            min-width: 300px;
+            border-right: 1px solid var(--border-color);
+        }
+
+        .styles-panel {
+            width: 350px;
+            min-width: 250px;
+        }
+
+        .panel-header {
+            display: flex;
+            align-items: center;
+            padding: 6px 12px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            font-size: 11px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .panel-content {
+            flex: 1;
+            overflow: auto;
+            padding: 8px 0;
+        }
+
+        .panel-content::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        .panel-content::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .panel-content::-webkit-scrollbar-thumb {
+            background: var(--bg-hover);
+            border-radius: 4px;
+        }
+
+        .panel-content::-webkit-scrollbar-thumb:hover {
+            background: var(--text-muted);
+        }
+
+        /* DOM Tree Styles */
+        .dom-tree {
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+
+        .dom-node {
+            position: relative;
+        }
+
+        .dom-node-line {
+            display: flex;
+            align-items: center;
+            padding: 1px 8px 1px 0;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        .dom-node-line:hover {
+            background: var(--bg-hover);
+        }
+
+        .dom-node-line.selected {
+            background: var(--bg-selected);
+        }
+
+        .dom-node-line.highlighted {
+            background: var(--highlight-bg);
+            outline: 1px solid var(--highlight-border);
+            outline-offset: -1px;
+        }
+
+        .dom-toggle {
+            width: 16px;
+            height: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+            flex-shrink: 0;
+        }
+
+        .dom-toggle svg {
+            width: 10px;
+            height: 10px;
+            transition: transform 0.15s;
+        }
+
+        .dom-toggle.expanded svg {
+            transform: rotate(90deg);
+        }
+
+        .dom-toggle.hidden {
+            visibility: hidden;
+        }
+
+        .dom-content {
+            display: flex;
+            align-items: center;
+            gap: 2px;
+        }
+
+        .dom-tag {
+            color: var(--tag-color);
+        }
+
+        .dom-tag-bracket {
+            color: var(--text-muted);
+        }
+
+        .dom-attr-name {
+            color: var(--attr-name);
+        }
+
+        .dom-attr-value {
+            color: var(--attr-value);
+        }
+
+        .dom-text {
+            color: var(--text-content);
+            max-width: 300px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .dom-comment {
+            color: var(--text-muted);
+            font-style: italic;
+        }
+
+        .dom-children {
+            display: none;
+        }
+
+        .dom-node.expanded > .dom-children {
+            display: block;
+        }
+
+        .dom-closing-tag {
+            padding-left: 0;
+        }
+
+        /* Styles Panel */
+        .styles-section {
+            border-bottom: 1px solid var(--border-color);
+            padding: 8px 12px;
+        }
+
+        .styles-section:last-child {
+            border-bottom: none;
+        }
+
+        .styles-section-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 8px;
+            font-size: 11px;
+            font-weight: 500;
+            color: var(--text-secondary);
+        }
+
+        .styles-section-toggle {
+            width: 12px;
+            height: 12px;
+            color: var(--text-muted);
+            cursor: pointer;
+        }
+
+        /* Box Model */
+        .box-model {
+            display: flex;
+            justify-content: center;
+            padding: 12px;
+        }
+
+        .box-model-diagram {
+            position: relative;
+            text-align: center;
+            font-size: 10px;
+        }
+
+        .box-margin {
+            background: rgba(249, 204, 157, 0.3);
+            border: 1px dashed rgba(249, 204, 157, 0.6);
+            padding: 12px;
+        }
+
+        .box-border {
+            background: rgba(253, 221, 155, 0.3);
+            border: 1px solid rgba(253, 221, 155, 0.8);
+            padding: 12px;
+        }
+
+        .box-padding {
+            background: rgba(195, 232, 141, 0.3);
+            border: 1px dashed rgba(195, 232, 141, 0.6);
+            padding: 12px;
+        }
+
+        .box-content {
+            background: rgba(137, 196, 244, 0.3);
+            border: 1px solid rgba(137, 196, 244, 0.8);
+            padding: 8px 16px;
+            min-width: 60px;
+        }
+
+        .box-label {
+            position: absolute;
+            font-size: 9px;
+            color: var(--text-muted);
+        }
+
+        .box-value {
+            color: var(--text-primary);
+            font-family: 'SF Mono', monospace;
+        }
+
+        .box-value.zero {
+            color: var(--text-muted);
+        }
+
+        /* Computed Styles */
+        .computed-styles {
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 11px;
+        }
+
+        .style-rule {
+            padding: 4px 0;
+        }
+
+        .style-property {
+            display: flex;
+            padding: 2px 0;
+        }
+
+        .style-property-name {
+            color: var(--property-name);
+            margin-right: 4px;
+        }
+
+        .style-property-name::after {
+            content: ':';
+            color: var(--text-muted);
+        }
+
+        .style-property-value {
+            color: var(--property-value);
+            flex: 1;
+        }
+
+        .style-property-value .number {
+            color: var(--number-color);
+        }
+
+        .style-property-value .unit {
+            color: var(--unit-color);
+        }
+
+        .style-property-value .keyword {
+            color: var(--keyword-color);
+        }
+
+        .style-property-value .color-preview {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 2px;
+            margin-right: 4px;
+            vertical-align: middle;
+        }
+
+        /* Element Info */
+        .element-info {
+            padding: 8px 12px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            font-size: 11px;
+        }
+
+        .element-info-selector {
+            color: var(--accent);
+            font-family: 'SF Mono', monospace;
+        }
+
+        .element-info-dimensions {
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+
+        /* Empty State */
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--text-muted);
+            text-align: center;
+            padding: 20px;
+        }
+
+        .empty-state svg {
+            width: 48px;
+            height: 48px;
+            margin-bottom: 12px;
+            opacity: 0.5;
+        }
+
+        .empty-state-title {
+            font-size: 14px;
+            margin-bottom: 4px;
+            color: var(--text-secondary);
+        }
+
+        .empty-state-hint {
+            font-size: 12px;
+        }
+
+        /* Resizer */
+        .panel-resizer {
+            width: 4px;
+            cursor: col-resize;
+            background: transparent;
+            transition: background 0.15s;
+        }
+
+        .panel-resizer:hover {
+            background: var(--accent);
+        }
+
+        /* Console Panel */
+        .console-panel {
+            display: none;
+            flex: 1;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .console-panel.active {
+            display: flex;
+        }
+
+        .console-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 8px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            min-height: 28px;
+        }
+
+        .console-filter-btn {
+            padding: 2px 8px;
+            border: 1px solid transparent;
+            border-radius: 4px;
+            background: transparent;
+            color: var(--text-secondary);
+            font-size: 11px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .console-filter-btn:hover {
+            background: var(--bg-hover);
+            color: var(--text-primary);
+        }
+
+        .console-filter-btn.active {
+            background: var(--bg-tertiary);
+            border-color: var(--border-color);
+            color: var(--text-primary);
+        }
+
+        .console-filter-btn.error {
+            color: #f87171;
+        }
+
+        .console-filter-btn.warn {
+            color: #fbbf24;
+        }
+
+        .console-filter-btn .count {
+            margin-left: 4px;
+            opacity: 0.7;
+        }
+
+        .console-output {
+            flex: 1;
+            overflow-y: auto;
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+
+        .console-output::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .console-output::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .console-output::-webkit-scrollbar-thumb {
+            background: var(--bg-hover);
+            border-radius: 4px;
+        }
+
+        .console-entry {
+            display: flex;
+            padding: 4px 12px;
+            border-bottom: 1px solid var(--border-color);
+            min-height: 24px;
+            align-items: flex-start;
+        }
+
+        .console-entry:hover {
+            background: var(--bg-hover);
+        }
+
+        .console-entry.log {
+            color: var(--text-primary);
+        }
+
+        .console-entry.info {
+            color: #60a5fa;
+            background: rgba(96, 165, 250, 0.05);
+        }
+
+        .console-entry.warn {
+            color: #fbbf24;
+            background: rgba(251, 191, 36, 0.08);
+            border-left: 3px solid #fbbf24;
+        }
+
+        .console-entry.error {
+            color: #f87171;
+            background: rgba(248, 113, 113, 0.08);
+            border-left: 3px solid #f87171;
+        }
+
+        .console-entry.debug {
+            color: var(--text-secondary);
+        }
+
+        .console-entry.group {
+            font-weight: 500;
+            color: var(--accent);
+        }
+
+        .console-entry.input {
+            color: var(--accent);
+            background: rgba(86, 156, 214, 0.05);
+            font-style: italic;
+        }
+
+        .console-entry.result {
+            color: var(--property-value);
+            background: rgba(206, 145, 120, 0.05);
+        }
+
+        .console-entry.result::before {
+            content: '\2190';
+            margin-right: 8px;
+            color: var(--text-muted);
+        }
+
+        .console-entry-icon {
+            width: 16px;
+            height: 16px;
+            margin-right: 8px;
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .console-entry-icon svg {
+            width: 14px;
+            height: 14px;
+        }
+
+        .console-entry-content {
+            flex: 1;
+            word-break: break-word;
+            white-space: pre-wrap;
+        }
+
+        .console-entry-source {
+            flex-shrink: 0;
+            margin-left: 12px;
+            font-size: 10px;
+            color: var(--text-muted);
+            cursor: pointer;
+        }
+
+        .console-entry-source:hover {
+            color: var(--accent);
+            text-decoration: underline;
+        }
+
+        .console-entry-time {
+            flex-shrink: 0;
+            margin-right: 8px;
+            font-size: 10px;
+            color: var(--text-muted);
+        }
+
+        .console-string { color: var(--attr-value); }
+        .console-number { color: var(--number-color); }
+        .console-boolean { color: var(--keyword-color); }
+        .console-null { color: var(--text-muted); font-style: italic; }
+        .console-undefined { color: var(--text-muted); font-style: italic; }
+        .console-function { color: var(--accent); font-style: italic; }
+        .console-object { color: var(--text-primary); }
+
+        .console-input-container {
+            display: flex;
+            align-items: center;
+            padding: 4px 8px;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border-color);
+        }
+
+        .console-input-prompt {
+            color: var(--accent);
+            margin-right: 8px;
+            font-family: 'SF Mono', monospace;
+            font-size: 12px;
+        }
+
+        .console-input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: var(--text-primary);
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+            font-size: 12px;
+            outline: none;
+            padding: 4px 0;
+        }
+
+        .console-input::placeholder {
+            color: var(--text-muted);
+        }
+
+        .console-empty {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--text-muted);
+            text-align: center;
+            padding: 20px;
+        }
+
+        .console-empty svg {
+            width: 48px;
+            height: 48px;
+            margin-bottom: 12px;
+            opacity: 0.5;
+        }
+    </style>
+</head>
+<body>
+    <div class="inspector-container">
+        <div class="inspector-toolbar">
+            <button class="toolbar-btn" id="picker-btn" title="Select element (Cmd+Shift+C)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/>
+                    <path d="M13 13l6 6"/>
+                </svg>
+            </button>
+            <button class="toolbar-btn" id="refresh-btn" title="Refresh DOM tree">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M23 4v6h-6"/>
+                    <path d="M1 20v-6h6"/>
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                </svg>
+            </button>
+            <div class="toolbar-divider"></div>
+            <div class="toolbar-tabs">
+                <button class="toolbar-tab active" data-tab="elements">Elements</button>
+                <button class="toolbar-tab" data-tab="console">Console</button>
+            </div>
+            <div class="toolbar-spacer"></div>
+            <div class="search-box">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="11" cy="11" r="8"/>
+                    <path d="M21 21l-4.35-4.35"/>
+                </svg>
+                <input type="text" id="search-input" placeholder="Search by selector...">
+            </div>
+            <button class="toolbar-btn" id="close-btn" title="Close inspector (Esc)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M18 6L6 18M6 6l12 12"/>
+                </svg>
+            </button>
+        </div>
+
+        <div class="inspector-main">
+            <!-- Elements Panel (default view) -->
+            <div class="panel elements-panel" id="elements-panel">
+                <div class="panel-content" id="dom-tree-container">
+                    <div class="empty-state" id="elements-empty">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+                        </svg>
+                        <div class="empty-state-title">No element selected</div>
+                        <div class="empty-state-hint">Click the picker icon or right-click an element to inspect</div>
+                    </div>
+                    <div class="dom-tree" id="dom-tree" style="display: none;"></div>
+                </div>
+            </div>
+
+            <div class="panel-resizer" id="panel-resizer"></div>
+
+            <div class="panel styles-panel" id="styles-panel">
+                <div class="element-info" id="element-info" style="display: none;">
+                    <div class="element-info-selector" id="selected-selector"></div>
+                    <div class="element-info-dimensions" id="selected-dimensions"></div>
+                </div>
+                <div class="panel-content" id="styles-container">
+                    <div class="empty-state" id="styles-empty">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                            <path d="M2 17l10 5 10-5"/>
+                            <path d="M2 12l10 5 10-5"/>
+                        </svg>
+                        <div class="empty-state-title">No styles</div>
+                        <div class="empty-state-hint">Select an element to view its styles</div>
+                    </div>
+                    <div id="styles-content" style="display: none;">
+                        <div class="styles-section">
+                            <div class="styles-section-header">Box Model</div>
+                            <div class="box-model">
+                                <div class="box-model-diagram">
+                                    <div class="box-margin">
+                                        <span class="box-label" style="top: 2px; left: 50%; transform: translateX(-50%);">margin</span>
+                                        <span class="box-value" id="margin-top">0</span>
+                                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                                            <span class="box-value" id="margin-left">0</span>
+                                            <div class="box-border">
+                                                <span class="box-label" style="top: 2px; left: 50%; transform: translateX(-50%);">border</span>
+                                                <span class="box-value" id="border-top">0</span>
+                                                <div style="display: flex; justify-content: space-between; align-items: center;">
+                                                    <span class="box-value" id="border-left">0</span>
+                                                    <div class="box-padding">
+                                                        <span class="box-label" style="top: 2px; left: 50%; transform: translateX(-50%);">padding</span>
+                                                        <span class="box-value" id="padding-top">0</span>
+                                                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                                                            <span class="box-value" id="padding-left">0</span>
+                                                            <div class="box-content">
+                                                                <span class="box-value" id="content-size">0 x 0</span>
+                                                            </div>
+                                                            <span class="box-value" id="padding-right">0</span>
+                                                        </div>
+                                                        <span class="box-value" id="padding-bottom">0</span>
+                                                    </div>
+                                                    <span class="box-value" id="border-right">0</span>
+                                                </div>
+                                                <span class="box-value" id="border-bottom">0</span>
+                                            </div>
+                                            <span class="box-value" id="margin-right">0</span>
+                                        </div>
+                                        <span class="box-value" id="margin-bottom">0</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="styles-section">
+                            <div class="styles-section-header">Computed Styles</div>
+                            <div class="computed-styles" id="computed-styles"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Console Panel (hidden by default) -->
+            <div class="console-panel" id="console-panel">
+                <div class="console-toolbar">
+                    <button class="console-filter-btn active" data-filter="all">All</button>
+                    <button class="console-filter-btn error" data-filter="error">Errors <span class="count" id="error-count">0</span></button>
+                    <button class="console-filter-btn warn" data-filter="warn">Warnings <span class="count" id="warn-count">0</span></button>
+                    <button class="console-filter-btn" data-filter="info">Info</button>
+                    <button class="console-filter-btn" data-filter="log">Log</button>
+                    <div class="toolbar-spacer"></div>
+                    <button class="toolbar-btn" id="console-clear-btn" title="Clear console">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"/>
+                            <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="console-output" id="console-output">
+                    <div class="console-empty" id="console-empty">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <polyline points="4 17 10 11 4 5"/>
+                            <line x1="12" y1="19" x2="20" y2="19"/>
+                        </svg>
+                        <div class="empty-state-title">Console is empty</div>
+                        <div class="empty-state-hint">Messages logged by the page will appear here</div>
+                    </div>
+                </div>
+                <div class="console-input-container">
+                    <span class="console-input-prompt">&gt;</span>
+                    <input type="text" class="console-input" id="console-input" placeholder="Evaluate JavaScript...">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        (function() {
+            // State
+            let selectedElement = null;
+            let pickerActive = false;
+            let domTreeData = null;
+            let currentTab = 'elements';
+            let consoleEntries = [];
+            let consoleFilter = 'all';
+            let commandHistory = [];
+            let historyIndex = -1;
+
+            // Elements
+            const domTreeContainer = document.getElementById('dom-tree');
+            const elementsEmpty = document.getElementById('elements-empty');
+            const stylesEmpty = document.getElementById('styles-empty');
+            const stylesContent = document.getElementById('styles-content');
+            const elementInfo = document.getElementById('element-info');
+            const pickerBtn = document.getElementById('picker-btn');
+            const refreshBtn = document.getElementById('refresh-btn');
+            const closeBtn = document.getElementById('close-btn');
+            const searchInput = document.getElementById('search-input');
+
+            // Console elements
+            const consolePanel = document.getElementById('console-panel');
+            const elementsPanel = document.getElementById('elements-panel');
+            const stylesPanel = document.getElementById('styles-panel');
+            const panelResizer = document.getElementById('panel-resizer');
+            const consoleOutput = document.getElementById('console-output');
+            const consoleEmpty = document.getElementById('console-empty');
+            const consoleInput = document.getElementById('console-input');
+            const consoleClearBtn = document.getElementById('console-clear-btn');
+            const errorCount = document.getElementById('error-count');
+            const warnCount = document.getElementById('warn-count');
+
+            // Tab switching
+            const toolbarTabs = document.querySelectorAll('.toolbar-tab');
+            toolbarTabs.forEach(tab => {
+                tab.addEventListener('click', () => {
+                    const tabName = tab.dataset.tab;
+                    switchTab(tabName);
+                });
+            });
+
+            function switchTab(tabName) {
+                currentTab = tabName;
+
+                // Update toolbar tabs
+                toolbarTabs.forEach(t => t.classList.toggle('active', t.dataset.tab === tabName));
+
+                // Show/hide panels
+                if (tabName === 'elements') {
+                    elementsPanel.style.display = 'flex';
+                    stylesPanel.style.display = 'flex';
+                    panelResizer.style.display = 'block';
+                    consolePanel.classList.remove('active');
+                    // Show picker/refresh buttons
+                    pickerBtn.style.display = '';
+                    refreshBtn.style.display = '';
+                } else if (tabName === 'console') {
+                    elementsPanel.style.display = 'none';
+                    stylesPanel.style.display = 'none';
+                    panelResizer.style.display = 'none';
+                    consolePanel.classList.add('active');
+                    // Hide picker/refresh buttons in console view
+                    pickerBtn.style.display = 'none';
+                    refreshBtn.style.display = 'none';
+                    // Focus console input
+                    setTimeout(() => consoleInput.focus(), 50);
+                }
+            }
+
+            // Console functionality
+            function getConsoleIcon(level) {
+                switch (level) {
+                    case 'error':
+                        return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>';
+                    case 'warn':
+                        return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
+                    case 'info':
+                        return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>';
+                    case 'debug':
+                        return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 14a4 4 0 1 1 4-4 4 4 0 0 1-4 4z"/></svg>';
+                    default:
+                        return '';
+                }
+            }
+
+            function formatTime(timestamp) {
+                const date = new Date(timestamp);
+                return date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            }
+
+            function formatSource(stack) {
+                if (!stack || stack.length === 0) return '';
+                const frame = stack[0];
+                if (frame.raw) return '';
+                if (frame.file) {
+                    // Extract filename from URL
+                    let filename = frame.file;
+                    try {
+                        const url = new URL(frame.file);
+                        filename = url.pathname.split('/').pop() || url.hostname;
+                    } catch (e) {
+                        // Not a valid URL, use as-is
+                        filename = frame.file.split('/').pop();
+                    }
+                    return `${filename}:${frame.line}`;
+                }
+                return '';
+            }
+
+            function renderConsoleEntry(entry) {
+                const icon = getConsoleIcon(entry.level);
+                const time = formatTime(entry.timestamp);
+                const source = formatSource(entry.stack);
+
+                return `<div class="console-entry ${entry.level}" data-id="${entry.id}" data-level="${entry.level}">
+                    <span class="console-entry-time">${time}</span>
+                    ${icon ? `<span class="console-entry-icon">${icon}</span>` : ''}
+                    <span class="console-entry-content">${escapeHtml(entry.message)}</span>
+                    ${source ? `<span class="console-entry-source">${source}</span>` : ''}
+                </div>`;
+            }
+
+            function updateConsoleDisplay() {
+                const filteredEntries = consoleFilter === 'all'
+                    ? consoleEntries
+                    : consoleEntries.filter(e => e.level === consoleFilter);
+
+                if (filteredEntries.length === 0) {
+                    consoleEmpty.style.display = 'flex';
+                    // Remove all entries except empty state
+                    const entries = consoleOutput.querySelectorAll('.console-entry');
+                    entries.forEach(e => e.remove());
+                } else {
+                    consoleEmpty.style.display = 'none';
+                    consoleOutput.innerHTML = filteredEntries.map(renderConsoleEntry).join('');
+                    // Scroll to bottom
+                    consoleOutput.scrollTop = consoleOutput.scrollHeight;
+                }
+
+                // Update counts
+                const errors = consoleEntries.filter(e => e.level === 'error').length;
+                const warnings = consoleEntries.filter(e => e.level === 'warn').length;
+                errorCount.textContent = errors;
+                warnCount.textContent = warnings;
+            }
+
+            function addConsoleEntry(entry) {
+                consoleEntries.push(entry);
+                updateConsoleDisplay();
+            }
+
+            function clearConsole() {
+                consoleEntries = [];
+                updateConsoleDisplay();
+            }
+
+            // Console filter buttons
+            document.querySelectorAll('.console-filter-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    document.querySelectorAll('.console-filter-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    consoleFilter = btn.dataset.filter;
+                    updateConsoleDisplay();
+                });
+            });
+
+            // Console clear button
+            consoleClearBtn.addEventListener('click', () => {
+                clearConsole();
+            });
+
+            // Console input
+            consoleInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    const code = consoleInput.value.trim();
+                    if (code) {
+                        // Add to history
+                        commandHistory.push(code);
+                        historyIndex = commandHistory.length;
+
+                        // Add input to console as a log entry
+                        addConsoleEntry({
+                            id: Date.now(),
+                            level: 'input',
+                            message: '> ' + code,
+                            timestamp: Date.now(),
+                            stack: []
+                        });
+
+                        // Send to content webview for evaluation
+                        window.ipc.postMessage(JSON.stringify({
+                            cmd: 'inspector_console_eval',
+                            code: code
+                        }));
+
+                        consoleInput.value = '';
+                    }
+                } else if (e.key === 'ArrowUp') {
+                    if (historyIndex > 0) {
+                        historyIndex--;
+                        consoleInput.value = commandHistory[historyIndex] || '';
+                    }
+                    e.preventDefault();
+                } else if (e.key === 'ArrowDown') {
+                    if (historyIndex < commandHistory.length - 1) {
+                        historyIndex++;
+                        consoleInput.value = commandHistory[historyIndex] || '';
+                    } else {
+                        historyIndex = commandHistory.length;
+                        consoleInput.value = '';
+                    }
+                    e.preventDefault();
+                }
+            });
+
+            // Render DOM tree node
+            function renderDomNode(node, depth = 0) {
+                const indent = depth * 16;
+                const hasChildren = node.children && node.children.length > 0;
+                const isExpanded = depth < 3; // Auto-expand first 3 levels
+
+                let html = `<div class="dom-node ${isExpanded ? 'expanded' : ''}" data-path="${escapeHtml(node.path || '')}">`;
+                html += `<div class="dom-node-line" style="padding-left: ${indent}px">`;
+
+                // Toggle arrow
+                if (hasChildren) {
+                    html += `<span class="dom-toggle ${isExpanded ? 'expanded' : ''}">
+                        <svg viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M9 6l6 6-6 6"/>
+                        </svg>
+                    </span>`;
+                } else {
+                    html += `<span class="dom-toggle hidden"></span>`;
+                }
+
+                // Content
+                html += `<span class="dom-content">`;
+
+                if (node.type === 'element') {
+                    html += `<span class="dom-tag-bracket">&lt;</span>`;
+                    html += `<span class="dom-tag">${escapeHtml(node.tag)}</span>`;
+
+                    // ID attribute
+                    if (node.id) {
+                        html += ` <span class="dom-attr-name">id</span>=<span class="dom-attr-value">"${escapeHtml(node.id)}"</span>`;
+                    }
+
+                    // Class attribute
+                    if (node.classes && node.classes.length > 0) {
+                        html += ` <span class="dom-attr-name">class</span>=<span class="dom-attr-value">"${escapeHtml(node.classes.join(' '))}"</span>`;
+                    }
+
+                    // Other attributes (limit to 2)
+                    if (node.attributes) {
+                        const attrs = Object.entries(node.attributes).slice(0, 2);
+                        for (const [name, value] of attrs) {
+                            if (name !== 'id' && name !== 'class') {
+                                html += ` <span class="dom-attr-name">${escapeHtml(name)}</span>=<span class="dom-attr-value">"${escapeHtml(String(value).substring(0, 50))}"</span>`;
+                            }
+                        }
+                    }
+
+                    html += `<span class="dom-tag-bracket">&gt;</span>`;
+
+                    // Inline text for leaf nodes
+                    if (!hasChildren && node.textContent) {
+                        html += `<span class="dom-text">${escapeHtml(node.textContent.substring(0, 50))}</span>`;
+                        html += `<span class="dom-tag-bracket">&lt;/</span>`;
+                        html += `<span class="dom-tag">${escapeHtml(node.tag)}</span>`;
+                        html += `<span class="dom-tag-bracket">&gt;</span>`;
+                    }
+                } else if (node.type === 'text') {
+                    const text = node.textContent.trim();
+                    if (text) {
+                        html += `<span class="dom-text">"${escapeHtml(text.substring(0, 80))}"</span>`;
+                    }
+                } else if (node.type === 'comment') {
+                    html += `<span class="dom-comment">&lt;!-- ${escapeHtml(node.textContent.substring(0, 50))} --&gt;</span>`;
+                }
+
+                html += `</span></div>`;
+
+                // Children
+                if (hasChildren) {
+                    html += `<div class="dom-children">`;
+                    for (const child of node.children) {
+                        html += renderDomNode(child, depth + 1);
+                    }
+                    // Closing tag
+                    html += `<div class="dom-node-line dom-closing-tag" style="padding-left: ${indent}px">`;
+                    html += `<span class="dom-toggle hidden"></span>`;
+                    html += `<span class="dom-content">`;
+                    html += `<span class="dom-tag-bracket">&lt;/</span>`;
+                    html += `<span class="dom-tag">${escapeHtml(node.tag)}</span>`;
+                    html += `<span class="dom-tag-bracket">&gt;</span>`;
+                    html += `</span></div>`;
+                    html += `</div>`;
+                }
+
+                html += `</div>`;
+                return html;
+            }
+
+            function escapeHtml(text) {
+                if (!text) return '';
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+
+            // Update box model display
+            function updateBoxModel(boxModel) {
+                if (!boxModel) return;
+
+                const setBoxValue = (id, value) => {
+                    const el = document.getElementById(id);
+                    if (el) {
+                        const num = parseFloat(value) || 0;
+                        el.textContent = num;
+                        el.className = 'box-value' + (num === 0 ? ' zero' : '');
+                    }
+                };
+
+                setBoxValue('margin-top', boxModel.marginTop);
+                setBoxValue('margin-right', boxModel.marginRight);
+                setBoxValue('margin-bottom', boxModel.marginBottom);
+                setBoxValue('margin-left', boxModel.marginLeft);
+                setBoxValue('border-top', boxModel.borderTop);
+                setBoxValue('border-right', boxModel.borderRight);
+                setBoxValue('border-bottom', boxModel.borderBottom);
+                setBoxValue('border-left', boxModel.borderLeft);
+                setBoxValue('padding-top', boxModel.paddingTop);
+                setBoxValue('padding-right', boxModel.paddingRight);
+                setBoxValue('padding-bottom', boxModel.paddingBottom);
+                setBoxValue('padding-left', boxModel.paddingLeft);
+
+                const contentSize = document.getElementById('content-size');
+                if (contentSize) {
+                    contentSize.textContent = `${Math.round(boxModel.width || 0)} x ${Math.round(boxModel.height || 0)}`;
+                }
+            }
+
+            // Render computed styles
+            function renderComputedStyles(styles) {
+                const container = document.getElementById('computed-styles');
+                if (!container || !styles) return;
+
+                // Group important styles first
+                const importantProps = [
+                    'display', 'position', 'width', 'height', 'margin', 'padding',
+                    'color', 'background-color', 'font-family', 'font-size', 'font-weight',
+                    'border', 'flex', 'grid', 'opacity', 'z-index'
+                ];
+
+                let html = '';
+                const renderedProps = new Set();
+
+                // Render important properties first
+                for (const prop of importantProps) {
+                    if (styles[prop] !== undefined && styles[prop] !== '') {
+                        html += renderStyleProperty(prop, styles[prop]);
+                        renderedProps.add(prop);
+                    }
+                }
+
+                // Render remaining properties
+                const sortedProps = Object.keys(styles).sort();
+                for (const prop of sortedProps) {
+                    if (!renderedProps.has(prop) && styles[prop] !== '') {
+                        html += renderStyleProperty(prop, styles[prop]);
+                    }
+                }
+
+                container.innerHTML = html || '<div style="color: var(--text-muted); padding: 8px;">No computed styles</div>';
+            }
+
+            function renderStyleProperty(name, value) {
+                let formattedValue = escapeHtml(String(value));
+
+                // Color preview
+                if (name.includes('color') || name === 'background') {
+                    const colorMatch = value.match(/^(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\)|[a-z]+)$/i);
+                    if (colorMatch) {
+                        formattedValue = `<span class="color-preview" style="background: ${escapeHtml(value)}"></span>${formattedValue}`;
+                    }
+                }
+
+                // Number highlighting
+                formattedValue = formattedValue.replace(/(\d+\.?\d*)(px|em|rem|%|vh|vw|deg|s|ms)?/g,
+                    '<span class="number">$1</span><span class="unit">$2</span>');
+
+                return `<div class="style-property">
+                    <span class="style-property-name">${escapeHtml(name)}</span>
+                    <span class="style-property-value">${formattedValue}</span>
+                </div>`;
+            }
+
+            // Event handlers
+            domTreeContainer.addEventListener('click', (e) => {
+                const nodeLine = e.target.closest('.dom-node-line');
+                if (!nodeLine) return;
+
+                const toggle = e.target.closest('.dom-toggle');
+                const node = nodeLine.closest('.dom-node');
+
+                if (toggle && !toggle.classList.contains('hidden')) {
+                    // Toggle expand/collapse
+                    node.classList.toggle('expanded');
+                    toggle.classList.toggle('expanded');
+                } else {
+                    // Select element
+                    const path = node.dataset.path;
+                    if (path) {
+                        selectElement(path);
+                    }
+                }
+            });
+
+            function selectElement(path) {
+                // Update UI selection
+                const allLines = domTreeContainer.querySelectorAll('.dom-node-line');
+                allLines.forEach(line => line.classList.remove('selected'));
+
+                const node = domTreeContainer.querySelector(`[data-path="${CSS.escape(path)}"]`);
+                if (node) {
+                    const line = node.querySelector('.dom-node-line');
+                    if (line) {
+                        line.classList.add('selected');
+                        line.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    }
+                }
+
+                selectedElement = path;
+
+                // Request styles from content
+                window.ipc.postMessage(JSON.stringify({
+                    cmd: 'inspector_select_element',
+                    path: path
+                }));
+            }
+
+            pickerBtn.addEventListener('click', () => {
+                pickerActive = !pickerActive;
+                pickerBtn.classList.toggle('active', pickerActive);
+                window.ipc.postMessage(JSON.stringify({
+                    cmd: pickerActive ? 'inspector_start_picker' : 'inspector_stop_picker'
+                }));
+            });
+
+            refreshBtn.addEventListener('click', () => {
+                window.ipc.postMessage(JSON.stringify({ cmd: 'inspector_refresh' }));
+            });
+
+            closeBtn.addEventListener('click', () => {
+                window.ipc.postMessage(JSON.stringify({ cmd: 'inspector_close' }));
+            });
+
+            searchInput.addEventListener('input', (e) => {
+                const query = e.target.value.toLowerCase();
+                // Simple search - highlight matching nodes
+                const nodes = domTreeContainer.querySelectorAll('.dom-node-line');
+                nodes.forEach(node => {
+                    const text = node.textContent.toLowerCase();
+                    node.classList.toggle('highlighted', query && text.includes(query));
+                });
+            });
+
+            // Keyboard shortcuts
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    if (pickerActive) {
+                        pickerActive = false;
+                        pickerBtn.classList.remove('active');
+                        window.ipc.postMessage(JSON.stringify({ cmd: 'inspector_stop_picker' }));
+                    } else {
+                        window.ipc.postMessage(JSON.stringify({ cmd: 'inspector_close' }));
+                    }
+                }
+            });
+
+            // Public API for Rust to call
+            window.hiwaveInspector = {
+                setDomTree: function(tree) {
+                    domTreeData = tree;
+                    if (tree && tree.children) {
+                        elementsEmpty.style.display = 'none';
+                        domTreeContainer.style.display = 'block';
+                        domTreeContainer.innerHTML = '';
+                        for (const child of tree.children) {
+                            domTreeContainer.innerHTML += renderDomNode(child);
+                        }
+                    } else {
+                        elementsEmpty.style.display = 'flex';
+                        domTreeContainer.style.display = 'none';
+                    }
+                },
+
+                setElementStyles: function(data) {
+                    if (!data) {
+                        stylesEmpty.style.display = 'flex';
+                        stylesContent.style.display = 'none';
+                        elementInfo.style.display = 'none';
+                        return;
+                    }
+
+                    stylesEmpty.style.display = 'none';
+                    stylesContent.style.display = 'block';
+                    elementInfo.style.display = 'block';
+
+                    // Update selector display
+                    document.getElementById('selected-selector').textContent = data.selector || '';
+                    document.getElementById('selected-dimensions').textContent =
+                        data.rect ? `${Math.round(data.rect.width)} x ${Math.round(data.rect.height)}` : '';
+
+                    // Update box model
+                    if (data.boxModel) {
+                        updateBoxModel(data.boxModel);
+                    }
+
+                    // Update computed styles
+                    if (data.computedStyles) {
+                        renderComputedStyles(data.computedStyles);
+                    }
+                },
+
+                highlightElement: function(path) {
+                    const allLines = domTreeContainer.querySelectorAll('.dom-node-line');
+                    allLines.forEach(line => line.classList.remove('highlighted'));
+
+                    if (path) {
+                        const node = domTreeContainer.querySelector(`[data-path="${CSS.escape(path)}"]`);
+                        if (node) {
+                            const line = node.querySelector('.dom-node-line');
+                            if (line) {
+                                line.classList.add('highlighted');
+                            }
+                        }
+                    }
+                },
+
+                setPickerActive: function(active) {
+                    pickerActive = active;
+                    pickerBtn.classList.toggle('active', active);
+                },
+
+                selectElementByPath: function(path) {
+                    selectElement(path);
+                },
+
+                clear: function() {
+                    domTreeData = null;
+                    selectedElement = null;
+                    elementsEmpty.style.display = 'flex';
+                    domTreeContainer.style.display = 'none';
+                    domTreeContainer.innerHTML = '';
+                    stylesEmpty.style.display = 'flex';
+                    stylesContent.style.display = 'none';
+                    elementInfo.style.display = 'none';
+                },
+
+                // Console API
+                addConsoleEntry: function(entry) {
+                    addConsoleEntry(entry);
+                },
+
+                clearConsole: function() {
+                    clearConsole();
+                },
+
+                addConsoleResult: function(result, isError) {
+                    addConsoleEntry({
+                        id: Date.now(),
+                        level: isError ? 'error' : 'result',
+                        message: result,
+                        timestamp: Date.now(),
+                        stack: []
+                    });
+                }
+            };
+
+            // Request initial DOM tree
+            setTimeout(() => {
+                window.ipc.postMessage(JSON.stringify({ cmd: 'inspector_refresh' }));
+            }, 100);
+        })();
+    </script>
+</body>
+</html>
