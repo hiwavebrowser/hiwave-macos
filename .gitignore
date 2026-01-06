@@ -1,4 +1,5 @@
 # Claude Code
+.claude
 .claude/
 .claude/*
 
@@ -32,6 +33,7 @@ nul
 *.local.toml
 
 # AI Orchestrator - local artifacts (ignored)
+.ai
 .ai/artifacts/
 .ai/cache/
 .ai/reports/

@@ -8,6 +8,7 @@ use wry::Rect;
 
 /// Unified content webview type (RustKit + WRY support)
 #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[allow(dead_code)]
 pub enum ContentWebView {
     RustKit(Arc<RustKitView>),
     Wry(Arc<wry::WebView>),
@@ -54,6 +55,7 @@ impl ContentWebViewOps for ContentWebView {
 #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
 impl ContentWebView {
     /// Process events (for RustKit)
+    #[allow(dead_code)]
     pub fn process_events(&self) {
         match self {
             ContentWebView::RustKit(v) => {
@@ -66,6 +68,7 @@ impl ContentWebView {
     }
 
     /// Render (for RustKit)
+    #[allow(dead_code)]
     pub fn render(&self) {
         match self {
             ContentWebView::RustKit(v) => {

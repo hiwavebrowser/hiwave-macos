@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, info, trace};
 
 use rustkit_layout::DisplayCommand;
 use rustkit_renderer::Renderer;

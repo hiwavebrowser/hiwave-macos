@@ -991,7 +991,7 @@ mod tests {
         
         let mut btn1 = AccessibleNode::new(Role::Button);
         btn1.tab_index = Some(2);
-        let id1 = tree.add_node(btn1);
+        let _id1 = tree.add_node(btn1);
         
         let mut btn2 = AccessibleNode::new(Role::Button);
         btn2.tab_index = Some(1);

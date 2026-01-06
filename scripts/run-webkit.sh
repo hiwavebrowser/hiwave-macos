@@ -25,9 +25,6 @@ set -e
 
 cd "$(dirname "$0")/.."
 
-echo "Building HiWave with WebKit fallback..."
-cargo build -p hiwave-app --no-default-features --features webview-fallback "$@"
-
-echo "Running HiWave (WebKit fallback mode)..."
+echo "Building and running HiWave with WebKit fallback..."
 cargo run -p hiwave-app --no-default-features --features webview-fallback "$@"
 

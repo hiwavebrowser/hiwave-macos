@@ -1384,7 +1384,7 @@ mod tests {
             ..Default::default()
         };
 
-        let id = timeline.animate(target, "fade", timing).unwrap();
+        let _id = timeline.animate(target, "fade", timing).unwrap();
         assert_eq!(timeline.animation_count(), 1);
 
         // Tick should be running

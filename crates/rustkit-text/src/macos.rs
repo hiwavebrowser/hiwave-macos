@@ -197,7 +197,7 @@ fn create_font_with_traits(
     // Map CSS font-weight to Core Text weight trait
     // CSS: 100-900, Core Text: -1.0 to 1.0
     // 400 = normal (0.0), 700 = bold (~0.4)
-    let weight_trait = match weight {
+    let _weight_trait = match weight {
         0..=199 => -0.8,      // Thin
         200..=299 => -0.6,    // ExtraLight
         300..=399 => -0.4,    // Light

@@ -3,11 +3,13 @@
 //! This module provides the RustKit engine as the default WebView backend for content rendering.
 //! It wraps `rustkit_engine::Engine` and provides a WRY-like interface.
 
+#![allow(dead_code)]
+
 use super::shield_adapter::create_shield_interceptor_with_counter;
 use super::webview::IWebContent;
 use hiwave_core::{HiWaveError, HiWaveResult};
 use rustkit_engine::{Engine, EngineBuilder, EngineEvent, EngineViewId};
-use rustkit_viewhost::{Bounds, ViewHostTrait, WindowHandle};
+use rustkit_viewhost::Bounds;
 use std::cell::RefCell;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;

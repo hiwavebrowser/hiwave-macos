@@ -20,7 +20,6 @@ pub enum ScreenshotError {
 
 /// Screenshot metadata for test verification.
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScreenshotMetadata {
     /// Width in pixels.
     pub width: u32,
@@ -254,8 +253,8 @@ pub fn compare_images(
 pub fn generate_diff_image(
     expected: &[u8],
     actual: &[u8],
-    width: u32,
-    height: u32,
+    _width: u32,
+    _height: u32,
     tolerance: u8,
 ) -> Vec<u8> {
     let mut diff = Vec::with_capacity(expected.len());

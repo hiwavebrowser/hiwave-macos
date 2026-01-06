@@ -4,14 +4,13 @@
 //! using NSView for rendering surfaces and TAO window handles.
 
 use crate::{Bounds, ViewHostError, ViewId};
-use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
+use raw_window_handle::RawWindowHandle;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 #[cfg(target_os = "macos")]
 use cocoa::{
-    appkit::{NSView, NSWindow},
     base::{id, nil},
 };
 #[cfg(target_os = "macos")]
@@ -20,12 +19,12 @@ use objc::{msg_send, sel, sel_impl};
 /// macOS-specific view state
 #[cfg(target_os = "macos")]
 struct MacOSViewState {
-    id: ViewId,
+    _id: ViewId,
     view: id, // NSView
     bounds: Bounds,
     dpi: u32,
     visible: bool,
-    focused: bool,
+    _focused: bool,
 }
 
 /// macOS ViewHost implementation
@@ -70,7 +69,7 @@ impl MacOSViewHost {
         // We need to get the window from the view
         let ns_view = match window_handle {
             RawWindowHandle::AppKit(handle) => {
-                unsafe { handle.ns_view.as_ptr() as id }
+                handle.ns_view.as_ptr() as id
             }
             _ => {
                 return Err(ViewHostError::InvalidParent);
@@ -142,12 +141,12 @@ impl MacOSViewHost {
         };
 
         let state = Arc::new(Mutex::new(MacOSViewState {
-            id: view_id,
+            _id: view_id,
             view,
             bounds,
             dpi,
             visible: true,
-            focused: false,
+            _focused: false,
         }));
 
         {
@@ -210,7 +209,7 @@ impl MacOSViewHost {
         use std::ptr::NonNull;
         let handle = RawWindowHandle::AppKit(
             raw_window_handle::AppKitWindowHandle::new(
-                NonNull::new(unsafe { view as *mut std::ffi::c_void })
+                NonNull::new(view as *mut std::ffi::c_void)
                     .expect("View pointer is null")
             )
         );

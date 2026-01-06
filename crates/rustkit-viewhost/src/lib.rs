@@ -29,7 +29,7 @@ pub use macos::MacOSViewHost;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use thiserror::Error;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 #[cfg(windows)]
 use rustkit_core::{
@@ -39,7 +39,6 @@ use rustkit_core::{
 
 #[cfg(target_os = "macos")]
 use cocoa::{
-    appkit::NSView,
     base::{id, nil},
 };
 #[cfg(target_os = "macos")]
@@ -639,8 +638,6 @@ impl ViewHost {
         parent: WindowHandle,
         initial_bounds: Bounds,
     ) -> Result<ViewId, ViewHostError> {
-        use raw_window_handle::HasRawWindowHandle;
-
         let view_id = ViewId::new();
         debug!(?view_id, ?initial_bounds, "Creating macOS view");
 
@@ -653,7 +650,7 @@ impl ViewHost {
         };
 
         // In raw-window-handle 0.6, AppKitHandle contains ns_view
-        let ns_view = unsafe { raw_handle.ns_view.as_ptr() as id };
+        let ns_view = raw_handle.ns_view.as_ptr() as id;
         if ns_view == nil {
             return Err(ViewHostError::InvalidParent);
         }
@@ -892,6 +889,7 @@ impl ViewHost {
 
         if let Some(state) = state {
             let state_lock = state.lock().unwrap();
+            #[cfg(windows)]
             let hwnd_raw = state_lock.hwnd_raw;
             drop(state_lock);
 
@@ -1476,7 +1474,7 @@ impl ViewHostTrait for ViewHost {
         // AppKitWindowHandle::new() expects NonNull<c_void>
         let handle = RawWindowHandle::AppKit(
             AppKitWindowHandle::new(
-                NonNull::new(unsafe { view as *mut std::ffi::c_void })
+                NonNull::new(view as *mut std::ffi::c_void)
                     .expect("View pointer is null")
             )
         );

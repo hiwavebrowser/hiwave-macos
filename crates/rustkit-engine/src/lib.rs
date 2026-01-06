@@ -2341,7 +2341,7 @@ fn parse_radial_gradient(value: &str) -> Option<rustkit_css::Gradient> {
     }
     
     let mut shape = rustkit_css::RadialShape::Ellipse;
-    let mut size = rustkit_css::RadialSize::FarthestCorner;
+    let size = rustkit_css::RadialSize::FarthestCorner;
     let mut center = (0.5, 0.5);
     let mut stops_start = 0;
     

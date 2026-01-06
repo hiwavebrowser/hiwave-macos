@@ -20,9 +20,6 @@ set -e
 
 cd "$(dirname "$0")/.."
 
-echo "Building HiWave with RustKit engine..."
-cargo build -p hiwave-app --features rustkit "$@"
-
-echo "Running HiWave (RustKit mode)..."
+echo "Building and running HiWave with RustKit engine..."
 cargo run -p hiwave-app --features rustkit "$@"
 

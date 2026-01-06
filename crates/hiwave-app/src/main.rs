@@ -57,7 +57,6 @@ use content_webview_enum::ContentWebView as UnifiedContentWebView;
 
 use ipc::{IpcMessage, JS_BRIDGE};
 use state::AppState;
-use hiwave_shield::ResourceType;
 
 /// The HTML content for the browser chrome
 const CHROME_HTML: &str = include_str!("ui/chrome.html");
@@ -1073,21 +1072,21 @@ fn main() {
     );
 
     // === CONTENT WEBVIEW (created second, below chrome) ===
-    let content_proxy = proxy.clone();
-    let content_proxy2 = proxy.clone();
-    let content_proxy3 = proxy.clone();
-    let content_proxy4 = proxy.clone();
+    let _content_proxy = proxy.clone();
+    let _content_proxy2 = proxy.clone();
+    let _content_proxy3 = proxy.clone();
+    let _content_proxy4 = proxy.clone();
     let content_proxy5 = proxy.clone();
-    let content_proxy_new_window = proxy.clone();
-    let content_proxy_downloads = proxy.clone();
-    let content_proxy_downloads_complete = proxy.clone();
-    let content_proxy_history = proxy.clone();
-    let content_proxy_ipc = proxy.clone();
-    let content_state = Arc::clone(&state);
-    let content_state2 = Arc::clone(&state);
-    let content_state_ipc = Arc::clone(&state);
-    let content_state_download_start = Arc::clone(&state);
-    let content_state_download_complete = Arc::clone(&state);
+    let _content_proxy_new_window = proxy.clone();
+    let _content_proxy_downloads = proxy.clone();
+    let _content_proxy_downloads_complete = proxy.clone();
+    let _content_proxy_history = proxy.clone();
+    let _content_proxy_ipc = proxy.clone();
+    let _content_state = Arc::clone(&state);
+    let _content_state2 = Arc::clone(&state);
+    let _content_state_ipc = Arc::clone(&state);
+    let _content_state_download_start = Arc::clone(&state);
+    let _content_state_download_complete = Arc::clone(&state);
     let initial_url = {
         let s = state.lock().unwrap();
         s.shell

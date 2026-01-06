@@ -760,6 +760,7 @@ mod tests {
     use crate::BoxType;
     use rustkit_css::{ComputedStyle, GridTemplateAreas};
 
+    #[allow(dead_code)]
     fn create_test_container() -> LayoutBox {
         let mut style = ComputedStyle::new();
         style.display = Display::Grid;
@@ -863,7 +864,7 @@ mod tests {
             TrackSize::Auto,
         ]);
 
-        let mut grid = GridLayout::new(
+        let grid = GridLayout::new(
             &template_cols,
             &template_rows,
             &TrackSize::Auto,

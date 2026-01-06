@@ -5,16 +5,16 @@
 //!
 //! Note: Currently feature-flagged for gradual rollout.
 
+#![allow(dead_code)]
+
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
 use hiwave_core::{HiWaveError, HiWaveResult};
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
 use rustkit_engine::{Engine, EngineBuilder, EngineEvent, EngineViewId};
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
-use rustkit_viewhost::{Bounds, ViewHostTrait, WindowHandle};
+use rustkit_viewhost::Bounds;
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
 use std::cell::RefCell;
-#[cfg(all(target_os = "macos", feature = "rustkit"))]
-use std::sync::Arc;
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
 use tao::rwh_06::HasWindowHandle;
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
@@ -25,8 +25,6 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
 use wry::Rect;
-#[cfg(all(target_os = "macos", feature = "rustkit"))]
-use wry::dpi::LogicalPosition;
 
 /// The HTML content for the RustKit-rendered browser chrome
 #[cfg(all(target_os = "macos", feature = "rustkit"))]

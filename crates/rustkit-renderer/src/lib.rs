@@ -43,7 +43,7 @@
 use bytemuck::{Pod, Zeroable};
 use hashbrown::HashMap;
 use rustkit_css::Color;
-use rustkit_layout::{BorderRadius, DisplayCommand, Rect};
+use rustkit_layout::{DisplayCommand, Rect};
 use std::sync::Arc;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
@@ -313,7 +313,7 @@ pub struct Renderer {
     glyph_cache: GlyphCache,
 
     // Texture bind group layout (for sharing)
-    texture_bind_group_layout: wgpu::BindGroupLayout,
+    _texture_bind_group_layout: wgpu::BindGroupLayout,
 }
 
 /// A stacking context for z-ordering.
@@ -424,7 +424,7 @@ impl Renderer {
             stacking_contexts: Vec::new(),
             texture_cache,
             glyph_cache,
-            texture_bind_group_layout,
+            _texture_bind_group_layout: texture_bind_group_layout,
         })
     }
 

@@ -153,6 +153,7 @@ impl UserBlocklist {
     }
 
     /// Check if a URL should be blocked based on its domain
+    #[allow(dead_code)]
     pub fn should_block(&self, url: &str) -> bool {
         if let Ok(parsed) = Url::parse(url) {
             if let Some(host) = parsed.host_str() {
@@ -574,6 +575,7 @@ pub struct AppState {
 
     /// Recent popup requests for flood protection (URL, timestamp)
     /// This is runtime-only state, not persisted
+    #[allow(dead_code)]
     pub recent_popups: Vec<(String, Instant)>,
 
     /// Zoom levels per tab (tab_id -> zoom_level, default 1.0)
@@ -919,6 +921,7 @@ impl AppState {
 
     /// Check if a popup request should be allowed (flood protection)
     /// Returns true if allowed, false if blocked due to flood
+    #[allow(dead_code)]
     pub fn should_allow_popup(&mut self, url: &str) -> bool {
         use std::time::Duration;
 
@@ -1100,12 +1103,14 @@ impl AppState {
         }
     }
 
+    #[allow(dead_code)]
     pub fn prepare_download_path(&self, url: &str) -> PathBuf {
         self.ensure_download_dir();
         let file_name = Self::suggested_download_name(url, self.next_download_id);
         Self::unique_file_path(&self.config.download_dir, &file_name)
     }
 
+    #[allow(dead_code)]
     pub fn register_download(&mut self, url: &str, target_path: &Path) {
         let id = self.next_download_id;
         self.next_download_id = self.next_download_id.saturating_add(1);
@@ -1126,6 +1131,7 @@ impl AppState {
         });
     }
 
+    #[allow(dead_code)]
     pub fn finalize_download(&mut self, url: &str, saved_path: Option<PathBuf>, success: bool) {
         // Convert saved_path to string for comparison
         let saved_path_str = saved_path
@@ -1284,6 +1290,7 @@ impl AppState {
         self.save_visit_history()
     }
 
+    #[allow(dead_code)]
     fn suggested_download_name(url: &str, idx: u64) -> String {
         if let Ok(parsed) = Url::parse(url) {
             if let Some(name) = parsed
@@ -1299,6 +1306,7 @@ impl AppState {
         format!("download-{}", idx)
     }
 
+    #[allow(dead_code)]
     fn unique_file_path(dir: &Path, file_name: &str) -> PathBuf {
         let mut candidate = dir.join(file_name);
         if !candidate.exists() {

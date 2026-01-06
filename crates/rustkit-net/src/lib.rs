@@ -21,7 +21,7 @@ use mime::Mime;
 use rustkit_http::Client as HttpClient;
 use thiserror::Error;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 use url::Url;
 
 pub mod download;

@@ -17,9 +17,11 @@ use rustkit_css::{
     TextTransform, WhiteSpace,
 };
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use thiserror::Error;
 
+#[cfg(windows)]
+use std::sync::Arc;
 #[cfg(windows)]
 use rustkit_text::{FontCollection as RkFontCollection, FontStretch as RkFontStretch, FontStyle as RkFontStyle, FontWeight as RkFontWeight};
 
@@ -394,7 +396,7 @@ pub struct FontCache {
     #[cfg(windows)]
     fonts: RwLock<HashMap<FontKey, Arc<FontCacheEntry>>>,
     #[cfg(not(windows))]
-    fonts: RwLock<HashMap<FontKey, ()>>,
+    _fonts: RwLock<HashMap<FontKey, ()>>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
