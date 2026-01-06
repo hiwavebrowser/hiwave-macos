@@ -594,8 +594,15 @@ impl Engine {
             view.bindings = Some(bindings);
         }
 
-        // Layout and render
+        // Initial layout and render
         self.relayout(id)?;
+        
+        // Load external resources (stylesheets, images)
+        // This will trigger additional relayouts as resources arrive
+        if let Err(e) = self.load_subresources(id).await {
+            warn!(?e, "Failed to load some subresources");
+            // Continue even if some resources fail to load
+        }
 
         // Finish navigation
         let view = self.views.get_mut(&id).unwrap();
