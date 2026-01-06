@@ -1160,9 +1160,23 @@ impl Engine {
         let mut matching_rules: Vec<(&Rule, (usize, usize, usize), usize)> = Vec::new();
         let mut rule_index = 0;
         
+        // For now, we don't track siblings during style computation
+        // TODO: Pass sibling info from build_layout_from_node_with_styles
+        let empty_siblings: Vec<(String, Vec<String>, Option<String>)> = Vec::new();
+        let element_index = 0;
+        let sibling_count = 1;
+        
         for stylesheet in stylesheets {
             for rule in &stylesheet.rules {
-                if self.selector_matches(&rule.selector, tag_name, attributes, ancestors) {
+                if self.selector_matches(
+                    &rule.selector,
+                    tag_name,
+                    attributes,
+                    ancestors,
+                    &empty_siblings,
+                    element_index,
+                    sibling_count,
+                ) {
                     let specificity = self.selector_specificity(&rule.selector);
                     matching_rules.push((rule, specificity, rule_index));
                 }
@@ -1220,12 +1234,41 @@ impl Engine {
 
     /// Apply a single CSS property to a computed style.
     fn apply_style_property(&self, style: &mut ComputedStyle, property: &str, value: &str) {
+        let value = value.trim();
+        
+        // Handle CSS-wide keywords
+        // inherit: use the computed value from the parent (already handled by inherit_from)
+        // initial: use the property's initial value
+        // unset: for inherited properties, acts like inherit; for non-inherited, acts like initial
+        match value {
+            "inherit" => {
+                // Skip - the property will keep its inherited value
+                return;
+            }
+            "initial" => {
+                // Reset to initial value based on property
+                self.apply_initial_value(style, property);
+                return;
+            }
+            "unset" => {
+                // For inherited properties (color, font-*), skip (keeps inherited value)
+                // For non-inherited properties, apply initial
+                if is_inherited_property(property) {
+                    return;
+                } else {
+                    self.apply_initial_value(style, property);
+                    return;
+                }
+            }
+            _ => {}
+        }
+        
         match property {
-                    "color" => {
-                        if let Some(color) = parse_color(value) {
-                            style.color = color;
-                        }
-                    }
+            "color" => {
+                if let Some(color) = parse_color(value) {
+                    style.color = color;
+                }
+            }
                     "background-color" | "background" | "background-image" => {
                         debug!(value = value, "Applying background");
                         // Check for gradient first
@@ -1275,14 +1318,15 @@ impl Engine {
                     }
                 }
             }
-                    "margin" => {
-                        if let Some(length) = parse_length(value) {
-                            style.margin_top = length;
-                            style.margin_right = length;
-                            style.margin_bottom = length;
-                            style.margin_left = length;
-                        }
-                    }
+            "margin" => {
+                // Shorthand: margin can have 1-4 values
+                if let Some((t, r, b, l)) = parse_shorthand_4(value) {
+                    style.margin_top = t;
+                    style.margin_right = r;
+                    style.margin_bottom = b;
+                    style.margin_left = l;
+                }
+            }
             "margin-top" => {
                 if let Some(length) = parse_length(value) {
                     style.margin_top = length;
@@ -1300,17 +1344,18 @@ impl Engine {
             }
             "margin-left" => {
                 if let Some(length) = parse_length(value) {
-                            style.margin_left = length;
-                        }
-                    }
-                    "padding" => {
-                        if let Some(length) = parse_length(value) {
-                            style.padding_top = length;
-                            style.padding_right = length;
-                            style.padding_bottom = length;
-                            style.padding_left = length;
-                        }
-                    }
+                    style.margin_left = length;
+                }
+            }
+            "padding" => {
+                // Shorthand: padding can have 1-4 values
+                if let Some((t, r, b, l)) = parse_shorthand_4(value) {
+                    style.padding_top = t;
+                    style.padding_right = r;
+                    style.padding_bottom = b;
+                    style.padding_left = l;
+                }
+            }
             "padding-top" => {
                 if let Some(length) = parse_length(value) {
                     style.padding_top = length;
@@ -1522,6 +1567,38 @@ impl Engine {
             }
             _ => {
                 // Unknown property, ignore
+            }
+        }
+    }
+    
+    /// Apply the initial (default) value for a CSS property.
+    fn apply_initial_value(&self, style: &mut ComputedStyle, property: &str) {
+        match property {
+            "color" => style.color = rustkit_css::Color::BLACK,
+            "background-color" => style.background_color = rustkit_css::Color::TRANSPARENT,
+            "font-size" => style.font_size = rustkit_css::Length::Px(16.0),
+            "font-weight" => style.font_weight = rustkit_css::FontWeight::NORMAL,
+            "font-style" => style.font_style = rustkit_css::FontStyle::Normal,
+            "font-family" => style.font_family = String::new(),
+            "line-height" => style.line_height = 1.2,
+            "margin" | "margin-top" => style.margin_top = rustkit_css::Length::Zero,
+            "margin-right" => style.margin_right = rustkit_css::Length::Zero,
+            "margin-bottom" => style.margin_bottom = rustkit_css::Length::Zero,
+            "margin-left" => style.margin_left = rustkit_css::Length::Zero,
+            "padding" | "padding-top" => style.padding_top = rustkit_css::Length::Zero,
+            "padding-right" => style.padding_right = rustkit_css::Length::Zero,
+            "padding-bottom" => style.padding_bottom = rustkit_css::Length::Zero,
+            "padding-left" => style.padding_left = rustkit_css::Length::Zero,
+            "border-width" | "border-top-width" => style.border_top_width = rustkit_css::Length::Zero,
+            "border-right-width" => style.border_right_width = rustkit_css::Length::Zero,
+            "border-bottom-width" => style.border_bottom_width = rustkit_css::Length::Zero,
+            "border-left-width" => style.border_left_width = rustkit_css::Length::Zero,
+            "width" => style.width = rustkit_css::Length::Auto,
+            "height" => style.height = rustkit_css::Length::Auto,
+            "display" => style.display = rustkit_css::Display::Block,
+            "opacity" => style.opacity = 1.0,
+            _ => {
+                // Unknown property, do nothing
             }
         }
     }
@@ -1799,44 +1876,220 @@ impl Engine {
     }
 
     /// Check if a selector matches an element.
-    fn selector_matches(&self, selector: &str, tag_name: &str, attributes: &HashMap<String, String>, ancestors: &[String]) -> bool {
+    /// 
+    /// `ancestors` is a list of (tag_name, classes, id) tuples from parent to root.
+    /// `siblings_before` is a list of (tag_name, classes, id) tuples for preceding siblings.
+    /// `element_index` is the 0-based index of this element among its siblings.
+    /// `sibling_count` is the total number of siblings.
+    fn selector_matches(
+        &self,
+        selector: &str,
+        tag_name: &str,
+        attributes: &HashMap<String, String>,
+        ancestors: &[String],
+        siblings_before: &[(String, Vec<String>, Option<String>)],
+        element_index: usize,
+        sibling_count: usize,
+    ) -> bool {
         let selector = selector.trim();
         
         // Handle multiple selectors (comma-separated)
         if selector.contains(',') {
             return selector.split(',')
-                .any(|s| self.selector_matches(s.trim(), tag_name, attributes, ancestors));
+                .any(|s| self.selector_matches(
+                    s.trim(), tag_name, attributes, ancestors,
+                    siblings_before, element_index, sibling_count
+                ));
         }
         
-        // Handle descendant combinator (space-separated)
-        if selector.contains(' ') {
-            let parts: Vec<&str> = selector.split_whitespace().collect();
-            if let Some((last, ancestor_selectors)) = parts.split_last() {
-                // Last part must match current element
-                if !self.simple_selector_matches(last, tag_name, attributes) {
-                    return false;
-                }
-                // Ancestor selectors must match some ancestor (in order)
-                let mut ancestor_idx = 0;
-                for sel in ancestor_selectors {
-                    while ancestor_idx < ancestors.len() {
-                        if self.simple_selector_matches_tag_only(sel, &ancestors[ancestor_idx]) {
-                            ancestor_idx += 1;
+        // Tokenize selector into parts and combinators
+        let tokens = self.tokenize_selector(selector);
+        
+        if tokens.is_empty() {
+            return false;
+        }
+        
+        // The last token must match the current element
+        let last_token = &tokens[tokens.len() - 1];
+        if !last_token.1.is_empty() {
+            // There's a combinator before this - we need to handle it
+            return false; // Simplified - we'll handle this below
+        }
+        
+        if !self.simple_selector_matches_with_pseudo(
+            &last_token.0, tag_name, attributes, element_index, sibling_count
+        ) {
+            return false;
+        }
+        
+        // If there's only one token, we're done
+        if tokens.len() == 1 {
+            return true;
+        }
+        
+        // Handle combinators by walking backwards through tokens
+        let current_ancestors = ancestors;
+        let current_siblings = siblings_before;
+        
+        for i in (0..tokens.len() - 1).rev() {
+            let (sel_part, combinator) = &tokens[i];
+            
+            match combinator.as_str() {
+                " " => {
+                    // Descendant combinator: some ancestor must match
+                    let mut found = false;
+                    for ancestor in current_ancestors {
+                        if self.simple_selector_matches_tag_only(sel_part, ancestor) {
+                            found = true;
                             break;
                         }
-                        ancestor_idx += 1;
+                    }
+                    if !found {
+                        return false;
                     }
                 }
-                return true; // Simplified - just check if element matches
+                ">" => {
+                    // Child combinator: immediate parent must match
+                    if let Some(parent) = current_ancestors.first() {
+                        if !self.simple_selector_matches_tag_only(sel_part, parent) {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+                "+" => {
+                    // Adjacent sibling combinator: immediate previous sibling must match
+                    if let Some((prev_tag, _prev_classes, _prev_id)) = current_siblings.last() {
+                        if !self.simple_selector_matches_tag_only(sel_part, prev_tag) {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+                "~" => {
+                    // General sibling combinator: any previous sibling must match
+                    let mut found = false;
+                    for (sib_tag, _sib_classes, _sib_id) in current_siblings {
+                        if self.simple_selector_matches_tag_only(sel_part, sib_tag) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        return false;
+                    }
+                }
+                _ => {
+                    // Unknown combinator, skip
+                }
             }
         }
         
-        // Simple selector (no combinators)
-        self.simple_selector_matches(selector, tag_name, attributes)
+        true
+    }
+    
+    /// Tokenize a selector into (simple_selector, combinator) pairs.
+    /// The combinator is the one that follows this selector part.
+    fn tokenize_selector(&self, selector: &str) -> Vec<(String, String)> {
+        let mut tokens = Vec::new();
+        let mut current = String::new();
+        let mut chars = selector.chars().peekable();
+        let mut in_brackets = false;
+        let mut in_quotes = false;
+        let mut quote_char = ' ';
+        
+        while let Some(c) = chars.next() {
+            if in_quotes {
+                current.push(c);
+                if c == quote_char {
+                    in_quotes = false;
+                }
+                continue;
+            }
+            
+            if c == '"' || c == '\'' {
+                in_quotes = true;
+                quote_char = c;
+                current.push(c);
+                continue;
+            }
+            
+            if c == '[' {
+                in_brackets = true;
+                current.push(c);
+                continue;
+            }
+            
+            if c == ']' {
+                in_brackets = false;
+                current.push(c);
+                continue;
+            }
+            
+            if in_brackets {
+                current.push(c);
+                continue;
+            }
+            
+            // Check for combinators
+            if c == '>' || c == '+' || c == '~' {
+                if !current.trim().is_empty() {
+                    tokens.push((current.trim().to_string(), c.to_string()));
+                    current = String::new();
+                }
+                continue;
+            }
+            
+            if c.is_whitespace() {
+                // Could be a descendant combinator or just whitespace around other combinators
+                if !current.trim().is_empty() {
+                    // Peek ahead to see if there's a combinator
+                    while chars.peek().map(|c| c.is_whitespace()).unwrap_or(false) {
+                        chars.next();
+                    }
+                    
+                    if let Some(&next) = chars.peek() {
+                        if next == '>' || next == '+' || next == '~' {
+                            // The combinator will be handled in the next iteration
+                            tokens.push((current.trim().to_string(), " ".to_string()));
+                            current = String::new();
+                        } else if next.is_alphanumeric() || next == '.' || next == '#' || next == '[' || next == ':' || next == '*' {
+                            // Descendant combinator
+                            tokens.push((current.trim().to_string(), " ".to_string()));
+                            current = String::new();
+                        }
+                    }
+                }
+                continue;
+            }
+            
+            current.push(c);
+        }
+        
+        // Add the last token with empty combinator
+        if !current.trim().is_empty() {
+            tokens.push((current.trim().to_string(), String::new()));
+        }
+        
+        tokens
     }
 
-    /// Check if a simple selector matches an element.
+    /// Check if a simple selector matches an element (without pseudo-class context).
     fn simple_selector_matches(&self, selector: &str, tag_name: &str, attributes: &HashMap<String, String>) -> bool {
+        self.simple_selector_matches_with_pseudo(selector, tag_name, attributes, 0, 1)
+    }
+    
+    /// Check if a simple selector matches an element with pseudo-class context.
+    fn simple_selector_matches_with_pseudo(
+        &self,
+        selector: &str,
+        tag_name: &str,
+        attributes: &HashMap<String, String>,
+        element_index: usize,
+        sibling_count: usize,
+    ) -> bool {
         // Universal selector
         if selector == "*" {
             return true;
@@ -1856,8 +2109,8 @@ impl Engine {
         }
         
         // Class selector: .class (can be chained: .a.b)
-        if selector.starts_with('.') {
-            let classes: Vec<&str> = selector[1..].split('.').collect();
+        if selector.starts_with('.') && !selector.contains(|c| c == '#' || c == '[' || c == ':') {
+            let classes: Vec<&str> = selector[1..].split('.').filter(|s| !s.is_empty()).collect();
             if let Some(el_class) = attributes.get("class") {
                 let el_classes: Vec<&str> = el_class.split_whitespace().collect();
                 return classes.iter().all(|c| el_classes.contains(c));
@@ -1866,7 +2119,7 @@ impl Engine {
         }
         
         // Type selector (element name)
-        // May have class or ID attached: div.class or div#id
+        // May have class, ID, attribute, or pseudo-class attached: div.class or div#id or div[attr] or div:first-child
         let mut remaining = selector;
         
         // Extract tag part
@@ -1880,7 +2133,7 @@ impl Engine {
             return false;
         }
         
-        // Check remaining parts (classes, IDs)
+        // Check remaining parts (classes, IDs, attributes, pseudo-classes)
         while !remaining.is_empty() {
             if let Some(rest) = remaining.strip_prefix('.') {
                 // Class
@@ -1907,43 +2160,22 @@ impl Engine {
                     return false;
                 }
             } else if let Some(rest) = remaining.strip_prefix('[') {
-                // Attribute selector: [attr], [attr=value], [attr="value"]
+                // Attribute selector with operators
                 let bracket_end = rest.find(']').unwrap_or(rest.len());
                 let attr_selector = &rest[..bracket_end];
                 remaining = if bracket_end < rest.len() { &rest[bracket_end + 1..] } else { "" };
                 
-                // Parse attribute selector
-                if let Some(eq_pos) = attr_selector.find('=') {
-                    let attr_name = attr_selector[..eq_pos].trim();
-                    let mut attr_value = attr_selector[eq_pos + 1..].trim();
-                    
-                    // Remove quotes if present
-                    if (attr_value.starts_with('"') && attr_value.ends_with('"')) ||
-                       (attr_value.starts_with('\'') && attr_value.ends_with('\'')) {
-                        attr_value = &attr_value[1..attr_value.len() - 1];
-                    }
-                    
-                    // Check if attribute matches value
-                    if let Some(el_attr) = attributes.get(attr_name) {
-                        if el_attr != attr_value {
-                            return false;
-                        }
-                    } else {
-                        return false;
-                    }
-                } else {
-                    // Just [attr] - check presence
-                    let attr_name = attr_selector.trim();
-                    if !attributes.contains_key(attr_name) {
-                        return false;
-                    }
+                if !self.match_attribute_selector(attr_selector, attributes) {
+                    return false;
                 }
-            } else if remaining.starts_with(':') {
-                // Pseudo-class - skip for now
-                let pseudo_end = remaining[1..].find(|c| c == '.' || c == '#' || c == ':' || c == '[')
-                    .map(|i| i + 1)
-                    .unwrap_or(remaining.len());
-                remaining = &remaining[pseudo_end..];
+            } else if let Some(rest) = remaining.strip_prefix(':') {
+                // Pseudo-class
+                let (pseudo_name, pseudo_arg, consumed) = self.parse_pseudo_class(rest);
+                remaining = &rest[consumed..];
+                
+                if !self.match_pseudo_class(&pseudo_name, pseudo_arg.as_deref(), element_index, sibling_count, attributes) {
+                    return false;
+                }
             } else {
                 // Unknown, skip
                 break;
@@ -1951,6 +2183,181 @@ impl Engine {
         }
         
         true
+    }
+    
+    /// Match an attribute selector with operators.
+    fn match_attribute_selector(&self, attr_selector: &str, attributes: &HashMap<String, String>) -> bool {
+        // Determine the operator
+        let operators = ["~=", "|=", "^=", "$=", "*=", "="];
+        
+        for op in &operators {
+            if let Some(pos) = attr_selector.find(op) {
+                let attr_name = attr_selector[..pos].trim();
+                let mut attr_value = attr_selector[pos + op.len()..].trim();
+                
+                // Remove quotes if present
+                if (attr_value.starts_with('"') && attr_value.ends_with('"')) ||
+                   (attr_value.starts_with('\'') && attr_value.ends_with('\'')) {
+                    attr_value = &attr_value[1..attr_value.len() - 1];
+                }
+                
+                if let Some(el_attr) = attributes.get(attr_name) {
+                    return match *op {
+                        "=" => el_attr == attr_value,
+                        "~=" => el_attr.split_whitespace().any(|w| w == attr_value),
+                        "|=" => el_attr == attr_value || el_attr.starts_with(&format!("{}-", attr_value)),
+                        "^=" => el_attr.starts_with(attr_value),
+                        "$=" => el_attr.ends_with(attr_value),
+                        "*=" => el_attr.contains(attr_value),
+                        _ => false,
+                    };
+                } else {
+                    return false;
+                }
+            }
+        }
+        
+        // Just [attr] - check presence
+        let attr_name = attr_selector.trim();
+        attributes.contains_key(attr_name)
+    }
+    
+    /// Parse a pseudo-class, returning (name, optional_arg, chars_consumed).
+    fn parse_pseudo_class(&self, rest: &str) -> (String, Option<String>, usize) {
+        // Handle :not(...) and :nth-child(...) with parentheses
+        let name_end = rest.find(|c: char| !c.is_alphanumeric() && c != '-')
+            .unwrap_or(rest.len());
+        let name = rest[..name_end].to_string();
+        
+        if rest[name_end..].starts_with('(') {
+            // Find matching closing paren
+            let paren_start = name_end + 1;
+            let mut depth = 1;
+            let mut paren_end = paren_start;
+            for (i, c) in rest[paren_start..].chars().enumerate() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            paren_end = paren_start + i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let arg = rest[paren_start..paren_end].to_string();
+            (name, Some(arg), paren_end + 1)
+        } else {
+            (name, None, name_end)
+        }
+    }
+    
+    /// Match a pseudo-class.
+    fn match_pseudo_class(
+        &self,
+        name: &str,
+        arg: Option<&str>,
+        element_index: usize,
+        sibling_count: usize,
+        attributes: &HashMap<String, String>,
+    ) -> bool {
+        match name {
+            "first-child" => element_index == 0,
+            "last-child" => element_index == sibling_count.saturating_sub(1),
+            "only-child" => sibling_count == 1,
+            "nth-child" => {
+                if let Some(arg) = arg {
+                    self.match_nth(arg, element_index + 1) // nth-child is 1-indexed
+                } else {
+                    false
+                }
+            }
+            "nth-last-child" => {
+                if let Some(arg) = arg {
+                    let from_end = sibling_count - element_index;
+                    self.match_nth(arg, from_end)
+                } else {
+                    false
+                }
+            }
+            "not" => {
+                if let Some(arg) = arg {
+                    // :not() negates the inner selector
+                    // For simplicity, we only support simple selectors inside :not()
+                    !self.simple_selector_matches(arg, "", attributes)
+                } else {
+                    true
+                }
+            }
+            "hover" | "focus" | "active" | "visited" => {
+                // Dynamic pseudo-classes - always false in static rendering
+                false
+            }
+            "disabled" => attributes.contains_key("disabled"),
+            "enabled" => !attributes.contains_key("disabled"),
+            "checked" => attributes.contains_key("checked"),
+            "empty" => false, // Would need DOM context
+            "root" => false, // Handled separately
+            _ => true, // Unknown pseudo-classes pass through
+        }
+    }
+    
+    /// Match an nth-child expression like "2n+1", "odd", "even", or a number.
+    fn match_nth(&self, expr: &str, n: usize) -> bool {
+        let expr = expr.trim().to_lowercase();
+        
+        if expr == "odd" {
+            return n % 2 == 1;
+        }
+        if expr == "even" {
+            return n % 2 == 0;
+        }
+        
+        // Try parsing as a simple number
+        if let Ok(num) = expr.parse::<usize>() {
+            return n == num;
+        }
+        
+        // Parse An+B formula
+        // Examples: 2n, 2n+1, -n+3, n+2
+        let mut a = 0i32;
+        let mut b = 0i32;
+        
+        if let Some(n_pos) = expr.find('n') {
+            let a_part = &expr[..n_pos].trim();
+            a = if a_part.is_empty() || *a_part == "+" {
+                1
+            } else if *a_part == "-" {
+                -1
+            } else {
+                a_part.parse().unwrap_or(0)
+            };
+            
+            let b_part = expr[n_pos + 1..].trim();
+            if !b_part.is_empty() {
+                b = b_part.replace('+', "").trim().parse().unwrap_or(0);
+            }
+        } else {
+            // Just a number
+            b = expr.parse().unwrap_or(0);
+        }
+        
+        // Check if n matches An+B for some non-negative integer
+        let n = n as i32;
+        if a == 0 {
+            return n == b;
+        }
+        
+        // n = a*k + b for some k >= 0
+        // k = (n - b) / a
+        let diff = n - b;
+        if a > 0 {
+            diff >= 0 && diff % a == 0
+        } else {
+            diff <= 0 && diff % a == 0
+        }
     }
 
     /// Simplified selector match for ancestor checking (only checks tag and class).
@@ -2948,6 +3355,11 @@ fn parse_length(value: &str) -> Option<rustkit_css::Length> {
             rustkit_css::Length::Zero
         });
     }
+    
+    // Handle calc() expressions (simplified)
+    if value.starts_with("calc(") && value.ends_with(')') {
+        return parse_calc(value);
+    }
 
     if value.ends_with("px") {
         let num: f32 = value.trim_end_matches("px").trim().parse().ok()?;
@@ -2976,6 +3388,118 @@ fn parse_length(value: &str) -> Option<rustkit_css::Length> {
     }
 
     None
+}
+
+/// Parse a calc() expression (simplified - only handles basic patterns).
+/// Supports: calc(100% - 20px), calc(50% + 10px), etc.
+fn parse_calc(value: &str) -> Option<rustkit_css::Length> {
+    let inner = value.strip_prefix("calc(")?.strip_suffix(')')?;
+    let inner = inner.trim();
+    
+    // Look for + or - operator (not at the start, and not inside a number like -20px)
+    let mut op_idx = None;
+    let mut op_char = '+';
+    let chars: Vec<char> = inner.chars().collect();
+    
+    for (i, &c) in chars.iter().enumerate() {
+        if i == 0 {
+            continue;
+        }
+        if (c == '+' || c == '-') && chars.get(i.saturating_sub(1)).map(|&prev| prev.is_whitespace()).unwrap_or(false) {
+            op_idx = Some(i);
+            op_char = c;
+            break;
+        }
+    }
+    
+    if let Some(idx) = op_idx {
+        let left = inner[..idx].trim();
+        let right = inner[idx + 1..].trim();
+        
+        // For now, we can only handle simple cases where one is % and one is px
+        // Return the dominant type (percent if present, otherwise first)
+        if let (Some(left_len), Some(right_len)) = (parse_length(left), parse_length(right)) {
+            // If left is percent and right is px, return a "Calc" type
+            // For now, just return the percent part as a simplification
+            match (&left_len, &right_len) {
+                (rustkit_css::Length::Percent(p), rustkit_css::Length::Px(_px)) => {
+                    // Can't properly represent this without a Calc type, so approximate
+                    // by returning percent (the px offset will be ignored)
+                    return Some(rustkit_css::Length::Percent(*p));
+                }
+                (rustkit_css::Length::Px(_px), rustkit_css::Length::Percent(p)) => {
+                    return Some(rustkit_css::Length::Percent(*p));
+                }
+                (rustkit_css::Length::Px(px1), rustkit_css::Length::Px(px2)) => {
+                    let result = if op_char == '+' { px1 + px2 } else { px1 - px2 };
+                    return Some(rustkit_css::Length::Px(result));
+                }
+                _ => {
+                    // Return the first value as fallback
+                    return Some(left_len);
+                }
+            }
+        }
+    }
+    
+    // Fallback: try to parse as a single length
+    parse_length(inner)
+}
+
+/// Parse a shorthand value with 1-4 parts (like margin, padding).
+/// Returns (top, right, bottom, left).
+fn parse_shorthand_4(value: &str) -> Option<(rustkit_css::Length, rustkit_css::Length, rustkit_css::Length, rustkit_css::Length)> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    
+    match parts.len() {
+        1 => {
+            let v = parse_length(parts[0])?;
+            Some((v, v, v, v))
+        }
+        2 => {
+            let tb = parse_length(parts[0])?;
+            let lr = parse_length(parts[1])?;
+            Some((tb, lr, tb, lr))
+        }
+        3 => {
+            let t = parse_length(parts[0])?;
+            let lr = parse_length(parts[1])?;
+            let b = parse_length(parts[2])?;
+            Some((t, lr, b, lr))
+        }
+        4 => {
+            let t = parse_length(parts[0])?;
+            let r = parse_length(parts[1])?;
+            let b = parse_length(parts[2])?;
+            let l = parse_length(parts[3])?;
+            Some((t, r, b, l))
+        }
+        _ => None,
+    }
+}
+
+/// Check if a CSS property is inherited by default.
+fn is_inherited_property(property: &str) -> bool {
+    matches!(
+        property,
+        "color"
+            | "font"
+            | "font-family"
+            | "font-size"
+            | "font-style"
+            | "font-weight"
+            | "line-height"
+            | "text-align"
+            | "text-decoration"
+            | "text-transform"
+            | "letter-spacing"
+            | "word-spacing"
+            | "white-space"
+            | "visibility"
+            | "cursor"
+            | "direction"
+            | "writing-mode"
+    )
 }
 
 /// Parse a box-shadow value from CSS.

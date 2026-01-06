@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Flex Positioning Test</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            font-size: 16px;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+        
+        .section {
+            background: white;
+            margin-bottom: 20px;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        
+        .section-title {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        /* Test 1: Basic flex row */
+        .flex-row {
+            display: flex;
+            flex-direction: row;
+            gap: 10px;
+            background: #e0e0e0;
+            padding: 10px;
+        }
+        
+        .flex-item {
+            background: #4a90d9;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 4px;
+        }
+        
+        /* Test 2: Checkbox + label row */
+        .checkbox-row {
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            gap: 8px;
+            padding: 10px;
+            background: #f0f0f0;
+        }
+        
+        .checkbox-row input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+        }
+        
+        .checkbox-row label {
+            font-size: 14px;
+            color: #333;
+        }
+        
+        /* Test 3: Button group */
+        .button-group {
+            display: flex;
+            flex-direction: row;
+            gap: 8px;
+            padding: 10px;
+        }
+        
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        
+        .btn-primary {
+            background: #007bff;
+            color: white;
+        }
+        
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+        
+        .btn-outline {
+            background: transparent;
+            border: 1px solid #007bff;
+            color: #007bff;
+        }
+        
+        /* Test 4: Nested flex (column > row) */
+        .nested-flex {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            padding: 10px;
+            background: #e8e8e8;
+        }
+        
+        .nested-row {
+            display: flex;
+            flex-direction: row;
+            gap: 8px;
+            background: #d0d0d0;
+            padding: 8px;
+        }
+        
+        .nested-item {
+            background: #28a745;
+            color: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        
+        /* Test 5: justify-content variations */
+        .justify-test {
+            display: flex;
+            flex-direction: row;
+            padding: 10px;
+            background: #f8f8f8;
+            margin-bottom: 5px;
+        }
+        
+        .justify-start { justify-content: flex-start; }
+        .justify-center { justify-content: center; }
+        .justify-end { justify-content: flex-end; }
+        .justify-between { justify-content: space-between; }
+        
+        .justify-item {
+            background: #dc3545;
+            color: white;
+            padding: 5px 15px;
+            font-size: 12px;
+        }
+        
+        /* Test 6: align-items variations */
+        .align-test {
+            display: flex;
+            flex-direction: row;
+            height: 60px;
+            padding: 5px;
+            background: #f0f0f0;
+            margin-bottom: 5px;
+            gap: 10px;
+        }
+        
+        .align-start { align-items: flex-start; }
+        .align-center { align-items: center; }
+        .align-end { align-items: flex-end; }
+        .align-stretch { align-items: stretch; }
+        
+        .align-item {
+            background: #6f42c1;
+            color: white;
+            padding: 5px 15px;
+            font-size: 12px;
+        }
+        
+        .align-item.tall {
+            padding: 15px;
+        }
+        
+        /* Test 7: Form control row */
+        .form-row {
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            gap: 10px;
+            padding: 10px;
+            background: #fff;
+            border: 1px solid #ddd;
+        }
+        
+        .form-row label {
+            font-size: 14px;
+            color: #333;
+            min-width: 80px;
+        }
+        
+        .form-row input[type="text"] {
+            flex: 1;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        .form-row button {
+            padding: 8px 16px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <!-- Test 1: Basic flex row -->
+    <div class="section">
+        <div class="section-title">Basic Flex Row</div>
+        <div class="flex-row">
+            <div class="flex-item">Item 1</div>
+            <div class="flex-item">Item 2</div>
+            <div class="flex-item">Item 3</div>
+        </div>
+    </div>
+    
+    <!-- Test 2: Checkbox + label -->
+    <div class="section">
+        <div class="section-title">Checkbox + Label</div>
+        <div class="checkbox-row">
+            <input type="checkbox" id="check1">
+            <label for="check1">Enable notifications</label>
+        </div>
+        <div class="checkbox-row">
+            <input type="checkbox" id="check2">
+            <label for="check2">Remember my preferences</label>
+        </div>
+    </div>
+    
+    <!-- Test 3: Button group -->
+    <div class="section">
+        <div class="section-title">Button Group</div>
+        <div class="button-group">
+            <button class="btn btn-primary">Save</button>
+            <button class="btn btn-secondary">Cancel</button>
+            <button class="btn btn-outline">Reset</button>
+        </div>
+    </div>
+    
+    <!-- Test 4: Nested flex -->
+    <div class="section">
+        <div class="section-title">Nested Flex (Column > Row)</div>
+        <div class="nested-flex">
+            <div class="nested-row">
+                <div class="nested-item">Row 1, Item A</div>
+                <div class="nested-item">Row 1, Item B</div>
+            </div>
+            <div class="nested-row">
+                <div class="nested-item">Row 2, Item A</div>
+                <div class="nested-item">Row 2, Item B</div>
+                <div class="nested-item">Row 2, Item C</div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Test 5: justify-content -->
+    <div class="section">
+        <div class="section-title">Justify Content</div>
+        <div class="justify-test justify-start">
+            <div class="justify-item">Start</div>
+            <div class="justify-item">A</div>
+            <div class="justify-item">B</div>
+        </div>
+        <div class="justify-test justify-center">
+            <div class="justify-item">Center</div>
+            <div class="justify-item">A</div>
+            <div class="justify-item">B</div>
+        </div>
+        <div class="justify-test justify-end">
+            <div class="justify-item">End</div>
+            <div class="justify-item">A</div>
+            <div class="justify-item">B</div>
+        </div>
+        <div class="justify-test justify-between">
+            <div class="justify-item">Between</div>
+            <div class="justify-item">A</div>
+            <div class="justify-item">B</div>
+        </div>
+    </div>
+    
+    <!-- Test 6: align-items -->
+    <div class="section">
+        <div class="section-title">Align Items</div>
+        <div class="align-test align-start">
+            <div class="align-item">Start</div>
+            <div class="align-item tall">Tall</div>
+        </div>
+        <div class="align-test align-center">
+            <div class="align-item">Center</div>
+            <div class="align-item tall">Tall</div>
+        </div>
+        <div class="align-test align-end">
+            <div class="align-item">End</div>
+            <div class="align-item tall">Tall</div>
+        </div>
+    </div>
+    
+    <!-- Test 7: Form row -->
+    <div class="section">
+        <div class="section-title">Form Row</div>
+        <div class="form-row">
+            <label>Username:</label>
+            <input type="text" placeholder="Enter username">
+            <button>Submit</button>
+        </div>
+    </div>
+</body>
+</html>
+

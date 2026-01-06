@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>CSS Selector Test Suite</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            font-size: 14px;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        
+        .section {
+            background: white;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        
+        .section-title {
+            font-size: 12px;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+            padding-bottom: 5px;
+            border-bottom: 1px solid #eee;
+        }
+        
+        /* Test 1: Child combinator > */
+        .test-child > .direct-child {
+            background: #4a90d9;
+            color: white;
+            padding: 8px;
+            margin: 4px 0;
+        }
+        
+        .test-child .nested-child {
+            background: #e0e0e0;
+            padding: 8px;
+            margin: 4px 0;
+        }
+        
+        /* Test 2: Adjacent sibling + */
+        .trigger + .adjacent {
+            background: #28a745;
+            color: white;
+            padding: 8px;
+            margin: 4px 0;
+        }
+        
+        /* Test 3: General sibling ~ */
+        .trigger-general ~ .following {
+            background: #ffc107;
+            color: #333;
+            padding: 8px;
+            margin: 4px 0;
+        }
+        
+        /* Test 4: Attribute selectors */
+        input[type="text"] {
+            border: 2px solid #4a90d9;
+            padding: 8px;
+            margin: 4px 0;
+            width: 200px;
+        }
+        
+        input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+        }
+        
+        /* ~= (word in space-separated list) */
+        [data-tags~="important"] {
+            border-left: 4px solid #dc3545;
+            padding-left: 10px;
+        }
+        
+        /* ^= (starts with) */
+        [href^="https"] {
+            color: #28a745;
+        }
+        
+        /* $= (ends with) */
+        [href$=".pdf"] {
+            color: #dc3545;
+        }
+        
+        /* *= (contains) */
+        [href*="example"] {
+            font-weight: bold;
+        }
+        
+        /* |= (exact or prefix with hyphen) */
+        [lang|="en"] {
+            font-style: italic;
+        }
+        
+        /* Test 5: Pseudo-classes */
+        .list-items li:first-child {
+            background: #4a90d9;
+            color: white;
+        }
+        
+        .list-items li:last-child {
+            background: #dc3545;
+            color: white;
+        }
+        
+        .list-items li:nth-child(2) {
+            background: #28a745;
+            color: white;
+        }
+        
+        .list-items li:nth-child(odd) {
+            font-weight: bold;
+        }
+        
+        /* Test 6: :not() pseudo-class */
+        .buttons button:not(.disabled) {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            margin: 4px;
+            cursor: pointer;
+        }
+        
+        .buttons button.disabled {
+            background: #ccc;
+            color: #666;
+            border: none;
+            padding: 8px 16px;
+            margin: 4px;
+        }
+        
+        /* Test 7: Chained selectors */
+        div.box.primary {
+            background: #007bff;
+            color: white;
+            padding: 10px;
+            margin: 4px 0;
+        }
+        
+        div.box.secondary {
+            background: #6c757d;
+            color: white;
+            padding: 10px;
+            margin: 4px 0;
+        }
+        
+        /* Test 8: Complex selector chains */
+        .container > .row > .col:first-child {
+            background: #17a2b8;
+            color: white;
+            padding: 10px;
+        }
+        
+        .container > .row > .col:last-child {
+            background: #6610f2;
+            color: white;
+            padding: 10px;
+        }
+        
+        /* Test items for visual verification */
+        .test-item {
+            padding: 8px;
+            margin: 4px 0;
+            border: 1px solid #ddd;
+        }
+        
+        .list-items li {
+            padding: 8px 12px;
+            margin: 2px 0;
+        }
+    </style>
+</head>
+<body>
+    <!-- Test 1: Child combinator > -->
+    <div class="section">
+        <div class="section-title">Child Combinator (&gt;)</div>
+        <div class="test-child">
+            <div class="direct-child">Direct child (should be blue)</div>
+            <div class="wrapper">
+                <div class="nested-child">Nested child (should be grey)</div>
+            </div>
+            <div class="direct-child">Another direct child (should be blue)</div>
+        </div>
+    </div>
+    
+    <!-- Test 2: Adjacent sibling + -->
+    <div class="section">
+        <div class="section-title">Adjacent Sibling (+)</div>
+        <div class="test-item">Not affected</div>
+        <div class="trigger">Trigger element</div>
+        <div class="adjacent">Adjacent sibling (should be green)</div>
+        <div class="adjacent">Not adjacent (should NOT be green)</div>
+    </div>
+    
+    <!-- Test 3: General sibling ~ -->
+    <div class="section">
+        <div class="section-title">General Sibling (~)</div>
+        <div class="test-item">Not affected</div>
+        <div class="trigger-general">Trigger element</div>
+        <div class="following">Following sibling 1 (should be yellow)</div>
+        <div class="following">Following sibling 2 (should be yellow)</div>
+    </div>
+    
+    <!-- Test 4: Attribute selectors -->
+    <div class="section">
+        <div class="section-title">Attribute Selectors</div>
+        <div>
+            <input type="text" placeholder="Text input (blue border)">
+        </div>
+        <div>
+            <input type="checkbox" id="check1">
+            <label for="check1">Checkbox</label>
+        </div>
+        <div data-tags="urgent important notice">
+            Word match ~= (should have red left border)
+        </div>
+        <div>
+            <a href="https://example.com">HTTPS link (should be green, bold)</a>
+        </div>
+        <div>
+            <a href="http://example.com/doc.pdf">PDF link (should be red, bold)</a>
+        </div>
+        <div lang="en-US">
+            Lang prefix |= (should be italic)
+        </div>
+    </div>
+    
+    <!-- Test 5: Pseudo-classes -->
+    <div class="section">
+        <div class="section-title">Pseudo-classes (:first-child, :last-child, :nth-child)</div>
+        <ul class="list-items">
+            <li>First item (blue, bold)</li>
+            <li>Second item (green)</li>
+            <li>Third item (bold)</li>
+            <li>Fourth item</li>
+            <li>Last item (red, bold)</li>
+        </ul>
+    </div>
+    
+    <!-- Test 6: :not() -->
+    <div class="section">
+        <div class="section-title">:not() Pseudo-class</div>
+        <div class="buttons">
+            <button>Active Button (blue)</button>
+            <button class="disabled">Disabled Button (grey)</button>
+            <button>Another Active (blue)</button>
+        </div>
+    </div>
+    
+    <!-- Test 7: Chained selectors -->
+    <div class="section">
+        <div class="section-title">Chained Selectors (div.box.primary)</div>
+        <div class="box primary">Primary box (blue)</div>
+        <div class="box secondary">Secondary box (grey)</div>
+        <div class="box">Plain box (no color)</div>
+    </div>
+    
+    <!-- Test 8: Complex chains -->
+    <div class="section">
+        <div class="section-title">Complex Selector Chains</div>
+        <div class="container">
+            <div class="row">
+                <div class="col">First col (cyan)</div>
+                <div class="col">Middle col</div>
+                <div class="col">Last col (purple)</div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+

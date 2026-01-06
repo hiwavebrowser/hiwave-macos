@@ -87,10 +87,22 @@ def compare_rects(
         "delta_height": abs(rustkit_rect.get("height", 0) - chromium_rect.get("height", 0)),
     }
 
+def is_in_viewport(rect: Dict[str, float], viewport_width: float, viewport_height: float) -> bool:
+    """Check if a rectangle is at least partially inside the viewport."""
+    x = rect.get("x", 0)
+    y = rect.get("y", 0)
+    w = rect.get("width", 0)
+    h = rect.get("height", 0)
+    
+    # Box is in viewport if any part of it overlaps
+    return (x + w > 0 and x < viewport_width and
+            y + h > 0 and y < viewport_height)
+
 def analyze_case(
     case_id: str,
     rustkit_layout: Dict[str, Any],
-    chromium_oracle: Dict[str, Any]
+    chromium_oracle: Dict[str, Any],
+    in_viewport_only: bool = True
 ) -> Dict[str, Any]:
     """Analyze a single case comparing RustKit layout to Chromium oracle."""
     
@@ -100,7 +112,10 @@ def analyze_case(
         "chromium_viewport": chromium_oracle.get("viewport", {}),
         "rustkit_box_count": 0,
         "chromium_element_count": len(chromium_oracle.get("elements", [])),
-        "issues": []
+        "in_viewport_only": in_viewport_only,
+        "issues": [],
+        "in_viewport_issues": [],
+        "below_fold_issues": []
     }
     
     # Flatten RustKit layout tree
@@ -119,26 +134,53 @@ def analyze_case(
     if rk_vp.get("width") != cr_vp.get("width") or rk_vp.get("height") != cr_vp.get("height"):
         result["issues"].append(f"Viewport mismatch: RustKit {rk_vp} vs Chromium {cr_vp}")
     
+    vp_w = rk_vp.get("width", 1280)
+    vp_h = rk_vp.get("height", 800)
+    
     # Analyze RustKit layout for potential issues
+    in_viewport_count = 0
+    below_fold_count = 0
+    
     for box in rustkit_boxes:
         rect = box.get("content_rect") or box.get("rect", {})
         x, y = rect.get("x", 0), rect.get("y", 0)
         w, h = rect.get("width", 0), rect.get("height", 0)
         
-        # Check for elements at origin (potential layout failure)
-        if x == 0 and y == 0 and w > 0 and h > 0:
-            if box["depth"] > 1:  # Not the root
-                pass  # This is often normal for positioned elements
+        in_vp = is_in_viewport(rect, vp_w, vp_h)
         
-        # Check for zero-size boxes
-        if w == 0 and h == 0 and box["type"] != "text":
-            result["issues"].append(f"Zero-size {box['type']} box at depth {box['depth']}")
+        if in_vp:
+            in_viewport_count += 1
+        else:
+            below_fold_count += 1
         
-        # Check for elements outside viewport
-        vp_w = rk_vp.get("width", 1280)
-        vp_h = rk_vp.get("height", 800)
+        # Check for zero-size boxes (always an issue)
+        if w == 0 and h == 0 and box["type"] not in ["text", "anonymous_block"]:
+            issue = f"Zero-size {box['type']} box at depth {box['depth']}"
+            if in_vp:
+                result["in_viewport_issues"].append(issue)
+            else:
+                result["below_fold_issues"].append(issue)
+        
+        # Check for elements completely outside viewport
         if x > vp_w or y > vp_h:
-            result["issues"].append(f"Box outside viewport: x={x}, y={y}")
+            issue = f"Box outside viewport: x={x:.0f}, y={y:.0f}"
+            if in_vp:
+                result["in_viewport_issues"].append(issue)
+            else:
+                result["below_fold_issues"].append(issue)
+        
+        # Check for mispositioned elements (x=0, y=0 when they shouldn't be)
+        if x == 0 and y == 0 and box["depth"] > 1 and w > 0 and h > 0:
+            # This could be a flex positioning issue
+            if box["type"] in ["form_control", "block"] and box["depth"] > 2:
+                issue = f"Potential mispositioned {box['type']} at (0,0) depth={box['depth']}"
+                if in_vp:
+                    result["in_viewport_issues"].append(issue)
+                else:
+                    result["below_fold_issues"].append(issue)
+    
+    result["in_viewport_box_count"] = in_viewport_count
+    result["below_fold_box_count"] = below_fold_count
     
     # Compare text runs if available
     chromium_text_runs = chromium_oracle.get("textRuns", [])
@@ -153,7 +195,34 @@ def analyze_case(
             f"Text count mismatch: Chromium {len(chromium_text_runs)} vs RustKit {len(rustkit_text_boxes)}"
         )
     
+    # Combine issues based on filtering mode
+    if in_viewport_only:
+        result["issues"].extend(result["in_viewport_issues"])
+    else:
+        result["issues"].extend(result["in_viewport_issues"])
+        result["issues"].extend(result["below_fold_issues"])
+    
     return result
+
+def classify_issue(issue: str) -> str:
+    """Classify an issue into a category for WorkOrder routing."""
+    issue_lower = issue.lower()
+    
+    if "zero-size" in issue_lower or "mispositioned" in issue_lower:
+        if "form_control" in issue_lower:
+            return "flex-form-controls"
+        return "flex-positioning"
+    
+    if "outside viewport" in issue_lower:
+        return "layout-overflow"
+    
+    if "text count mismatch" in issue_lower:
+        return "text-layout"
+    
+    if "viewport mismatch" in issue_lower:
+        return "capture-size"
+    
+    return "unknown"
 
 def main():
     if len(sys.argv) < 2:
@@ -174,6 +243,7 @@ def main():
     print()
     
     results = []
+    issue_categories = {}
     
     for layout_file in rustkit_dir.glob("*.layout.json"):
         case_id = layout_file.stem.replace(".layout", "")
@@ -193,6 +263,16 @@ def main():
         result = analyze_case(case_id, rustkit_layout, chromium_oracle)
         results.append(result)
         
+        # Classify issues
+        for issue in result["issues"]:
+            category = classify_issue(issue)
+            if category not in issue_categories:
+                issue_categories[category] = []
+            issue_categories[category].append({
+                "case_id": case_id,
+                "issue": issue
+            })
+        
         issue_count = len(result["issues"])
         status = "OK" if issue_count == 0 else f"{issue_count} issues"
         
@@ -208,10 +288,12 @@ def main():
         json.dump({
             "run_dir": str(run_dir),
             "cases": results,
+            "issue_categories": issue_categories,
             "summary": {
                 "total": len(results),
                 "with_issues": sum(1 for r in results if r["issues"]),
-                "total_issues": sum(len(r["issues"]) for r in results)
+                "total_issues": sum(len(r["issues"]) for r in results),
+                "categories": {cat: len(issues) for cat, issues in issue_categories.items()}
             }
         }, f, indent=2)
     
@@ -224,6 +306,13 @@ def main():
     
     print()
     print(f"Summary: {cases_with_issues}/{len(results)} cases have issues, {total_issues} total issues")
+    
+    # Print category breakdown
+    if issue_categories:
+        print()
+        print("Issue Categories:")
+        for cat, issues in sorted(issue_categories.items(), key=lambda x: -len(x[1])):
+            print(f"  {cat}: {len(issues)} issues")
 
 if __name__ == "__main__":
     main()

@@ -19,6 +19,7 @@ use crate::{Dimensions, EdgeSizes, LayoutBox, Rect};
 use rustkit_css::{
     AlignContent, AlignItems, AlignSelf, FlexBasis, FlexWrap, JustifyContent, Length,
 };
+use tracing::trace;
 
 /// Represents the main and cross axes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,7 +250,30 @@ pub fn layout_flex_container(
     }
 
     // 10. Apply final positions to layout boxes
-    apply_positions(&mut lines, main_axis, direction.is_reverse(), wrap == FlexWrap::WrapReverse);
+    // Pass the container's content origin so positions are absolute, not relative
+    let container_origin = (containing_block.content.x, containing_block.content.y);
+    apply_positions(&mut lines, main_axis, direction.is_reverse(), wrap == FlexWrap::WrapReverse, container_origin);
+    
+    // 11. Recursively layout children of flex items (important for nested flex containers)
+    // After flex positioning, each item's dimensions are set, so we can use them as containing blocks
+    for line in &mut lines {
+        for item in &mut line.items {
+            // If this flex item has children and is a container (flex or block), lay them out
+            if !item.layout_box.children.is_empty() {
+                if item.layout_box.style.display.is_flex() {
+                    // Nested flex container: recursively apply flex layout
+                    let child_containing = item.layout_box.dimensions.clone();
+                    layout_flex_container(item.layout_box, &child_containing);
+                } else {
+                    // Block container: lay out children normally
+                    for child in &mut item.layout_box.children {
+                        let cb = item.layout_box.dimensions.clone();
+                        child.layout(&cb);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Create a FlexItem from a LayoutBox.
@@ -660,12 +684,25 @@ fn align_cross_axis(line: &mut FlexLine, align_items: AlignItems) {
 }
 
 /// Apply computed positions to layout boxes.
+/// 
+/// The `container_origin` is the (x, y) of the container's content area,
+/// which is added to the flex-computed positions to get absolute coordinates.
 fn apply_positions(
     lines: &mut [FlexLine],
     main_axis: Axis,
     _reverse_main: bool,
     reverse_cross: bool,
+    container_origin: (f32, f32),
 ) {
+    let (origin_x, origin_y) = container_origin;
+    
+    trace!(
+        ?origin_x,
+        ?origin_y,
+        num_lines = lines.len(),
+        "apply_positions: starting"
+    );
+    
     let lines_iter: Box<dyn Iterator<Item = &mut FlexLine>> = if reverse_cross {
         Box::new(lines.iter_mut().rev())
     } else {
@@ -674,7 +711,7 @@ fn apply_positions(
 
     for line in lines_iter {
         for item in &mut line.items {
-            let (x, y, width, height) = match main_axis {
+            let (rel_x, rel_y, width, height) = match main_axis {
                 Axis::Horizontal => (
                     item.main_position,
                     line.cross_position + item.cross_position,
@@ -689,10 +726,26 @@ fn apply_positions(
                 ),
             };
 
-            // Update layout box dimensions
+            let abs_x = origin_x + rel_x;
+            let abs_y = origin_y + rel_y;
+            
+            trace!(
+                ?rel_x,
+                ?rel_y,
+                ?abs_x,
+                ?abs_y,
+                ?width,
+                ?height,
+                main_position = item.main_position,
+                cross_position = item.cross_position,
+                line_cross_position = line.cross_position,
+                "apply_positions: positioning flex item"
+            );
+
+            // Update layout box dimensions with absolute positions
             item.layout_box.dimensions.content = Rect {
-                x,
-                y,
+                x: abs_x,
+                y: abs_y,
                 width,
                 height,
             };

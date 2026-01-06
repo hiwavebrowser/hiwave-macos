@@ -60,6 +60,24 @@
       "viewport": { "width": 800, "height": 600 },
       "capabilities": ["gradients"],
       "priority": 1
+    },
+    {
+      "id": "flex-positioning",
+      "name": "Flex Positioning",
+      "description": "Tests flex item positioning, gap, alignment, nested flex, and form controls in flex",
+      "path": "cases/flex-positioning/index.html",
+      "viewport": { "width": 800, "height": 1000 },
+      "capabilities": ["flexbox", "forms", "alignment"],
+      "priority": 1
+    },
+    {
+      "id": "css-selectors",
+      "name": "CSS Selectors",
+      "description": "Tests CSS selector matching: combinators (> + ~), attribute ops (~= |= ^= $= *=), pseudo-classes (:first-child :last-child :nth-child :not)",
+      "path": "cases/css-selectors/index.html",
+      "viewport": { "width": 800, "height": 1200 },
+      "capabilities": ["selectors", "pseudo-classes", "attributes"],
+      "priority": 1
     }
   ],
   "diff_threshold": {

@@ -65,3 +65,10 @@ tokio = { version = "1.42", features = ["rt", "time"] }
 # HTTP types for shield adapter tests
 [dev-dependencies]
 http = "1.0"
+tempfile = "3.13"
+raw-window-handle = "0.6"
+
+# macOS test window creation
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+cocoa = "0.25"
+objc = "0.2"

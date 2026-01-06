@@ -2386,6 +2386,7 @@ dependencies = [
 name = "hiwave-app"
 version = "0.1.0"
 dependencies = [
+ "cocoa 0.25.0",
  "dirs",
  "hiwave-analytics",
  "hiwave-core",
@@ -2395,6 +2396,8 @@ dependencies = [
  "http",
  "log",
  "muda",
+ "objc",
+ "raw-window-handle",
  "rfd",
  "rustkit-compositor",
  "rustkit-engine",
@@ -2404,6 +2407,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tao",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-log",
