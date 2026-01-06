@@ -29,6 +29,7 @@ pub mod menu_ids {
     pub const GO_BACK: &str = "go_back";
     pub const GO_FORWARD: &str = "go_forward";
     pub const FOCUS_URL: &str = "focus_url";
+    pub const TOGGLE_INSPECTOR: &str = "toggle_inspector";
 }
 
 /// macOS platform manager
@@ -266,6 +267,21 @@ impl MacOSPlatform {
         view_menu
             .append(&focus_url_item)
             .map_err(|e| PlatformError::MenuInitFailed(format!("Failed to add Focus URL: {}", e)))?;
+
+        view_menu
+            .append(&PredefinedMenuItem::separator())
+            .map_err(|e| PlatformError::MenuInitFailed(format!("Failed to add separator: {}", e)))?;
+
+        // Developer Tools / Inspector (Cmd+Opt+I)
+        let inspector_item = MenuItem::with_id(
+            menu_ids::TOGGLE_INSPECTOR,
+            "Developer Tools",
+            true,
+            Some(Accelerator::new(Some(Modifiers::META | Modifiers::ALT), Code::KeyI)),
+        );
+        view_menu
+            .append(&inspector_item)
+            .map_err(|e| PlatformError::MenuInitFailed(format!("Failed to add Developer Tools: {}", e)))?;
 
         menu.append(&view_menu)
             .map_err(|e| PlatformError::MenuInitFailed(format!("Failed to append view menu: {}", e)))?;

@@ -311,6 +311,60 @@ pub enum IpcMessage {
         format: String, // "json" or "csv"
     },
     ResetAnalyticsData,
+
+    // Inspector (DevTools)
+    OpenInspector,
+    CloseInspector,
+    ToggleInspector,
+    InspectorReady,
+    InspectorElementPicked {
+        path: String,
+        styles: serde_json::Value,
+    },
+    InspectorPickerStopped,
+    InspectorGetDomTree,
+    InspectorGetElementStyles {
+        path: String,
+    },
+    InspectorHighlightElement {
+        path: String,
+    },
+    InspectorClearHighlight,
+    InspectorStartPicker,
+    InspectorStopPicker,
+    InspectorScrollToElement {
+        path: String,
+    },
+    /// Request to inspect element at specific path (from context menu)
+    InspectElement {
+        path: String,
+    },
+    /// DOM tree result from content webview
+    InspectorDomTreeResult {
+        tree: serde_json::Value,
+    },
+    /// Element styles result from content webview
+    InspectorElementStylesResult {
+        styles: serde_json::Value,
+    },
+    /// Console message from content webview
+    InspectorConsoleMessage {
+        entry: serde_json::Value,
+    },
+    /// Console clear from content webview
+    InspectorConsoleClear,
+    /// Execute JavaScript in content webview (from console input)
+    InspectorConsoleEval {
+        code: String,
+    },
+    /// Refresh inspector data (from inspector toolbar)
+    InspectorRefresh,
+    /// Select element in DOM tree (from inspector)
+    InspectorSelectElement {
+        path: String,
+    },
+    /// Close inspector (from inspector close button)
+    InspectorClose,
 }
 
 /// IPC response from Rust to JavaScript
