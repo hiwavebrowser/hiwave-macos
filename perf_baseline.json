@@ -1,0 +1,37 @@
+{
+  "chrome": {
+    "engine_init": 4.36,
+    "frame_capture": 8.24,
+    "html_load": 24.79,
+    "render": 39.24,
+    "view_create": 2.3
+  },
+  "new_tab": {
+    "engine_init": 12.3,
+    "frame_capture": 17.24,
+    "html_load": 14.21,
+    "render": 39.09,
+    "view_create": 2.47
+  },
+  "shelf": {
+    "engine_init": 4.41,
+    "frame_capture": 17.37,
+    "html_load": 10.33,
+    "render": 7.82,
+    "view_create": 2.58
+  },
+  "settings": {
+    "engine_init": 4.22,
+    "frame_capture": 13.62,
+    "html_load": 10.54,
+    "render": 7.86,
+    "view_create": 2.46
+  },
+  "about": {
+    "engine_init": 4.42,
+    "frame_capture": 12.89,
+    "html_load": 15.39,
+    "render": 39.27,
+    "view_create": 2.38
+  }
+}
