@@ -50,10 +50,12 @@ mod webview_rustkit_chrome;
 mod content_webview_trait;
 #[cfg(target_os = "macos")]
 mod content_webview_enum;
+mod chrome_webview_enum;
 
 use content_webview_trait::ContentWebViewOps;
 #[cfg(target_os = "macos")]
 use content_webview_enum::ContentWebView as UnifiedContentWebView;
+use chrome_webview_enum::ChromeWebViewOps;
 
 use ipc::{IpcMessage, JS_BRIDGE};
 use state::AppState;
