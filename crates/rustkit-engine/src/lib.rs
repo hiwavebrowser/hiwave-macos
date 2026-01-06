@@ -158,6 +158,8 @@ struct ViewState {
     scroll_offset: (f32, f32),
     /// Maximum scroll offset based on content size.
     max_scroll_offset: (f32, f32),
+    /// External stylesheets loaded from <link> elements.
+    external_stylesheets: Vec<Stylesheet>,
 }
 
 /// Engine configuration.
@@ -312,6 +314,7 @@ impl Engine {
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
+            external_stylesheets: Vec::new(),
         };
 
         self.views.insert(id, view_state);
@@ -360,6 +363,7 @@ impl Engine {
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
+            external_stylesheets: Vec::new(),
         };
 
         let id = view_state.id;
@@ -752,10 +756,15 @@ impl Engine {
             "Created containing block"
         );
 
+        // Get external stylesheets from view state
+        let external_stylesheets = self.views.get(&id)
+            .map(|v| v.external_stylesheets.clone())
+            .unwrap_or_default();
+        
         // Build layout tree from DOM with tracing
         let root_box = {
             let _build_span = tracing::info_span!("build_layout_tree").entered();
-            self.build_layout_from_document(&document)
+            self.build_layout_from_document(&document, &external_stylesheets)
         };
         
         // Layout computation
@@ -821,13 +830,18 @@ impl Engine {
     }
 
     /// Build a layout tree from a DOM document.
-    fn build_layout_from_document(&self, document: &Document) -> LayoutBox {
+    fn build_layout_from_document(&self, document: &Document, external_stylesheets: &[Stylesheet]) -> LayoutBox {
         // Extract stylesheets from <style> elements
-        let stylesheets = self.extract_stylesheets(document);
+        let mut stylesheets = self.extract_stylesheets(document);
+        
+        // Add external stylesheets (loaded from <link> elements)
+        stylesheets.extend(external_stylesheets.iter().cloned());
+        
         let css_vars = self.extract_css_variables(&stylesheets);
         
         info!(
-            stylesheet_count = stylesheets.len(),
+            inline_count = stylesheets.len() - external_stylesheets.len(),
+            external_count = external_stylesheets.len(),
             css_var_count = css_vars.len(),
             "Extracted stylesheets and CSS variables"
         );
@@ -1535,6 +1549,185 @@ impl Engine {
         }
         
         stylesheets
+    }
+    
+    /// Discover external stylesheets from <link> elements.
+    fn discover_external_stylesheets(&self, document: &Document, base_url: Option<&Url>) -> Vec<Url> {
+        let mut urls = Vec::new();
+        
+        // Find all <link rel="stylesheet"> elements
+        let link_elements = document.get_elements_by_tag_name("link");
+        
+        for link_el in link_elements {
+            if let NodeType::Element { attributes, .. } = &link_el.node_type {
+                // Check if this is a stylesheet link
+                let rel = attributes.get("rel").map(|s| s.to_lowercase());
+                if rel.as_deref() != Some("stylesheet") {
+                    continue;
+                }
+                
+                // Get href
+                if let Some(href) = attributes.get("href") {
+                    // Resolve relative URL
+                    let resolved = if let Some(base) = base_url {
+                        base.join(href).ok()
+                    } else {
+                        Url::parse(href).ok()
+                    };
+                    
+                    if let Some(url) = resolved {
+                        debug!(%url, "Discovered external stylesheet");
+                        urls.push(url);
+                    }
+                }
+            }
+        }
+        
+        urls
+    }
+    
+    /// Discover images from <img> elements.
+    fn discover_images(&self, document: &Document, base_url: Option<&Url>) -> Vec<(String, Url)> {
+        let mut images = Vec::new();
+        
+        // Find all <img> elements
+        let img_elements = document.get_elements_by_tag_name("img");
+        
+        for img_el in img_elements {
+            if let NodeType::Element { attributes, .. } = &img_el.node_type {
+                if let Some(src) = attributes.get("src") {
+                    // Resolve relative URL
+                    let resolved = if let Some(base) = base_url {
+                        base.join(src).ok()
+                    } else {
+                        Url::parse(src).ok()
+                    };
+                    
+                    if let Some(url) = resolved {
+                        debug!(%url, "Discovered image");
+                        images.push((src.clone(), url));
+                    }
+                }
+            }
+        }
+        
+        images
+    }
+    
+    /// Load external stylesheets asynchronously.
+    pub async fn load_external_stylesheets(&mut self, id: EngineViewId) -> Result<Vec<Stylesheet>, EngineError> {
+        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+        
+        let Some(document) = &view.document else {
+            return Ok(Vec::new());
+        };
+        
+        let base_url = view.url.as_ref();
+        let urls = self.discover_external_stylesheets(document.as_ref(), base_url);
+        
+        let mut stylesheets = Vec::new();
+        
+        for url in urls {
+            info!(%url, "Loading external stylesheet");
+            
+            match self.loader.fetch(Request::get(url.clone())).await {
+                Ok(response) => {
+                    if response.ok() {
+                        match response.text().await {
+                            Ok(css_text) => {
+                                match Stylesheet::parse(&css_text) {
+                                    Ok(stylesheet) => {
+                                        debug!(rules = stylesheet.rules.len(), %url, "Parsed external stylesheet");
+                                        stylesheets.push(stylesheet);
+                                    }
+                                    Err(e) => {
+                                        warn!(?e, %url, "Failed to parse external stylesheet");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!(?e, %url, "Failed to read stylesheet body");
+                            }
+                        }
+                    } else {
+                        warn!(status = %response.status, %url, "Failed to fetch stylesheet");
+                    }
+                }
+                Err(e) => {
+                    warn!(?e, %url, "Failed to fetch stylesheet");
+                }
+            }
+        }
+        
+        Ok(stylesheets)
+    }
+    
+    /// Load images asynchronously and store in cache.
+    pub async fn load_images(&mut self, id: EngineViewId) -> Result<usize, EngineError> {
+        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+        
+        let Some(document) = &view.document else {
+            return Ok(0);
+        };
+        
+        let base_url = view.url.as_ref();
+        let images = self.discover_images(document.as_ref(), base_url);
+        
+        let mut loaded = 0;
+        
+        for (_src, url) in images {
+            info!(%url, "Loading image");
+            
+            match self.loader.fetch(Request::get(url.clone())).await {
+                Ok(response) => {
+                    if response.ok() {
+                        match response.bytes().await {
+                            Ok(bytes) => {
+                                // Store in image cache (to be implemented)
+                                debug!(len = bytes.len(), %url, "Image loaded");
+                                loaded += 1;
+                            }
+                            Err(e) => {
+                                warn!(?e, %url, "Failed to read image body");
+                            }
+                        }
+                    } else {
+                        warn!(status = %response.status, %url, "Failed to fetch image");
+                    }
+                }
+                Err(e) => {
+                    warn!(?e, %url, "Failed to fetch image");
+                }
+            }
+        }
+        
+        Ok(loaded)
+    }
+    
+    /// Load all subresources (stylesheets, images) for a view.
+    pub async fn load_subresources(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+        // Load external stylesheets
+        let external_stylesheets = self.load_external_stylesheets(id).await?;
+        
+        if !external_stylesheets.is_empty() {
+            info!(count = external_stylesheets.len(), "Loaded external stylesheets");
+            // Store for use during relayout
+            if let Some(view) = self.views.get_mut(&id) {
+                view.external_stylesheets = external_stylesheets;
+            }
+            // Trigger relayout with new styles
+            self.relayout(id)?;
+        }
+        
+        // Load images
+        let image_count = self.load_images(id).await?;
+        if image_count > 0 {
+            info!(count = image_count, "Loaded images");
+            // Trigger repaint for images
+            self.relayout(id)?;
+        }
+        
+        Ok(())
     }
 
     /// Extract CSS variables from :root rules.
@@ -2758,7 +2951,7 @@ mod tests {
         };
         
         // Build layout tree from document
-        let layout = engine.build_layout_from_document(&document);
+        let layout = engine.build_layout_from_document(&document, &[]);
         
         // Verify layout tree is not empty
         assert!(!layout.children.is_empty(), "Layout tree should have children from body");
@@ -2818,7 +3011,7 @@ mod tests {
             event_rx: Some(event_rx),
         };
         
-        let mut layout = engine.build_layout_from_document(&document);
+        let mut layout = engine.build_layout_from_document(&document, &[]);
         
         // Perform layout with a containing block
         let containing_block = Dimensions {

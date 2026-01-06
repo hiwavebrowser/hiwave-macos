@@ -1202,7 +1202,7 @@ pub struct Rule {
 }
 
 /// A complete stylesheet.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
 }
