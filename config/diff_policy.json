@@ -1,0 +1,65 @@
+{
+  "version": "1.0",
+  "description": "Visual diff policy configuration for RustKit regression testing",
+  
+  "default": {
+    "aa_tolerance": 5,
+    "strict_size": true,
+    "max_diff_percent": 0.0,
+    "fail_on_size_mismatch": true
+  },
+  
+  "suites": {
+    "builtins": {
+      "description": "Built-in pages (newtab, about, settings, chrome, shelf)",
+      "policy": {
+        "aa_tolerance": 5,
+        "strict_size": true,
+        "max_diff_percent": 0.0
+      }
+    },
+    "fixtures": {
+      "description": "Deterministic test fixtures",
+      "policy": {
+        "aa_tolerance": 5,
+        "strict_size": true,
+        "max_diff_percent": 0.0
+      }
+    },
+    "websuite": {
+      "description": "Offline website-like test cases",
+      "policy": {
+        "aa_tolerance": 5,
+        "strict_size": true,
+        "max_diff_percent": 0.0
+      }
+    },
+    "live-sites": {
+      "description": "Live website smoke tests (non-gating)",
+      "policy": {
+        "aa_tolerance": 10,
+        "strict_size": false,
+        "max_diff_percent": 5.0
+      },
+      "gating": false
+    }
+  },
+  
+  "capture_matrix": {
+    "viewports": [
+      { "name": "desktop", "width": 1280, "height": 800 },
+      { "name": "small", "width": 800, "height": 600 }
+    ],
+    "dpr": [1, 2],
+    "default_dpr": 2
+  },
+  
+  "artifacts": {
+    "rustkit_format": "ppm",
+    "baseline_format": "png",
+    "diff_format": "png",
+    "save_display_list": true,
+    "save_perf_json": true
+  }
+}
+
