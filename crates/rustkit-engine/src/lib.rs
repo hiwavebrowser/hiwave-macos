@@ -1906,6 +1906,44 @@ impl Engine {
                 if attributes.get("id").map(|s| s.as_str()) != Some(id_name) {
                     return false;
                 }
+            } else if let Some(rest) = remaining.strip_prefix('[') {
+                // Attribute selector: [attr], [attr=value], [attr="value"]
+                let bracket_end = rest.find(']').unwrap_or(rest.len());
+                let attr_selector = &rest[..bracket_end];
+                remaining = if bracket_end < rest.len() { &rest[bracket_end + 1..] } else { "" };
+                
+                // Parse attribute selector
+                if let Some(eq_pos) = attr_selector.find('=') {
+                    let attr_name = attr_selector[..eq_pos].trim();
+                    let mut attr_value = attr_selector[eq_pos + 1..].trim();
+                    
+                    // Remove quotes if present
+                    if (attr_value.starts_with('"') && attr_value.ends_with('"')) ||
+                       (attr_value.starts_with('\'') && attr_value.ends_with('\'')) {
+                        attr_value = &attr_value[1..attr_value.len() - 1];
+                    }
+                    
+                    // Check if attribute matches value
+                    if let Some(el_attr) = attributes.get(attr_name) {
+                        if el_attr != attr_value {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                } else {
+                    // Just [attr] - check presence
+                    let attr_name = attr_selector.trim();
+                    if !attributes.contains_key(attr_name) {
+                        return false;
+                    }
+                }
+            } else if remaining.starts_with(':') {
+                // Pseudo-class - skip for now
+                let pseudo_end = remaining[1..].find(|c| c == '.' || c == '#' || c == ':' || c == '[')
+                    .map(|i| i + 1)
+                    .unwrap_or(remaining.len());
+                remaining = &remaining[pseudo_end..];
             } else {
                 // Unknown, skip
                 break;

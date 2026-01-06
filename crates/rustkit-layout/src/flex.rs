@@ -285,15 +285,23 @@ fn create_flex_item<'a>(
     // Calculate flex basis
     let flex_basis = match flex_basis_value {
         FlexBasis::Auto => {
-            // Use main size property
-            match main_axis {
+            // Use main size property, or intrinsic size for replaced elements
+            let explicit_size = match main_axis {
                 Axis::Horizontal => resolve_length(&layout_box.style.width, container_main),
                 Axis::Vertical => resolve_length(&layout_box.style.height, container_main),
+            };
+            
+            // If explicit size is 0 (auto), check for intrinsic sizing
+            if explicit_size == 0.0 {
+                // Get intrinsic size for replaced elements (form controls, images)
+                get_intrinsic_main_size(&layout_box.box_type, main_axis, &layout_box.style)
+            } else {
+                explicit_size
             }
         }
         FlexBasis::Content => {
-            // Use content size (simplified - would need actual content measurement)
-            0.0
+            // Use content size - for replaced elements, use intrinsic size
+            get_intrinsic_main_size(&layout_box.box_type, main_axis, &layout_box.style)
         }
         FlexBasis::Length(len) => len,
         FlexBasis::Percent(pct) => pct / 100.0 * container_main,
@@ -705,6 +713,57 @@ fn apply_positions(
                 },
             };
         }
+    }
+}
+
+/// Get the intrinsic main size for replaced elements (form controls, images).
+fn get_intrinsic_main_size(box_type: &crate::BoxType, main_axis: Axis, style: &rustkit_css::ComputedStyle) -> f32 {
+    let font_size = match style.font_size {
+        Length::Px(px) => px,
+        _ => 16.0,
+    };
+    
+    match box_type {
+        crate::BoxType::FormControl(control) => {
+            use crate::FormControlType;
+            match control {
+                FormControlType::TextInput { .. } => {
+                    match main_axis {
+                        Axis::Horizontal => font_size * 12.0, // ~20 chars
+                        Axis::Vertical => font_size * 1.5 + 8.0,
+                    }
+                }
+                FormControlType::TextArea { rows, cols, .. } => {
+                    match main_axis {
+                        Axis::Horizontal => font_size * 0.6 * (*cols).max(20) as f32,
+                        Axis::Vertical => font_size * 1.2 * (*rows).max(2) as f32 + 8.0,
+                    }
+                }
+                FormControlType::Button { label, .. } => {
+                    match main_axis {
+                        Axis::Horizontal => label.len() as f32 * font_size * 0.6 + 24.0,
+                        Axis::Vertical => font_size * 1.5 + 12.0,
+                    }
+                }
+                FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
+                    // Fixed size for checkboxes and radios
+                    font_size * 1.2
+                }
+                FormControlType::Select { .. } => {
+                    match main_axis {
+                        Axis::Horizontal => font_size * 10.0,
+                        Axis::Vertical => font_size * 1.5 + 8.0,
+                    }
+                }
+            }
+        }
+        crate::BoxType::Image { natural_width, natural_height, .. } => {
+            match main_axis {
+                Axis::Horizontal => *natural_width,
+                Axis::Vertical => *natural_height,
+            }
+        }
+        _ => 0.0, // Non-replaced elements don't have intrinsic size
     }
 }
 
