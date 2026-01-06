@@ -1,0 +1,62 @@
+{
+  "description": "Live site smoke tests - non-gating, for manual/nightly validation",
+  "warning": "These tests require network access and may be flaky due to dynamic content",
+  "sites": [
+    {
+      "id": "google-search",
+      "name": "Google Search",
+      "url": "https://www.google.com",
+      "viewport": { "width": 1280, "height": 800 },
+      "wait_ms": 2000,
+      "notes": "Simple search page, mostly static"
+    },
+    {
+      "id": "wikipedia-main",
+      "name": "Wikipedia Main Page",
+      "url": "https://en.wikipedia.org/wiki/Main_Page",
+      "viewport": { "width": 1280, "height": 800 },
+      "wait_ms": 2000,
+      "notes": "Complex layout, multiple columns, images"
+    },
+    {
+      "id": "hackernews",
+      "name": "Hacker News",
+      "url": "https://news.ycombinator.com",
+      "viewport": { "width": 1280, "height": 800 },
+      "wait_ms": 1000,
+      "notes": "Simple table layout, mostly text"
+    },
+    {
+      "id": "github-explore",
+      "name": "GitHub Explore",
+      "url": "https://github.com/explore",
+      "viewport": { "width": 1280, "height": 800 },
+      "wait_ms": 3000,
+      "notes": "Complex UI, cards, images, requires fonts"
+    },
+    {
+      "id": "mdn-docs",
+      "name": "MDN Web Docs",
+      "url": "https://developer.mozilla.org/en-US/",
+      "viewport": { "width": 1280, "height": 800 },
+      "wait_ms": 2000,
+      "notes": "Documentation site, good CSS test"
+    },
+    {
+      "id": "example-com",
+      "name": "Example.com",
+      "url": "https://example.com",
+      "viewport": { "width": 800, "height": 600 },
+      "wait_ms": 500,
+      "notes": "Minimal page, should render perfectly"
+    }
+  ],
+  "output_config": {
+    "capture_screenshot": true,
+    "capture_console_log": true,
+    "capture_network_log": true,
+    "capture_crash_dump": true,
+    "timeout_ms": 30000
+  }
+}
+
