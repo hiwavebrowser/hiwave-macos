@@ -6,13 +6,37 @@
 //! - Layout calculation → Box positioning
 //! - Display list generation → GPU commands
 //! - Final pixel output
+//!
+//! Note: Tests skip gracefully if no GPU is available (e.g., in CI).
 
 use crate::support::{TestEngine, RGB, assert_color_near, assert_not_blank};
+
+/// Helper macro to skip test if no GPU is available.
+macro_rules! require_gpu {
+    () => {
+        match TestEngine::try_new() {
+            Ok(engine) => engine,
+            Err(_) => {
+                eprintln!("Skipping test: No GPU available");
+                return;
+            }
+        }
+    };
+    ($width:expr, $height:expr) => {
+        match TestEngine::try_with_size($width, $height) {
+            Ok(engine) => engine,
+            Err(_) => {
+                eprintln!("Skipping test: No GPU available");
+                return;
+            }
+        }
+    };
+}
 
 #[test]
 #[cfg(target_os = "macos")]
 fn test_simple_html_renders() {
-    let mut engine = TestEngine::new();
+    let mut engine = require_gpu!();
 
     let html = r#"<!DOCTYPE html>
         <html>
@@ -44,7 +68,7 @@ fn test_simple_html_renders() {
 #[test]
 #[cfg(target_os = "macos")]
 fn test_red_background_renders() {
-    let mut engine = TestEngine::new();
+    let mut engine = require_gpu!();
 
     let html = r#"<!DOCTYPE html>
         <html>
@@ -73,7 +97,7 @@ fn test_red_background_renders() {
 #[test]
 #[cfg(target_os = "macos")]
 fn test_blue_background_renders() {
-    let mut engine = TestEngine::new();
+    let mut engine = require_gpu!();
 
     let html = r#"<!DOCTYPE html>
         <html>
@@ -102,7 +126,7 @@ fn test_blue_background_renders() {
 #[test]
 #[cfg(target_os = "macos")]
 fn test_inline_styles_apply() {
-    let mut engine = TestEngine::new();
+    let mut engine = require_gpu!();
 
     let html = r#"<!DOCTYPE html>
         <html>
@@ -123,7 +147,7 @@ fn test_inline_styles_apply() {
 #[test]
 #[cfg(target_os = "macos")]
 fn test_nested_divs_render() {
-    let mut engine = TestEngine::new();
+    let mut engine = require_gpu!();
 
     let html = r#"<!DOCTYPE html>
         <html>
@@ -166,7 +190,7 @@ fn test_nested_divs_render() {
 #[test]
 #[cfg(target_os = "macos")]
 fn test_css_cascade() {
-    let mut engine = TestEngine::new();
+    let mut engine = require_gpu!();
 
     let html = r#"<!DOCTYPE html>
         <html>
@@ -197,7 +221,7 @@ fn test_css_cascade() {
 #[test]
 #[cfg(target_os = "macos")]
 fn test_multiple_renders_consistent() {
-    let mut engine = TestEngine::new();
+    let mut engine = require_gpu!();
 
     let html = r#"<!DOCTYPE html>
         <html>
@@ -233,7 +257,7 @@ fn test_multiple_renders_consistent() {
 #[test]
 #[cfg(target_os = "macos")]
 fn test_resize_re_renders() {
-    let mut engine = TestEngine::with_size(400, 300);
+    let mut engine = require_gpu!(400, 300);
 
     let html = r#"<!DOCTYPE html>
         <html>
@@ -275,7 +299,7 @@ fn test_resize_re_renders() {
 #[test]
 #[cfg(target_os = "macos")]
 fn test_complex_document_renders() {
-    let mut engine = TestEngine::new();
+    let mut engine = require_gpu!();
 
     let html = r#"<!DOCTYPE html>
         <html>

@@ -5,6 +5,18 @@ use rustkit_viewhost::Bounds;
 
 use super::test_frame::TestFrame;
 
+/// Error returned when GPU is not available.
+#[derive(Debug)]
+pub struct NoGpuError;
+
+impl std::fmt::Display for NoGpuError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "No GPU adapter available for testing")
+    }
+}
+
+impl std::error::Error for NoGpuError {}
+
 /// Headless test engine wrapper.
 ///
 /// Uses RustKit's headless mode to render without requiring a window.
@@ -18,17 +30,39 @@ pub struct TestEngine {
 
 impl TestEngine {
     /// Create a new test engine with default size (800x600).
+    /// 
+    /// Returns `None` if no GPU is available (e.g., in CI without GPU).
+    pub fn try_new() -> Result<Self, NoGpuError> {
+        Self::try_with_size(800, 600)
+    }
+    
+    /// Create a new test engine with default size (800x600).
+    /// 
+    /// Panics if no GPU is available.
     pub fn new() -> Self {
-        Self::with_size(800, 600)
+        Self::try_new().expect("Failed to create test engine (no GPU?)")
     }
 
     /// Create a new test engine with specified size.
-    pub fn with_size(width: u32, height: u32) -> Self {
-        let mut engine = EngineBuilder::new()
+    /// 
+    /// Returns `None` if no GPU is available.
+    pub fn try_with_size(width: u32, height: u32) -> Result<Self, NoGpuError> {
+        let engine_result = EngineBuilder::new()
             .user_agent("TestEngine/1.0")
             .javascript_enabled(false)
-            .build()
-            .expect("Failed to create test engine");
+            .build();
+        
+        let mut engine = match engine_result {
+            Ok(e) => e,
+            Err(e) => {
+                // Check if this is a GPU error
+                let err_str = format!("{:?}", e);
+                if err_str.contains("GPU") || err_str.contains("adapter") {
+                    return Err(NoGpuError);
+                }
+                panic!("Failed to create test engine: {:?}", e);
+            }
+        };
 
         let bounds = Bounds {
             x: 0,
@@ -38,16 +72,32 @@ impl TestEngine {
         };
 
         // Use headless mode for testing (no window required!)
-        let view_id = engine
-            .create_headless_view(bounds)
-            .expect("Failed to create headless test view");
+        let view_result = engine.create_headless_view(bounds);
+        
+        let view_id = match view_result {
+            Ok(id) => id,
+            Err(e) => {
+                let err_str = format!("{:?}", e);
+                if err_str.contains("GPU") || err_str.contains("adapter") {
+                    return Err(NoGpuError);
+                }
+                panic!("Failed to create headless view: {:?}", e);
+            }
+        };
 
-        Self {
+        Ok(Self {
             engine,
             view_id,
             width,
             height,
-        }
+        })
+    }
+
+    /// Create a new test engine with specified size.
+    /// 
+    /// Panics if no GPU is available.
+    pub fn with_size(width: u32, height: u32) -> Self {
+        Self::try_with_size(width, height).expect("Failed to create test engine (no GPU?)")
     }
 
     /// Load HTML content into the engine.
@@ -130,13 +180,25 @@ mod tests {
 
     #[test]
     fn test_engine_creates() {
-        let _engine = TestEngine::new();
-        // If we got here, engine created successfully
+        match TestEngine::try_new() {
+            Ok(_engine) => {
+                // If we got here, engine created successfully
+            }
+            Err(_) => {
+                eprintln!("Skipping test: No GPU available");
+            }
+        }
     }
 
     #[test]
     fn test_engine_custom_size() {
-        let _engine = TestEngine::with_size(1024, 768);
-        // Successfully created with custom size
+        match TestEngine::try_with_size(1024, 768) {
+            Ok(_engine) => {
+                // Successfully created with custom size
+            }
+            Err(_) => {
+                eprintln!("Skipping test: No GPU available");
+            }
+        }
     }
 }
