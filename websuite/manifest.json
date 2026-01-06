@@ -1,0 +1,70 @@
+{
+  "version": "1.0",
+  "description": "HiWave RustKit WebSuite - deterministic website-like test cases for visual regression",
+  "viewport": {
+    "width": 1280,
+    "height": 800,
+    "scale_factor": 2.0
+  },
+  "cases": [
+    {
+      "id": "article-typography",
+      "name": "Typography-heavy Article",
+      "description": "Tests font rendering, line-height, text decoration, and multi-column layout",
+      "path": "cases/article-typography/index.html",
+      "viewport": { "width": 1280, "height": 800 },
+      "capabilities": ["text", "fonts", "layout"],
+      "priority": 1
+    },
+    {
+      "id": "card-grid",
+      "name": "Card Grid with Flexbox",
+      "description": "Tests flexbox layout, shadows, borders, and responsive grid",
+      "path": "cases/card-grid/index.html",
+      "viewport": { "width": 1280, "height": 800 },
+      "capabilities": ["flexbox", "shadows", "borders"],
+      "priority": 1
+    },
+    {
+      "id": "form-elements",
+      "name": "Form Elements",
+      "description": "Tests input fields, buttons, checkboxes, radio buttons, and select",
+      "path": "cases/form-elements/index.html",
+      "viewport": { "width": 800, "height": 600 },
+      "capabilities": ["forms", "inputs", "focus"],
+      "priority": 1
+    },
+    {
+      "id": "image-gallery",
+      "name": "Image Gallery",
+      "description": "Tests image loading, sizing, object-fit, and lazy loading",
+      "path": "cases/image-gallery/index.html",
+      "viewport": { "width": 1280, "height": 800 },
+      "capabilities": ["images", "grid", "aspect-ratio"],
+      "priority": 2
+    },
+    {
+      "id": "sticky-scroll",
+      "name": "Sticky Header + Scroll",
+      "description": "Tests sticky positioning, overflow clipping, and scrollable regions",
+      "path": "cases/sticky-scroll/index.html",
+      "viewport": { "width": 1280, "height": 800 },
+      "capabilities": ["position-sticky", "overflow", "scroll"],
+      "priority": 2
+    },
+    {
+      "id": "gradient-backgrounds",
+      "name": "Gradient Backgrounds",
+      "description": "Tests linear and radial gradients with various stops and directions",
+      "path": "cases/gradient-backgrounds/index.html",
+      "viewport": { "width": 800, "height": 600 },
+      "capabilities": ["gradients"],
+      "priority": 1
+    }
+  ],
+  "diff_threshold": {
+    "exact": 0,
+    "antialiasing_tolerance": 5
+  }
+}
+

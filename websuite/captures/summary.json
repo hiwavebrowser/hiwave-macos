@@ -1,0 +1,38 @@
+{
+  "timestamp": "2026-01-05T21:03:55.527599",
+  "total": 6,
+  "passed": 6,
+  "failed": 0,
+  "captures": [
+    {
+      "case_id": "sticky-scroll",
+      "frame": "sticky-scroll.ppm",
+      "perf": {}
+    },
+    {
+      "case_id": "form-elements",
+      "frame": "form-elements.ppm",
+      "perf": {}
+    },
+    {
+      "case_id": "article-typography",
+      "frame": "article-typography.ppm",
+      "perf": {}
+    },
+    {
+      "case_id": "image-gallery",
+      "frame": "image-gallery.ppm",
+      "perf": {}
+    },
+    {
+      "case_id": "card-grid",
+      "frame": "card-grid.ppm",
+      "perf": {}
+    },
+    {
+      "case_id": "gradient-backgrounds",
+      "frame": "gradient-backgrounds.ppm",
+      "perf": {}
+    }
+  ]
+}

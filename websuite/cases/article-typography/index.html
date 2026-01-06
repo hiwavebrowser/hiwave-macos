@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Typography Article Test</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: Georgia, 'Times New Roman', serif;
+            line-height: 1.6;
+            color: #333;
+            background: #fafafa;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+        
+        header {
+            text-align: center;
+            margin-bottom: 40px;
+            border-bottom: 1px solid #e0e0e0;
+            padding-bottom: 20px;
+        }
+        
+        h1 {
+            font-size: 2.5em;
+            font-weight: 700;
+            margin-bottom: 10px;
+            color: #1a1a1a;
+            letter-spacing: -0.02em;
+        }
+        
+        .subtitle {
+            font-size: 1.2em;
+            color: #666;
+            font-style: italic;
+        }
+        
+        .meta {
+            font-size: 0.9em;
+            color: #888;
+            margin-top: 15px;
+        }
+        
+        .meta span {
+            margin: 0 10px;
+        }
+        
+        article {
+            font-size: 1.1em;
+        }
+        
+        h2 {
+            font-size: 1.8em;
+            margin: 30px 0 15px;
+            color: #2c3e50;
+            font-weight: 600;
+        }
+        
+        h3 {
+            font-size: 1.4em;
+            margin: 25px 0 10px;
+            color: #34495e;
+        }
+        
+        p {
+            margin-bottom: 20px;
+            text-align: justify;
+        }
+        
+        .lead {
+            font-size: 1.3em;
+            color: #555;
+            margin-bottom: 30px;
+        }
+        
+        blockquote {
+            margin: 30px 0;
+            padding: 20px 30px;
+            background: #f5f5f5;
+            border-left: 4px solid #3498db;
+            font-style: italic;
+            color: #555;
+        }
+        
+        blockquote cite {
+            display: block;
+            margin-top: 10px;
+            font-size: 0.9em;
+            color: #888;
+            font-style: normal;
+        }
+        
+        .highlight {
+            background: linear-gradient(120deg, #ffeaa7 0%, #ffeaa7 100%);
+            background-size: 100% 0.3em;
+            background-position: 0 88%;
+            background-repeat: no-repeat;
+        }
+        
+        a {
+            color: #3498db;
+            text-decoration: none;
+            border-bottom: 1px solid #3498db;
+        }
+        
+        a:hover {
+            color: #2980b9;
+        }
+        
+        code {
+            font-family: 'Menlo', 'Monaco', monospace;
+            font-size: 0.9em;
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+        }
+        
+        pre {
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 20px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 25px 0;
+        }
+        
+        pre code {
+            background: none;
+            padding: 0;
+            color: inherit;
+        }
+        
+        ul, ol {
+            margin: 20px 0 20px 30px;
+        }
+        
+        li {
+            margin-bottom: 8px;
+        }
+        
+        .columns {
+            column-count: 2;
+            column-gap: 40px;
+            margin: 30px 0;
+        }
+        
+        .drop-cap::first-letter {
+            float: left;
+            font-size: 4em;
+            line-height: 0.8;
+            padding-right: 10px;
+            color: #2c3e50;
+            font-weight: bold;
+        }
+        
+        .text-decoration-demo {
+            margin: 20px 0;
+            padding: 15px;
+            background: #f9f9f9;
+            border-radius: 5px;
+        }
+        
+        .underline { text-decoration: underline; }
+        .line-through { text-decoration: line-through; }
+        .overline { text-decoration: overline; }
+        .small-caps { font-variant: small-caps; }
+        .all-caps { text-transform: uppercase; letter-spacing: 0.1em; }
+        
+        footer {
+            margin-top: 50px;
+            padding-top: 20px;
+            border-top: 1px solid #e0e0e0;
+            text-align: center;
+            color: #888;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>The Art of Typography</h1>
+            <p class="subtitle">A comprehensive exploration of typeface design and web rendering</p>
+            <p class="meta">
+                <span>By Jane Designer</span>
+                <span>•</span>
+                <span>January 6, 2026</span>
+                <span>•</span>
+                <span>12 min read</span>
+            </p>
+        </header>
+        
+        <article>
+            <p class="lead">Typography is the art and technique of arranging type to make written language legible, readable, and appealing when displayed.</p>
+            
+            <p class="drop-cap">The arrangement of type involves selecting typefaces, point sizes, line lengths, line-spacing, and letter-spacing, and adjusting the space between pairs of letters. The term typography is also applied to the style, arrangement, and appearance of the letters, numbers, and symbols created by the process.</p>
+            
+            <h2>Fundamentals of Type Design</h2>
+            
+            <p>Type design is a closely related craft, sometimes considered part of typography; most typographers do not design typefaces, and some type designers do not consider themselves typographers. Typography also may be used as an <span class="highlight">ornamental and decorative device</span>, unrelated to the communication of information.</p>
+            
+            <blockquote>
+                "Typography is what language looks like."
+                <cite>— Ellen Lupton, Graphic Designer</cite>
+            </blockquote>
+            
+            <h3>Key Principles</h3>
+            
+            <ul>
+                <li><strong>Hierarchy:</strong> Establishing visual importance through size, weight, and position</li>
+                <li><strong>Contrast:</strong> Creating visual interest through variety</li>
+                <li><strong>Balance:</strong> Distributing elements evenly across the design</li>
+                <li><strong>Alignment:</strong> Creating order and organization</li>
+            </ul>
+            
+            <h2>Technical Considerations</h2>
+            
+            <p>In digital typography, we must consider <code>font-family</code>, <code>font-size</code>, <code>line-height</code>, and <code>letter-spacing</code> properties to achieve optimal readability.</p>
+            
+            <pre><code>body {
+    font-family: Georgia, serif;
+    font-size: 1.1em;
+    line-height: 1.6;
+    letter-spacing: 0.01em;
+}</code></pre>
+            
+            <div class="columns">
+                <p>Multi-column layouts have been used in print for centuries to improve readability of long-form content. On the web, CSS columns allow us to recreate this traditional layout pattern while maintaining the flexibility of digital content.</p>
+                <p>The key to successful column layouts is finding the right balance between column width and line length. Too narrow, and the text becomes choppy; too wide, and readers lose their place between lines.</p>
+            </div>
+            
+            <h2>Text Decoration Examples</h2>
+            
+            <div class="text-decoration-demo">
+                <p><span class="underline">Underlined text</span> for emphasis</p>
+                <p><span class="line-through">Strikethrough text</span> for deletions</p>
+                <p><span class="overline">Overlined text</span> for special notation</p>
+                <p><span class="small-caps">Small Caps Text</span> for stylistic variety</p>
+                <p><span class="all-caps">All Caps Text</span> for headings</p>
+            </div>
+            
+            <h3>Font Weight Variations</h3>
+            
+            <p style="font-weight: 300;">Light weight (300) text sample</p>
+            <p style="font-weight: 400;">Regular weight (400) text sample</p>
+            <p style="font-weight: 500;">Medium weight (500) text sample</p>
+            <p style="font-weight: 600;">Semibold weight (600) text sample</p>
+            <p style="font-weight: 700;">Bold weight (700) text sample</p>
+            
+            <h2>Conclusion</h2>
+            
+            <p>Good typography enhances readability and creates a visual hierarchy that guides readers through content. By understanding and applying these principles, we can create more effective and engaging digital experiences.</p>
+        </article>
+        
+        <footer>
+            <p>© 2026 Typography Studies. All rights reserved.</p>
+        </footer>
+    </div>
+</body>
+</html>
+
