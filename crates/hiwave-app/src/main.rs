@@ -55,6 +55,7 @@ mod chrome_webview_enum;
 use content_webview_trait::ContentWebViewOps;
 #[cfg(target_os = "macos")]
 use content_webview_enum::ContentWebView as UnifiedContentWebView;
+#[allow(unused_imports)]
 use chrome_webview_enum::ChromeWebViewOps;
 
 use ipc::{IpcMessage, JS_BRIDGE};

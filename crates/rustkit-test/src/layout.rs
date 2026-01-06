@@ -115,6 +115,8 @@ fn format_box(layout: &LayoutBox, output: &mut String, indent: usize) {
         BoxType::Inline => "inline",
         BoxType::AnonymousBlock => "anonymous",
         BoxType::Text(_) => "text",
+        BoxType::Image { .. } => "image",
+        BoxType::FormControl(_) => "form-control",
     };
 
     output.push_str(&format!(

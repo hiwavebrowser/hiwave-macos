@@ -185,10 +185,10 @@ fn should_skip_folder_name(name: &str) -> bool {
 
 /// Format a workspace name with prefix and path
 fn format_workspace_name(prefix: &str, name: &str, parent_path: &str) -> String {
-    // Filter out generic folder names from parent path
+    // Filter out generic folder names and empty strings from parent path
     let filtered_parent: Vec<&str> = parent_path
         .split('-')
-        .filter(|s| !should_skip_folder_name(s))
+        .filter(|s| !s.is_empty() && !should_skip_folder_name(s))
         .collect();
 
     // If the name itself is a generic folder, just use prefix
@@ -261,7 +261,10 @@ mod tests {
     #[test]
     fn test_abbreviate_path() {
         assert_eq!(abbreviate_path("Work", 10), "Work");
-        assert_eq!(abbreviate_path("Shopping-Clothes", 10), "Sho-Clo...");
+        // "Shopping-Clothes" abbreviates to "Sho-Clo" (7 chars), which fits in max_len 10
+        assert_eq!(abbreviate_path("Shopping-Clothes", 10), "Sho-Clo");
+        // Test case where abbreviation still exceeds max_len
+        assert_eq!(abbreviate_path("Shopping-Clothes", 5), "Sh...");
     }
 
     #[test]

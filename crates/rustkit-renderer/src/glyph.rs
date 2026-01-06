@@ -311,7 +311,8 @@ impl GlyphCache {
 }
 
 /// Estimate glyph size based on character and font size.
-fn _estimate_glyph_size(ch: char, font_size: f32) -> (u32, u32) {
+#[allow(dead_code)]
+fn estimate_glyph_size(ch: char, font_size: f32) -> (u32, u32) {
     let height = font_size.ceil() as u32;
     
     // Estimate width based on character type
