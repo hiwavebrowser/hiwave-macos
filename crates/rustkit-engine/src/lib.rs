@@ -915,6 +915,94 @@ impl Engine {
                     );
                 }
                 
+                // Handle form controls
+                if tag_lower == "input" {
+                    let input_type = attributes.get("type").cloned().unwrap_or_else(|| "text".to_string());
+                    let value = attributes.get("value").cloned().unwrap_or_default();
+                    let placeholder = attributes.get("placeholder").cloned().unwrap_or_default();
+                    
+                    let control = match input_type.as_str() {
+                        "checkbox" => rustkit_layout::FormControlType::Checkbox {
+                            checked: attributes.contains_key("checked"),
+                        },
+                        "radio" => rustkit_layout::FormControlType::Radio {
+                            checked: attributes.contains_key("checked"),
+                            name: attributes.get("name").cloned().unwrap_or_default(),
+                        },
+                        _ => rustkit_layout::FormControlType::TextInput {
+                            value,
+                            placeholder,
+                            input_type,
+                        },
+                    };
+                    
+                    return LayoutBox::new(BoxType::FormControl(control), style);
+                }
+                
+                if tag_lower == "button" {
+                    // Get button label from inner text or value
+                    let text = node.text_content();
+                    let label = if text.trim().is_empty() {
+                        attributes.get("value").cloned().unwrap_or_else(|| "Button".to_string())
+                    } else {
+                        text
+                    };
+                    let button_type = attributes.get("type").cloned().unwrap_or_else(|| "button".to_string());
+                    
+                    return LayoutBox::new(
+                        BoxType::FormControl(rustkit_layout::FormControlType::Button {
+                            label,
+                            button_type,
+                        }),
+                        style,
+                    );
+                }
+                
+                if tag_lower == "textarea" {
+                    let value = node.text_content();
+                    let placeholder = attributes.get("placeholder").cloned().unwrap_or_default();
+                    let rows = attributes.get("rows").and_then(|r| r.parse().ok()).unwrap_or(3);
+                    let cols = attributes.get("cols").and_then(|c| c.parse().ok()).unwrap_or(20);
+                    
+                    return LayoutBox::new(
+                        BoxType::FormControl(rustkit_layout::FormControlType::TextArea {
+                            value,
+                            placeholder,
+                            rows,
+                            cols,
+                        }),
+                        style,
+                    );
+                }
+                
+                if tag_lower == "select" {
+                    // Get options from children
+                    let options: Vec<String> = node.children()
+                        .into_iter()
+                        .filter_map(|child| {
+                            if let rustkit_dom::NodeType::Element { tag_name, .. } = &child.node_type {
+                                if tag_name.to_lowercase() == "option" {
+                                    let text = child.text_content();
+                                    if !text.is_empty() {
+                                        return Some(text);
+                                    }
+                                }
+                            }
+                            None
+                        })
+                        .collect();
+                    
+                    let selected_index = if options.is_empty() { None } else { Some(0) };
+                    
+                    return LayoutBox::new(
+                        BoxType::FormControl(rustkit_layout::FormControlType::Select {
+                            options,
+                            selected_index,
+                        }),
+                        style,
+                    );
+                }
+                
                 // Determine box type based on tag for non-replaced elements
                 let is_inline = matches!(
                     tag_lower.as_str(),
@@ -939,7 +1027,8 @@ impl Engine {
                     // Only add non-empty boxes
                     if !matches!(child_box.box_type, BoxType::Block) || !child_box.children.is_empty() 
                         || matches!(child_box.box_type, BoxType::Text(_))
-                        || matches!(child_box.box_type, BoxType::Image { .. }) {
+                        || matches!(child_box.box_type, BoxType::Image { .. })
+                        || matches!(child_box.box_type, BoxType::FormControl(_)) {
                         layout_box.children.push(child_box);
                     }
                 }

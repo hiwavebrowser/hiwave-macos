@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Form Controls Test</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            margin: 20px;
+            background: #f5f5f5;
+        }
+        .section {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        h2 {
+            margin-top: 0;
+            color: #333;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 10px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+            color: #555;
+        }
+        input[type="text"],
+        input[type="email"],
+        input[type="password"] {
+            width: 300px;
+            padding: 8px 12px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        input:focus {
+            outline: none;
+            border-color: #007aff;
+            box-shadow: 0 0 0 2px rgba(0,122,255,0.2);
+        }
+        button {
+            padding: 10px 20px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background: linear-gradient(to bottom, #f9f9f9, #e8e8e8);
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 8px;
+        }
+        button:hover {
+            background: linear-gradient(to bottom, #f0f0f0, #ddd);
+        }
+        button.primary {
+            background: #007aff;
+            color: white;
+            border-color: #0066cc;
+        }
+        textarea {
+            width: 300px;
+            height: 100px;
+            padding: 8px 12px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 14px;
+            resize: vertical;
+        }
+        select {
+            width: 300px;
+            padding: 8px 12px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 14px;
+            background: white;
+        }
+        .checkbox-group, .radio-group {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        input[type="checkbox"],
+        input[type="radio"] {
+            margin-right: 8px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Form Controls</h1>
+    
+    <div class="section">
+        <h2>Text Inputs</h2>
+        <div class="form-group">
+            <label for="name">Name</label>
+            <input type="text" id="name" placeholder="Enter your name">
+        </div>
+        <div class="form-group">
+            <label for="email">Email</label>
+            <input type="email" id="email" placeholder="user@example.com">
+        </div>
+        <div class="form-group">
+            <label for="password">Password</label>
+            <input type="password" id="password" placeholder="Enter password">
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2>Buttons</h2>
+        <button type="button">Default Button</button>
+        <button type="button" class="primary">Primary Button</button>
+        <button type="submit">Submit</button>
+        <button type="reset">Reset</button>
+    </div>
+    
+    <div class="section">
+        <h2>Textarea</h2>
+        <div class="form-group">
+            <label for="bio">Bio</label>
+            <textarea id="bio" placeholder="Tell us about yourself..."></textarea>
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2>Select Dropdown</h2>
+        <div class="form-group">
+            <label for="country">Country</label>
+            <select id="country">
+                <option>United States</option>
+                <option>Canada</option>
+                <option>United Kingdom</option>
+                <option>Australia</option>
+            </select>
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2>Checkboxes</h2>
+        <div class="checkbox-group">
+            <input type="checkbox" id="opt1" checked>
+            <label for="opt1">Option 1 (checked)</label>
+        </div>
+        <div class="checkbox-group">
+            <input type="checkbox" id="opt2">
+            <label for="opt2">Option 2</label>
+        </div>
+        <div class="checkbox-group">
+            <input type="checkbox" id="opt3">
+            <label for="opt3">Option 3</label>
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2>Radio Buttons</h2>
+        <div class="radio-group">
+            <input type="radio" name="plan" id="basic" checked>
+            <label for="basic">Basic Plan</label>
+        </div>
+        <div class="radio-group">
+            <input type="radio" name="plan" id="pro">
+            <label for="pro">Pro Plan</label>
+        </div>
+        <div class="radio-group">
+            <input type="radio" name="plan" id="enterprise">
+            <label for="enterprise">Enterprise Plan</label>
+        </div>
+    </div>
+</body>
+</html>
+

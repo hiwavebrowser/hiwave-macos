@@ -579,6 +579,68 @@ impl Renderer {
                 self.draw_radial_gradient(*rect, *shape, *size, *center, stops);
             }
 
+            DisplayCommand::TextInput {
+                rect,
+                value,
+                placeholder,
+                font_size,
+                text_color,
+                placeholder_color,
+                background_color,
+                border_color,
+                border_width,
+                focused,
+                caret_position,
+            } => {
+                self.draw_text_input(
+                    *rect,
+                    value,
+                    placeholder,
+                    *font_size,
+                    *text_color,
+                    *placeholder_color,
+                    *background_color,
+                    *border_color,
+                    *border_width,
+                    *focused,
+                    *caret_position,
+                );
+            }
+
+            DisplayCommand::Button {
+                rect,
+                label,
+                font_size,
+                text_color,
+                background_color,
+                border_color,
+                border_width,
+                border_radius,
+                pressed,
+                focused,
+            } => {
+                self.draw_button(
+                    *rect,
+                    label,
+                    *font_size,
+                    *text_color,
+                    *background_color,
+                    *border_color,
+                    *border_width,
+                    *border_radius,
+                    *pressed,
+                    *focused,
+                );
+            }
+
+            DisplayCommand::FocusRing { rect, color, width, offset } => {
+                self.draw_focus_ring(*rect, *color, *width, *offset);
+            }
+
+            DisplayCommand::Caret { x, y, height, color } => {
+                self.draw_caret(*x, *y, *height, *color);
+            }
+
             DisplayCommand::PushClip(rect) => {
                 self.push_clip(*rect);
             }
@@ -1054,6 +1116,174 @@ impl Renderer {
             }
         }
         stops[stops.len() - 1].1
+    }
+    
+    /// Draw a text input field.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_text_input(
+        &mut self,
+        rect: Rect,
+        value: &str,
+        placeholder: &str,
+        font_size: f32,
+        text_color: Color,
+        placeholder_color: Color,
+        background_color: Color,
+        border_color: Color,
+        border_width: f32,
+        focused: bool,
+        caret_position: Option<usize>,
+    ) {
+        // Draw background
+        self.draw_solid_rect(rect, background_color);
+        
+        // Draw border
+        let border_rect = rect;
+        self.draw_solid_rect(
+            Rect::new(rect.x, rect.y, rect.width, border_width),
+            border_color,
+        );
+        self.draw_solid_rect(
+            Rect::new(rect.x, rect.y + rect.height - border_width, rect.width, border_width),
+            border_color,
+        );
+        self.draw_solid_rect(
+            Rect::new(rect.x, rect.y, border_width, rect.height),
+            border_color,
+        );
+        self.draw_solid_rect(
+            Rect::new(rect.x + rect.width - border_width, rect.y, border_width, rect.height),
+            border_color,
+        );
+        
+        // Draw text or placeholder
+        let padding = 6.0;
+        let text_x = rect.x + padding;
+        let text_y = rect.y + (rect.height + font_size) / 2.0 - font_size * 0.2;
+        
+        let (display_text, display_color) = if value.is_empty() {
+            (placeholder, placeholder_color)
+        } else {
+            (value, text_color)
+        };
+        
+        if !display_text.is_empty() {
+            self.draw_text(display_text, text_x, text_y, display_color, font_size, "sans-serif", 400, 0);
+        }
+        
+        // Draw focus ring if focused
+        if focused {
+            self.draw_focus_ring(border_rect, Color::new(0, 122, 255, 1.0), 2.0, 2.0);
+        }
+        
+        // Draw caret if focused and position is set
+        if focused {
+            if let Some(pos) = caret_position {
+                let caret_x = text_x + (pos as f32 * font_size * 0.5);
+                self.draw_caret(caret_x, rect.y + 4.0, rect.height - 8.0, text_color);
+            }
+        }
+    }
+    
+    /// Draw a button.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_button(
+        &mut self,
+        rect: Rect,
+        label: &str,
+        font_size: f32,
+        text_color: Color,
+        background_color: Color,
+        border_color: Color,
+        border_width: f32,
+        _border_radius: f32,
+        pressed: bool,
+        focused: bool,
+    ) {
+        // Adjust colors for pressed state
+        let bg = if pressed {
+            Color::new(
+                (background_color.r as i32 - 20).max(0) as u8,
+                (background_color.g as i32 - 20).max(0) as u8,
+                (background_color.b as i32 - 20).max(0) as u8,
+                background_color.a,
+            )
+        } else {
+            background_color
+        };
+        
+        // Draw background
+        self.draw_solid_rect(rect, bg);
+        
+        // Draw border
+        self.draw_solid_rect(
+            Rect::new(rect.x, rect.y, rect.width, border_width),
+            border_color,
+        );
+        self.draw_solid_rect(
+            Rect::new(rect.x, rect.y + rect.height - border_width, rect.width, border_width),
+            border_color,
+        );
+        self.draw_solid_rect(
+            Rect::new(rect.x, rect.y, border_width, rect.height),
+            border_color,
+        );
+        self.draw_solid_rect(
+            Rect::new(rect.x + rect.width - border_width, rect.y, border_width, rect.height),
+            border_color,
+        );
+        
+        // Draw label (centered)
+        if !label.is_empty() {
+            let label_width = label.len() as f32 * font_size * 0.5;
+            let text_x = rect.x + (rect.width - label_width) / 2.0;
+            let text_y = rect.y + (rect.height + font_size) / 2.0 - font_size * 0.2;
+            self.draw_text(label, text_x, text_y, text_color, font_size, "sans-serif", 400, 0);
+        }
+        
+        // Draw focus ring if focused
+        if focused {
+            self.draw_focus_ring(rect, Color::new(0, 122, 255, 1.0), 2.0, 2.0);
+        }
+    }
+    
+    /// Draw a focus ring around an element.
+    fn draw_focus_ring(&mut self, rect: Rect, color: Color, width: f32, offset: f32) {
+        let outer = Rect::new(
+            rect.x - offset,
+            rect.y - offset,
+            rect.width + offset * 2.0,
+            rect.height + offset * 2.0,
+        );
+        
+        // Top
+        self.draw_solid_rect(
+            Rect::new(outer.x, outer.y, outer.width, width),
+            color,
+        );
+        // Bottom
+        self.draw_solid_rect(
+            Rect::new(outer.x, outer.y + outer.height - width, outer.width, width),
+            color,
+        );
+        // Left
+        self.draw_solid_rect(
+            Rect::new(outer.x, outer.y, width, outer.height),
+            color,
+        );
+        // Right
+        self.draw_solid_rect(
+            Rect::new(outer.x + outer.width - width, outer.y, width, outer.height),
+            color,
+        );
+    }
+    
+    /// Draw a text caret (cursor).
+    fn draw_caret(&mut self, x: f32, y: f32, height: f32, color: Color) {
+        self.draw_solid_rect(
+            Rect::new(x, y, 2.0, height),
+            color,
+        );
     }
 
     /// Draw text.

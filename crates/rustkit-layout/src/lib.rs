@@ -337,6 +337,45 @@ pub enum BoxType {
         natural_width: f32,
         natural_height: f32,
     },
+    /// Form control (input, button, textarea, select).
+    FormControl(FormControlType),
+}
+
+/// Type of form control for layout/rendering.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FormControlType {
+    /// Text input field.
+    TextInput {
+        value: String,
+        placeholder: String,
+        input_type: String, // "text", "password", "email", etc.
+    },
+    /// Multi-line text area.
+    TextArea {
+        value: String,
+        placeholder: String,
+        rows: u32,
+        cols: u32,
+    },
+    /// Button element.
+    Button {
+        label: String,
+        button_type: String, // "submit", "button", "reset"
+    },
+    /// Checkbox input.
+    Checkbox {
+        checked: bool,
+    },
+    /// Radio button input.
+    Radio {
+        checked: bool,
+        name: String,
+    },
+    /// Select dropdown (placeholder for future).
+    Select {
+        options: Vec<String>,
+        selected_index: Option<usize>,
+    },
 }
 
 /// Stacking context for z-index ordering.
@@ -479,6 +518,10 @@ impl LayoutBox {
                 // Replaced element: use intrinsic dimensions or explicit sizing
                 self.layout_image(*natural_width, *natural_height, containing_block);
             }
+            BoxType::FormControl(ref control) => {
+                // Form controls are replaced elements with intrinsic sizing
+                self.layout_form_control(control.clone(), containing_block);
+            }
         }
 
         // Apply positioning offsets after normal layout
@@ -566,6 +609,60 @@ impl LayoutBox {
         self.dimensions.content.height = height;
     }
 
+    /// Layout a form control (input, button, textarea, etc.)
+    fn layout_form_control(&mut self, control: FormControlType, containing_block: &Dimensions) {
+        let font_size = match self.style.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        
+        // Calculate intrinsic dimensions based on control type
+        let (intrinsic_width, intrinsic_height) = match &control {
+            FormControlType::TextInput { .. } => {
+                // Default text input: ~20 characters wide, single line height
+                (font_size * 12.0, font_size * 1.5 + 8.0)
+            }
+            FormControlType::TextArea { rows, cols, .. } => {
+                // Textarea: based on rows/cols
+                let rows = (*rows).max(2) as f32;
+                let cols = (*cols).max(20) as f32;
+                (font_size * 0.6 * cols, font_size * 1.2 * rows + 8.0)
+            }
+            FormControlType::Button { label, .. } => {
+                // Button: width based on label, with padding
+                let label_width = label.len() as f32 * font_size * 0.6;
+                (label_width + 24.0, font_size * 1.5 + 12.0)
+            }
+            FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
+                // Fixed size for checkboxes and radios
+                (font_size * 1.2, font_size * 1.2)
+            }
+            FormControlType::Select { .. } => {
+                // Dropdown: similar to text input but with arrow space
+                (font_size * 10.0, font_size * 1.5 + 8.0)
+            }
+        };
+        
+        // Override with explicit CSS dimensions if specified
+        let width = match self.style.width {
+            Length::Px(px) => px,
+            Length::Percent(pct) => pct / 100.0 * containing_block.content.width,
+            _ => intrinsic_width,
+        };
+        
+        let height = match self.style.height {
+            Length::Px(px) => px,
+            Length::Percent(pct) => pct / 100.0 * containing_block.content.height,
+            _ => intrinsic_height,
+        };
+        
+        // Position within containing block
+        self.dimensions.content.x = containing_block.content.x;
+        self.dimensions.content.y = containing_block.content.y + containing_block.content.height;
+        self.dimensions.content.width = width;
+        self.dimensions.content.height = height;
+    }
+
     /// Get line height for text layout.
     fn get_line_height(&self) -> f32 {
         let font_size = match self.style.font_size {
@@ -608,6 +705,9 @@ impl LayoutBox {
             }
             BoxType::Image { natural_width, natural_height, .. } => {
                 self.layout_image(*natural_width, *natural_height, containing_block);
+            }
+            BoxType::FormControl(ref control) => {
+                self.layout_form_control(control.clone(), containing_block);
             }
         }
 
@@ -1317,6 +1417,47 @@ pub enum DisplayCommand {
         center: (f32, f32),
         stops: Vec<rustkit_css::ColorStop>,
     },
+    /// Draw a text input field.
+    TextInput {
+        rect: Rect,
+        value: String,
+        placeholder: String,
+        font_size: f32,
+        text_color: Color,
+        placeholder_color: Color,
+        background_color: Color,
+        border_color: Color,
+        border_width: f32,
+        focused: bool,
+        caret_position: Option<usize>,
+    },
+    /// Draw a button.
+    Button {
+        rect: Rect,
+        label: String,
+        font_size: f32,
+        text_color: Color,
+        background_color: Color,
+        border_color: Color,
+        border_width: f32,
+        border_radius: f32,
+        pressed: bool,
+        focused: bool,
+    },
+    /// Draw a focus ring around an element.
+    FocusRing {
+        rect: Rect,
+        color: Color,
+        width: f32,
+        offset: f32,
+    },
+    /// Draw a text caret (cursor).
+    Caret {
+        x: f32,
+        y: f32,
+        height: f32,
+        color: Color,
+    },
     /// Push a clip rect (for overflow handling).
     PushClip(Rect),
     /// Pop clip rect.
@@ -1998,39 +2139,183 @@ impl DisplayList {
     
     /// Render replaced content (images).
     fn render_replaced_content(&mut self, layout_box: &LayoutBox) {
-        if let BoxType::Image { url, natural_width, natural_height } = &layout_box.box_type {
-            let dims = &layout_box.dimensions;
-            let container = Rect {
-                x: dims.content.x,
-                y: dims.content.y,
-                width: dims.content.width,
-                height: dims.content.height,
-            };
-            
-            // Parse object-fit from style
-            let object_fit = match layout_box.style.object_fit.as_str() {
-                "fill" => ObjectFit::Fill,
-                "contain" => ObjectFit::Contain,
-                "cover" => ObjectFit::Cover,
-                "none" => ObjectFit::None,
-                "scale-down" => ObjectFit::ScaleDown,
-                _ => ObjectFit::Contain,
-            };
-            
-            let (pos_x, pos_y) = layout_box.style.object_position;
-            
-            // Generate image display command
-            let cmd = crate::images::render_image(
-                url,
-                container,
-                *natural_width,
-                *natural_height,
-                object_fit,
-                (pos_x, pos_y),
-                layout_box.style.opacity,
-            );
-            
-            self.commands.push(cmd);
+        match &layout_box.box_type {
+            BoxType::Image { url, natural_width, natural_height } => {
+                let dims = &layout_box.dimensions;
+                let container = Rect {
+                    x: dims.content.x,
+                    y: dims.content.y,
+                    width: dims.content.width,
+                    height: dims.content.height,
+                };
+                
+                // Parse object-fit from style
+                let object_fit = match layout_box.style.object_fit.as_str() {
+                    "fill" => ObjectFit::Fill,
+                    "contain" => ObjectFit::Contain,
+                    "cover" => ObjectFit::Cover,
+                    "none" => ObjectFit::None,
+                    "scale-down" => ObjectFit::ScaleDown,
+                    _ => ObjectFit::Contain,
+                };
+                
+                let (pos_x, pos_y) = layout_box.style.object_position;
+                
+                // Generate image display command
+                let cmd = crate::images::render_image(
+                    url,
+                    container,
+                    *natural_width,
+                    *natural_height,
+                    object_fit,
+                    (pos_x, pos_y),
+                    layout_box.style.opacity,
+                );
+                
+                self.commands.push(cmd);
+            }
+            BoxType::FormControl(control) => {
+                self.render_form_control(layout_box, control);
+            }
+            _ => {}
+        }
+    }
+    
+    /// Render a form control.
+    fn render_form_control(&mut self, layout_box: &LayoutBox, control: &FormControlType) {
+        let dims = &layout_box.dimensions;
+        let rect = Rect {
+            x: dims.content.x,
+            y: dims.content.y,
+            width: dims.content.width,
+            height: dims.content.height,
+        };
+        
+        let font_size = match layout_box.style.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        
+        let text_color = layout_box.style.color;
+        let bg_color = layout_box.style.background_color;
+        let border_color = layout_box.style.border_top_color;
+        
+        match control {
+            FormControlType::TextInput { value, placeholder, .. } => {
+                self.commands.push(DisplayCommand::TextInput {
+                    rect,
+                    value: value.clone(),
+                    placeholder: placeholder.clone(),
+                    font_size,
+                    text_color,
+                    placeholder_color: Color::new(160, 160, 160, 1.0),
+                    background_color: if bg_color.a > 0.0 { bg_color } else { Color::WHITE },
+                    border_color: if border_color.a > 0.0 { border_color } else { Color::new(200, 200, 200, 1.0) },
+                    border_width: 1.0,
+                    focused: false, // TODO: track focus state
+                    caret_position: None,
+                });
+            }
+            FormControlType::TextArea { value, placeholder, .. } => {
+                self.commands.push(DisplayCommand::TextInput {
+                    rect,
+                    value: value.clone(),
+                    placeholder: placeholder.clone(),
+                    font_size,
+                    text_color,
+                    placeholder_color: Color::new(160, 160, 160, 1.0),
+                    background_color: if bg_color.a > 0.0 { bg_color } else { Color::WHITE },
+                    border_color: if border_color.a > 0.0 { border_color } else { Color::new(200, 200, 200, 1.0) },
+                    border_width: 1.0,
+                    focused: false,
+                    caret_position: None,
+                });
+            }
+            FormControlType::Button { label, .. } => {
+                self.commands.push(DisplayCommand::Button {
+                    rect,
+                    label: label.clone(),
+                    font_size,
+                    text_color: if text_color.a > 0.0 { text_color } else { Color::BLACK },
+                    background_color: if bg_color.a > 0.0 { bg_color } else { Color::new(239, 239, 239, 1.0) },
+                    border_color: if border_color.a > 0.0 { border_color } else { Color::new(180, 180, 180, 1.0) },
+                    border_width: 1.0,
+                    border_radius: 4.0,
+                    pressed: false,
+                    focused: false,
+                });
+            }
+            FormControlType::Checkbox { checked } => {
+                // Draw checkbox as a small rect with optional checkmark
+                let check_color = if *checked { text_color } else { Color::TRANSPARENT };
+                self.commands.push(DisplayCommand::SolidColor(
+                    if bg_color.a > 0.0 { bg_color } else { Color::WHITE },
+                    rect,
+                ));
+                self.commands.push(DisplayCommand::Border {
+                    color: Color::new(150, 150, 150, 1.0),
+                    rect,
+                    top: 1.0,
+                    right: 1.0,
+                    bottom: 1.0,
+                    left: 1.0,
+                });
+                if *checked {
+                    // Draw a simple checkmark using lines (simplified)
+                    let inner = Rect {
+                        x: rect.x + 3.0,
+                        y: rect.y + 3.0,
+                        width: rect.width - 6.0,
+                        height: rect.height - 6.0,
+                    };
+                    self.commands.push(DisplayCommand::SolidColor(check_color, inner));
+                }
+            }
+            FormControlType::Radio { checked, .. } => {
+                // Draw radio as a circle (using ellipse)
+                self.commands.push(DisplayCommand::FillEllipse {
+                    rect,
+                    color: if bg_color.a > 0.0 { bg_color } else { Color::WHITE },
+                });
+                // Outer ring
+                self.commands.push(DisplayCommand::StrokeCircle {
+                    cx: rect.x + rect.width / 2.0,
+                    cy: rect.y + rect.height / 2.0,
+                    radius: rect.width / 2.0 - 1.0,
+                    color: Color::new(150, 150, 150, 1.0),
+                    width: 1.0,
+                });
+                if *checked {
+                    // Inner dot
+                    self.commands.push(DisplayCommand::FillCircle {
+                        cx: rect.x + rect.width / 2.0,
+                        cy: rect.y + rect.height / 2.0,
+                        radius: rect.width / 4.0,
+                        color: text_color,
+                    });
+                }
+            }
+            FormControlType::Select { options, selected_index } => {
+                // Draw as a text input with dropdown arrow
+                let display_text = selected_index
+                    .and_then(|i| options.get(i))
+                    .cloned()
+                    .unwrap_or_default();
+                
+                self.commands.push(DisplayCommand::TextInput {
+                    rect,
+                    value: display_text,
+                    placeholder: String::new(),
+                    font_size,
+                    text_color,
+                    placeholder_color: Color::new(160, 160, 160, 1.0),
+                    background_color: if bg_color.a > 0.0 { bg_color } else { Color::WHITE },
+                    border_color: if border_color.a > 0.0 { border_color } else { Color::new(200, 200, 200, 1.0) },
+                    border_width: 1.0,
+                    focused: false,
+                    caret_position: None,
+                });
+            }
         }
     }
 }
