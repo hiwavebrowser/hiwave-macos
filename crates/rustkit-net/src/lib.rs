@@ -24,10 +24,12 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, trace, warn};
 use url::Url;
 
+pub mod cache;
 pub mod download;
 pub mod intercept;
 pub mod security;
 
+pub use cache::{CacheConfig, CacheKey, CacheStats, CachedResponse, MemoryCache, parse_cache_control};
 pub use download::{Download, DownloadEvent, DownloadId, DownloadManager, DownloadState};
 pub use intercept::{InterceptAction, InterceptHandler, RequestInterceptor};
 pub use security::{
@@ -417,6 +419,7 @@ pub struct ResourceLoader {
     config: LoaderConfig,
     interceptor: Option<Arc<RwLock<RequestInterceptor>>>,
     download_manager: Arc<DownloadManager>,
+    cache: Arc<MemoryCache>,
 }
 
 impl ResourceLoader {
@@ -439,9 +442,9 @@ impl ResourceLoader {
             .map_err(|e| NetError::RequestFailed(e.to_string()))?;
 
         if interceptor.is_some() {
-            info!("ResourceLoader initialized with request interceptor");
+            info!("ResourceLoader initialized with request interceptor and cache");
         } else {
-            info!("ResourceLoader initialized");
+            info!("ResourceLoader initialized with cache");
         }
 
         Ok(Self {
@@ -449,7 +452,18 @@ impl ResourceLoader {
             config,
             interceptor: interceptor.map(|i| Arc::new(RwLock::new(i))),
             download_manager: Arc::new(DownloadManager::new()),
+            cache: Arc::new(MemoryCache::new()),
         })
+    }
+    
+    /// Get a reference to the memory cache.
+    pub fn cache(&self) -> &Arc<MemoryCache> {
+        &self.cache
+    }
+    
+    /// Get cache statistics.
+    pub fn cache_stats(&self) -> CacheStats {
+        self.cache.stats()
     }
 
     /// Set the request interceptor.
@@ -491,6 +505,33 @@ impl ResourceLoader {
                 }
             }
         }
+        
+        // Check cache for GET requests
+        let cache_key = if request.method == Method::GET {
+            let key = CacheKey::new(&request.url);
+            if let Some(cached) = self.cache.get(&key) {
+                debug!(url = %request.url, "Serving from cache");
+                
+                // Parse content type
+                let content_type = cached.headers
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<Mime>().ok());
+                
+                return Ok(Response {
+                    request_id: request.id,
+                    url: request.url.clone(),
+                    status: cached.status,
+                    headers: cached.headers,
+                    content_type,
+                    content_length: Some(cached.body.len() as u64),
+                    body: ResponseBody::Full(cached.body),
+                });
+            }
+            Some(key)
+        } else {
+            None
+        };
 
         // Build headers for rustkit-http request
         let mut headers = request.headers.clone();
@@ -536,6 +577,29 @@ impl ResourceLoader {
             body_len = http_response.body.len(),
             "Response received"
         );
+        
+        // Cache successful GET responses
+        if let Some(key) = cache_key {
+            if http_response.status.is_success() {
+                use std::time::Instant;
+                
+                // Determine TTL from Cache-Control or use default
+                let ttl = parse_cache_control(&http_response.headers)
+                    .unwrap_or(self.config.default_timeout);
+                
+                if ttl > Duration::ZERO {
+                    let cached = CachedResponse {
+                        status: http_response.status,
+                        headers: http_response.headers.clone(),
+                        body: http_response.body.clone(),
+                        cached_at: Instant::now(),
+                        expires_at: Instant::now() + ttl,
+                        size: http_response.body.len(),
+                    };
+                    self.cache.put(key, cached);
+                }
+            }
+        }
 
         Ok(Response {
             request_id: request.id,
