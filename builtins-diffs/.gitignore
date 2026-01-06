@@ -1,0 +1,4 @@
+# Visual diff outputs are regenerated on demand
+*.png
+summary.json
+
