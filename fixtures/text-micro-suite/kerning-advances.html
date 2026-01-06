@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Kerning and Advances Test</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif;
+            background: white;
+            padding: 20px;
+        }
+        .test-section {
+            margin-bottom: 30px;
+        }
+        .test-section h2 {
+            font-size: 14px;
+            color: #333;
+            margin-bottom: 10px;
+        }
+        .kerning-sample {
+            font-size: 48px;
+            background: #f5f5f5;
+            padding: 20px;
+            margin-bottom: 10px;
+            letter-spacing: normal;
+        }
+        .kerning-sample.no-kern {
+            font-kerning: none;
+        }
+        .kerning-sample.kern {
+            font-kerning: normal;
+        }
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(60px, 1fr));
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .glyph-cell {
+            text-align: center;
+            padding: 10px;
+            background: #f0f0f0;
+            border-radius: 4px;
+        }
+        .glyph-char {
+            font-size: 32px;
+            display: block;
+            margin-bottom: 5px;
+        }
+        .glyph-info {
+            font-size: 10px;
+            color: #666;
+        }
+        .letter-spacing-test {
+            font-size: 24px;
+            margin: 10px 0;
+            padding: 10px;
+            background: #f5f5f5;
+        }
+    </style>
+</head>
+<body>
+    <h1 style="margin-bottom: 30px;">Kerning and Advances Test</h1>
+    
+    <!-- Kerning Pairs -->
+    <div class="test-section">
+        <h2>Common Kerning Pairs (with kerning)</h2>
+        <div class="kerning-sample kern">AV AW AT AY FA LT LY PA TA TO VA WA WO YA Yo Te</div>
+    </div>
+    
+    <div class="test-section">
+        <h2>Common Kerning Pairs (without kerning)</h2>
+        <div class="kerning-sample no-kern">AV AW AT AY FA LT LY PA TA TO VA WA WO YA Yo Te</div>
+    </div>
+    
+    <!-- Width Metrics -->
+    <div class="test-section">
+        <h2>Character Width Test (should align)</h2>
+        <div style="font-size: 24px; font-family: monospace; background: #f5f5f5; padding: 10px;">
+            <div>MMMMMMMMMM</div>
+            <div>iiiiiiiiii</div>
+            <div>WWWWWWWWWW</div>
+            <div>llllllllll</div>
+        </div>
+    </div>
+    
+    <!-- Proportional Width -->
+    <div class="test-section">
+        <h2>Proportional Width Test</h2>
+        <div style="font-size: 24px; background: #f5f5f5; padding: 10px;">
+            <div>MMMMMMMMMM</div>
+            <div>iiiiiiiiii</div>
+            <div>WWWWWWWWWW</div>
+            <div>llllllllll</div>
+        </div>
+    </div>
+    
+    <!-- Letter Spacing -->
+    <div class="test-section">
+        <h2>Letter Spacing Tests</h2>
+        <div class="letter-spacing-test" style="letter-spacing: -2px;">Letter spacing: -2px</div>
+        <div class="letter-spacing-test" style="letter-spacing: -1px;">Letter spacing: -1px</div>
+        <div class="letter-spacing-test" style="letter-spacing: 0;">Letter spacing: 0 (normal)</div>
+        <div class="letter-spacing-test" style="letter-spacing: 1px;">Letter spacing: 1px</div>
+        <div class="letter-spacing-test" style="letter-spacing: 2px;">Letter spacing: 2px</div>
+        <div class="letter-spacing-test" style="letter-spacing: 5px;">Letter spacing: 5px</div>
+        <div class="letter-spacing-test" style="letter-spacing: 0.1em;">Letter spacing: 0.1em</div>
+    </div>
+    
+    <!-- Word Spacing -->
+    <div class="test-section">
+        <h2>Word Spacing Tests</h2>
+        <div class="letter-spacing-test" style="word-spacing: -5px;">Word spacing: -5px (the quick brown fox)</div>
+        <div class="letter-spacing-test" style="word-spacing: 0;">Word spacing: 0 (the quick brown fox)</div>
+        <div class="letter-spacing-test" style="word-spacing: 5px;">Word spacing: 5px (the quick brown fox)</div>
+        <div class="letter-spacing-test" style="word-spacing: 10px;">Word spacing: 10px (the quick brown fox)</div>
+        <div class="letter-spacing-test" style="word-spacing: 0.5em;">Word spacing: 0.5em (the quick brown fox)</div>
+    </div>
+    
+    <!-- Glyph Metrics Grid -->
+    <div class="test-section">
+        <h2>Individual Glyph Metrics</h2>
+        <div class="metrics-grid">
+            <div class="glyph-cell"><span class="glyph-char">A</span><span class="glyph-info">U+0041</span></div>
+            <div class="glyph-cell"><span class="glyph-char">M</span><span class="glyph-info">U+004D</span></div>
+            <div class="glyph-cell"><span class="glyph-char">W</span><span class="glyph-info">U+0057</span></div>
+            <div class="glyph-cell"><span class="glyph-char">i</span><span class="glyph-info">U+0069</span></div>
+            <div class="glyph-cell"><span class="glyph-char">l</span><span class="glyph-info">U+006C</span></div>
+            <div class="glyph-cell"><span class="glyph-char">f</span><span class="glyph-info">U+0066</span></div>
+            <div class="glyph-cell"><span class="glyph-char">j</span><span class="glyph-info">U+006A</span></div>
+            <div class="glyph-cell"><span class="glyph-char">g</span><span class="glyph-info">U+0067</span></div>
+            <div class="glyph-cell"><span class="glyph-char">p</span><span class="glyph-info">U+0070</span></div>
+            <div class="glyph-cell"><span class="glyph-char">y</span><span class="glyph-info">U+0079</span></div>
+            <div class="glyph-cell"><span class="glyph-char">0</span><span class="glyph-info">U+0030</span></div>
+            <div class="glyph-cell"><span class="glyph-char">1</span><span class="glyph-info">U+0031</span></div>
+        </div>
+    </div>
+    
+    <!-- Combining Characters -->
+    <div class="test-section">
+        <h2>Combining Characters and Diacritics</h2>
+        <div style="font-size: 32px; background: #f5f5f5; padding: 20px;">
+            <div>cafe caf&#233;</div>
+            <div>resume r&#233;sum&#233;</div>
+            <div>naive na&#239;ve</div>
+            <div>&#252;ber &#228;hnlich &#246;ffentlich</div>
+            <div>&#241; &#231; &#229; &#248; &#230;</div>
+        </div>
+    </div>
+</body>
+</html>
+

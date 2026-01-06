@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Emoji and Fallback Font Test</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif;
+            background: white;
+            padding: 20px;
+        }
+        .test-section {
+            margin-bottom: 30px;
+        }
+        .test-section h2 {
+            font-size: 14px;
+            color: #333;
+            margin-bottom: 10px;
+        }
+        .emoji-row {
+            font-size: 32px;
+            background: #f5f5f5;
+            padding: 15px;
+            margin-bottom: 10px;
+            line-height: 1.5;
+        }
+        .emoji-small {
+            font-size: 16px;
+        }
+        .emoji-large {
+            font-size: 48px;
+        }
+        .mixed-text {
+            font-size: 24px;
+            background: #f5f5f5;
+            padding: 15px;
+            margin-bottom: 10px;
+        }
+        .symbol-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+            gap: 10px;
+        }
+        .symbol-cell {
+            text-align: center;
+            padding: 15px 10px;
+            background: #f0f0f0;
+            border-radius: 4px;
+        }
+        .symbol-char {
+            font-size: 24px;
+            display: block;
+            margin-bottom: 5px;
+        }
+        .symbol-name {
+            font-size: 10px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <h1 style="margin-bottom: 30px;">Emoji and Fallback Font Test</h1>
+    
+    <!-- Common Emoji -->
+    <div class="test-section">
+        <h2>Common Emoji (32px)</h2>
+        <div class="emoji-row">
+            &#x1F600; &#x1F603; &#x1F604; &#x1F601; &#x1F606; &#x1F605; &#x1F602; &#x1F923;
+        </div>
+        <div class="emoji-row">
+            &#x2764;&#xFE0F; &#x1F499; &#x1F49A; &#x1F49B; &#x1F9E1; &#x1F49C; &#x1F5A4; &#x1F90D;
+        </div>
+        <div class="emoji-row">
+            &#x1F44D; &#x1F44E; &#x1F44C; &#x270C;&#xFE0F; &#x1F91E; &#x1F44B; &#x1F64F; &#x1F4AA;
+        </div>
+    </div>
+    
+    <!-- Emoji at Different Sizes -->
+    <div class="test-section">
+        <h2>Emoji Size Scaling</h2>
+        <div class="emoji-row emoji-small">16px: &#x1F600; &#x1F4BB; &#x1F680; &#x2B50; &#x1F308;</div>
+        <div class="emoji-row">32px: &#x1F600; &#x1F4BB; &#x1F680; &#x2B50; &#x1F308;</div>
+        <div class="emoji-row emoji-large">48px: &#x1F600; &#x1F4BB; &#x1F680; &#x2B50; &#x1F308;</div>
+    </div>
+    
+    <!-- Mixed Text and Emoji -->
+    <div class="test-section">
+        <h2>Mixed Text and Emoji (baseline alignment)</h2>
+        <div class="mixed-text">Hello &#x1F44B; World! How are you? &#x1F600;</div>
+        <div class="mixed-text">Check this out &#x1F449; important &#x2757;</div>
+        <div class="mixed-text">I &#x2764;&#xFE0F; coding &#x1F4BB; and coffee &#x2615;</div>
+        <div class="mixed-text">Great job! &#x1F389; &#x1F38A; &#x1F973;</div>
+    </div>
+    
+    <!-- Symbol Characters -->
+    <div class="test-section">
+        <h2>Symbol Characters (should use system fonts)</h2>
+        <div class="symbol-grid">
+            <div class="symbol-cell"><span class="symbol-char">&#x2713;</span><span class="symbol-name">Check</span></div>
+            <div class="symbol-cell"><span class="symbol-char">&#x2717;</span><span class="symbol-name">Cross</span></div>
+            <div class="symbol-cell"><span class="symbol-char">&#x2022;</span><span class="symbol-name">Bullet</span></div>
+            <div class="symbol-cell"><span class="symbol-char">&#x2192;</span><span class="symbol-name">Arrow R</span></div>
+            <div class="symbol-cell"><span class="symbol-char">&#x2190;</span><span class="symbol-name">Arrow L</span></div>
+            <div class="symbol-cell"><span class="symbol-char">&#x2191;</span><span class="symbol-name">Arrow U</span></div>
+            <div class="symbol-cell"><span class="symbol-char">&#x2193;</span><span class="symbol-name">Arrow D</span></div>
+            <div class="symbol-cell"><span class="symbol-char">&#x2605;</span><span class="symbol-name">Star</span></div>
+            <div class="symbol-cell"><span class="symbol-char">&#x2606;</span><span class="symbol-name">Star O</span></div>
+            <div class="symbol-cell"><span class="symbol-char">&#x266A;</span><span class="symbol-name">Note</span></div>
+            <div class="symbol-cell"><span class="symbol-char">&#x2665;</span><span class="symbol-name">Heart</span></div>
+            <div class="symbol-cell"><span class="symbol-char">&#x2660;</span><span class="symbol-name">Spade</span></div>
+        </div>
+    </div>
+    
+    <!-- Currency Symbols -->
+    <div class="test-section">
+        <h2>Currency and Special Symbols</h2>
+        <div class="mixed-text">$100 &#x20AC;50 &#x00A3;25 &#x00A5;1000 &#x20BF;0.5</div>
+        <div class="mixed-text">&#x00A9; 2024 &#x00AE; &#x2122; &#x00B0;C &#x00B1;5%</div>
+        <div class="mixed-text">&#x00BD; &#x00BC; &#x00BE; &#x2153; &#x2154;</div>
+    </div>
+    
+    <!-- CJK Characters (font fallback test) -->
+    <div class="test-section">
+        <h2>CJK Characters (font fallback)</h2>
+        <div class="mixed-text">&#x4E2D;&#x6587; Chinese</div>
+        <div class="mixed-text">&#x65E5;&#x672C;&#x8A9E; Japanese</div>
+        <div class="mixed-text">&#xD55C;&#xAD6D;&#xC5B4; Korean</div>
+    </div>
+    
+    <!-- Emoji with Skin Tone Modifiers -->
+    <div class="test-section">
+        <h2>Emoji with Skin Tone Modifiers</h2>
+        <div class="emoji-row">
+            &#x1F44D; &#x1F44D;&#x1F3FB; &#x1F44D;&#x1F3FC; &#x1F44D;&#x1F3FD; &#x1F44D;&#x1F3FE; &#x1F44D;&#x1F3FF;
+        </div>
+        <div class="emoji-row">
+            &#x1F64B; &#x1F64B;&#x1F3FB; &#x1F64B;&#x1F3FC; &#x1F64B;&#x1F3FD; &#x1F64B;&#x1F3FE; &#x1F64B;&#x1F3FF;
+        </div>
+    </div>
+    
+    <!-- ZWJ Sequences -->
+    <div class="test-section">
+        <h2>ZWJ Emoji Sequences</h2>
+        <div class="emoji-row">
+            &#x1F468;&#x200D;&#x1F4BB; &#x1F469;&#x200D;&#x1F4BB; &#x1F468;&#x200D;&#x1F3A8; &#x1F469;&#x200D;&#x1F3A8;
+        </div>
+        <div class="emoji-row">
+            &#x1F468;&#x200D;&#x1F469;&#x200D;&#x1F467; &#x1F468;&#x200D;&#x1F469;&#x200D;&#x1F467;&#x200D;&#x1F466;
+        </div>
+    </div>
+</body>
+</html>
+

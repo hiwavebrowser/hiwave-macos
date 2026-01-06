@@ -193,8 +193,21 @@ if [ -x "$NPM_BIN" ]; then
         
         echo -n "  Capturing $id (Chromium + oracle)... "
         
-        # Capture screenshot and oracle
-        if node extract_oracle.js "$html_path" "$RUN_DIR/oracle" 2>/dev/null; then
+        # Get the actual RustKit capture dimensions from the PPM header
+        RUSTKIT_PPM="$RUN_DIR/rustkit/${id}.ppm"
+        if [ -f "$RUSTKIT_PPM" ]; then
+            # PPM header format: P6\nWIDTH HEIGHT\nMAXVAL\n
+            PPM_DIMS=$(head -2 "$RUSTKIT_PPM" | tail -1)
+            PPM_WIDTH=$(echo "$PPM_DIMS" | awk '{print $1}')
+            PPM_HEIGHT=$(echo "$PPM_DIMS" | awk '{print $2}')
+        else
+            PPM_WIDTH=$width
+            PPM_HEIGHT=$height
+        fi
+        
+        # Capture screenshot and oracle with matching dimensions
+        # Use 1x DPR since we're matching the exact pixel dimensions from RustKit
+        if node extract_oracle.js "$html_path" "$RUN_DIR/oracle" "$PPM_WIDTH" "$PPM_HEIGHT" 1 2>/dev/null; then
             # Move screenshot to chromium dir
             BASE_NAME=$(basename "$html_path" .html)
             if [ -f "$RUN_DIR/oracle/${BASE_NAME}.chromium.png" ]; then
