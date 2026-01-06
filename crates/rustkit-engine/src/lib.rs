@@ -160,6 +160,8 @@ struct ViewState {
     max_scroll_offset: (f32, f32),
     /// External stylesheets loaded from <link> elements.
     external_stylesheets: Vec<Stylesheet>,
+    /// Headless bounds (only set for headless views, None for window-based views).
+    headless_bounds: Option<Bounds>,
 }
 
 /// Engine configuration.
@@ -315,6 +317,7 @@ impl Engine {
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Vec::new(),
+            headless_bounds: None,
         };
 
         self.views.insert(id, view_state);
@@ -364,6 +367,7 @@ impl Engine {
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Vec::new(),
+            headless_bounds: None,
         };
 
         let id = view_state.id;
@@ -389,6 +393,59 @@ impl Engine {
         Ok(id)
     }
 
+    /// Create a headless view for offscreen rendering (testing/CI mode).
+    ///
+    /// This creates a view without requiring a window, perfect for unit tests
+    /// and CI environments. Requires the "headless" feature flag.
+    #[cfg(feature = "headless")]
+    pub fn create_headless_view(
+        &mut self,
+        bounds: Bounds,
+    ) -> Result<EngineViewId, EngineError> {
+        let id = EngineViewId::new();
+        let viewhost_id = ViewId::new();
+
+        debug!(?id, ?bounds, "Creating headless view");
+
+        // Create headless texture instead of surface
+        self.compositor
+            .create_headless_texture(viewhost_id, bounds.width, bounds.height)
+            .map_err(|e| EngineError::RenderError(e.to_string()))?;
+
+        // Create navigation state machine
+        let (nav_tx, nav_rx) = mpsc::unbounded_channel();
+        let navigation = NavigationStateMachine::new(nav_tx);
+
+        let view_state = ViewState {
+            id,
+            viewhost_id,
+            url: None,
+            title: None,
+            document: None,
+            layout: None,
+            display_list: None,
+            bindings: None,
+            navigation,
+            nav_event_rx: nav_rx,
+            focused_node: None,
+            view_focused: false,
+            scroll_offset: (0.0, 0.0),
+            max_scroll_offset: (0.0, 0.0),
+            external_stylesheets: Vec::new(),
+            headless_bounds: Some(bounds),
+        };
+
+        self.views.insert(id, view_state);
+
+        // Render initial background to headless texture
+        self.compositor
+            .render_solid_color(viewhost_id, self.config.background_color)
+            .map_err(|e| EngineError::RenderError(e.to_string()))?;
+
+        info!(?id, "Headless view created");
+        Ok(id)
+    }
+
     /// Destroy a view.
     pub fn destroy_view(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         let view = self
@@ -409,18 +466,36 @@ impl Engine {
     /// Resize a view.
     pub fn resize_view(&mut self, id: EngineViewId, bounds: Bounds) -> Result<(), EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+        let viewhost_id = view.viewhost_id;
+        let is_headless = view.headless_bounds.is_some();
 
-        debug!(?id, ?bounds, "Resizing view");
+        debug!(?id, ?bounds, is_headless, "Resizing view");
 
-        // Resize viewhost
-        self.viewhost
-            .set_bounds(view.viewhost_id, bounds)
-            .map_err(|e| EngineError::ViewError(e.to_string()))?;
+        if is_headless {
+            // Headless view: recreate headless texture with new size
+            // First destroy old texture
+            self.compositor
+                .destroy_headless_texture(viewhost_id)
+                .ok(); // Ignore errors if it doesn't exist
 
-        // Resize compositor surface
-        self.compositor
-            .resize_surface(view.viewhost_id, bounds.width, bounds.height)
-            .map_err(|e| EngineError::RenderError(e.to_string()))?;
+            // Create new texture with new size
+            self.compositor
+                .create_headless_texture(viewhost_id, bounds.width, bounds.height)
+                .map_err(|e| EngineError::RenderError(e.to_string()))?;
+
+            // Update headless_bounds in view state
+            let view = self.views.get_mut(&id).unwrap();
+            view.headless_bounds = Some(bounds);
+        } else {
+            // Regular view: resize viewhost and surface
+            self.viewhost
+                .set_bounds(viewhost_id, bounds)
+                .map_err(|e| EngineError::ViewError(e.to_string()))?;
+
+            self.compositor
+                .resize_surface(viewhost_id, bounds.width, bounds.height)
+                .map_err(|e| EngineError::RenderError(e.to_string()))?;
+        }
 
         // Re-layout if we have content
         if self.views.get(&id).unwrap().document.is_some() {
@@ -736,11 +811,14 @@ impl Engine {
             .ok_or(EngineError::RenderError("No document".into()))?
             .clone();
 
-        // Get view bounds
-        let bounds = self
-            .viewhost
-            .get_bounds(view.viewhost_id)
-            .map_err(|e| EngineError::ViewError(e.to_string()))?;
+        // Get view bounds (from headless_bounds if headless, otherwise from viewhost)
+        let bounds = if let Some(headless_bounds) = view.headless_bounds {
+            headless_bounds
+        } else {
+            self.viewhost
+                .get_bounds(view.viewhost_id)
+                .map_err(|e| EngineError::ViewError(e.to_string()))?
+        };
 
         debug!(
             ?id,
@@ -779,6 +857,17 @@ impl Engine {
         {
             let _layout_span = tracing::info_span!("layout_compute").entered();
             root_box.layout(&containing_block);
+        }
+
+        // Ensure body element fills viewport (common browser behavior)
+        // If body has zero or minimal height, extend it to viewport height
+        if !root_box.children.is_empty() {
+            let body_box = &mut root_box.children[0];
+            if body_box.dimensions.content.height < 1.0 {
+                // Body is empty or has no content - fill viewport
+                body_box.dimensions.content.height = bounds.height as f32;
+                debug!("Extended empty body to fill viewport height: {}px", bounds.height);
+            }
         }
 
         // Debug: log the layout box tree AFTER layout
@@ -834,6 +923,43 @@ impl Engine {
         self.render(id)?;
 
         Ok(())
+    }
+
+    /// Check if a style has visible styling (dimensions, background, borders, etc.)
+    fn has_visible_styling(style: &ComputedStyle) -> bool {
+        // Check for explicit dimensions
+        if !matches!(style.width, rustkit_css::Length::Auto) ||
+           !matches!(style.height, rustkit_css::Length::Auto) {
+            return true;
+        }
+
+        // Check for visible background
+        if style.background_color.a > 0.0 && style.background_color != rustkit_css::Color::WHITE {
+            return true;
+        }
+
+        // Check for background gradient
+        if style.background_gradient.is_some() {
+            return true;
+        }
+
+        // Check for borders
+        if !matches!(style.border_top_width, rustkit_css::Length::Px(0.0)) ||
+           !matches!(style.border_right_width, rustkit_css::Length::Px(0.0)) ||
+           !matches!(style.border_bottom_width, rustkit_css::Length::Px(0.0)) ||
+           !matches!(style.border_left_width, rustkit_css::Length::Px(0.0)) {
+            return true;
+        }
+
+        // Check for padding (creates visual space)
+        if !matches!(style.padding_top, rustkit_css::Length::Px(0.0)) ||
+           !matches!(style.padding_right, rustkit_css::Length::Px(0.0)) ||
+           !matches!(style.padding_bottom, rustkit_css::Length::Px(0.0)) ||
+           !matches!(style.padding_left, rustkit_css::Length::Px(0.0)) {
+            return true;
+        }
+
+        false
     }
 
     /// Build a layout tree from a DOM document.
@@ -1045,11 +1171,19 @@ impl Engine {
                 // Process children
                 for child in node.children() {
                     let child_box = self.build_layout_from_node_with_styles(&child, stylesheets, css_vars, &child_ancestors);
-                    // Only add non-empty boxes
-                    if !matches!(child_box.box_type, BoxType::Block) || !child_box.children.is_empty() 
-                        || matches!(child_box.box_type, BoxType::Text(_))
-                        || matches!(child_box.box_type, BoxType::Image { .. })
-                        || matches!(child_box.box_type, BoxType::FormControl(_)) {
+
+                    // Determine if box should be included in layout tree
+                    let should_include = match child_box.box_type {
+                        BoxType::Block => {
+                            // Include blocks if they have children, OR have visible styling
+                            !child_box.children.is_empty() ||
+                            Self::has_visible_styling(&child_box.style)
+                        }
+                        BoxType::Text(_) | BoxType::Image { .. } | BoxType::FormControl(_) => true,
+                        _ => false,
+                    };
+
+                    if should_include {
                         layout_box.children.push(child_box);
                     }
                 }
@@ -2597,14 +2731,15 @@ impl Engine {
     #[tracing::instrument(skip(self), fields(view_id = ?id))]
     fn render(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         let _span = tracing::info_span!("render", ?id).entered();
-        
+
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
         let viewhost_id = view.viewhost_id;
         let display_list = view.display_list.as_ref();
         let has_display_list = display_list.is_some();
         let cmd_count = display_list.map(|dl| dl.commands.len()).unwrap_or(0);
+        let is_headless = view.headless_bounds.is_some();
 
-        trace!(?id, has_display_list, cmd_count, "Rendering view");
+        trace!(?id, has_display_list, cmd_count, is_headless, "Rendering view");
 
         // Get surface size and update renderer viewport before rendering
         let (surface_width, surface_height) = {
@@ -2618,16 +2753,16 @@ impl Engine {
             renderer.set_viewport_size(surface_width, surface_height);
         }
 
-        // Get surface texture
-        let (output, texture_view) = {
-            let _texture_span = tracing::debug_span!("get_surface_texture").entered();
-            self.compositor
-                .get_surface_texture(viewhost_id)
-                .map_err(|e| EngineError::RenderError(e.to_string()))?
-        };
+        // Render based on whether view is headless or not
+        if is_headless {
+            // Headless rendering path - no surface, no present
+            let texture_view = {
+                let _texture_span = tracing::debug_span!("get_headless_texture_view").entered();
+                self.compositor
+                    .get_headless_texture_view(viewhost_id)
+                    .map_err(|e| EngineError::RenderError(e.to_string()))?
+            };
 
-        // Render using display list if available, otherwise just clear to background
-        {
             let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
             if let (Some(renderer), Some(display_list)) = (&mut self.renderer, display_list) {
                 renderer.execute(&display_list.commands, &texture_view)
@@ -2637,17 +2772,45 @@ impl Engine {
                 renderer.execute(&[], &texture_view)
                     .map_err(|e| EngineError::RenderError(e.to_string()))?;
             } else {
-                // Fallback to compositor solid color (shouldn't normally happen)
-                drop(output); // Release the texture
+                // Fallback to compositor solid color
                 self.compositor
                     .render_solid_color(viewhost_id, self.config.background_color)
                     .map_err(|e| EngineError::RenderError(e.to_string()))?;
-                return Ok(());
             }
-        }
 
-        // Present
-        self.compositor.present(output);
+            // No present() needed for headless - texture is already updated
+        } else {
+            // Regular surface rendering path
+            let (output, texture_view) = {
+                let _texture_span = tracing::debug_span!("get_surface_texture").entered();
+                self.compositor
+                    .get_surface_texture(viewhost_id)
+                    .map_err(|e| EngineError::RenderError(e.to_string()))?
+            };
+
+            // Render using display list if available, otherwise just clear to background
+            {
+                let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
+                if let (Some(renderer), Some(display_list)) = (&mut self.renderer, display_list) {
+                    renderer.execute(&display_list.commands, &texture_view)
+                        .map_err(|e| EngineError::RenderError(e.to_string()))?;
+                } else if let Some(renderer) = &mut self.renderer {
+                    // No display list, render empty (will clear to white or debug color)
+                    renderer.execute(&[], &texture_view)
+                        .map_err(|e| EngineError::RenderError(e.to_string()))?;
+                } else {
+                    // Fallback to compositor solid color (shouldn't normally happen)
+                    drop(output); // Release the texture
+                    self.compositor
+                        .render_solid_color(viewhost_id, self.config.background_color)
+                        .map_err(|e| EngineError::RenderError(e.to_string()))?;
+                    return Ok(());
+                }
+            }
+
+            // Present surface texture
+            self.compositor.present(output);
+        }
 
         Ok(())
     }

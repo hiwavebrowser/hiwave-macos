@@ -5,112 +5,13 @@ use rustkit_viewhost::Bounds;
 
 use super::test_frame::TestFrame;
 
-#[cfg(target_os = "macos")]
-use cocoa::{
-    appkit::{NSBackingStoreType, NSWindowStyleMask},
-    base::{id, nil, NO},
-    foundation::{NSPoint, NSRect, NSSize},
-};
-#[cfg(target_os = "macos")]
-use objc::{msg_send, sel, sel_impl};
-
-/// Test window wrapper.
-///
-/// Creates a real but invisible NSWindow for headless testing.
-/// The window is never shown but provides a valid GPU rendering surface.
-#[cfg(target_os = "macos")]
-pub struct TestWindow {
-    ns_window: id,
-}
-
-#[cfg(target_os = "macos")]
-impl TestWindow {
-    /// Create a real offscreen test window.
-    ///
-    /// This creates an actual NSWindow with a valid NSView, but sets it to invisible.
-    /// This allows GPU rendering to work without showing anything on screen.
-    pub fn create(width: u32, height: u32) -> Self {
-        unsafe {
-            // Get NSWindow class
-            let ns_window_class = cocoa::appkit::NSWindow::class();
-
-            // Allocate and initialize NSWindow
-            let ns_window: id = msg_send![ns_window_class, alloc];
-            let ns_window: id = msg_send![ns_window,
-                initWithContentRect: NSRect::new(
-                    NSPoint::new(0.0, 0.0),
-                    NSSize::new(width as f64, height as f64)
-                )
-                styleMask: NSWindowStyleMask::NSBorderlessWindowMask
-                backing: NSBackingStoreType::NSBackingStoreBuffered
-                defer: NO
-            ];
-
-            // Make it invisible
-            let _: () = msg_send![ns_window, setIsVisible: NO];
-
-            // Set title for debugging
-            let title = cocoa::foundation::NSString::alloc(nil);
-            let title = cocoa::foundation::NSString::init_str(title, "TestWindow");
-            let _: () = msg_send![ns_window, setTitle: title];
-
-            Self { ns_window }
-        }
-    }
-
-    /// Get the raw window handle for the test window.
-    pub fn raw_handle(&self) -> raw_window_handle::RawWindowHandle {
-        use raw_window_handle::{AppKitWindowHandle, RawWindowHandle};
-        use std::ptr::NonNull;
-
-        unsafe {
-            // Get the content view from the window
-            let content_view: id = msg_send![self.ns_window, contentView];
-
-            // Create handle with the real NSView pointer
-            let ns_view = NonNull::new(content_view as *mut std::ffi::c_void)
-                .expect("Content view should not be null");
-
-            let handle = AppKitWindowHandle::new(ns_view);
-            RawWindowHandle::AppKit(handle)
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl Drop for TestWindow {
-    fn drop(&mut self) {
-        unsafe {
-            // Close and release the window
-            let _: () = msg_send![self.ns_window, close];
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub struct TestWindow {
-    _marker: std::marker::PhantomData<()>,
-}
-
-#[cfg(not(target_os = "macos"))]
-impl TestWindow {
-    pub fn create(_width: u32, _height: u32) -> Self {
-        Self {
-            _marker: std::marker::PhantomData,
-        }
-    }
-
-    pub fn raw_handle(&self) -> raw_window_handle::RawWindowHandle {
-        // Platform-specific implementation needed
-        panic!("TestWindow only supports macOS currently")
-    }
-}
-
 /// Headless test engine wrapper.
+///
+/// Uses RustKit's headless mode to render without requiring a window.
+/// Perfect for automated testing and CI environments.
 pub struct TestEngine {
     engine: Engine,
     view_id: EngineViewId,
-    _window: TestWindow,
     width: u32,
     height: u32,
 }
@@ -129,7 +30,6 @@ impl TestEngine {
             .build()
             .expect("Failed to create test engine");
 
-        let window = TestWindow::create(width, height);
         let bounds = Bounds {
             x: 0,
             y: 0,
@@ -137,14 +37,14 @@ impl TestEngine {
             height,
         };
 
+        // Use headless mode for testing (no window required!)
         let view_id = engine
-            .create_view(window.raw_handle(), bounds)
-            .expect("Failed to create test view");
+            .create_headless_view(bounds)
+            .expect("Failed to create headless test view");
 
         Self {
             engine,
             view_id,
-            _window: window,
             width,
             height,
         }

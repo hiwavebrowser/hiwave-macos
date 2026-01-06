@@ -70,6 +70,14 @@ pub struct SurfaceState {
     height: u32,
 }
 
+/// Headless texture state for offscreen rendering (used in testing/headless mode).
+pub struct HeadlessState {
+    view_id: ViewId,
+    texture: wgpu::Texture,
+    width: u32,
+    height: u32,
+}
+
 impl SurfaceState {
     /// Resize the surface.
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -105,6 +113,7 @@ pub struct Compositor {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     surfaces: RwLock<HashMap<ViewId, SurfaceState>>,
+    headless_textures: RwLock<HashMap<ViewId, HeadlessState>>,
     config: CompositorConfig,
 }
 
@@ -165,6 +174,7 @@ impl Compositor {
             device: Arc::new(device),
             queue: Arc::new(queue),
             surfaces: RwLock::new(HashMap::new()),
+            headless_textures: RwLock::new(HashMap::new()),
             config,
         })
     }
@@ -320,6 +330,53 @@ impl Compositor {
         Ok(())
     }
 
+    /// Create a headless texture for offscreen rendering (testing/headless mode).
+    ///
+    /// This creates an offscreen render target that doesn't require a window.
+    /// Perfect for unit tests and CI environments.
+    pub fn create_headless_texture(
+        &self,
+        view_id: ViewId,
+        width: u32,
+        height: u32,
+    ) -> Result<(), CompositorError> {
+        debug!(?view_id, width, height, "Creating headless texture");
+
+        if width == 0 || height == 0 {
+            return Err(CompositorError::SurfaceCreation(
+                "Headless texture dimensions must be non-zero".into(),
+            ));
+        }
+
+        // Create offscreen texture
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Headless Render Target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        let state = HeadlessState {
+            view_id,
+            texture,
+            width,
+            height,
+        };
+
+        self.headless_textures.write().unwrap().insert(view_id, state);
+
+        info!(?view_id, width, height, "Headless texture created");
+        Ok(())
+    }
+
     /// Resize a surface.
     pub fn resize_surface(
         &self,
@@ -351,6 +408,47 @@ impl Compositor {
         view_id: ViewId,
         color: [f64; 4],
     ) -> Result<(), CompositorError> {
+        // Check if this is a headless texture first
+        let headless = self.headless_textures.read().unwrap();
+        if let Some(state) = headless.get(&view_id) {
+            let view = state.texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Solid Color Encoder (Headless)"),
+                });
+
+            {
+                let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Solid Color Pass (Headless)"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: color[0],
+                                g: color[1],
+                                b: color[2],
+                                a: color[3],
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+            }
+
+            self.queue.submit(std::iter::once(encoder.finish()));
+
+            trace!(?view_id, "Rendered solid color to headless texture");
+            return Ok(());
+        }
+        drop(headless);
+
+        // Otherwise, render to regular surface
         let surfaces = self.surfaces.read().unwrap();
         let state = surfaces
             .get(&view_id)
@@ -401,6 +499,17 @@ impl Compositor {
         let removed = self.surfaces.write().unwrap().remove(&view_id);
         if removed.is_some() {
             info!(?view_id, "Surface destroyed");
+            Ok(())
+        } else {
+            Err(CompositorError::SurfaceNotFound(view_id))
+        }
+    }
+
+    /// Destroy a headless texture.
+    pub fn destroy_headless_texture(&self, view_id: ViewId) -> Result<(), CompositorError> {
+        let removed = self.headless_textures.write().unwrap().remove(&view_id);
+        if removed.is_some() {
+            info!(?view_id, "Headless texture destroyed");
             Ok(())
         } else {
             Err(CompositorError::SurfaceNotFound(view_id))
@@ -459,6 +568,21 @@ impl Compositor {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         Ok((output, view))
+    }
+
+    /// Get headless texture view for rendering (headless mode).
+    /// Returns just the texture view - no presentation needed for headless.
+    pub fn get_headless_texture_view(
+        &self,
+        view_id: ViewId,
+    ) -> Result<wgpu::TextureView, CompositorError> {
+        let headless = self.headless_textures.read().unwrap();
+        let state = headless
+            .get(&view_id)
+            .ok_or(CompositorError::SurfaceNotFound(view_id))?;
+
+        let view = state.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Ok(view)
     }
 
     /// Present a surface texture.
@@ -641,13 +765,22 @@ impl Compositor {
         renderer: &mut Renderer,
         commands: &[DisplayCommand],
     ) -> Result<(), CompositorError> {
-        let surfaces = self.surfaces.read().unwrap();
-        let state = surfaces
-            .get(&view_id)
-            .ok_or(CompositorError::SurfaceNotFound(view_id))?;
-
-        let width = state.width;
-        let height = state.height;
+        // Get dimensions from either headless texture or surface
+        let (width, height) = {
+            // Check headless textures first
+            let headless = self.headless_textures.read().unwrap();
+            if let Some(state) = headless.get(&view_id) {
+                (state.width, state.height)
+            } else {
+                drop(headless);
+                // Fall back to surfaces
+                let surfaces = self.surfaces.read().unwrap();
+                let state = surfaces
+                    .get(&view_id)
+                    .ok_or(CompositorError::SurfaceNotFound(view_id))?;
+                (state.width, state.height)
+            }
+        };
 
         if width == 0 || height == 0 {
             return Err(CompositorError::Render(
@@ -772,8 +905,16 @@ impl Compositor {
         Ok(())
     }
 
-    /// Get the surface dimensions for a view.
+    /// Get the surface dimensions for a view (supports both surfaces and headless textures).
     pub fn get_surface_size(&self, view_id: ViewId) -> Result<(u32, u32), CompositorError> {
+        // Check headless textures first
+        let headless = self.headless_textures.read().unwrap();
+        if let Some(state) = headless.get(&view_id) {
+            return Ok((state.width, state.height));
+        }
+        drop(headless);
+
+        // Fall back to surfaces
         let surfaces = self.surfaces.read().unwrap();
         let state = surfaces
             .get(&view_id)

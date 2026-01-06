@@ -6,6 +6,12 @@ description = "Browser engine orchestration layer for RustKit"
 authors = ["HiWave Team"]
 license = "MIT"
 
+[features]
+default = []
+# Headless mode: Enables offscreen rendering without window surfaces
+# Useful for testing, CI/CD, and server-side rendering
+headless = []
+
 [dependencies]
 # RustKit crates
 rustkit-viewhost = { path = "../rustkit-viewhost" }

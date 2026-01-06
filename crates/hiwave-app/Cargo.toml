@@ -62,6 +62,11 @@ rustkit-net = { workspace = true }
 wgpu = "24"
 tokio = { version = "1.42", features = ["rt", "time"] }
 
+# Enable headless mode for integration tests
+[target.'cfg(target_os = "macos")'.dev-dependencies.rustkit-engine]
+workspace = true
+features = ["headless"]
+
 # HTTP types for shield adapter tests
 [dev-dependencies]
 http = "1.0"
