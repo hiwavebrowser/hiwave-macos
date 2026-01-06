@@ -2013,6 +2013,141 @@ impl Engine {
         }
     }
 
+    /// Export the layout tree for a view as JSON.
+    ///
+    /// This exports the current layout tree with dimensions for each box,
+    /// which can be compared against Chromium's DOMRect data for layout parity testing.
+    pub fn export_layout_json(&self, id: EngineViewId, path: &str) -> Result<(), EngineError> {
+        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+        
+        let layout = view.layout.as_ref().ok_or_else(|| {
+            EngineError::RenderError("No layout tree available".into())
+        })?;
+        
+        // Convert layout tree to JSON-serializable structure
+        fn layout_box_to_json(layout_box: &LayoutBox) -> serde_json::Value {
+            let dims = &layout_box.dimensions;
+            let content = &dims.content;
+            let margin_box = dims.margin_box();
+            let padding_box = dims.padding_box();
+            let border_box = dims.border_box();
+            
+            let box_type = match &layout_box.box_type {
+                BoxType::Block => "block",
+                BoxType::Inline => "inline",
+                BoxType::AnonymousBlock => "anonymous_block",
+                BoxType::Text(t) => return serde_json::json!({
+                    "type": "text",
+                    "text": t.chars().take(50).collect::<String>(),
+                    "rect": {
+                        "x": content.x,
+                        "y": content.y,
+                        "width": content.width,
+                        "height": content.height
+                    }
+                }),
+                BoxType::Image { natural_width, natural_height, .. } => return serde_json::json!({
+                    "type": "image",
+                    "natural_width": natural_width,
+                    "natural_height": natural_height,
+                    "rect": {
+                        "x": content.x,
+                        "y": content.y,
+                        "width": content.width,
+                        "height": content.height
+                    }
+                }),
+                BoxType::FormControl(ctrl) => return serde_json::json!({
+                    "type": "form_control",
+                    "control_type": format!("{:?}", ctrl),
+                    "rect": {
+                        "x": content.x,
+                        "y": content.y,
+                        "width": content.width,
+                        "height": content.height
+                    }
+                }),
+            };
+            
+            let children: Vec<serde_json::Value> = layout_box.children
+                .iter()
+                .map(layout_box_to_json)
+                .collect();
+            
+            serde_json::json!({
+                "type": box_type,
+                "content_rect": {
+                    "x": content.x,
+                    "y": content.y,
+                    "width": content.width,
+                    "height": content.height
+                },
+                "padding_box": {
+                    "x": padding_box.x,
+                    "y": padding_box.y,
+                    "width": padding_box.width,
+                    "height": padding_box.height
+                },
+                "border_box": {
+                    "x": border_box.x,
+                    "y": border_box.y,
+                    "width": border_box.width,
+                    "height": border_box.height
+                },
+                "margin_box": {
+                    "x": margin_box.x,
+                    "y": margin_box.y,
+                    "width": margin_box.width,
+                    "height": margin_box.height
+                },
+                "margin": {
+                    "top": dims.margin.top,
+                    "right": dims.margin.right,
+                    "bottom": dims.margin.bottom,
+                    "left": dims.margin.left
+                },
+                "padding": {
+                    "top": dims.padding.top,
+                    "right": dims.padding.right,
+                    "bottom": dims.padding.bottom,
+                    "left": dims.padding.left
+                },
+                "border": {
+                    "top": dims.border.top,
+                    "right": dims.border.right,
+                    "bottom": dims.border.bottom,
+                    "left": dims.border.left
+                },
+                "children": children
+            })
+        }
+        
+        let layout_json = layout_box_to_json(layout);
+        
+        // Get viewport size from compositor
+        let (width, height) = self.compositor
+            .get_surface_size(view.viewhost_id)
+            .unwrap_or((0, 0));
+        
+        let wrapper = serde_json::json!({
+            "version": 1,
+            "viewport": {
+                "width": width,
+                "height": height
+            },
+            "root": layout_json
+        });
+        
+        let json_str = serde_json::to_string_pretty(&wrapper)
+            .map_err(|e| EngineError::RenderError(format!("JSON serialization failed: {}", e)))?;
+        
+        std::fs::write(path, json_str)
+            .map_err(|e| EngineError::RenderError(format!("Failed to write layout file: {}", e)))?;
+        
+        info!(?id, path, "Layout tree exported");
+        Ok(())
+    }
+
     /// Render a view (internal).
     #[tracing::instrument(skip(self), fields(view_id = ?id))]
     fn render(&mut self, id: EngineViewId) -> Result<(), EngineError> {

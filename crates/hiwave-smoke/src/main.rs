@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use tao::window::WindowBuilder;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebViewBuilder};
 
@@ -464,6 +464,14 @@ fn main() {
                                 perf.record("frame_capture", capture_start.elapsed());
                                 info!("Frame captured successfully");
                                 frame_dumped = true;
+                                
+                                // Also export layout tree for parity testing
+                                let layout_path = path.replace(".ppm", ".layout.json");
+                                if let Err(e) = engine.export_layout_json(content_view_id, &layout_path) {
+                                    warn!(?e, "Failed to export layout tree");
+                                } else {
+                                    info!(?layout_path, "Layout tree exported");
+                                }
                             }
                             Err(e) => {
                                 error!(?e, "Failed to capture frame");

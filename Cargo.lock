@@ -5159,6 +5159,7 @@ dependencies = [
  "rustkit-net",
  "rustkit-renderer",
  "rustkit-viewhost",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
