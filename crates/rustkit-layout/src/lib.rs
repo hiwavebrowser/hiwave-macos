@@ -621,20 +621,21 @@ impl LayoutBox {
         };
         self.dimensions.content.width = computed_width;
         
-        // Height: use explicit height, or max of children height, line-height, or padding/border
+        // Height: use explicit height, or line-height as minimum for inline boxes
         let min_height = self.dimensions.padding.vertical() + self.dimensions.border.vertical();
         let line_height = self.get_line_height();
         
-        // CONSISTENCY FIX: If width is zero (empty inline box), height should also be zero
-        // This ensures empty inline boxes fully collapse and don't create phantom layout boxes
+        // Height calculation for inline boxes:
+        // Inline boxes should always have at least line-height to maintain proper vertical rhythm.
+        // This is critical for flex containers where inline items need proper sizing.
         let computed_height = if let Some(h) = explicit_height {
             h
-        } else if computed_width == 0.0 && self.children.is_empty() {
-            // Empty inline box with no width should collapse completely
-            0.0
-        } else {
-            // Use max of: children height, line height (for text baseline), or min box model height
+        } else if !self.children.is_empty() {
+            // Has children: use max of children height and line height
             max_height.max(line_height).max(min_height)
+        } else {
+            // No children: use line height as minimum (ensures proper flex item sizing)
+            line_height.max(min_height)
         };
         self.dimensions.content.height = computed_height;
     }

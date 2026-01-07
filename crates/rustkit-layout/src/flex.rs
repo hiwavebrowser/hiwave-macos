@@ -619,14 +619,23 @@ fn get_content_cross_size(layout_box: &LayoutBox) -> f32 {
         _ => 16.0,
     };
     
+    // Get line height (used for text and inline boxes)
+    let line_height_multiplier = if layout_box.style.line_height > 0.0 {
+        layout_box.style.line_height
+    } else {
+        1.2
+    };
+    let line_height = font_size * line_height_multiplier;
+    
     // For text boxes, use line height
     if let crate::BoxType::Text(_) = &layout_box.box_type {
-        let line_height_multiplier = if layout_box.style.line_height > 0.0 {
-            layout_box.style.line_height
-        } else {
-            1.2
-        };
-        return font_size * line_height_multiplier;
+        return line_height;
+    }
+    
+    // For inline boxes, use line height as minimum cross size
+    // This ensures proper vertical rhythm in flex containers
+    if let crate::BoxType::Inline = &layout_box.box_type {
+        return line_height;
     }
     
     // For form controls, use intrinsic height
@@ -948,7 +957,25 @@ fn get_intrinsic_main_size(box_type: &crate::BoxType, main_axis: Axis, style: &r
                 Axis::Vertical => *natural_height,
             }
         }
-        _ => 0.0, // Non-replaced elements don't have intrinsic size
+        crate::BoxType::Inline | crate::BoxType::Block | crate::BoxType::AnonymousBlock => {
+            // For block/inline elements, use line height as intrinsic main size
+            // This ensures proper sizing in flex containers
+            let line_height_multiplier = if style.line_height > 0.0 {
+                style.line_height
+            } else {
+                1.2
+            };
+            font_size * line_height_multiplier
+        }
+        crate::BoxType::Text(_) => {
+            // For text boxes, use line height
+            let line_height_multiplier = if style.line_height > 0.0 {
+                style.line_height
+            } else {
+                1.2
+            };
+            font_size * line_height_multiplier
+        }
     }
 }
 
