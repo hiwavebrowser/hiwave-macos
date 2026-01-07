@@ -20,7 +20,9 @@ Examples:
     python3 scripts/parity_baseline.py --gpu  # Requires display/GPU
     
 Options:
-    --gpu           Use GPU-based capture (requires display). Default is headless.
+    --gpu           Use GPU-based capture (requires display). 
+                    NOTE: GPU capture requires running outside of sandboxed environments.
+                    If running from Cursor/IDE, ensure the terminal has full disk/GPU access.
     --tag <name>    Tag this run with a name for easier identification.
     --output-dir    Output directory for captures and reports.
     --no-archive    Skip auto-archiving to parity-history/.
@@ -95,10 +97,10 @@ def run_rustkit_capture(
     build_mode = "--release" if use_release else ""
     
     if use_gpu:
-        # GPU mode: Use the full hiwave-smoke harness with display
-        # This requires a running display but gives accurate GPU rendering
+        # GPU mode: Use parity-capture but it should find GPU when display is available
+        # The compositor now automatically falls back to software if hardware unavailable
         cmd = [
-            "cargo", "run", "-p", "hiwave-smoke",
+            "cargo", "run", "-p", "parity-capture",
         ]
         if use_release:
             cmd.insert(2, "--release")
@@ -108,7 +110,8 @@ def run_rustkit_capture(
             "--width", str(width),
             "--height", str(height),
             "--dump-frame", str(frame_path),
-            "--duration-ms", "2000",  # Short duration for testing
+            "--dump-layout", str(layout_path),
+            "-v",  # Verbose mode to see GPU adapter info
         ])
     else:
         # Headless mode: Use parity-capture (may fail without GPU adapter)

@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-01-07T08:22:14.983645",
+  "timestamp": "2026-01-07T08:33:48.987452",
   "config": {
     "builtins_weight": 0.6,
     "websuite_weight": 0.4,
@@ -7,33 +7,33 @@
   },
   "metrics": {
     "tier_a_threshold": 25,
-    "tier_a_pass_rate": 0.05,
+    "tier_a_pass_rate": 0.0,
     "tier_a_builtin_pass": 0.0,
-    "tier_a_websuite_pass": 0.125,
-    "tier_b_median_diff": 46.555554799999996,
-    "tier_b_weighted_mean": 41.13342263,
+    "tier_a_websuite_pass": 0.0,
+    "tier_b_median_diff": 100,
+    "tier_b_weighted_mean": 100.0,
     "worst_3_cases": [
       {
-        "case_id": "css-selectors",
-        "type": "websuite",
-        "diff_pct": 59.893616
+        "case_id": "new_tab",
+        "type": "builtin",
+        "diff_pct": 100
       },
       {
-        "case_id": "image-gallery",
-        "type": "websuite",
-        "diff_pct": 54.296875
+        "case_id": "about",
+        "type": "builtin",
+        "diff_pct": 100
       },
       {
-        "case_id": "sticky-scroll",
-        "type": "websuite",
-        "diff_pct": 53.379307999999995
+        "case_id": "settings",
+        "type": "builtin",
+        "diff_pct": 100
       }
     ],
-    "builtin_mean_diff": 37.102578199999996,
-    "websuite_mean_diff": 47.179689275
+    "builtin_mean_diff": 100.0,
+    "websuite_mean_diff": 100.0
   },
   "issue_clusters": {
-    "sizing_layout": 0,
+    "sizing_layout": 13,
     "paint": 0,
     "text": 0,
     "images": 0
@@ -44,26 +44,16 @@
       "html_path": "crates/hiwave-app/src/ui/new_tab.html",
       "width": 1280,
       "height": 800,
-      "success": true,
-      "frame_path": "parity-baseline/captures/new_tab.ppm",
+      "success": false,
+      "frame_path": null,
       "layout_path": "parity-baseline/captures/new_tab.layout.json",
-      "layout_stats": {
-        "total_boxes": 213,
-        "sized": 199,
-        "zero_size": 14,
-        "positioned": 211,
-        "at_origin": 2,
-        "sizing_rate": 0.9342723,
-        "positioning_rate": 0.9906103
-      },
+      "layout_stats": null,
       "perf": {},
-      "error": null,
-      "estimated_diff_pct": 32.31925,
+      "error": "Process exited with code 0",
+      "capture_mode": "gpu",
+      "estimated_diff_pct": 100,
       "issue_clusters": {
-        "sizing_layout": 0,
-        "paint": 0,
-        "text": 0,
-        "images": 0
+        "sizing_layout": 1
       }
     },
     {
@@ -71,26 +61,16 @@
       "html_path": "crates/hiwave-app/src/ui/about.html",
       "width": 800,
       "height": 600,
-      "success": true,
-      "frame_path": "parity-baseline/captures/about.ppm",
+      "success": false,
+      "frame_path": null,
       "layout_path": "parity-baseline/captures/about.layout.json",
-      "layout_stats": {
-        "total_boxes": 485,
-        "sized": 377,
-        "zero_size": 108,
-        "positioned": 482,
-        "at_origin": 3,
-        "sizing_rate": 0.7773196,
-        "positioning_rate": 0.9938144
-      },
+      "layout_stats": null,
       "perf": {},
-      "error": null,
-      "estimated_diff_pct": 43.608248,
+      "error": "Process exited with code 0",
+      "capture_mode": "gpu",
+      "estimated_diff_pct": 100,
       "issue_clusters": {
-        "sizing_layout": 0,
-        "paint": 0,
-        "text": 0,
-        "images": 0
+        "sizing_layout": 1
       }
     },
     {
@@ -98,26 +78,16 @@
       "html_path": "crates/hiwave-app/src/ui/settings.html",
       "width": 1024,
       "height": 768,
-      "success": true,
-      "frame_path": "parity-baseline/captures/settings.ppm",
+      "success": false,
+      "frame_path": null,
       "layout_path": "parity-baseline/captures/settings.layout.json",
-      "layout_stats": {
-        "total_boxes": 601,
-        "sized": 406,
-        "zero_size": 195,
-        "positioned": 600,
-        "at_origin": 1,
-        "sizing_rate": 0.67554075,
-        "positioning_rate": 0.9983361
-      },
+      "layout_stats": null,
       "perf": {},
-      "error": null,
-      "estimated_diff_pct": 49.534110999999996,
+      "error": "Process exited with code 0",
+      "capture_mode": "gpu",
+      "estimated_diff_pct": 100,
       "issue_clusters": {
-        "sizing_layout": 0,
-        "paint": 0,
-        "text": 0,
-        "images": 0
+        "sizing_layout": 1
       }
     },
     {
@@ -125,26 +95,16 @@
       "html_path": "crates/hiwave-app/src/ui/chrome_rustkit.html",
       "width": 1280,
       "height": 100,
-      "success": true,
-      "frame_path": "parity-baseline/captures/chrome_rustkit.ppm",
+      "success": false,
+      "frame_path": null,
       "layout_path": "parity-baseline/captures/chrome_rustkit.layout.json",
-      "layout_stats": {
-        "total_boxes": 117,
-        "sized": 106,
-        "zero_size": 11,
-        "positioned": 114,
-        "at_origin": 3,
-        "sizing_rate": 0.9059829,
-        "positioning_rate": 0.974359
-      },
+      "layout_stats": null,
       "perf": {},
-      "error": null,
-      "estimated_diff_pct": 28.66666599999999,
+      "error": "Process exited with code 0",
+      "capture_mode": "gpu",
+      "estimated_diff_pct": 100,
       "issue_clusters": {
-        "sizing_layout": 0,
-        "paint": 0,
-        "text": 0,
-        "images": 0
+        "sizing_layout": 1
       }
     },
     {
@@ -152,26 +112,16 @@
       "html_path": "crates/hiwave-app/src/ui/shelf.html",
       "width": 1280,
       "height": 120,
-      "success": true,
-      "frame_path": "parity-baseline/captures/shelf.ppm",
+      "success": false,
+      "frame_path": null,
       "layout_path": "parity-baseline/captures/shelf.layout.json",
-      "layout_stats": {
-        "total_boxes": 39,
-        "sized": 31,
-        "zero_size": 8,
-        "positioned": 36,
-        "at_origin": 3,
-        "sizing_rate": 0.7948718,
-        "positioning_rate": 0.9230769
-      },
+      "layout_stats": null,
       "perf": {},
-      "error": null,
-      "estimated_diff_pct": 31.38461600000001,
+      "error": "Process exited with code 0",
+      "capture_mode": "gpu",
+      "estimated_diff_pct": 100,
       "issue_clusters": {
-        "sizing_layout": 0,
-        "paint": 0,
-        "text": 0,
-        "images": 0
+        "sizing_layout": 1
       }
     }
   ],
@@ -181,26 +131,16 @@
       "html_path": "websuite/cases/article-typography/index.html",
       "width": 1280,
       "height": 800,
-      "success": true,
-      "frame_path": "parity-baseline/captures/article-typography.ppm",
+      "success": false,
+      "frame_path": null,
       "layout_path": "parity-baseline/captures/article-typography.layout.json",
-      "layout_stats": {
-        "total_boxes": 175,
-        "sized": 120,
-        "zero_size": 55,
-        "positioned": 172,
-        "at_origin": 3,
-        "sizing_rate": 0.6857143,
-        "positioning_rate": 0.98285717
-      },
+      "layout_stats": null,
       "perf": {},
-      "error": null,
-      "estimated_diff_pct": 49.542855200000005,
+      "error": "Process exited with code 0",
+      "capture_mode": "gpu",
+      "estimated_diff_pct": 100,
       "issue_clusters": {
-        "sizing_layout": 0,
-        "paint": 0,
-        "text": 0,
-        "images": 0
+        "sizing_layout": 1
       }
     },
     {
@@ -208,26 +148,16 @@
       "html_path": "websuite/cases/card-grid/index.html",
       "width": 1280,
       "height": 800,
-      "success": true,
-      "frame_path": "parity-baseline/captures/card-grid.ppm",
+      "success": false,
+      "frame_path": null,
       "layout_path": "parity-baseline/captures/card-grid.layout.json",
-      "layout_stats": {
-        "total_boxes": 180,
-        "sized": 131,
-        "zero_size": 49,
-        "positioned": 179,
-        "at_origin": 1,
-        "sizing_rate": 0.7277778,
-        "positioning_rate": 0.99444443
-      },
+      "layout_stats": null,
       "perf": {},
-      "error": null,
-      "estimated_diff_pct": 46.555554799999996,
+      "error": "Process exited with code 0",
+      "capture_mode": "gpu",
+      "estimated_diff_pct": 100,
       "issue_clusters": {
-        "sizing_layout": 0,
-        "paint": 0,
-        "text": 0,
-        "images": 0
+        "sizing_layout": 1
       }
     },
     {
@@ -235,26 +165,16 @@
       "html_path": "websuite/cases/css-selectors/index.html",
       "width": 800,
       "height": 1200,
-      "success": true,
-      "frame_path": "parity-baseline/captures/css-selectors.ppm",
+      "success": false,
+      "frame_path": null,
       "layout_path": "parity-baseline/captures/css-selectors.layout.json",
-      "layout_stats": {
-        "total_boxes": 188,
-        "sized": 95,
-        "zero_size": 93,
-        "positioned": 187,
-        "at_origin": 1,
-        "sizing_rate": 0.5053192,
-        "positioning_rate": 0.9946808
-      },
+      "layout_stats": null,
       "perf": {},
-      "error": null,
-      "estimated_diff_pct": 59.893616,
+      "error": "Process exited with code 0",
+      "capture_mode": "gpu",
+      "estimated_diff_pct": 100,
       "issue_clusters": {
-        "sizing_layout": 0,
-        "paint": 0,
-        "text": 0,
-        "images": 0
+        "sizing_layout": 1
       }
     },
     {
@@ -262,26 +182,16 @@
       "html_path": "websuite/cases/flex-positioning/index.html",
       "width": 800,
       "height": 1000,
-      "success": true,
-      "frame_path": "parity-baseline/captures/flex-positioning.ppm",
+      "success": false,
+      "frame_path": null,
       "layout_path": "parity-baseline/captures/flex-positioning.layout.json",
-      "layout_stats": {
-        "total_boxes": 205,
-        "sized": 156,
-        "zero_size": 49,
-        "positioned": 204,
-        "at_origin": 1,
-        "sizing_rate": 0.7609756,
-        "positioning_rate": 0.99512196
-      },
+      "layout_stats": null,
       "perf": {},
-      "error": null,
-      "estimated_diff_pct": 44.53658560000001,
+      "error": "Process exited with code 0",
+      "capture_mode": "gpu",
+      "estimated_diff_pct": 100,
       "issue_clusters": {
-        "sizing_layout": 0,
-        "paint": 0,
-        "text": 0,
-        "images": 0
+        "sizing_layout": 1
       }
     },
     {
@@ -289,26 +199,16 @@
       "html_path": "websuite/cases/form-elements/index.html",
       "width": 800,
       "height": 600,
-      "success": true,
-      "frame_path": "parity-baseline/captures/form-elements.ppm",
+      "success": false,
+      "frame_path": null,
       "layout_path": "parity-baseline/captures/form-elements.layout.json",
-      "layout_stats": {
-        "total_boxes": 177,
-        "sized": 114,
-        "zero_size": 63,
-        "positioned": 176,
-        "at_origin": 1,
-        "sizing_rate": 0.6440678,
-        "positioning_rate": 0.99435025
-      },
+      "layout_stats": null,
       "perf": {},
-      "error": null,
-      "estimated_diff_pct": 51.581922,
+      "error": "Process exited with code 0",
+      "capture_mode": "gpu",
+      "estimated_diff_pct": 100,
       "issue_clusters": {
-        "sizing_layout": 0,
-        "paint": 0,
-        "text": 0,
-        "images": 0
+        "sizing_layout": 1
       }
     },
     {
@@ -316,26 +216,16 @@
       "html_path": "websuite/cases/gradient-backgrounds/index.html",
       "width": 800,
       "height": 600,
-      "success": true,
-      "frame_path": "parity-baseline/captures/gradient-backgrounds.ppm",
+      "success": false,
+      "frame_path": null,
       "layout_path": "parity-baseline/captures/gradient-backgrounds.layout.json",
-      "layout_stats": {
-        "total_boxes": 126,
-        "sized": 119,
-        "zero_size": 7,
-        "positioned": 125,
-        "at_origin": 1,
-        "sizing_rate": 0.9444444,
-        "positioning_rate": 0.99206346
-      },
+      "layout_stats": null,
       "perf": {},
-      "error": null,
-      "estimated_diff_pct": 17.6507976,
+      "error": "Process exited with code 0",
+      "capture_mode": "gpu",
+      "estimated_diff_pct": 100,
       "issue_clusters": {
-        "sizing_layout": 0,
-        "paint": 0,
-        "text": 0,
-        "images": 0
+        "sizing_layout": 1
       }
     },
     {
@@ -343,26 +233,16 @@
       "html_path": "websuite/cases/image-gallery/index.html",
       "width": 1280,
       "height": 800,
-      "success": true,
-      "frame_path": "parity-baseline/captures/image-gallery.ppm",
+      "success": false,
+      "frame_path": null,
       "layout_path": "parity-baseline/captures/image-gallery.layout.json",
-      "layout_stats": {
-        "total_boxes": 256,
-        "sized": 153,
-        "zero_size": 103,
-        "positioned": 255,
-        "at_origin": 1,
-        "sizing_rate": 0.59765625,
-        "positioning_rate": 0.99609375
-      },
+      "layout_stats": null,
       "perf": {},
-      "error": null,
-      "estimated_diff_pct": 54.296875,
+      "error": "Process exited with code 0",
+      "capture_mode": "gpu",
+      "estimated_diff_pct": 100,
       "issue_clusters": {
-        "sizing_layout": 0,
-        "paint": 0,
-        "text": 0,
-        "images": 0
+        "sizing_layout": 1
       }
     },
     {
@@ -370,26 +250,16 @@
       "html_path": "websuite/cases/sticky-scroll/index.html",
       "width": 1280,
       "height": 800,
-      "success": true,
-      "frame_path": "parity-baseline/captures/sticky-scroll.ppm",
+      "success": false,
+      "frame_path": null,
       "layout_path": "parity-baseline/captures/sticky-scroll.layout.json",
-      "layout_stats": {
-        "total_boxes": 290,
-        "sized": 179,
-        "zero_size": 111,
-        "positioned": 287,
-        "at_origin": 3,
-        "sizing_rate": 0.6172414,
-        "positioning_rate": 0.9896552
-      },
+      "layout_stats": null,
       "perf": {},
-      "error": null,
-      "estimated_diff_pct": 53.379307999999995,
+      "error": "Process exited with code 0",
+      "capture_mode": "gpu",
+      "estimated_diff_pct": 100,
       "issue_clusters": {
-        "sizing_layout": 0,
-        "paint": 0,
-        "text": 0,
-        "images": 0
+        "sizing_layout": 1
       }
     }
   ]

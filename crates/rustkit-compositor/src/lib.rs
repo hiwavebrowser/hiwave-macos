@@ -127,28 +127,40 @@ impl Compositor {
     pub fn with_config(config: CompositorConfig) -> Result<Self, CompositorError> {
         info!("Initializing compositor");
 
-        // Create wgpu instance
+        // Create wgpu instance - use all backends to allow fallback options
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            #[cfg(target_os = "windows")]
-            backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN,
-            #[cfg(target_os = "macos")]
-            backends: wgpu::Backends::METAL,
-            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            // Use all available backends to maximize compatibility
+            // On macOS this includes Metal and potentially software fallback
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
 
-        // Request adapter
+        // Request adapter - try hardware first, then fall back to software
         let adapter = pollster::block_on(async {
-            instance
+            // First try hardware adapter
+            let hardware = instance
                 .request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference: config.power_preference,
                     compatible_surface: None,
                     force_fallback_adapter: false,
                 })
+                .await;
+            
+            if hardware.is_some() {
+                return hardware;
+            }
+            
+            // Fall back to software adapter if hardware not available
+            info!("No hardware GPU adapter found, trying software fallback");
+            instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    compatible_surface: None,
+                    force_fallback_adapter: true,
+                })
                 .await
         })
-        .ok_or_else(|| CompositorError::DeviceCreation("No suitable GPU adapter found".into()))?;
+        .ok_or_else(|| CompositorError::DeviceCreation("No suitable GPU adapter found (tried hardware and software fallback)".into()))?;
 
         info!(adapter = ?adapter.get_info().name, "GPU adapter selected");
 
