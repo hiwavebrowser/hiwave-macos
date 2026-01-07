@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-01-06T23:37:50.295679",
+  "timestamp": "2026-01-06T23:43:09.150871",
   "config": {
     "builtins_weight": 0.6,
     "websuite_weight": 0.4,
@@ -11,7 +11,7 @@
     "tier_a_builtin_pass": 0.0,
     "tier_a_websuite_pass": 0.0,
     "tier_b_median_diff": 65.80699000000001,
-    "tier_b_weighted_mean": 67.33985091000001,
+    "tier_b_weighted_mean": 66.934217022,
     "worst_3_cases": [
       {
         "case_id": "shelf",
@@ -29,7 +29,7 @@
         "diff_pct": 71.7094008
       }
     ],
-    "builtin_mean_diff": 69.65562500000001,
+    "builtin_mean_diff": 68.97956852,
     "websuite_mean_diff": 63.866189775
   },
   "issue_clusters": {
@@ -49,16 +49,16 @@
       "layout_path": "parity-baseline/captures/new_tab.layout.json",
       "layout_stats": {
         "total_boxes": 213,
-        "sized": 72,
-        "zero_size": 141,
+        "sized": 84,
+        "zero_size": 129,
         "positioned": 210,
         "at_origin": 3,
-        "sizing_rate": 0.33802816,
+        "sizing_rate": 0.3943662,
         "positioning_rate": 0.9859155
       },
       "perf": {},
       "error": null,
-      "estimated_diff_pct": 70.2816904,
+      "estimated_diff_pct": 66.901408,
       "issue_clusters": {
         "sizing_layout": 0,
         "paint": 0,

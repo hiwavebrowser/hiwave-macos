@@ -614,6 +614,34 @@ pub fn layout_grid_container(
         position_idx += 1;
     }
 
+    // Phase 7: Recursively layout children of grid items
+    for child in container.children.iter_mut() {
+        if child.style.display == Display::None {
+            continue;
+        }
+        
+        if !child.children.is_empty() {
+            if child.style.display.is_flex() {
+                // Nested flex container
+                let child_containing = child.dimensions.clone();
+                crate::flex::layout_flex_container(child, &child_containing);
+            } else if child.style.display.is_grid() {
+                // Nested grid container
+                layout_grid_container(
+                    child,
+                    child.dimensions.content.width,
+                    child.dimensions.content.height,
+                );
+            } else {
+                // Block container: lay out children normally
+                for grandchild in &mut child.children {
+                    let cb = child.dimensions.clone();
+                    grandchild.layout(&cb);
+                }
+            }
+        }
+    }
+
     debug!(
         "Grid layout complete: {} columns, {} rows, {} items",
         grid.column_count(),
