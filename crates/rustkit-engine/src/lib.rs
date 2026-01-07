@@ -1196,8 +1196,8 @@ impl Engine {
                 // Create text box for non-empty text
                 let trimmed = text.trim();
                 if trimmed.is_empty() {
-                    // Return minimal box for whitespace-only text
-                    LayoutBox::new(BoxType::Block, ComputedStyle::new())
+                    // Skip whitespace-only text - return an inline box that won't be included
+                    LayoutBox::new(BoxType::Inline, ComputedStyle::new())
                 } else {
                     let mut style = ComputedStyle::new();
                     style.color = rustkit_css::Color::BLACK;
