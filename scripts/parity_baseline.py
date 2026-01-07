@@ -17,6 +17,15 @@ Examples:
     python3 scripts/parity_baseline.py
     python3 scripts/parity_baseline.py --tag "after-flex-fix"
     python3 scripts/parity_baseline.py --no-archive
+    python3 scripts/parity_baseline.py --gpu  # Requires display/GPU
+    
+Options:
+    --gpu           Use GPU-based capture (requires display). Default is headless.
+    --tag <name>    Tag this run with a name for easier identification.
+    --output-dir    Output directory for captures and reports.
+    --no-archive    Skip auto-archiving to parity-history/.
+    --release       Use release build (default: release).
+    --debug         Use debug build instead of release.
 """
 
 import json
@@ -58,20 +67,64 @@ WEBSUITE = [
 ]
 
 
-def run_rustkit_capture(case_id: str, html_path: str, width: int, height: int, output_dir: Path) -> Dict[str, Any]:
-    """Run parity-capture (headless) to capture a frame and layout tree."""
+def run_rustkit_capture(
+    case_id: str, 
+    html_path: str, 
+    width: int, 
+    height: int, 
+    output_dir: Path,
+    use_gpu: bool = False,
+    use_release: bool = True,
+) -> Dict[str, Any]:
+    """Run parity-capture to capture a frame and layout tree.
+    
+    Args:
+        case_id: Identifier for this test case
+        html_path: Path to HTML file to render
+        width: Viewport width
+        height: Viewport height
+        output_dir: Directory to save outputs
+        use_gpu: If True, use GPU-based capture (requires display). 
+                 If False, use headless capture (may fail without GPU adapter).
+        use_release: If True, use release build. If False, use debug.
+    """
     frame_path = output_dir / f"{case_id}.ppm"
     layout_path = output_dir / f"{case_id}.layout.json"
     
-    # Use parity-capture which runs headless (no display required)
-    cmd = [
-        "cargo", "run", "-p", "parity-capture", "--",
-        "--html-file", html_path,
-        "--width", str(width),
-        "--height", str(height),
-        "--dump-frame", str(frame_path),
-        "--dump-layout", str(layout_path),
-    ]
+    # Build command based on capture mode
+    build_mode = "--release" if use_release else ""
+    
+    if use_gpu:
+        # GPU mode: Use the full hiwave-smoke harness with display
+        # This requires a running display but gives accurate GPU rendering
+        cmd = [
+            "cargo", "run", "-p", "hiwave-smoke",
+        ]
+        if use_release:
+            cmd.insert(2, "--release")
+        cmd.extend([
+            "--",
+            "--html-file", html_path,
+            "--width", str(width),
+            "--height", str(height),
+            "--dump-frame", str(frame_path),
+            "--duration-ms", "2000",  # Short duration for testing
+        ])
+    else:
+        # Headless mode: Use parity-capture (may fail without GPU adapter)
+        cmd = [
+            "cargo", "run", "-p", "parity-capture",
+        ]
+        if use_release:
+            cmd.insert(2, "--release")
+        cmd.extend([
+            "--",
+            "--html-file", html_path,
+            "--width", str(width),
+            "--height", str(height),
+            "--dump-frame", str(frame_path),
+            "--dump-layout", str(layout_path),
+        ])
     
     try:
         result = subprocess.run(
@@ -93,6 +146,11 @@ def run_rustkit_capture(case_id: str, html_path: str, width: int, height: int, o
         
         success = capture_result.get("status") == "ok" and frame_path.exists()
         
+        # If headless failed with GPU error, suggest using --gpu flag
+        error_msg = capture_result.get("error")
+        if not success and error_msg and "GPU" in error_msg:
+            error_msg += " (Try running with --gpu flag if you have a display)"
+        
         return {
             "case_id": case_id,
             "html_path": html_path,
@@ -103,7 +161,8 @@ def run_rustkit_capture(case_id: str, html_path: str, width: int, height: int, o
             "layout_path": str(layout_path) if layout_path.exists() else None,
             "layout_stats": capture_result.get("layout_stats"),
             "perf": {},
-            "error": capture_result.get("error") if not success else None,
+            "error": error_msg if not success else None,
+            "capture_mode": "gpu" if use_gpu else "headless",
         }
     except subprocess.TimeoutExpired:
         return {
@@ -287,6 +346,8 @@ def main():
     history_dir = Path("parity-history")
     tag = None
     auto_archive = True
+    use_gpu = False
+    use_release = True
     
     # Parse arguments
     args = sys.argv[1:]
@@ -304,6 +365,18 @@ def main():
         elif args[i] == "--no-archive":
             auto_archive = False
             i += 1
+        elif args[i] == "--gpu":
+            use_gpu = True
+            i += 1
+        elif args[i] == "--release":
+            use_release = True
+            i += 1
+        elif args[i] == "--debug":
+            use_release = False
+            i += 1
+        elif args[i] in ["-h", "--help"]:
+            print(__doc__)
+            sys.exit(0)
         else:
             i += 1
     
@@ -316,6 +389,8 @@ def main():
     print(f"Output: {output_dir}")
     if tag:
         print(f"Tag: {tag}")
+    print(f"Capture Mode: {'GPU (requires display)' if use_gpu else 'Headless'}")
+    print(f"Build: {'Release' if use_release else 'Debug'}")
     print(f"Timestamp: {datetime.now().isoformat()}")
     print("=" * 60)
     
@@ -324,7 +399,7 @@ def main():
     builtin_results = []
     for case_id, html_path, width, height in BUILTINS:
         print(f"  Capturing {case_id}...", end=" ", flush=True)
-        result = run_rustkit_capture(case_id, html_path, width, height, captures_dir)
+        result = run_rustkit_capture(case_id, html_path, width, height, captures_dir, use_gpu, use_release)
         
         if result["success"]:
             # Use layout_stats from capture if available, otherwise analyze
@@ -347,7 +422,7 @@ def main():
     websuite_results = []
     for case_id, html_path, width, height in WEBSUITE:
         print(f"  Capturing {case_id}...", end=" ", flush=True)
-        result = run_rustkit_capture(case_id, html_path, width, height, captures_dir)
+        result = run_rustkit_capture(case_id, html_path, width, height, captures_dir, use_gpu, use_release)
         
         if result["success"]:
             # Use layout_stats from capture if available, otherwise analyze
