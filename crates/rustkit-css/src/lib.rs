@@ -1083,6 +1083,13 @@ pub struct ComputedStyle {
     pub writing_mode: WritingMode,
     pub direction: Direction,
 
+    // Positioning offsets
+    pub top: Option<Length>,
+    pub right: Option<Length>,
+    pub bottom: Option<Length>,
+    pub left: Option<Length>,
+    pub z_index: i32,
+
     // Visual
     pub opacity: f32,
     pub overflow_x: Overflow,

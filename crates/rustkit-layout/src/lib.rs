@@ -533,9 +533,29 @@ impl LayoutBox {
 
     /// Layout an inline box.
     fn layout_inline(&mut self, containing_block: &Dimensions) {
+        // Calculate margins, padding, and borders for the inline box
+        let d = &mut self.dimensions;
+        let container_width = containing_block.content.width;
+        
+        d.margin.left = self.style.margin_left.to_px(16.0, 16.0, container_width);
+        d.margin.right = self.style.margin_right.to_px(16.0, 16.0, container_width);
+        // Vertical margins don't apply to inline elements
+        d.margin.top = 0.0;
+        d.margin.bottom = 0.0;
+        
+        d.padding.left = self.style.padding_left.to_px(16.0, 16.0, container_width);
+        d.padding.right = self.style.padding_right.to_px(16.0, 16.0, container_width);
+        d.padding.top = self.style.padding_top.to_px(16.0, 16.0, container_width);
+        d.padding.bottom = self.style.padding_bottom.to_px(16.0, 16.0, container_width);
+        
+        d.border.left = self.style.border_left_width.to_px(16.0, 16.0, container_width);
+        d.border.right = self.style.border_right_width.to_px(16.0, 16.0, container_width);
+        d.border.top = self.style.border_top_width.to_px(16.0, 16.0, container_width);
+        d.border.bottom = self.style.border_bottom_width.to_px(16.0, 16.0, container_width);
+        
         // Position at containing block's content area
-        self.dimensions.content.x = containing_block.content.x;
-        self.dimensions.content.y = containing_block.content.y + containing_block.content.height;
+        d.content.x = containing_block.content.x + d.margin.left + d.border.left + d.padding.left;
+        d.content.y = containing_block.content.y + containing_block.content.height;
         
         // Layout inline children sequentially
         let mut cursor_x = 0.0;
@@ -552,8 +572,12 @@ impl LayoutBox {
             max_height = max_height.max(child.dimensions.margin_box().height);
         }
         
+        // Set content dimensions based on children
         self.dimensions.content.width = cursor_x;
-        self.dimensions.content.height = max_height.max(self.get_line_height());
+        
+        // Height: max of children height, line-height, or padding/border contribution
+        let min_height = self.dimensions.padding.top + self.dimensions.padding.bottom;
+        self.dimensions.content.height = max_height.max(self.get_line_height()).max(min_height);
     }
 
     /// Layout a text box.

@@ -964,6 +964,30 @@ impl Engine {
         false
     }
 
+    /// Check if a layout box has content children (text, images, form controls).
+    /// This is used to determine if an inline wrapper should be included.
+    fn has_content_children(layout_box: &LayoutBox) -> bool {
+        for child in &layout_box.children {
+            match &child.box_type {
+                BoxType::Text(text) => {
+                    if !text.trim().is_empty() {
+                        return true;
+                    }
+                }
+                BoxType::Image { .. } | BoxType::FormControl(_) => {
+                    return true;
+                }
+                BoxType::Inline | BoxType::Block | BoxType::AnonymousBlock => {
+                    // Recursively check children
+                    if Self::has_content_children(child) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Build a layout tree from a DOM document.
     fn build_layout_from_document(&self, document: &Document, external_stylesheets: &[Stylesheet]) -> LayoutBox {
         // Extract stylesheets from <style> elements
@@ -1176,13 +1200,18 @@ impl Engine {
 
                     // Determine if box should be included in layout tree
                     let should_include = match child_box.box_type {
-                        BoxType::Block => {
+                        BoxType::Block | BoxType::AnonymousBlock => {
                             // Include blocks if they have children, OR have visible styling
                             !child_box.children.is_empty() ||
                             Self::has_visible_styling(&child_box.style)
                         }
+                        BoxType::Inline => {
+                            // Include inline boxes if they have content children (text, images, form controls)
+                            // or have visible styling (padding, border, background)
+                            Self::has_content_children(&child_box) ||
+                            Self::has_visible_styling(&child_box.style)
+                        }
                         BoxType::Text(_) | BoxType::Image { .. } | BoxType::FormControl(_) => true,
-                        _ => false,
                     };
 
                     if should_include {
@@ -1756,6 +1785,87 @@ impl Engine {
                     style.opacity = opacity.clamp(0.0, 1.0);
                 }
             }
+            "position" => {
+                style.position = match value.trim() {
+                    "static" => rustkit_css::Position::Static,
+                    "relative" => rustkit_css::Position::Relative,
+                    "absolute" => rustkit_css::Position::Absolute,
+                    "fixed" => rustkit_css::Position::Fixed,
+                    "sticky" => rustkit_css::Position::Sticky,
+                    _ => rustkit_css::Position::Static,
+                };
+            }
+            "top" => {
+                if let Some(length) = parse_length(value) {
+                    style.top = Some(length);
+                }
+            }
+            "right" => {
+                if let Some(length) = parse_length(value) {
+                    style.right = Some(length);
+                }
+            }
+            "bottom" => {
+                if let Some(length) = parse_length(value) {
+                    style.bottom = Some(length);
+                }
+            }
+            "left" => {
+                if let Some(length) = parse_length(value) {
+                    style.left = Some(length);
+                }
+            }
+            "inset" => {
+                // Shorthand: inset: top right bottom left (or 1-4 values)
+                let parts: Vec<&str> = value.split_whitespace().collect();
+                match parts.len() {
+                    1 => {
+                        if let Some(length) = parse_length(parts[0]) {
+                            style.top = Some(length);
+                            style.right = Some(length);
+                            style.bottom = Some(length);
+                            style.left = Some(length);
+                        }
+                    }
+                    2 => {
+                        if let (Some(tb), Some(lr)) = (parse_length(parts[0]), parse_length(parts[1])) {
+                            style.top = Some(tb);
+                            style.bottom = Some(tb);
+                            style.right = Some(lr);
+                            style.left = Some(lr);
+                        }
+                    }
+                    4 => {
+                        if let (Some(t), Some(r), Some(b), Some(l)) = (
+                            parse_length(parts[0]),
+                            parse_length(parts[1]),
+                            parse_length(parts[2]),
+                            parse_length(parts[3]),
+                        ) {
+                            style.top = Some(t);
+                            style.right = Some(r);
+                            style.bottom = Some(b);
+                            style.left = Some(l);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "overflow" => {
+                style.overflow_x = parse_overflow(value);
+                style.overflow_y = parse_overflow(value);
+            }
+            "overflow-x" => {
+                style.overflow_x = parse_overflow(value);
+            }
+            "overflow-y" => {
+                style.overflow_y = parse_overflow(value);
+            }
+            "z-index" => {
+                if let Ok(z) = value.parse::<i32>() {
+                    style.z_index = z;
+                }
+            }
             "text-decoration" | "text-decoration-line" => {
                 match value.trim().to_lowercase().as_str() {
                     "none" => style.text_decoration_line = rustkit_css::TextDecorationLine::NONE,
@@ -1859,19 +1969,69 @@ impl Engine {
                     style.border_left_color = color;
                 }
             }
-            "min-width" => {
-                if let Some(length) = parse_length(value) {
-                    style.min_width = length;
+            // CSS Grid properties
+            "grid-template-columns" => {
+                if let Some(template) = parse_grid_template(value) {
+                    style.grid_template_columns = template;
                 }
             }
-            "min-height" => {
-                if let Some(length) = parse_length(value) {
-                    style.min_height = length;
+            "grid-template-rows" => {
+                if let Some(template) = parse_grid_template(value) {
+                    style.grid_template_rows = template;
                 }
             }
-            "max-height" => {
-                if let Some(length) = parse_length(value) {
-                    style.max_height = length;
+            "grid-column" => {
+                // Shorthand: grid-column: start / end
+                if let Some((start, end)) = parse_grid_line_shorthand(value) {
+                    style.grid_column_start = start;
+                    style.grid_column_end = end;
+                }
+            }
+            "grid-column-start" => {
+                if let Some(line) = parse_grid_line(value) {
+                    style.grid_column_start = line;
+                }
+            }
+            "grid-column-end" => {
+                if let Some(line) = parse_grid_line(value) {
+                    style.grid_column_end = line;
+                }
+            }
+            "grid-row" => {
+                // Shorthand: grid-row: start / end
+                if let Some((start, end)) = parse_grid_line_shorthand(value) {
+                    style.grid_row_start = start;
+                    style.grid_row_end = end;
+                }
+            }
+            "grid-row-start" => {
+                if let Some(line) = parse_grid_line(value) {
+                    style.grid_row_start = line;
+                }
+            }
+            "grid-row-end" => {
+                if let Some(line) = parse_grid_line(value) {
+                    style.grid_row_end = line;
+                }
+            }
+            "grid-auto-flow" => {
+                style.grid_auto_flow = match value.trim() {
+                    "row" => rustkit_css::GridAutoFlow::Row,
+                    "column" => rustkit_css::GridAutoFlow::Column,
+                    "row dense" | "dense row" => rustkit_css::GridAutoFlow::RowDense,
+                    "column dense" | "dense column" => rustkit_css::GridAutoFlow::ColumnDense,
+                    "dense" => rustkit_css::GridAutoFlow::RowDense,
+                    _ => rustkit_css::GridAutoFlow::Row,
+                };
+            }
+            "grid-auto-columns" => {
+                if let Some(size) = parse_track_size(value) {
+                    style.grid_auto_columns = size;
+                }
+            }
+            "grid-auto-rows" => {
+                if let Some(size) = parse_track_size(value) {
+                    style.grid_auto_rows = size;
                 }
             }
             _ => {
@@ -3943,6 +4103,202 @@ fn parse_box_shadow(value: &str) -> Option<rustkit_css::BoxShadow> {
     shadow.color = color_value.unwrap_or(rustkit_css::Color::new(0, 0, 0, 0.5));
     
     Some(shadow)
+}
+
+/// Parse an overflow value.
+fn parse_overflow(value: &str) -> rustkit_css::Overflow {
+    match value.trim() {
+        "visible" => rustkit_css::Overflow::Visible,
+        "hidden" => rustkit_css::Overflow::Hidden,
+        "scroll" => rustkit_css::Overflow::Scroll,
+        "auto" => rustkit_css::Overflow::Auto,
+        "clip" => rustkit_css::Overflow::Clip,
+        _ => rustkit_css::Overflow::Visible,
+    }
+}
+
+/// Parse a grid-template-columns or grid-template-rows value.
+/// Supports: repeat(N, 1fr), explicit track sizes, and combinations.
+fn parse_grid_template(value: &str) -> Option<rustkit_css::GridTemplate> {
+    let value = value.trim();
+    
+    if value == "none" || value.is_empty() {
+        return Some(rustkit_css::GridTemplate::none());
+    }
+    
+    let mut tracks = Vec::new();
+    
+    // Check for repeat() function
+    if let Some(repeat_start) = value.find("repeat(") {
+        let after_repeat = &value[repeat_start + 7..];
+        if let Some(close_paren) = find_matching_paren(after_repeat) {
+            let repeat_content = &after_repeat[..close_paren];
+            
+            // Parse repeat(count, track-size)
+            if let Some(comma_pos) = repeat_content.find(',') {
+                let count_str = repeat_content[..comma_pos].trim();
+                let track_str = repeat_content[comma_pos + 1..].trim();
+                
+                // Parse count (could be number, auto-fill, auto-fit)
+                let count: Option<u32> = if count_str == "auto-fill" || count_str == "auto-fit" {
+                    // For now, default to a reasonable number
+                    Some(4)
+                } else {
+                    count_str.parse().ok()
+                };
+                
+                if let (Some(count), Some(track_size)) = (count, parse_track_size(track_str)) {
+                    for _ in 0..count {
+                        tracks.push(rustkit_css::TrackDefinition::simple(track_size.clone()));
+                    }
+                }
+            }
+        }
+    } else {
+        // Parse space-separated track sizes
+        for part in value.split_whitespace() {
+            if let Some(track_size) = parse_track_size(part) {
+                tracks.push(rustkit_css::TrackDefinition::simple(track_size));
+            }
+        }
+    }
+    
+    if tracks.is_empty() {
+        return None;
+    }
+    
+    Some(rustkit_css::GridTemplate {
+        tracks,
+        repeats: Vec::new(),
+        final_line_names: Vec::new(),
+    })
+}
+
+/// Find the position of the matching closing parenthesis.
+fn find_matching_paren(s: &str) -> Option<usize> {
+    let mut depth = 1;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Parse a single track size (e.g., "1fr", "100px", "auto", "minmax(...)").
+fn parse_track_size(value: &str) -> Option<rustkit_css::TrackSize> {
+    let value = value.trim();
+    
+    if value == "auto" {
+        return Some(rustkit_css::TrackSize::Auto);
+    }
+    
+    if value == "min-content" {
+        return Some(rustkit_css::TrackSize::MinContent);
+    }
+    
+    if value == "max-content" {
+        return Some(rustkit_css::TrackSize::MaxContent);
+    }
+    
+    // Check for fr unit
+    if let Some(fr_str) = value.strip_suffix("fr") {
+        if let Ok(fr) = fr_str.trim().parse::<f32>() {
+            return Some(rustkit_css::TrackSize::Fr(fr));
+        }
+    }
+    
+    // Check for px unit
+    if let Some(px_str) = value.strip_suffix("px") {
+        if let Ok(px) = px_str.trim().parse::<f32>() {
+            return Some(rustkit_css::TrackSize::Px(px));
+        }
+    }
+    
+    // Check for percent
+    if let Some(pct_str) = value.strip_suffix('%') {
+        if let Ok(pct) = pct_str.trim().parse::<f32>() {
+            return Some(rustkit_css::TrackSize::Percent(pct));
+        }
+    }
+    
+    // Check for minmax()
+    if value.starts_with("minmax(") {
+        if let Some(close) = find_matching_paren(&value[7..]) {
+            let content = &value[7..7 + close];
+            if let Some(comma) = content.find(',') {
+                let min_str = content[..comma].trim();
+                let max_str = content[comma + 1..].trim();
+                if let (Some(min), Some(max)) = (parse_track_size(min_str), parse_track_size(max_str)) {
+                    return Some(rustkit_css::TrackSize::MinMax(Box::new(min), Box::new(max)));
+                }
+            }
+        }
+    }
+    
+    // Check for fit-content()
+    if value.starts_with("fit-content(") {
+        if let Some(close) = find_matching_paren(&value[12..]) {
+            let content = &value[12..12 + close];
+            if let Some(length) = parse_length(content) {
+                return Some(rustkit_css::TrackSize::FitContent(length.to_px(16.0, 16.0, 0.0)));
+            }
+        }
+    }
+    
+    None
+}
+
+/// Parse a grid line value (e.g., "1", "span 2", "auto").
+fn parse_grid_line(value: &str) -> Option<rustkit_css::GridLine> {
+    let value = value.trim();
+    
+    if value == "auto" {
+        return Some(rustkit_css::GridLine::Auto);
+    }
+    
+    // Check for "span N"
+    if let Some(span_str) = value.strip_prefix("span") {
+        let span_str = span_str.trim();
+        if let Ok(span) = span_str.parse::<u32>() {
+            return Some(rustkit_css::GridLine::Span(span));
+        }
+    }
+    
+    // Try as a number
+    if let Ok(num) = value.parse::<i32>() {
+        return Some(rustkit_css::GridLine::Number(num));
+    }
+    
+    // Could be a named line (just use auto for now)
+    Some(rustkit_css::GridLine::Auto)
+}
+
+/// Parse a grid-column or grid-row shorthand (e.g., "1 / 3", "span 2").
+fn parse_grid_line_shorthand(value: &str) -> Option<(rustkit_css::GridLine, rustkit_css::GridLine)> {
+    let value = value.trim();
+    
+    // Check for "start / end" format
+    if let Some(slash_pos) = value.find('/') {
+        let start_str = value[..slash_pos].trim();
+        let end_str = value[slash_pos + 1..].trim();
+        
+        let start = parse_grid_line(start_str)?;
+        let end = parse_grid_line(end_str)?;
+        
+        return Some((start, end));
+    }
+    
+    // Single value - applies to start, end is auto
+    let start = parse_grid_line(value)?;
+    Some((start, rustkit_css::GridLine::Auto))
 }
 
 #[cfg(test)]

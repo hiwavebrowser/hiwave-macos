@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inline Wrapper Test</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            font-size: 16px;
+            line-height: 1.5;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        
+        h2 {
+            margin: 20px 0 10px;
+            color: #333;
+        }
+        
+        .test-case {
+            margin-bottom: 20px;
+            padding: 15px;
+            background: white;
+            border-radius: 8px;
+        }
+        
+        /* Test 1: Basic span with text */
+        .basic-span {
+            color: blue;
+        }
+        
+        /* Test 2: Span with padding and border */
+        .styled-span {
+            padding: 4px 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background: #eee;
+        }
+        
+        /* Test 3: Nested inline elements */
+        .outer-span {
+            color: green;
+        }
+        .inner-span {
+            font-weight: bold;
+            text-decoration: underline;
+        }
+        
+        /* Test 4: Label element */
+        .styled-label {
+            display: inline;
+            padding: 2px 6px;
+            background: #e0e0e0;
+            border-radius: 3px;
+            font-size: 14px;
+        }
+        
+        /* Test 5: Mixed inline content */
+        .mixed-content strong {
+            color: red;
+        }
+        .mixed-content em {
+            color: purple;
+        }
+        .mixed-content code {
+            background: #f0f0f0;
+            padding: 2px 4px;
+            font-family: monospace;
+        }
+        
+        /* Test 6: Inline with margin */
+        .inline-margin {
+            margin: 0 10px;
+            padding: 4px;
+            background: #ddf;
+        }
+    </style>
+</head>
+<body>
+    <h1>Inline Wrapper Tests</h1>
+    
+    <div class="test-case">
+        <h2>Test 1: Basic Span</h2>
+        <p>This is a paragraph with a <span class="basic-span">blue span</span> inside it.</p>
+    </div>
+    
+    <div class="test-case">
+        <h2>Test 2: Styled Span (padding + border)</h2>
+        <p>Here is some text with a <span class="styled-span">styled span</span> that has padding and border.</p>
+    </div>
+    
+    <div class="test-case">
+        <h2>Test 3: Nested Inline Elements</h2>
+        <p>This has <span class="outer-span">outer span with <span class="inner-span">nested bold underlined</span> text</span> inside.</p>
+    </div>
+    
+    <div class="test-case">
+        <h2>Test 4: Label Element</h2>
+        <p><label class="styled-label">Status:</label> Active</p>
+    </div>
+    
+    <div class="test-case">
+        <h2>Test 5: Mixed Inline Content</h2>
+        <p class="mixed-content">
+            This paragraph has <strong>strong text</strong>, 
+            <em>emphasized text</em>, and 
+            <code>inline code</code> elements.
+        </p>
+    </div>
+    
+    <div class="test-case">
+        <h2>Test 6: Inline with Margin</h2>
+        <p>Before<span class="inline-margin">inline with margin</span>After</p>
+    </div>
+</body>
+</html>
+

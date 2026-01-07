@@ -216,7 +216,7 @@ impl GlyphCache {
             Some((bitmap, glyph_width, glyph_height, glyph_width as f32, 0.0f32, font_size * 0.8))
         };
         
-        let (bitmap, glyph_width, glyph_height, advance, _bearing_x, bearing_y) = raster_result?;
+        let (bitmap, glyph_width, glyph_height, advance, bearing_x, bearing_y) = raster_result?;
         
         let glyph_width = glyph_width.max(1).min(256);
         let glyph_height = glyph_height.max(1).min(256);
@@ -256,17 +256,34 @@ impl GlyphCache {
 
         // The y passed to draw_text is the top of the content box.
         // We need to position glyphs so they align on a common baseline.
-        // Baseline is typically at y + ascent (about 0.75-0.8 * font_size).
-        // Each glyph's top should be at baseline - bearing_y.
-        // So glyph_y = (y + ascent) - bearing_y = y + (ascent - bearing_y)
-        // For most glyphs, ascent ≈ bearing_y, so offset ≈ 0
-        // But we need the actual bearing_y per glyph for proper alignment.
-        let ascent = font_size * 0.8; // Approximate font ascent
-        let y_offset = ascent - bearing_y; // Position glyph relative to baseline
+        // 
+        // Text layout convention:
+        // - The baseline is at y + ascent from the top of the text box
+        // - Each glyph's bearing_y is the distance from baseline to glyph top
+        // - So glyph top should be at: (y + ascent) - bearing_y
+        //
+        // Get actual font metrics for proper baseline alignment
+        #[cfg(target_os = "macos")]
+        let ascent = {
+            let family = if key.font_family.is_empty() { "Helvetica" } else { &key.font_family };
+            let shaper = rustkit_text::macos::TextShaper::new(family, font_size as f64)
+                .unwrap_or_else(|_| rustkit_text::macos::TextShaper::with_system_font(font_size as f64));
+            shaper.get_metrics().ascent
+        };
+        
+        #[cfg(not(target_os = "macos"))]
+        let ascent = font_size * 0.8; // Fallback approximation
+        
+        // y_offset: how far below the text box top to place the glyph
+        // baseline is at ascent from top, glyph top is bearing_y above baseline
+        let y_offset = ascent - bearing_y;
+        
+        // x_offset: horizontal bearing adjustment
+        let x_offset = bearing_x;
         
         let entry = GlyphEntry {
             tex_coords: [u0, v0, u1, v1],
-            offset: [0.0, y_offset],
+            offset: [x_offset, y_offset],
             advance,
         };
 
