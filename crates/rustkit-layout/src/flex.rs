@@ -274,6 +274,51 @@ pub fn layout_flex_container(
             }
         }
     }
+    
+    // 12. Update container dimensions based on flex items
+    // Calculate the total main and cross sizes used by items
+    if !lines.is_empty() {
+        let (total_main, total_cross) = match main_axis {
+            Axis::Horizontal => {
+                // Main axis is horizontal (width), cross axis is vertical (height)
+                let max_main: f32 = lines.iter()
+                    .flat_map(|l| l.items.iter())
+                    .map(|item| item.main_position + item.target_main_size)
+                    .fold(0.0f32, f32::max);
+                let total_cross: f32 = lines.iter().map(|l| l.cross_size).sum::<f32>()
+                    + cross_gap * (lines.len().saturating_sub(1)) as f32;
+                (max_main, total_cross)
+            }
+            Axis::Vertical => {
+                // Main axis is vertical (height), cross axis is horizontal (width)
+                let max_main: f32 = lines.iter()
+                    .flat_map(|l| l.items.iter())
+                    .map(|item| item.main_position + item.target_main_size)
+                    .fold(0.0f32, f32::max);
+                let total_cross: f32 = lines.iter().map(|l| l.cross_size).sum::<f32>()
+                    + cross_gap * (lines.len().saturating_sub(1)) as f32;
+                (max_main, total_cross)
+            }
+        };
+        
+        // Update container height if it wasn't explicitly set
+        match main_axis {
+            Axis::Horizontal => {
+                // For row direction, update height from cross size
+                if container.dimensions.content.height == 0.0 || 
+                   matches!(container.style.height, rustkit_css::Length::Auto) {
+                    container.dimensions.content.height = total_cross;
+                }
+            }
+            Axis::Vertical => {
+                // For column direction, update height from main size
+                if container.dimensions.content.height == 0.0 ||
+                   matches!(container.style.height, rustkit_css::Length::Auto) {
+                    container.dimensions.content.height = total_main;
+                }
+            }
+        }
+    }
 }
 
 /// Create a FlexItem from a LayoutBox.

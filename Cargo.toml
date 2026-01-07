@@ -7,6 +7,7 @@ members = [
     "crates/hiwave-shell",
     "crates/hiwave-analytics",
     "crates/hiwave-app",
+    "crates/parity-capture",
     "crates/rustkit-common",
     "crates/rustkit-core",
     "crates/rustkit-viewhost",

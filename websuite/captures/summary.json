@@ -1,12 +1,22 @@
 {
-  "timestamp": "2026-01-05T22:00:44.727377",
-  "total": 6,
-  "passed": 6,
+  "timestamp": "2026-01-06T23:33:28.065013",
+  "total": 8,
+  "passed": 8,
   "failed": 0,
   "captures": [
     {
       "case_id": "sticky-scroll",
       "frame": "sticky-scroll.ppm",
+      "perf": {}
+    },
+    {
+      "case_id": "flex-positioning",
+      "frame": "flex-positioning.ppm",
+      "perf": {}
+    },
+    {
+      "case_id": "css-selectors",
+      "frame": "css-selectors.ppm",
       "perf": {}
     },
     {

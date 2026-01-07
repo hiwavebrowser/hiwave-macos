@@ -1050,6 +1050,17 @@ impl Engine {
         css_vars: &HashMap<String, String>,
         ancestors: &[String],
     ) -> LayoutBox {
+        self.build_layout_from_node_with_parent_style(node, stylesheets, css_vars, ancestors, None)
+    }
+    
+    fn build_layout_from_node_with_parent_style(
+        &self,
+        node: &Rc<Node>,
+        stylesheets: &[Stylesheet],
+        css_vars: &HashMap<String, String>,
+        ancestors: &[String],
+        parent_style: Option<&ComputedStyle>,
+    ) -> LayoutBox {
         match &node.node_type {
             NodeType::Element { tag_name, attributes, .. } => {
                 let tag_lower = tag_name.to_lowercase();
@@ -1222,7 +1233,7 @@ impl Engine {
 
                 // Process children
                 for child in node.children() {
-                    let child_box = self.build_layout_from_node_with_styles(&child, stylesheets, css_vars, &child_ancestors);
+                    let child_box = self.build_layout_from_node_with_parent_style(&child, stylesheets, css_vars, &child_ancestors, Some(&style));
 
                     // Determine if box should be included in layout tree
                     let should_include = match child_box.box_type {
@@ -1266,8 +1277,28 @@ impl Engine {
                     // Skip whitespace-only text - return an inline box that won't be included
                     LayoutBox::new(BoxType::Inline, ComputedStyle::new())
                 } else {
-                    let mut style = ComputedStyle::new();
-                    style.color = rustkit_css::Color::BLACK;
+                    // Inherit font properties from parent style
+                    let style = if let Some(parent) = parent_style {
+                        let mut s = ComputedStyle::new();
+                        // Inherit text-related properties
+                        s.font_family = parent.font_family.clone();
+                        s.font_size = parent.font_size.clone();
+                        s.font_weight = parent.font_weight;
+                        s.font_style = parent.font_style;
+                        s.color = parent.color;
+                        s.line_height = parent.line_height.clone();
+                        s.text_align = parent.text_align;
+                        s.text_decoration_line = parent.text_decoration_line;
+                        s.text_decoration_color = parent.text_decoration_color;
+                        s.letter_spacing = parent.letter_spacing.clone();
+                        s.word_spacing = parent.word_spacing.clone();
+                        s.text_transform = parent.text_transform;
+                        s
+                    } else {
+                        let mut s = ComputedStyle::new();
+                        s.color = rustkit_css::Color::BLACK;
+                        s
+                    };
                     LayoutBox::new(BoxType::Text(trimmed.to_string()), style)
                 }
             }

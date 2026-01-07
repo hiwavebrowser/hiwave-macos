@@ -59,16 +59,18 @@ WEBSUITE = [
 
 
 def run_rustkit_capture(case_id: str, html_path: str, width: int, height: int, output_dir: Path) -> Dict[str, Any]:
-    """Run hiwave-smoke to capture a frame and layout tree."""
+    """Run parity-capture (headless) to capture a frame and layout tree."""
     frame_path = output_dir / f"{case_id}.ppm"
     layout_path = output_dir / f"{case_id}.layout.json"
     
+    # Use parity-capture which runs headless (no display required)
     cmd = [
-        "cargo", "run", "-p", "hiwave-smoke", "--",
+        "cargo", "run", "-p", "parity-capture", "--",
         "--html-file", html_path,
         "--width", str(width),
         "--height", str(height),
         "--dump-frame", str(frame_path),
+        "--dump-layout", str(layout_path),
     ]
     
     try:
@@ -76,20 +78,20 @@ def run_rustkit_capture(case_id: str, html_path: str, width: int, height: int, o
             cmd,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=120,
             cwd=Path(__file__).parent.parent,
         )
         
-        success = result.returncode == 0 and frame_path.exists()
-        
-        # Parse perf data from stdout (last line is JSON)
-        perf_data = {}
+        # Parse JSON result from stdout (last line)
+        capture_result = {}
         for line in result.stdout.strip().split('\n'):
             if line.startswith('{') and '"status"' in line:
                 try:
-                    perf_data = json.loads(line)
+                    capture_result = json.loads(line)
                 except json.JSONDecodeError:
                     pass
+        
+        success = capture_result.get("status") == "ok" and frame_path.exists()
         
         return {
             "case_id": case_id,
@@ -99,14 +101,15 @@ def run_rustkit_capture(case_id: str, html_path: str, width: int, height: int, o
             "success": success,
             "frame_path": str(frame_path) if success else None,
             "layout_path": str(layout_path) if layout_path.exists() else None,
-            "perf": perf_data,
-            "error": result.stderr if not success else None,
+            "layout_stats": capture_result.get("layout_stats"),
+            "perf": {},
+            "error": capture_result.get("error") if not success else None,
         }
     except subprocess.TimeoutExpired:
         return {
             "case_id": case_id,
             "success": False,
-            "error": "Timeout after 60s",
+            "error": "Timeout after 120s",
         }
     except Exception as e:
         return {
@@ -324,11 +327,14 @@ def main():
         result = run_rustkit_capture(case_id, html_path, width, height, captures_dir)
         
         if result["success"]:
-            layout_stats = analyze_layout(result.get("layout_path"))
+            # Use layout_stats from capture if available, otherwise analyze
+            layout_stats = result.get("layout_stats")
+            if not layout_stats:
+                layout_stats = analyze_layout(result.get("layout_path"))
             result["layout_stats"] = layout_stats
             result["estimated_diff_pct"] = estimate_diff_percent(layout_stats)
             result["issue_clusters"] = classify_issues(layout_stats)
-            print(f"OK (est. diff: {result['estimated_diff_pct']:.1f}%)")
+            print(f"OK (sizing: {layout_stats.get('sizing_rate', 0)*100:.1f}%, est. diff: {result['estimated_diff_pct']:.1f}%)")
         else:
             result["estimated_diff_pct"] = 100
             result["issue_clusters"] = {"sizing_layout": 1}
@@ -344,11 +350,14 @@ def main():
         result = run_rustkit_capture(case_id, html_path, width, height, captures_dir)
         
         if result["success"]:
-            layout_stats = analyze_layout(result.get("layout_path"))
+            # Use layout_stats from capture if available, otherwise analyze
+            layout_stats = result.get("layout_stats")
+            if not layout_stats:
+                layout_stats = analyze_layout(result.get("layout_path"))
             result["layout_stats"] = layout_stats
             result["estimated_diff_pct"] = estimate_diff_percent(layout_stats)
             result["issue_clusters"] = classify_issues(layout_stats)
-            print(f"OK (est. diff: {result['estimated_diff_pct']:.1f}%)")
+            print(f"OK (sizing: {layout_stats.get('sizing_rate', 0)*100:.1f}%, est. diff: {result['estimated_diff_pct']:.1f}%)")
         else:
             result["estimated_diff_pct"] = 100
             result["issue_clusters"] = {"sizing_layout": 1}

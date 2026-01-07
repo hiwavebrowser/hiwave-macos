@@ -588,12 +588,15 @@ impl LayoutBox {
         };
         
         // Layout inline children sequentially
+        // Use the containing block's width for child layout, not our own (which might be 0)
+        let available_width = containing_block.content.width;
         let mut cursor_x = 0.0;
         let mut max_height = 0.0f32;
         
         for child in &mut self.children {
             let mut cb = self.dimensions.clone();
             cb.content.x = self.dimensions.content.x + cursor_x;
+            cb.content.width = available_width; // Pass parent's available width
             cb.content.height = 0.0;
             
             child.layout(&cb);
@@ -657,7 +660,13 @@ impl LayoutBox {
         // Position at containing block's content area
         self.dimensions.content.x = containing_block.content.x;
         self.dimensions.content.y = containing_block.content.y + containing_block.content.height;
-        self.dimensions.content.width = text_width.min(containing_block.content.width);
+        // Use text width, clamping to containing block only if it has a meaningful width
+        // This prevents text from collapsing to 0 width in intrinsic sizing scenarios
+        self.dimensions.content.width = if containing_block.content.width > 0.0 {
+            text_width.min(containing_block.content.width)
+        } else {
+            text_width // Don't clamp if containing block has no width yet
+        };
         self.dimensions.content.height = self.get_line_height();
     }
 
