@@ -1,6 +1,6 @@
 {
   "case_id": "gradient-backgrounds",
-  "generated_at": "2026-01-06T22:49:22.867619",
+  "generated_at": "2026-01-06T23:10:13.434194",
   "estimated_diff_pct": 85.55555555555556,
   "html_path": "websuite/cases/gradient-backgrounds/index.html",
   "dimensions": {
@@ -527,7 +527,7 @@
   "dominant_issue": "sizing_layout",
   "dominant_count": 99,
   "perf": {
-    "elapsed_ms": 4162,
+    "elapsed_ms": 4155,
     "final_layout": {
       "left_sidebar_width": 232.0,
       "right_sidebar_open": true,
@@ -536,39 +536,39 @@
     "frame_dumped": true,
     "perf": {
       "engine_init": {
-        "avg_ms": 14.16,
+        "avg_ms": 13.84,
         "count": 1,
-        "max_ms": 14.16,
-        "min_ms": 14.16,
-        "total_ms": 14.16
+        "max_ms": 13.84,
+        "min_ms": 13.84,
+        "total_ms": 13.84
       },
       "frame_capture": {
-        "avg_ms": 118.55,
+        "avg_ms": 106.25,
         "count": 1,
-        "max_ms": 118.55,
-        "min_ms": 118.55,
-        "total_ms": 118.55
+        "max_ms": 106.25,
+        "min_ms": 106.25,
+        "total_ms": 106.25
       },
       "html_load": {
-        "avg_ms": 36.88,
+        "avg_ms": 37.75,
         "count": 1,
-        "max_ms": 36.88,
-        "min_ms": 36.88,
-        "total_ms": 36.88
+        "max_ms": 37.75,
+        "min_ms": 37.75,
+        "total_ms": 37.75
       },
       "render": {
-        "avg_ms": 16.32,
+        "avg_ms": 16.35,
         "count": 213,
-        "max_ms": 18.57,
+        "max_ms": 19.74,
         "min_ms": 1.65,
-        "total_ms": 3475.15
+        "total_ms": 3482.01
       },
       "view_create": {
-        "avg_ms": 3.92,
+        "avg_ms": 3.74,
         "count": 1,
-        "max_ms": 3.92,
-        "min_ms": 3.92,
-        "total_ms": 3.92
+        "max_ms": 3.74,
+        "min_ms": 3.74,
+        "total_ms": 3.74
       }
     },
     "render_count": 212,

@@ -1,6 +1,6 @@
 {
   "case_id": "shelf",
-  "generated_at": "2026-01-06T22:49:22.858639",
+  "generated_at": "2026-01-06T23:10:13.432132",
   "estimated_diff_pct": 86.41025641025641,
   "html_path": "crates/hiwave-app/src/ui/shelf.html",
   "dimensions": {
@@ -177,7 +177,7 @@
   "dominant_issue": "sizing_layout",
   "dominant_count": 29,
   "perf": {
-    "elapsed_ms": 4169,
+    "elapsed_ms": 4142,
     "final_layout": {
       "left_sidebar_width": 232.0,
       "right_sidebar_open": true,
@@ -186,42 +186,42 @@
     "frame_dumped": true,
     "perf": {
       "engine_init": {
-        "avg_ms": 14.79,
+        "avg_ms": 13.21,
         "count": 1,
-        "max_ms": 14.79,
-        "min_ms": 14.79,
-        "total_ms": 14.79
+        "max_ms": 13.21,
+        "min_ms": 13.21,
+        "total_ms": 13.21
       },
       "frame_capture": {
-        "avg_ms": 119.15,
+        "avg_ms": 118.86,
         "count": 1,
-        "max_ms": 119.15,
-        "min_ms": 119.15,
-        "total_ms": 119.15
+        "max_ms": 118.86,
+        "min_ms": 118.86,
+        "total_ms": 118.86
       },
       "html_load": {
-        "avg_ms": 34.94,
+        "avg_ms": 35.22,
         "count": 1,
-        "max_ms": 34.94,
-        "min_ms": 34.94,
-        "total_ms": 34.94
+        "max_ms": 35.22,
+        "min_ms": 35.22,
+        "total_ms": 35.22
       },
       "render": {
-        "avg_ms": 16.34,
-        "count": 214,
-        "max_ms": 18.43,
-        "min_ms": 1.18,
-        "total_ms": 3496.55
+        "avg_ms": 16.23,
+        "count": 212,
+        "max_ms": 18.55,
+        "min_ms": 2.26,
+        "total_ms": 3440.78
       },
       "view_create": {
-        "avg_ms": 3.76,
+        "avg_ms": 4.0,
         "count": 1,
-        "max_ms": 3.76,
-        "min_ms": 3.76,
-        "total_ms": 3.76
+        "max_ms": 4.0,
+        "min_ms": 4.0,
+        "total_ms": 4.0
       }
     },
-    "render_count": 213,
+    "render_count": 211,
     "status": "pass"
   }
 }

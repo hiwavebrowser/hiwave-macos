@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-01-06T22:49:22.850560",
+  "timestamp": "2026-01-06T23:10:13.423763",
   "config": {
     "builtins_weight": 0.6,
     "websuite_weight": 0.4,
@@ -11,7 +11,7 @@
     "tier_a_builtin_pass": 0.0,
     "tier_a_websuite_pass": 0.0,
     "tier_b_median_diff": 73.22222222222223,
-    "tier_b_weighted_mean": 73.9998053657855,
+    "tier_b_weighted_mean": 74.2412618856296,
     "worst_3_cases": [
       {
         "case_id": "shelf",
@@ -26,11 +26,11 @@
       {
         "case_id": "new_tab",
         "type": "builtin",
-        "diff_pct": 82.48826291079811
+        "diff_pct": 82.67605633802816
       }
     ],
-    "builtin_mean_diff": 75.90783114172837,
-    "websuite_mean_diff": 71.13776670187121
+    "builtin_mean_diff": 76.28727016905472,
+    "websuite_mean_diff": 71.17224946049191
   },
   "issue_clusters": {
     "sizing_layout": 1736,
@@ -48,7 +48,7 @@
       "frame_path": "parity-baseline/captures/new_tab.ppm",
       "layout_path": "parity-baseline/captures/new_tab.layout.json",
       "perf": {
-        "elapsed_ms": 4170,
+        "elapsed_ms": 4193,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -57,51 +57,51 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 14.91,
+            "avg_ms": 14.32,
             "count": 1,
-            "max_ms": 14.91,
-            "min_ms": 14.91,
-            "total_ms": 14.91
+            "max_ms": 14.32,
+            "min_ms": 14.32,
+            "total_ms": 14.32
           },
           "frame_capture": {
-            "avg_ms": 118.8,
+            "avg_ms": 106.87,
             "count": 1,
-            "max_ms": 118.8,
-            "min_ms": 118.8,
-            "total_ms": 118.8
+            "max_ms": 106.87,
+            "min_ms": 106.87,
+            "total_ms": 106.87
           },
           "html_load": {
-            "avg_ms": 49.65,
+            "avg_ms": 48.41,
             "count": 1,
-            "max_ms": 49.65,
-            "min_ms": 49.65,
-            "total_ms": 49.65
+            "max_ms": 48.41,
+            "min_ms": 48.41,
+            "total_ms": 48.41
           },
           "render": {
-            "avg_ms": 15.73,
-            "count": 211,
-            "max_ms": 18.55,
-            "min_ms": 1.21,
-            "total_ms": 3318.28
+            "avg_ms": 15.84,
+            "count": 213,
+            "max_ms": 19.11,
+            "min_ms": 1.24,
+            "total_ms": 3374.05
           },
           "view_create": {
-            "avg_ms": 3.54,
+            "avg_ms": 3.58,
             "count": 1,
-            "max_ms": 3.54,
-            "min_ms": 3.54,
-            "total_ms": 3.54
+            "max_ms": 3.58,
+            "min_ms": 3.58,
+            "total_ms": 3.58
           }
         },
-        "render_count": 210,
+        "render_count": 212,
         "status": "pass"
       },
       "error": null,
       "layout_stats": {
         "total_boxes": 213,
-        "positioned": 211,
+        "positioned": 210,
         "sized": 28,
         "zero_size": 185,
-        "at_origin": 2,
+        "at_origin": 3,
         "form_controls": 1,
         "text_boxes": 65,
         "block_boxes": 55,
@@ -729,9 +729,9 @@
           }
         ],
         "sizing_rate": 0.13145539906103287,
-        "positioning_rate": 0.9906103286384976
+        "positioning_rate": 0.9859154929577465
       },
-      "estimated_diff_pct": 82.48826291079811,
+      "estimated_diff_pct": 82.67605633802816,
       "issue_clusters": {
         "sizing_layout": 124,
         "paint": 0,
@@ -748,7 +748,7 @@
       "frame_path": "parity-baseline/captures/about.ppm",
       "layout_path": "parity-baseline/captures/about.layout.json",
       "perf": {
-        "elapsed_ms": 4199,
+        "elapsed_ms": 4208,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -757,42 +757,42 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 13.79,
+            "avg_ms": 14.09,
             "count": 1,
-            "max_ms": 13.79,
-            "min_ms": 13.79,
-            "total_ms": 13.79
+            "max_ms": 14.09,
+            "min_ms": 14.09,
+            "total_ms": 14.09
           },
           "frame_capture": {
-            "avg_ms": 111.43,
+            "avg_ms": 110.42,
             "count": 1,
-            "max_ms": 111.43,
-            "min_ms": 111.43,
-            "total_ms": 111.43
+            "max_ms": 110.42,
+            "min_ms": 110.42,
+            "total_ms": 110.42
           },
           "html_load": {
-            "avg_ms": 87.57,
+            "avg_ms": 91.19,
             "count": 1,
-            "max_ms": 87.57,
-            "min_ms": 87.57,
-            "total_ms": 87.57
+            "max_ms": 91.19,
+            "min_ms": 91.19,
+            "total_ms": 91.19
           },
           "render": {
-            "avg_ms": 14.04,
-            "count": 175,
-            "max_ms": 17.34,
-            "min_ms": 3.65,
-            "total_ms": 2456.86
+            "avg_ms": 14.01,
+            "count": 172,
+            "max_ms": 20.4,
+            "min_ms": 3.6,
+            "total_ms": 2409.63
           },
           "view_create": {
-            "avg_ms": 3.78,
+            "avg_ms": 3.77,
             "count": 1,
-            "max_ms": 3.78,
-            "min_ms": 3.78,
-            "total_ms": 3.78
+            "max_ms": 3.77,
+            "min_ms": 3.77,
+            "total_ms": 3.77
           }
         },
-        "render_count": 174,
+        "render_count": 171,
         "status": "pass"
       },
       "error": null,
@@ -1868,7 +1868,7 @@
       "frame_path": "parity-baseline/captures/settings.ppm",
       "layout_path": "parity-baseline/captures/settings.layout.json",
       "perf": {
-        "elapsed_ms": 4265,
+        "elapsed_ms": 4247,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -1877,42 +1877,42 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 14.42,
+            "avg_ms": 13.51,
             "count": 1,
-            "max_ms": 14.42,
-            "min_ms": 14.42,
-            "total_ms": 14.42
+            "max_ms": 13.51,
+            "min_ms": 13.51,
+            "total_ms": 13.51
           },
           "frame_capture": {
-            "avg_ms": 119.0,
+            "avg_ms": 106.42,
             "count": 1,
-            "max_ms": 119.0,
-            "min_ms": 119.0,
-            "total_ms": 119.0
+            "max_ms": 106.42,
+            "min_ms": 106.42,
+            "total_ms": 106.42
           },
           "html_load": {
-            "avg_ms": 113.07,
+            "avg_ms": 117.06,
             "count": 1,
-            "max_ms": 113.07,
-            "min_ms": 113.07,
-            "total_ms": 113.07
+            "max_ms": 117.06,
+            "min_ms": 117.06,
+            "total_ms": 117.06
           },
           "render": {
             "avg_ms": 12.94,
-            "count": 133,
-            "max_ms": 17.7,
-            "min_ms": 2.15,
-            "total_ms": 1721.42
+            "count": 131,
+            "max_ms": 18.79,
+            "min_ms": 2.16,
+            "total_ms": 1695.05
           },
           "view_create": {
-            "avg_ms": 3.78,
+            "avg_ms": 4.01,
             "count": 1,
-            "max_ms": 3.78,
-            "min_ms": 3.78,
-            "total_ms": 3.78
+            "max_ms": 4.01,
+            "min_ms": 4.01,
+            "total_ms": 4.01
           }
         },
-        "render_count": 132,
+        "render_count": 130,
         "status": "pass"
       },
       "error": null,
@@ -3928,7 +3928,7 @@
       "frame_path": "parity-baseline/captures/chrome_rustkit.ppm",
       "layout_path": "parity-baseline/captures/chrome_rustkit.layout.json",
       "perf": {
-        "elapsed_ms": 4151,
+        "elapsed_ms": 4187,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -3937,51 +3937,51 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 14.69,
+            "avg_ms": 13.15,
             "count": 1,
-            "max_ms": 14.69,
-            "min_ms": 14.69,
-            "total_ms": 14.69
+            "max_ms": 13.15,
+            "min_ms": 13.15,
+            "total_ms": 13.15
           },
           "frame_capture": {
-            "avg_ms": 120.21,
+            "avg_ms": 116.47,
             "count": 1,
-            "max_ms": 120.21,
-            "min_ms": 120.21,
-            "total_ms": 120.21
+            "max_ms": 116.47,
+            "min_ms": 116.47,
+            "total_ms": 116.47
           },
           "html_load": {
-            "avg_ms": 40.09,
+            "avg_ms": 40.65,
             "count": 1,
-            "max_ms": 40.09,
-            "min_ms": 40.09,
-            "total_ms": 40.09
+            "max_ms": 40.65,
+            "min_ms": 40.65,
+            "total_ms": 40.65
           },
           "render": {
-            "avg_ms": 16.23,
-            "count": 212,
-            "max_ms": 18.1,
-            "min_ms": 0.99,
-            "total_ms": 3441.81
+            "avg_ms": 16.24,
+            "count": 214,
+            "max_ms": 18.63,
+            "min_ms": 0.84,
+            "total_ms": 3475.36
           },
           "view_create": {
-            "avg_ms": 3.69,
+            "avg_ms": 4.04,
             "count": 1,
-            "max_ms": 3.69,
-            "min_ms": 3.69,
-            "total_ms": 3.69
+            "max_ms": 4.04,
+            "min_ms": 4.04,
+            "total_ms": 4.04
           }
         },
-        "render_count": 211,
+        "render_count": 213,
         "status": "pass"
       },
       "error": null,
       "layout_stats": {
         "total_boxes": 117,
-        "positioned": 114,
+        "positioned": 109,
         "sized": 33,
         "zero_size": 84,
-        "at_origin": 3,
+        "at_origin": 8,
         "form_controls": 0,
         "text_boxes": 23,
         "block_boxes": 24,
@@ -4309,9 +4309,9 @@
           }
         ],
         "sizing_rate": 0.28205128205128205,
-        "positioning_rate": 0.9743589743589743
+        "positioning_rate": 0.9316239316239316
       },
-      "estimated_diff_pct": 74.1025641025641,
+      "estimated_diff_pct": 75.81196581196582,
       "issue_clusters": {
         "sizing_layout": 64,
         "paint": 0,
@@ -4328,7 +4328,7 @@
       "frame_path": "parity-baseline/captures/shelf.ppm",
       "layout_path": "parity-baseline/captures/shelf.layout.json",
       "perf": {
-        "elapsed_ms": 4169,
+        "elapsed_ms": 4142,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -4337,42 +4337,42 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 14.79,
+            "avg_ms": 13.21,
             "count": 1,
-            "max_ms": 14.79,
-            "min_ms": 14.79,
-            "total_ms": 14.79
+            "max_ms": 13.21,
+            "min_ms": 13.21,
+            "total_ms": 13.21
           },
           "frame_capture": {
-            "avg_ms": 119.15,
+            "avg_ms": 118.86,
             "count": 1,
-            "max_ms": 119.15,
-            "min_ms": 119.15,
-            "total_ms": 119.15
+            "max_ms": 118.86,
+            "min_ms": 118.86,
+            "total_ms": 118.86
           },
           "html_load": {
-            "avg_ms": 34.94,
+            "avg_ms": 35.22,
             "count": 1,
-            "max_ms": 34.94,
-            "min_ms": 34.94,
-            "total_ms": 34.94
+            "max_ms": 35.22,
+            "min_ms": 35.22,
+            "total_ms": 35.22
           },
           "render": {
-            "avg_ms": 16.34,
-            "count": 214,
-            "max_ms": 18.43,
-            "min_ms": 1.18,
-            "total_ms": 3496.55
+            "avg_ms": 16.23,
+            "count": 212,
+            "max_ms": 18.55,
+            "min_ms": 2.26,
+            "total_ms": 3440.78
           },
           "view_create": {
-            "avg_ms": 3.76,
+            "avg_ms": 4.0,
             "count": 1,
-            "max_ms": 3.76,
-            "min_ms": 3.76,
-            "total_ms": 3.76
+            "max_ms": 4.0,
+            "min_ms": 4.0,
+            "total_ms": 4.0
           }
         },
-        "render_count": 213,
+        "render_count": 211,
         "status": "pass"
       },
       "error": null,
@@ -4555,7 +4555,7 @@
       "frame_path": "parity-baseline/captures/article-typography.ppm",
       "layout_path": "parity-baseline/captures/article-typography.layout.json",
       "perf": {
-        "elapsed_ms": 4184,
+        "elapsed_ms": 4178,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -4564,18 +4564,18 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 14.45,
+            "avg_ms": 13.66,
             "count": 1,
-            "max_ms": 14.45,
-            "min_ms": 14.45,
-            "total_ms": 14.45
+            "max_ms": 13.66,
+            "min_ms": 13.66,
+            "total_ms": 13.66
           },
           "frame_capture": {
-            "avg_ms": 117.82,
+            "avg_ms": 116.69,
             "count": 1,
-            "max_ms": 117.82,
-            "min_ms": 117.82,
-            "total_ms": 117.82
+            "max_ms": 116.69,
+            "min_ms": 116.69,
+            "total_ms": 116.69
           },
           "html_load": {
             "avg_ms": 40.58,
@@ -4585,21 +4585,21 @@
             "total_ms": 40.58
           },
           "render": {
-            "avg_ms": 16.37,
-            "count": 214,
-            "max_ms": 17.68,
-            "min_ms": 2.57,
-            "total_ms": 3502.26
+            "avg_ms": 16.32,
+            "count": 213,
+            "max_ms": 19.92,
+            "min_ms": 2.58,
+            "total_ms": 3475.85
           },
           "view_create": {
-            "avg_ms": 4.06,
+            "avg_ms": 3.68,
             "count": 1,
-            "max_ms": 4.06,
-            "min_ms": 4.06,
-            "total_ms": 4.06
+            "max_ms": 3.68,
+            "min_ms": 3.68,
+            "total_ms": 3.68
           }
         },
-        "render_count": 213,
+        "render_count": 212,
         "status": "pass"
       },
       "error": null,
@@ -4995,7 +4995,7 @@
       "frame_path": "parity-baseline/captures/card-grid.ppm",
       "layout_path": "parity-baseline/captures/card-grid.layout.json",
       "perf": {
-        "elapsed_ms": 4163,
+        "elapsed_ms": 4160,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -5004,42 +5004,42 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 14.03,
+            "avg_ms": 13.04,
             "count": 1,
-            "max_ms": 14.03,
-            "min_ms": 14.03,
-            "total_ms": 14.03
+            "max_ms": 13.04,
+            "min_ms": 13.04,
+            "total_ms": 13.04
           },
           "frame_capture": {
-            "avg_ms": 107.92,
+            "avg_ms": 119.04,
             "count": 1,
-            "max_ms": 107.92,
-            "min_ms": 107.92,
-            "total_ms": 107.92
+            "max_ms": 119.04,
+            "min_ms": 119.04,
+            "total_ms": 119.04
           },
           "html_load": {
-            "avg_ms": 43.86,
+            "avg_ms": 44.78,
             "count": 1,
-            "max_ms": 43.86,
-            "min_ms": 43.86,
-            "total_ms": 43.86
+            "max_ms": 44.78,
+            "min_ms": 44.78,
+            "total_ms": 44.78
           },
           "render": {
-            "avg_ms": 16.26,
-            "count": 213,
-            "max_ms": 18.4,
-            "min_ms": 2.12,
-            "total_ms": 3463.18
+            "avg_ms": 16.24,
+            "count": 212,
+            "max_ms": 19.21,
+            "min_ms": 1.81,
+            "total_ms": 3443.16
           },
           "view_create": {
-            "avg_ms": 3.8,
+            "avg_ms": 3.73,
             "count": 1,
-            "max_ms": 3.8,
-            "min_ms": 3.8,
-            "total_ms": 3.8
+            "max_ms": 3.73,
+            "min_ms": 3.73,
+            "total_ms": 3.73
           }
         },
-        "render_count": 212,
+        "render_count": 211,
         "status": "pass"
       },
       "error": null,
@@ -5590,7 +5590,7 @@
       "frame_path": "parity-baseline/captures/css-selectors.ppm",
       "layout_path": "parity-baseline/captures/css-selectors.layout.json",
       "perf": {
-        "elapsed_ms": 4159,
+        "elapsed_ms": 4152,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -5599,39 +5599,39 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 13.89,
+            "avg_ms": 13.43,
             "count": 1,
-            "max_ms": 13.89,
-            "min_ms": 13.89,
-            "total_ms": 13.89
+            "max_ms": 13.43,
+            "min_ms": 13.43,
+            "total_ms": 13.43
           },
           "frame_capture": {
-            "avg_ms": 118.84,
+            "avg_ms": 110.79,
             "count": 1,
-            "max_ms": 118.84,
-            "min_ms": 118.84,
-            "total_ms": 118.84
+            "max_ms": 110.79,
+            "min_ms": 110.79,
+            "total_ms": 110.79
           },
           "html_load": {
-            "avg_ms": 38.46,
+            "avg_ms": 38.68,
             "count": 1,
-            "max_ms": 38.46,
-            "min_ms": 38.46,
-            "total_ms": 38.46
+            "max_ms": 38.68,
+            "min_ms": 38.68,
+            "total_ms": 38.68
           },
           "render": {
-            "avg_ms": 16.25,
+            "avg_ms": 16.28,
             "count": 212,
-            "max_ms": 18.95,
-            "min_ms": 1.53,
-            "total_ms": 3445.47
+            "max_ms": 19.27,
+            "min_ms": 1.6,
+            "total_ms": 3451.95
           },
           "view_create": {
-            "avg_ms": 3.72,
+            "avg_ms": 3.7,
             "count": 1,
-            "max_ms": 3.72,
-            "min_ms": 3.72,
-            "total_ms": 3.72
+            "max_ms": 3.7,
+            "min_ms": 3.7,
+            "total_ms": 3.7
           }
         },
         "render_count": 211,
@@ -6150,7 +6150,7 @@
       "frame_path": "parity-baseline/captures/flex-positioning.ppm",
       "layout_path": "parity-baseline/captures/flex-positioning.layout.json",
       "perf": {
-        "elapsed_ms": 4185,
+        "elapsed_ms": 4164,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -6159,42 +6159,42 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 14.6,
+            "avg_ms": 12.95,
             "count": 1,
-            "max_ms": 14.6,
-            "min_ms": 14.6,
-            "total_ms": 14.6
+            "max_ms": 12.95,
+            "min_ms": 12.95,
+            "total_ms": 12.95
           },
           "frame_capture": {
-            "avg_ms": 120.09,
+            "avg_ms": 111.56,
             "count": 1,
-            "max_ms": 120.09,
-            "min_ms": 120.09,
-            "total_ms": 120.09
+            "max_ms": 111.56,
+            "min_ms": 111.56,
+            "total_ms": 111.56
           },
           "html_load": {
-            "avg_ms": 41.1,
+            "avg_ms": 42.34,
             "count": 1,
-            "max_ms": 41.1,
-            "min_ms": 41.1,
-            "total_ms": 41.1
+            "max_ms": 42.34,
+            "min_ms": 42.34,
+            "total_ms": 42.34
           },
           "render": {
-            "avg_ms": 16.28,
-            "count": 213,
-            "max_ms": 19.2,
-            "min_ms": 1.01,
-            "total_ms": 3466.85
+            "avg_ms": 16.27,
+            "count": 212,
+            "max_ms": 19.74,
+            "min_ms": 1.11,
+            "total_ms": 3449.05
           },
           "view_create": {
-            "avg_ms": 3.86,
+            "avg_ms": 3.8,
             "count": 1,
-            "max_ms": 3.86,
-            "min_ms": 3.86,
-            "total_ms": 3.86
+            "max_ms": 3.8,
+            "min_ms": 3.8,
+            "total_ms": 3.8
           }
         },
-        "render_count": 212,
+        "render_count": 211,
         "status": "pass"
       },
       "error": null,
@@ -6895,7 +6895,7 @@
       "frame_path": "parity-baseline/captures/form-elements.ppm",
       "layout_path": "parity-baseline/captures/form-elements.layout.json",
       "perf": {
-        "elapsed_ms": 4181,
+        "elapsed_ms": 4140,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -6904,42 +6904,42 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 14.72,
+            "avg_ms": 12.84,
             "count": 1,
-            "max_ms": 14.72,
-            "min_ms": 14.72,
-            "total_ms": 14.72
+            "max_ms": 12.84,
+            "min_ms": 12.84,
+            "total_ms": 12.84
           },
           "frame_capture": {
-            "avg_ms": 119.83,
+            "avg_ms": 106.34,
             "count": 1,
-            "max_ms": 119.83,
-            "min_ms": 119.83,
-            "total_ms": 119.83
+            "max_ms": 106.34,
+            "min_ms": 106.34,
+            "total_ms": 106.34
           },
           "html_load": {
-            "avg_ms": 43.98,
+            "avg_ms": 44.53,
             "count": 1,
-            "max_ms": 43.98,
-            "min_ms": 43.98,
-            "total_ms": 43.98
+            "max_ms": 44.53,
+            "min_ms": 44.53,
+            "total_ms": 44.53
           },
           "render": {
-            "avg_ms": 16.23,
-            "count": 213,
-            "max_ms": 19.9,
-            "min_ms": 1.13,
-            "total_ms": 3457.98
+            "avg_ms": 16.21,
+            "count": 211,
+            "max_ms": 18.74,
+            "min_ms": 1.05,
+            "total_ms": 3419.4
           },
           "view_create": {
-            "avg_ms": 4.03,
+            "avg_ms": 3.8,
             "count": 1,
-            "max_ms": 4.03,
-            "min_ms": 4.03,
-            "total_ms": 4.03
+            "max_ms": 3.8,
+            "min_ms": 3.8,
+            "total_ms": 3.8
           }
         },
-        "render_count": 212,
+        "render_count": 210,
         "status": "pass"
       },
       "error": null,
@@ -7480,7 +7480,7 @@
       "frame_path": "parity-baseline/captures/gradient-backgrounds.ppm",
       "layout_path": "parity-baseline/captures/gradient-backgrounds.layout.json",
       "perf": {
-        "elapsed_ms": 4162,
+        "elapsed_ms": 4155,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -7489,39 +7489,39 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 14.16,
+            "avg_ms": 13.84,
             "count": 1,
-            "max_ms": 14.16,
-            "min_ms": 14.16,
-            "total_ms": 14.16
+            "max_ms": 13.84,
+            "min_ms": 13.84,
+            "total_ms": 13.84
           },
           "frame_capture": {
-            "avg_ms": 118.55,
+            "avg_ms": 106.25,
             "count": 1,
-            "max_ms": 118.55,
-            "min_ms": 118.55,
-            "total_ms": 118.55
+            "max_ms": 106.25,
+            "min_ms": 106.25,
+            "total_ms": 106.25
           },
           "html_load": {
-            "avg_ms": 36.88,
+            "avg_ms": 37.75,
             "count": 1,
-            "max_ms": 36.88,
-            "min_ms": 36.88,
-            "total_ms": 36.88
+            "max_ms": 37.75,
+            "min_ms": 37.75,
+            "total_ms": 37.75
           },
           "render": {
-            "avg_ms": 16.32,
+            "avg_ms": 16.35,
             "count": 213,
-            "max_ms": 18.57,
+            "max_ms": 19.74,
             "min_ms": 1.65,
-            "total_ms": 3475.15
+            "total_ms": 3482.01
           },
           "view_create": {
-            "avg_ms": 3.92,
+            "avg_ms": 3.74,
             "count": 1,
-            "max_ms": 3.92,
-            "min_ms": 3.92,
-            "total_ms": 3.92
+            "max_ms": 3.74,
+            "min_ms": 3.74,
+            "total_ms": 3.74
           }
         },
         "render_count": 212,
@@ -8055,7 +8055,7 @@
       "frame_path": "parity-baseline/captures/image-gallery.ppm",
       "layout_path": "parity-baseline/captures/image-gallery.layout.json",
       "perf": {
-        "elapsed_ms": 4175,
+        "elapsed_ms": 4205,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -8064,42 +8064,42 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 14.46,
+            "avg_ms": 13.29,
             "count": 1,
-            "max_ms": 14.46,
-            "min_ms": 14.46,
-            "total_ms": 14.46
+            "max_ms": 13.29,
+            "min_ms": 13.29,
+            "total_ms": 13.29
           },
           "frame_capture": {
-            "avg_ms": 110.46,
+            "avg_ms": 116.62,
             "count": 1,
-            "max_ms": 110.46,
-            "min_ms": 110.46,
-            "total_ms": 110.46
+            "max_ms": 116.62,
+            "min_ms": 116.62,
+            "total_ms": 116.62
           },
           "html_load": {
-            "avg_ms": 55.83,
+            "avg_ms": 54.99,
             "count": 1,
-            "max_ms": 55.83,
-            "min_ms": 55.83,
-            "total_ms": 55.83
+            "max_ms": 54.99,
+            "min_ms": 54.99,
+            "total_ms": 54.99
           },
           "render": {
-            "avg_ms": 15.36,
-            "count": 212,
-            "max_ms": 18.55,
-            "min_ms": 2.85,
-            "total_ms": 3256.89
+            "avg_ms": 15.28,
+            "count": 213,
+            "max_ms": 20.71,
+            "min_ms": 2.77,
+            "total_ms": 3253.74
           },
           "view_create": {
-            "avg_ms": 3.57,
+            "avg_ms": 3.64,
             "count": 1,
-            "max_ms": 3.57,
-            "min_ms": 3.57,
-            "total_ms": 3.57
+            "max_ms": 3.64,
+            "min_ms": 3.64,
+            "total_ms": 3.64
           }
         },
-        "render_count": 211,
+        "render_count": 212,
         "status": "pass"
       },
       "error": null,
@@ -8895,7 +8895,7 @@
       "frame_path": "parity-baseline/captures/sticky-scroll.ppm",
       "layout_path": "parity-baseline/captures/sticky-scroll.layout.json",
       "perf": {
-        "elapsed_ms": 4191,
+        "elapsed_ms": 4193,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -8904,39 +8904,39 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 14.77,
+            "avg_ms": 13.62,
             "count": 1,
-            "max_ms": 14.77,
-            "min_ms": 14.77,
-            "total_ms": 14.77
+            "max_ms": 13.62,
+            "min_ms": 13.62,
+            "total_ms": 13.62
           },
           "frame_capture": {
-            "avg_ms": 118.23,
+            "avg_ms": 119.45,
             "count": 1,
-            "max_ms": 118.23,
-            "min_ms": 118.23,
-            "total_ms": 118.23
+            "max_ms": 119.45,
+            "min_ms": 119.45,
+            "total_ms": 119.45
           },
           "html_load": {
-            "avg_ms": 49.55,
+            "avg_ms": 50.14,
             "count": 1,
-            "max_ms": 49.55,
-            "min_ms": 49.55,
-            "total_ms": 49.55
+            "max_ms": 50.14,
+            "min_ms": 50.14,
+            "total_ms": 50.14
           },
           "render": {
-            "avg_ms": 16.0,
+            "avg_ms": 15.86,
             "count": 212,
-            "max_ms": 17.92,
-            "min_ms": 2.36,
-            "total_ms": 3392.54
+            "max_ms": 21.97,
+            "min_ms": 2.23,
+            "total_ms": 3363.22
           },
           "view_create": {
-            "avg_ms": 3.65,
+            "avg_ms": 3.99,
             "count": 1,
-            "max_ms": 3.65,
-            "min_ms": 3.65,
-            "total_ms": 3.65
+            "max_ms": 3.99,
+            "min_ms": 3.99,
+            "total_ms": 3.99
           }
         },
         "render_count": 211,
@@ -8945,10 +8945,10 @@
       "error": null,
       "layout_stats": {
         "total_boxes": 290,
-        "positioned": 287,
+        "positioned": 285,
         "sized": 100,
         "zero_size": 190,
-        "at_origin": 3,
+        "at_origin": 5,
         "form_controls": 1,
         "text_boxes": 57,
         "block_boxes": 80,
@@ -9751,9 +9751,9 @@
           }
         ],
         "sizing_rate": 0.3448275862068966,
-        "positioning_rate": 0.9896551724137931
+        "positioning_rate": 0.9827586206896551
       },
-      "estimated_diff_pct": 69.72413793103448,
+      "estimated_diff_pct": 70.0,
       "issue_clusters": {
         "sizing_layout": 159,
         "paint": 0,

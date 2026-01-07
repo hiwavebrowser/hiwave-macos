@@ -17,12 +17,12 @@
     {
       "case_id": "new_tab",
       "type": "builtin",
-      "diff_pct": 82.48826291079811
+      "diff_pct": 82.67605633802816
     }
   ],
   "acceptance_criteria": [
     "Reduce diff% for shelf below 25%",
     "All three cases show measurable improvement"
   ],
-  "created": "2026-01-06T22:49:22.858493"
+  "created": "2026-01-06T23:10:13.431972"
 }
