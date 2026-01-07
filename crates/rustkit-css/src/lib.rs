@@ -1024,6 +1024,7 @@ pub struct ComputedStyle {
     pub min_height: Length,
     pub max_width: Length,
     pub max_height: Length,
+    pub aspect_ratio: Option<f32>,  // width / height ratio
 
     // Margin
     pub margin_top: Length,

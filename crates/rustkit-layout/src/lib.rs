@@ -1152,6 +1152,12 @@ impl LayoutBox {
             }
             _ => {
                 // Auto or Zero - content.height was set by layout_block_children
+                // But if aspect-ratio is set and we have a width, calculate height from it
+                if let Some(ratio) = self.style.aspect_ratio {
+                    if self.dimensions.content.width > 0.0 && ratio > 0.0 {
+                        self.dimensions.content.height = self.dimensions.content.width / ratio;
+                    }
+                }
             }
         }
         

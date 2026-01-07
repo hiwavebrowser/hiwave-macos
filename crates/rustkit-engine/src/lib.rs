@@ -1662,6 +1662,25 @@ impl Engine {
                     style.order = order;
                 }
             }
+            "aspect-ratio" => {
+                // Parse aspect-ratio: width / height or auto
+                let value = value.trim();
+                if value == "auto" {
+                    // Auto is the default, do nothing
+                } else if let Some(slash_pos) = value.find('/') {
+                    // Format: width / height
+                    let width_str = value[..slash_pos].trim();
+                    let height_str = value[slash_pos + 1..].trim();
+                    if let (Ok(w), Ok(h)) = (width_str.parse::<f32>(), height_str.parse::<f32>()) {
+                        if h > 0.0 {
+                            style.aspect_ratio = Some(w / h);
+                        }
+                    }
+                } else if let Ok(ratio) = value.parse::<f32>() {
+                    // Single number (ratio to 1)
+                    style.aspect_ratio = Some(ratio);
+                }
+            }
             "text-align" => {
                 // Store text-align if ComputedStyle supports it
                 // For now, just ignore
