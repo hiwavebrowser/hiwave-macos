@@ -1,0 +1,237 @@
+{
+  "case_id": "shelf",
+  "generated_at": "2026-01-06T21:54:11.757430",
+  "estimated_diff_pct": 89.48717948717949,
+  "html_path": "crates/hiwave-app/src/ui/shelf.html",
+  "dimensions": {
+    "width": 1280,
+    "height": 120
+  },
+  "rustkit_frame": "parity-baseline/failure_packets/shelf/rustkit_frame.ppm",
+  "layout_stats": {
+    "total_boxes": 39,
+    "positioned": 29,
+    "sized": 7,
+    "zero_size": 32,
+    "at_origin": 10,
+    "form_controls": 2,
+    "text_boxes": 2,
+    "block_boxes": 13,
+    "image_boxes": 0,
+    "issues": [
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 2
+      },
+      {
+        "type": "zero_size",
+        "node_type": "block",
+        "depth": 2
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 3
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 3
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 3
+      },
+      {
+        "type": "zero_size",
+        "node_type": "form_control",
+        "depth": 3
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 3
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 2
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 3
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 4
+      },
+      {
+        "type": "zero_size",
+        "node_type": "block",
+        "depth": 4
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 5
+      },
+      {
+        "type": "zero_size",
+        "node_type": "block",
+        "depth": 5
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 5
+      },
+      {
+        "type": "zero_size",
+        "node_type": "block",
+        "depth": 5
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 5
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 4
+      },
+      {
+        "type": "zero_size",
+        "node_type": "form_control",
+        "depth": 4
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 4
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 4
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 3
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 4
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 4
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 3
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 2
+      },
+      {
+        "type": "zero_size",
+        "node_type": "block",
+        "depth": 2
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 2
+      },
+      {
+        "type": "zero_size",
+        "node_type": "block",
+        "depth": 2
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 2
+      },
+      {
+        "type": "zero_size",
+        "node_type": "block",
+        "depth": 2
+      },
+      {
+        "type": "zero_size",
+        "node_type": "inline",
+        "depth": 2
+      }
+    ],
+    "sizing_rate": 0.1794871794871795,
+    "positioning_rate": 0.7435897435897436
+  },
+  "issue_clusters": {
+    "sizing_layout": 31,
+    "paint": 0,
+    "text": 0,
+    "images": 0
+  },
+  "dominant_issue": "sizing_layout",
+  "dominant_count": 31,
+  "perf": {
+    "elapsed_ms": 4171,
+    "final_layout": {
+      "left_sidebar_width": 232.0,
+      "right_sidebar_open": true,
+      "shelf_height": 120.0
+    },
+    "frame_dumped": true,
+    "perf": {
+      "engine_init": {
+        "avg_ms": 11.66,
+        "count": 1,
+        "max_ms": 11.66,
+        "min_ms": 11.66,
+        "total_ms": 11.66
+      },
+      "frame_capture": {
+        "avg_ms": 109.57,
+        "count": 1,
+        "max_ms": 109.57,
+        "min_ms": 109.57,
+        "total_ms": 109.57
+      },
+      "html_load": {
+        "avg_ms": 25.7,
+        "count": 1,
+        "max_ms": 25.7,
+        "min_ms": 25.7,
+        "total_ms": 25.7
+      },
+      "render": {
+        "avg_ms": 8.13,
+        "count": 457,
+        "max_ms": 10.79,
+        "min_ms": 0.84,
+        "total_ms": 3717.17
+      },
+      "view_create": {
+        "avg_ms": 3.09,
+        "count": 1,
+        "max_ms": 3.09,
+        "min_ms": 3.09,
+        "total_ms": 3.09
+      }
+    },
+    "render_count": 456,
+    "status": "pass"
+  }
+}
