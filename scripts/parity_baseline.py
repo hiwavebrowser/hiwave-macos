@@ -19,7 +19,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Optional
 
 # Configuration
 BUILTINS_WEIGHT = 0.60
@@ -389,9 +389,80 @@ def main():
     for wo in workorders_created:
         print(f"  Created: {wo}")
     
+    # Generate failure packets for top 3 worst cases
+    packets_dir = output_dir / "failure_packets"
+    packets_dir.mkdir(exist_ok=True)
+    
+    print("\n--- Generating Failure Packets for Top 3 Cases ---")
+    all_results = {r["case_id"]: r for r in builtin_results + websuite_results}
+    for worst in metrics["worst_3_cases"]:
+        case_id = worst["case_id"]
+        result = all_results.get(case_id)
+        if result and result.get("success"):
+            packet_path = generate_failure_packet(
+                case_id,
+                result,
+                packets_dir,
+            )
+            if packet_path:
+                print(f"  Generated: {packet_path}")
+    
     # Determine overall parity estimate
     parity_estimate = 100 - metrics["tier_b_weighted_mean"]
     print(f"\n>>> ESTIMATED PARITY: {parity_estimate:.1f}% <<<")
+
+
+def generate_failure_packet(case_id: str, result: Dict[str, Any], output_dir: Path) -> Optional[str]:
+    """Generate a failure packet for a specific case."""
+    packet_dir = output_dir / case_id
+    packet_dir.mkdir(exist_ok=True)
+    
+    packet = {
+        "case_id": case_id,
+        "generated_at": datetime.now().isoformat(),
+        "estimated_diff_pct": result.get("estimated_diff_pct", 100),
+        "html_path": result.get("html_path"),
+        "dimensions": {
+            "width": result.get("width"),
+            "height": result.get("height"),
+        },
+    }
+    
+    # Copy frame if available
+    frame_path = result.get("frame_path")
+    if frame_path and Path(frame_path).exists():
+        dest_frame = packet_dir / "rustkit_frame.ppm"
+        import shutil
+        shutil.copy(frame_path, dest_frame)
+        packet["rustkit_frame"] = str(dest_frame)
+    
+    # Include layout stats
+    layout_stats = result.get("layout_stats", {})
+    if layout_stats:
+        packet["layout_stats"] = layout_stats
+    
+    # Include issue clusters
+    issue_clusters = result.get("issue_clusters", {})
+    if issue_clusters:
+        packet["issue_clusters"] = issue_clusters
+    
+    # Identify dominant issue
+    if issue_clusters:
+        dominant = max(issue_clusters.items(), key=lambda x: x[1])
+        packet["dominant_issue"] = dominant[0]
+        packet["dominant_count"] = dominant[1]
+    
+    # Include perf data if available
+    perf = result.get("perf", {})
+    if perf:
+        packet["perf"] = perf
+    
+    # Save packet manifest
+    manifest_path = packet_dir / "manifest.json"
+    with open(manifest_path, "w") as f:
+        json.dump(packet, f, indent=2)
+    
+    return str(packet_dir)
 
 
 def generate_workorders(clusters: Dict[str, int], worst_cases: List[Dict], output_dir: Path) -> List[str]:
