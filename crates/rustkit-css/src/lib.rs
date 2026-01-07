@@ -88,6 +88,14 @@ pub enum Length {
     Rem(f32),
     /// Percentage.
     Percent(f32),
+    /// Viewport width (1vw = 1% of viewport width).
+    Vw(f32),
+    /// Viewport height (1vh = 1% of viewport height).
+    Vh(f32),
+    /// Viewport min (1vmin = 1% of smaller viewport dimension).
+    Vmin(f32),
+    /// Viewport max (1vmax = 1% of larger viewport dimension).
+    Vmax(f32),
     /// Auto.
     Auto,
     /// Zero.
@@ -97,12 +105,30 @@ pub enum Length {
 
 impl Length {
     /// Compute the absolute pixel value.
+    /// 
+    /// For viewport units, pass viewport dimensions via `viewport_width` and `viewport_height`.
     pub fn to_px(&self, font_size: f32, root_font_size: f32, container_size: f32) -> f32 {
+        self.to_px_with_viewport(font_size, root_font_size, container_size, 0.0, 0.0)
+    }
+    
+    /// Compute the absolute pixel value with viewport dimensions for vh/vw units.
+    pub fn to_px_with_viewport(
+        &self,
+        font_size: f32,
+        root_font_size: f32,
+        container_size: f32,
+        viewport_width: f32,
+        viewport_height: f32,
+    ) -> f32 {
         match self {
             Length::Px(px) => *px,
             Length::Em(em) => em * font_size,
             Length::Rem(rem) => rem * root_font_size,
             Length::Percent(pct) => pct / 100.0 * container_size,
+            Length::Vw(vw) => vw / 100.0 * viewport_width,
+            Length::Vh(vh) => vh / 100.0 * viewport_height,
+            Length::Vmin(vmin) => vmin / 100.0 * viewport_width.min(viewport_height),
+            Length::Vmax(vmax) => vmax / 100.0 * viewport_width.max(viewport_height),
             Length::Auto => 0.0, // Context-dependent
             Length::Zero => 0.0,
         }
@@ -1356,6 +1382,9 @@ pub fn parse_display(value: &str) -> Option<Display> {
         "inline" => Some(Display::Inline),
         "inline-block" => Some(Display::InlineBlock),
         "flex" => Some(Display::Flex),
+        "inline-flex" => Some(Display::InlineFlex),
+        "grid" => Some(Display::Grid),
+        "inline-grid" => Some(Display::InlineGrid),
         "none" => Some(Display::None),
         _ => None,
     }

@@ -856,6 +856,8 @@ impl Engine {
         let mut root_box = root_box;
         {
             let _layout_span = tracing::info_span!("layout_compute").entered();
+            // Set viewport dimensions for vh/vw unit resolution
+            root_box.set_viewport(bounds.width as f32, bounds.height as f32);
             root_box.layout(&containing_block);
         }
 
@@ -1531,6 +1533,135 @@ impl Engine {
                     style.display = display;
                 }
             }
+            // Flexbox properties
+            "flex-grow" => {
+                if let Ok(grow) = value.parse::<f32>() {
+                    style.flex_grow = grow;
+                }
+            }
+            "flex-shrink" => {
+                if let Ok(shrink) = value.parse::<f32>() {
+                    style.flex_shrink = shrink;
+                }
+            }
+            "flex-basis" => {
+                if value == "auto" {
+                    style.flex_basis = rustkit_css::FlexBasis::Auto;
+                } else if value == "content" {
+                    style.flex_basis = rustkit_css::FlexBasis::Content;
+                } else if let Some(length) = parse_length(value) {
+                    match length {
+                        rustkit_css::Length::Px(px) => style.flex_basis = rustkit_css::FlexBasis::Length(px),
+                        rustkit_css::Length::Percent(pct) => style.flex_basis = rustkit_css::FlexBasis::Percent(pct),
+                        _ => {}
+                    }
+                }
+            }
+            "flex" => {
+                // Shorthand: flex: <grow> [<shrink>] [<basis>]
+                let parts: Vec<&str> = value.split_whitespace().collect();
+                if parts.len() >= 1 {
+                    if let Ok(grow) = parts[0].parse::<f32>() {
+                        style.flex_grow = grow;
+                    }
+                }
+                if parts.len() >= 2 {
+                    if let Ok(shrink) = parts[1].parse::<f32>() {
+                        style.flex_shrink = shrink;
+                    }
+                }
+                if parts.len() >= 3 {
+                    if let Some(length) = parse_length(parts[2]) {
+                        match length {
+                            rustkit_css::Length::Px(px) => style.flex_basis = rustkit_css::FlexBasis::Length(px),
+                            rustkit_css::Length::Percent(pct) => style.flex_basis = rustkit_css::FlexBasis::Percent(pct),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            "flex-direction" => {
+                style.flex_direction = match value.trim() {
+                    "row" => rustkit_css::FlexDirection::Row,
+                    "row-reverse" => rustkit_css::FlexDirection::RowReverse,
+                    "column" => rustkit_css::FlexDirection::Column,
+                    "column-reverse" => rustkit_css::FlexDirection::ColumnReverse,
+                    _ => rustkit_css::FlexDirection::Row,
+                };
+            }
+            "flex-wrap" => {
+                style.flex_wrap = match value.trim() {
+                    "nowrap" => rustkit_css::FlexWrap::NoWrap,
+                    "wrap" => rustkit_css::FlexWrap::Wrap,
+                    "wrap-reverse" => rustkit_css::FlexWrap::WrapReverse,
+                    _ => rustkit_css::FlexWrap::NoWrap,
+                };
+            }
+            "justify-content" => {
+                style.justify_content = match value.trim() {
+                    "flex-start" | "start" => rustkit_css::JustifyContent::FlexStart,
+                    "flex-end" | "end" => rustkit_css::JustifyContent::FlexEnd,
+                    "center" => rustkit_css::JustifyContent::Center,
+                    "space-between" => rustkit_css::JustifyContent::SpaceBetween,
+                    "space-around" => rustkit_css::JustifyContent::SpaceAround,
+                    "space-evenly" => rustkit_css::JustifyContent::SpaceEvenly,
+                    _ => rustkit_css::JustifyContent::FlexStart,
+                };
+            }
+            "align-items" => {
+                style.align_items = match value.trim() {
+                    "flex-start" | "start" => rustkit_css::AlignItems::FlexStart,
+                    "flex-end" | "end" => rustkit_css::AlignItems::FlexEnd,
+                    "center" => rustkit_css::AlignItems::Center,
+                    "baseline" => rustkit_css::AlignItems::Baseline,
+                    "stretch" => rustkit_css::AlignItems::Stretch,
+                    _ => rustkit_css::AlignItems::Stretch,
+                };
+            }
+            "align-content" => {
+                style.align_content = match value.trim() {
+                    "flex-start" | "start" => rustkit_css::AlignContent::FlexStart,
+                    "flex-end" | "end" => rustkit_css::AlignContent::FlexEnd,
+                    "center" => rustkit_css::AlignContent::Center,
+                    "space-between" => rustkit_css::AlignContent::SpaceBetween,
+                    "space-around" => rustkit_css::AlignContent::SpaceAround,
+                    "stretch" => rustkit_css::AlignContent::Stretch,
+                    _ => rustkit_css::AlignContent::Stretch,
+                };
+            }
+            "align-self" => {
+                style.align_self = match value.trim() {
+                    "auto" => rustkit_css::AlignSelf::Auto,
+                    "flex-start" | "start" => rustkit_css::AlignSelf::FlexStart,
+                    "flex-end" | "end" => rustkit_css::AlignSelf::FlexEnd,
+                    "center" => rustkit_css::AlignSelf::Center,
+                    "baseline" => rustkit_css::AlignSelf::Baseline,
+                    "stretch" => rustkit_css::AlignSelf::Stretch,
+                    _ => rustkit_css::AlignSelf::Auto,
+                };
+            }
+            "gap" | "grid-gap" => {
+                // gap shorthand (row-gap column-gap or single value)
+                if let Some(length) = parse_length(value) {
+                    style.row_gap = length;
+                    style.column_gap = length;
+                }
+            }
+            "row-gap" => {
+                if let Some(length) = parse_length(value) {
+                    style.row_gap = length;
+                }
+            }
+            "column-gap" => {
+                if let Some(length) = parse_length(value) {
+                    style.column_gap = length;
+                }
+            }
+            "order" => {
+                if let Ok(order) = value.parse::<i32>() {
+                    style.order = order;
+                }
+            }
             "text-align" => {
                 // Store text-align if ComputedStyle supports it
                 // For now, just ignore
@@ -1571,9 +1702,34 @@ impl Engine {
                     style.box_shadows.push(shadow);
                 }
             }
+            "width" => {
+                if let Some(length) = parse_length(value) {
+                    style.width = length;
+                }
+            }
+            "height" => {
+                if let Some(length) = parse_length(value) {
+                    style.height = length;
+                }
+            }
+            "min-width" => {
+                if let Some(length) = parse_length(value) {
+                    style.min_width = length;
+                }
+            }
+            "min-height" => {
+                if let Some(length) = parse_length(value) {
+                    style.min_height = length;
+                }
+            }
             "max-width" => {
                 if let Some(length) = parse_length(value) {
                     style.max_width = length;
+                }
+            }
+            "max-height" => {
+                if let Some(length) = parse_length(value) {
+                    style.max_height = length;
                 }
             }
             "opacity" => {
@@ -3538,6 +3694,27 @@ fn parse_length(value: &str) -> Option<rustkit_css::Length> {
     if value.ends_with("em") {
         let num: f32 = value.trim_end_matches("em").trim().parse().ok()?;
         return Some(rustkit_css::Length::Em(num));
+    }
+    
+    // Viewport units (check vmin/vmax before vh/vw since they're longer)
+    if value.ends_with("vmin") {
+        let num: f32 = value.trim_end_matches("vmin").trim().parse().ok()?;
+        return Some(rustkit_css::Length::Vmin(num));
+    }
+    
+    if value.ends_with("vmax") {
+        let num: f32 = value.trim_end_matches("vmax").trim().parse().ok()?;
+        return Some(rustkit_css::Length::Vmax(num));
+    }
+    
+    if value.ends_with("vh") {
+        let num: f32 = value.trim_end_matches("vh").trim().parse().ok()?;
+        return Some(rustkit_css::Length::Vh(num));
+    }
+    
+    if value.ends_with("vw") {
+        let num: f32 = value.trim_end_matches("vw").trim().parse().ok()?;
+        return Some(rustkit_css::Length::Vw(num));
     }
 
     if value.ends_with('%') {

@@ -827,6 +827,10 @@ fn resolve_length(length: &Length, container_size: f32) -> f32 {
         Length::Em(em) => em * 16.0, // Default font size
         Length::Rem(rem) => rem * 16.0,
         Length::Percent(pct) => pct / 100.0 * container_size,
+        Length::Vw(vw) => vw / 100.0 * container_size, // Approximation (use container as viewport)
+        Length::Vh(vh) => vh / 100.0 * container_size, // Approximation (use container as viewport)
+        Length::Vmin(vmin) => vmin / 100.0 * container_size,
+        Length::Vmax(vmax) => vmax / 100.0 * container_size,
         Length::Auto => 0.0,
         Length::Zero => 0.0,
     }

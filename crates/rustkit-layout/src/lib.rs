@@ -415,6 +415,8 @@ pub struct LayoutBox {
     /// Reference to containing block (for positioned elements).
     #[allow(dead_code)]
     pub containing_block_index: Option<usize>,
+    /// Viewport dimensions for resolving vh/vw units.
+    pub viewport: (f32, f32),
 }
 
 impl LayoutBox {
@@ -432,6 +434,7 @@ impl LayoutBox {
             z_index: 0,
             stacking_context: None,
             containing_block_index: None,
+            viewport: (0.0, 0.0),
         }
     }
 
@@ -780,13 +783,40 @@ impl LayoutBox {
             || self.dimensions.border.bottom > 0.0
             || self.dimensions.padding.bottom > 0.0;
 
-        // Layout children with new margin context
-        if blocks_collapse {
-            let mut child_margin_context = MarginCollapseContext::new();
-            self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
+        // Check for flex or grid container - these have special child layout
+        if self.style.display.is_flex() {
+            // For flex containers, layout children normally first to get their intrinsic sizes
+            if blocks_collapse {
+                let mut child_margin_context = MarginCollapseContext::new();
+                self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
+            } else {
+                self.layout_block_children_with_collapse(margin_context, float_context);
+            }
+            // Then apply flex layout algorithm
+            flex::layout_flex_container(self, &self.dimensions.clone());
+        } else if self.style.display.is_grid() {
+            // For grid containers, layout children normally first
+            if blocks_collapse {
+                let mut child_margin_context = MarginCollapseContext::new();
+                self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
+            } else {
+                self.layout_block_children_with_collapse(margin_context, float_context);
+            }
+            // Then apply grid layout algorithm
+            grid::layout_grid_container(
+                self,
+                self.dimensions.content.width,
+                self.dimensions.content.height,
+            );
         } else {
-            // Margins can collapse through this box
-            self.layout_block_children_with_collapse(margin_context, float_context);
+            // Normal block layout
+            if blocks_collapse {
+                let mut child_margin_context = MarginCollapseContext::new();
+                self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
+            } else {
+                // Margins can collapse through this box
+                self.layout_block_children_with_collapse(margin_context, float_context);
+            }
         }
 
         // Height depends on children
@@ -990,6 +1020,17 @@ impl LayoutBox {
             _ => self.length_to_px(style.width, containing_block.content.width),
         };
 
+        // Apply min-width constraint
+        let min_width = self.length_to_px(style.min_width, containing_block.content.width);
+        let content_width = content_width.max(min_width);
+        
+        // Apply max-width constraint
+        let max_width = match style.max_width {
+            Length::Auto | Length::Zero => f32::INFINITY,
+            _ => self.length_to_px(style.max_width, containing_block.content.width),
+        };
+        let content_width = content_width.min(max_width);
+        
         self.dimensions.content.width = content_width;
         self.dimensions.margin.left = margin_left;
         self.dimensions.margin.right = margin_right;
@@ -1083,10 +1124,58 @@ impl LayoutBox {
     /// Calculate block height.
     fn calculate_block_height(&mut self) {
         // If height is explicitly set, use it
-        if let Length::Px(h) = self.style.height {
-            self.dimensions.content.height = h;
+        match self.style.height {
+            Length::Px(h) => {
+                self.dimensions.content.height = h;
+            }
+            Length::Percent(pct) => {
+                // Percent height requires a known containing block height
+                // For now, use viewport height as fallback
+                if self.viewport.1 > 0.0 {
+                    self.dimensions.content.height = pct / 100.0 * self.viewport.1;
+                }
+            }
+            Length::Vh(vh) => {
+                if self.viewport.1 > 0.0 {
+                    self.dimensions.content.height = vh / 100.0 * self.viewport.1;
+                }
+            }
+            Length::Em(em) => {
+                let font_size = match self.style.font_size {
+                    Length::Px(px) => px,
+                    _ => 16.0,
+                };
+                self.dimensions.content.height = em * font_size;
+            }
+            Length::Rem(rem) => {
+                self.dimensions.content.height = rem * 16.0; // Root font size
+            }
+            _ => {
+                // Auto or Zero - content.height was set by layout_block_children
+            }
         }
-        // Otherwise, content.height was set by layout_block_children
+        
+        // Apply min-height constraint
+        let min_height = match self.style.min_height {
+            Length::Px(px) => px,
+            Length::Vh(vh) => vh / 100.0 * self.viewport.1,
+            Length::Percent(pct) => pct / 100.0 * self.viewport.1,
+            _ => 0.0,
+        };
+        if self.dimensions.content.height < min_height {
+            self.dimensions.content.height = min_height;
+        }
+        
+        // Apply max-height constraint
+        let max_height = match self.style.max_height {
+            Length::Px(px) => px,
+            Length::Vh(vh) => vh / 100.0 * self.viewport.1,
+            Length::Percent(pct) => pct / 100.0 * self.viewport.1,
+            _ => f32::INFINITY,
+        };
+        if self.dimensions.content.height > max_height {
+            self.dimensions.content.height = max_height;
+        }
     }
 
     /// Convert a Length to pixels.
@@ -1095,7 +1184,15 @@ impl LayoutBox {
             Length::Px(px) => px,
             _ => 16.0,
         };
-        length.to_px(font_size, 16.0, container_size)
+        length.to_px_with_viewport(font_size, 16.0, container_size, self.viewport.0, self.viewport.1)
+    }
+    
+    /// Set viewport dimensions for this box and all children.
+    pub fn set_viewport(&mut self, width: f32, height: f32) {
+        self.viewport = (width, height);
+        for child in &mut self.children {
+            child.set_viewport(width, height);
+        }
     }
 
     /// Get children sorted by z-index for painting.
