@@ -146,10 +146,22 @@ def run_rustkit_capture(
         
         success = capture_result.get("status") == "ok" and frame_path.exists()
         
-        # If headless failed with GPU error, suggest using --gpu flag
-        error_msg = capture_result.get("error")
-        if not success and error_msg and "GPU" in error_msg:
-            error_msg += " (Try running with --gpu flag if you have a display)"
+        # Determine error message
+        error_msg = None
+        if not success:
+            error_msg = capture_result.get("error")
+            if not error_msg:
+                # No JSON error, check stderr or exit code
+                if result.returncode != 0:
+                    # Get last few lines of stderr
+                    stderr_lines = result.stderr.strip().split('\n')[-3:]
+                    error_msg = '; '.join(line.strip() for line in stderr_lines if line.strip())
+                if not error_msg:
+                    error_msg = f"Process exited with code {result.returncode}"
+            
+            # Suggest --gpu flag for GPU errors
+            if error_msg and "GPU" in error_msg:
+                error_msg += " (Try running with --gpu flag if you have a display)"
         
         return {
             "case_id": case_id,
@@ -161,7 +173,7 @@ def run_rustkit_capture(
             "layout_path": str(layout_path) if layout_path.exists() else None,
             "layout_stats": capture_result.get("layout_stats"),
             "perf": {},
-            "error": error_msg if not success else None,
+            "error": error_msg,
             "capture_mode": "gpu" if use_gpu else "headless",
         }
     except subprocess.TimeoutExpired:
@@ -413,7 +425,8 @@ def main():
         else:
             result["estimated_diff_pct"] = 100
             result["issue_clusters"] = {"sizing_layout": 1}
-            print(f"FAIL: {result.get('error', 'Unknown')[:50]}")
+            error_msg = result.get('error') or 'Unknown error'
+            print(f"FAIL: {error_msg[:50]}")
         
         builtin_results.append(result)
     
@@ -436,7 +449,8 @@ def main():
         else:
             result["estimated_diff_pct"] = 100
             result["issue_clusters"] = {"sizing_layout": 1}
-            print(f"FAIL: {result.get('error', 'Unknown')[:50]}")
+            error_msg = result.get('error') or 'Unknown error'
+            print(f"FAIL: {error_msg[:50]}")
         
         websuite_results.append(result)
     
