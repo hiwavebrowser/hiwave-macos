@@ -478,13 +478,11 @@ impl Renderer {
             }
 
             DisplayCommand::RoundedRect { color, rect, radius } => {
-                // For now, fall back to solid rect
-                // TODO: Implement proper rounded rect rendering with bezier curves
                 if radius.is_zero() {
                     self.draw_solid_rect(*rect, *color);
                 } else {
-                    // Draw a solid rect (rounded corners require more complex rendering)
-                    self.draw_solid_rect(*rect, *color);
+                    // Draw rounded rect using SDF-based pixel rendering
+                    self.draw_rounded_rect(*rect, *color, *radius);
                 }
             }
 
@@ -860,6 +858,99 @@ impl Renderer {
         ]);
     }
 
+    /// Draw a rounded rectangle using SDF-based rendering.
+    fn draw_rounded_rect(&mut self, rect: Rect, color: Color, radius: rustkit_layout::BorderRadius) {
+        // For small radii or very small rects, fall back to solid rect
+        let max_radius = radius.top_left.max(radius.top_right).max(radius.bottom_left).max(radius.bottom_right);
+        if max_radius < 1.0 || rect.width < 4.0 || rect.height < 4.0 {
+            self.draw_solid_rect(rect, color);
+            return;
+        }
+
+        // Clamp radii to half the rect dimensions
+        let max_r = (rect.width / 2.0).min(rect.height / 2.0);
+        let r_tl = radius.top_left.min(max_r);
+        let r_tr = radius.top_right.min(max_r);
+        let r_br = radius.bottom_right.min(max_r);
+        let r_bl = radius.bottom_left.min(max_r);
+
+        // Draw the interior (non-corner) regions as solid rects for efficiency
+        // Top edge (between corners)
+        if rect.width > r_tl + r_tr {
+            self.draw_solid_rect(
+                Rect::new(rect.x + r_tl, rect.y, rect.width - r_tl - r_tr, r_tl.max(r_tr)),
+                color,
+            );
+        }
+        // Bottom edge (between corners)
+        if rect.width > r_bl + r_br {
+            self.draw_solid_rect(
+                Rect::new(rect.x + r_bl, rect.y + rect.height - r_bl.max(r_br), rect.width - r_bl - r_br, r_bl.max(r_br)),
+                color,
+            );
+        }
+        // Middle section (full width, between top and bottom corner rows)
+        let top_corner_height = r_tl.max(r_tr);
+        let bottom_corner_height = r_bl.max(r_br);
+        if rect.height > top_corner_height + bottom_corner_height {
+            self.draw_solid_rect(
+                Rect::new(rect.x, rect.y + top_corner_height, rect.width, rect.height - top_corner_height - bottom_corner_height),
+                color,
+            );
+        }
+
+        // Draw corners using SDF
+        self.draw_rounded_corner(rect.x, rect.y, r_tl, color, 0); // top-left
+        self.draw_rounded_corner(rect.x + rect.width - r_tr, rect.y, r_tr, color, 1); // top-right
+        self.draw_rounded_corner(rect.x + rect.width - r_br, rect.y + rect.height - r_br, r_br, color, 2); // bottom-right
+        self.draw_rounded_corner(rect.x, rect.y + rect.height - r_bl, r_bl, color, 3); // bottom-left
+    }
+
+    /// Draw a single rounded corner using pixel-based SDF.
+    /// quadrant: 0=top-left, 1=top-right, 2=bottom-right, 3=bottom-left
+    fn draw_rounded_corner(&mut self, x: f32, y: f32, radius: f32, color: Color, quadrant: u8) {
+        if radius < 1.0 {
+            return;
+        }
+
+        // Calculate center of the corner circle
+        let (cx, cy) = match quadrant {
+            0 => (x + radius, y + radius), // top-left: center is inside
+            1 => (x, y + radius),          // top-right: center is to the left
+            2 => (x, y),                   // bottom-right: center is up-left
+            3 => (x + radius, y),          // bottom-left: center is up
+            _ => return,
+        };
+
+        // Draw corner using small rectangles
+        let step = 1.0;
+        let mut py = y;
+        while py < y + radius {
+            let mut px = x;
+            while px < x + radius {
+                // Check if this pixel is inside the rounded corner
+                let dx = match quadrant {
+                    0 | 3 => cx - (px + step / 2.0), // left corners: measure from right edge
+                    _ => (px + step / 2.0) - cx,    // right corners: measure from left edge
+                };
+                let dy = match quadrant {
+                    0 | 1 => cy - (py + step / 2.0), // top corners: measure from bottom edge
+                    _ => (py + step / 2.0) - cy,    // bottom corners: measure from top edge
+                };
+                
+                let dist = (dx * dx + dy * dy).sqrt();
+                
+                // Inside the quarter circle
+                if dist <= radius {
+                    self.draw_solid_rect(Rect::new(px, py, step, step), color);
+                }
+                
+                px += step;
+            }
+            py += step;
+        }
+    }
+
     /// Draw a border.
     fn draw_border(&mut self, rect: Rect, color: Color, top: f32, right: f32, bottom: f32, left: f32) {
         // Top border
@@ -1085,11 +1176,45 @@ impl Renderer {
                     rustkit_css::RadialShape::Ellipse => (dx, dy),
                 }
             }
-            rustkit_css::RadialSize::ClosestCorner | rustkit_css::RadialSize::FarthestCorner => {
-                // Simplified: use diagonal distance
-                let dx = rect.width * 0.5;
-                let dy = rect.height * 0.5;
-                ((dx * dx + dy * dy).sqrt(), (dx * dx + dy * dy).sqrt())
+            rustkit_css::RadialSize::ClosestCorner => {
+                // Distance to closest corner
+                let corners = [
+                    (0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)
+                ];
+                let mut min_dist = f32::INFINITY;
+                for (cx_frac, cy_frac) in corners {
+                    let dx = (cx_frac - center.0).abs() * rect.width;
+                    let dy = (cy_frac - center.1).abs() * rect.height;
+                    let dist = (dx * dx + dy * dy).sqrt();
+                    min_dist = min_dist.min(dist);
+                }
+                match shape {
+                    rustkit_css::RadialShape::Circle => (min_dist, min_dist),
+                    rustkit_css::RadialShape::Ellipse => {
+                        let aspect = rect.width / rect.height.max(1.0);
+                        (min_dist, min_dist / aspect)
+                    }
+                }
+            }
+            rustkit_css::RadialSize::FarthestCorner => {
+                // Distance to farthest corner
+                let corners = [
+                    (0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)
+                ];
+                let mut max_dist = 0.0f32;
+                for (cx_frac, cy_frac) in corners {
+                    let dx = (cx_frac - center.0).abs() * rect.width;
+                    let dy = (cy_frac - center.1).abs() * rect.height;
+                    let dist = (dx * dx + dy * dy).sqrt();
+                    max_dist = max_dist.max(dist);
+                }
+                match shape {
+                    rustkit_css::RadialShape::Circle => (max_dist, max_dist),
+                    rustkit_css::RadialShape::Ellipse => {
+                        let aspect = rect.width / rect.height.max(1.0);
+                        (max_dist, max_dist / aspect)
+                    }
+                }
             }
             rustkit_css::RadialSize::Explicit(r1, r2) => (r1, r2),
         };
@@ -1103,36 +1228,32 @@ impl Renderer {
             normalized_stops.push((pos, stop.color));
         }
         
-        // Draw as concentric rings
-        let max_radius = rx.max(ry);
-        let ring_count = (max_radius / 4.0).max(8.0) as usize;
-        
-        for i in (0..ring_count).rev() {
-            let t = i as f32 / ring_count as f32;
-            let color = Self::interpolate_color(&normalized_stops, t);
-            
-            let ring_rx = rx * (t + 1.0 / ring_count as f32);
-            let ring_ry = ry * (t + 1.0 / ring_count as f32);
-            
-            // Draw as an axis-aligned ellipse (approximated as rect for now)
-            let ring_rect = Rect::new(
-                cx - ring_rx,
-                cy - ring_ry,
-                ring_rx * 2.0,
-                ring_ry * 2.0,
-            );
-            
-            // Clip to original rect
-            let clipped = Rect::new(
-                ring_rect.x.max(rect.x),
-                ring_rect.y.max(rect.y),
-                (ring_rect.x + ring_rect.width).min(rect.x + rect.width) - ring_rect.x.max(rect.x),
-                (ring_rect.y + ring_rect.height).min(rect.y + rect.height) - ring_rect.y.max(rect.y),
-            );
-            
-            if clipped.width > 0.0 && clipped.height > 0.0 {
-                self.draw_solid_rect(clipped, color);
+        // Draw using pixel rows for accurate radial gradient
+        // Each row is drawn as a series of colored rectangles
+        let step_size: f32 = 2.0; // Draw every 2 pixels for performance
+        let mut y = rect.y;
+        while y < rect.y + rect.height {
+            let row_height = step_size.min(rect.y + rect.height - y);
+            let mut x = rect.x;
+            while x < rect.x + rect.width {
+                let col_width = step_size.min(rect.x + rect.width - x);
+                
+                // Calculate distance from center (normalized to ellipse)
+                let dx = (x + col_width / 2.0 - cx) / rx.max(0.001);
+                let dy = (y + row_height / 2.0 - cy) / ry.max(0.001);
+                let t = (dx * dx + dy * dy).sqrt();
+                
+                // Get color at this distance
+                let color = Self::interpolate_color(&normalized_stops, t);
+                
+                // Only draw if not fully transparent
+                if color.a > 0.0 {
+                    self.draw_solid_rect(Rect::new(x, y, col_width, row_height), color);
+                }
+                
+                x += step_size;
             }
+            y += step_size;
         }
     }
     
