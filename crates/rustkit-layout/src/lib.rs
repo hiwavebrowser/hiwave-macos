@@ -2215,21 +2215,45 @@ impl DisplayList {
                     rustkit_css::TextDecorationStyle::Wavy => TextDecorationStyleValue::Wavy,
                 };
 
-                // Calculate thickness
+                // Get actual font metrics for accurate decoration positioning
+                let metrics = measure_text_advanced(
+                    text,
+                    &style.font_family,
+                    font_size,
+                    style.font_weight,
+                    style.font_style,
+                );
+                
+                // Calculate thickness from style or font metrics
                 let thickness = match style.text_decoration_thickness {
                     Length::Px(px) => px,
                     Length::Em(em) => em * font_size,
-                    _ => font_size / 14.0, // Auto thickness
+                    _ => {
+                        // Use font metrics if available, otherwise fallback
+                        if metrics.underline_thickness > 0.0 {
+                            metrics.underline_thickness
+                        } else {
+                            font_size / 14.0
+                        }
+                    }
                 };
 
-                let ascent = font_size * 0.8;
-                let descent = font_size * 0.2;
+                // Use actual metrics for positioning
+                let ascent = if metrics.ascent > 0.0 { metrics.ascent } else { font_size * 0.8 };
 
-                // Underline
+                // Underline: position below baseline using font metrics
                 if decoration_line.underline {
+                    let underline_y = if metrics.underline_offset != 0.0 {
+                        // Font provides underline position (negative = below baseline)
+                        y + ascent - metrics.underline_offset
+                    } else {
+                        // Fallback: position slightly below baseline
+                        y + ascent + font_size * 0.1
+                    };
+                    
                     self.commands.push(DisplayCommand::TextDecoration {
                         x,
-                        y: y + ascent + descent * 0.3,
+                        y: underline_y,
                         width: text_width,
                         thickness,
                         color: decoration_color,
@@ -2237,11 +2261,17 @@ impl DisplayList {
                     });
                 }
 
-                // Overline
+                // Overline: position at top of text
                 if decoration_line.overline {
+                    let overline_y = if metrics.overline_offset != 0.0 {
+                        y + ascent - metrics.overline_offset
+                    } else {
+                        y // At top of text box
+                    };
+                    
                     self.commands.push(DisplayCommand::TextDecoration {
                         x,
-                        y: y - thickness,
+                        y: overline_y,
                         width: text_width,
                         thickness,
                         color: decoration_color,
@@ -2249,11 +2279,18 @@ impl DisplayList {
                     });
                 }
 
-                // Line-through (strikethrough)
+                // Line-through (strikethrough): position at middle of x-height
                 if decoration_line.line_through {
+                    let strikethrough_y = if metrics.strikethrough_offset != 0.0 {
+                        y + ascent - metrics.strikethrough_offset
+                    } else {
+                        // Fallback: approximately middle of x-height
+                        y + ascent * 0.35
+                    };
+                    
                     self.commands.push(DisplayCommand::TextDecoration {
                         x,
-                        y: y + ascent * 0.35,
+                        y: strikethrough_y,
                         width: text_width,
                         thickness,
                         color: decoration_color,

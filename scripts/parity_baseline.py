@@ -380,9 +380,76 @@ def main():
     
     print(f"\nReport saved to: {report_path}")
     
+    # Generate WorkOrders for dominant clusters
+    workorders_dir = output_dir / "workorders"
+    workorders_dir.mkdir(exist_ok=True)
+    
+    print("\n--- Auto-Generated WorkOrders ---")
+    workorders_created = generate_workorders(total_clusters, metrics["worst_3_cases"], workorders_dir)
+    for wo in workorders_created:
+        print(f"  Created: {wo}")
+    
     # Determine overall parity estimate
     parity_estimate = 100 - metrics["tier_b_weighted_mean"]
     print(f"\n>>> ESTIMATED PARITY: {parity_estimate:.1f}% <<<")
+
+
+def generate_workorders(clusters: Dict[str, int], worst_cases: List[Dict], output_dir: Path) -> List[str]:
+    """Generate WorkOrders based on failure clusters."""
+    created = []
+    
+    # Find the dominant cluster
+    sorted_clusters = sorted(clusters.items(), key=lambda x: -x[1])
+    
+    for cluster_name, count in sorted_clusters:
+        if count == 0:
+            continue
+        
+        # Create WorkOrder for this cluster
+        workorder = {
+            "id": f"parity-{cluster_name}-{datetime.now().strftime('%Y%m%d')}",
+            "title": f"Fix {cluster_name.replace('_', ' ').title()} Issues",
+            "description": f"Address {count} {cluster_name} issues identified in parity baseline.",
+            "priority": "high" if count > 10 else "medium",
+            "cluster": cluster_name,
+            "issue_count": count,
+            "affected_cases": [c["case_id"] for c in worst_cases if cluster_name in str(c)],
+            "acceptance_criteria": [
+                f"Reduce {cluster_name} issue count by at least 50%",
+                "No regression in other clusters",
+                "Tier A pass rate improves",
+            ],
+            "created": datetime.now().isoformat(),
+        }
+        
+        wo_path = output_dir / f"{cluster_name}.json"
+        with open(wo_path, "w") as f:
+            json.dump(workorder, f, indent=2)
+        
+        created.append(str(wo_path))
+    
+    # Create a summary WorkOrder for the top 3 worst cases
+    if worst_cases:
+        summary_wo = {
+            "id": f"parity-top-failures-{datetime.now().strftime('%Y%m%d')}",
+            "title": "Fix Top 3 Worst Parity Cases",
+            "description": "Focus on the three cases with highest pixel diff.",
+            "priority": "critical",
+            "cases": worst_cases,
+            "acceptance_criteria": [
+                f"Reduce diff% for {worst_cases[0]['case_id']} below 25%",
+                "All three cases show measurable improvement",
+            ],
+            "created": datetime.now().isoformat(),
+        }
+        
+        wo_path = output_dir / "top_failures.json"
+        with open(wo_path, "w") as f:
+            json.dump(summary_wo, f, indent=2)
+        
+        created.append(str(wo_path))
+    
+    return created
 
 
 if __name__ == "__main__":
