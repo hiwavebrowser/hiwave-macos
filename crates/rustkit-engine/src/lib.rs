@@ -175,6 +175,9 @@ pub struct EngineConfig {
     pub cookies_enabled: bool,
     /// Default background color.
     pub background_color: [f64; 4],
+    /// Disable animations and transitions for deterministic parity captures.
+    /// When true, all CSS animations and transitions are ignored during rendering.
+    pub disable_animations: bool,
 }
 
 impl Default for EngineConfig {
@@ -184,6 +187,17 @@ impl Default for EngineConfig {
             javascript_enabled: true,
             cookies_enabled: true,
             background_color: [1.0, 1.0, 1.0, 1.0], // White
+            disable_animations: false,
+        }
+    }
+}
+
+impl EngineConfig {
+    /// Create a configuration for parity testing (animations disabled).
+    pub fn for_parity_testing() -> Self {
+        Self {
+            disable_animations: true,
+            ..Default::default()
         }
     }
 }
@@ -1188,11 +1202,23 @@ impl Engine {
                     BoxType::Block
                 };
 
-                let mut layout_box = LayoutBox::new(box_type, style);
+                let mut layout_box = LayoutBox::new(box_type, style.clone());
 
                 // Build ancestors list for child elements
                 let mut child_ancestors = ancestors.to_vec();
-                child_ancestors.push(tag_lower);
+                child_ancestors.push(tag_lower.clone());
+
+                // Check for ::before pseudo-element
+                if let Some(before_box) = self.create_pseudo_element(
+                    &tag_lower,
+                    attributes,
+                    stylesheets,
+                    css_vars,
+                    ancestors,
+                    "::before",
+                ) {
+                    layout_box.children.push(before_box);
+                }
 
                 // Process children
                 for child in node.children() {
@@ -1219,6 +1245,18 @@ impl Engine {
                     }
                 }
 
+                // Check for ::after pseudo-element
+                if let Some(after_box) = self.create_pseudo_element(
+                    &tag_lower,
+                    attributes,
+                    stylesheets,
+                    css_vars,
+                    ancestors,
+                    "::after",
+                ) {
+                    layout_box.children.push(after_box);
+                }
+
                 layout_box
             }
             NodeType::Text(text) => {
@@ -1238,6 +1276,81 @@ impl Engine {
                 LayoutBox::new(BoxType::Block, ComputedStyle::new())
             }
         }
+    }
+
+    /// Create a pseudo-element (::before or ::after) if applicable.
+    fn create_pseudo_element(
+        &self,
+        tag_name: &str,
+        attributes: &std::collections::HashMap<String, String>,
+        stylesheets: &[Stylesheet],
+        _css_vars: &HashMap<String, String>,
+        ancestors: &[String],
+        pseudo: &str,
+    ) -> Option<LayoutBox> {
+        // Compute style for the pseudo-element by matching selectors with the pseudo suffix
+        let mut pseudo_style = ComputedStyle::new();
+        
+        // Collect matching rules for this element + pseudo
+        // Use (a, b, c) specificity tuple converted to u32 for sorting
+        let mut matching_rules: Vec<((usize, usize, usize), &Rule)> = Vec::new();
+        
+        for stylesheet in stylesheets {
+            for rule in &stylesheet.rules {
+                let selector = &rule.selector;
+                
+                // Check for explicit pseudo-element in selector
+                if selector.ends_with(pseudo) || selector.ends_with(&pseudo.replace("::", ":")) {
+                    // Get the base selector (without pseudo)
+                    let base_selector = selector
+                        .trim_end_matches(pseudo)
+                        .trim_end_matches(&pseudo.replace("::", ":"));
+                    
+                    // Check if base selector matches this element
+                    // Use 0, 1 for element_index, sibling_count since we don't need sibling selectors for pseudo-elements
+                    if self.selector_matches(base_selector.trim(), tag_name, attributes, ancestors, &[], 0, 1) {
+                        let specificity = self.selector_specificity(selector);
+                        matching_rules.push((specificity, rule));
+                    }
+                }
+            }
+        }
+        
+        // If no rules match, no pseudo-element
+        if matching_rules.is_empty() {
+            return None;
+        }
+        
+        // Sort by specificity (a, b, c)
+        matching_rules.sort_by_key(|(spec, _)| *spec);
+        
+        // Apply matching rules
+        for (_, rule) in matching_rules {
+            for declaration in &rule.declarations {
+                let value_str = match &declaration.value {
+                    rustkit_css::PropertyValue::Specified(s) => s.as_str(),
+                    rustkit_css::PropertyValue::Inherit => continue,
+                    rustkit_css::PropertyValue::Initial => continue,
+                };
+                self.apply_style_property(&mut pseudo_style, &declaration.property, value_str);
+            }
+        }
+        
+        // Only create pseudo-element if content property is set
+        let content = pseudo_style.content.as_ref()?;
+        
+        // Create the pseudo-element box
+        let mut pseudo_box = LayoutBox::new(BoxType::Inline, pseudo_style.clone());
+        
+        // If content is not empty, add a text child
+        if !content.is_empty() {
+            let mut text_style = pseudo_style.clone();
+            text_style.content = None;
+            let text_box = LayoutBox::new(BoxType::Text(content.clone()), text_style);
+            pseudo_box.children.push(text_box);
+        }
+        
+        Some(pseudo_box)
     }
 
     /// Compute a basic style for an element based on its tag and attributes.
@@ -1543,9 +1656,9 @@ impl Engine {
             }
             "border" | "border-width" => {
                 if let Some(length) = parse_length(value) {
-                    style.border_top_width = length;
-                    style.border_right_width = length;
-                    style.border_bottom_width = length;
+                    style.border_top_width = length.clone();
+                    style.border_right_width = length.clone();
+                    style.border_bottom_width = length.clone();
                     style.border_left_width = length;
                 }
             }
@@ -1672,7 +1785,7 @@ impl Engine {
             "gap" | "grid-gap" => {
                 // gap shorthand (row-gap column-gap or single value)
                 if let Some(length) = parse_length(value) {
-                    style.row_gap = length;
+                    style.row_gap = length.clone();
                     style.column_gap = length;
                 }
             }
@@ -1717,9 +1830,9 @@ impl Engine {
             "border-radius" => {
                 // Parse border-radius (shorthand: all corners same)
                 if let Some(length) = rustkit_css::parse_length(value) {
-                    style.border_top_left_radius = length;
-                    style.border_top_right_radius = length;
-                    style.border_bottom_right_radius = length;
+                    style.border_top_left_radius = length.clone();
+                    style.border_top_right_radius = length.clone();
+                    style.border_bottom_right_radius = length.clone();
                     style.border_bottom_left_radius = length;
                 }
             }
@@ -1821,17 +1934,17 @@ impl Engine {
                 match parts.len() {
                     1 => {
                         if let Some(length) = parse_length(parts[0]) {
-                            style.top = Some(length);
-                            style.right = Some(length);
-                            style.bottom = Some(length);
+                            style.top = Some(length.clone());
+                            style.right = Some(length.clone());
+                            style.bottom = Some(length.clone());
                             style.left = Some(length);
                         }
                     }
                     2 => {
                         if let (Some(tb), Some(lr)) = (parse_length(parts[0]), parse_length(parts[1])) {
-                            style.top = Some(tb);
+                            style.top = Some(tb.clone());
                             style.bottom = Some(tb);
-                            style.right = Some(lr);
+                            style.right = Some(lr.clone());
                             style.left = Some(lr);
                         }
                     }
@@ -2032,6 +2145,182 @@ impl Engine {
             "grid-auto-rows" => {
                 if let Some(size) = parse_track_size(value) {
                     style.grid_auto_rows = size;
+                }
+            }
+            // ==================== Transforms ====================
+            "transform" => {
+                if let Some(transform_list) = parse_transform(value) {
+                    style.transform = transform_list;
+                }
+            }
+            "transform-origin" => {
+                if let Some(origin) = parse_transform_origin(value) {
+                    style.transform_origin = origin;
+                }
+            }
+            // ==================== Transitions (parsed, not executed) ====================
+            "transition" => {
+                // Shorthand: property duration timing-function delay
+                let parts: Vec<&str> = value.split_whitespace().collect();
+                if !parts.is_empty() {
+                    style.transition_property = parts[0].to_string();
+                }
+                if parts.len() > 1 {
+                    if let Some(dur) = parse_time(parts[1]) {
+                        style.transition_duration = dur;
+                    }
+                }
+                if parts.len() > 2 {
+                    style.transition_timing_function = parse_timing_function(parts[2]);
+                }
+                if parts.len() > 3 {
+                    if let Some(delay) = parse_time(parts[3]) {
+                        style.transition_delay = delay;
+                    }
+                }
+            }
+            "transition-property" => {
+                style.transition_property = value.trim().to_string();
+            }
+            "transition-duration" => {
+                if let Some(dur) = parse_time(value) {
+                    style.transition_duration = dur;
+                }
+            }
+            "transition-timing-function" => {
+                style.transition_timing_function = parse_timing_function(value);
+            }
+            "transition-delay" => {
+                if let Some(delay) = parse_time(value) {
+                    style.transition_delay = delay;
+                }
+            }
+            // ==================== Animations (parsed, not executed) ====================
+            "animation" => {
+                // Shorthand: name duration timing-function delay iteration-count direction fill-mode play-state
+                let parts: Vec<&str> = value.split_whitespace().collect();
+                for (i, part) in parts.iter().enumerate() {
+                    // First non-time value is usually the name
+                    if i == 0 && !part.ends_with('s') && !part.ends_with("ms") {
+                        style.animation_name = part.to_string();
+                    } else if let Some(t) = parse_time(part) {
+                        if style.animation_duration == 0.0 {
+                            style.animation_duration = t;
+                        } else {
+                            style.animation_delay = t;
+                        }
+                    } else {
+                        match *part {
+                            "infinite" => style.animation_iteration_count = rustkit_css::AnimationIterationCount::Infinite,
+                            "normal" => style.animation_direction = rustkit_css::AnimationDirection::Normal,
+                            "reverse" => style.animation_direction = rustkit_css::AnimationDirection::Reverse,
+                            "alternate" => style.animation_direction = rustkit_css::AnimationDirection::Alternate,
+                            "alternate-reverse" => style.animation_direction = rustkit_css::AnimationDirection::AlternateReverse,
+                            "forwards" => style.animation_fill_mode = rustkit_css::AnimationFillMode::Forwards,
+                            "backwards" => style.animation_fill_mode = rustkit_css::AnimationFillMode::Backwards,
+                            "both" => style.animation_fill_mode = rustkit_css::AnimationFillMode::Both,
+                            "paused" => style.animation_play_state = rustkit_css::AnimationPlayState::Paused,
+                            "running" => style.animation_play_state = rustkit_css::AnimationPlayState::Running,
+                            _ => {
+                                // Could be timing function or name
+                                if i == 0 || style.animation_name.is_empty() {
+                                    style.animation_name = part.to_string();
+                                } else {
+                                    style.animation_timing_function = parse_timing_function(part);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "animation-name" => {
+                style.animation_name = value.trim().to_string();
+            }
+            "animation-duration" => {
+                if let Some(dur) = parse_time(value) {
+                    style.animation_duration = dur;
+                }
+            }
+            "animation-timing-function" => {
+                style.animation_timing_function = parse_timing_function(value);
+            }
+            "animation-delay" => {
+                if let Some(delay) = parse_time(value) {
+                    style.animation_delay = delay;
+                }
+            }
+            "animation-iteration-count" => {
+                let v = value.trim();
+                if v == "infinite" {
+                    style.animation_iteration_count = rustkit_css::AnimationIterationCount::Infinite;
+                } else if let Ok(n) = v.parse::<f32>() {
+                    style.animation_iteration_count = rustkit_css::AnimationIterationCount::Count(n);
+                }
+            }
+            "animation-direction" => {
+                style.animation_direction = match value.trim() {
+                    "normal" => rustkit_css::AnimationDirection::Normal,
+                    "reverse" => rustkit_css::AnimationDirection::Reverse,
+                    "alternate" => rustkit_css::AnimationDirection::Alternate,
+                    "alternate-reverse" => rustkit_css::AnimationDirection::AlternateReverse,
+                    _ => rustkit_css::AnimationDirection::Normal,
+                };
+            }
+            "animation-fill-mode" => {
+                style.animation_fill_mode = match value.trim() {
+                    "none" => rustkit_css::AnimationFillMode::None,
+                    "forwards" => rustkit_css::AnimationFillMode::Forwards,
+                    "backwards" => rustkit_css::AnimationFillMode::Backwards,
+                    "both" => rustkit_css::AnimationFillMode::Both,
+                    _ => rustkit_css::AnimationFillMode::None,
+                };
+            }
+            "animation-play-state" => {
+                style.animation_play_state = match value.trim() {
+                    "running" => rustkit_css::AnimationPlayState::Running,
+                    "paused" => rustkit_css::AnimationPlayState::Paused,
+                    _ => rustkit_css::AnimationPlayState::Running,
+                };
+            }
+            // ==================== Box Sizing ====================
+            "box-sizing" => {
+                style.box_sizing = match value.trim() {
+                    "content-box" => rustkit_css::BoxSizing::ContentBox,
+                    "border-box" => rustkit_css::BoxSizing::BorderBox,
+                    _ => rustkit_css::BoxSizing::ContentBox,
+                };
+            }
+            // ==================== Pseudo-element content ====================
+            "content" => {
+                let v = value.trim();
+                if v == "none" || v == "normal" {
+                    style.content = None;
+                } else if v.starts_with('"') && v.ends_with('"') && v.len() >= 2 {
+                    // Quoted string content
+                    style.content = Some(v[1..v.len()-1].to_string());
+                } else if v.starts_with('\'') && v.ends_with('\'') && v.len() >= 2 {
+                    // Single-quoted string content
+                    style.content = Some(v[1..v.len()-1].to_string());
+                } else if v == "''" || v == "\"\"" {
+                    // Empty string
+                    style.content = Some(String::new());
+                }
+            }
+            // ==================== Background clip (for gradient text) ====================
+            "background-clip" | "-webkit-background-clip" => {
+                style.background_clip = match value.trim() {
+                    "border-box" => rustkit_css::BackgroundClip::BorderBox,
+                    "padding-box" => rustkit_css::BackgroundClip::PaddingBox,
+                    "content-box" => rustkit_css::BackgroundClip::ContentBox,
+                    "text" => rustkit_css::BackgroundClip::Text,
+                    _ => rustkit_css::BackgroundClip::BorderBox,
+                };
+            }
+            "-webkit-text-fill-color" => {
+                if let Some(color) = parse_color(value) {
+                    style.webkit_text_fill_color = Some(color);
+                } else if value.trim() == "transparent" {
+                    style.webkit_text_fill_color = Some(rustkit_css::Color::TRANSPARENT);
                 }
             }
             _ => {
@@ -3560,6 +3849,18 @@ impl EngineBuilder {
         self
     }
 
+    /// Set the entire configuration at once.
+    pub fn with_config(mut self, config: EngineConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Disable animations for deterministic parity testing.
+    pub fn disable_animations(mut self, disable: bool) -> Self {
+        self.config.disable_animations = disable;
+        self
+    }
+
     /// Build the engine.
     pub fn build(self) -> Result<Engine, EngineError> {
         Engine::with_interceptor(self.config, self.interceptor)
@@ -3858,6 +4159,21 @@ fn parse_length(value: &str) -> Option<rustkit_css::Length> {
     if value.starts_with("calc(") && value.ends_with(')') {
         return parse_calc(value);
     }
+    
+    // Handle min() function
+    if value.starts_with("min(") && value.ends_with(')') {
+        return parse_min_max_clamp(value, "min");
+    }
+    
+    // Handle max() function
+    if value.starts_with("max(") && value.ends_with(')') {
+        return parse_min_max_clamp(value, "max");
+    }
+    
+    // Handle clamp() function
+    if value.starts_with("clamp(") && value.ends_with(')') {
+        return parse_min_max_clamp(value, "clamp");
+    }
 
     if value.ends_with("px") {
         let num: f32 = value.trim_end_matches("px").trim().parse().ok()?;
@@ -3965,6 +4281,74 @@ fn parse_calc(value: &str) -> Option<rustkit_css::Length> {
     parse_length(inner)
 }
 
+/// Parse min(), max(), or clamp() CSS functions.
+fn parse_min_max_clamp(value: &str, func: &str) -> Option<rustkit_css::Length> {
+    // Strip the function name and parentheses
+    let prefix_len = func.len() + 1; // "min(" or "max(" or "clamp("
+    let inner = &value[prefix_len..value.len() - 1];
+    
+    // Split by comma, but be careful of nested functions
+    let args = split_css_args(inner);
+    
+    match func {
+        "min" => {
+            if args.len() >= 2 {
+                let a = parse_length(args[0].trim())?;
+                let b = parse_length(args[1].trim())?;
+                Some(rustkit_css::Length::Min(Box::new((a, b))))
+            } else {
+                None
+            }
+        }
+        "max" => {
+            if args.len() >= 2 {
+                let a = parse_length(args[0].trim())?;
+                let b = parse_length(args[1].trim())?;
+                Some(rustkit_css::Length::Max(Box::new((a, b))))
+            } else {
+                None
+            }
+        }
+        "clamp" => {
+            if args.len() >= 3 {
+                let min_val = parse_length(args[0].trim())?;
+                let preferred = parse_length(args[1].trim())?;
+                let max_val = parse_length(args[2].trim())?;
+                Some(rustkit_css::Length::Clamp(Box::new((min_val, preferred, max_val))))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Split CSS function arguments, respecting nested parentheses.
+fn split_css_args(s: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                result.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    
+    // Don't forget the last argument
+    if start < s.len() {
+        result.push(&s[start..]);
+    }
+    
+    result
+}
+
 /// Parse a shorthand value with 1-4 parts (like margin, padding).
 /// Returns (top, right, bottom, left).
 fn parse_shorthand_4(value: &str) -> Option<(rustkit_css::Length, rustkit_css::Length, rustkit_css::Length, rustkit_css::Length)> {
@@ -3973,18 +4357,18 @@ fn parse_shorthand_4(value: &str) -> Option<(rustkit_css::Length, rustkit_css::L
     match parts.len() {
         1 => {
             let v = parse_length(parts[0])?;
-            Some((v, v, v, v))
+            Some((v.clone(), v.clone(), v.clone(), v))
         }
         2 => {
             let tb = parse_length(parts[0])?;
             let lr = parse_length(parts[1])?;
-            Some((tb, lr, tb, lr))
+            Some((tb.clone(), lr.clone(), tb, lr))
         }
         3 => {
             let t = parse_length(parts[0])?;
             let lr = parse_length(parts[1])?;
             let b = parse_length(parts[2])?;
-            Some((t, lr, b, lr))
+            Some((t, lr.clone(), b, lr))
         }
         4 => {
             let t = parse_length(parts[0])?;
@@ -4114,6 +4498,210 @@ fn parse_overflow(value: &str) -> rustkit_css::Overflow {
         "auto" => rustkit_css::Overflow::Auto,
         "clip" => rustkit_css::Overflow::Clip,
         _ => rustkit_css::Overflow::Visible,
+    }
+}
+
+/// Parse a CSS time value (e.g., "0.3s", "300ms") into seconds.
+fn parse_time(value: &str) -> Option<f32> {
+    let value = value.trim();
+    if value.ends_with("ms") {
+        value[..value.len() - 2].parse::<f32>().ok().map(|v| v / 1000.0)
+    } else if value.ends_with('s') {
+        value[..value.len() - 1].parse::<f32>().ok()
+    } else {
+        None
+    }
+}
+
+/// Parse a CSS timing function.
+fn parse_timing_function(value: &str) -> rustkit_css::TimingFunction {
+    let value = value.trim();
+    match value {
+        "ease" => rustkit_css::TimingFunction::Ease,
+        "linear" => rustkit_css::TimingFunction::Linear,
+        "ease-in" => rustkit_css::TimingFunction::EaseIn,
+        "ease-out" => rustkit_css::TimingFunction::EaseOut,
+        "ease-in-out" => rustkit_css::TimingFunction::EaseInOut,
+        "step-start" => rustkit_css::TimingFunction::StepStart,
+        "step-end" => rustkit_css::TimingFunction::StepEnd,
+        _ if value.starts_with("cubic-bezier(") => {
+            // Parse cubic-bezier(x1, y1, x2, y2)
+            let inner = value.trim_start_matches("cubic-bezier(").trim_end_matches(')');
+            let parts: Vec<f32> = inner.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+            if parts.len() == 4 {
+                rustkit_css::TimingFunction::CubicBezier(parts[0], parts[1], parts[2], parts[3])
+            } else {
+                rustkit_css::TimingFunction::Ease
+            }
+        }
+        _ if value.starts_with("steps(") => {
+            // Parse steps(count, jump-start|jump-end)
+            let inner = value.trim_start_matches("steps(").trim_end_matches(')');
+            let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+            if let Some(count) = parts.first().and_then(|s| s.parse::<u32>().ok()) {
+                let jump_start = parts.get(1).map(|s| *s == "jump-start" || *s == "start").unwrap_or(false);
+                rustkit_css::TimingFunction::Steps(count, jump_start)
+            } else {
+                rustkit_css::TimingFunction::StepEnd
+            }
+        }
+        _ => rustkit_css::TimingFunction::Ease,
+    }
+}
+
+/// Parse a CSS transform value into a TransformList.
+fn parse_transform(value: &str) -> Option<rustkit_css::TransformList> {
+    let value = value.trim();
+    if value == "none" {
+        return Some(rustkit_css::TransformList::none());
+    }
+
+    let mut ops = Vec::new();
+    let mut remaining = value;
+
+    while !remaining.is_empty() {
+        remaining = remaining.trim_start();
+        
+        // Find the function name
+        if let Some(paren_pos) = remaining.find('(') {
+            let func_name = &remaining[..paren_pos];
+            let after_paren = &remaining[paren_pos + 1..];
+            
+            // Find matching closing paren
+            if let Some(close_pos) = find_matching_paren(after_paren) {
+                let args = &after_paren[..close_pos];
+                remaining = &after_paren[close_pos + 1..];
+                
+                if let Some(op) = parse_transform_op(func_name, args) {
+                    ops.push(op);
+                }
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    if ops.is_empty() {
+        None
+    } else {
+        Some(rustkit_css::TransformList { ops })
+    }
+}
+
+/// Parse a single transform operation.
+fn parse_transform_op(func: &str, args: &str) -> Option<rustkit_css::TransformOp> {
+    let args = args.trim();
+    let parts: Vec<&str> = args.split(',').map(|s| s.trim()).collect();
+    
+    match func.trim() {
+        "translate" => {
+            let x = parse_length(parts.first()?)?;
+            let y = parts.get(1).and_then(|s| parse_length(s)).unwrap_or(rustkit_css::Length::Zero);
+            Some(rustkit_css::TransformOp::Translate(x, y))
+        }
+        "translateX" => {
+            let x = parse_length(parts.first()?)?;
+            Some(rustkit_css::TransformOp::TranslateX(x))
+        }
+        "translateY" => {
+            let y = parse_length(parts.first()?)?;
+            Some(rustkit_css::TransformOp::TranslateY(y))
+        }
+        "scale" => {
+            let sx = parts.first()?.parse::<f32>().ok()?;
+            let sy = parts.get(1).and_then(|s| s.parse::<f32>().ok()).unwrap_or(sx);
+            Some(rustkit_css::TransformOp::Scale(sx, sy))
+        }
+        "scaleX" => {
+            let s = parts.first()?.parse::<f32>().ok()?;
+            Some(rustkit_css::TransformOp::ScaleX(s))
+        }
+        "scaleY" => {
+            let s = parts.first()?.parse::<f32>().ok()?;
+            Some(rustkit_css::TransformOp::ScaleY(s))
+        }
+        "rotate" => {
+            let angle = parse_angle(parts.first()?)?;
+            Some(rustkit_css::TransformOp::Rotate(angle))
+        }
+        "skew" => {
+            let ax = parse_angle(parts.first()?)?;
+            let ay = parts.get(1).and_then(|s| parse_angle(s)).unwrap_or(0.0);
+            Some(rustkit_css::TransformOp::Skew(ax, ay))
+        }
+        "skewX" => {
+            let angle = parse_angle(parts.first()?)?;
+            Some(rustkit_css::TransformOp::SkewX(angle))
+        }
+        "skewY" => {
+            let angle = parse_angle(parts.first()?)?;
+            Some(rustkit_css::TransformOp::SkewY(angle))
+        }
+        "matrix" => {
+            if parts.len() >= 6 {
+                let a = parts[0].parse::<f32>().ok()?;
+                let b = parts[1].parse::<f32>().ok()?;
+                let c = parts[2].parse::<f32>().ok()?;
+                let d = parts[3].parse::<f32>().ok()?;
+                let e = parts[4].parse::<f32>().ok()?;
+                let f = parts[5].parse::<f32>().ok()?;
+                Some(rustkit_css::TransformOp::Matrix(a, b, c, d, e, f))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Parse a CSS angle value (e.g., "45deg", "1rad", "0.5turn") into degrees.
+fn parse_angle(value: &str) -> Option<f32> {
+    let value = value.trim();
+    if value.ends_with("deg") {
+        value[..value.len() - 3].parse().ok()
+    } else if value.ends_with("rad") {
+        value[..value.len() - 3].parse::<f32>().ok().map(|r| r.to_degrees())
+    } else if value.ends_with("turn") {
+        value[..value.len() - 4].parse::<f32>().ok().map(|t| t * 360.0)
+    } else if value.ends_with("grad") {
+        value[..value.len() - 4].parse::<f32>().ok().map(|g| g * 0.9)
+    } else {
+        // Try parsing as number (defaults to degrees)
+        value.parse().ok()
+    }
+}
+
+/// Parse transform-origin value.
+fn parse_transform_origin(value: &str) -> Option<rustkit_css::TransformOrigin> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    
+    let parse_component = |s: &str| -> Option<rustkit_css::Length> {
+        match s {
+            "left" => Some(rustkit_css::Length::Percent(0.0)),
+            "center" => Some(rustkit_css::Length::Percent(50.0)),
+            "right" => Some(rustkit_css::Length::Percent(100.0)),
+            "top" => Some(rustkit_css::Length::Percent(0.0)),
+            "bottom" => Some(rustkit_css::Length::Percent(100.0)),
+            _ => parse_length(s),
+        }
+    };
+    
+    match parts.len() {
+        1 => {
+            let x = parse_component(parts[0])?;
+            Some(rustkit_css::TransformOrigin {
+                x,
+                y: rustkit_css::Length::Percent(50.0),
+            })
+        }
+        2 | 3 => {
+            let x = parse_component(parts[0])?;
+            let y = parse_component(parts[1])?;
+            Some(rustkit_css::TransformOrigin { x, y })
+        }
+        _ => None,
     }
 }
 
@@ -4469,5 +5057,110 @@ mod tests {
         assert_eq!(parse_length("1.5em"), Some(rustkit_css::Length::Em(1.5)));
         assert_eq!(parse_length("2rem"), Some(rustkit_css::Length::Rem(2.0)));
         assert_eq!(parse_length("50%"), Some(rustkit_css::Length::Percent(50.0)));
+    }
+
+    #[test]
+    fn test_parse_min_max_clamp() {
+        // Test min()
+        if let Some(rustkit_css::Length::Min(pair)) = parse_length("min(100px, 50%)") {
+            assert_eq!(pair.0, rustkit_css::Length::Px(100.0));
+            assert_eq!(pair.1, rustkit_css::Length::Percent(50.0));
+        } else {
+            panic!("Failed to parse min()");
+        }
+
+        // Test max()
+        if let Some(rustkit_css::Length::Max(pair)) = parse_length("max(200px, 30%)") {
+            assert_eq!(pair.0, rustkit_css::Length::Px(200.0));
+            assert_eq!(pair.1, rustkit_css::Length::Percent(30.0));
+        } else {
+            panic!("Failed to parse max()");
+        }
+
+        // Test clamp()
+        if let Some(rustkit_css::Length::Clamp(triple)) = parse_length("clamp(100px, 50%, 300px)") {
+            assert_eq!(triple.0, rustkit_css::Length::Px(100.0));
+            assert_eq!(triple.1, rustkit_css::Length::Percent(50.0));
+            assert_eq!(triple.2, rustkit_css::Length::Px(300.0));
+        } else {
+            panic!("Failed to parse clamp()");
+        }
+    }
+
+    #[test]
+    fn test_parse_transform() {
+        // Test translateX
+        let transform = parse_transform("translateX(10px)").unwrap();
+        assert_eq!(transform.ops.len(), 1);
+        if let rustkit_css::TransformOp::TranslateX(x) = &transform.ops[0] {
+            assert_eq!(*x, rustkit_css::Length::Px(10.0));
+        } else {
+            panic!("Expected TranslateX");
+        }
+
+        // Test scale
+        let transform = parse_transform("scale(1.5)").unwrap();
+        assert_eq!(transform.ops.len(), 1);
+        if let rustkit_css::TransformOp::Scale(sx, sy) = transform.ops[0] {
+            assert_eq!(sx, 1.5);
+            assert_eq!(sy, 1.5);
+        } else {
+            panic!("Expected Scale");
+        }
+
+        // Test rotate
+        let transform = parse_transform("rotate(45deg)").unwrap();
+        assert_eq!(transform.ops.len(), 1);
+        if let rustkit_css::TransformOp::Rotate(angle) = transform.ops[0] {
+            assert!((angle - 45.0).abs() < 0.01);
+        } else {
+            panic!("Expected Rotate");
+        }
+
+        // Test multiple transforms
+        let transform = parse_transform("translateX(10px) scale(2) rotate(90deg)").unwrap();
+        assert_eq!(transform.ops.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_transform_origin() {
+        // Test center
+        let origin = parse_transform_origin("center").unwrap();
+        assert_eq!(origin.x, rustkit_css::Length::Percent(50.0));
+        assert_eq!(origin.y, rustkit_css::Length::Percent(50.0));
+
+        // Test top left
+        let origin = parse_transform_origin("top left").unwrap();
+        assert_eq!(origin.x, rustkit_css::Length::Percent(0.0));
+        assert_eq!(origin.y, rustkit_css::Length::Percent(0.0));
+
+        // Test pixel values
+        let origin = parse_transform_origin("10px 20px").unwrap();
+        assert_eq!(origin.x, rustkit_css::Length::Px(10.0));
+        assert_eq!(origin.y, rustkit_css::Length::Px(20.0));
+    }
+
+    #[test]
+    fn test_parse_timing_function() {
+        assert!(matches!(parse_timing_function("ease"), rustkit_css::TimingFunction::Ease));
+        assert!(matches!(parse_timing_function("linear"), rustkit_css::TimingFunction::Linear));
+        assert!(matches!(parse_timing_function("ease-in"), rustkit_css::TimingFunction::EaseIn));
+        assert!(matches!(parse_timing_function("ease-out"), rustkit_css::TimingFunction::EaseOut));
+        
+        // Test cubic-bezier
+        if let rustkit_css::TimingFunction::CubicBezier(x1, y1, x2, y2) = parse_timing_function("cubic-bezier(0.1, 0.2, 0.3, 0.4)") {
+            assert!((x1 - 0.1).abs() < 0.01);
+            assert!((y1 - 0.2).abs() < 0.01);
+            assert!((x2 - 0.3).abs() < 0.01);
+            assert!((y2 - 0.4).abs() < 0.01);
+        } else {
+            panic!("Expected CubicBezier");
+        }
+    }
+
+    #[test]
+    fn test_engine_config_for_parity() {
+        let config = EngineConfig::for_parity_testing();
+        assert!(config.disable_animations);
     }
 }

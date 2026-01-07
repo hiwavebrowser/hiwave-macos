@@ -822,18 +822,8 @@ fn get_intrinsic_main_size(box_type: &crate::BoxType, main_axis: Axis, style: &r
 
 /// Resolve a Length to pixels.
 fn resolve_length(length: &Length, container_size: f32) -> f32 {
-    match length {
-        Length::Px(px) => *px,
-        Length::Em(em) => em * 16.0, // Default font size
-        Length::Rem(rem) => rem * 16.0,
-        Length::Percent(pct) => pct / 100.0 * container_size,
-        Length::Vw(vw) => vw / 100.0 * container_size, // Approximation (use container as viewport)
-        Length::Vh(vh) => vh / 100.0 * container_size, // Approximation (use container as viewport)
-        Length::Vmin(vmin) => vmin / 100.0 * container_size,
-        Length::Vmax(vmax) => vmax / 100.0 * container_size,
-        Length::Auto => 0.0,
-        Length::Zero => 0.0,
-    }
+    // Use the Length's built-in resolution with default viewport size
+    length.to_px_with_viewport(16.0, 16.0, container_size, 800.0, 600.0)
 }
 
 /// Resolve a max Length (returns f32::INFINITY for Auto).

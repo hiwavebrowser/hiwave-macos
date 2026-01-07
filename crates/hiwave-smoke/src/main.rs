@@ -317,8 +317,10 @@ fn main() {
     let perf_output = args.perf_output.clone();
 
     // Content area (using RustKit engine)
+    // Use parity testing config to disable animations for deterministic capture
     let engine_start = Instant::now();
     let mut engine = EngineBuilder::new()
+        .with_config(rustkit_engine::EngineConfig::for_parity_testing())
         .build()
         .expect("Failed to create RustKit engine");
     perf.record("engine_init", engine_start.elapsed());

@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CSS min/max/clamp</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            width: 100%;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .box {
+            height: 60px;
+            margin: 10px 0;
+            background: #3498db;
+            color: white;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+        .min-width {
+            width: min(300px, 100%);
+            background: #e74c3c;
+        }
+        .max-width {
+            width: max(200px, 50%);
+            background: #2ecc71;
+        }
+        .clamp-width {
+            width: clamp(200px, 50%, 400px);
+            background: #9b59b6;
+        }
+        .nested {
+            width: min(max(100px, 30%), 500px);
+            background: #f39c12;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="box min-width">min(300px, 100%)</div>
+        <div class="box max-width">max(200px, 50%)</div>
+        <div class="box clamp-width">clamp(200px, 50%, 400px)</div>
+        <div class="box nested">min(max(100px, 30%), 500px)</div>
+    </div>
+</body>
+</html>
+

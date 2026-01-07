@@ -307,6 +307,9 @@ pub struct Renderer {
     // State stacks
     clip_stack: Vec<Rect>,
     stacking_contexts: Vec<StackingContext>,
+    /// Stack of 2D transform matrices and their origins.
+    /// Each entry is (matrix [a,b,c,d,e,f], origin (x,y)).
+    transform_stack: Vec<([f32; 6], (f32, f32))>,
 
     // Caches
     texture_cache: TextureCache,
@@ -422,6 +425,7 @@ impl Renderer {
             texture_indices: Vec::with_capacity(8192),
             clip_stack: Vec::new(),
             stacking_contexts: Vec::new(),
+            transform_stack: Vec::new(),
             texture_cache,
             glyph_cache,
             _texture_bind_group_layout: texture_bind_group_layout,
@@ -453,6 +457,7 @@ impl Renderer {
         self.texture_indices.clear();
         self.clip_stack.clear();
         self.stacking_contexts.clear();
+        self.transform_stack.clear();
 
         // Process commands
         for cmd in commands {
@@ -771,6 +776,46 @@ impl Renderer {
                     });
                 }
             }
+
+            DisplayCommand::PushTransform { matrix, origin } => {
+                self.push_transform(*matrix, *origin);
+            }
+
+            DisplayCommand::PopTransform => {
+                self.pop_transform();
+            }
+
+            DisplayCommand::GradientText {
+                text,
+                x,
+                y,
+                font_size,
+                font_family,
+                font_weight,
+                font_style,
+                gradient: _,
+                rect: _,
+            } => {
+                // For now, render gradient text as regular text with a fallback color
+                // Full gradient text implementation would require:
+                // 1. Render text to an offscreen alpha mask
+                // 2. Use the mask to clip a gradient fill
+                // TODO: Implement proper gradient text masking
+                
+                // Use a visible fallback color (gradient's first color stop or magenta for debugging)
+                let fallback_color = Color::new(128, 0, 255, 1.0); // Purple as fallback
+                
+                self.draw_text(
+                    text,
+                    *x,
+                    *y,
+                    fallback_color,
+                    *font_size,
+                    font_family,
+                    *font_weight,
+                    *font_style,
+                );
+            }
         }
     }
 
@@ -796,11 +841,17 @@ impl Renderer {
 
         let base = self.color_vertices.len() as u32;
 
+        // Apply transform to corners
+        let (x0, y0) = self.transform_point(rect.x, rect.y);
+        let (x1, y1) = self.transform_point(rect.x + rect.width, rect.y);
+        let (x2, y2) = self.transform_point(rect.x + rect.width, rect.y + rect.height);
+        let (x3, y3) = self.transform_point(rect.x, rect.y + rect.height);
+
         self.color_vertices.extend_from_slice(&[
-            ColorVertex { position: [rect.x, rect.y], color: c },
-            ColorVertex { position: [rect.x + rect.width, rect.y], color: c },
-            ColorVertex { position: [rect.x + rect.width, rect.y + rect.height], color: c },
-            ColorVertex { position: [rect.x, rect.y + rect.height], color: c },
+            ColorVertex { position: [x0, y0], color: c },
+            ColorVertex { position: [x1, y1], color: c },
+            ColorVertex { position: [x2, y2], color: c },
+            ColorVertex { position: [x3, y3], color: c },
         ]);
 
         self.color_indices.extend_from_slice(&[
@@ -1325,26 +1376,32 @@ impl Renderer {
                 let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
                 let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
 
+                // Apply transform to glyph corners
+                let (x0, y0) = self.transform_point(glyph_x, glyph_y);
+                let (x1, y1) = self.transform_point(glyph_x + glyph_w, glyph_y);
+                let (x2, y2) = self.transform_point(glyph_x + glyph_w, glyph_y + glyph_h);
+                let (x3, y3) = self.transform_point(glyph_x, glyph_y + glyph_h);
+
                 let base = self.texture_vertices.len() as u32;
 
                 self.texture_vertices.extend_from_slice(&[
                     TextureVertex {
-                        position: [glyph_x, glyph_y],
+                        position: [x0, y0],
                         tex_coords: [entry.tex_coords[0], entry.tex_coords[1]],
                         color: c,
                     },
                     TextureVertex {
-                        position: [glyph_x + glyph_w, glyph_y],
+                        position: [x1, y1],
                         tex_coords: [entry.tex_coords[2], entry.tex_coords[1]],
                         color: c,
                     },
                     TextureVertex {
-                        position: [glyph_x + glyph_w, glyph_y + glyph_h],
+                        position: [x2, y2],
                         tex_coords: [entry.tex_coords[2], entry.tex_coords[3]],
                         color: c,
                     },
                     TextureVertex {
-                        position: [glyph_x, glyph_y + glyph_h],
+                        position: [x3, y3],
                         tex_coords: [entry.tex_coords[0], entry.tex_coords[3]],
                         color: c,
                     },
@@ -1366,26 +1423,32 @@ impl Renderer {
     /// Draw an image.
     fn draw_image(&mut self, url: &str, rect: Rect) {
         if self.texture_cache.contains(url) {
+            // Apply transform to image corners
+            let (x0, y0) = self.transform_point(rect.x, rect.y);
+            let (x1, y1) = self.transform_point(rect.x + rect.width, rect.y);
+            let (x2, y2) = self.transform_point(rect.x + rect.width, rect.y + rect.height);
+            let (x3, y3) = self.transform_point(rect.x, rect.y + rect.height);
+
             let base = self.texture_vertices.len() as u32;
 
             self.texture_vertices.extend_from_slice(&[
                 TextureVertex {
-                    position: [rect.x, rect.y],
+                    position: [x0, y0],
                     tex_coords: [0.0, 0.0],
                     color: [1.0, 1.0, 1.0, 1.0],
                 },
                 TextureVertex {
-                    position: [rect.x + rect.width, rect.y],
+                    position: [x1, y1],
                     tex_coords: [1.0, 0.0],
                     color: [1.0, 1.0, 1.0, 1.0],
                 },
                 TextureVertex {
-                    position: [rect.x + rect.width, rect.y + rect.height],
+                    position: [x2, y2],
                     tex_coords: [1.0, 1.0],
                     color: [1.0, 1.0, 1.0, 1.0],
                 },
                 TextureVertex {
-                    position: [rect.x, rect.y + rect.height],
+                    position: [x3, y3],
                     tex_coords: [0.0, 1.0],
                     color: [1.0, 1.0, 1.0, 1.0],
                 },
@@ -1463,6 +1526,53 @@ impl Renderer {
     /// Get the current clip rectangle.
     fn current_clip(&self) -> Option<Rect> {
         self.clip_stack.last().copied()
+    }
+
+    /// Push a 2D transform matrix onto the stack.
+    fn push_transform(&mut self, matrix: [f32; 6], origin: (f32, f32)) {
+        self.transform_stack.push((matrix, origin));
+    }
+
+    /// Pop the current transform from the stack.
+    fn pop_transform(&mut self) {
+        self.transform_stack.pop();
+    }
+
+    /// Get the current combined transform matrix.
+    /// Returns identity matrix [1, 0, 0, 1, 0, 0] if no transforms are active.
+    fn current_transform(&self) -> [f32; 6] {
+        if self.transform_stack.is_empty() {
+            return [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]; // Identity
+        }
+
+        // Compose all transforms on the stack
+        let mut result = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        for (matrix, origin) in &self.transform_stack {
+            // Apply origin offset: translate(-origin) * matrix * translate(origin)
+            // First, translate to origin
+            let t1 = [1.0, 0.0, 0.0, 1.0, -origin.0, -origin.1];
+            // Then the transform
+            let m = *matrix;
+            // Then translate back
+            let t2 = [1.0, 0.0, 0.0, 1.0, origin.0, origin.1];
+
+            // Compose: result = result * t1 * m * t2
+            let temp1 = multiply_matrices_2d(result, t1);
+            let temp2 = multiply_matrices_2d(temp1, m);
+            result = multiply_matrices_2d(temp2, t2);
+        }
+        result
+    }
+
+    /// Apply the current transform to a point.
+    fn transform_point(&self, x: f32, y: f32) -> (f32, f32) {
+        let m = self.current_transform();
+        // [a, b, c, d, e, f] where:
+        // x' = a*x + c*y + e
+        // y' = b*x + d*y + f
+        let x_prime = m[0] * x + m[2] * y + m[4];
+        let y_prime = m[1] * x + m[3] * y + m[5];
+        (x_prime, y_prime)
     }
 
     /// Flush all batched vertices to the target.
@@ -1615,6 +1725,24 @@ impl RectExt for Rect {
             None
         }
     }
+}
+
+// ==================== Transform Helpers ====================
+
+/// Multiply two 2D affine matrices.
+/// Matrix format: [a, b, c, d, e, f] representing:
+/// | a c e |
+/// | b d f |
+/// | 0 0 1 |
+fn multiply_matrices_2d(a: [f32; 6], b: [f32; 6]) -> [f32; 6] {
+    [
+        a[0] * b[0] + a[2] * b[1],
+        a[1] * b[0] + a[3] * b[1],
+        a[0] * b[2] + a[2] * b[3],
+        a[1] * b[2] + a[3] * b[3],
+        a[0] * b[4] + a[2] * b[5] + a[4],
+        a[1] * b[4] + a[3] * b[5] + a[5],
+    ]
 }
 
 #[cfg(test)]

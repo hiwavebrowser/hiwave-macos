@@ -78,7 +78,7 @@ impl Default for Color {
 }
 
 /// A CSS length value.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum Length {
     /// Pixels.
     Px(f32),
@@ -101,6 +101,12 @@ pub enum Length {
     /// Zero.
     #[default]
     Zero,
+    /// min(a, b) - returns the smaller of two lengths.
+    Min(Box<(Length, Length)>),
+    /// max(a, b) - returns the larger of two lengths.
+    Max(Box<(Length, Length)>),
+    /// clamp(min, preferred, max) - clamps preferred between min and max.
+    Clamp(Box<(Length, Length, Length)>),
 }
 
 impl Length {
@@ -131,6 +137,22 @@ impl Length {
             Length::Vmax(vmax) => vmax / 100.0 * viewport_width.max(viewport_height),
             Length::Auto => 0.0, // Context-dependent
             Length::Zero => 0.0,
+            Length::Min(pair) => {
+                let a = pair.0.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                let b = pair.1.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                a.min(b)
+            }
+            Length::Max(pair) => {
+                let a = pair.0.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                let b = pair.1.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                a.max(b)
+            }
+            Length::Clamp(triple) => {
+                let min_val = triple.0.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                let pref = triple.1.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                let max_val = triple.2.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                pref.clamp(min_val, max_val)
+            }
         }
     }
 }
@@ -1012,6 +1034,209 @@ pub enum Direction {
     Rtl,
 }
 
+// ==================== Transform Types ====================
+
+/// A single 2D transform operation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TransformOp {
+    /// translate(x, y)
+    Translate(Length, Length),
+    /// translateX(x)
+    TranslateX(Length),
+    /// translateY(y)
+    TranslateY(Length),
+    /// scale(x, y) or scale(s)
+    Scale(f32, f32),
+    /// scaleX(s)
+    ScaleX(f32),
+    /// scaleY(s)
+    ScaleY(f32),
+    /// rotate(angle) - angle in degrees
+    Rotate(f32),
+    /// skewX(angle) - angle in degrees
+    SkewX(f32),
+    /// skewY(angle) - angle in degrees
+    SkewY(f32),
+    /// skew(x, y) - angles in degrees
+    Skew(f32, f32),
+    /// matrix(a, b, c, d, e, f) - 2D affine transform
+    Matrix(f32, f32, f32, f32, f32, f32),
+}
+
+/// A list of transform operations (applied in order).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TransformList {
+    pub ops: Vec<TransformOp>,
+}
+
+impl TransformList {
+    /// Create an empty (identity) transform list.
+    pub fn none() -> Self {
+        Self { ops: Vec::new() }
+    }
+
+    /// Check if this is the identity transform.
+    pub fn is_identity(&self) -> bool {
+        self.ops.is_empty()
+    }
+
+    /// Compute the 3x3 affine transform matrix.
+    /// Returns [a, b, c, d, e, f] where the matrix is:
+    /// | a c e |
+    /// | b d f |
+    /// | 0 0 1 |
+    pub fn to_matrix(&self, container_width: f32, container_height: f32) -> [f32; 6] {
+        let mut result = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]; // Identity
+
+        for op in &self.ops {
+            let m = match op {
+                TransformOp::Translate(x, y) => {
+                    let tx = x.to_px(16.0, 16.0, container_width);
+                    let ty = y.to_px(16.0, 16.0, container_height);
+                    [1.0, 0.0, 0.0, 1.0, tx, ty]
+                }
+                TransformOp::TranslateX(x) => {
+                    let tx = x.to_px(16.0, 16.0, container_width);
+                    [1.0, 0.0, 0.0, 1.0, tx, 0.0]
+                }
+                TransformOp::TranslateY(y) => {
+                    let ty = y.to_px(16.0, 16.0, container_height);
+                    [1.0, 0.0, 0.0, 1.0, 0.0, ty]
+                }
+                TransformOp::Scale(sx, sy) => [*sx, 0.0, 0.0, *sy, 0.0, 0.0],
+                TransformOp::ScaleX(s) => [*s, 0.0, 0.0, 1.0, 0.0, 0.0],
+                TransformOp::ScaleY(s) => [1.0, 0.0, 0.0, *s, 0.0, 0.0],
+                TransformOp::Rotate(deg) => {
+                    let rad = deg.to_radians();
+                    let cos = rad.cos();
+                    let sin = rad.sin();
+                    [cos, sin, -sin, cos, 0.0, 0.0]
+                }
+                TransformOp::SkewX(deg) => {
+                    let tan = deg.to_radians().tan();
+                    [1.0, 0.0, tan, 1.0, 0.0, 0.0]
+                }
+                TransformOp::SkewY(deg) => {
+                    let tan = deg.to_radians().tan();
+                    [1.0, tan, 0.0, 1.0, 0.0, 0.0]
+                }
+                TransformOp::Skew(dx, dy) => {
+                    let tan_x = dx.to_radians().tan();
+                    let tan_y = dy.to_radians().tan();
+                    [1.0, tan_y, tan_x, 1.0, 0.0, 0.0]
+                }
+                TransformOp::Matrix(a, b, c, d, e, f) => [*a, *b, *c, *d, *e, *f],
+            };
+
+            // Multiply: result = result * m
+            result = multiply_matrices(result, m);
+        }
+
+        result
+    }
+}
+
+/// Multiply two 2D affine matrices.
+fn multiply_matrices(a: [f32; 6], b: [f32; 6]) -> [f32; 6] {
+    [
+        a[0] * b[0] + a[2] * b[1],
+        a[1] * b[0] + a[3] * b[1],
+        a[0] * b[2] + a[2] * b[3],
+        a[1] * b[2] + a[3] * b[3],
+        a[0] * b[4] + a[2] * b[5] + a[4],
+        a[1] * b[4] + a[3] * b[5] + a[5],
+    ]
+}
+
+/// Transform origin (default: 50% 50%).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransformOrigin {
+    pub x: Length,
+    pub y: Length,
+}
+
+impl Default for TransformOrigin {
+    fn default() -> Self {
+        Self {
+            x: Length::Percent(50.0),
+            y: Length::Percent(50.0),
+        }
+    }
+}
+
+// ==================== Animation/Transition Types ====================
+
+/// Animation timing function.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum TimingFunction {
+    #[default]
+    Ease,
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    StepStart,
+    StepEnd,
+    Steps(u32, bool), // (count, jump_start)
+    CubicBezier(f32, f32, f32, f32),
+}
+
+/// Animation fill mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnimationFillMode {
+    #[default]
+    None,
+    Forwards,
+    Backwards,
+    Both,
+}
+
+/// Animation play state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnimationPlayState {
+    #[default]
+    Running,
+    Paused,
+}
+
+/// Animation direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnimationDirection {
+    #[default]
+    Normal,
+    Reverse,
+    Alternate,
+    AlternateReverse,
+}
+
+/// Animation iteration count.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum AnimationIterationCount {
+    #[default]
+    One,
+    Infinite,
+    Count(f32),
+}
+
+/// Box sizing model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BoxSizing {
+    #[default]
+    ContentBox,
+    BorderBox,
+}
+
+/// Background clip mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackgroundClip {
+    #[default]
+    BorderBox,
+    PaddingBox,
+    ContentBox,
+    /// Clip to text (for gradient text effects).
+    Text,
+}
+
 /// Computed style for an element.
 #[derive(Debug, Clone, Default)]
 pub struct ComputedStyle {
@@ -1090,6 +1315,29 @@ pub struct ComputedStyle {
     pub left: Option<Length>,
     pub z_index: i32,
 
+    // Transforms
+    pub transform: TransformList,
+    pub transform_origin: TransformOrigin,
+
+    // Transitions (parsed but not executed during parity capture)
+    pub transition_property: String,
+    pub transition_duration: f32, // seconds
+    pub transition_timing_function: TimingFunction,
+    pub transition_delay: f32, // seconds
+
+    // Animations (parsed but not executed during parity capture)
+    pub animation_name: String,
+    pub animation_duration: f32, // seconds
+    pub animation_timing_function: TimingFunction,
+    pub animation_delay: f32, // seconds
+    pub animation_iteration_count: AnimationIterationCount,
+    pub animation_direction: AnimationDirection,
+    pub animation_fill_mode: AnimationFillMode,
+    pub animation_play_state: AnimationPlayState,
+
+    // Box sizing
+    pub box_sizing: BoxSizing,
+
     // Visual
     pub opacity: f32,
     pub overflow_x: Overflow,
@@ -1144,6 +1392,17 @@ pub struct ComputedStyle {
     // Grid Alignment (also used by Flexbox)
     pub justify_items: JustifyItems,
     pub justify_self: JustifySelf,
+
+    // Pseudo-element content
+    /// The `content` property for ::before/::after pseudo-elements.
+    /// None means no content (element not rendered).
+    /// Some("") means empty content (element rendered but empty).
+    /// Some("text") means text content.
+    pub content: Option<String>,
+
+    // Background clip for gradient text
+    pub background_clip: BackgroundClip,
+    pub webkit_text_fill_color: Option<Color>,
 }
 
 impl ComputedStyle {
@@ -1181,16 +1440,16 @@ impl ComputedStyle {
         Self {
             // Inherited properties
             color: parent.color,
-            font_size: parent.font_size,
+            font_size: parent.font_size.clone(),
             font_weight: parent.font_weight,
             font_style: parent.font_style,
             font_stretch: parent.font_stretch,
             font_family: parent.font_family.clone(),
             line_height: parent.line_height,
             text_align: parent.text_align,
-            letter_spacing: parent.letter_spacing,
-            word_spacing: parent.word_spacing,
-            text_indent: parent.text_indent,
+            letter_spacing: parent.letter_spacing.clone(),
+            word_spacing: parent.word_spacing.clone(),
+            text_indent: parent.text_indent.clone(),
             text_transform: parent.text_transform,
             white_space: parent.white_space,
             word_break: parent.word_break,

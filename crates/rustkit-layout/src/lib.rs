@@ -856,17 +856,17 @@ impl LayoutBox {
         let style = &self.style;
 
         self.dimensions.margin.top =
-            self.length_to_px(style.margin_top, containing_block.content.width);
+            self.length_to_px(&style.margin_top, containing_block.content.width);
         self.dimensions.margin.bottom =
-            self.length_to_px(style.margin_bottom, containing_block.content.width);
+            self.length_to_px(&style.margin_bottom, containing_block.content.width);
         self.dimensions.border.top =
-            self.length_to_px(style.border_top_width, containing_block.content.width);
+            self.length_to_px(&style.border_top_width, containing_block.content.width);
         self.dimensions.border.bottom =
-            self.length_to_px(style.border_bottom_width, containing_block.content.width);
+            self.length_to_px(&style.border_bottom_width, containing_block.content.width);
         self.dimensions.padding.top =
-            self.length_to_px(style.padding_top, containing_block.content.width);
+            self.length_to_px(&style.padding_top, containing_block.content.width);
         self.dimensions.padding.bottom =
-            self.length_to_px(style.padding_bottom, containing_block.content.width);
+            self.length_to_px(&style.padding_bottom, containing_block.content.width);
     }
 
     /// Layout a floated box.
@@ -1023,14 +1023,14 @@ impl LayoutBox {
         let style = &self.style;
 
         // Get values from style
-        let margin_left = self.length_to_px(style.margin_left, containing_block.content.width);
-        let margin_right = self.length_to_px(style.margin_right, containing_block.content.width);
+        let margin_left = self.length_to_px(&style.margin_left, containing_block.content.width);
+        let margin_right = self.length_to_px(&style.margin_right, containing_block.content.width);
         let border_left =
-            self.length_to_px(style.border_left_width, containing_block.content.width);
+            self.length_to_px(&style.border_left_width, containing_block.content.width);
         let border_right =
-            self.length_to_px(style.border_right_width, containing_block.content.width);
-        let padding_left = self.length_to_px(style.padding_left, containing_block.content.width);
-        let padding_right = self.length_to_px(style.padding_right, containing_block.content.width);
+            self.length_to_px(&style.border_right_width, containing_block.content.width);
+        let padding_left = self.length_to_px(&style.padding_left, containing_block.content.width);
+        let padding_right = self.length_to_px(&style.padding_right, containing_block.content.width);
 
         let total_margin_border_padding =
             margin_left + margin_right + border_left + border_right + padding_left + padding_right;
@@ -1041,17 +1041,17 @@ impl LayoutBox {
                 // Fill available space
                 (containing_block.content.width - total_margin_border_padding).max(0.0)
             }
-            _ => self.length_to_px(style.width, containing_block.content.width),
+            _ => self.length_to_px(&style.width, containing_block.content.width),
         };
 
         // Apply min-width constraint
-        let min_width = self.length_to_px(style.min_width, containing_block.content.width);
+        let min_width = self.length_to_px(&style.min_width, containing_block.content.width);
         let content_width = content_width.max(min_width);
         
         // Apply max-width constraint
         let max_width = match style.max_width {
             Length::Auto | Length::Zero => f32::INFINITY,
-            _ => self.length_to_px(style.max_width, containing_block.content.width),
+            _ => self.length_to_px(&style.max_width, containing_block.content.width),
         };
         let content_width = content_width.min(max_width);
         
@@ -1069,17 +1069,17 @@ impl LayoutBox {
         let style = &self.style;
 
         self.dimensions.margin.top =
-            self.length_to_px(style.margin_top, containing_block.content.width);
+            self.length_to_px(&style.margin_top, containing_block.content.width);
         self.dimensions.margin.bottom =
-            self.length_to_px(style.margin_bottom, containing_block.content.width);
+            self.length_to_px(&style.margin_bottom, containing_block.content.width);
         self.dimensions.border.top =
-            self.length_to_px(style.border_top_width, containing_block.content.width);
+            self.length_to_px(&style.border_top_width, containing_block.content.width);
         self.dimensions.border.bottom =
-            self.length_to_px(style.border_bottom_width, containing_block.content.width);
+            self.length_to_px(&style.border_bottom_width, containing_block.content.width);
         self.dimensions.padding.top =
-            self.length_to_px(style.padding_top, containing_block.content.width);
+            self.length_to_px(&style.padding_top, containing_block.content.width);
         self.dimensions.padding.bottom =
-            self.length_to_px(style.padding_bottom, containing_block.content.width);
+            self.length_to_px(&style.padding_bottom, containing_block.content.width);
 
         // Position below the containing block's content
         self.dimensions.content.x = containing_block.content.x
@@ -1209,9 +1209,9 @@ impl LayoutBox {
     }
 
     /// Convert a Length to pixels.
-    fn length_to_px(&self, length: Length, container_size: f32) -> f32 {
-        let font_size = match self.style.font_size {
-            Length::Px(px) => px,
+    fn length_to_px(&self, length: &Length, container_size: f32) -> f32 {
+        let font_size = match &self.style.font_size {
+            Length::Px(px) => *px,
             _ => 16.0,
         };
         length.to_px_with_viewport(font_size, 16.0, container_size, self.viewport.0, self.viewport.1)
@@ -1593,6 +1593,31 @@ pub enum DisplayCommand {
     PushStackingContext { z_index: i32, rect: Rect },
     /// End stacking context.
     PopStackingContext,
+    /// Push a 2D transform matrix.
+    /// The matrix is [a, b, c, d, e, f] representing:
+    /// | a c e |
+    /// | b d f |
+    /// | 0 0 1 |
+    /// Origin is the point around which the transform is applied.
+    PushTransform {
+        matrix: [f32; 6],
+        origin: (f32, f32),
+    },
+    /// Pop a transform matrix.
+    PopTransform,
+
+    /// Draw text with a gradient fill (for background-clip: text effect).
+    GradientText {
+        text: String,
+        x: f32,
+        y: f32,
+        font_size: f32,
+        font_family: String,
+        font_weight: u16,
+        font_style: u8,
+        gradient: rustkit_css::Gradient,
+        rect: Rect,
+    },
 
     // SVG-specific commands
     /// Fill a rectangle with solid color.
@@ -1923,6 +1948,21 @@ impl DisplayList {
             });
         }
 
+        // Check if this box has a transform
+        let has_transform = !layout_box.style.transform.is_identity();
+        if has_transform {
+            let border_box = layout_box.dimensions.border_box();
+            // Compute transform matrix
+            let matrix = layout_box.style.transform.to_matrix(border_box.width, border_box.height);
+            // Compute origin in absolute coordinates
+            let origin_x = border_box.x + layout_box.style.transform_origin.x.to_px(16.0, 16.0, border_box.width);
+            let origin_y = border_box.y + layout_box.style.transform_origin.y.to_px(16.0, 16.0, border_box.height);
+            self.commands.push(DisplayCommand::PushTransform {
+                matrix,
+                origin: (origin_x, origin_y),
+            });
+        }
+
         // Render this box
         self.render_box_content(layout_box);
 
@@ -1981,6 +2021,11 @@ impl DisplayList {
         // 3. Floats and positive/zero z-index positioned descendants
         for (child, _) in positive_z {
             self.render_stacking_context(child, z_index, layer);
+        }
+
+        // Pop transform if we pushed one
+        if has_transform {
+            self.commands.push(DisplayCommand::PopTransform);
         }
 
         if creates_context {
@@ -2177,8 +2222,8 @@ impl DisplayList {
     fn render_text(&mut self, layout_box: &LayoutBox) {
         if let BoxType::Text(ref text) = layout_box.box_type {
             let style = &layout_box.style;
-            let font_size = match style.font_size {
-                Length::Px(px) => px,
+            let font_size = match &style.font_size {
+                Length::Px(px) => *px,
                 _ => 16.0,
             };
 
@@ -2186,7 +2231,34 @@ impl DisplayList {
             let y = layout_box.dimensions.content.y;
             let text_width = layout_box.dimensions.content.width;
 
-            // Draw text
+            // Check if this is gradient text (background-clip: text with gradient and transparent fill)
+            let is_gradient_text = style.background_clip == rustkit_css::BackgroundClip::Text
+                && style.webkit_text_fill_color == Some(rustkit_css::Color::TRANSPARENT)
+                && style.background_gradient.is_some();
+
+            if is_gradient_text {
+                // Emit gradient text command
+                if let Some(gradient) = &style.background_gradient {
+                    self.commands.push(DisplayCommand::GradientText {
+                        text: text.clone(),
+                        x,
+                        y,
+                        font_size,
+                        font_family: style.font_family.clone(),
+                        font_weight: style.font_weight.0,
+                        font_style: match style.font_style {
+                            rustkit_css::FontStyle::Normal => 0,
+                            rustkit_css::FontStyle::Italic => 1,
+                            rustkit_css::FontStyle::Oblique => 2,
+                        },
+                        gradient: gradient.clone(),
+                        rect: Rect::new(x, y, text_width, layout_box.dimensions.content.height),
+                    });
+                    return; // Skip regular text rendering
+                }
+            }
+
+            // Draw regular text
             self.commands.push(DisplayCommand::Text {
                 text: text.clone(),
                 x,
