@@ -5194,4 +5194,109 @@ mod tests {
         let config = EngineConfig::for_parity_testing();
         assert!(config.disable_animations);
     }
+
+    #[test]
+    fn test_parse_linear_gradient() {
+        // Test simple linear gradient
+        let gradient = parse_gradient("linear-gradient(to right, #ff0000 0%, #0000ff 100%)");
+        assert!(gradient.is_some(), "Should parse simple linear gradient");
+        
+        if let Some(rustkit_css::Gradient::Linear(linear)) = gradient {
+            assert_eq!(linear.direction, rustkit_css::GradientDirection::ToRight);
+            assert_eq!(linear.stops.len(), 2);
+            assert_eq!(linear.stops[0].color, rustkit_css::Color::from_rgb(255, 0, 0));
+            assert_eq!(linear.stops[0].position, Some(0.0));
+            assert_eq!(linear.stops[1].color, rustkit_css::Color::from_rgb(0, 0, 255));
+            assert_eq!(linear.stops[1].position, Some(1.0));
+        } else {
+            panic!("Expected Linear gradient");
+        }
+        
+        // Test with angle
+        let gradient = parse_gradient("linear-gradient(45deg, red 0%, blue 100%)");
+        assert!(gradient.is_some(), "Should parse gradient with angle");
+        
+        if let Some(rustkit_css::Gradient::Linear(linear)) = gradient {
+            assert!(matches!(linear.direction, rustkit_css::GradientDirection::Angle(a) if (a - 45.0).abs() < 0.01));
+        } else {
+            panic!("Expected Linear gradient with angle");
+        }
+        
+        // Test default direction (to bottom)
+        let gradient = parse_gradient("linear-gradient(#667eea, #764ba2)");
+        assert!(gradient.is_some(), "Should parse gradient without direction");
+        
+        if let Some(rustkit_css::Gradient::Linear(linear)) = gradient {
+            assert_eq!(linear.direction, rustkit_css::GradientDirection::ToBottom);
+        } else {
+            panic!("Expected Linear gradient with default direction");
+        }
+    }
+
+    #[test]
+    fn test_parse_radial_gradient() {
+        // Test simple radial gradient
+        let gradient = parse_gradient("radial-gradient(circle at center, #667eea 0%, #764ba2 100%)");
+        assert!(gradient.is_some(), "Should parse radial gradient");
+        
+        if let Some(rustkit_css::Gradient::Radial(radial)) = gradient {
+            assert_eq!(radial.shape, rustkit_css::RadialShape::Circle);
+            assert_eq!(radial.stops.len(), 2);
+        } else {
+            panic!("Expected Radial gradient");
+        }
+        
+        // Test ellipse
+        let gradient = parse_gradient("radial-gradient(ellipse at top left, #f093fb 0%, #f5576c 100%)");
+        assert!(gradient.is_some(), "Should parse ellipse radial gradient");
+        
+        if let Some(rustkit_css::Gradient::Radial(radial)) = gradient {
+            assert_eq!(radial.shape, rustkit_css::RadialShape::Ellipse);
+            assert!((radial.center.0 - 0.0).abs() < 0.01, "center.0 should be 0.0 for left");
+            assert!((radial.center.1 - 0.0).abs() < 0.01, "center.1 should be 0.0 for top");
+        } else {
+            panic!("Expected Radial gradient with ellipse");
+        }
+    }
+
+    #[test]
+    fn test_parse_color_stop() {
+        // Test color with percentage position
+        let stop = parse_color_stop("#ff0000 50%");
+        assert!(stop.is_some());
+        let stop = stop.unwrap();
+        assert_eq!(stop.color, rustkit_css::Color::from_rgb(255, 0, 0));
+        assert_eq!(stop.position, Some(0.5));
+        
+        // Test color without position
+        let stop = parse_color_stop("blue");
+        assert!(stop.is_some());
+        let stop = stop.unwrap();
+        assert_eq!(stop.color, rustkit_css::Color::from_rgb(0, 0, 255));
+        assert_eq!(stop.position, None);
+        
+        // Test rgba color with position
+        let stop = parse_color_stop("rgba(255, 255, 255, 0.5) 25%");
+        assert!(stop.is_some());
+        let stop = stop.unwrap();
+        assert_eq!(stop.color.r, 255);
+        assert_eq!(stop.color.g, 255);
+        assert_eq!(stop.color.b, 255);
+        assert!((stop.color.a - 0.5).abs() < 0.01);
+        assert_eq!(stop.position, Some(0.25));
+    }
+
+    #[test]
+    fn test_split_by_comma() {
+        // Simple case
+        let parts = split_by_comma("a, b, c");
+        assert_eq!(parts, vec!["a", " b", " c"]);
+        
+        // With nested parentheses
+        let parts = split_by_comma("rgb(255, 0, 0), blue, rgba(0, 255, 0, 0.5)");
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], "rgb(255, 0, 0)");
+        assert_eq!(parts[1].trim(), "blue");
+        assert_eq!(parts[2].trim(), "rgba(0, 255, 0, 0.5)");
+    }
 }

@@ -137,6 +137,104 @@ impl<'a> GridItem<'a> {
         }
     }
 
+    /// Get the item's contribution to row sizing.
+    /// This considers explicit heights, min-heights, and intrinsic content.
+    pub fn get_height_contribution(&self, container_height: f32) -> f32 {
+        let style = &self.layout_box.style;
+        
+        // Check for explicit height
+        match &style.height {
+            Length::Px(h) => return *h,
+            Length::Percent(p) if container_height > 0.0 => {
+                return container_height * p / 100.0;
+            }
+            _ => {}
+        }
+        
+        // Check for min-height
+        let min_height = match &style.min_height {
+            Length::Px(h) => *h,
+            Length::Percent(p) if container_height > 0.0 => container_height * p / 100.0,
+            _ => 0.0,
+        };
+        
+        // For auto height, estimate based on content
+        // This is a simplified calculation - a full implementation would
+        // do a layout pass to determine content height
+        let content_height = self.estimate_content_height();
+        
+        min_height.max(content_height)
+    }
+
+    /// Estimate content height (simplified).
+    fn estimate_content_height(&self) -> f32 {
+        // Get font size for text content
+        let font_size = match self.layout_box.style.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        
+        // Get line height
+        let line_height = if self.layout_box.style.line_height > 0.0 {
+            self.layout_box.style.line_height
+        } else {
+            1.2
+        };
+        
+        // Count text children (simplified)
+        let text_lines = self.count_text_lines();
+        
+        // Padding contribution
+        let padding_top = self.layout_box.style.padding_top.to_px(font_size, font_size, 0.0);
+        let padding_bottom = self.layout_box.style.padding_bottom.to_px(font_size, font_size, 0.0);
+        
+        let content = if text_lines > 0 {
+            font_size * line_height * text_lines as f32
+        } else {
+            0.0
+        };
+        
+        content + padding_top + padding_bottom
+    }
+
+    /// Count approximate text lines in this item.
+    fn count_text_lines(&self) -> usize {
+        fn count_text(layout_box: &LayoutBox) -> usize {
+            let mut count = 0;
+            if let crate::BoxType::Text(_) = &layout_box.box_type {
+                count += 1;
+            }
+            for child in &layout_box.children {
+                count += count_text(child);
+            }
+            count
+        }
+        count_text(self.layout_box)
+    }
+
+    /// Get the item's contribution to column sizing.
+    pub fn get_width_contribution(&self, container_width: f32) -> f32 {
+        let style = &self.layout_box.style;
+        
+        // Check for explicit width
+        match &style.width {
+            Length::Px(w) => return *w,
+            Length::Percent(p) if container_width > 0.0 => {
+                return container_width * p / 100.0;
+            }
+            _ => {}
+        }
+        
+        // Check for min-width
+        let min_width = match &style.min_width {
+            Length::Px(w) => *w,
+            Length::Percent(p) if container_width > 0.0 => container_width * p / 100.0,
+            _ => 0.0,
+        };
+        
+        min_width
+    }
+
     /// Set explicit placement from style.
     pub fn set_placement(&mut self, placement: &GridPlacement) {
         // Resolve column placement
@@ -522,7 +620,50 @@ pub fn layout_grid_container(
         );
     }
 
-    // Phase 3: Size tracks
+    // Phase 3: Size tracks with item contributions
+    // First, collect item contributions for each row
+    let mut row_contributions: Vec<f32> = vec![0.0; grid.row_count()];
+    let mut col_contributions: Vec<f32> = vec![0.0; grid.column_count()];
+    
+    for item in &items {
+        let row_start_idx = (item.row_start - 1).max(0) as usize;
+        let row_span = item.row_span.max(1) as usize;
+        let col_start_idx = (item.column_start - 1).max(0) as usize;
+        let col_span = item.column_span.max(1) as usize;
+        
+        // Get item height contribution
+        let height_contrib = item.get_height_contribution(container_height);
+        let width_contrib = item.get_width_contribution(container_width);
+        
+        // Distribute height across spanned rows
+        if row_span > 0 && height_contrib > 0.0 {
+            let per_row = height_contrib / row_span as f32;
+            for r in row_start_idx..(row_start_idx + row_span).min(row_contributions.len()) {
+                row_contributions[r] = row_contributions[r].max(per_row);
+            }
+        }
+        
+        // Distribute width across spanned columns
+        if col_span > 0 && width_contrib > 0.0 {
+            let per_col = width_contrib / col_span as f32;
+            for c in col_start_idx..(col_start_idx + col_span).min(col_contributions.len()) {
+                col_contributions[c] = col_contributions[c].max(per_col);
+            }
+        }
+    }
+    
+    // Apply contributions to tracks
+    for (i, track) in grid.rows.iter_mut().enumerate() {
+        if i < row_contributions.len() && row_contributions[i] > track.base_size {
+            track.base_size = row_contributions[i];
+        }
+    }
+    for (i, track) in grid.columns.iter_mut().enumerate() {
+        if i < col_contributions.len() && col_contributions[i] > track.base_size {
+            track.base_size = col_contributions[i];
+        }
+    }
+    
     size_grid_tracks(&mut grid.columns, container_width, column_gap);
     size_grid_tracks(&mut grid.rows, container_height, row_gap);
 
