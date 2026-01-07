@@ -86,9 +86,10 @@ enum UserEvent {
 }
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
+    // Use minimum dimensions of 1.0 to avoid scale factor assertion failures
     Rect {
         position: LogicalPosition::new(x, y).into(),
-        size: LogicalSize::new(w.max(0.0), h.max(0.0)).into(),
+        size: LogicalSize::new(w.max(1.0), h.max(1.0)).into(),
     }
 }
 
@@ -285,8 +286,12 @@ fn main() {
     let window = WindowBuilder::new()
         .with_title("HiWave Smoke Harness (RustKit)")
         .with_inner_size(tao::dpi::LogicalSize::new(1100.0, 760.0))
+        .with_visible(true)
         .build(&event_loop)
         .expect("Failed to create window");
+    
+    // Ensure window is visible before creating child webviews
+    window.set_visible(true);
 
     // Chrome bar (using WRY for simple UI)
     let chrome = WebViewBuilder::new()

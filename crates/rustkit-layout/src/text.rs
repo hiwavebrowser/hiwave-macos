@@ -1,12 +1,12 @@
 //! # Text Rendering Module
 //!
-//! Comprehensive text rendering support using DirectWrite on Windows.
+//! Comprehensive text rendering support using DirectWrite on Windows and Core Text on macOS.
 //! Provides font fallback, text shaping, text decoration, and line height calculation.
 //!
 //! ## Features
 //!
 //! - **Font Fallback Chain**: Automatic fallback for missing glyphs
-//! - **Complex Script Support**: Full Unicode shaping via DirectWrite
+//! - **Complex Script Support**: Full Unicode shaping via DirectWrite/Core Text
 //! - **Text Decoration**: Underline, strikethrough, overline
 //! - **Line Height**: Proper line-height calculation with various units
 //! - **Font Variants**: Bold, italic, weights, stretches
@@ -24,6 +24,13 @@ use thiserror::Error;
 use std::sync::Arc;
 #[cfg(windows)]
 use rustkit_text::{FontCollection as RkFontCollection, FontStretch as RkFontStretch, FontStyle as RkFontStyle, FontWeight as RkFontWeight};
+
+#[cfg(target_os = "macos")]
+use core_foundation::base::TCFType;
+#[cfg(target_os = "macos")]
+use core_graphics::geometry::CGSize;
+#[cfg(target_os = "macos")]
+use core_text::font as ct_font;
 
 /// Errors that can occur in text operations.
 #[derive(Error, Debug)]
@@ -71,6 +78,20 @@ impl FontFamilyChain {
     }
 
     /// Create default font chain for sans-serif.
+    #[cfg(target_os = "macos")]
+    pub fn sans_serif() -> Self {
+        Self::new("SF Pro")
+            .with_fallback(".AppleSystemUIFont")
+            .with_fallback("Helvetica Neue")
+            .with_fallback("Helvetica")
+            .with_fallback("Arial")
+            .with_fallback("PingFang SC")
+            .with_fallback("Hiragino Sans")
+            .with_fallback("sans-serif")
+    }
+    
+    /// Create default font chain for sans-serif.
+    #[cfg(not(target_os = "macos"))]
     pub fn sans_serif() -> Self {
         Self::new("Segoe UI")
             .with_fallback("Arial")
@@ -82,6 +103,17 @@ impl FontFamilyChain {
     }
 
     /// Create default font chain for serif.
+    #[cfg(target_os = "macos")]
+    pub fn serif() -> Self {
+        Self::new("New York")
+            .with_fallback("Times New Roman")
+            .with_fallback("Georgia")
+            .with_fallback("Songti SC")
+            .with_fallback("serif")
+    }
+    
+    /// Create default font chain for serif.
+    #[cfg(not(target_os = "macos"))]
     pub fn serif() -> Self {
         Self::new("Times New Roman")
             .with_fallback("Georgia")
@@ -92,6 +124,17 @@ impl FontFamilyChain {
     }
 
     /// Create default font chain for monospace.
+    #[cfg(target_os = "macos")]
+    pub fn monospace() -> Self {
+        Self::new("SF Mono")
+            .with_fallback("Menlo")
+            .with_fallback("Monaco")
+            .with_fallback("Courier New")
+            .with_fallback("monospace")
+    }
+    
+    /// Create default font chain for monospace.
+    #[cfg(not(target_os = "macos"))]
     pub fn monospace() -> Self {
         Self::new("Cascadia Code")
             .with_fallback("Consolas")
@@ -739,7 +782,8 @@ impl TextShaper {
         })
     }
 
-    #[cfg(not(windows))]
+    /// Shape text using Core Text on macOS.
+    #[cfg(target_os = "macos")]
     pub fn shape(
         &self,
         text: &str,
@@ -749,7 +793,201 @@ impl TextShaper {
         stretch: FontStretch,
         size: f32,
     ) -> Result<ShapedRun, TextError> {
-        // Simplified shaping for non-Windows platforms
+        if text.is_empty() {
+            return Ok(ShapedRun {
+                text: String::new(),
+                glyphs: Vec::new(),
+                font_family: font_chain.primary.clone(),
+                font_weight: weight,
+                font_style: style,
+                font_stretch: stretch,
+                font_size: size,
+                metrics: TextMetrics::with_font_size(size),
+            });
+        }
+
+        // Try to find a font from the chain
+        let mut ct_font_opt: Option<core_text::font::CTFont> = None;
+        let mut used_family = font_chain.primary.clone();
+        
+        for family in font_chain.all_families() {
+            // Try to create font with traits
+            if let Ok(font) = Self::create_ct_font_with_traits(family, size, weight.0, style == FontStyle::Italic) {
+                ct_font_opt = Some(font);
+                used_family = family.to_string();
+                break;
+            }
+        }
+        
+        // Fallback to system font if nothing found
+        let ct_font = ct_font_opt.unwrap_or_else(|| {
+            ct_font::new_from_name("Helvetica", size as f64)
+                .unwrap_or_else(|_| ct_font::new_from_name(".AppleSystemUIFont", size as f64).unwrap())
+        });
+        
+        // Convert text to UTF-16 for Core Text
+        let utf16_chars: Vec<u16> = text.encode_utf16().collect();
+        let char_count = utf16_chars.len();
+        
+        // Get glyph IDs
+        let mut glyph_ids: Vec<u16> = vec![0; char_count];
+        
+        unsafe {
+            extern "C" {
+                fn CTFontGetGlyphsForCharacters(
+                    font: core_text::font::CTFontRef,
+                    characters: *const u16,
+                    glyphs: *mut u16,
+                    count: isize,
+                ) -> bool;
+                
+                fn CTFontGetAdvancesForGlyphs(
+                    font: core_text::font::CTFontRef,
+                    orientation: u32,
+                    glyphs: *const u16,
+                    advances: *mut CGSize,
+                    count: isize,
+                ) -> f64;
+            }
+            
+            let _success = CTFontGetGlyphsForCharacters(
+                ct_font.as_concrete_TypeRef(),
+                utf16_chars.as_ptr(),
+                glyph_ids.as_mut_ptr(),
+                char_count as isize,
+            );
+            
+            // Get advances for each glyph
+            let mut glyph_advances: Vec<CGSize> = vec![CGSize::new(0.0, 0.0); char_count];
+            let _total_advance = CTFontGetAdvancesForGlyphs(
+                ct_font.as_concrete_TypeRef(),
+                0, // kCTFontOrientationHorizontal
+                glyph_ids.as_ptr(),
+                glyph_advances.as_mut_ptr(),
+                char_count as isize,
+            );
+            
+            // Build positioned glyphs
+            let text_chars: Vec<char> = text.chars().collect();
+            let mut glyphs = Vec::with_capacity(text_chars.len());
+            let mut x_offset: f32 = 0.0;
+            
+            // Handle surrogate pairs - UTF-16 index to char index mapping
+            let mut char_idx = 0;
+            let mut utf16_idx = 0;
+            
+            while utf16_idx < char_count && char_idx < text_chars.len() {
+                let c = text_chars[char_idx];
+                let advance = glyph_advances[utf16_idx].width as f32;
+                
+                // Handle missing glyphs (glyph ID 0)
+                let final_advance = if glyph_ids[utf16_idx] == 0 && advance == 0.0 {
+                    size * 0.5 // Fallback advance
+                } else {
+                    advance
+                };
+                
+                glyphs.push(PositionedGlyph {
+                    glyph_id: glyph_ids[utf16_idx],
+                    x: x_offset,
+                    y: 0.0,
+                    advance: final_advance,
+                    character: c,
+                    cluster: char_idx as u32,
+                });
+                
+                x_offset += final_advance;
+                
+                // Advance UTF-16 index (handle surrogate pairs)
+                utf16_idx += c.len_utf16();
+                char_idx += 1;
+            }
+            
+            // Get font metrics from Core Text
+            let ascent = ct_font.ascent() as f32;
+            let descent = ct_font.descent() as f32;
+            let leading = ct_font.leading() as f32;
+            let underline_position = ct_font.underline_position() as f32;
+            let underline_thickness = ct_font.underline_thickness() as f32;
+            
+            // Calculate strikethrough position (approximately middle of x-height)
+            let x_height = ct_font.x_height() as f32;
+            let strikethrough_offset = x_height * 0.5;
+            
+            let metrics = TextMetrics {
+                width: x_offset,
+                height: ascent + descent + leading,
+                ascent,
+                descent,
+                leading,
+                underline_offset: underline_position,
+                underline_thickness,
+                strikethrough_offset,
+                strikethrough_thickness: underline_thickness,
+                overline_offset: -ascent,
+            };
+            
+            Ok(ShapedRun {
+                text: text.to_string(),
+                glyphs,
+                font_family: used_family,
+                font_weight: weight,
+                font_style: style,
+                font_stretch: stretch,
+                font_size: size,
+                metrics,
+            })
+        }
+    }
+    
+    /// Create a Core Text font with specific traits.
+    #[cfg(target_os = "macos")]
+    fn create_ct_font_with_traits(
+        family: &str,
+        size: f32,
+        weight: u16,
+        italic: bool,
+    ) -> Result<core_text::font::CTFont, TextError> {
+        // Try to find a font variant with the specified traits
+        // First try appending -Bold, -Italic, etc. to the family name
+        let mut variants_to_try = vec![family.to_string()];
+        
+        if weight >= 700 {
+            variants_to_try.push(format!("{}-Bold", family));
+            variants_to_try.push(format!("{}Bold", family));
+            if italic {
+                variants_to_try.push(format!("{}-BoldItalic", family));
+                variants_to_try.push(format!("{}-BoldOblique", family));
+            }
+        }
+        
+        if italic {
+            variants_to_try.push(format!("{}-Italic", family));
+            variants_to_try.push(format!("{}-Oblique", family));
+            variants_to_try.push(format!("{}Italic", family));
+        }
+        
+        for variant in &variants_to_try {
+            if let Ok(font) = ct_font::new_from_name(variant, size as f64) {
+                return Ok(font);
+            }
+        }
+        
+        Err(TextError::FontNotFound(family.to_string()))
+    }
+    
+    /// Simplified shaping fallback for non-Windows, non-macOS platforms.
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    pub fn shape(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+    ) -> Result<ShapedRun, TextError> {
+        // Simplified shaping for other platforms
         let avg_char_width = size * 0.5;
         let mut glyphs = Vec::with_capacity(text.len());
         let mut x_offset: f32 = 0.0;
@@ -951,9 +1189,15 @@ mod tests {
     #[test]
     fn test_generic_font_families() {
         let sans = FontFamilyChain::from_css_value("sans-serif");
+        #[cfg(target_os = "macos")]
+        assert_eq!(sans.primary, "SF Pro");
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(sans.primary, "Segoe UI");
 
         let mono = FontFamilyChain::from_css_value("monospace");
+        #[cfg(target_os = "macos")]
+        assert_eq!(mono.primary, "SF Mono");
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(mono.primary, "Cascadia Code");
     }
 

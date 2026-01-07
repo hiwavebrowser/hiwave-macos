@@ -5246,6 +5246,10 @@ dependencies = [
 name = "rustkit-layout"
 version = "0.1.0"
 dependencies = [
+ "core-foundation 0.9.4",
+ "core-graphics 0.23.2",
+ "core-text",
+ "foreign-types-shared 0.3.1",
  "rustkit-css",
  "rustkit-dom",
  "rustkit-text",

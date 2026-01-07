@@ -1,0 +1,15 @@
+{
+  "id": "parity-sizing_layout-20260106",
+  "title": "Fix Sizing Layout Issues",
+  "description": "Address 1884 sizing_layout issues identified in parity baseline.",
+  "priority": "high",
+  "cluster": "sizing_layout",
+  "issue_count": 1884,
+  "affected_cases": [],
+  "acceptance_criteria": [
+    "Reduce sizing_layout issue count by at least 50%",
+    "No regression in other clusters",
+    "Tier A pass rate improves"
+  ],
+  "created": "2026-01-06T21:36:48.283165"
+}
