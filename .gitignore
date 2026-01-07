@@ -42,3 +42,10 @@ nul
 tools/*
 # Keep work_orders, roadmap_index.json, and README.md tracked
 # (they are NOT ignored because only the above subdirs are)
+
+# Parity testing artifacts (large captures)
+parity-history/
+parity-baseline/captures/
+parity-baseline/failure_packets/
+progress_report.json
+scripts/__pycache__/

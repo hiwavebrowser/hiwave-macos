@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-01-06T21:54:11.750753",
+  "timestamp": "2026-01-06T22:49:22.850560",
   "config": {
     "builtins_weight": 0.6,
     "websuite_weight": 0.4,
@@ -11,29 +11,29 @@
     "tier_a_builtin_pass": 0.0,
     "tier_a_websuite_pass": 0.0,
     "tier_b_median_diff": 73.22222222222223,
-    "tier_b_weighted_mean": 77.65310847750504,
+    "tier_b_weighted_mean": 73.9998053657855,
     "worst_3_cases": [
       {
         "case_id": "shelf",
         "type": "builtin",
-        "diff_pct": 89.48717948717949
-      },
-      {
-        "case_id": "new_tab",
-        "type": "builtin",
-        "diff_pct": 88.96713615023475
+        "diff_pct": 86.41025641025641
       },
       {
         "case_id": "gradient-backgrounds",
         "type": "websuite",
         "diff_pct": 85.55555555555556
+      },
+      {
+        "case_id": "new_tab",
+        "type": "builtin",
+        "diff_pct": 82.48826291079811
       }
     ],
-    "builtin_mean_diff": 81.51977177080047,
-    "websuite_mean_diff": 71.85311353756188
+    "builtin_mean_diff": 75.90783114172837,
+    "websuite_mean_diff": 71.13776670187121
   },
   "issue_clusters": {
-    "sizing_layout": 1884,
+    "sizing_layout": 1736,
     "paint": 0,
     "text": 0,
     "images": 0
@@ -48,7 +48,7 @@
       "frame_path": "parity-baseline/captures/new_tab.ppm",
       "layout_path": "parity-baseline/captures/new_tab.layout.json",
       "perf": {
-        "elapsed_ms": 4148,
+        "elapsed_ms": 4170,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -57,50 +57,50 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 10.56,
+            "avg_ms": 14.91,
             "count": 1,
-            "max_ms": 10.56,
-            "min_ms": 10.56,
-            "total_ms": 10.56
+            "max_ms": 14.91,
+            "min_ms": 14.91,
+            "total_ms": 14.91
           },
           "frame_capture": {
-            "avg_ms": 110.47,
+            "avg_ms": 118.8,
             "count": 1,
-            "max_ms": 110.47,
-            "min_ms": 110.47,
-            "total_ms": 110.47
+            "max_ms": 118.8,
+            "min_ms": 118.8,
+            "total_ms": 118.8
           },
           "html_load": {
-            "avg_ms": 37.4,
+            "avg_ms": 49.65,
             "count": 1,
-            "max_ms": 37.4,
-            "min_ms": 37.4,
-            "total_ms": 37.4
+            "max_ms": 49.65,
+            "min_ms": 49.65,
+            "total_ms": 49.65
           },
           "render": {
-            "avg_ms": 7.65,
-            "count": 449,
-            "max_ms": 10.31,
-            "min_ms": 0.77,
-            "total_ms": 3436.51
+            "avg_ms": 15.73,
+            "count": 211,
+            "max_ms": 18.55,
+            "min_ms": 1.21,
+            "total_ms": 3318.28
           },
           "view_create": {
-            "avg_ms": 3.34,
+            "avg_ms": 3.54,
             "count": 1,
-            "max_ms": 3.34,
-            "min_ms": 3.34,
-            "total_ms": 3.34
+            "max_ms": 3.54,
+            "min_ms": 3.54,
+            "total_ms": 3.54
           }
         },
-        "render_count": 448,
+        "render_count": 210,
         "status": "pass"
       },
       "error": null,
       "layout_stats": {
         "total_boxes": 213,
         "positioned": 211,
-        "sized": 5,
-        "zero_size": 208,
+        "sized": 28,
+        "zero_size": 185,
         "at_origin": 2,
         "form_controls": 1,
         "text_boxes": 65,
@@ -129,17 +129,7 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 3
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
             "depth": 4
           },
           {
@@ -154,27 +144,12 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 3
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 3
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 3
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
-            "node_type": "form_control",
             "depth": 4
           },
           {
@@ -189,27 +164,12 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 3
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 4
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
             "depth": 4
           },
           {
@@ -229,11 +189,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
             "node_type": "block",
             "depth": 6
           },
@@ -271,61 +226,6 @@
             "type": "zero_size",
             "node_type": "block",
             "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
           },
           {
             "type": "zero_size",
@@ -379,11 +279,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
             "node_type": "block",
             "depth": 6
           },
@@ -421,61 +316,6 @@
             "type": "zero_size",
             "node_type": "block",
             "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
           },
           {
             "type": "zero_size",
@@ -529,6 +369,46 @@
           },
           {
             "type": "zero_size",
+            "node_type": "block",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "block",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "block",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 5
+          },
+          {
+            "type": "zero_size",
+            "node_type": "block",
+            "depth": 5
+          },
+          {
+            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -579,52 +459,7 @@
           },
           {
             "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
             "node_type": "block",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
             "depth": 6
           },
           {
@@ -661,11 +496,6 @@
             "type": "zero_size",
             "node_type": "block",
             "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
           },
           {
             "type": "zero_size",
@@ -714,6 +544,41 @@
           },
           {
             "type": "zero_size",
+            "node_type": "block",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "block",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 5
+          },
+          {
+            "type": "zero_size",
+            "node_type": "block",
+            "depth": 5
+          },
+          {
+            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -756,6 +621,41 @@
             "type": "zero_size",
             "node_type": "inline",
             "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "block",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "block",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 5
+          },
+          {
+            "type": "zero_size",
+            "node_type": "block",
+            "depth": 5
           },
           {
             "type": "zero_size",
@@ -828,12 +728,12 @@
             "depth": 2
           }
         ],
-        "sizing_rate": 0.023474178403755867,
+        "sizing_rate": 0.13145539906103287,
         "positioning_rate": 0.9906103286384976
       },
-      "estimated_diff_pct": 88.96713615023475,
+      "estimated_diff_pct": 82.48826291079811,
       "issue_clusters": {
-        "sizing_layout": 144,
+        "sizing_layout": 124,
         "paint": 0,
         "text": 0,
         "images": 0
@@ -848,7 +748,7 @@
       "frame_path": "parity-baseline/captures/about.ppm",
       "layout_path": "parity-baseline/captures/about.layout.json",
       "perf": {
-        "elapsed_ms": 4157,
+        "elapsed_ms": 4199,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -857,50 +757,50 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 11.95,
+            "avg_ms": 13.79,
             "count": 1,
-            "max_ms": 11.95,
-            "min_ms": 11.95,
-            "total_ms": 11.95
+            "max_ms": 13.79,
+            "min_ms": 13.79,
+            "total_ms": 13.79
           },
           "frame_capture": {
-            "avg_ms": 95.52,
+            "avg_ms": 111.43,
             "count": 1,
-            "max_ms": 95.52,
-            "min_ms": 95.52,
-            "total_ms": 95.52
+            "max_ms": 111.43,
+            "min_ms": 111.43,
+            "total_ms": 111.43
           },
           "html_load": {
-            "avg_ms": 66.25,
+            "avg_ms": 87.57,
             "count": 1,
-            "max_ms": 66.25,
-            "min_ms": 66.25,
-            "total_ms": 66.25
+            "max_ms": 87.57,
+            "min_ms": 87.57,
+            "total_ms": 87.57
           },
           "render": {
-            "avg_ms": 7.74,
-            "count": 359,
-            "max_ms": 9.27,
-            "min_ms": 2.32,
-            "total_ms": 2778.5
+            "avg_ms": 14.04,
+            "count": 175,
+            "max_ms": 17.34,
+            "min_ms": 3.65,
+            "total_ms": 2456.86
           },
           "view_create": {
-            "avg_ms": 3.14,
+            "avg_ms": 3.78,
             "count": 1,
-            "max_ms": 3.14,
-            "min_ms": 3.14,
-            "total_ms": 3.14
+            "max_ms": 3.78,
+            "min_ms": 3.78,
+            "total_ms": 3.78
           }
         },
-        "render_count": 358,
+        "render_count": 174,
         "status": "pass"
       },
       "error": null,
       "layout_stats": {
         "total_boxes": 485,
         "positioned": 482,
-        "sized": 211,
-        "zero_size": 274,
+        "sized": 232,
+        "zero_size": 253,
         "at_origin": 3,
         "form_controls": 0,
         "text_boxes": 160,
@@ -950,16 +850,6 @@
           {
             "type": "zero_size",
             "node_type": "inline",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
             "depth": 3
           },
           {
@@ -971,11 +861,6 @@
             "type": "zero_size",
             "node_type": "inline",
             "depth": 3
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 4
           },
           {
             "type": "zero_size",
@@ -1006,11 +891,6 @@
             "type": "zero_size",
             "node_type": "inline",
             "depth": 3
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 4
           },
           {
             "type": "zero_size",
@@ -1076,11 +956,6 @@
             "type": "zero_size",
             "node_type": "inline",
             "depth": 3
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 4
           },
           {
             "type": "zero_size",
@@ -1145,62 +1020,12 @@
           {
             "type": "zero_size",
             "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
             "depth": 5
           },
           {
             "type": "zero_size",
             "node_type": "block",
             "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
           },
           {
             "type": "zero_size",
@@ -1265,6 +1090,36 @@
           {
             "type": "zero_size",
             "node_type": "inline",
+            "depth": 5
+          },
+          {
+            "type": "zero_size",
+            "node_type": "block",
+            "depth": 5
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
             "depth": 6
           },
           {
@@ -1305,22 +1160,12 @@
           {
             "type": "zero_size",
             "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
             "depth": 5
           },
           {
             "type": "zero_size",
             "node_type": "block",
             "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
           },
           {
             "type": "zero_size",
@@ -1380,11 +1225,6 @@
           {
             "type": "zero_size",
             "node_type": "inline",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
             "depth": 5
           },
           {
@@ -1435,6 +1275,36 @@
           {
             "type": "zero_size",
             "node_type": "inline",
+            "depth": 5
+          },
+          {
+            "type": "zero_size",
+            "node_type": "block",
+            "depth": 5
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
             "depth": 6
           },
           {
@@ -1475,62 +1345,12 @@
           {
             "type": "zero_size",
             "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
             "depth": 5
           },
           {
             "type": "zero_size",
             "node_type": "block",
             "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
           },
           {
             "type": "zero_size",
@@ -1586,11 +1406,6 @@
             "type": "zero_size",
             "node_type": "inline",
             "depth": 3
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 4
           },
           {
             "type": "zero_size",
@@ -1710,11 +1525,6 @@
           {
             "type": "zero_size",
             "node_type": "inline",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
             "depth": 5
           },
           {
@@ -1734,17 +1544,7 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
             "depth": 5
           },
           {
@@ -1821,11 +1621,6 @@
             "type": "zero_size",
             "node_type": "inline",
             "depth": 3
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 4
           },
           {
             "type": "zero_size",
@@ -2053,12 +1848,12 @@
             "depth": 2
           }
         ],
-        "sizing_rate": 0.4350515463917526,
+        "sizing_rate": 0.47835051546391755,
         "positioning_rate": 0.9938144329896907
       },
-      "estimated_diff_pct": 64.14432989690721,
+      "estimated_diff_pct": 61.54639175257732,
       "issue_clusters": {
-        "sizing_layout": 229,
+        "sizing_layout": 208,
         "paint": 0,
         "text": 0,
         "images": 0
@@ -2073,7 +1868,7 @@
       "frame_path": "parity-baseline/captures/settings.ppm",
       "layout_path": "parity-baseline/captures/settings.layout.json",
       "perf": {
-        "elapsed_ms": 4185,
+        "elapsed_ms": 4265,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -2082,50 +1877,50 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 11.03,
+            "avg_ms": 14.42,
             "count": 1,
-            "max_ms": 11.03,
-            "min_ms": 11.03,
-            "total_ms": 11.03
+            "max_ms": 14.42,
+            "min_ms": 14.42,
+            "total_ms": 14.42
           },
           "frame_capture": {
-            "avg_ms": 95.39,
+            "avg_ms": 119.0,
             "count": 1,
-            "max_ms": 95.39,
-            "min_ms": 95.39,
-            "total_ms": 95.39
+            "max_ms": 119.0,
+            "min_ms": 119.0,
+            "total_ms": 119.0
           },
           "html_load": {
-            "avg_ms": 85.11,
+            "avg_ms": 113.07,
             "count": 1,
-            "max_ms": 85.11,
-            "min_ms": 85.11,
-            "total_ms": 85.11
+            "max_ms": 113.07,
+            "min_ms": 113.07,
+            "total_ms": 113.07
           },
           "render": {
-            "avg_ms": 7.45,
-            "count": 286,
-            "max_ms": 8.97,
-            "min_ms": 1.61,
-            "total_ms": 2131.48
+            "avg_ms": 12.94,
+            "count": 133,
+            "max_ms": 17.7,
+            "min_ms": 2.15,
+            "total_ms": 1721.42
           },
           "view_create": {
-            "avg_ms": 2.86,
+            "avg_ms": 3.78,
             "count": 1,
-            "max_ms": 2.86,
-            "min_ms": 2.86,
-            "total_ms": 2.86
+            "max_ms": 3.78,
+            "min_ms": 3.78,
+            "total_ms": 3.78
           }
         },
-        "render_count": 285,
+        "render_count": 132,
         "status": "pass"
       },
       "error": null,
       "layout_stats": {
         "total_boxes": 601,
         "positioned": 600,
-        "sized": 79,
-        "zero_size": 522,
+        "sized": 151,
+        "zero_size": 450,
         "at_origin": 1,
         "form_controls": 37,
         "text_boxes": 68,
@@ -2179,11 +1974,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -2214,17 +2004,7 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "form_control",
             "depth": 6
           },
           {
@@ -2249,11 +2029,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -2284,17 +2059,7 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "form_control",
             "depth": 6
           },
           {
@@ -2319,11 +2084,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -2354,16 +2114,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -2374,23 +2124,8 @@
           },
           {
             "type": "zero_size",
-            "node_type": "form_control",
-            "depth": 7
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 7
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 7
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 8
           },
           {
             "type": "zero_size",
@@ -2444,11 +2179,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -2479,27 +2209,12 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
           {
             "type": "zero_size",
-            "node_type": "form_control",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "form_control",
             "depth": 6
           },
           {
@@ -2524,11 +2239,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -2559,17 +2269,7 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "form_control",
             "depth": 6
           },
           {
@@ -2594,11 +2294,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -2629,17 +2324,7 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "form_control",
             "depth": 6
           },
           {
@@ -2689,11 +2374,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -2724,16 +2404,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -2744,23 +2414,8 @@
           },
           {
             "type": "zero_size",
-            "node_type": "form_control",
-            "depth": 7
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 7
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 7
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 8
           },
           {
             "type": "zero_size",
@@ -2814,11 +2469,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -2849,16 +2499,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -2869,23 +2509,8 @@
           },
           {
             "type": "zero_size",
-            "node_type": "form_control",
-            "depth": 7
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 7
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 7
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 8
           },
           {
             "type": "zero_size",
@@ -2914,11 +2539,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -2949,17 +2569,7 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "form_control",
             "depth": 6
           },
           {
@@ -2994,11 +2604,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -3029,16 +2634,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -3049,23 +2644,8 @@
           },
           {
             "type": "zero_size",
-            "node_type": "form_control",
-            "depth": 7
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 7
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 7
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 8
           },
           {
             "type": "zero_size",
@@ -3094,11 +2674,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -3129,16 +2704,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -3149,23 +2714,8 @@
           },
           {
             "type": "zero_size",
-            "node_type": "form_control",
-            "depth": 7
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 7
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 7
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 8
           },
           {
             "type": "zero_size",
@@ -3194,11 +2744,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -3225,11 +2770,6 @@
           {
             "type": "zero_size",
             "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
             "depth": 5
           },
           {
@@ -3264,11 +2804,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -3334,17 +2869,7 @@
           },
           {
             "type": "zero_size",
-            "node_type": "form_control",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "form_control",
             "depth": 6
           },
           {
@@ -3459,11 +2984,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -3545,11 +3065,6 @@
           {
             "type": "zero_size",
             "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "form_control",
             "depth": 5
           },
           {
@@ -3569,11 +3084,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -3635,11 +3145,6 @@
           {
             "type": "zero_size",
             "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "form_control",
             "depth": 5
           },
           {
@@ -4049,11 +3554,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -4085,172 +3585,12 @@
           {
             "type": "zero_size",
             "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "form_control",
             "depth": 6
           },
           {
             "type": "zero_size",
             "node_type": "inline",
             "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 7
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "form_control",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "form_control",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 7
           },
           {
             "type": "zero_size",
@@ -4274,7 +3614,47 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 5
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 5
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 4
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
             "depth": 5
           },
           {
@@ -4309,7 +3689,62 @@
           },
           {
             "type": "zero_size",
-            "node_type": "form_control",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 5
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 4
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 5
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
             "depth": 5
           },
           {
@@ -4473,12 +3908,12 @@
             "depth": 2
           }
         ],
-        "sizing_rate": 0.1314475873544093,
+        "sizing_rate": 0.2512479201331115,
         "positioning_rate": 0.9983361064891847
       },
-      "estimated_diff_pct": 82.17970049916805,
+      "estimated_diff_pct": 74.99168053244591,
       "issue_clusters": {
-        "sizing_layout": 468,
+        "sizing_layout": 396,
         "paint": 0,
         "text": 0,
         "images": 0
@@ -4493,7 +3928,7 @@
       "frame_path": "parity-baseline/captures/chrome_rustkit.ppm",
       "layout_path": "parity-baseline/captures/chrome_rustkit.layout.json",
       "perf": {
-        "elapsed_ms": 4140,
+        "elapsed_ms": 4151,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -4502,50 +3937,50 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 11.86,
+            "avg_ms": 14.69,
             "count": 1,
-            "max_ms": 11.86,
-            "min_ms": 11.86,
-            "total_ms": 11.86
+            "max_ms": 14.69,
+            "min_ms": 14.69,
+            "total_ms": 14.69
           },
           "frame_capture": {
-            "avg_ms": 110.09,
+            "avg_ms": 120.21,
             "count": 1,
-            "max_ms": 110.09,
-            "min_ms": 110.09,
-            "total_ms": 110.09
+            "max_ms": 120.21,
+            "min_ms": 120.21,
+            "total_ms": 120.21
           },
           "html_load": {
-            "avg_ms": 29.62,
+            "avg_ms": 40.09,
             "count": 1,
-            "max_ms": 29.62,
-            "min_ms": 29.62,
-            "total_ms": 29.62
+            "max_ms": 40.09,
+            "min_ms": 40.09,
+            "total_ms": 40.09
           },
           "render": {
-            "avg_ms": 8.07,
-            "count": 452,
-            "max_ms": 10.3,
-            "min_ms": 0.63,
-            "total_ms": 3649.03
+            "avg_ms": 16.23,
+            "count": 212,
+            "max_ms": 18.1,
+            "min_ms": 0.99,
+            "total_ms": 3441.81
           },
           "view_create": {
-            "avg_ms": 3.14,
+            "avg_ms": 3.69,
             "count": 1,
-            "max_ms": 3.14,
-            "min_ms": 3.14,
-            "total_ms": 3.14
+            "max_ms": 3.69,
+            "min_ms": 3.69,
+            "total_ms": 3.69
           }
         },
-        "render_count": 451,
+        "render_count": 211,
         "status": "pass"
       },
       "error": null,
       "layout_stats": {
         "total_boxes": 117,
         "positioned": 114,
-        "sized": 16,
-        "zero_size": 101,
+        "sized": 33,
+        "zero_size": 84,
         "at_origin": 3,
         "form_controls": 0,
         "text_boxes": 23,
@@ -4579,11 +4014,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 5
           },
@@ -4600,21 +4030,6 @@
           {
             "type": "zero_size",
             "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
             "depth": 4
           },
           {
@@ -4644,11 +4059,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 5
           },
@@ -4669,7 +4079,7 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
+            "node_type": "inline",
             "depth": 4
           },
           {
@@ -4679,27 +4089,7 @@
           },
           {
             "type": "zero_size",
-            "node_type": "block",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
             "depth": 4
           },
           {
@@ -4740,21 +4130,6 @@
           {
             "type": "zero_size",
             "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
-            "node_type": "block",
             "depth": 4
           },
           {
@@ -4815,47 +4190,7 @@
           {
             "type": "zero_size",
             "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
             "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 6
           },
           {
             "type": "zero_size",
@@ -4905,17 +4240,32 @@
           {
             "type": "zero_size",
             "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
             "depth": 5
           },
           {
             "type": "zero_size",
             "node_type": "inline",
             "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 6
+          },
+          {
+            "type": "zero_size",
+            "node_type": "inline",
+            "depth": 5
           },
           {
             "type": "zero_size",
@@ -4958,12 +4308,12 @@
             "depth": 2
           }
         ],
-        "sizing_rate": 0.13675213675213677,
+        "sizing_rate": 0.28205128205128205,
         "positioning_rate": 0.9743589743589743
       },
-      "estimated_diff_pct": 82.82051282051282,
+      "estimated_diff_pct": 74.1025641025641,
       "issue_clusters": {
-        "sizing_layout": 81,
+        "sizing_layout": 64,
         "paint": 0,
         "text": 0,
         "images": 0
@@ -4978,7 +4328,7 @@
       "frame_path": "parity-baseline/captures/shelf.ppm",
       "layout_path": "parity-baseline/captures/shelf.layout.json",
       "perf": {
-        "elapsed_ms": 4171,
+        "elapsed_ms": 4169,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -4987,50 +4337,50 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 11.66,
+            "avg_ms": 14.79,
             "count": 1,
-            "max_ms": 11.66,
-            "min_ms": 11.66,
-            "total_ms": 11.66
+            "max_ms": 14.79,
+            "min_ms": 14.79,
+            "total_ms": 14.79
           },
           "frame_capture": {
-            "avg_ms": 109.57,
+            "avg_ms": 119.15,
             "count": 1,
-            "max_ms": 109.57,
-            "min_ms": 109.57,
-            "total_ms": 109.57
+            "max_ms": 119.15,
+            "min_ms": 119.15,
+            "total_ms": 119.15
           },
           "html_load": {
-            "avg_ms": 25.7,
+            "avg_ms": 34.94,
             "count": 1,
-            "max_ms": 25.7,
-            "min_ms": 25.7,
-            "total_ms": 25.7
+            "max_ms": 34.94,
+            "min_ms": 34.94,
+            "total_ms": 34.94
           },
           "render": {
-            "avg_ms": 8.13,
-            "count": 457,
-            "max_ms": 10.79,
-            "min_ms": 0.84,
-            "total_ms": 3717.17
+            "avg_ms": 16.34,
+            "count": 214,
+            "max_ms": 18.43,
+            "min_ms": 1.18,
+            "total_ms": 3496.55
           },
           "view_create": {
-            "avg_ms": 3.09,
+            "avg_ms": 3.76,
             "count": 1,
-            "max_ms": 3.09,
-            "min_ms": 3.09,
-            "total_ms": 3.09
+            "max_ms": 3.76,
+            "min_ms": 3.76,
+            "total_ms": 3.76
           }
         },
-        "render_count": 456,
+        "render_count": 213,
         "status": "pass"
       },
       "error": null,
       "layout_stats": {
         "total_boxes": 39,
         "positioned": 29,
-        "sized": 7,
-        "zero_size": 32,
+        "sized": 9,
+        "zero_size": 30,
         "at_origin": 10,
         "form_controls": 2,
         "text_boxes": 2,
@@ -5064,11 +4414,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "form_control",
-            "depth": 3
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 3
           },
@@ -5120,11 +4465,6 @@
           {
             "type": "zero_size",
             "node_type": "inline",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
-            "node_type": "form_control",
             "depth": 4
           },
           {
@@ -5193,12 +4533,12 @@
             "depth": 2
           }
         ],
-        "sizing_rate": 0.1794871794871795,
+        "sizing_rate": 0.23076923076923078,
         "positioning_rate": 0.7435897435897436
       },
-      "estimated_diff_pct": 89.48717948717949,
+      "estimated_diff_pct": 86.41025641025641,
       "issue_clusters": {
-        "sizing_layout": 31,
+        "sizing_layout": 29,
         "paint": 0,
         "text": 0,
         "images": 0
@@ -5215,7 +4555,7 @@
       "frame_path": "parity-baseline/captures/article-typography.ppm",
       "layout_path": "parity-baseline/captures/article-typography.layout.json",
       "perf": {
-        "elapsed_ms": 4128,
+        "elapsed_ms": 4184,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -5224,50 +4564,50 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 12.45,
+            "avg_ms": 14.45,
             "count": 1,
-            "max_ms": 12.45,
-            "min_ms": 12.45,
-            "total_ms": 12.45
+            "max_ms": 14.45,
+            "min_ms": 14.45,
+            "total_ms": 14.45
           },
           "frame_capture": {
-            "avg_ms": 97.82,
+            "avg_ms": 117.82,
             "count": 1,
-            "max_ms": 97.82,
-            "min_ms": 97.82,
-            "total_ms": 97.82
+            "max_ms": 117.82,
+            "min_ms": 117.82,
+            "total_ms": 117.82
           },
           "html_load": {
-            "avg_ms": 29.94,
+            "avg_ms": 40.58,
             "count": 1,
-            "max_ms": 29.94,
-            "min_ms": 29.94,
-            "total_ms": 29.94
+            "max_ms": 40.58,
+            "min_ms": 40.58,
+            "total_ms": 40.58
           },
           "render": {
-            "avg_ms": 8.15,
-            "count": 449,
-            "max_ms": 16.95,
-            "min_ms": 1.98,
-            "total_ms": 3659.31
+            "avg_ms": 16.37,
+            "count": 214,
+            "max_ms": 17.68,
+            "min_ms": 2.57,
+            "total_ms": 3502.26
           },
           "view_create": {
-            "avg_ms": 3.05,
+            "avg_ms": 4.06,
             "count": 1,
-            "max_ms": 3.05,
-            "min_ms": 3.05,
-            "total_ms": 3.05
+            "max_ms": 4.06,
+            "min_ms": 4.06,
+            "total_ms": 4.06
           }
         },
-        "render_count": 448,
+        "render_count": 213,
         "status": "pass"
       },
       "error": null,
       "layout_stats": {
         "total_boxes": 175,
         "positioned": 172,
-        "sized": 78,
-        "zero_size": 97,
+        "sized": 82,
+        "zero_size": 93,
         "at_origin": 3,
         "form_controls": 0,
         "text_boxes": 57,
@@ -5472,26 +4812,6 @@
           {
             "type": "zero_size",
             "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 5
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
             "depth": 4
           },
           {
@@ -5655,12 +4975,12 @@
             "depth": 2
           }
         ],
-        "sizing_rate": 0.44571428571428573,
+        "sizing_rate": 0.4685714285714286,
         "positioning_rate": 0.9828571428571429
       },
-      "estimated_diff_pct": 63.94285714285714,
+      "estimated_diff_pct": 62.57142857142856,
       "issue_clusters": {
-        "sizing_layout": 76,
+        "sizing_layout": 72,
         "paint": 0,
         "text": 0,
         "images": 0
@@ -5675,7 +4995,7 @@
       "frame_path": "parity-baseline/captures/card-grid.ppm",
       "layout_path": "parity-baseline/captures/card-grid.layout.json",
       "perf": {
-        "elapsed_ms": 4130,
+        "elapsed_ms": 4163,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -5684,42 +5004,42 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 11.42,
+            "avg_ms": 14.03,
             "count": 1,
-            "max_ms": 11.42,
-            "min_ms": 11.42,
-            "total_ms": 11.42
+            "max_ms": 14.03,
+            "min_ms": 14.03,
+            "total_ms": 14.03
           },
           "frame_capture": {
-            "avg_ms": 90.85,
+            "avg_ms": 107.92,
             "count": 1,
-            "max_ms": 90.85,
-            "min_ms": 90.85,
-            "total_ms": 90.85
+            "max_ms": 107.92,
+            "min_ms": 107.92,
+            "total_ms": 107.92
           },
           "html_load": {
-            "avg_ms": 33.37,
+            "avg_ms": 43.86,
             "count": 1,
-            "max_ms": 33.37,
-            "min_ms": 33.37,
-            "total_ms": 33.37
+            "max_ms": 43.86,
+            "min_ms": 43.86,
+            "total_ms": 43.86
           },
           "render": {
-            "avg_ms": 7.99,
-            "count": 451,
-            "max_ms": 11.71,
-            "min_ms": 1.76,
-            "total_ms": 3603.14
+            "avg_ms": 16.26,
+            "count": 213,
+            "max_ms": 18.4,
+            "min_ms": 2.12,
+            "total_ms": 3463.18
           },
           "view_create": {
-            "avg_ms": 3.04,
+            "avg_ms": 3.8,
             "count": 1,
-            "max_ms": 3.04,
-            "min_ms": 3.04,
-            "total_ms": 3.04
+            "max_ms": 3.8,
+            "min_ms": 3.8,
+            "total_ms": 3.8
           }
         },
-        "render_count": 450,
+        "render_count": 212,
         "status": "pass"
       },
       "error": null,
@@ -6270,7 +5590,7 @@
       "frame_path": "parity-baseline/captures/css-selectors.ppm",
       "layout_path": "parity-baseline/captures/css-selectors.layout.json",
       "perf": {
-        "elapsed_ms": 4170,
+        "elapsed_ms": 4159,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -6279,42 +5599,42 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 11.97,
+            "avg_ms": 13.89,
             "count": 1,
-            "max_ms": 11.97,
-            "min_ms": 11.97,
-            "total_ms": 11.97
+            "max_ms": 13.89,
+            "min_ms": 13.89,
+            "total_ms": 13.89
           },
           "frame_capture": {
-            "avg_ms": 107.35,
+            "avg_ms": 118.84,
             "count": 1,
-            "max_ms": 107.35,
-            "min_ms": 107.35,
-            "total_ms": 107.35
+            "max_ms": 118.84,
+            "min_ms": 118.84,
+            "total_ms": 118.84
           },
           "html_load": {
-            "avg_ms": 28.67,
+            "avg_ms": 38.46,
             "count": 1,
-            "max_ms": 28.67,
-            "min_ms": 28.67,
-            "total_ms": 28.67
+            "max_ms": 38.46,
+            "min_ms": 38.46,
+            "total_ms": 38.46
           },
           "render": {
-            "avg_ms": 8.09,
-            "count": 454,
-            "max_ms": 12.25,
-            "min_ms": 1.09,
-            "total_ms": 3674.66
+            "avg_ms": 16.25,
+            "count": 212,
+            "max_ms": 18.95,
+            "min_ms": 1.53,
+            "total_ms": 3445.47
           },
           "view_create": {
-            "avg_ms": 3.31,
+            "avg_ms": 3.72,
             "count": 1,
-            "max_ms": 3.31,
-            "min_ms": 3.31,
-            "total_ms": 3.31
+            "max_ms": 3.72,
+            "min_ms": 3.72,
+            "total_ms": 3.72
           }
         },
-        "render_count": 453,
+        "render_count": 211,
         "status": "pass"
       },
       "error": null,
@@ -6830,7 +6150,7 @@
       "frame_path": "parity-baseline/captures/flex-positioning.ppm",
       "layout_path": "parity-baseline/captures/flex-positioning.layout.json",
       "perf": {
-        "elapsed_ms": 4163,
+        "elapsed_ms": 4185,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -6839,50 +6159,50 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 11.41,
+            "avg_ms": 14.6,
             "count": 1,
-            "max_ms": 11.41,
-            "min_ms": 11.41,
-            "total_ms": 11.41
+            "max_ms": 14.6,
+            "min_ms": 14.6,
+            "total_ms": 14.6
           },
           "frame_capture": {
-            "avg_ms": 110.62,
+            "avg_ms": 120.09,
             "count": 1,
-            "max_ms": 110.62,
-            "min_ms": 110.62,
-            "total_ms": 110.62
+            "max_ms": 120.09,
+            "min_ms": 120.09,
+            "total_ms": 120.09
           },
           "html_load": {
-            "avg_ms": 30.04,
+            "avg_ms": 41.1,
             "count": 1,
-            "max_ms": 30.04,
-            "min_ms": 30.04,
-            "total_ms": 30.04
+            "max_ms": 41.1,
+            "min_ms": 41.1,
+            "total_ms": 41.1
           },
           "render": {
-            "avg_ms": 7.9,
-            "count": 453,
-            "max_ms": 11.36,
-            "min_ms": 0.78,
-            "total_ms": 3580.17
+            "avg_ms": 16.28,
+            "count": 213,
+            "max_ms": 19.2,
+            "min_ms": 1.01,
+            "total_ms": 3466.85
           },
           "view_create": {
-            "avg_ms": 2.96,
+            "avg_ms": 3.86,
             "count": 1,
-            "max_ms": 2.96,
-            "min_ms": 2.96,
-            "total_ms": 2.96
+            "max_ms": 3.86,
+            "min_ms": 3.86,
+            "total_ms": 3.86
           }
         },
-        "render_count": 452,
+        "render_count": 212,
         "status": "pass"
       },
       "error": null,
       "layout_stats": {
         "total_boxes": 205,
         "positioned": 204,
-        "sized": 39,
-        "zero_size": 166,
+        "sized": 43,
+        "zero_size": 162,
         "at_origin": 1,
         "form_controls": 7,
         "text_boxes": 36,
@@ -6986,11 +6306,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "form_control",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 4
           },
@@ -7012,11 +6327,6 @@
           {
             "type": "zero_size",
             "node_type": "inline",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
-            "node_type": "form_control",
             "depth": 4
           },
           {
@@ -7546,17 +6856,7 @@
           },
           {
             "type": "zero_size",
-            "node_type": "form_control",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
-            "depth": 4
-          },
-          {
-            "type": "zero_size",
-            "node_type": "form_control",
             "depth": 4
           },
           {
@@ -7575,12 +6875,12 @@
             "depth": 2
           }
         ],
-        "sizing_rate": 0.1902439024390244,
+        "sizing_rate": 0.2097560975609756,
         "positioning_rate": 0.9951219512195122
       },
-      "estimated_diff_pct": 78.78048780487805,
+      "estimated_diff_pct": 77.60975609756098,
       "issue_clusters": {
-        "sizing_layout": 137,
+        "sizing_layout": 133,
         "paint": 0,
         "text": 0,
         "images": 0
@@ -7595,7 +6895,7 @@
       "frame_path": "parity-baseline/captures/form-elements.ppm",
       "layout_path": "parity-baseline/captures/form-elements.layout.json",
       "perf": {
-        "elapsed_ms": 4160,
+        "elapsed_ms": 4181,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -7604,50 +6904,50 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 11.47,
+            "avg_ms": 14.72,
             "count": 1,
-            "max_ms": 11.47,
-            "min_ms": 11.47,
-            "total_ms": 11.47
+            "max_ms": 14.72,
+            "min_ms": 14.72,
+            "total_ms": 14.72
           },
           "frame_capture": {
-            "avg_ms": 110.13,
+            "avg_ms": 119.83,
             "count": 1,
-            "max_ms": 110.13,
-            "min_ms": 110.13,
-            "total_ms": 110.13
+            "max_ms": 119.83,
+            "min_ms": 119.83,
+            "total_ms": 119.83
           },
           "html_load": {
-            "avg_ms": 32.51,
+            "avg_ms": 43.98,
             "count": 1,
-            "max_ms": 32.51,
-            "min_ms": 32.51,
-            "total_ms": 32.51
+            "max_ms": 43.98,
+            "min_ms": 43.98,
+            "total_ms": 43.98
           },
           "render": {
-            "avg_ms": 7.82,
-            "count": 452,
-            "max_ms": 9.88,
-            "min_ms": 0.84,
-            "total_ms": 3532.75
+            "avg_ms": 16.23,
+            "count": 213,
+            "max_ms": 19.9,
+            "min_ms": 1.13,
+            "total_ms": 3457.98
           },
           "view_create": {
-            "avg_ms": 3.1,
+            "avg_ms": 4.03,
             "count": 1,
-            "max_ms": 3.1,
-            "min_ms": 3.1,
-            "total_ms": 3.1
+            "max_ms": 4.03,
+            "min_ms": 4.03,
+            "total_ms": 4.03
           }
         },
-        "render_count": 451,
+        "render_count": 212,
         "status": "pass"
       },
       "error": null,
       "layout_stats": {
         "total_boxes": 177,
         "positioned": 176,
-        "sized": 53,
-        "zero_size": 124,
+        "sized": 61,
+        "zero_size": 116,
         "at_origin": 1,
         "form_controls": 18,
         "text_boxes": 23,
@@ -7856,11 +7156,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "form_control",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -7886,11 +7181,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "form_control",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -7912,11 +7202,6 @@
           {
             "type": "zero_size",
             "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "form_control",
             "depth": 6
           },
           {
@@ -7966,11 +7251,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "form_control",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -7996,11 +7276,6 @@
           },
           {
             "type": "zero_size",
-            "node_type": "form_control",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
             "node_type": "inline",
             "depth": 6
           },
@@ -8022,11 +7297,6 @@
           {
             "type": "zero_size",
             "node_type": "inline",
-            "depth": 6
-          },
-          {
-            "type": "zero_size",
-            "node_type": "form_control",
             "depth": 6
           },
           {
@@ -8073,16 +7343,6 @@
             "type": "zero_size",
             "node_type": "inline",
             "depth": 7
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 7
-          },
-          {
-            "type": "zero_size",
-            "node_type": "inline",
-            "depth": 8
           },
           {
             "type": "zero_size",
@@ -8200,12 +7460,12 @@
             "depth": 2
           }
         ],
-        "sizing_rate": 0.2994350282485876,
+        "sizing_rate": 0.3446327683615819,
         "positioning_rate": 0.9943502824858758
       },
-      "estimated_diff_pct": 72.25988700564972,
+      "estimated_diff_pct": 69.54802259887006,
       "issue_clusters": {
-        "sizing_layout": 109,
+        "sizing_layout": 101,
         "paint": 0,
         "text": 0,
         "images": 0
@@ -8220,7 +7480,7 @@
       "frame_path": "parity-baseline/captures/gradient-backgrounds.ppm",
       "layout_path": "parity-baseline/captures/gradient-backgrounds.layout.json",
       "perf": {
-        "elapsed_ms": 4171,
+        "elapsed_ms": 4162,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -8229,42 +7489,42 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 11.75,
+            "avg_ms": 14.16,
             "count": 1,
-            "max_ms": 11.75,
-            "min_ms": 11.75,
-            "total_ms": 11.75
+            "max_ms": 14.16,
+            "min_ms": 14.16,
+            "total_ms": 14.16
           },
           "frame_capture": {
-            "avg_ms": 109.05,
+            "avg_ms": 118.55,
             "count": 1,
-            "max_ms": 109.05,
-            "min_ms": 109.05,
-            "total_ms": 109.05
+            "max_ms": 118.55,
+            "min_ms": 118.55,
+            "total_ms": 118.55
           },
           "html_load": {
-            "avg_ms": 26.27,
+            "avg_ms": 36.88,
             "count": 1,
-            "max_ms": 26.27,
-            "min_ms": 26.27,
-            "total_ms": 26.27
+            "max_ms": 36.88,
+            "min_ms": 36.88,
+            "total_ms": 36.88
           },
           "render": {
-            "avg_ms": 8.17,
-            "count": 456,
-            "max_ms": 12.22,
-            "min_ms": 1.12,
-            "total_ms": 3725.29
+            "avg_ms": 16.32,
+            "count": 213,
+            "max_ms": 18.57,
+            "min_ms": 1.65,
+            "total_ms": 3475.15
           },
           "view_create": {
-            "avg_ms": 3.15,
+            "avg_ms": 3.92,
             "count": 1,
-            "max_ms": 3.15,
-            "min_ms": 3.15,
-            "total_ms": 3.15
+            "max_ms": 3.92,
+            "min_ms": 3.92,
+            "total_ms": 3.92
           }
         },
-        "render_count": 455,
+        "render_count": 212,
         "status": "pass"
       },
       "error": null,
@@ -8795,7 +8055,7 @@
       "frame_path": "parity-baseline/captures/image-gallery.ppm",
       "layout_path": "parity-baseline/captures/image-gallery.layout.json",
       "perf": {
-        "elapsed_ms": 4131,
+        "elapsed_ms": 4175,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -8804,50 +8064,50 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 11.13,
+            "avg_ms": 14.46,
             "count": 1,
-            "max_ms": 11.13,
-            "min_ms": 11.13,
-            "total_ms": 11.13
+            "max_ms": 14.46,
+            "min_ms": 14.46,
+            "total_ms": 14.46
           },
           "frame_capture": {
-            "avg_ms": 93.68,
+            "avg_ms": 110.46,
             "count": 1,
-            "max_ms": 93.68,
-            "min_ms": 93.68,
-            "total_ms": 93.68
+            "max_ms": 110.46,
+            "min_ms": 110.46,
+            "total_ms": 110.46
           },
           "html_load": {
-            "avg_ms": 40.79,
+            "avg_ms": 55.83,
             "count": 1,
-            "max_ms": 40.79,
-            "min_ms": 40.79,
-            "total_ms": 40.79
+            "max_ms": 55.83,
+            "min_ms": 55.83,
+            "total_ms": 55.83
           },
           "render": {
-            "avg_ms": 7.6,
-            "count": 442,
-            "max_ms": 9.58,
-            "min_ms": 2.34,
-            "total_ms": 3360.71
+            "avg_ms": 15.36,
+            "count": 212,
+            "max_ms": 18.55,
+            "min_ms": 2.85,
+            "total_ms": 3256.89
           },
           "view_create": {
-            "avg_ms": 2.87,
+            "avg_ms": 3.57,
             "count": 1,
-            "max_ms": 2.87,
-            "min_ms": 2.87,
-            "total_ms": 2.87
+            "max_ms": 3.57,
+            "min_ms": 3.57,
+            "total_ms": 3.57
           }
         },
-        "render_count": 441,
+        "render_count": 211,
         "status": "pass"
       },
       "error": null,
       "layout_stats": {
         "total_boxes": 256,
         "positioned": 255,
-        "sized": 88,
-        "zero_size": 168,
+        "sized": 90,
+        "zero_size": 166,
         "at_origin": 1,
         "form_controls": 0,
         "text_boxes": 46,
@@ -9615,10 +8875,10 @@
             "depth": 2
           }
         ],
-        "sizing_rate": 0.34375,
+        "sizing_rate": 0.3515625,
         "positioning_rate": 0.99609375
       },
-      "estimated_diff_pct": 69.53125,
+      "estimated_diff_pct": 69.0625,
       "issue_clusters": {
         "sizing_layout": 152,
         "paint": 0,
@@ -9635,7 +8895,7 @@
       "frame_path": "parity-baseline/captures/sticky-scroll.ppm",
       "layout_path": "parity-baseline/captures/sticky-scroll.layout.json",
       "perf": {
-        "elapsed_ms": 4138,
+        "elapsed_ms": 4191,
         "final_layout": {
           "left_sidebar_width": 232.0,
           "right_sidebar_open": true,
@@ -9644,42 +8904,42 @@
         "frame_dumped": true,
         "perf": {
           "engine_init": {
-            "avg_ms": 11.96,
+            "avg_ms": 14.77,
             "count": 1,
-            "max_ms": 11.96,
-            "min_ms": 11.96,
-            "total_ms": 11.96
+            "max_ms": 14.77,
+            "min_ms": 14.77,
+            "total_ms": 14.77
           },
           "frame_capture": {
-            "avg_ms": 98.28,
+            "avg_ms": 118.23,
             "count": 1,
-            "max_ms": 98.28,
-            "min_ms": 98.28,
-            "total_ms": 98.28
+            "max_ms": 118.23,
+            "min_ms": 118.23,
+            "total_ms": 118.23
           },
           "html_load": {
-            "avg_ms": 38.23,
+            "avg_ms": 49.55,
             "count": 1,
-            "max_ms": 38.23,
-            "min_ms": 38.23,
-            "total_ms": 38.23
+            "max_ms": 49.55,
+            "min_ms": 49.55,
+            "total_ms": 49.55
           },
           "render": {
-            "avg_ms": 7.74,
-            "count": 448,
-            "max_ms": 11.19,
-            "min_ms": 1.84,
-            "total_ms": 3466.08
+            "avg_ms": 16.0,
+            "count": 212,
+            "max_ms": 17.92,
+            "min_ms": 2.36,
+            "total_ms": 3392.54
           },
           "view_create": {
-            "avg_ms": 3.22,
+            "avg_ms": 3.65,
             "count": 1,
-            "max_ms": 3.22,
-            "min_ms": 3.22,
-            "total_ms": 3.22
+            "max_ms": 3.65,
+            "min_ms": 3.65,
+            "total_ms": 3.65
           }
         },
-        "render_count": 447,
+        "render_count": 211,
         "status": "pass"
       },
       "error": null,

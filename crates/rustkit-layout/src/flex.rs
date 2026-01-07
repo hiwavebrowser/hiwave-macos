@@ -331,8 +331,8 @@ fn create_flex_item<'a>(
         FlexBasis::Percent(pct) => pct / 100.0 * container_main,
     };
 
-    // Get min/max constraints
-    let (min_main, max_main, min_cross, max_cross) = match main_axis {
+    // Get min/max constraints from CSS
+    let (css_min_main, max_main, css_min_cross, max_cross) = match main_axis {
         Axis::Horizontal => (
             resolve_length(&layout_box.style.min_width, container_main),
             resolve_max_length(&layout_box.style.max_width, container_main),
@@ -346,6 +346,12 @@ fn create_flex_item<'a>(
             resolve_max_length(&layout_box.style.max_width, container_cross),
         ),
     };
+    
+    // For replaced elements (form controls, images), use intrinsic size as minimum
+    // This ensures flex items have proper sizing even without explicit min-width/height
+    let intrinsic_cross = get_intrinsic_cross_size(&layout_box.box_type, main_axis, &layout_box.style);
+    let min_main = css_min_main;
+    let min_cross = if css_min_cross > 0.0 { css_min_cross } else { intrinsic_cross };
 
     // Hypothetical main size (clamped)
     let hypothetical_main_size = flex_basis.max(min_main).min(max_main);
@@ -526,13 +532,21 @@ fn calculate_cross_sizes(line: &mut FlexLine, container_cross: f32, align_items:
             }
         };
 
+        // First, compute the content-based cross size (hypothetical cross size)
+        let content_cross_size = get_content_cross_size(item.layout_box);
+        
         if align == AlignItems::Stretch {
             // Stretch to fill line (will be adjusted later)
-            item.cross_size = container_cross - item.cross_margin_start - item.cross_margin_end;
+            // But ensure we have at least the content size
+            let stretch_size = container_cross - item.cross_margin_start - item.cross_margin_end;
+            item.cross_size = stretch_size.max(content_cross_size);
         } else {
-            // Use hypothetical cross size (content-based)
-            // For simplicity, use min_cross_size as a placeholder
-            item.cross_size = item.min_cross_size;
+            // Use content-based cross size, falling back to min_cross_size only if content is 0
+            item.cross_size = if content_cross_size > 0.0 {
+                content_cross_size
+            } else {
+                item.min_cross_size
+            };
         }
 
         // Clamp to min/max
@@ -544,6 +558,79 @@ fn calculate_cross_sizes(line: &mut FlexLine, container_cross: f32, align_items:
         .iter()
         .map(|i| i.cross_size + i.cross_margin_start + i.cross_margin_end)
         .fold(0.0, f32::max);
+}
+
+/// Get the content-based cross size for a layout box.
+/// This computes the hypothetical cross size based on content, intrinsic sizing, or children.
+fn get_content_cross_size(layout_box: &LayoutBox) -> f32 {
+    // If the box already has a computed height from layout, use it
+    if layout_box.dimensions.content.height > 0.0 {
+        return layout_box.dimensions.content.height;
+    }
+    
+    // Get font size for intrinsic calculations
+    let font_size = match layout_box.style.font_size {
+        Length::Px(px) => px,
+        _ => 16.0,
+    };
+    
+    // For text boxes, use line height
+    if let crate::BoxType::Text(_) = &layout_box.box_type {
+        let line_height_multiplier = if layout_box.style.line_height > 0.0 {
+            layout_box.style.line_height
+        } else {
+            1.2
+        };
+        return font_size * line_height_multiplier;
+    }
+    
+    // For form controls, use intrinsic height
+    if let crate::BoxType::FormControl(control) = &layout_box.box_type {
+        use crate::FormControlType;
+        return match control {
+            FormControlType::TextInput { .. } => font_size * 1.5 + 8.0,
+            FormControlType::TextArea { rows, .. } => {
+                let rows = (*rows).max(2) as f32;
+                font_size * 1.2 * rows + 8.0
+            }
+            FormControlType::Button { .. } => font_size * 1.5 + 12.0,
+            FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => font_size * 1.2,
+            FormControlType::Select { .. } => font_size * 1.5 + 8.0,
+        };
+    }
+    
+    // For images, use natural height
+    if let crate::BoxType::Image { natural_height, .. } = &layout_box.box_type {
+        if *natural_height > 0.0 {
+            return *natural_height;
+        }
+    }
+    
+    // For containers with children, sum children heights (for block) or use max (for inline)
+    if !layout_box.children.is_empty() {
+        let children_height: f32 = layout_box.children
+            .iter()
+            .map(|c| c.dimensions.margin_box().height)
+            .sum();
+        if children_height > 0.0 {
+            return children_height;
+        }
+    }
+    
+    // Check for explicit CSS height
+    match layout_box.style.height {
+        Length::Px(px) if px > 0.0 => return px,
+        Length::Em(em) if em > 0.0 => return em * font_size,
+        _ => {}
+    }
+    
+    // For inline/block boxes without content, use line height as minimum
+    let line_height_multiplier = if layout_box.style.line_height > 0.0 {
+        layout_box.style.line_height
+    } else {
+        1.2
+    };
+    font_size * line_height_multiplier
 }
 
 /// Distribute lines according to align-content.
@@ -817,6 +904,84 @@ fn get_intrinsic_main_size(box_type: &crate::BoxType, main_axis: Axis, style: &r
             }
         }
         _ => 0.0, // Non-replaced elements don't have intrinsic size
+    }
+}
+
+/// Get the intrinsic cross size for replaced elements (form controls, images).
+/// This returns the height for horizontal main axis, width for vertical main axis.
+fn get_intrinsic_cross_size(box_type: &crate::BoxType, main_axis: Axis, style: &rustkit_css::ComputedStyle) -> f32 {
+    let font_size = match style.font_size {
+        Length::Px(px) => px,
+        _ => 16.0,
+    };
+    
+    // Cross axis is the opposite of main axis
+    let cross_axis = main_axis.cross();
+    
+    match box_type {
+        crate::BoxType::FormControl(control) => {
+            use crate::FormControlType;
+            match control {
+                FormControlType::TextInput { .. } => {
+                    match cross_axis {
+                        Axis::Horizontal => font_size * 12.0,
+                        Axis::Vertical => font_size * 1.5 + 8.0,
+                    }
+                }
+                FormControlType::TextArea { rows, cols, .. } => {
+                    match cross_axis {
+                        Axis::Horizontal => font_size * 0.6 * (*cols).max(20) as f32,
+                        Axis::Vertical => font_size * 1.2 * (*rows).max(2) as f32 + 8.0,
+                    }
+                }
+                FormControlType::Button { label, .. } => {
+                    match cross_axis {
+                        Axis::Horizontal => label.len() as f32 * font_size * 0.6 + 24.0,
+                        Axis::Vertical => font_size * 1.5 + 12.0,
+                    }
+                }
+                FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
+                    font_size * 1.2
+                }
+                FormControlType::Select { .. } => {
+                    match cross_axis {
+                        Axis::Horizontal => font_size * 10.0,
+                        Axis::Vertical => font_size * 1.5 + 8.0,
+                    }
+                }
+            }
+        }
+        crate::BoxType::Image { natural_width, natural_height, .. } => {
+            match cross_axis {
+                Axis::Horizontal => *natural_width,
+                Axis::Vertical => *natural_height,
+            }
+        }
+        crate::BoxType::Text(_) => {
+            // Text boxes have intrinsic height based on line height
+            let line_height_multiplier = if style.line_height > 0.0 {
+                style.line_height
+            } else {
+                1.2
+            };
+            match cross_axis {
+                Axis::Vertical => font_size * line_height_multiplier,
+                Axis::Horizontal => 0.0, // Text width depends on content
+            }
+        }
+        _ => {
+            // For block/inline boxes, provide a minimum based on line height
+            // This ensures flex items have non-zero cross size
+            let line_height_multiplier = if style.line_height > 0.0 {
+                style.line_height
+            } else {
+                1.2
+            };
+            match cross_axis {
+                Axis::Vertical => font_size * line_height_multiplier,
+                Axis::Horizontal => 0.0,
+            }
+        }
     }
 }
 

@@ -557,6 +557,36 @@ impl LayoutBox {
         d.content.x = containing_block.content.x + d.margin.left + d.border.left + d.padding.left;
         d.content.y = containing_block.content.y + containing_block.content.height;
         
+        // Check for explicit CSS width first
+        let explicit_width = match self.style.width {
+            Length::Px(px) if px > 0.0 => Some(px),
+            Length::Percent(pct) if pct > 0.0 => Some(pct / 100.0 * container_width),
+            Length::Em(em) if em > 0.0 => {
+                let font_size = match self.style.font_size {
+                    Length::Px(px) => px,
+                    _ => 16.0,
+                };
+                Some(em * font_size)
+            }
+            _ => None,
+        };
+        
+        // Check for explicit CSS height
+        let explicit_height = match self.style.height {
+            Length::Px(px) if px > 0.0 => Some(px),
+            Length::Percent(pct) if pct > 0.0 && containing_block.content.height > 0.0 => {
+                Some(pct / 100.0 * containing_block.content.height)
+            }
+            Length::Em(em) if em > 0.0 => {
+                let font_size = match self.style.font_size {
+                    Length::Px(px) => px,
+                    _ => 16.0,
+                };
+                Some(em * font_size)
+            }
+            _ => None,
+        };
+        
         // Layout inline children sequentially
         let mut cursor_x = 0.0;
         let mut max_height = 0.0f32;
@@ -572,12 +602,38 @@ impl LayoutBox {
             max_height = max_height.max(child.dimensions.margin_box().height);
         }
         
-        // Set content dimensions based on children
-        self.dimensions.content.width = cursor_x;
+        // Set content dimensions:
+        // 1. Use explicit CSS width if specified
+        // 2. Otherwise use computed width from children
+        // 3. Ensure minimum width for padding/border contribution
+        let computed_width = if let Some(w) = explicit_width {
+            w
+        } else if cursor_x > 0.0 {
+            cursor_x
+        } else {
+            // Inline box with no children and no explicit width:
+            // Use horizontal padding + border as minimum (inline-block behavior)
+            let horizontal_box = self.dimensions.padding.horizontal() + self.dimensions.border.horizontal();
+            horizontal_box
+        };
+        self.dimensions.content.width = computed_width;
         
-        // Height: max of children height, line-height, or padding/border contribution
-        let min_height = self.dimensions.padding.top + self.dimensions.padding.bottom;
-        self.dimensions.content.height = max_height.max(self.get_line_height()).max(min_height);
+        // Height: use explicit height, or max of children height, line-height, or padding/border
+        let min_height = self.dimensions.padding.vertical() + self.dimensions.border.vertical();
+        let line_height = self.get_line_height();
+        
+        // CONSISTENCY FIX: If width is zero (empty inline box), height should also be zero
+        // This ensures empty inline boxes fully collapse and don't create phantom layout boxes
+        let computed_height = if let Some(h) = explicit_height {
+            h
+        } else if computed_width == 0.0 && self.children.is_empty() {
+            // Empty inline box with no width should collapse completely
+            0.0
+        } else {
+            // Use max of: children height, line height (for text baseline), or min box model height
+            max_height.max(line_height).max(min_height)
+        };
+        self.dimensions.content.height = computed_height;
     }
 
     /// Layout a text box.
@@ -670,16 +726,27 @@ impl LayoutBox {
             }
         };
         
-        // Override with explicit CSS dimensions if specified
+        // Override with explicit CSS dimensions if specified, but always fall back to intrinsic
+        // if the explicit value resolves to zero (e.g., percent of zero-height container)
         let width = match self.style.width {
-            Length::Px(px) => px,
-            Length::Percent(pct) => pct / 100.0 * containing_block.content.width,
+            Length::Px(px) if px > 0.0 => px,
+            Length::Percent(pct) => {
+                let resolved = pct / 100.0 * containing_block.content.width;
+                if resolved > 0.0 { resolved } else { intrinsic_width }
+            }
+            Length::Em(em) if em > 0.0 => em * font_size,
             _ => intrinsic_width,
         };
         
         let height = match self.style.height {
-            Length::Px(px) => px,
-            Length::Percent(pct) => pct / 100.0 * containing_block.content.height,
+            Length::Px(px) if px > 0.0 => px,
+            Length::Percent(pct) => {
+                let resolved = pct / 100.0 * containing_block.content.height;
+                // CRITICAL: Fall back to intrinsic height if percent resolves to 0
+                // This fixes form controls in flex containers before flex layout runs
+                if resolved > 0.0 { resolved } else { intrinsic_height }
+            }
+            Length::Em(em) if em > 0.0 => em * font_size,
             _ => intrinsic_height,
         };
         

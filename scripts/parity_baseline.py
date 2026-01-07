@@ -8,18 +8,28 @@ This script:
 3. Computes weighted tiered metrics (built-ins 60%, websuite 40%)
 4. Clusters failures into: sizing/layout, paint, text, images
 5. Saves a reproducible baseline report
+6. Auto-archives to parity-history/ for tracking progress
 
 Usage:
-    python3 scripts/parity_baseline.py [--output-dir <dir>]
+    python3 scripts/parity_baseline.py [--tag <name>] [--output-dir <dir>]
+    
+Examples:
+    python3 scripts/parity_baseline.py
+    python3 scripts/parity_baseline.py --tag "after-flex-fix"
+    python3 scripts/parity_baseline.py --no-archive
 """
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
+
+# Import archive functions
+from parity_archive import archive_run, get_previous_run, extract_summary
 
 # Configuration
 BUILTINS_WEIGHT = 0.60
@@ -271,10 +281,28 @@ def compute_weighted_metrics(
 
 def main():
     output_dir = Path("parity-baseline")
-    if "--output-dir" in sys.argv:
-        idx = sys.argv.index("--output-dir")
-        if idx + 1 < len(sys.argv):
-            output_dir = Path(sys.argv[idx + 1])
+    history_dir = Path("parity-history")
+    tag = None
+    auto_archive = True
+    
+    # Parse arguments
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i] == "--output-dir" and i + 1 < len(args):
+            output_dir = Path(args[i + 1])
+            i += 2
+        elif args[i] == "--tag" and i + 1 < len(args):
+            tag = args[i + 1]
+            i += 2
+        elif args[i] == "--history" and i + 1 < len(args):
+            history_dir = Path(args[i + 1])
+            i += 2
+        elif args[i] == "--no-archive":
+            auto_archive = False
+            i += 1
+        else:
+            i += 1
     
     output_dir.mkdir(parents=True, exist_ok=True)
     captures_dir = output_dir / "captures"
@@ -283,6 +311,8 @@ def main():
     print("=" * 60)
     print("Parity Baseline Capture")
     print(f"Output: {output_dir}")
+    if tag:
+        print(f"Tag: {tag}")
     print(f"Timestamp: {datetime.now().isoformat()}")
     print("=" * 60)
     
@@ -410,6 +440,64 @@ def main():
     # Determine overall parity estimate
     parity_estimate = 100 - metrics["tier_b_weighted_mean"]
     print(f"\n>>> ESTIMATED PARITY: {parity_estimate:.1f}% <<<")
+    
+    # Auto-archive the run
+    if auto_archive:
+        print("\n--- Auto-Archiving Run ---")
+        run_dir = archive_run(output_dir, history_dir, tag)
+        if run_dir:
+            print(f"  Archived to: {run_dir}")
+            
+            # Compare to previous run
+            prev_run_id = get_previous_run(history_dir, run_dir.name)
+            if prev_run_id:
+                print("\n--- Comparison to Previous Run ---")
+                prev_summary_path = history_dir / prev_run_id / "summary.json"
+                curr_summary_path = run_dir / "summary.json"
+                
+                if prev_summary_path.exists() and curr_summary_path.exists():
+                    with open(prev_summary_path) as f:
+                        prev_summary = json.load(f)
+                    with open(curr_summary_path) as f:
+                        curr_summary = json.load(f)
+                    
+                    prev_parity = prev_summary["estimated_parity"]
+                    curr_parity = curr_summary["estimated_parity"]
+                    delta = curr_parity - prev_parity
+                    
+                    indicator = "▲" if delta > 0 else "▼" if delta < 0 else "="
+                    status = "IMPROVED" if delta > 0 else "REGRESSED" if delta < 0 else "UNCHANGED"
+                    
+                    print(f"  Previous: {prev_parity:.1f}%")
+                    print(f"  Current:  {curr_parity:.1f}%")
+                    print(f"  Change:   {indicator} {delta:+.1f}% {status}")
+                    
+                    # Show significant case changes
+                    prev_cases = prev_summary.get("case_diffs", {})
+                    curr_cases = curr_summary.get("case_diffs", {})
+                    
+                    significant_changes = []
+                    for case_id in set(prev_cases.keys()) | set(curr_cases.keys()):
+                        prev_diff = prev_cases.get(case_id, {}).get("diff_pct", 100)
+                        curr_diff = curr_cases.get(case_id, {}).get("diff_pct", 100)
+                        case_delta = curr_diff - prev_diff
+                        if abs(case_delta) >= 5:
+                            significant_changes.append((case_id, prev_diff, curr_diff, case_delta))
+                    
+                    if significant_changes:
+                        print("\n  Significant Case Changes (>5%):")
+                        for case_id, prev_diff, curr_diff, case_delta in sorted(significant_changes, key=lambda x: x[3]):
+                            ind = "✓" if case_delta < 0 else "✗"
+                            print(f"    {case_id}: {prev_diff:.1f}% -> {curr_diff:.1f}% ({case_delta:+.1f}%) {ind}")
+        else:
+            print("  Failed to archive run")
+    
+    print("\n" + "=" * 60)
+    print("Run complete!")
+    if auto_archive:
+        print("Use 'python3 scripts/parity_compare.py' to see full comparison")
+        print("Use 'python3 scripts/parity_summary.py' to see trend report")
+    print("=" * 60)
 
 
 def generate_failure_packet(case_id: str, result: Dict[str, Any], output_dir: Path) -> Optional[str]:

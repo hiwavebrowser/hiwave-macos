@@ -1,7 +1,7 @@
 {
   "case_id": "shelf",
-  "generated_at": "2026-01-06T21:54:11.757430",
-  "estimated_diff_pct": 89.48717948717949,
+  "generated_at": "2026-01-06T22:49:22.858639",
+  "estimated_diff_pct": 86.41025641025641,
   "html_path": "crates/hiwave-app/src/ui/shelf.html",
   "dimensions": {
     "width": 1280,
@@ -11,8 +11,8 @@
   "layout_stats": {
     "total_boxes": 39,
     "positioned": 29,
-    "sized": 7,
-    "zero_size": 32,
+    "sized": 9,
+    "zero_size": 30,
     "at_origin": 10,
     "form_controls": 2,
     "text_boxes": 2,
@@ -46,11 +46,6 @@
       },
       {
         "type": "zero_size",
-        "node_type": "form_control",
-        "depth": 3
-      },
-      {
-        "type": "zero_size",
         "node_type": "inline",
         "depth": 3
       },
@@ -102,11 +97,6 @@
       {
         "type": "zero_size",
         "node_type": "inline",
-        "depth": 4
-      },
-      {
-        "type": "zero_size",
-        "node_type": "form_control",
         "depth": 4
       },
       {
@@ -175,19 +165,19 @@
         "depth": 2
       }
     ],
-    "sizing_rate": 0.1794871794871795,
+    "sizing_rate": 0.23076923076923078,
     "positioning_rate": 0.7435897435897436
   },
   "issue_clusters": {
-    "sizing_layout": 31,
+    "sizing_layout": 29,
     "paint": 0,
     "text": 0,
     "images": 0
   },
   "dominant_issue": "sizing_layout",
-  "dominant_count": 31,
+  "dominant_count": 29,
   "perf": {
-    "elapsed_ms": 4171,
+    "elapsed_ms": 4169,
     "final_layout": {
       "left_sidebar_width": 232.0,
       "right_sidebar_open": true,
@@ -196,42 +186,42 @@
     "frame_dumped": true,
     "perf": {
       "engine_init": {
-        "avg_ms": 11.66,
+        "avg_ms": 14.79,
         "count": 1,
-        "max_ms": 11.66,
-        "min_ms": 11.66,
-        "total_ms": 11.66
+        "max_ms": 14.79,
+        "min_ms": 14.79,
+        "total_ms": 14.79
       },
       "frame_capture": {
-        "avg_ms": 109.57,
+        "avg_ms": 119.15,
         "count": 1,
-        "max_ms": 109.57,
-        "min_ms": 109.57,
-        "total_ms": 109.57
+        "max_ms": 119.15,
+        "min_ms": 119.15,
+        "total_ms": 119.15
       },
       "html_load": {
-        "avg_ms": 25.7,
+        "avg_ms": 34.94,
         "count": 1,
-        "max_ms": 25.7,
-        "min_ms": 25.7,
-        "total_ms": 25.7
+        "max_ms": 34.94,
+        "min_ms": 34.94,
+        "total_ms": 34.94
       },
       "render": {
-        "avg_ms": 8.13,
-        "count": 457,
-        "max_ms": 10.79,
-        "min_ms": 0.84,
-        "total_ms": 3717.17
+        "avg_ms": 16.34,
+        "count": 214,
+        "max_ms": 18.43,
+        "min_ms": 1.18,
+        "total_ms": 3496.55
       },
       "view_create": {
-        "avg_ms": 3.09,
+        "avg_ms": 3.76,
         "count": 1,
-        "max_ms": 3.09,
-        "min_ms": 3.09,
-        "total_ms": 3.09
+        "max_ms": 3.76,
+        "min_ms": 3.76,
+        "total_ms": 3.76
       }
     },
-    "render_count": 456,
+    "render_count": 213,
     "status": "pass"
   }
 }

@@ -7,22 +7,22 @@
     {
       "case_id": "shelf",
       "type": "builtin",
-      "diff_pct": 89.48717948717949
-    },
-    {
-      "case_id": "new_tab",
-      "type": "builtin",
-      "diff_pct": 88.96713615023475
+      "diff_pct": 86.41025641025641
     },
     {
       "case_id": "gradient-backgrounds",
       "type": "websuite",
       "diff_pct": 85.55555555555556
+    },
+    {
+      "case_id": "new_tab",
+      "type": "builtin",
+      "diff_pct": 82.48826291079811
     }
   ],
   "acceptance_criteria": [
     "Reduce diff% for shelf below 25%",
     "All three cases show measurable improvement"
   ],
-  "created": "2026-01-06T21:54:11.757237"
+  "created": "2026-01-06T22:49:22.858493"
 }
