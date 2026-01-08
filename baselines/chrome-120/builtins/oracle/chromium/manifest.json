@@ -1,0 +1,10 @@
+{
+  "timestamp": "2026-01-08T03:36:54.342Z",
+  "browser": "chromium",
+  "cases": {
+    "new_tab": {
+      "success": true,
+      "path": "baselines/chrome-120/builtins/oracle/chromium/new_tab.png"
+    }
+  }
+}

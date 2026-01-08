@@ -1,0 +1,898 @@
+{
+  "timestamp": "2026-01-08T03:37:17.236Z",
+  "viewport": {
+    "width": 1280,
+    "height": 100
+  },
+  "elementCount": 37,
+  "elements": [
+    {
+      "selector": "html > body",
+      "tag": "body",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 100,
+        "top": 0,
+        "right": 1280,
+        "bottom": 100,
+        "left": 0
+      },
+      "client": {
+        "width": 1280,
+        "height": 100
+      },
+      "scroll": {
+        "width": 1280,
+        "height": 100,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 100,
+        "top": 0,
+        "right": 1280,
+        "bottom": 100,
+        "left": 0
+      },
+      "client": {
+        "width": 1280,
+        "height": 100
+      },
+      "scroll": {
+        "width": 1280,
+        "height": 100,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.tab-strip:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 40,
+        "top": 0,
+        "right": 1280,
+        "bottom": 40,
+        "left": 0
+      },
+      "client": {
+        "width": 1280,
+        "height": 39
+      },
+      "scroll": {
+        "width": 1280,
+        "height": 39,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.tab-strip:nth-of-type(1) > div.tab active:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 8,
+        "y": 3,
+        "width": 120,
+        "height": 36,
+        "top": 3,
+        "right": 128,
+        "bottom": 39,
+        "left": 8
+      },
+      "client": {
+        "width": 120,
+        "height": 36
+      },
+      "scroll": {
+        "width": 120,
+        "height": 36,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.tab-strip:nth-of-type(1) > div.tab active:nth-of-type(1) > span.tab-title:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 24,
+        "y": 13,
+        "width": 62,
+        "height": 16,
+        "top": 13,
+        "right": 86,
+        "bottom": 29,
+        "left": 24
+      },
+      "client": {
+        "width": 62,
+        "height": 16
+      },
+      "scroll": {
+        "width": 62,
+        "height": 16,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.tab-strip:nth-of-type(1) > div.tab active:nth-of-type(1) > span.tab-close:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 94,
+        "y": 12,
+        "width": 18,
+        "height": 18,
+        "top": 12,
+        "right": 112,
+        "bottom": 30,
+        "left": 94
+      },
+      "client": {
+        "width": 18,
+        "height": 18
+      },
+      "scroll": {
+        "width": 18,
+        "height": 18,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.tab-strip:nth-of-type(1) > div.new-tab-btn:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 134,
+        "y": 11,
+        "width": 28,
+        "height": 28,
+        "top": 11,
+        "right": 162,
+        "bottom": 39,
+        "left": 134
+      },
+      "client": {
+        "width": 28,
+        "height": 28
+      },
+      "scroll": {
+        "width": 28,
+        "height": 28,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 40,
+        "width": 1280,
+        "height": 44,
+        "top": 40,
+        "right": 1280,
+        "bottom": 84,
+        "left": 0
+      },
+      "client": {
+        "width": 1280,
+        "height": 43
+      },
+      "scroll": {
+        "width": 1280,
+        "height": 43,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.sidebar-toggle:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 8,
+        "y": 40,
+        "width": 200,
+        "height": 43,
+        "top": 40,
+        "right": 208,
+        "bottom": 83,
+        "left": 8
+      },
+      "client": {
+        "width": 200,
+        "height": 43
+      },
+      "scroll": {
+        "width": 200,
+        "height": 43,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.sidebar-toggle:nth-of-type(1) > span.workspace-name",
+      "tag": "span",
+      "rect": {
+        "x": 16,
+        "y": 53.5,
+        "width": 45.9375,
+        "height": 16,
+        "top": 53.5,
+        "right": 61.9375,
+        "bottom": 69.5,
+        "left": 16
+      },
+      "client": {
+        "width": 46,
+        "height": 16
+      },
+      "scroll": {
+        "width": 46,
+        "height": 16,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.nav-btn disabled:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 214,
+        "y": 45.5,
+        "width": 32,
+        "height": 32,
+        "top": 45.5,
+        "right": 246,
+        "bottom": 77.5,
+        "left": 214
+      },
+      "client": {
+        "width": 32,
+        "height": 32
+      },
+      "scroll": {
+        "width": 32,
+        "height": 32,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.nav-btn disabled:nth-of-type(3)",
+      "tag": "div",
+      "rect": {
+        "x": 252,
+        "y": 45.5,
+        "width": 32,
+        "height": 32,
+        "top": 45.5,
+        "right": 284,
+        "bottom": 77.5,
+        "left": 252
+      },
+      "client": {
+        "width": 32,
+        "height": 32
+      },
+      "scroll": {
+        "width": 32,
+        "height": 32,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.nav-btn:nth-of-type(4)",
+      "tag": "div",
+      "rect": {
+        "x": 290,
+        "y": 45.5,
+        "width": 32,
+        "height": 32,
+        "top": 45.5,
+        "right": 322,
+        "bottom": 77.5,
+        "left": 290
+      },
+      "client": {
+        "width": 32,
+        "height": 32
+      },
+      "scroll": {
+        "width": 32,
+        "height": 32,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.url-bar:nth-of-type(5)",
+      "tag": "div",
+      "rect": {
+        "x": 328,
+        "y": 45.5,
+        "width": 906,
+        "height": 32,
+        "top": 45.5,
+        "right": 1234,
+        "bottom": 77.5,
+        "left": 328
+      },
+      "client": {
+        "width": 904,
+        "height": 30
+      },
+      "scroll": {
+        "width": 904,
+        "height": 30,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.url-bar:nth-of-type(5) > span.url-icon:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 341,
+        "y": 50,
+        "width": 18,
+        "height": 23,
+        "top": 50,
+        "right": 359,
+        "bottom": 73,
+        "left": 341
+      },
+      "client": {
+        "width": 18,
+        "height": 23
+      },
+      "scroll": {
+        "width": 18,
+        "height": 23,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.url-bar:nth-of-type(5) > span.url-text:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 367,
+        "y": 53,
+        "width": 809,
+        "height": 17,
+        "top": 53,
+        "right": 1176,
+        "bottom": 70,
+        "left": 367
+      },
+      "client": {
+        "width": 809,
+        "height": 17
+      },
+      "scroll": {
+        "width": 809,
+        "height": 17,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.url-bar:nth-of-type(5) > span.shield-icon:nth-of-type(3)",
+      "tag": "span",
+      "rect": {
+        "x": 1184,
+        "y": 51.5,
+        "width": 20,
+        "height": 20,
+        "top": 51.5,
+        "right": 1204,
+        "bottom": 71.5,
+        "left": 1184
+      },
+      "client": {
+        "width": 20,
+        "height": 20
+      },
+      "scroll": {
+        "width": 20,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.url-bar:nth-of-type(5) > span.shield-count:nth-of-type(4)",
+      "tag": "span",
+      "rect": {
+        "x": 1214,
+        "y": 55,
+        "width": 7,
+        "height": 13,
+        "top": 55,
+        "right": 1221,
+        "bottom": 68,
+        "left": 1214
+      },
+      "client": {
+        "width": 7,
+        "height": 13
+      },
+      "scroll": {
+        "width": 7,
+        "height": 13,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.menu-btn:nth-of-type(6)",
+      "tag": "div",
+      "rect": {
+        "x": 1240,
+        "y": 45.5,
+        "width": 32,
+        "height": 32,
+        "top": 45.5,
+        "right": 1272,
+        "bottom": 77.5,
+        "left": 1240
+      },
+      "client": {
+        "width": 32,
+        "height": 32
+      },
+      "scroll": {
+        "width": 32,
+        "height": 32,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 84,
+        "width": 220,
+        "height": 16,
+        "top": 84,
+        "right": 220,
+        "bottom": 100,
+        "left": 0
+      },
+      "client": {
+        "width": 219,
+        "height": 16
+      },
+      "scroll": {
+        "width": 219,
+        "height": 205,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3) > div.sidebar-section",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 84,
+        "width": 219,
+        "height": 205,
+        "top": 84,
+        "right": 219,
+        "bottom": 289,
+        "left": 0
+      },
+      "client": {
+        "width": 219,
+        "height": 205
+      },
+      "scroll": {
+        "width": 219,
+        "height": 205,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3) > div.sidebar-section > div.sidebar-title:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 8,
+        "y": 96,
+        "width": 203,
+        "height": 13,
+        "top": 96,
+        "right": 211,
+        "bottom": 109,
+        "left": 8
+      },
+      "client": {
+        "width": 203,
+        "height": 13
+      },
+      "scroll": {
+        "width": 203,
+        "height": 13,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3) > div.sidebar-section > div.sidebar-item active:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 8,
+        "y": 117,
+        "width": 203,
+        "height": 32,
+        "top": 117,
+        "right": 211,
+        "bottom": 149,
+        "left": 8
+      },
+      "client": {
+        "width": 203,
+        "height": 32
+      },
+      "scroll": {
+        "width": 203,
+        "height": 32,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3) > div.sidebar-section > div.sidebar-item active:nth-of-type(2) > span.sidebar-icon:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 16,
+        "y": 125,
+        "width": 16,
+        "height": 16,
+        "top": 125,
+        "right": 32,
+        "bottom": 141,
+        "left": 16
+      },
+      "client": {
+        "width": 16,
+        "height": 16
+      },
+      "scroll": {
+        "width": 17,
+        "height": 20,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3) > div.sidebar-section > div.sidebar-item active:nth-of-type(2) > span.sidebar-label:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 40,
+        "y": 125,
+        "width": 35.765625,
+        "height": 16,
+        "top": 125,
+        "right": 75.765625,
+        "bottom": 141,
+        "left": 40
+      },
+      "client": {
+        "width": 36,
+        "height": 16
+      },
+      "scroll": {
+        "width": 36,
+        "height": 16,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3) > div.sidebar-section > div.sidebar-item:nth-of-type(3)",
+      "tag": "div",
+      "rect": {
+        "x": 8,
+        "y": 149,
+        "width": 203,
+        "height": 32,
+        "top": 149,
+        "right": 211,
+        "bottom": 181,
+        "left": 8
+      },
+      "client": {
+        "width": 203,
+        "height": 32
+      },
+      "scroll": {
+        "width": 203,
+        "height": 32,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3) > div.sidebar-section > div.sidebar-item:nth-of-type(3) > span.sidebar-icon:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 16,
+        "y": 157,
+        "width": 16,
+        "height": 16,
+        "top": 157,
+        "right": 32,
+        "bottom": 173,
+        "left": 16
+      },
+      "client": {
+        "width": 16,
+        "height": 16
+      },
+      "scroll": {
+        "width": 17,
+        "height": 20,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3) > div.sidebar-section > div.sidebar-item:nth-of-type(3) > span.sidebar-label:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 40,
+        "y": 157,
+        "width": 54.734375,
+        "height": 16,
+        "top": 157,
+        "right": 94.734375,
+        "bottom": 173,
+        "left": 40
+      },
+      "client": {
+        "width": 55,
+        "height": 16
+      },
+      "scroll": {
+        "width": 55,
+        "height": 16,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3) > div.sidebar-section > div.sidebar-item:nth-of-type(4)",
+      "tag": "div",
+      "rect": {
+        "x": 8,
+        "y": 181,
+        "width": 203,
+        "height": 32,
+        "top": 181,
+        "right": 211,
+        "bottom": 213,
+        "left": 8
+      },
+      "client": {
+        "width": 203,
+        "height": 32
+      },
+      "scroll": {
+        "width": 203,
+        "height": 32,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3) > div.sidebar-section > div.sidebar-item:nth-of-type(4) > span.sidebar-icon:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 16,
+        "y": 189,
+        "width": 16,
+        "height": 16,
+        "top": 189,
+        "right": 32,
+        "bottom": 205,
+        "left": 16
+      },
+      "client": {
+        "width": 16,
+        "height": 16
+      },
+      "scroll": {
+        "width": 17,
+        "height": 20,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3) > div.sidebar-section > div.sidebar-item:nth-of-type(4) > span.sidebar-label:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 40,
+        "y": 189,
+        "width": 74.421875,
+        "height": 16,
+        "top": 189,
+        "right": 114.421875,
+        "bottom": 205,
+        "left": 40
+      },
+      "client": {
+        "width": 74,
+        "height": 16
+      },
+      "scroll": {
+        "width": 74,
+        "height": 16,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3) > div.sidebar-section > div.sidebar-item:nth-of-type(5)",
+      "tag": "div",
+      "rect": {
+        "x": 8,
+        "y": 213,
+        "width": 203,
+        "height": 32,
+        "top": 213,
+        "right": 211,
+        "bottom": 245,
+        "left": 8
+      },
+      "client": {
+        "width": 203,
+        "height": 32
+      },
+      "scroll": {
+        "width": 203,
+        "height": 32,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3) > div.sidebar-section > div.sidebar-item:nth-of-type(5) > span.sidebar-icon:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 16,
+        "y": 221,
+        "width": 16,
+        "height": 16,
+        "top": 221,
+        "right": 32,
+        "bottom": 237,
+        "left": 16
+      },
+      "client": {
+        "width": 16,
+        "height": 16
+      },
+      "scroll": {
+        "width": 17,
+        "height": 20,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3) > div.sidebar-section > div.sidebar-item:nth-of-type(5) > span.sidebar-label:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 40,
+        "y": 221,
+        "width": 66.78125,
+        "height": 16,
+        "top": 221,
+        "right": 106.78125,
+        "bottom": 237,
+        "left": 40
+      },
+      "client": {
+        "width": 67,
+        "height": 16
+      },
+      "scroll": {
+        "width": 67,
+        "height": 16,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3) > div.sidebar-section > div.sidebar-item:nth-of-type(6)",
+      "tag": "div",
+      "rect": {
+        "x": 8,
+        "y": 245,
+        "width": 203,
+        "height": 32,
+        "top": 245,
+        "right": 211,
+        "bottom": 277,
+        "left": 8
+      },
+      "client": {
+        "width": 203,
+        "height": 32
+      },
+      "scroll": {
+        "width": 203,
+        "height": 32,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3) > div.sidebar-section > div.sidebar-item:nth-of-type(6) > span.sidebar-icon:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 16,
+        "y": 253,
+        "width": 16,
+        "height": 16,
+        "top": 253,
+        "right": 32,
+        "bottom": 269,
+        "left": 16
+      },
+      "client": {
+        "width": 16,
+        "height": 16
+      },
+      "scroll": {
+        "width": 17,
+        "height": 20,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3) > div.sidebar-section > div.sidebar-item:nth-of-type(6) > span.sidebar-label:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 40,
+        "y": 253,
+        "width": 43.453125,
+        "height": 16,
+        "top": 253,
+        "right": 83.453125,
+        "bottom": 269,
+        "left": 40
+      },
+      "client": {
+        "width": 43,
+        "height": 16
+      },
+      "scroll": {
+        "width": 43,
+        "height": 16,
+        "top": 0,
+        "left": 0
+      }
+    }
+  ]
+}

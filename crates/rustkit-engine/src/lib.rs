@@ -3164,26 +3164,156 @@ impl Engine {
     }
 
     /// Calculate selector specificity for ordering.
+    /// Returns (a, b, c) where:
+    /// - a = number of ID selectors
+    /// - b = number of class selectors, attribute selectors, and pseudo-classes
+    /// - c = number of type selectors and pseudo-elements
     fn selector_specificity(&self, selector: &str) -> (usize, usize, usize) {
-        let mut ids = 0;
-        let mut classes = 0;
-        let mut tags = 0;
+        let mut ids = 0;      // (a)
+        let mut classes = 0;  // (b)
+        let mut tags = 0;     // (c)
         
+        // Handle comma-separated selectors - take max specificity
+        if selector.contains(',') {
+            let mut max_spec = (0, 0, 0);
+            for part in selector.split(',') {
+                let spec = self.selector_specificity(part.trim());
+                if spec > max_spec {
+                    max_spec = spec;
+                }
+            }
+            return max_spec;
+        }
+        
+        // Process each part of the selector (space-separated for descendants)
         for part in selector.split_whitespace() {
-            for segment in part.split(',') {
-                let segment = segment.trim();
-                // Count IDs
-                ids += segment.matches('#').count();
-                // Count classes and pseudo-classes
-                classes += segment.matches('.').count();
-                classes += segment.matches(':').count();
-                // Count type selectors
-                if !segment.is_empty() && 
-                   !segment.starts_with('.') && 
-                   !segment.starts_with('#') && 
-                   !segment.starts_with(':') &&
-                   segment != "*" {
-                    tags += 1;
+            // Skip combinators
+            if part == ">" || part == "+" || part == "~" {
+                continue;
+            }
+            
+            let chars: Vec<char> = part.chars().collect();
+            let mut i = 0;
+            
+            while i < chars.len() {
+                match chars[i] {
+                    '#' => {
+                        // ID selector
+                        ids += 1;
+                        i += 1;
+                        // Skip the ID name
+                        while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_') {
+                            i += 1;
+                        }
+                    }
+                    '.' => {
+                        // Class selector
+                        classes += 1;
+                        i += 1;
+                        // Skip the class name
+                        while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_') {
+                            i += 1;
+                        }
+                    }
+                    '[' => {
+                        // Attribute selector
+                        classes += 1;
+                        i += 1;
+                        // Skip until ]
+                        while i < chars.len() && chars[i] != ']' {
+                            i += 1;
+                        }
+                        if i < chars.len() {
+                            i += 1; // Skip ]
+                        }
+                    }
+                    ':' => {
+                        i += 1;
+                        if i < chars.len() && chars[i] == ':' {
+                            // Pseudo-element (::before, ::after, etc.)
+                            tags += 1;
+                            i += 1;
+                            // Skip the pseudo-element name
+                            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_') {
+                                i += 1;
+                            }
+                        } else {
+                            // Pseudo-class
+                            // Check for functional pseudo-classes
+                            let start = i;
+                            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_') {
+                                i += 1;
+                            }
+                            let name: String = chars[start..i].iter().collect();
+                            
+                            if i < chars.len() && chars[i] == '(' {
+                                // Functional pseudo-class
+                                if name == "not" || name == "is" {
+                                    // :not() and :is() - add specificity of argument
+                                    i += 1; // Skip (
+                                    let mut paren_depth = 1;
+                                    let arg_start = i;
+                                    while i < chars.len() && paren_depth > 0 {
+                                        if chars[i] == '(' {
+                                            paren_depth += 1;
+                                        } else if chars[i] == ')' {
+                                            paren_depth -= 1;
+                                        }
+                                        i += 1;
+                                    }
+                                    let arg: String = chars[arg_start..i.saturating_sub(1)].iter().collect();
+                                    let (a, b, c) = self.selector_specificity(&arg);
+                                    ids += a;
+                                    classes += b;
+                                    tags += c;
+                                } else if name == "where" {
+                                    // :where() has zero specificity
+                                    i += 1; // Skip (
+                                    let mut paren_depth = 1;
+                                    while i < chars.len() && paren_depth > 0 {
+                                        if chars[i] == '(' {
+                                            paren_depth += 1;
+                                        } else if chars[i] == ')' {
+                                            paren_depth -= 1;
+                                        }
+                                        i += 1;
+                                    }
+                                } else {
+                                    // Other functional pseudo-class (e.g., :nth-child(n))
+                                    classes += 1;
+                                    i += 1; // Skip (
+                                    let mut paren_depth = 1;
+                                    while i < chars.len() && paren_depth > 0 {
+                                        if chars[i] == '(' {
+                                            paren_depth += 1;
+                                        } else if chars[i] == ')' {
+                                            paren_depth -= 1;
+                                        }
+                                        i += 1;
+                                    }
+                                }
+                            } else {
+                                // Simple pseudo-class (:hover, :first-child, etc.)
+                                classes += 1;
+                            }
+                        }
+                    }
+                    '*' => {
+                        // Universal selector - no specificity
+                        i += 1;
+                    }
+                    _ if chars[i].is_alphabetic() || chars[i] == '_' => {
+                        // Type selector (element name)
+                        tags += 1;
+                        i += 1;
+                        // Skip the element name
+                        while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_') {
+                            i += 1;
+                        }
+                    }
+                    _ => {
+                        i += 1;
+                    }
                 }
             }
         }
@@ -5298,5 +5428,80 @@ mod tests {
         assert_eq!(parts[0], "rgb(255, 0, 0)");
         assert_eq!(parts[1].trim(), "blue");
         assert_eq!(parts[2].trim(), "rgba(0, 255, 0, 0.5)");
+    }
+
+    #[test]
+    fn test_selector_specificity() {
+        // Create a minimal engine for testing
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(_) => {
+                eprintln!("Skipping test: GPU not available");
+                return;
+            }
+        };
+        
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+        };
+        
+        // Test type selector: (0, 0, 1)
+        assert_eq!(engine.selector_specificity("div"), (0, 0, 1));
+        assert_eq!(engine.selector_specificity("p"), (0, 0, 1));
+        
+        // Test class selector: (0, 1, 0)
+        assert_eq!(engine.selector_specificity(".class"), (0, 1, 0));
+        assert_eq!(engine.selector_specificity(".a.b"), (0, 2, 0));
+        
+        // Test ID selector: (1, 0, 0)
+        assert_eq!(engine.selector_specificity("#id"), (1, 0, 0));
+        
+        // Test combined selectors
+        assert_eq!(engine.selector_specificity("div.class"), (0, 1, 1));
+        assert_eq!(engine.selector_specificity("div#id"), (1, 0, 1));
+        assert_eq!(engine.selector_specificity("#id.class"), (1, 1, 0));
+        
+        // Test pseudo-classes: (0, 1, 0) each
+        assert_eq!(engine.selector_specificity(":hover"), (0, 1, 0));
+        assert_eq!(engine.selector_specificity(":first-child"), (0, 1, 0));
+        assert_eq!(engine.selector_specificity("div:first-child"), (0, 1, 1));
+        
+        // Test pseudo-elements: (0, 0, 1) each
+        assert_eq!(engine.selector_specificity("::before"), (0, 0, 1));
+        assert_eq!(engine.selector_specificity("div::before"), (0, 0, 2));
+        
+        // Test attribute selectors: (0, 1, 0) each
+        assert_eq!(engine.selector_specificity("[type]"), (0, 1, 0));
+        assert_eq!(engine.selector_specificity("[type=text]"), (0, 1, 0));
+        assert_eq!(engine.selector_specificity("input[type=text]"), (0, 1, 1));
+        
+        // Test descendant selectors
+        assert_eq!(engine.selector_specificity("body div"), (0, 0, 2));
+        assert_eq!(engine.selector_specificity("body .class"), (0, 1, 1));
+        assert_eq!(engine.selector_specificity("#id .class div"), (1, 1, 1));
+        
+        // Test :not() - adds specificity of argument
+        assert_eq!(engine.selector_specificity(":not(.class)"), (0, 1, 0));
+        assert_eq!(engine.selector_specificity("div:not(.class)"), (0, 1, 1));
+        
+        // Test universal selector: (0, 0, 0)
+        assert_eq!(engine.selector_specificity("*"), (0, 0, 0));
+        
+        // Test complex selectors
+        assert_eq!(engine.selector_specificity("div.a.b#id:hover"), (1, 3, 1));
+        
+        // Test ID beats multiple classes
+        let id_spec = engine.selector_specificity("#test");
+        let multi_class_spec = engine.selector_specificity(".a.b.c.d.e");
+        assert!(id_spec > multi_class_spec, "ID should beat multiple classes");
     }
 }
