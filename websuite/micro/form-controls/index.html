@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Form Controls Intrinsic Sizing Test</title>
+  <style>
+    /* Reset */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; padding: 20px; background: #f5f5f5; }
+    
+    h2 { margin: 20px 0 10px; font-size: 14px; }
+    
+    .container {
+      border: 2px solid #333;
+      padding: 10px;
+      margin: 10px 0;
+      background: white;
+    }
+    
+    .row {
+      margin: 10px 0;
+    }
+    
+    label {
+      display: inline-block;
+      width: 120px;
+      font-size: 12px;
+    }
+    
+    /* ============================================
+       TEST 1: Text input - default intrinsic size
+       Should be ~170px wide, ~20px tall
+       ============================================ */
+    
+    /* ============================================
+       TEST 2: Text input with explicit width
+       Should be 300px wide
+       ============================================ */
+    .test2 input { width: 300px; }
+    
+    /* ============================================
+       TEST 3: Button - intrinsic size
+       Should fit content + padding
+       ============================================ */
+    
+    /* ============================================
+       TEST 4: Button with explicit dimensions
+       Should be 200x50
+       ============================================ */
+    .test4 button { width: 200px; height: 50px; }
+    
+    /* ============================================
+       TEST 5: Checkbox and radio - intrinsic size
+       Should be ~13x13 or ~16x16 depending on browser
+       ============================================ */
+    
+    /* ============================================
+       TEST 6: Select dropdown - intrinsic size
+       Should fit content + dropdown arrow
+       ============================================ */
+    
+    /* ============================================
+       TEST 7: Textarea - default rows/cols
+       Should be ~170px wide, ~50px tall (2 rows)
+       ============================================ */
+    
+    /* ============================================
+       TEST 8: Textarea with explicit rows/cols
+       Should be larger based on rows=5 cols=40
+       ============================================ */
+    
+    /* ============================================
+       TEST 9: Range input - intrinsic size
+       Should be ~130px wide
+       ============================================ */
+    
+    /* ============================================
+       TEST 10: Color input - intrinsic size
+       Should be ~44x23 or similar
+       ============================================ */
+    
+    /* ============================================
+       TEST 11: Form controls in flex container
+       Should size correctly in flex
+       ============================================ */
+    .test11 {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    
+    /* ============================================
+       TEST 12: Form controls with percentage width
+       Should be 50% of container
+       ============================================ */
+    .test12 { width: 400px; }
+    .test12 input { width: 50%; }
+  </style>
+</head>
+<body>
+  <h1>Form Controls Intrinsic Sizing Test</h1>
+  
+  <h2>1. Text input - default size</h2>
+  <div class="container test1">
+    <div class="row">
+      <label>Text:</label>
+      <input type="text" placeholder="Default size">
+    </div>
+    <div class="row">
+      <label>Email:</label>
+      <input type="email" placeholder="Email input">
+    </div>
+    <div class="row">
+      <label>Password:</label>
+      <input type="password" placeholder="Password">
+    </div>
+    <div class="row">
+      <label>Number:</label>
+      <input type="number" value="42">
+    </div>
+  </div>
+  
+  <h2>2. Text input with width: 300px</h2>
+  <div class="container test2">
+    <div class="row">
+      <label>Wide input:</label>
+      <input type="text" placeholder="300px wide">
+    </div>
+  </div>
+  
+  <h2>3. Buttons - intrinsic size</h2>
+  <div class="container test3">
+    <button>Short</button>
+    <button>Medium Button</button>
+    <button>This is a longer button label</button>
+    <input type="submit" value="Submit">
+    <input type="reset" value="Reset">
+  </div>
+  
+  <h2>4. Button with explicit dimensions (200x50)</h2>
+  <div class="container test4">
+    <button>Fixed Size Button</button>
+  </div>
+  
+  <h2>5. Checkbox and Radio</h2>
+  <div class="container test5">
+    <div class="row">
+      <input type="checkbox" id="cb1"> <label for="cb1">Checkbox 1</label>
+      <input type="checkbox" id="cb2" checked> <label for="cb2">Checkbox 2 (checked)</label>
+    </div>
+    <div class="row">
+      <input type="radio" name="radio" id="r1"> <label for="r1">Radio 1</label>
+      <input type="radio" name="radio" id="r2" checked> <label for="r2">Radio 2 (checked)</label>
+    </div>
+  </div>
+  
+  <h2>6. Select dropdown</h2>
+  <div class="container test6">
+    <div class="row">
+      <label>Select:</label>
+      <select>
+        <option>Option 1</option>
+        <option>Option 2</option>
+        <option>A longer option text</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>Multiple:</label>
+      <select multiple size="3">
+        <option>Item 1</option>
+        <option>Item 2</option>
+        <option>Item 3</option>
+        <option>Item 4</option>
+      </select>
+    </div>
+  </div>
+  
+  <h2>7. Textarea - default size</h2>
+  <div class="container test7">
+    <textarea placeholder="Default textarea"></textarea>
+  </div>
+  
+  <h2>8. Textarea with rows=5 cols=40</h2>
+  <div class="container test8">
+    <textarea rows="5" cols="40" placeholder="5 rows, 40 cols"></textarea>
+  </div>
+  
+  <h2>9. Range input</h2>
+  <div class="container test9">
+    <div class="row">
+      <label>Range:</label>
+      <input type="range" min="0" max="100" value="50">
+    </div>
+  </div>
+  
+  <h2>10. Color input</h2>
+  <div class="container test10">
+    <div class="row">
+      <label>Color:</label>
+      <input type="color" value="#3498db">
+    </div>
+  </div>
+  
+  <h2>11. Form controls in flex</h2>
+  <div class="container test11">
+    <input type="text" placeholder="Text">
+    <button>Button</button>
+    <select><option>Select</option></select>
+    <input type="checkbox">
+  </div>
+  
+  <h2>12. Percentage width (50% of 400px)</h2>
+  <div class="container test12">
+    <input type="text" placeholder="50% width">
+  </div>
+</body>
+</html>
+
