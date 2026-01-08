@@ -1794,16 +1794,22 @@ impl Engine {
                 }
             }
                     "background-color" | "background" | "background-image" => {
-                        debug!(value = value, "Applying background");
-                        // Check for gradient first
-                        if let Some(gradient) = parse_gradient(value) {
-                            debug!("Parsed gradient background");
-                            style.background_gradient = Some(gradient);
-                        } else if let Some(color) = parse_color(value) {
-                            debug!(?color, "Parsed background color");
-                            style.background_color = color;
-                        } else {
-                            debug!("Failed to parse background");
+                        // Handle multiple backgrounds (comma-separated)
+                        // The last layer is the bottom-most (typically the solid color)
+                        let layers: Vec<&str> = split_by_comma(value);
+                        
+                        for layer in layers.iter().rev() {
+                            let layer = layer.trim();
+                            if layer.is_empty() {
+                                continue;
+                            }
+                            
+                            // Check for gradient first
+                            if let Some(gradient) = parse_gradient(layer) {
+                                style.background_gradient = Some(gradient);
+                            } else if let Some(color) = parse_color(layer) {
+                                style.background_color = color;
+                            }
                         }
                     }
                     "font-size" => {

@@ -1,43 +1,17 @@
 {
-  "timestamp": "2026-01-07T22:51:03.037653",
-  "scope": "builtins",
-  "passed": 3,
-  "failed": 2,
+  "timestamp": "2026-01-07T23:03:40.879258",
+  "scope": "all",
+  "passed": 0,
+  "failed": 1,
   "results": [
-    {
-      "case_id": "new_tab",
-      "type": "builtins",
-      "threshold": 15,
-      "pixel": {
-        "diffPixels": 16799,
-        "totalPixels": 1024000,
-        "diffPercent": 1.6405273437499999,
-        "width": 1280,
-        "height": 800,
-        "diffPath": "/Users/petecopeland/Repos/hiwave-macos/parity-baseline/diffs/new_tab/diff.png",
-        "heatmapPath": "/Users/petecopeland/Repos/hiwave-macos/parity-baseline/diffs/new_tab/heatmap.png"
-      },
-      "styles": {
-        "error": "RustKit styles not found",
-        "matched": 0,
-        "mismatched": 0
-      },
-      "rects": {
-        "matched": 0,
-        "mismatched": 67,
-        "differences": []
-      },
-      "passed": true,
-      "diff_pct": 1.6405273437499999
-    },
     {
       "case_id": "about",
       "type": "builtins",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 478169,
+        "diffPixels": 477970,
         "totalPixels": 480000,
-        "diffPercent": 99.61854166666667,
+        "diffPercent": 99.57708333333333,
         "width": 800,
         "height": 600,
         "diffPath": "/Users/petecopeland/Repos/hiwave-macos/parity-baseline/diffs/about/diff.png",
@@ -54,85 +28,7 @@
         "differences": []
       },
       "passed": false,
-      "diff_pct": 99.61854166666667
-    },
-    {
-      "case_id": "settings",
-      "type": "builtins",
-      "threshold": 15,
-      "pixel": {
-        "diffPixels": 782475,
-        "totalPixels": 786432,
-        "diffPercent": 99.49684143066406,
-        "width": 1024,
-        "height": 768,
-        "diffPath": "/Users/petecopeland/Repos/hiwave-macos/parity-baseline/diffs/settings/diff.png",
-        "heatmapPath": "/Users/petecopeland/Repos/hiwave-macos/parity-baseline/diffs/settings/heatmap.png"
-      },
-      "styles": {
-        "error": "RustKit styles not found",
-        "matched": 0,
-        "mismatched": 0
-      },
-      "rects": {
-        "matched": 0,
-        "mismatched": 189,
-        "differences": []
-      },
-      "passed": false,
-      "diff_pct": 99.49684143066406
-    },
-    {
-      "case_id": "chrome_rustkit",
-      "type": "builtins",
-      "threshold": 15,
-      "pixel": {
-        "diffPixels": 2520,
-        "totalPixels": 128000,
-        "diffPercent": 1.96875,
-        "width": 1280,
-        "height": 100,
-        "diffPath": "/Users/petecopeland/Repos/hiwave-macos/parity-baseline/diffs/chrome_rustkit/diff.png",
-        "heatmapPath": "/Users/petecopeland/Repos/hiwave-macos/parity-baseline/diffs/chrome_rustkit/heatmap.png"
-      },
-      "styles": {
-        "error": "RustKit styles not found",
-        "matched": 0,
-        "mismatched": 0
-      },
-      "rects": {
-        "matched": 0,
-        "mismatched": 37,
-        "differences": []
-      },
-      "passed": true,
-      "diff_pct": 1.96875
-    },
-    {
-      "case_id": "shelf",
-      "type": "builtins",
-      "threshold": 15,
-      "pixel": {
-        "diffPixels": 4664,
-        "totalPixels": 153600,
-        "diffPercent": 3.0364583333333335,
-        "width": 1280,
-        "height": 120,
-        "diffPath": "/Users/petecopeland/Repos/hiwave-macos/parity-baseline/diffs/shelf/diff.png",
-        "heatmapPath": "/Users/petecopeland/Repos/hiwave-macos/parity-baseline/diffs/shelf/heatmap.png"
-      },
-      "styles": {
-        "error": "RustKit styles not found",
-        "matched": 0,
-        "mismatched": 0
-      },
-      "rects": {
-        "matched": 0,
-        "mismatched": 12,
-        "differences": []
-      },
-      "passed": true,
-      "diff_pct": 3.0364583333333335
+      "diff_pct": 99.57708333333333
     }
   ]
 }
