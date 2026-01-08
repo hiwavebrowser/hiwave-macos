@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=800, height=600">
+  <title>Micro Test: CSS Selector Specificity</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      padding: 20px;
+      margin: 0;
+      background: #f5f5f5;
+    }
+    
+    h1 {
+      font-size: 18px;
+      margin-bottom: 20px;
+    }
+    
+    .test-case {
+      background: white;
+      padding: 15px;
+      margin-bottom: 15px;
+      border-radius: 4px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    
+    .label {
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 5px;
+    }
+    
+    /* === Specificity Tests === */
+    
+    /* Test 1: Element vs Class (class wins) */
+    div { color: red; }
+    .class-wins { color: green; }
+    
+    /* Test 2: Class vs ID (ID wins) */
+    .class-loses { color: red; }
+    #id-wins { color: green; }
+    
+    /* Test 3: Multiple classes (more specific) */
+    .single { color: red; }
+    .double.classes { color: green; }
+    
+    /* Test 4: Element + Class vs Class only */
+    .element-class { color: red; }
+    div.element-class { color: green; }
+    
+    /* Test 5: Inline style (highest) */
+    #inline-test { color: red !important; }
+    
+    /* Test 6: !important overrides */
+    .important-test { color: green !important; }
+    #important-id { color: red; }
+    
+    /* Test 7: Order matters for same specificity */
+    .order-test { color: red; }
+    .order-test { color: green; }
+    
+    /* Test 8: Nested selectors */
+    .parent .child { color: green; }
+    .child { color: red; }
+    
+    /* Test 9: Attribute selector */
+    [data-test] { color: green; }
+    .attr-test { color: red; }
+    
+    /* Test 10: :not() doesn't add specificity */
+    .not-test:not(.foo) { color: green; }
+    .not-test { color: red; }
+  </style>
+</head>
+<body>
+  <h1>CSS Selector Specificity Tests</h1>
+  
+  <div class="test-case">
+    <div class="label">Test 1: Element vs Class - should be GREEN</div>
+    <div class="class-wins">This text should be green (class beats element)</div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 2: Class vs ID - should be GREEN</div>
+    <div class="class-loses" id="id-wins">This text should be green (ID beats class)</div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 3: Multiple classes - should be GREEN</div>
+    <div class="single double classes">This text should be green (more classes = more specific)</div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 4: Element + Class - should be GREEN</div>
+    <div class="element-class">This text should be green (div.class beats .class)</div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 5: Inline style - should be BLUE</div>
+    <div id="inline-test" style="color: blue;">This text should be blue (inline beats ID+important)</div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 6: !important - should be GREEN</div>
+    <div class="important-test" id="important-id">This text should be green (!important beats ID)</div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 7: Order (same specificity) - should be GREEN</div>
+    <div class="order-test">This text should be green (later rule wins)</div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 8: Nested selector - should be GREEN</div>
+    <div class="parent">
+      <div class="child">This text should be green (nested selector more specific)</div>
+    </div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 9: Attribute selector - should be GREEN</div>
+    <div class="attr-test" data-test="yes">This text should be green (attr selector = class specificity)</div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 10: :not() pseudo - should be GREEN</div>
+    <div class="not-test">This text should be green (:not() adds specificity of its argument)</div>
+  </div>
+</body>
+</html>
+

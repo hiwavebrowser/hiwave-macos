@@ -1,0 +1,128 @@
+{
+  "cases": {
+    "css-selectors": {
+      "assignee": null,
+      "status": "unassigned",
+      "started": null,
+      "target_diff": 25,
+      "current_diff": 59.89,
+      "branch": null,
+      "notes": "Likely selector matching + cascade issues. Check combinators, specificity, pseudo-classes."
+    },
+    "image-gallery": {
+      "assignee": null,
+      "status": "unassigned",
+      "started": null,
+      "target_diff": 25,
+      "current_diff": 54.30,
+      "branch": null,
+      "notes": "Image intrinsic sizing + object-fit. Check decode path and texture upload."
+    },
+    "sticky-scroll": {
+      "assignee": null,
+      "status": "unassigned",
+      "started": null,
+      "target_diff": 25,
+      "current_diff": 53.38,
+      "branch": null,
+      "notes": "Scroll offset model + position:sticky constraints."
+    },
+    "form-elements": {
+      "assignee": null,
+      "status": "unassigned",
+      "started": null,
+      "target_diff": 25,
+      "current_diff": 51.58,
+      "branch": null,
+      "notes": "Form control rendering and intrinsic sizing."
+    },
+    "settings": {
+      "assignee": null,
+      "status": "unassigned",
+      "started": null,
+      "target_diff": 25,
+      "current_diff": 49.53,
+      "branch": null,
+      "notes": "Built-in settings page - high priority for shipping."
+    },
+    "article-typography": {
+      "assignee": null,
+      "status": "unassigned",
+      "started": null,
+      "target_diff": 25,
+      "current_diff": 49.54,
+      "branch": null,
+      "notes": "Text rendering and typography features."
+    },
+    "card-grid": {
+      "assignee": null,
+      "status": "unassigned",
+      "started": null,
+      "target_diff": 25,
+      "current_diff": 46.56,
+      "branch": null,
+      "notes": "Grid layout and card component styling."
+    },
+    "flex-positioning": {
+      "assignee": null,
+      "status": "unassigned",
+      "started": null,
+      "target_diff": 25,
+      "current_diff": 44.54,
+      "branch": null,
+      "notes": "Flexbox layout edge cases."
+    },
+    "about": {
+      "assignee": null,
+      "status": "unassigned",
+      "started": null,
+      "target_diff": 25,
+      "current_diff": 43.61,
+      "branch": null,
+      "notes": "Built-in about page - high priority for shipping."
+    },
+    "new_tab": {
+      "assignee": null,
+      "status": "unassigned",
+      "started": null,
+      "target_diff": 25,
+      "current_diff": 32.32,
+      "branch": null,
+      "notes": "Built-in new tab page - CRITICAL for shipping."
+    },
+    "shelf": {
+      "assignee": null,
+      "status": "unassigned",
+      "started": null,
+      "target_diff": 25,
+      "current_diff": 31.38,
+      "branch": null,
+      "notes": "Built-in shelf/bookmarks bar."
+    },
+    "chrome_rustkit": {
+      "assignee": null,
+      "status": "unassigned",
+      "started": null,
+      "target_diff": 25,
+      "current_diff": 28.67,
+      "branch": null,
+      "notes": "Browser chrome UI - CRITICAL for shipping."
+    },
+    "gradient-backgrounds": {
+      "assignee": null,
+      "status": "unassigned",
+      "started": null,
+      "target_diff": 15,
+      "current_diff": 17.65,
+      "branch": null,
+      "notes": "Already near target! Minor gradient tweaks needed."
+    }
+  },
+  "rules": {
+    "max_cases_per_developer": 2,
+    "rotation_days": 7,
+    "regression_threshold_pct": 2,
+    "tier_a_threshold": 25
+  },
+  "last_updated": "2026-01-07T08:41:19"
+}

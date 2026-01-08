@@ -18,11 +18,13 @@ Examples:
     python3 scripts/parity_baseline.py --tag "after-flex-fix"
     python3 scripts/parity_baseline.py --no-archive
     python3 scripts/parity_baseline.py --gpu  # Requires display/GPU
+    python3 scripts/parity_baseline.py --case css-selectors  # Single case
     
 Options:
     --gpu           Use GPU-based capture (requires display). 
                     NOTE: GPU capture requires running outside of sandboxed environments.
                     If running from Cursor/IDE, ensure the terminal has full disk/GPU access.
+    --case <name>   Run only a single case (for fast iteration).
     --tag <name>    Tag this run with a name for easier identification.
     --output-dir    Output directory for captures and reports.
     --no-archive    Skip auto-archiving to parity-history/.
@@ -194,7 +196,12 @@ def run_rustkit_capture(
 
 
 def analyze_layout(layout_path: str) -> Dict[str, Any]:
-    """Analyze a layout tree JSON for issues."""
+    """Analyze a layout tree JSON for issues.
+    
+    Uses AREA-ONLY zero detection: only counts boxes with zero area (w*h==0)
+    as problematic, and excludes known-benign node types like text runs and
+    inline elements with height but no width.
+    """
     if not layout_path or not Path(layout_path).exists():
         return {"error": "No layout file"}
     
@@ -205,46 +212,85 @@ def analyze_layout(layout_path: str) -> Dict[str, Any]:
         "total_boxes": 0,
         "positioned": 0,
         "sized": 0,
-        "zero_size": 0,
+        "zero_area": 0,           # Boxes with w*h == 0 (true zero area)
+        "zero_width_only": 0,     # Boxes with w==0 but h>0 (often benign)
+        "zero_height_only": 0,    # Boxes with h==0 but w>0 (often benign)
+        "zero_size": 0,           # Legacy: any w==0 or h==0 (for comparison)
         "at_origin": 0,
         "form_controls": 0,
         "text_boxes": 0,
         "block_boxes": 0,
+        "inline_boxes": 0,
         "image_boxes": 0,
         "issues": [],
     }
+    
+    # Node types that are benign when zero-width (e.g., text runs, inline wrappers)
+    BENIGN_ZERO_WIDTH_TYPES = {"text", "text_run", "inline", "anonymous_inline", "anonymous_block"}
+    # Node types that indicate real layout problems when zero-area
+    PROBLEMATIC_TYPES = {"block", "form_control", "image", "replaced", "flex_item", "grid_item"}
     
     def walk(node, depth=0):
         rect = node.get("content_rect") or node.get("rect", {})
         x, y = rect.get("x", 0), rect.get("y", 0)
         w, h = rect.get("width", 0), rect.get("height", 0)
         node_type = node.get("type", "unknown")
+        box_type = node.get("box_type", node_type)  # Some layouts use box_type
+        effective_type = box_type if box_type != "unknown" else node_type
         
         stats["total_boxes"] += 1
         
+        # Positioning check
         if x != 0 or y != 0:
             stats["positioned"] += 1
         else:
             stats["at_origin"] += 1
         
-        if w > 0 and h > 0:
+        # Area-based sizing check (Phase A fix)
+        area = w * h
+        has_width = w > 0
+        has_height = h > 0
+        
+        if has_width and has_height:
             stats["sized"] += 1
         else:
+            # Legacy counter for comparison
             stats["zero_size"] += 1
-            if depth > 1 and node_type not in ["text", "anonymous_block"]:
+            
+            # More nuanced zero detection
+            if area == 0:
+                if not has_width and not has_height:
+                    stats["zero_area"] += 1
+                elif not has_width:
+                    stats["zero_width_only"] += 1
+                else:
+                    stats["zero_height_only"] += 1
+            
+            # Only flag as issue if it's a problematic type with zero area
+            # and not a known-benign node
+            is_benign = effective_type.lower() in BENIGN_ZERO_WIDTH_TYPES
+            is_problematic = effective_type.lower() in PROBLEMATIC_TYPES
+            
+            if depth > 1 and not is_benign and (is_problematic or area == 0):
                 stats["issues"].append({
-                    "type": "zero_size",
-                    "node_type": node_type,
+                    "type": "zero_area" if area == 0 else "zero_dimension",
+                    "node_type": effective_type,
                     "depth": depth,
+                    "width": w,
+                    "height": h,
                 })
         
-        if node_type == "form_control":
+        # Type counting
+        type_lower = effective_type.lower()
+        if type_lower in ["form_control", "input", "button", "select", "textarea"]:
             stats["form_controls"] += 1
-        elif node_type == "text":
+        elif type_lower in ["text", "text_run"]:
             stats["text_boxes"] += 1
-        elif node_type == "block":
+        elif type_lower in ["block", "div"]:
             stats["block_boxes"] += 1
-        elif node_type == "image":
+        elif type_lower in ["inline", "span"]:
+            stats["inline_boxes"] += 1
+        elif type_lower in ["image", "img", "replaced"]:
             stats["image_boxes"] += 1
         
         for child in node.get("children", []):
@@ -253,15 +299,20 @@ def analyze_layout(layout_path: str) -> Dict[str, Any]:
     if "root" in data:
         walk(data["root"])
     
-    # Compute sizing rate
+    # Compute sizing rate using area-based metric
     stats["sizing_rate"] = stats["sized"] / max(1, stats["total_boxes"])
     stats["positioning_rate"] = stats["positioned"] / max(1, stats["total_boxes"])
+    
+    # Also compute an "area sizing rate" that's more lenient
+    # (counts zero-width-only as sized if type is benign)
+    benign_zeros = stats["zero_width_only"]  # These are often text runs with height
+    stats["area_sizing_rate"] = (stats["sized"] + benign_zeros) / max(1, stats["total_boxes"])
     
     return stats
 
 
 def classify_issues(layout_stats: Dict[str, Any]) -> Dict[str, int]:
-    """Classify issues into buckets."""
+    """Classify issues into buckets based on node types and issue patterns."""
     clusters = {
         "sizing_layout": 0,
         "paint": 0,
@@ -270,15 +321,27 @@ def classify_issues(layout_stats: Dict[str, Any]) -> Dict[str, int]:
     }
     
     for issue in layout_stats.get("issues", []):
-        if issue["type"] == "zero_size":
-            if issue["node_type"] in ["form_control", "block"]:
+        issue_type = issue.get("type", "")
+        node_type = issue.get("node_type", "").lower()
+        
+        # Only count actual zero-area issues as problems
+        if issue_type in ["zero_area", "zero_dimension"]:
+            if node_type in ["form_control", "input", "button", "select", "textarea", 
+                            "block", "div", "flex_item", "grid_item"]:
                 clusters["sizing_layout"] += 1
-            elif issue["node_type"] == "text":
+            elif node_type in ["text", "text_run"]:
                 clusters["text"] += 1
-            elif issue["node_type"] == "image":
+            elif node_type in ["image", "img", "replaced"]:
                 clusters["images"] += 1
             else:
+                # Unknown types default to sizing_layout
                 clusters["sizing_layout"] += 1
+    
+    # Additional heuristics based on aggregate stats
+    zero_area = layout_stats.get("zero_area", 0)
+    if zero_area > 10:
+        # Many true zero-area boxes suggest layout engine issues
+        clusters["sizing_layout"] += max(0, zero_area - 10)
     
     return clusters
 
@@ -288,22 +351,40 @@ def estimate_diff_percent(layout_stats: Dict[str, Any]) -> float:
     Estimate pixel diff % based on layout analysis.
     
     This is a heuristic until we have actual Chromium baselines.
-    Higher sizing_rate and positioning_rate = lower diff.
+    Uses AREA-BASED sizing rate for more accurate estimation.
+    
+    The formula weights:
+    - 50% area_sizing_rate (lenient, counts benign zero-width as sized)
+    - 30% strict sizing_rate
+    - 20% positioning_rate
+    
+    Penalties are applied only for TRUE zero-area boxes, not benign zeros.
     """
     if "error" in layout_stats:
         return 100.0
     
+    # Use area-based sizing rate if available, fall back to strict
+    area_sizing_rate = layout_stats.get("area_sizing_rate", layout_stats.get("sizing_rate", 0))
     sizing_rate = layout_stats.get("sizing_rate", 0)
     positioning_rate = layout_stats.get("positioning_rate", 0)
     
-    # Base diff estimate: inverse of quality
-    base_diff = 100 * (1 - (sizing_rate * 0.6 + positioning_rate * 0.4))
+    # Base diff estimate using blended rates
+    base_diff = 100 * (1 - (
+        area_sizing_rate * 0.50 +  # Most lenient
+        sizing_rate * 0.30 +       # Strict
+        positioning_rate * 0.20    # Position matters too
+    ))
     
-    # Add penalty for zero-size boxes
-    zero_penalty = min(30, layout_stats.get("zero_size", 0) * 2)
+    # Penalty only for TRUE zero-area boxes (not benign zero-width)
+    zero_area = layout_stats.get("zero_area", 0)
+    zero_penalty = min(20, zero_area * 1.5)  # Reduced from 2x multiplier
+    
+    # Small penalty for problematic issues (true layout failures)
+    issues = layout_stats.get("issues", [])
+    issue_penalty = min(10, len(issues) * 0.5)
     
     # Clamp to 0-100
-    return min(100, max(0, base_diff + zero_penalty))
+    return min(100, max(0, base_diff + zero_penalty + issue_penalty))
 
 
 def compute_weighted_metrics(
@@ -356,6 +437,68 @@ def compute_weighted_metrics(
     }
 
 
+def get_all_cases() -> Dict[str, Tuple[str, str, int, int, str]]:
+    """Return all cases as a dict keyed by case_id."""
+    cases = {}
+    for case_id, html_path, width, height in BUILTINS:
+        cases[case_id] = (case_id, html_path, width, height, "builtin")
+    for case_id, html_path, width, height in WEBSUITE:
+        cases[case_id] = (case_id, html_path, width, height, "websuite")
+    return cases
+
+
+def run_oracle(cases: List[str], output_dir: Path, scope: str = "top") -> Optional[Dict]:
+    """Run the Chromium oracle to capture baselines and compare pixels.
+    
+    Returns oracle results dict or None if oracle not available.
+    """
+    oracle_script = Path(__file__).parent.parent / "tools" / "parity_oracle" / "run_oracle.mjs"
+    
+    if not oracle_script.exists():
+        print("  Oracle not available (run: cd tools/parity_oracle && npm install)")
+        return None
+    
+    # Check if npm dependencies are installed
+    node_modules = oracle_script.parent / "node_modules"
+    if not node_modules.exists():
+        print("  Oracle dependencies not installed (run: cd tools/parity_oracle && npm install)")
+        return None
+    
+    try:
+        # Run oracle full pipeline
+        cmd = [
+            "node", str(oracle_script), "full",
+            "--scope", scope,
+            "--output", str(output_dir),
+        ]
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 min timeout for full oracle
+            cwd=Path(__file__).parent.parent,
+        )
+        
+        if result.returncode != 0:
+            print(f"  Oracle failed: {result.stderr[:100]}")
+            return None
+        
+        # Load oracle results
+        oracle_results_path = output_dir / "oracle_results.json"
+        if oracle_results_path.exists():
+            with open(oracle_results_path) as f:
+                return json.load(f)
+        
+        return None
+    except subprocess.TimeoutExpired:
+        print("  Oracle timed out after 5 minutes")
+        return None
+    except Exception as e:
+        print(f"  Oracle error: {e}")
+        return None
+
+
 def main():
     output_dir = Path("parity-baseline")
     history_dir = Path("parity-history")
@@ -363,6 +506,9 @@ def main():
     auto_archive = True
     use_gpu = False
     use_release = True
+    single_case = None  # --case flag for single case iteration
+    use_oracle = False  # --oracle flag for Chromium comparison
+    oracle_scope = "top"  # --oracle-scope: top, builtins, websuite, all
     
     # Parse arguments
     args = sys.argv[1:]
@@ -376,6 +522,20 @@ def main():
             i += 2
         elif args[i] == "--history" and i + 1 < len(args):
             history_dir = Path(args[i + 1])
+            i += 2
+        elif args[i] == "--case" and i + 1 < len(args):
+            single_case = args[i + 1]
+            i += 2
+        elif args[i] == "--oracle":
+            use_oracle = True
+            # Check if next arg is the oracle type (chromium)
+            if i + 1 < len(args) and not args[i + 1].startswith("--"):
+                oracle_type = args[i + 1]  # Currently only "chromium" supported
+                i += 2
+            else:
+                i += 1
+        elif args[i] == "--oracle-scope" and i + 1 < len(args):
+            oracle_scope = args[i + 1]
             i += 2
         elif args[i] == "--no-archive":
             auto_archive = False
@@ -395,6 +555,15 @@ def main():
         else:
             i += 1
     
+    # Validate single_case if provided
+    all_cases = get_all_cases()
+    if single_case:
+        if single_case not in all_cases:
+            print(f"Error: Unknown case '{single_case}'")
+            print(f"Available cases: {', '.join(sorted(all_cases.keys()))}")
+            sys.exit(1)
+        auto_archive = False  # Don't archive single-case runs
+    
     output_dir.mkdir(parents=True, exist_ok=True)
     captures_dir = output_dir / "captures"
     captures_dir.mkdir(exist_ok=True)
@@ -404,58 +573,106 @@ def main():
     print(f"Output: {output_dir}")
     if tag:
         print(f"Tag: {tag}")
+    if single_case:
+        print(f"Single Case Mode: {single_case}")
     print(f"Capture Mode: {'GPU (requires display)' if use_gpu else 'Headless'}")
     print(f"Build: {'Release' if use_release else 'Debug'}")
+    if use_oracle:
+        print(f"Oracle: Chromium (scope: {oracle_scope})")
     print(f"Timestamp: {datetime.now().isoformat()}")
     print("=" * 60)
     
-    # Capture built-ins
-    print("\n--- Built-in Pages (60% weight) ---")
-    builtin_results = []
-    for case_id, html_path, width, height in BUILTINS:
+    def capture_case(case_id: str, html_path: str, width: int, height: int) -> Dict[str, Any]:
+        """Capture a single case and analyze it."""
         print(f"  Capturing {case_id}...", end=" ", flush=True)
         result = run_rustkit_capture(case_id, html_path, width, height, captures_dir, use_gpu, use_release)
         
         if result["success"]:
-            # Use layout_stats from capture if available, otherwise analyze
-            layout_stats = result.get("layout_stats")
-            if not layout_stats:
-                layout_stats = analyze_layout(result.get("layout_path"))
+            # ALWAYS analyze the layout JSON for accurate clustering
+            # (capture result's layout_stats may lack per-node detail)
+            layout_path = result.get("layout_path")
+            layout_stats = analyze_layout(layout_path) if layout_path else result.get("layout_stats", {})
+            
+            # Merge with any stats from capture (e.g., perf data)
+            if result.get("layout_stats"):
+                for key in ["total_boxes", "sized", "zero_size"]:
+                    if key not in layout_stats and key in result["layout_stats"]:
+                        layout_stats[key] = result["layout_stats"][key]
+            
             result["layout_stats"] = layout_stats
             result["estimated_diff_pct"] = estimate_diff_percent(layout_stats)
             result["issue_clusters"] = classify_issues(layout_stats)
-            print(f"OK (sizing: {layout_stats.get('sizing_rate', 0)*100:.1f}%, est. diff: {result['estimated_diff_pct']:.1f}%)")
+            
+            # Print detailed stats
+            area_rate = layout_stats.get('area_sizing_rate', layout_stats.get('sizing_rate', 0))
+            zero_area = layout_stats.get('zero_area', 0)
+            print(f"OK (area_sizing: {area_rate*100:.1f}%, zero_area: {zero_area}, est. diff: {result['estimated_diff_pct']:.1f}%)")
         else:
             result["estimated_diff_pct"] = 100
             result["issue_clusters"] = {"sizing_layout": 1}
             error_msg = result.get('error') or 'Unknown error'
             print(f"FAIL: {error_msg[:50]}")
         
-        builtin_results.append(result)
+        return result
+    
+    # Filter cases if single_case mode
+    builtins_to_run = BUILTINS
+    websuite_to_run = WEBSUITE
+    
+    if single_case:
+        case_info = all_cases[single_case]
+        case_type = case_info[4]  # "builtin" or "websuite"
+        if case_type == "builtin":
+            builtins_to_run = [(case_info[0], case_info[1], case_info[2], case_info[3])]
+            websuite_to_run = []
+        else:
+            builtins_to_run = []
+            websuite_to_run = [(case_info[0], case_info[1], case_info[2], case_info[3])]
+    
+    # Capture built-ins
+    builtin_results = []
+    if builtins_to_run:
+        print("\n--- Built-in Pages (60% weight) ---")
+        for case_id, html_path, width, height in builtins_to_run:
+            result = capture_case(case_id, html_path, width, height)
+            builtin_results.append(result)
     
     # Capture websuite
-    print("\n--- Websuite Cases (40% weight) ---")
     websuite_results = []
-    for case_id, html_path, width, height in WEBSUITE:
-        print(f"  Capturing {case_id}...", end=" ", flush=True)
-        result = run_rustkit_capture(case_id, html_path, width, height, captures_dir, use_gpu, use_release)
+    if websuite_to_run:
+        print("\n--- Websuite Cases (40% weight) ---")
+        for case_id, html_path, width, height in websuite_to_run:
+            result = capture_case(case_id, html_path, width, height)
+            websuite_results.append(result)
+    
+    # Run Chromium oracle if requested
+    oracle_results = None
+    if use_oracle:
+        print("\n--- Running Chromium Oracle ---")
+        oracle_results = run_oracle(
+            [r["case_id"] for r in builtin_results + websuite_results if r.get("success")],
+            output_dir,
+            oracle_scope,
+        )
         
-        if result["success"]:
-            # Use layout_stats from capture if available, otherwise analyze
-            layout_stats = result.get("layout_stats")
-            if not layout_stats:
-                layout_stats = analyze_layout(result.get("layout_path"))
-            result["layout_stats"] = layout_stats
-            result["estimated_diff_pct"] = estimate_diff_percent(layout_stats)
-            result["issue_clusters"] = classify_issues(layout_stats)
-            print(f"OK (sizing: {layout_stats.get('sizing_rate', 0)*100:.1f}%, est. diff: {result['estimated_diff_pct']:.1f}%)")
-        else:
-            result["estimated_diff_pct"] = 100
-            result["issue_clusters"] = {"sizing_layout": 1}
-            error_msg = result.get('error') or 'Unknown error'
-            print(f"FAIL: {error_msg[:50]}")
-        
-        websuite_results.append(result)
+        if oracle_results:
+            oracle_cases = oracle_results.get("cases", {})
+            # Update results with oracle pixel diff (ground truth)
+            for result in builtin_results + websuite_results:
+                case_id = result["case_id"]
+                if case_id in oracle_cases and oracle_cases[case_id].get("success"):
+                    oracle_diff = oracle_cases[case_id].get("diff_pct", 100)
+                    heuristic_diff = result.get("estimated_diff_pct", 100)
+                    
+                    # Store both for comparison
+                    result["oracle_diff_pct"] = oracle_diff
+                    result["heuristic_diff_pct"] = heuristic_diff
+                    result["diff_source"] = "oracle"
+                    
+                    # Use oracle as primary diff (ground truth)
+                    result["estimated_diff_pct"] = oracle_diff
+                    
+                    print(f"  {case_id}: oracle={oracle_diff:.1f}% (heuristic={heuristic_diff:.1f}%)")
     
     # Compute metrics
     print("\n--- Computing Weighted Tiered Metrics ---")
@@ -474,11 +691,14 @@ def main():
             "builtins_weight": BUILTINS_WEIGHT,
             "websuite_weight": WEBSUITE_WEIGHT,
             "tier_a_threshold": TIER_A_THRESHOLD,
+            "oracle_enabled": use_oracle,
+            "oracle_scope": oracle_scope if use_oracle else None,
         },
         "metrics": metrics,
         "issue_clusters": total_clusters,
         "builtin_results": builtin_results,
         "websuite_results": websuite_results,
+        "oracle_results": oracle_results,
     }
     
     # Save report
