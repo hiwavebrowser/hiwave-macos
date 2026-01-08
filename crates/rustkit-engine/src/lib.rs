@@ -1397,70 +1397,285 @@ impl Engine {
         style.color = rustkit_css::Color::BLACK;
 
         // Apply tag-specific default styles (user-agent stylesheet)
+        // Apply tag-specific default styles (Chrome UA stylesheet alignment)
+        // Reference: https://chromium.googlesource.com/chromium/blink/+/master/Source/core/css/html.css
         match tag_name.to_lowercase().as_str() {
+            "html" => {
+                style.display = rustkit_css::Display::Block;
+            }
             "body" => {
+                style.display = rustkit_css::Display::Block;
                 style.background_color = rustkit_css::Color::WHITE;
                 style.margin_top = rustkit_css::Length::Px(8.0);
                 style.margin_right = rustkit_css::Length::Px(8.0);
                 style.margin_bottom = rustkit_css::Length::Px(8.0);
                 style.margin_left = rustkit_css::Length::Px(8.0);
             }
+            // Headings (Chrome uses em units, we convert to px assuming 16px base)
             "h1" => {
-                style.font_size = rustkit_css::Length::Px(32.0);
+                style.display = rustkit_css::Display::Block;
+                style.font_size = rustkit_css::Length::Px(32.0); // 2em
                 style.font_weight = rustkit_css::FontWeight::BOLD;
-                style.margin_top = rustkit_css::Length::Px(21.44);
+                style.margin_top = rustkit_css::Length::Px(21.44); // 0.67em * 32px
                 style.margin_bottom = rustkit_css::Length::Px(21.44);
             }
             "h2" => {
-                style.font_size = rustkit_css::Length::Px(24.0);
+                style.display = rustkit_css::Display::Block;
+                style.font_size = rustkit_css::Length::Px(24.0); // 1.5em
                 style.font_weight = rustkit_css::FontWeight::BOLD;
-                style.margin_top = rustkit_css::Length::Px(19.92);
+                style.margin_top = rustkit_css::Length::Px(19.92); // 0.83em * 24px
                 style.margin_bottom = rustkit_css::Length::Px(19.92);
             }
             "h3" => {
-                style.font_size = rustkit_css::Length::Px(18.72);
+                style.display = rustkit_css::Display::Block;
+                style.font_size = rustkit_css::Length::Px(18.72); // 1.17em
                 style.font_weight = rustkit_css::FontWeight::BOLD;
-                style.margin_top = rustkit_css::Length::Px(18.72);
+                style.margin_top = rustkit_css::Length::Px(18.72); // 1em
                 style.margin_bottom = rustkit_css::Length::Px(18.72);
             }
+            "h4" => {
+                style.display = rustkit_css::Display::Block;
+                style.font_size = rustkit_css::Length::Px(16.0); // 1em
+                style.font_weight = rustkit_css::FontWeight::BOLD;
+                style.margin_top = rustkit_css::Length::Px(21.28); // 1.33em
+                style.margin_bottom = rustkit_css::Length::Px(21.28);
+            }
+            "h5" => {
+                style.display = rustkit_css::Display::Block;
+                style.font_size = rustkit_css::Length::Px(13.28); // 0.83em
+                style.font_weight = rustkit_css::FontWeight::BOLD;
+                style.margin_top = rustkit_css::Length::Px(22.17); // 1.67em
+                style.margin_bottom = rustkit_css::Length::Px(22.17);
+            }
+            "h6" => {
+                style.display = rustkit_css::Display::Block;
+                style.font_size = rustkit_css::Length::Px(10.72); // 0.67em
+                style.font_weight = rustkit_css::FontWeight::BOLD;
+                style.margin_top = rustkit_css::Length::Px(25.0); // 2.33em
+                style.margin_bottom = rustkit_css::Length::Px(25.0);
+            }
+            // Paragraphs and text blocks
             "p" => {
-                style.margin_top = rustkit_css::Length::Px(16.0);
+                style.display = rustkit_css::Display::Block;
+                style.margin_top = rustkit_css::Length::Px(16.0); // 1em
                 style.margin_bottom = rustkit_css::Length::Px(16.0);
             }
             "div" => {
-                // Block element with no special styling
+                style.display = rustkit_css::Display::Block;
             }
+            "span" => {
+                style.display = rustkit_css::Display::Inline;
+            }
+            // Links
             "a" => {
-                style.color = rustkit_css::Color::new(0, 0, 238, 1.0); // Blue
+                style.display = rustkit_css::Display::Inline;
+                style.color = rustkit_css::Color::new(0, 0, 238, 1.0); // #0000EE
+                style.text_decoration_line = rustkit_css::TextDecorationLine::UNDERLINE;
             }
+            // Text formatting
             "strong" | "b" => {
+                style.display = rustkit_css::Display::Inline;
                 style.font_weight = rustkit_css::FontWeight::BOLD;
             }
             "em" | "i" => {
+                style.display = rustkit_css::Display::Inline;
                 style.font_style = rustkit_css::FontStyle::Italic;
             }
-            "pre" | "code" => {
+            "u" => {
+                style.display = rustkit_css::Display::Inline;
+                style.text_decoration_line = rustkit_css::TextDecorationLine::UNDERLINE;
+            }
+            "s" | "strike" | "del" => {
+                style.display = rustkit_css::Display::Inline;
+                style.text_decoration_line = rustkit_css::TextDecorationLine::LINE_THROUGH;
+            }
+            "small" => {
+                style.display = rustkit_css::Display::Inline;
+                style.font_size = rustkit_css::Length::Px(13.0); // smaller
+            }
+            "big" => {
+                style.display = rustkit_css::Display::Inline;
+                style.font_size = rustkit_css::Length::Px(19.0); // larger
+            }
+            "sub" => {
+                style.display = rustkit_css::Display::Inline;
+                style.font_size = rustkit_css::Length::Px(13.0); // smaller
+                // vertical-align: sub (not implemented)
+            }
+            "sup" => {
+                style.display = rustkit_css::Display::Inline;
+                style.font_size = rustkit_css::Length::Px(13.0); // smaller
+                // vertical-align: super (not implemented)
+            }
+            // Code and preformatted
+            "pre" => {
+                style.display = rustkit_css::Display::Block;
+                style.font_family = "monospace".to_string();
+                style.margin_top = rustkit_css::Length::Px(16.0); // 1em
+                style.margin_bottom = rustkit_css::Length::Px(16.0);
+                // white-space: pre (not implemented)
+            }
+            "code" | "kbd" | "samp" | "tt" => {
+                style.display = rustkit_css::Display::Inline;
                 style.font_family = "monospace".to_string();
             }
+            // Lists
             "ul" | "ol" => {
-                style.margin_top = rustkit_css::Length::Px(16.0);
+                style.display = rustkit_css::Display::Block;
+                style.margin_top = rustkit_css::Length::Px(16.0); // 1em
                 style.margin_bottom = rustkit_css::Length::Px(16.0);
                 style.padding_left = rustkit_css::Length::Px(40.0);
             }
             "li" => {
-                // List items are blocks
+                style.display = rustkit_css::Display::Block; // list-item
             }
-            "blockquote" => {
+            "dl" => {
+                style.display = rustkit_css::Display::Block;
                 style.margin_top = rustkit_css::Length::Px(16.0);
+                style.margin_bottom = rustkit_css::Length::Px(16.0);
+            }
+            "dt" => {
+                style.display = rustkit_css::Display::Block;
+            }
+            "dd" => {
+                style.display = rustkit_css::Display::Block;
+                style.margin_left = rustkit_css::Length::Px(40.0);
+            }
+            // Quotes
+            "blockquote" => {
+                style.display = rustkit_css::Display::Block;
+                style.margin_top = rustkit_css::Length::Px(16.0); // 1em
                 style.margin_bottom = rustkit_css::Length::Px(16.0);
                 style.margin_left = rustkit_css::Length::Px(40.0);
                 style.margin_right = rustkit_css::Length::Px(40.0);
             }
+            "q" => {
+                style.display = rustkit_css::Display::Inline;
+                // quotes: auto (not implemented)
+            }
+            // Horizontal rule
             "hr" => {
+                style.display = rustkit_css::Display::Block;
                 style.border_top_width = rustkit_css::Length::Px(1.0);
                 style.border_top_color = rustkit_css::Color::new(128, 128, 128, 1.0);
-                style.margin_top = rustkit_css::Length::Px(8.0);
+                style.margin_top = rustkit_css::Length::Px(8.0); // 0.5em
                 style.margin_bottom = rustkit_css::Length::Px(8.0);
+            }
+            // Sections
+            "article" | "aside" | "footer" | "header" | "main" | "nav" | "section" => {
+                style.display = rustkit_css::Display::Block;
+            }
+            // Figure
+            "figure" => {
+                style.display = rustkit_css::Display::Block;
+                style.margin_top = rustkit_css::Length::Px(16.0); // 1em
+                style.margin_bottom = rustkit_css::Length::Px(16.0);
+                style.margin_left = rustkit_css::Length::Px(40.0);
+                style.margin_right = rustkit_css::Length::Px(40.0);
+            }
+            "figcaption" => {
+                style.display = rustkit_css::Display::Block;
+            }
+            // Address
+            "address" => {
+                style.display = rustkit_css::Display::Block;
+                style.font_style = rustkit_css::FontStyle::Italic;
+            }
+            // Form elements
+            "form" => {
+                style.display = rustkit_css::Display::Block;
+            }
+            "fieldset" => {
+                style.display = rustkit_css::Display::Block;
+                style.margin_left = rustkit_css::Length::Px(2.0);
+                style.margin_right = rustkit_css::Length::Px(2.0);
+                style.padding_top = rustkit_css::Length::Px(8.0); // 0.35em
+                style.padding_bottom = rustkit_css::Length::Px(10.0); // 0.625em
+                style.padding_left = rustkit_css::Length::Px(12.0); // 0.75em
+                style.padding_right = rustkit_css::Length::Px(12.0);
+                style.border_top_width = rustkit_css::Length::Px(2.0);
+                style.border_right_width = rustkit_css::Length::Px(2.0);
+                style.border_bottom_width = rustkit_css::Length::Px(2.0);
+                style.border_left_width = rustkit_css::Length::Px(2.0);
+                style.border_top_color = rustkit_css::Color::new(192, 192, 192, 1.0);
+                style.border_right_color = rustkit_css::Color::new(192, 192, 192, 1.0);
+                style.border_bottom_color = rustkit_css::Color::new(192, 192, 192, 1.0);
+                style.border_left_color = rustkit_css::Color::new(192, 192, 192, 1.0);
+            }
+            "legend" => {
+                style.display = rustkit_css::Display::Block;
+                style.padding_left = rustkit_css::Length::Px(2.0);
+                style.padding_right = rustkit_css::Length::Px(2.0);
+            }
+            "label" => {
+                style.display = rustkit_css::Display::Inline;
+            }
+            "input" => {
+                style.display = rustkit_css::Display::Inline;
+                // Intrinsic sizing handled elsewhere
+            }
+            "button" => {
+                style.display = rustkit_css::Display::Inline;
+            }
+            "select" => {
+                style.display = rustkit_css::Display::Inline;
+            }
+            "textarea" => {
+                style.display = rustkit_css::Display::Inline;
+                style.font_family = "monospace".to_string();
+            }
+            // Table elements
+            "table" => {
+                style.display = rustkit_css::Display::Block; // Should be table
+                // border-collapse: separate (not implemented)
+            }
+            "caption" => {
+                style.display = rustkit_css::Display::Block; // Should be table-caption
+            }
+            "thead" | "tbody" | "tfoot" => {
+                style.display = rustkit_css::Display::Block; // Should be table-row-group
+            }
+            "tr" => {
+                style.display = rustkit_css::Display::Block; // Should be table-row
+            }
+            "th" => {
+                style.display = rustkit_css::Display::Block; // Should be table-cell
+                style.font_weight = rustkit_css::FontWeight::BOLD;
+            }
+            "td" => {
+                style.display = rustkit_css::Display::Block; // Should be table-cell
+            }
+            // Media
+            "img" => {
+                style.display = rustkit_css::Display::Inline;
+            }
+            "video" | "audio" => {
+                style.display = rustkit_css::Display::Inline;
+            }
+            "canvas" => {
+                style.display = rustkit_css::Display::Inline;
+            }
+            "iframe" => {
+                style.display = rustkit_css::Display::Inline;
+            }
+            // Misc
+            "br" => {
+                style.display = rustkit_css::Display::Inline;
+            }
+            "mark" => {
+                style.display = rustkit_css::Display::Inline;
+                style.background_color = rustkit_css::Color::new(255, 255, 0, 1.0); // yellow
+            }
+            "abbr" | "acronym" => {
+                style.display = rustkit_css::Display::Inline;
+            }
+            "cite" | "dfn" | "var" => {
+                style.display = rustkit_css::Display::Inline;
+                style.font_style = rustkit_css::FontStyle::Italic;
+            }
+            "ins" => {
+                style.display = rustkit_css::Display::Inline;
+                style.text_decoration_line = rustkit_css::TextDecorationLine::UNDERLINE;
             }
             _ => {}
         }
