@@ -5,24 +5,24 @@
   "priority": "critical",
   "cases": [
     {
+      "case_id": "settings",
+      "type": "builtin",
+      "diff_pct": 21.763727121464218
+    },
+    {
       "case_id": "css-selectors",
       "type": "websuite",
-      "diff_pct": 59.893616
+      "diff_pct": 21.074468085106375
     },
     {
       "case_id": "image-gallery",
       "type": "websuite",
-      "diff_pct": 54.296875
-    },
-    {
-      "case_id": "sticky-scroll",
-      "type": "websuite",
-      "diff_pct": 53.379307999999995
+      "diff_pct": 16.2109375
     }
   ],
   "acceptance_criteria": [
-    "Reduce diff% for css-selectors below 25%",
+    "Reduce diff% for settings below 25%",
     "All three cases show measurable improvement"
   ],
-  "created": "2026-01-07T08:41:19.707876"
+  "created": "2026-01-07T20:16:09.516307"
 }
