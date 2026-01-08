@@ -1,0 +1,46 @@
+{
+  "chrome_version": "120.0.0.0",
+  "playwright_version": "1.40.0",
+  "os": "macOS",
+  "os_version": "14.x",
+  "dpi": 1,
+  "created_at": null,
+  "last_updated": null,
+  "git_commit": null,
+  "environment": {
+    "font_rendering": "default",
+    "color_profile": "sRGB",
+    "viewport_scale": 1.0
+  },
+  "cases": {
+    "builtins": [
+      "new_tab",
+      "about", 
+      "settings",
+      "chrome_rustkit",
+      "shelf"
+    ],
+    "websuite_top5": [
+      "article-typography",
+      "card-grid",
+      "form-elements",
+      "gradient-backgrounds",
+      "image-gallery"
+    ],
+    "websuite_other": [
+      "css-selectors",
+      "flex-positioning",
+      "sticky-scroll"
+    ]
+  },
+  "thresholds": {
+    "layout_structure": 5,
+    "solid_backgrounds": 8,
+    "images_replaced": 10,
+    "gradients_effects": 15,
+    "form_controls": 12,
+    "text_rendering": 20,
+    "sticky_scroll": 25
+  }
+}
+
