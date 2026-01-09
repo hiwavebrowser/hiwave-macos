@@ -1963,6 +1963,33 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_color_hsl() {
+        // Pure red: hsl(0, 100%, 50%)
+        let red = parse_color("hsl(0, 100%, 50%)");
+        assert!(red.is_some(), "HSL red should parse");
+        let red = red.unwrap();
+        assert_eq!(red.r, 255, "HSL red R component");
+        assert_eq!(red.g, 0, "HSL red G component");
+        assert_eq!(red.b, 0, "HSL red B component");
+
+        // Pure green: hsl(120, 100%, 50%)
+        let green = parse_color("hsl(120, 100%, 50%)");
+        assert!(green.is_some(), "HSL green should parse");
+        let green = green.unwrap();
+        assert_eq!(green.r, 0, "HSL green R component");
+        assert_eq!(green.g, 255, "HSL green G component");
+        assert_eq!(green.b, 0, "HSL green B component");
+
+        // Pure blue: hsl(240, 100%, 50%)
+        let blue = parse_color("hsl(240, 100%, 50%)");
+        assert!(blue.is_some(), "HSL blue should parse");
+        let blue = blue.unwrap();
+        assert_eq!(blue.r, 0, "HSL blue R component");
+        assert_eq!(blue.g, 0, "HSL blue G component");
+        assert_eq!(blue.b, 255, "HSL blue B component");
+    }
+
+    #[test]
     fn test_parse_length() {
         assert_eq!(parse_length("10px"), Some(Length::Px(10.0)));
         assert_eq!(parse_length("1.5em"), Some(Length::Em(1.5)));

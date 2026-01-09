@@ -4325,7 +4325,74 @@ fn parse_color(value: &str) -> Option<rustkit_css::Color> {
         }
     }
 
+    // hsl() and hsla()
+    if value.starts_with("hsl(") || value.starts_with("hsla(") {
+        let inner = value
+            .trim_start_matches("hsla(")
+            .trim_start_matches("hsl(")
+            .trim_end_matches(')');
+        let parts: Vec<&str> = inner.split(',').collect();
+        if parts.len() >= 3 {
+            let h: f32 = parts[0].trim().trim_end_matches("deg").parse().ok()?;
+            let s: f32 = parts[1].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
+            let l: f32 = parts[2].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
+            let a: f32 = if parts.len() >= 4 {
+                parts[3].trim().parse().ok()?
+            } else {
+                1.0
+            };
+            let (r, g, b) = hsl_to_rgb(h, s, l);
+            return Some(rustkit_css::Color::new(r, g, b, a));
+        }
+    }
+
     None
+}
+
+/// Convert HSL to RGB.
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    let s = s.clamp(0.0, 1.0);
+    let l = l.clamp(0.0, 1.0);
+
+    if s < 0.0001 {
+        // Achromatic (gray)
+        let v = (l * 255.0).round() as u8;
+        return (v, v, v);
+    }
+
+    let h = ((h % 360.0) + 360.0) % 360.0 / 360.0;
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
+    let p = 2.0 * l - q;
+
+    let r = hue_to_rgb(p, q, h + 1.0 / 3.0);
+    let g = hue_to_rgb(p, q, h);
+    let b = hue_to_rgb(p, q, h - 1.0 / 3.0);
+
+    (
+        (r * 255.0).round().clamp(0.0, 255.0) as u8,
+        (g * 255.0).round().clamp(0.0, 255.0) as u8,
+        (b * 255.0).round().clamp(0.0, 255.0) as u8,
+    )
+}
+
+fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
+    if t < 0.0 { t += 1.0; }
+    if t > 1.0 { t -= 1.0; }
+
+    if t < 1.0 / 6.0 {
+        return p + (q - p) * 6.0 * t;
+    }
+    if t < 0.5 {
+        return q;
+    }
+    if t < 2.0 / 3.0 {
+        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+    }
+    p
 }
 
 /// Parse a CSS gradient value (linear-gradient or radial-gradient).

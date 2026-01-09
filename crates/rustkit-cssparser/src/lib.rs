@@ -204,6 +204,18 @@ mod tests {
         let err = parse_stylesheet(css).unwrap_err();
         matches!(err, ParseError::UnexpectedEof);
     }
+
+    #[test]
+    fn parse_hsl_values() {
+        let css = r#"
+            .hsl1 { background-color: hsl(0, 100%, 50%); }
+            .hsl2 { background-color: hsl(120, 100%, 50%); }
+        "#;
+        let ast = parse_stylesheet(css).unwrap();
+        assert_eq!(ast.rules.len(), 2);
+        assert_eq!(ast.rules[0].declarations[0].value, "hsl(0, 100%, 50%)");
+        assert_eq!(ast.rules[1].declarations[0].value, "hsl(120, 100%, 50%)");
+    }
 }
 
 
