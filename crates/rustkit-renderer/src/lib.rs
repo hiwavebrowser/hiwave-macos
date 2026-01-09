@@ -906,7 +906,7 @@ impl Renderer {
         self.draw_rounded_corner(rect.x, rect.y + rect.height - r_bl, r_bl, color, 3); // bottom-left
     }
 
-    /// Draw a single rounded corner using pixel-based SDF.
+    /// Draw a single rounded corner using pixel-based SDF with anti-aliasing.
     /// quadrant: 0=top-left, 1=top-right, 2=bottom-right, 3=bottom-left
     fn draw_rounded_corner(&mut self, x: f32, y: f32, radius: f32, color: Color, quadrant: u8) {
         if radius < 1.0 {
@@ -922,13 +922,13 @@ impl Renderer {
             _ => return,
         };
 
-        // Draw corner using small rectangles
+        // Draw corner using small rectangles with AA
         let step = 1.0;
         let mut py = y;
         while py < y + radius {
             let mut px = x;
             while px < x + radius {
-                // Check if this pixel is inside the rounded corner
+                // Calculate distance from pixel center to corner center
                 let dx = match quadrant {
                     0 | 3 => cx - (px + step / 2.0), // left corners: measure from right edge
                     _ => (px + step / 2.0) - cx,    // right corners: measure from left edge
@@ -940,10 +940,28 @@ impl Renderer {
                 
                 let dist = (dx * dx + dy * dy).sqrt();
                 
-                // Inside the quarter circle
-                if dist <= radius {
+                // Use signed distance field for anti-aliasing
+                // Distance to edge (positive = inside, negative = outside)
+                let signed_dist = radius - dist;
+                
+                if signed_dist >= 1.0 {
+                    // Fully inside
                     self.draw_solid_rect(Rect::new(px, py, step, step), color);
+                } else if signed_dist > -1.0 {
+                    // Edge pixel - apply anti-aliasing
+                    // Coverage is 0.5 + signed_dist * 0.5 (clamped to 0-1)
+                    let coverage = (signed_dist * 0.5 + 0.5).clamp(0.0, 1.0);
+                    if coverage > 0.01 {
+                        let aa_color = Color::new(
+                            color.r,
+                            color.g,
+                            color.b,
+                            color.a * coverage,
+                        );
+                        self.draw_solid_rect(Rect::new(px, py, step, step), aa_color);
+                    }
                 }
+                // else: outside, don't draw
                 
                 px += step;
             }
@@ -1105,8 +1123,9 @@ impl Renderer {
 
         if is_horizontal {
             // Horizontal gradient (left to right or right to left)
+            // Quality-first: 1px sampling for smooth gradients
             let reverse = angle_deg > 180.0;
-            let step_count = (rect.width / 2.0).max(2.0) as usize;
+            let step_count = rect.width.max(2.0) as usize;
             let strip_width = rect.width / step_count as f32;
 
             for i in 0..step_count {
@@ -1115,14 +1134,15 @@ impl Renderer {
                 } else {
                     (i as f32 + 0.5) / step_count as f32
                 };
-                let color = Self::interpolate_color(&normalized_stops, t);
+                let color = Self::interpolate_color_gamma(&normalized_stops, t);
                 let x_pos = rect.x + i as f32 * strip_width;
                 self.draw_solid_rect(Rect::new(x_pos, rect.y, strip_width + 0.5, rect.height), color);
             }
         } else if is_vertical {
             // Vertical gradient (top to bottom or bottom to top)
+            // Quality-first: 1px sampling for smooth gradients
             let reverse = angle_deg < 90.0 || angle_deg > 270.0;
-            let step_count = (rect.height / 2.0).max(2.0) as usize;
+            let step_count = rect.height.max(2.0) as usize;
             let strip_height = rect.height / step_count as f32;
 
             for i in 0..step_count {
@@ -1131,14 +1151,21 @@ impl Renderer {
                 } else {
                     (i as f32 + 0.5) / step_count as f32
                 };
-                let color = Self::interpolate_color(&normalized_stops, t);
+                let color = Self::interpolate_color_gamma(&normalized_stops, t);
                 let y_pos = rect.y + i as f32 * strip_height;
                 self.draw_solid_rect(Rect::new(rect.x, y_pos, rect.width, strip_height + 0.5), color);
             }
         } else {
             // Diagonal gradient - render using cells for proper angular gradients
-            // Use 2x2 pixel cells for performance while maintaining accuracy
-            let cell_size: f32 = 2.0;
+            // Use adaptive cell sizing to prevent GPU buffer overflow for large gradients
+            // while maintaining 1px quality for small UI elements
+            let area = rect.width * rect.height;
+            let max_cells: f32 = 100_000.0; // Limit cells to prevent buffer overflow
+            let cell_size: f32 = if area > max_cells {
+                (area / max_cells).sqrt().ceil()
+            } else {
+                1.0
+            };
 
             // Calculate the gradient line length (diagonal of rectangle projected onto gradient line)
             // For CSS gradients, the gradient line goes through the center and extends to the corners
@@ -1168,7 +1195,7 @@ impl Renderer {
                     let t = (projection / gradient_half_length + 1.0) / 2.0;
                     let t_clamped = t.clamp(0.0, 1.0);
 
-                    let color = Self::interpolate_color(&normalized_stops, t_clamped);
+                    let color = Self::interpolate_color_gamma(&normalized_stops, t_clamped);
 
                     if color.a > 0.0 {
                         self.draw_solid_rect(Rect::new(x, y, cell_w, cell_h), color);
@@ -1268,9 +1295,15 @@ impl Renderer {
             normalized_stops.push((pos, stop.color));
         }
         
-        // Draw using pixel rows for accurate radial gradient
-        // Each row is drawn as a series of colored rectangles
-        let step_size: f32 = 2.0; // Draw every 2 pixels for performance
+        // Adaptive step sizing to prevent GPU buffer overflow for large gradients
+        // while maintaining 1px quality for small UI elements
+        let area = rect.width * rect.height;
+        let max_cells: f32 = 100_000.0; // Limit cells to prevent buffer overflow
+        let step_size: f32 = if area > max_cells {
+            (area / max_cells).sqrt().ceil()
+        } else {
+            1.0
+        };
         let mut y = rect.y;
         while y < rect.y + rect.height {
             let row_height = step_size.min(rect.y + rect.height - y);
@@ -1283,8 +1316,8 @@ impl Renderer {
                 let dy = (y + row_height / 2.0 - cy) / ry.max(0.001);
                 let t = (dx * dx + dy * dy).sqrt();
                 
-                // Get color at this distance
-                let color = Self::interpolate_color(&normalized_stops, t);
+                // Get color at this distance (gamma-correct)
+                let color = Self::interpolate_color_gamma(&normalized_stops, t);
                 
                 // Only draw if not fully transparent
                 if color.a > 0.0 {
@@ -1297,7 +1330,80 @@ impl Renderer {
         }
     }
     
-    /// Interpolate between color stops.
+    /// Convert sRGB to linear space for interpolation.
+    #[inline]
+    fn srgb_to_linear(c: f32) -> f32 {
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    
+    /// Convert linear to sRGB space after interpolation.
+    #[inline]
+    fn linear_to_srgb(c: f32) -> f32 {
+        if c <= 0.0031308 {
+            c * 12.92
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        }
+    }
+    
+    /// Interpolate between color stops with gamma-correct blending.
+    /// This matches CSS spec for gradient color interpolation.
+    fn interpolate_color_gamma(stops: &[(f32, Color)], t: f32) -> Color {
+        if stops.is_empty() {
+            return Color::TRANSPARENT;
+        }
+        if stops.len() == 1 || t <= stops[0].0 {
+            return stops[0].1;
+        }
+        if t >= stops[stops.len() - 1].0 {
+            return stops[stops.len() - 1].1;
+        }
+        
+        // Find the two stops surrounding t
+        for i in 0..stops.len() - 1 {
+            let (pos0, color0) = stops[i];
+            let (pos1, color1) = stops[i + 1];
+            if t >= pos0 && t <= pos1 {
+                let local_t = if (pos1 - pos0).abs() < 0.0001 {
+                    0.0
+                } else {
+                    (t - pos0) / (pos1 - pos0)
+                };
+                
+                // Convert to linear space (0-1 range)
+                let r0 = Self::srgb_to_linear(color0.r as f32 / 255.0);
+                let g0 = Self::srgb_to_linear(color0.g as f32 / 255.0);
+                let b0 = Self::srgb_to_linear(color0.b as f32 / 255.0);
+                
+                let r1 = Self::srgb_to_linear(color1.r as f32 / 255.0);
+                let g1 = Self::srgb_to_linear(color1.g as f32 / 255.0);
+                let b1 = Self::srgb_to_linear(color1.b as f32 / 255.0);
+                
+                // Interpolate in linear space
+                let r_lin = (1.0 - local_t) * r0 + local_t * r1;
+                let g_lin = (1.0 - local_t) * g0 + local_t * g1;
+                let b_lin = (1.0 - local_t) * b0 + local_t * b1;
+                
+                // Convert back to sRGB
+                let r = (Self::linear_to_srgb(r_lin) * 255.0).round() as u8;
+                let g = (Self::linear_to_srgb(g_lin) * 255.0).round() as u8;
+                let b = (Self::linear_to_srgb(b_lin) * 255.0).round() as u8;
+                
+                // Alpha is linear
+                let a = (1.0 - local_t) * color0.a + local_t * color1.a;
+                
+                return Color::new(r, g, b, a);
+            }
+        }
+        stops[stops.len() - 1].1
+    }
+    
+    /// Interpolate between color stops (legacy linear sRGB - kept for non-gradient uses).
+    #[allow(dead_code)]
     fn interpolate_color(stops: &[(f32, Color)], t: f32) -> Color {
         if stops.is_empty() {
             return Color::TRANSPARENT;
@@ -1320,9 +1426,9 @@ impl Renderer {
                     (t - pos0) / (pos1 - pos0)
                 };
                 return Color::new(
-                    ((1.0 - local_t) * color0.r as f32 + local_t * color1.r as f32) as u8,
-                    ((1.0 - local_t) * color0.g as f32 + local_t * color1.g as f32) as u8,
-                    ((1.0 - local_t) * color0.b as f32 + local_t * color1.b as f32) as u8,
+                    ((1.0 - local_t) * color0.r as f32 + local_t * color1.r as f32).round() as u8,
+                    ((1.0 - local_t) * color0.g as f32 + local_t * color1.g as f32).round() as u8,
+                    ((1.0 - local_t) * color0.b as f32 + local_t * color1.b as f32).round() as u8,
                     (1.0 - local_t) * color0.a + local_t * color1.a,
                 );
             }
