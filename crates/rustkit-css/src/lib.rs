@@ -1542,7 +1542,7 @@ impl Stylesheet {
 pub fn parse_color(value: &str) -> Option<Color> {
     let value = value.trim();
 
-    // Named colors
+    // Named colors (CSS Color Level 4)
     match value.to_lowercase().as_str() {
         "transparent" => return Some(Color::TRANSPARENT),
         "black" => return Some(Color::BLACK),
@@ -1552,6 +1552,137 @@ pub fn parse_color(value: &str) -> Option<Color> {
         "blue" => return Some(Color::from_rgb(0, 0, 255)),
         "yellow" => return Some(Color::from_rgb(255, 255, 0)),
         "gray" | "grey" => return Some(Color::from_rgb(128, 128, 128)),
+        // Extended named colors
+        "coral" => return Some(Color::from_rgb(255, 127, 80)),
+        "orange" => return Some(Color::from_rgb(255, 165, 0)),
+        "pink" => return Some(Color::from_rgb(255, 192, 203)),
+        "purple" => return Some(Color::from_rgb(128, 0, 128)),
+        "cyan" => return Some(Color::from_rgb(0, 255, 255)),
+        "magenta" | "fuchsia" => return Some(Color::from_rgb(255, 0, 255)),
+        "lime" => return Some(Color::from_rgb(0, 255, 0)),
+        "navy" => return Some(Color::from_rgb(0, 0, 128)),
+        "teal" => return Some(Color::from_rgb(0, 128, 128)),
+        "olive" => return Some(Color::from_rgb(128, 128, 0)),
+        "maroon" => return Some(Color::from_rgb(128, 0, 0)),
+        "aqua" => return Some(Color::from_rgb(0, 255, 255)),
+        "silver" => return Some(Color::from_rgb(192, 192, 192)),
+        "lightgray" | "lightgrey" => return Some(Color::from_rgb(211, 211, 211)),
+        "darkgray" | "darkgrey" => return Some(Color::from_rgb(169, 169, 169)),
+        "dimgray" | "dimgrey" => return Some(Color::from_rgb(105, 105, 105)),
+        "lightblue" => return Some(Color::from_rgb(173, 216, 230)),
+        "lightgreen" => return Some(Color::from_rgb(144, 238, 144)),
+        "lightyellow" => return Some(Color::from_rgb(255, 255, 224)),
+        "lightpink" => return Some(Color::from_rgb(255, 182, 193)),
+        "lightcoral" => return Some(Color::from_rgb(240, 128, 128)),
+        "darkblue" => return Some(Color::from_rgb(0, 0, 139)),
+        "darkgreen" => return Some(Color::from_rgb(0, 100, 0)),
+        "darkred" => return Some(Color::from_rgb(139, 0, 0)),
+        "gold" => return Some(Color::from_rgb(255, 215, 0)),
+        "brown" => return Some(Color::from_rgb(165, 42, 42)),
+        "beige" => return Some(Color::from_rgb(245, 245, 220)),
+        "ivory" => return Some(Color::from_rgb(255, 255, 240)),
+        "wheat" => return Some(Color::from_rgb(245, 222, 179)),
+        "tan" => return Some(Color::from_rgb(210, 180, 140)),
+        "khaki" => return Some(Color::from_rgb(240, 230, 140)),
+        "salmon" => return Some(Color::from_rgb(250, 128, 114)),
+        "tomato" => return Some(Color::from_rgb(255, 99, 71)),
+        "crimson" => return Some(Color::from_rgb(220, 20, 60)),
+        "indianred" => return Some(Color::from_rgb(205, 92, 92)),
+        "firebrick" => return Some(Color::from_rgb(178, 34, 34)),
+        "orangered" => return Some(Color::from_rgb(255, 69, 0)),
+        "chocolate" => return Some(Color::from_rgb(210, 105, 30)),
+        "sienna" => return Some(Color::from_rgb(160, 82, 45)),
+        "peru" => return Some(Color::from_rgb(205, 133, 63)),
+        "sandybrown" => return Some(Color::from_rgb(244, 164, 96)),
+        "goldenrod" => return Some(Color::from_rgb(218, 165, 32)),
+        "darkgoldenrod" => return Some(Color::from_rgb(184, 134, 11)),
+        "lemonchiffon" => return Some(Color::from_rgb(255, 250, 205)),
+        "palegoldenrod" => return Some(Color::from_rgb(238, 232, 170)),
+        "greenyellow" => return Some(Color::from_rgb(173, 255, 47)),
+        "chartreuse" => return Some(Color::from_rgb(127, 255, 0)),
+        "lawngreen" => return Some(Color::from_rgb(124, 252, 0)),
+        "springgreen" => return Some(Color::from_rgb(0, 255, 127)),
+        "mediumspringgreen" => return Some(Color::from_rgb(0, 250, 154)),
+        "seagreen" => return Some(Color::from_rgb(46, 139, 87)),
+        "forestgreen" => return Some(Color::from_rgb(34, 139, 34)),
+        "limegreen" => return Some(Color::from_rgb(50, 205, 50)),
+        "palegreen" => return Some(Color::from_rgb(152, 251, 152)),
+        "mediumseagreen" => return Some(Color::from_rgb(60, 179, 113)),
+        "aquamarine" => return Some(Color::from_rgb(127, 255, 212)),
+        "turquoise" => return Some(Color::from_rgb(64, 224, 208)),
+        "mediumturquoise" => return Some(Color::from_rgb(72, 209, 204)),
+        "darkturquoise" => return Some(Color::from_rgb(0, 206, 209)),
+        "cadetblue" => return Some(Color::from_rgb(95, 158, 160)),
+        "steelblue" => return Some(Color::from_rgb(70, 130, 180)),
+        "lightsteelblue" => return Some(Color::from_rgb(176, 196, 222)),
+        "powderblue" => return Some(Color::from_rgb(176, 224, 230)),
+        "skyblue" => return Some(Color::from_rgb(135, 206, 235)),
+        "lightskyblue" => return Some(Color::from_rgb(135, 206, 250)),
+        "deepskyblue" => return Some(Color::from_rgb(0, 191, 255)),
+        "dodgerblue" => return Some(Color::from_rgb(30, 144, 255)),
+        "cornflowerblue" => return Some(Color::from_rgb(100, 149, 237)),
+        "royalblue" => return Some(Color::from_rgb(65, 105, 225)),
+        "mediumblue" => return Some(Color::from_rgb(0, 0, 205)),
+        "midnightblue" => return Some(Color::from_rgb(25, 25, 112)),
+        "slateblue" => return Some(Color::from_rgb(106, 90, 205)),
+        "darkslateblue" => return Some(Color::from_rgb(72, 61, 139)),
+        "mediumslateblue" => return Some(Color::from_rgb(123, 104, 238)),
+        "mediumpurple" => return Some(Color::from_rgb(147, 112, 219)),
+        "blueviolet" => return Some(Color::from_rgb(138, 43, 226)),
+        "darkorchid" => return Some(Color::from_rgb(153, 50, 204)),
+        "darkviolet" => return Some(Color::from_rgb(148, 0, 211)),
+        "mediumorchid" => return Some(Color::from_rgb(186, 85, 211)),
+        "orchid" => return Some(Color::from_rgb(218, 112, 214)),
+        "plum" => return Some(Color::from_rgb(221, 160, 221)),
+        "violet" => return Some(Color::from_rgb(238, 130, 238)),
+        "thistle" => return Some(Color::from_rgb(216, 191, 216)),
+        "lavender" => return Some(Color::from_rgb(230, 230, 250)),
+        "mistyrose" => return Some(Color::from_rgb(255, 228, 225)),
+        "antiquewhite" => return Some(Color::from_rgb(250, 235, 215)),
+        "linen" => return Some(Color::from_rgb(250, 240, 230)),
+        "oldlace" => return Some(Color::from_rgb(253, 245, 230)),
+        "papayawhip" => return Some(Color::from_rgb(255, 239, 213)),
+        "seashell" => return Some(Color::from_rgb(255, 245, 238)),
+        "mintcream" => return Some(Color::from_rgb(245, 255, 250)),
+        "slategray" | "slategrey" => return Some(Color::from_rgb(112, 128, 144)),
+        "lightslategray" | "lightslategrey" => return Some(Color::from_rgb(119, 136, 153)),
+        "gainsboro" => return Some(Color::from_rgb(220, 220, 220)),
+        "whitesmoke" => return Some(Color::from_rgb(245, 245, 245)),
+        "floralwhite" => return Some(Color::from_rgb(255, 250, 240)),
+        "ghostwhite" => return Some(Color::from_rgb(248, 248, 255)),
+        "honeydew" => return Some(Color::from_rgb(240, 255, 240)),
+        "azure" => return Some(Color::from_rgb(240, 255, 255)),
+        "aliceblue" => return Some(Color::from_rgb(240, 248, 255)),
+        "snow" => return Some(Color::from_rgb(255, 250, 250)),
+        "darkcyan" => return Some(Color::from_rgb(0, 139, 139)),
+        "darkmagenta" => return Some(Color::from_rgb(139, 0, 139)),
+        "darkorange" => return Some(Color::from_rgb(255, 140, 0)),
+        "darksalmon" => return Some(Color::from_rgb(233, 150, 122)),
+        "darkseagreen" => return Some(Color::from_rgb(143, 188, 143)),
+        "darkslategray" | "darkslategrey" => return Some(Color::from_rgb(47, 79, 79)),
+        "deeppink" => return Some(Color::from_rgb(255, 20, 147)),
+        "hotpink" => return Some(Color::from_rgb(255, 105, 180)),
+        "mediumvioletred" => return Some(Color::from_rgb(199, 21, 133)),
+        "palevioletred" => return Some(Color::from_rgb(219, 112, 147)),
+        "rosybrown" => return Some(Color::from_rgb(188, 143, 143)),
+        "saddlebrown" => return Some(Color::from_rgb(139, 69, 19)),
+        "yellowgreen" => return Some(Color::from_rgb(154, 205, 50)),
+        "olivedrab" => return Some(Color::from_rgb(107, 142, 35)),
+        "darkolivegreen" => return Some(Color::from_rgb(85, 107, 47)),
+        "mediumaquamarine" => return Some(Color::from_rgb(102, 205, 170)),
+        "lightcyan" => return Some(Color::from_rgb(224, 255, 255)),
+        "paleturquoise" => return Some(Color::from_rgb(175, 238, 238)),
+        "lightseagreen" => return Some(Color::from_rgb(32, 178, 170)),
+        "cornsilk" => return Some(Color::from_rgb(255, 248, 220)),
+        "blanchedalmond" => return Some(Color::from_rgb(255, 235, 205)),
+        "bisque" => return Some(Color::from_rgb(255, 228, 196)),
+        "navajowhite" => return Some(Color::from_rgb(255, 222, 173)),
+        "moccasin" => return Some(Color::from_rgb(255, 228, 181)),
+        "peachpuff" => return Some(Color::from_rgb(255, 218, 185)),
+        "burlywood" => return Some(Color::from_rgb(222, 184, 135)),
+        "lavenderblush" => return Some(Color::from_rgb(255, 240, 245)),
+        "currentcolor" => return None, // Special case - needs context
+        "inherit" => return None, // Special case - needs context
         _ => {}
     }
 
@@ -1603,7 +1734,73 @@ pub fn parse_color(value: &str) -> Option<Color> {
         }
     }
 
+    // hsl() / hsla()
+    if value.starts_with("hsl") {
+        let inner = value
+            .trim_start_matches("hsla(")
+            .trim_start_matches("hsl(")
+            .trim_end_matches(')');
+        let parts: Vec<&str> = inner.split(',').collect();
+        if parts.len() >= 3 {
+            let h = parts[0].trim().trim_end_matches("deg").parse::<f32>().ok()?;
+            let s = parts[1].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
+            let l = parts[2].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
+            let a = if parts.len() >= 4 {
+                parts[3].trim().parse::<f32>().ok()?
+            } else {
+                1.0
+            };
+            
+            // HSL to RGB conversion
+            let (r, g, b) = hsl_to_rgb(h, s, l);
+            return Some(Color::new(r, g, b, a));
+        }
+    }
+
     None
+}
+
+/// Convert HSL to RGB
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    if s == 0.0 {
+        // Achromatic (gray)
+        let v = (l * 255.0).round() as u8;
+        return (v, v, v);
+    }
+
+    let h = h / 360.0;
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
+    let p = 2.0 * l - q;
+
+    let r = hue_to_rgb(p, q, h + 1.0 / 3.0);
+    let g = hue_to_rgb(p, q, h);
+    let b = hue_to_rgb(p, q, h - 1.0 / 3.0);
+
+    (
+        (r * 255.0).round() as u8,
+        (g * 255.0).round() as u8,
+        (b * 255.0).round() as u8,
+    )
+}
+
+fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
+    if t < 0.0 { t += 1.0; }
+    if t > 1.0 { t -= 1.0; }
+    
+    if t < 1.0 / 6.0 {
+        return p + (q - p) * 6.0 * t;
+    }
+    if t < 1.0 / 2.0 {
+        return q;
+    }
+    if t < 2.0 / 3.0 {
+        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+    }
+    p
 }
 
 /// Parse a length value.
