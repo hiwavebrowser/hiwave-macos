@@ -2187,18 +2187,39 @@ impl DisplayList {
     }
     
     /// Render background.
+    /// For multi-layer backgrounds (e.g., `background: gradient, color`),
+    /// the solid color is the bottom layer, painted first, then gradient on top.
     fn render_background(&mut self, layout_box: &LayoutBox) {
         let rect = layout_box.dimensions.border_box();
         let s = &layout_box.style;
-        
+
         // Get font size for relative length calculations
         let font_size = match s.font_size {
             Length::Px(px) => px,
             _ => 16.0,
         };
         let root_font_size = 16.0; // TODO: Pass actual root font size
-        
-        // Check if we have a gradient background
+
+        // Calculate border radius once (used for both solid color and gradient clipping)
+        let radius = BorderRadius {
+            top_left: s.border_top_left_radius.to_px(font_size, root_font_size, rect.width),
+            top_right: s.border_top_right_radius.to_px(font_size, root_font_size, rect.width),
+            bottom_right: s.border_bottom_right_radius.to_px(font_size, root_font_size, rect.width),
+            bottom_left: s.border_bottom_left_radius.to_px(font_size, root_font_size, rect.width),
+        };
+
+        // Step 1: Paint solid background color FIRST (bottom layer)
+        // This must be painted even if there's a gradient, as the gradient may be semi-transparent
+        let color = s.background_color;
+        if color.a > 0.0 {
+            if radius.is_zero() {
+                self.commands.push(DisplayCommand::SolidColor(color, rect));
+            } else {
+                self.commands.push(DisplayCommand::RoundedRect { color, rect, radius });
+            }
+        }
+
+        // Step 2: Paint gradient on TOP of solid color (if present)
         if let Some(gradient) = &s.background_gradient {
             match gradient {
                 rustkit_css::Gradient::Linear(linear) => {
@@ -2217,25 +2238,6 @@ impl DisplayList {
                         stops: radial.stops.clone(),
                     });
                 }
-            }
-            return; // Gradient takes precedence over solid color
-        }
-        
-        // Solid color background
-        let color = s.background_color;
-        if color.a > 0.0 {
-            // Check if we have border-radius
-            let radius = BorderRadius {
-                top_left: s.border_top_left_radius.to_px(font_size, root_font_size, rect.width),
-                top_right: s.border_top_right_radius.to_px(font_size, root_font_size, rect.width),
-                bottom_right: s.border_bottom_right_radius.to_px(font_size, root_font_size, rect.width),
-                bottom_left: s.border_bottom_left_radius.to_px(font_size, root_font_size, rect.width),
-            };
-            
-            if radius.is_zero() {
-                self.commands.push(DisplayCommand::SolidColor(color, rect));
-            } else {
-                self.commands.push(DisplayCommand::RoundedRect { color, rect, radius });
             }
         }
     }
