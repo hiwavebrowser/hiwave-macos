@@ -23,8 +23,10 @@ import json
 import os
 import subprocess
 import sys
+import statistics
 from datetime import datetime
 from pathlib import Path
+from typing import Optional, List, Dict, Any
 
 REPO_ROOT = Path(__file__).parent.parent
 BASELINES_DIR = REPO_ROOT / "baselines" / "chrome-120"
@@ -48,6 +50,20 @@ WEBSUITE = [
     ("gradient-backgrounds", "websuite/cases/gradient-backgrounds/index.html", 800, 600),
     ("image-gallery", "websuite/cases/image-gallery/index.html", 1280, 800),
     ("sticky-scroll", "websuite/cases/sticky-scroll/index.html", 1280, 800),
+]
+
+# Micro-tests for specific CSS features
+MICRO_TESTS = [
+    ("backgrounds", "websuite/micro/backgrounds/index.html", 900, 1000),
+    ("bg-solid", "websuite/micro/bg-solid/index.html", 800, 600),
+    ("bg-pure", "websuite/micro/bg-pure/index.html", 800, 600),
+    ("combinators", "websuite/micro/combinators/index.html", 800, 800),
+    ("form-controls", "websuite/micro/form-controls/index.html", 800, 1200),
+    ("gradients", "websuite/micro/gradients/index.html", 900, 1000),
+    ("images-intrinsic", "websuite/micro/images-intrinsic/index.html", 800, 1400),
+    ("pseudo-classes", "websuite/micro/pseudo-classes/index.html", 800, 800),
+    ("rounded-corners", "websuite/micro/rounded-corners/index.html", 900, 1000),
+    ("specificity", "websuite/micro/specificity/index.html", 800, 600),
 ]
 
 # Thresholds by component type
@@ -86,10 +102,6 @@ def run_rustkit_capture(case_id: str, html_path: str, width: int, height: int) -
     frame_path = output_dir / "frame.ppm"
     layout_path = output_dir / "layout.json"
     
-    # Build parity-capture if needed
-    build_cmd = ["cargo", "build", "--release", "-p", "parity-capture"]
-    subprocess.run(build_cmd, capture_output=True, cwd=REPO_ROOT)
-    
     # Run capture
     capture_cmd = [
         str(REPO_ROOT / "target" / "release" / "parity-capture"),
@@ -123,17 +135,31 @@ def run_rustkit_capture(case_id: str, html_path: str, width: int, height: int) -
         return {"success": False, "error": str(e)}
 
 
-def compare_pixels(chrome_png: Path, rustkit_ppm: Path, output_dir: Path) -> dict:
+def compare_pixels(
+    chrome_png: Path,
+    rustkit_ppm: Path,
+    output_dir: Path,
+    chrome_rects: Optional[Path] = None,
+    chrome_styles: Optional[Path] = None,
+) -> dict:
     """Compare pixel data using Node.js tool."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
+    chrome_rects_arg = str(chrome_rects) if chrome_rects and chrome_rects.exists() else ""
+    chrome_styles_arg = str(chrome_styles) if chrome_styles and chrome_styles.exists() else ""
+
     cmd = [
         "node", "-e", f"""
 import {{ comparePixels }} from './tools/parity_oracle/compare_baseline.mjs';
 const result = await comparePixels(
     '{chrome_png}',
     '{rustkit_ppm}',
-    '{output_dir}'
+    '{output_dir}',
+    {{
+      chromeRectsPath: {json.dumps(chrome_rects_arg)},
+      chromeStylesPath: {json.dumps(chrome_styles_arg)},
+      attributionTopN: 10,
+    }}
 );
 console.log(JSON.stringify(result));
 """
@@ -255,7 +281,15 @@ def compare_rects(chrome_rects: Path, rustkit_rects: Path, tolerance: float = 5.
         return {"error": str(e)}
 
 
-def run_test(case_id: str, html_path: str, width: int, height: int, case_type: str) -> dict:
+def run_test(
+    case_id: str,
+    html_path: str,
+    width: int,
+    height: int,
+    case_type: str,
+    iterations: int = 1,
+    max_variance: float = 0.10,
+) -> dict:
     """Run full triple-verification test for a case."""
     baseline_dir = BASELINES_DIR / case_type / case_id
     capture_dir = OUTPUT_DIR / "captures" / case_id
@@ -276,23 +310,48 @@ def run_test(case_id: str, html_path: str, width: int, height: int, case_type: s
     if not chrome_png.exists():
         result["error"] = "No Chrome baseline"
         return result
-    
-    # Capture RustKit
-    capture_result = run_rustkit_capture(case_id, html_path, width, height)
-    if not capture_result.get("success"):
-        result["error"] = f"Capture failed: {capture_result.get('error', 'Unknown')}"
-        return result
-    
-    # Find RustKit output
-    rustkit_ppm = capture_dir / "frame.ppm"
-    if not rustkit_ppm.exists():
-        result["error"] = "No RustKit capture output"
-        return result
-    
-    # 1. Pixel comparison
-    pixel_result = compare_pixels(chrome_png, rustkit_ppm, diff_dir)
-    result["pixel"] = pixel_result
-    
+
+    chrome_rects = baseline_dir / "layout-rects.json"
+    chrome_styles = baseline_dir / "computed-styles.json"
+
+    run_diffs: List[float] = []
+    last_pixel_result: Optional[Dict[str, Any]] = None
+
+    for run_idx in range(iterations):
+        # Capture RustKit
+        capture_result = run_rustkit_capture(case_id, html_path, width, height)
+        if not capture_result.get("success"):
+            result["error"] = f"Capture failed: {capture_result.get('error', 'Unknown')}"
+            return result
+
+        # Find RustKit output
+        rustkit_ppm = capture_dir / "frame.ppm"
+        if not rustkit_ppm.exists():
+            result["error"] = "No RustKit capture output"
+            return result
+
+        # 1. Pixel comparison (per-run output)
+        run_diff_dir = diff_dir / f"run-{run_idx+1}"
+        pixel_result = compare_pixels(chrome_png, rustkit_ppm, run_diff_dir, chrome_rects, chrome_styles)
+        last_pixel_result = pixel_result
+
+        if pixel_result.get("error"):
+            result["error"] = f"Pixel compare error: {pixel_result.get('error')}"
+            return result
+
+        run_diffs.append(float(pixel_result.get("diffPercent", 100.0)))
+
+    result["pixel_runs"] = run_diffs
+    if run_diffs:
+        result["diff_pct_median"] = float(statistics.median(run_diffs))
+        result["diff_pct_min"] = float(min(run_diffs))
+        result["diff_pct_max"] = float(max(run_diffs))
+        result["diff_pct_variance"] = float(max(run_diffs) - min(run_diffs))
+        result["stable"] = (iterations >= 3) and (result["diff_pct_variance"] <= max_variance)
+
+    # Attach last-run artifacts (diff/heatmap/overlay/attribution) for inspection
+    result["pixel"] = last_pixel_result
+
     # 2. Style comparison
     chrome_styles = baseline_dir / "computed-styles.json"
     rustkit_styles = capture_dir / "computed-styles.json"
@@ -304,7 +363,7 @@ def run_test(case_id: str, html_path: str, width: int, height: int, case_type: s
     result["rects"] = compare_rects(chrome_rects, rustkit_rects)
     
     # Determine pass/fail
-    diff_pct = pixel_result.get("diffPercent", 100)
+    diff_pct = result.get("diff_pct_median", last_pixel_result.get("diffPercent", 100) if last_pixel_result else 100)
     result["diff_pct"] = diff_pct
     result["passed"] = diff_pct <= result["threshold"]
     
@@ -315,6 +374,9 @@ def main():
     scope = "all"
     single_case = None
     threshold_override = None
+    iterations = 1
+    max_variance = 0.10
+    output_path = OUTPUT_DIR / "parity_test_results.json"
     
     # Parse arguments
     args = sys.argv[1:]
@@ -329,6 +391,15 @@ def main():
         elif args[i] == "--threshold" and i + 1 < len(args):
             threshold_override = float(args[i + 1])
             i += 2
+        elif args[i] == "--iterations" and i + 1 < len(args):
+            iterations = int(args[i + 1])
+            i += 2
+        elif args[i] == "--max-variance" and i + 1 < len(args):
+            max_variance = float(args[i + 1])
+            i += 2
+        elif args[i] == "--output" and i + 1 < len(args):
+            output_path = Path(args[i + 1])
+            i += 2
         elif args[i] in ["-h", "--help"]:
             print(__doc__)
             sys.exit(0)
@@ -340,16 +411,32 @@ def main():
     print("=" * 60)
     print(f"Baselines: {BASELINES_DIR}")
     print(f"Scope: {scope}")
+    print(f"Iterations: {iterations}")
+    if iterations >= 3:
+        print(f"Stability max variance: {max_variance}%")
     print(f"Timestamp: {datetime.now().isoformat()}")
     print()
+
+    # Build parity-capture once
+    build_cmd = ["cargo", "build", "--release", "-p", "parity-capture"]
+    build = subprocess.run(build_cmd, capture_output=True, text=True, cwd=REPO_ROOT)
+    if build.returncode != 0:
+        print("Error: failed to build parity-capture")
+        print(build.stderr[:400])
+        sys.exit(1)
     
     # Determine cases to run
     cases = []
     if single_case:
-        all_cases = {c[0]: c for c in BUILTINS + WEBSUITE}
+        all_cases = {c[0]: c for c in BUILTINS + WEBSUITE + MICRO_TESTS}
         if single_case in all_cases:
             c = all_cases[single_case]
-            case_type = "builtins" if any(b[0] == single_case for b in BUILTINS) else "websuite"
+            if any(b[0] == single_case for b in BUILTINS):
+                case_type = "builtins"
+            elif any(m[0] == single_case for m in MICRO_TESTS):
+                case_type = "micro"
+            else:
+                case_type = "websuite"
             cases = [(c[0], c[1], c[2], c[3], case_type)]
         else:
             print(f"Error: Unknown case '{single_case}'")
@@ -359,6 +446,8 @@ def main():
             cases.extend([(c[0], c[1], c[2], c[3], "builtins") for c in BUILTINS])
         if scope in ["all", "websuite"]:
             cases.extend([(c[0], c[1], c[2], c[3], "websuite") for c in WEBSUITE])
+        if scope in ["all", "micro"]:
+            cases.extend([(c[0], c[1], c[2], c[3], "micro") for c in MICRO_TESTS])
     
     # Run tests
     results = []
@@ -368,26 +457,44 @@ def main():
     for case_id, html_path, width, height, case_type in cases:
         print(f"  Testing {case_id}...", end=" ", flush=True)
         
-        result = run_test(case_id, html_path, width, height, case_type)
+        result = run_test(
+            case_id,
+            html_path,
+            width,
+            height,
+            case_type,
+            iterations=iterations,
+            max_variance=max_variance,
+        )
         results.append(result)
         
         if result.get("error"):
             print(f"ERROR: {result['error'][:40]}")
             failed += 1
         elif result["passed"]:
-            print(f"✓ {result['diff_pct']:.1f}% (threshold: {result['threshold']}%)")
+            stable = result.get("stable")
+            stable_str = ""
+            if iterations >= 3:
+                stable_str = " stable" if stable else " UNSTABLE"
+            print(f"✓ {result['diff_pct']:.2f}% (threshold: {result['threshold']}%){stable_str}")
             passed += 1
         else:
-            print(f"✗ {result['diff_pct']:.1f}% (threshold: {result['threshold']}%)")
+            stable = result.get("stable")
+            stable_str = ""
+            if iterations >= 3:
+                stable_str = " stable" if stable else " UNSTABLE"
+            print(f"✗ {result['diff_pct']:.2f}% (threshold: {result['threshold']}%){stable_str}")
             failed += 1
     
     # Save results
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    results_path = OUTPUT_DIR / "parity_test_results.json"
-    with open(results_path, "w") as f:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
         json.dump({
             "timestamp": datetime.now().isoformat(),
             "scope": scope,
+            "iterations": iterations,
+            "max_variance": max_variance,
             "passed": passed,
             "failed": failed,
             "results": results,
@@ -405,7 +512,7 @@ def main():
         avg_diff = sum(r.get("diff_pct", 100) for r in results) / len(results)
         print(f"Average Diff: {avg_diff:.1f}%")
     
-    print(f"\nResults saved to: {results_path}")
+    print(f"\nResults saved to: {output_path}")
     
     # Show worst cases
     sorted_results = sorted(results, key=lambda r: r.get("diff_pct", 100), reverse=True)

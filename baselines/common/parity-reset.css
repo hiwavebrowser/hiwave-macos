@@ -1,0 +1,66 @@
+/* baselines/common/parity-reset.css
+ *
+ * Parity-only reset to make pixel diffs deterministic across runs and machines.
+ * This should be applied only to parity micro-tests (not built-in UI pages).
+ */
+
+/* Bundled test fonts for consistent rendering across Chrome and RustKit */
+@font-face {
+  font-family: 'ParityTest';
+  src: url('/baselines/common/fonts/NotoSans-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'ParityTest';
+  src: url('/baselines/common/fonts/NotoSans-Bold.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'ParityTest';
+  src: url('/baselines/common/fonts/NotoSans-Italic.ttf') format('truetype');
+  font-weight: 400;
+  font-style: italic;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'ParityTest';
+  src: url('/baselines/common/fonts/NotoSans-BoldItalic.ttf') format('truetype');
+  font-weight: 700;
+  font-style: italic;
+  font-display: block;
+}
+
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  transition: none !important;
+  animation: none !important;
+  animation-play-state: paused !important;
+  caret-color: transparent !important;
+  text-rendering: geometricPrecision;
+}
+
+html {
+  font-family: 'ParityTest', 'Noto Sans', sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  color: #000;
+  background: #fff;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  min-height: 100vh;
+  font-family: 'ParityTest', 'Noto Sans', sans-serif;
+}
+
+

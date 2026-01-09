@@ -259,3 +259,5 @@ export function generateHeatmap(diffData, width, height, outputPath) {
   savePng(heatmap, width, height, outputPath);
 }
 
+
+

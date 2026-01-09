@@ -6,6 +6,11 @@ import { chromium } from 'playwright';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
+import {
+  createDeterministicContext,
+  getDeterministicLaunchOptions,
+  shouldApplyParityResetForHtmlPath,
+} from './deterministic.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -26,15 +31,15 @@ export async function captureChrome(htmlPath, outputPath, width, height) {
     throw new Error(`HTML file not found: ${absolutePath}`);
   }
   
-  const browser = await chromium.launch({
-    headless: true,
-  });
+  const browser = await chromium.launch(getDeterministicLaunchOptions());
   
   try {
-    const context = await browser.newContext({
-      viewport: { width, height },
-      deviceScaleFactor: 1,  // Ensure 1:1 pixel ratio for comparison
-    });
+    const context = await createDeterministicContext(
+      browser,
+      width,
+      height,
+      { applyParityReset: shouldApplyParityResetForHtmlPath(absolutePath) }
+    );
     
     const page = await context.newPage();
     
@@ -42,8 +47,8 @@ export async function captureChrome(htmlPath, outputPath, width, height) {
     const fileUrl = `file://${absolutePath}`;
     await page.goto(fileUrl, { waitUntil: 'networkidle' });
     
-    // Wait a bit for any CSS transitions/animations to settle
-    await page.waitForTimeout(500);
+    // Small settle for layout/font load. Animations are frozen by init script.
+    await page.waitForTimeout(50);
     
     // Capture screenshot
     await page.screenshot({
@@ -66,7 +71,7 @@ export async function captureChrome(htmlPath, outputPath, width, height) {
  * @returns {Promise<Object>} Results keyed by case ID
  */
 export async function captureMultiple(cases, outputDir) {
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch(getDeterministicLaunchOptions());
   const results = {};
   
   try {
@@ -75,16 +80,18 @@ export async function captureMultiple(cases, outputDir) {
       const outputPath = `${outputDir}/${id}.png`;
       
       try {
-        const context = await browser.newContext({
-          viewport: { width, height },
-          deviceScaleFactor: 1,
-        });
+        const context = await createDeterministicContext(
+          browser,
+          width,
+          height,
+          { applyParityReset: shouldApplyParityResetForHtmlPath(htmlPath) }
+        );
         
         const page = await context.newPage();
         const fileUrl = `file://${resolve(htmlPath)}`;
         
         await page.goto(fileUrl, { waitUntil: 'networkidle' });
-        await page.waitForTimeout(500);
+        await page.waitForTimeout(50);
         await page.screenshot({ path: outputPath, type: 'png', fullPage: false });
         
         await context.close();
@@ -100,4 +107,6 @@ export async function captureMultiple(cases, outputDir) {
   
   return results;
 }
+
+
 

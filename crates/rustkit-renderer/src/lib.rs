@@ -1078,18 +1078,14 @@ impl Renderer {
         if stops.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
             return;
         }
-        
+
         // Convert direction to angle in radians
         let angle_deg = direction.to_degrees();
         let angle_rad = angle_deg.to_radians();
-        
-        // Calculate gradient line length based on angle
-        let (dx, dy) = (angle_rad.sin(), -angle_rad.cos());
-        
-        // Determine number of steps based on gradient length
-        let gradient_length = (rect.width * dx.abs() + rect.height * dy.abs()).max(1.0);
-        let step_count = (gradient_length / 2.0).max(2.0) as usize;
-        
+
+        // Calculate gradient direction vector
+        let (sin_a, cos_a) = (angle_rad.sin(), angle_rad.cos());
+
         // Normalize color stop positions
         let mut normalized_stops: Vec<(f32, Color)> = Vec::with_capacity(stops.len());
         for (i, stop) in stops.iter().enumerate() {
@@ -1102,42 +1098,86 @@ impl Renderer {
             });
             normalized_stops.push((pos, stop.color));
         }
-        
-        // Draw gradient as multiple thin rectangles
-        let step_size = 1.0 / step_count as f32;
-        for i in 0..step_count {
-            let t = (i as f32 + 0.5) * step_size;
-            
-            // Find the two color stops surrounding this position
-            let color = Self::interpolate_color(&normalized_stops, t);
-            
-            // Calculate the strip position based on angle
-            let strip_rect = if (angle_deg - 90.0).abs() < 0.1 || (angle_deg - 270.0).abs() < 0.1 {
-                // Horizontal gradient (left to right or right to left)
-                let strip_width = rect.width / step_count as f32;
-                let x_pos = if angle_deg < 180.0 {
-                    rect.x + i as f32 * strip_width
+
+        // Check for axis-aligned gradients (more efficient rendering)
+        let is_horizontal = (angle_deg - 90.0).abs() < 0.1 || (angle_deg - 270.0).abs() < 0.1;
+        let is_vertical = angle_deg.abs() < 0.1 || (angle_deg - 180.0).abs() < 0.1;
+
+        if is_horizontal {
+            // Horizontal gradient (left to right or right to left)
+            let reverse = angle_deg > 180.0;
+            let step_count = (rect.width / 2.0).max(2.0) as usize;
+            let strip_width = rect.width / step_count as f32;
+
+            for i in 0..step_count {
+                let t = if reverse {
+                    1.0 - (i as f32 + 0.5) / step_count as f32
                 } else {
-                    rect.x + rect.width - (i + 1) as f32 * strip_width
+                    (i as f32 + 0.5) / step_count as f32
                 };
-                Rect::new(x_pos, rect.y, strip_width + 0.5, rect.height)
-            } else if angle_deg.abs() < 0.1 || (angle_deg - 180.0).abs() < 0.1 {
-                // Vertical gradient (top to bottom or bottom to top)
-                let strip_height = rect.height / step_count as f32;
-                let y_pos = if angle_deg < 90.0 || angle_deg > 270.0 {
-                    rect.y + rect.height - (i + 1) as f32 * strip_height
-                } else {
-                    rect.y + i as f32 * strip_height
-                };
-                Rect::new(rect.x, y_pos, rect.width, strip_height + 0.5)
-            } else {
-                // Diagonal gradient - simplified as vertical strips
-                let strip_width = rect.width / step_count as f32;
+                let color = Self::interpolate_color(&normalized_stops, t);
                 let x_pos = rect.x + i as f32 * strip_width;
-                Rect::new(x_pos, rect.y, strip_width + 0.5, rect.height)
-            };
-            
-            self.draw_solid_rect(strip_rect, color);
+                self.draw_solid_rect(Rect::new(x_pos, rect.y, strip_width + 0.5, rect.height), color);
+            }
+        } else if is_vertical {
+            // Vertical gradient (top to bottom or bottom to top)
+            let reverse = angle_deg < 90.0 || angle_deg > 270.0;
+            let step_count = (rect.height / 2.0).max(2.0) as usize;
+            let strip_height = rect.height / step_count as f32;
+
+            for i in 0..step_count {
+                let t = if reverse {
+                    1.0 - (i as f32 + 0.5) / step_count as f32
+                } else {
+                    (i as f32 + 0.5) / step_count as f32
+                };
+                let color = Self::interpolate_color(&normalized_stops, t);
+                let y_pos = rect.y + i as f32 * strip_height;
+                self.draw_solid_rect(Rect::new(rect.x, y_pos, rect.width, strip_height + 0.5), color);
+            }
+        } else {
+            // Diagonal gradient - render using cells for proper angular gradients
+            // Use 2x2 pixel cells for performance while maintaining accuracy
+            let cell_size: f32 = 2.0;
+
+            // Calculate the gradient line length (diagonal of rectangle projected onto gradient line)
+            // For CSS gradients, the gradient line goes through the center and extends to the corners
+            let half_width = rect.width / 2.0;
+            let half_height = rect.height / 2.0;
+
+            // The gradient length is the distance along the gradient line from corner to corner
+            let gradient_half_length = (half_width * sin_a.abs() + half_height * cos_a.abs()).max(0.001);
+
+            let mut y = rect.y;
+            while y < rect.y + rect.height {
+                let cell_h = cell_size.min(rect.y + rect.height - y);
+                let mut x = rect.x;
+
+                while x < rect.x + rect.width {
+                    let cell_w = cell_size.min(rect.x + rect.width - x);
+
+                    // Calculate position relative to center of rect
+                    let px = x + cell_w / 2.0 - rect.x - half_width;
+                    let py = y + cell_h / 2.0 - rect.y - half_height;
+
+                    // Project point onto gradient line
+                    // Gradient direction: (sin_a, -cos_a) where angle 0 is "to top"
+                    let projection = px * sin_a + py * (-cos_a);
+
+                    // Normalize to 0-1 range
+                    let t = (projection / gradient_half_length + 1.0) / 2.0;
+                    let t_clamped = t.clamp(0.0, 1.0);
+
+                    let color = Self::interpolate_color(&normalized_stops, t_clamped);
+
+                    if color.a > 0.0 {
+                        self.draw_solid_rect(Rect::new(x, y, cell_w, cell_h), color);
+                    }
+
+                    x += cell_size;
+                }
+                y += cell_size;
+            }
         }
     }
     

@@ -11,6 +11,8 @@ import pixelmatch from 'pixelmatch';
 import { PNG } from 'pngjs';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
+import { attributeDiff } from './attribute_diff.mjs';
+import { buildChromeStyleIndex, classifyContributor } from './classify_diff.mjs';
 
 /**
  * Load a PNG file as RGBA buffer
@@ -91,6 +93,33 @@ function savePng(data, width, height, outputPath) {
   png.data = data;
   const buffer = PNG.sync.write(png);
   writeFileSync(outputPath, buffer);
+}
+
+function drawRectOutline(rgba, width, height, rect, color) {
+  const x0 = Math.max(0, Math.floor(rect.x || 0));
+  const y0 = Math.max(0, Math.floor(rect.y || 0));
+  const x1 = Math.min(width - 1, Math.floor((rect.x || 0) + (rect.width || 0)));
+  const y1 = Math.min(height - 1, Math.floor((rect.y || 0) + (rect.height || 0)));
+
+  const [cr, cg, cb, ca] = color;
+
+  const setPx = (x, y) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    const idx = (y * width + x) * 4;
+    rgba[idx] = cr;
+    rgba[idx + 1] = cg;
+    rgba[idx + 2] = cb;
+    rgba[idx + 3] = ca;
+  };
+
+  for (let x = x0; x <= x1; x++) {
+    setPx(x, y0);
+    setPx(x, y1);
+  }
+  for (let y = y0; y <= y1; y++) {
+    setPx(x0, y);
+    setPx(x1, y);
+  }
 }
 
 /**
@@ -188,6 +217,73 @@ export async function comparePixels(chromePath, rustkitPath, outputDir, options 
   const heatmapPath = join(outputDir, 'heatmap.png');
   savePng(heatmapData, width, height, heatmapPath);
   
+  // Optional: element attribution (Chrome rects + styles)
+  let attribution = null;
+  let overlayPath = null;
+  let taxonomy = null;
+
+  if (options.chromeRectsPath && existsSync(options.chromeRectsPath)) {
+    try {
+      const chromeRectsJson = JSON.parse(readFileSync(options.chromeRectsPath, 'utf-8'));
+      attribution = attributeDiff(diffData, width, height, chromeRectsJson, {
+        topN: options.attributionTopN || 10,
+      });
+
+      // Taxonomy classification needs styles (optional)
+      taxonomy = {};
+      let styleIndex = null;
+      if (options.chromeStylesPath && existsSync(options.chromeStylesPath)) {
+        const chromeStylesJson = JSON.parse(readFileSync(options.chromeStylesPath, 'utf-8'));
+        styleIndex = buildChromeStyleIndex(chromeStylesJson);
+      }
+
+      if (attribution?.top_contributors?.length) {
+        for (const c of attribution.top_contributors) {
+          const label = classifyContributor(c, styleIndex);
+          taxonomy[label] = (taxonomy[label] || 0) + (c.contribution_percent || 0);
+          c.likely_cause = label;
+        }
+      }
+
+      // Overlay top contributor rects on heatmap for fast debugging.
+      const overlay = Buffer.from(heatmapData);
+      const colors = [
+        [255, 255, 255, 255],
+        [0, 255, 0, 255],
+        [255, 255, 0, 255],
+        [0, 255, 255, 255],
+        [255, 0, 255, 255],
+      ];
+      (attribution.top_contributors || []).slice(0, 10).forEach((c, i) => {
+        drawRectOutline(overlay, width, height, c.rect, colors[i % colors.length]);
+      });
+
+      overlayPath = join(outputDir, 'overlay.png');
+      savePng(overlay, width, height, overlayPath);
+
+      const attributionPath = join(outputDir, 'attribution.json');
+      writeFileSync(
+        attributionPath,
+        JSON.stringify(
+          {
+            width,
+            height,
+            diffPercent,
+            totalDiffPixels: attribution.total_diff_pixels,
+            unattributedDiffPixels: attribution.unattributed_diff_pixels,
+            taxonomy,
+            topContributors: attribution.top_contributors,
+          },
+          null,
+          2
+        )
+      );
+    } catch (e) {
+      // Attribution is best-effort; never break the pipeline.
+      attribution = { error: String(e?.message || e) };
+    }
+  }
+
   return {
     diffPixels,
     totalPixels,
@@ -196,6 +292,9 @@ export async function comparePixels(chromePath, rustkitPath, outputDir, options 
     height,
     diffPath,
     heatmapPath,
+    overlayPath,
+    attribution,
+    taxonomy,
   };
 }
 
@@ -386,4 +485,6 @@ export async function tripleCompare(baselineDir, rustkitCaptureDir, outputDir) {
   
   return results;
 }
+
+
 

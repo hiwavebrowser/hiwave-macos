@@ -9,11 +9,13 @@ Exit codes:
 
 Usage:
     python3 scripts/parity_gate.py [--minimum <pct>] [--report <path>]
+    python3 scripts/parity_gate.py --mode test_results [--level <commit|pr_merge|nightly|release>] [--max-diff <pct>]
     
 Examples:
     python3 scripts/parity_gate.py --minimum 80
     python3 scripts/parity_gate.py --report parity-baseline/baseline_report.json
     python3 scripts/parity_gate.py --minimum 80 --fail-on-regression 2
+    python3 scripts/parity_gate.py --mode test_results --level commit
 """
 
 import json
@@ -70,12 +72,94 @@ def check_regressions(current_report: Dict, previous_report: Dict, threshold: fl
     return regressions
 
 
+def detect_mode(report: Dict[str, Any]) -> str:
+    # Legacy baseline report
+    if "metrics" in report and ("builtin_results" in report or "websuite_results" in report):
+        return "baseline_report"
+    # parity_test.py output
+    if "results" in report and isinstance(report.get("results"), list):
+        return "test_results"
+    return "unknown"
+
+
+def level_defaults(level: str) -> Dict[str, Any]:
+    # Percent units (diff percent).
+    if level == "commit":
+        return {"max_diff": 1.0, "require_stable": False, "max_variance": 0.10, "regression_budget": 0.0}
+    if level == "pr_merge":
+        return {"max_diff": 0.5, "require_stable": True, "max_variance": 0.10, "regression_budget": 0.1}
+    if level == "nightly":
+        return {"max_diff": 0.25, "require_stable": True, "max_variance": 0.10, "regression_budget": 0.0}
+    if level == "release":
+        return {"max_diff": 0.0, "require_stable": True, "max_variance": 0.10, "regression_budget": 0.0}
+    return {"max_diff": 1.0, "require_stable": False, "max_variance": 0.10, "regression_budget": 0.0}
+
+
+def gate_test_results(
+    report: Dict[str, Any],
+    max_diff: float,
+    require_stable: bool,
+    max_variance: float,
+) -> Dict[str, Any]:
+    failures = []
+    results = report.get("results", [])
+
+    for r in results:
+        case_id = r.get("case_id", "<unknown>")
+        err = r.get("error")
+        if err:
+            failures.append({"case_id": case_id, "reason": "error", "detail": err})
+            continue
+
+        diff = r.get("diff_pct_median", r.get("diff_pct", 100.0))
+        variance = r.get("diff_pct_variance", None)
+        stable = r.get("stable", None)
+
+        if diff is None:
+            failures.append({"case_id": case_id, "reason": "missing_diff"})
+            continue
+
+        if float(diff) > max_diff:
+            failures.append({"case_id": case_id, "reason": "diff", "diff": float(diff), "max_diff": max_diff})
+            continue
+
+        if require_stable:
+            if stable is not True:
+                failures.append({"case_id": case_id, "reason": "unstable", "variance": variance, "max_variance": max_variance})
+                continue
+            if variance is not None and float(variance) > max_variance:
+                failures.append({"case_id": case_id, "reason": "variance", "variance": float(variance), "max_variance": max_variance})
+
+    return {"failures": failures, "total": len(results)}
+
+
+def regressions_test_results(current: Dict[str, Any], previous: Dict[str, Any], budget: float) -> list:
+    current_map = {r.get("case_id"): r.get("diff_pct_median", r.get("diff_pct", 100.0)) for r in current.get("results", [])}
+    prev_map = {r.get("case_id"): r.get("diff_pct_median", r.get("diff_pct", 100.0)) for r in previous.get("results", [])}
+    regressions = []
+    for case_id, cur in current_map.items():
+        if case_id is None:
+            continue
+        prev = prev_map.get(case_id, None)
+        if prev is None:
+            continue
+        delta = float(cur) - float(prev)
+        if delta > budget:
+            regressions.append({"case_id": case_id, "previous_diff": float(prev), "current_diff": float(cur), "delta": delta})
+    return regressions
+
+
 def main():
     # Default values
     minimum_parity = 80.0
     report_path = Path("parity-baseline/baseline_report.json")
     previous_path = None
     regression_threshold = None
+    mode = None
+    level = None
+    max_diff = None
+    require_stable = None
+    max_variance = None
     verbose = False
     
     # Parse arguments
@@ -87,6 +171,21 @@ def main():
             i += 2
         elif args[i] == "--report" and i + 1 < len(args):
             report_path = Path(args[i + 1])
+            i += 2
+        elif args[i] == "--mode" and i + 1 < len(args):
+            mode = args[i + 1]
+            i += 2
+        elif args[i] == "--level" and i + 1 < len(args):
+            level = args[i + 1]
+            i += 2
+        elif args[i] == "--max-diff" and i + 1 < len(args):
+            max_diff = float(args[i + 1])
+            i += 2
+        elif args[i] == "--require-stable":
+            require_stable = True
+            i += 1
+        elif args[i] == "--max-variance" and i + 1 < len(args):
+            max_variance = float(args[i + 1])
             i += 2
         elif args[i] == "--previous" and i + 1 < len(args):
             previous_path = Path(args[i + 1])
@@ -106,14 +205,66 @@ def main():
     print("=" * 60)
     print("Parity Gate Check")
     print("=" * 60)
-    print(f"\nMinimum Required: {minimum_parity}%")
-    print(f"Report: {report_path}")
-    if regression_threshold:
-        print(f"Regression Threshold: {regression_threshold}%")
+    print(f"\nReport: {report_path}")
     
     # Load current report
     report = load_report(report_path)
     if not report:
+        sys.exit(1)
+
+    detected = detect_mode(report)
+    if mode is None:
+        mode = detected
+
+    if mode == "test_results":
+        defaults = level_defaults(level or "commit")
+        if max_diff is None:
+            max_diff = defaults["max_diff"]
+        if require_stable is None:
+            require_stable = defaults["require_stable"]
+        if max_variance is None:
+            max_variance = defaults["max_variance"]
+        if regression_threshold is None and previous_path:
+            regression_threshold = defaults["regression_budget"]
+
+        print(f"Mode: test_results")
+        if level:
+            print(f"Level: {level}")
+        print(f"Max diff: {max_diff}%")
+        print(f"Require stable: {bool(require_stable)}")
+        if require_stable:
+            print(f"Max variance: {max_variance}%")
+        if regression_threshold is not None and previous_path:
+            print(f"Regression budget: {regression_threshold}%")
+
+        gate = gate_test_results(report, max_diff=max_diff, require_stable=bool(require_stable), max_variance=max_variance)
+        failures = gate["failures"]
+
+        regressions = []
+        if previous_path and regression_threshold is not None:
+            prev = load_report(previous_path)
+            if prev:
+                regressions = regressions_test_results(report, prev, budget=float(regression_threshold))
+
+        if failures:
+            print(f"\n✗ FAIL: {len(failures)}/{gate['total']} case(s) violated the gate:")
+            for f in failures[:25]:
+                print(f"  - {f['case_id']}: {f['reason']}" + (f" ({f})" if verbose else ""))
+        else:
+            print(f"\n✓ PASS: All {gate['total']} case(s) within max diff {max_diff}%")
+
+        if regressions:
+            print(f"\n✗ FAIL: {len(regressions)} regression(s) exceeded budget {regression_threshold}%:")
+            for r in sorted(regressions, key=lambda x: -x["delta"])[:25]:
+                print(f"  - {r['case_id']}: {r['previous_diff']:.2f}% -> {r['current_diff']:.2f}% (+{r['delta']:.2f}%)")
+        elif previous_path and regression_threshold is not None:
+            print(f"\n✓ PASS: No regressions exceeding budget {regression_threshold}%")
+
+        print("\n" + "=" * 60)
+        if not failures and not regressions:
+            print("GATE: PASSED")
+            sys.exit(0)
+        print("GATE: FAILED")
         sys.exit(1)
     
     # Compute parity
@@ -171,4 +322,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 

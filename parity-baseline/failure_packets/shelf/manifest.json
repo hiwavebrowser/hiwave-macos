@@ -1,7 +1,7 @@
 {
   "case_id": "shelf",
-  "generated_at": "2026-01-06T23:44:53.928123",
-  "estimated_diff_pct": 84.8717934,
+  "generated_at": "2026-01-09T10:09:37.519811",
+  "estimated_diff_pct": 6.923076923076921,
   "html_path": "crates/hiwave-app/src/ui/shelf.html",
   "dimensions": {
     "width": 1280,
@@ -9,13 +9,23 @@
   },
   "rustkit_frame": "parity-baseline/failure_packets/shelf/rustkit_frame.ppm",
   "layout_stats": {
-    "total_boxes": 39,
-    "sized": 10,
-    "zero_size": 29,
-    "positioned": 29,
-    "at_origin": 10,
-    "sizing_rate": 0.25641027,
-    "positioning_rate": 0.74358976
+    "total_boxes": 13,
+    "positioned": 10,
+    "sized": 12,
+    "zero_area": 0,
+    "zero_width_only": 1,
+    "zero_height_only": 0,
+    "zero_size": 1,
+    "at_origin": 3,
+    "form_controls": 2,
+    "text_boxes": 2,
+    "block_boxes": 7,
+    "inline_boxes": 2,
+    "image_boxes": 0,
+    "issues": [],
+    "sizing_rate": 0.9230769230769231,
+    "positioning_rate": 0.7692307692307693,
+    "area_sizing_rate": 1.0
   },
   "issue_clusters": {
     "sizing_layout": 0,

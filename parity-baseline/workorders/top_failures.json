@@ -1,28 +1,28 @@
 {
-  "id": "parity-top-failures-20260107",
+  "id": "parity-top-failures-20260109",
   "title": "Fix Top 3 Worst Parity Cases",
   "description": "Focus on the three cases with highest pixel diff.",
   "priority": "critical",
   "cases": [
     {
-      "case_id": "settings",
+      "case_id": "shelf",
       "type": "builtin",
-      "diff_pct": 21.763727121464218
+      "diff_pct": 6.923076923076921
     },
     {
-      "case_id": "css-selectors",
-      "type": "websuite",
-      "diff_pct": 21.074468085106375
+      "case_id": "chrome_rustkit",
+      "type": "builtin",
+      "diff_pct": 1.3114754098360604
     },
     {
-      "case_id": "image-gallery",
+      "case_id": "sticky-scroll",
       "type": "websuite",
-      "diff_pct": 16.2109375
+      "diff_pct": 1.2962962962962954
     }
   ],
   "acceptance_criteria": [
-    "Reduce diff% for settings below 25%",
+    "Reduce diff% for shelf below 25%",
     "All three cases show measurable improvement"
   ],
-  "created": "2026-01-07T21:57:16.698998"
+  "created": "2026-01-09T10:09:37.519636"
 }

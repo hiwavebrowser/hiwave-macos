@@ -173,28 +173,107 @@ impl<'a> GridItem<'a> {
             Length::Px(px) => px,
             _ => 16.0,
         };
-        
+
         // Get line height
         let line_height = if self.layout_box.style.line_height > 0.0 {
             self.layout_box.style.line_height
         } else {
             1.2
         };
-        
+
         // Count text children (simplified)
         let text_lines = self.count_text_lines();
-        
+
         // Padding contribution
         let padding_top = self.layout_box.style.padding_top.to_px(font_size, font_size, 0.0);
         let padding_bottom = self.layout_box.style.padding_bottom.to_px(font_size, font_size, 0.0);
-        
-        let content = if text_lines > 0 {
+
+        let text_content = if text_lines > 0 {
             font_size * line_height * text_lines as f32
         } else {
             0.0
         };
-        
+
+        // Also consider children's min-heights and actual content
+        let children_height = self.estimate_children_height(font_size);
+
+        // Use max of text content or children content
+        let content = text_content.max(children_height);
+
         content + padding_top + padding_bottom
+    }
+
+    /// Estimate height from children (including min-height).
+    fn estimate_children_height(&self, font_size: f32) -> f32 {
+        let mut total_height = 0.0f32;
+        let mut max_height = 0.0f32;
+
+        for child in &self.layout_box.children {
+            let child_style = &child.style;
+
+            // Check child's min-height
+            let min_height = match child_style.min_height {
+                Length::Px(h) => h,
+                Length::Em(em) => em * font_size,
+                _ => 0.0,
+            };
+
+            // Check child's explicit height
+            let explicit_height = match child_style.height {
+                Length::Px(h) => h,
+                Length::Em(em) => em * font_size,
+                _ => 0.0,
+            };
+
+            // If child has display: flex, it might have content
+            let child_font_size = match child_style.font_size {
+                Length::Px(px) => px,
+                _ => font_size,
+            };
+            let child_line_height = if child_style.line_height > 0.0 {
+                child_style.line_height
+            } else {
+                1.2
+            };
+
+            // Estimate child's content height
+            let child_content_height = if let crate::BoxType::Text(_) = &child.box_type {
+                child_font_size * child_line_height
+            } else {
+                // Recursively estimate children
+                let nested_height: f32 = child.children.iter()
+                    .map(|c| {
+                        let c_min = match c.style.min_height {
+                            Length::Px(h) => h,
+                            _ => 0.0,
+                        };
+                        let c_height = match c.style.height {
+                            Length::Px(h) => h,
+                            _ => 0.0,
+                        };
+                        c_min.max(c_height)
+                    })
+                    .sum();
+                nested_height
+            };
+
+            let child_height = min_height.max(explicit_height).max(child_content_height);
+
+            // For absolute positioned children, don't count their height in flow
+            if matches!(child_style.position, rustkit_css::Position::Absolute | rustkit_css::Position::Fixed) {
+                // Skip absolutely positioned children for height calculation
+                continue;
+            }
+
+            // Accumulate heights (block-level) or take max (inline-level)
+            if matches!(child_style.display, rustkit_css::Display::Block | rustkit_css::Display::Flex | rustkit_css::Display::Grid) {
+                total_height += child_height;
+            } else {
+                max_height = max_height.max(child_height);
+            }
+        }
+
+        total_height.max(max_height)
     }
 
     /// Count approximate text lines in this item.

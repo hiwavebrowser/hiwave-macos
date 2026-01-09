@@ -959,19 +959,25 @@ impl Engine {
             return true;
         }
 
-        // Check for borders
-        if !matches!(style.border_top_width, rustkit_css::Length::Px(0.0)) ||
-           !matches!(style.border_right_width, rustkit_css::Length::Px(0.0)) ||
-           !matches!(style.border_bottom_width, rustkit_css::Length::Px(0.0)) ||
-           !matches!(style.border_left_width, rustkit_css::Length::Px(0.0)) {
+        // Check for borders (need to check both Px(0.0) and Zero)
+        let has_border = |len: &rustkit_css::Length| -> bool {
+            !matches!(len, rustkit_css::Length::Px(0.0) | rustkit_css::Length::Zero)
+        };
+        if has_border(&style.border_top_width) ||
+           has_border(&style.border_right_width) ||
+           has_border(&style.border_bottom_width) ||
+           has_border(&style.border_left_width) {
             return true;
         }
 
         // Check for padding (creates visual space)
-        if !matches!(style.padding_top, rustkit_css::Length::Px(0.0)) ||
-           !matches!(style.padding_right, rustkit_css::Length::Px(0.0)) ||
-           !matches!(style.padding_bottom, rustkit_css::Length::Px(0.0)) ||
-           !matches!(style.padding_left, rustkit_css::Length::Px(0.0)) {
+        let has_padding = |len: &rustkit_css::Length| -> bool {
+            !matches!(len, rustkit_css::Length::Px(0.0) | rustkit_css::Length::Zero)
+        };
+        if has_padding(&style.padding_top) ||
+           has_padding(&style.padding_right) ||
+           has_padding(&style.padding_bottom) ||
+           has_padding(&style.padding_left) {
             return true;
         }
 
@@ -1302,8 +1308,12 @@ impl Engine {
                     LayoutBox::new(BoxType::Text(trimmed.to_string()), style)
                 }
             }
+            NodeType::Comment(_) => {
+                // Comments should not create layout boxes - return an inline box that will be filtered out
+                LayoutBox::new(BoxType::Inline, ComputedStyle::new())
+            }
             _ => {
-                // For other node types (Document, Comment, etc.), return empty box
+                // For other node types (Document, etc.), return empty box
                 LayoutBox::new(BoxType::Block, ComputedStyle::new())
             }
         }
@@ -1793,25 +1803,25 @@ impl Engine {
                     style.color = color;
                 }
             }
-                    "background-color" | "background" | "background-image" => {
-                        // Handle multiple backgrounds (comma-separated)
-                        // The last layer is the bottom-most (typically the solid color)
-                        let layers: Vec<&str> = split_by_comma(value);
-                        
-                        for layer in layers.iter().rev() {
-                            let layer = layer.trim();
-                            if layer.is_empty() {
-                                continue;
-                            }
-                            
-                            // Check for gradient first
-                            if let Some(gradient) = parse_gradient(layer) {
-                                style.background_gradient = Some(gradient);
-                            } else if let Some(color) = parse_color(layer) {
-                                style.background_color = color;
-                            }
-                        }
+            "background-color" | "background" | "background-image" => {
+                // Handle multiple backgrounds (comma-separated)
+                // The last layer is the bottom-most (typically the solid color)
+                let layers: Vec<&str> = split_by_comma(value);
+                
+                for layer in layers.iter().rev() {
+                    let layer = layer.trim();
+                    if layer.is_empty() {
+                        continue;
                     }
+                    
+                    // Check for gradient first
+                    if let Some(gradient) = parse_gradient(layer) {
+                        style.background_gradient = Some(gradient);
+                    } else if let Some(color) = parse_color(layer) {
+                        style.background_color = color;
+                    }
+                }
+            }
                     "font-size" => {
                         if let Some(length) = parse_length(value) {
                             style.font_size = length;

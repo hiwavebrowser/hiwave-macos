@@ -1,0 +1,85 @@
+name: Parity Gate
+
+on:
+  pull_request:
+  push:
+    branches: [ master, main ]
+  schedule:
+    - cron: "0 9 * * *"
+
+jobs:
+  parity-commit:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install oracle deps
+        working-directory: tools/parity_oracle
+        run: npm ci
+
+      - name: Build Rust
+        run: cargo build --release -p parity-capture
+
+      # Fast gate: built-ins + websuite at one viewport, single iteration.
+      - name: Parity test (commit gate)
+        run: python3 scripts/parity_test.py --scope all --iterations 1 --output parity-baseline/parity_test_results.json
+
+      - name: Gate (commit)
+        run: python3 scripts/parity_gate.py --mode test_results --level commit --report parity-baseline/parity_test_results.json
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-baseline
+          path: |
+            parity-baseline/parity_test_results.json
+            parity-baseline/diffs
+
+  parity-nightly:
+    if: github.event_name == 'schedule'
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install oracle deps
+        working-directory: tools/parity_oracle
+        run: npm ci
+
+      - name: Build Rust
+        run: cargo build --release -p parity-capture
+
+      - name: Parity test (nightly)
+        run: python3 scripts/parity_test.py --scope all --iterations 3 --max-variance 0.10 --output parity-baseline/parity_test_results.json
+
+      - name: Gate (nightly)
+        run: python3 scripts/parity_gate.py --mode test_results --level nightly --report parity-baseline/parity_test_results.json
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-nightly
+          path: |
+            parity-baseline/parity_test_results.json
+            parity-baseline/diffs
+
+

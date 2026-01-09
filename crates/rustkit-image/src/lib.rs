@@ -529,6 +529,35 @@ impl ImageManager {
     pub fn get_cached(&self, url: &Url) -> Option<Arc<LoadedImage>> {
         self.cache.read().unwrap().get(url)
     }
+
+    /// Load an image synchronously (blocking).
+    /// This is primarily for parity testing where we need images to be loaded
+    /// before capturing a frame.
+    pub fn load_blocking(&self, url: Url) -> ImageResult<Arc<LoadedImage>> {
+        // Check cache first
+        if let Some(cached) = self.cache.read().unwrap().get(&url) {
+            return Ok(cached);
+        }
+
+        // For data URLs, decode synchronously
+        if url.scheme() == "data" {
+            return self.decode_data_url(&url);
+        }
+
+        // For other URLs, we need to block on the async load
+        // This uses a simple polling approach
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| ImageError::FetchError(format!("Runtime error: {}", e)))?;
+
+        runtime.block_on(self.load(url))
+    }
+
+    /// Check if an image is loading
+    pub fn is_loading(&self, url: &Url) -> bool {
+        self.pending.read().unwrap().contains_key(url)
+    }
 }
 
 impl Default for ImageManager {

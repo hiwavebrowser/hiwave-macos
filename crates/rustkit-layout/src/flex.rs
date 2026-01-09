@@ -274,7 +274,48 @@ pub fn layout_flex_container(
             }
         }
     }
-    
+
+    // 11b. Recompute cross sizes now that children are laid out
+    // This fixes the chicken-and-egg problem where we need children heights
+    // before we can determine item cross sizes
+    for line in &mut lines {
+        for item in &mut line.items {
+            // Only recompute if cross_size is still using fallback (line_height or similar)
+            // and we have children with actual heights
+            if !item.layout_box.children.is_empty() {
+                let children_height: f32 = item.layout_box.children
+                    .iter()
+                    .map(|c| c.dimensions.margin_box().height)
+                    .sum();
+
+                if children_height > 0.0 && children_height > item.cross_size {
+                    // Update cross size based on actual children heights
+                    item.cross_size = children_height.max(item.min_cross_size).min(item.max_cross_size);
+
+                    // Also update the layout box content height
+                    match cross_axis {
+                        Axis::Vertical => {
+                            if item.layout_box.dimensions.content.height < children_height {
+                                item.layout_box.dimensions.content.height = children_height;
+                            }
+                        }
+                        Axis::Horizontal => {
+                            if item.layout_box.dimensions.content.width < children_height {
+                                item.layout_box.dimensions.content.width = children_height;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Recompute line cross size based on updated item cross sizes
+        line.cross_size = line.items
+            .iter()
+            .map(|i| i.cross_size + i.cross_margin_start + i.cross_margin_end)
+            .fold(0.0, f32::max);
+    }
+
     // 12. Update container dimensions based on flex items
     // Calculate the total main and cross sizes used by items
     if !lines.is_empty() {

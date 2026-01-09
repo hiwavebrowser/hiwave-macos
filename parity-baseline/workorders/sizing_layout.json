@@ -1,5 +1,5 @@
 {
-  "id": "parity-sizing_layout-20260107",
+  "id": "parity-sizing_layout-20260108",
   "title": "Fix Sizing Layout Issues",
   "description": "Address 68 sizing_layout issues identified in parity baseline.",
   "priority": "high",
@@ -11,5 +11,5 @@
     "No regression in other clusters",
     "Tier A pass rate improves"
   ],
-  "created": "2026-01-07T21:57:16.698881"
+  "created": "2026-01-08T23:18:48.297098"
 }

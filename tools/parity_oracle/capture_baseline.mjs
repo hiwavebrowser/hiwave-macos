@@ -11,6 +11,11 @@ import { chromium } from 'playwright';
 import { dirname, resolve, join } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import {
+  createDeterministicContext,
+  getDeterministicLaunchOptions,
+  shouldApplyParityResetForHtmlPath,
+} from './deterministic.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -66,20 +71,22 @@ export async function captureBaseline(htmlPath, outputDir, width, height) {
   
   mkdirSync(outputDir, { recursive: true });
   
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch(getDeterministicLaunchOptions());
   
   try {
-    const context = await browser.newContext({
-      viewport: { width, height },
-      deviceScaleFactor: 1,  // 1x for consistency
-    });
+    const context = await createDeterministicContext(
+      browser,
+      width,
+      height,
+      { applyParityReset: shouldApplyParityResetForHtmlPath(absolutePath) }
+    );
     
     const page = await context.newPage();
     
     // Load the page
     const fileUrl = `file://${absolutePath}`;
     await page.goto(fileUrl, { waitUntil: 'networkidle' });
-    await page.waitForTimeout(500);  // Let animations settle
+    await page.waitForTimeout(50);  // Animations are frozen; allow layout/fonts to settle
     
     // 1. Capture screenshot
     const screenshotPath = join(outputDir, 'baseline.png');
@@ -252,4 +259,6 @@ export async function captureMultipleBaselines(cases, baseOutputDir) {
   
   return results;
 }
+
+
 

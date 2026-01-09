@@ -5,6 +5,11 @@
 import { chromium } from 'playwright';
 import { resolve } from 'path';
 import { existsSync } from 'fs';
+import {
+  createDeterministicContext,
+  getDeterministicLaunchOptions,
+  shouldApplyParityResetForHtmlPath,
+} from './deterministic.mjs';
 
 // Key CSS properties to extract for comparison
 const KEY_PROPERTIES = [
@@ -146,20 +151,22 @@ export async function exportStyles(htmlPath, width, height, selector = '*') {
     throw new Error(`HTML file not found: ${absolutePath}`);
   }
   
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch(getDeterministicLaunchOptions());
   
   try {
-    const context = await browser.newContext({
-      viewport: { width, height },
-      deviceScaleFactor: 1,
-    });
+    const context = await createDeterministicContext(
+      browser,
+      width,
+      height,
+      { applyParityReset: shouldApplyParityResetForHtmlPath(absolutePath) }
+    );
     
     const page = await context.newPage();
     
     // Load the page
     const fileUrl = `file://${absolutePath}`;
     await page.goto(fileUrl, { waitUntil: 'networkidle' });
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(50);
     
     // Extract styles
     const styles = await page.evaluate((args) => {
@@ -312,4 +319,6 @@ export function compareStyles(chromeStyles, rustkitStyles) {
   
   return results;
 }
+
+
 

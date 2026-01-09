@@ -1,0 +1,164 @@
+{
+  "width": 1280,
+  "height": 120,
+  "diffPercent": 3.0364583333333335,
+  "totalDiffPixels": 153600,
+  "unattributedDiffPixels": 0,
+  "taxonomy": {
+    "text_metrics": 67.58072916666667,
+    "form_control": 32.35286458333333,
+    "replaced_content": 0.06640625
+  },
+  "topContributors": [
+    {
+      "selector": "body > div.shelf-header:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 41
+      },
+      "diff_pixels": 50329,
+      "contribution_percent": 32.766276041666664,
+      "element_diff_percent": 95.90129573170731,
+      "corner_ratio": 0.01144469391404558,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "#commandInput",
+      "tag": "input",
+      "rect": {
+        "x": 53,
+        "y": 54,
+        "width": 1198,
+        "height": 41
+      },
+      "diff_pixels": 49118,
+      "contribution_percent": 31.977864583333332,
+      "element_diff_percent": 100,
+      "corner_ratio": 0.011726861842908913,
+      "likely_cause": "form_control"
+    },
+    {
+      "selector": "html > body",
+      "tag": "body",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 120
+      },
+      "diff_pixels": 32480,
+      "contribution_percent": 21.145833333333332,
+      "element_diff_percent": 21.145833333333332,
+      "corner_ratio": 0.008866995073891626,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "#commandResults",
+      "tag": "div",
+      "rect": {
+        "x": 16,
+        "y": 108,
+        "width": 1248,
+        "height": 56
+      },
+      "diff_pixels": 14976,
+      "contribution_percent": 9.75,
+      "element_diff_percent": 21.428571428571427,
+      "corner_ratio": 0.019230769230769232,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.command-palette:nth-of-type(2) > div.command-input-wrapper:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 16,
+        "y": 53,
+        "width": 1248,
+        "height": 43
+      },
+      "diff_pixels": 4350,
+      "contribution_percent": 2.83203125,
+      "element_diff_percent": 8.105992844364938,
+      "corner_ratio": 0.13241379310344828,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.shelf-header:nth-of-type(1) > span.shelf-title",
+      "tag": "span",
+      "rect": {
+        "x": 16,
+        "y": 12.5,
+        "width": 104.78125,
+        "height": 15
+      },
+      "diff_pixels": 1575,
+      "contribution_percent": 1.025390625,
+      "element_diff_percent": 100.20876826722338,
+      "corner_ratio": 0.22857142857142856,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "#closeBtn",
+      "tag": "button",
+      "rect": {
+        "x": 1240,
+        "y": 8,
+        "width": 24,
+        "height": 24
+      },
+      "diff_pixels": 576,
+      "contribution_percent": 0.375,
+      "element_diff_percent": 100,
+      "corner_ratio": 1,
+      "likely_cause": "form_control"
+    },
+    {
+      "selector": "body > div.command-palette:nth-of-type(2) > div.command-input-wrapper:nth-of-type(1) > svg",
+      "tag": "svg",
+      "rect": {
+        "x": 29,
+        "y": 67.5,
+        "width": 14,
+        "height": 14
+      },
+      "diff_pixels": 102,
+      "contribution_percent": 0.06640625,
+      "element_diff_percent": 52.04081632653062,
+      "corner_ratio": 1,
+      "likely_cause": "replaced_content"
+    },
+    {
+      "selector": "body > div.command-palette:nth-of-type(2) > div.command-input-wrapper:nth-of-type(1) > svg > circle",
+      "tag": "circle",
+      "rect": {
+        "x": 30.75,
+        "y": 69.25,
+        "width": 9.333332061767578,
+        "height": 9.333335876464844
+      },
+      "diff_pixels": 88,
+      "contribution_percent": 0.057291666666666664,
+      "element_diff_percent": 101.02039440033255,
+      "corner_ratio": 1,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.command-palette:nth-of-type(2) > div.command-input-wrapper:nth-of-type(1) > svg > path",
+      "tag": "path",
+      "rect": {
+        "x": 38.712501525878906,
+        "y": 77.2125015258789,
+        "width": 2.5374984741210938,
+        "height": 2.5374984741210938
+      },
+      "diff_pixels": 6,
+      "contribution_percent": 0.00390625,
+      "element_diff_percent": 93.18363993862425,
+      "corner_ratio": 1,
+      "likely_cause": "text_metrics"
+    }
+  ]
+}

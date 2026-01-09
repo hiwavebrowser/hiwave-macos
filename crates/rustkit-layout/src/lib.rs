@@ -1064,7 +1064,38 @@ impl LayoutBox {
 
     /// Apply absolute positioning offsets.
     fn apply_position_offsets_absolute(&mut self, containing_block: &Dimensions) {
-        if let Some(left) = self.offsets.left {
+        let has_left = self.offsets.left.is_some();
+        let has_right = self.offsets.right.is_some();
+        let has_top = self.offsets.top.is_some();
+        let has_bottom = self.offsets.bottom.is_some();
+
+        // Handle horizontal positioning
+        if has_left && has_right {
+            // When both left and right are set with width: auto, stretch to fill
+            let left = self.offsets.left.unwrap();
+            let right = self.offsets.right.unwrap();
+
+            // Calculate stretched width if width is auto
+            if matches!(self.style.width, Length::Auto) {
+                let available_width = containing_block.content.width
+                    - left
+                    - right
+                    - self.dimensions.margin.left
+                    - self.dimensions.margin.right
+                    - self.dimensions.border.left
+                    - self.dimensions.border.right
+                    - self.dimensions.padding.left
+                    - self.dimensions.padding.right;
+                self.dimensions.content.width = available_width.max(0.0);
+            }
+
+            // Position from left
+            self.dimensions.content.x = containing_block.content.x
+                + left
+                + self.dimensions.margin.left
+                + self.dimensions.border.left
+                + self.dimensions.padding.left;
+        } else if let Some(left) = self.offsets.left {
             self.dimensions.content.x = containing_block.content.x
                 + left
                 + self.dimensions.margin.left
@@ -1079,7 +1110,33 @@ impl LayoutBox {
                 - self.dimensions.content.width;
         }
 
-        if let Some(top) = self.offsets.top {
+        // Handle vertical positioning
+        if has_top && has_bottom {
+            // When both top and bottom are set with height: auto, stretch to fill
+            let top = self.offsets.top.unwrap();
+            let bottom = self.offsets.bottom.unwrap();
+
+            // Calculate stretched height if height is auto
+            if matches!(self.style.height, Length::Auto) {
+                let available_height = containing_block.content.height
+                    - top
+                    - bottom
+                    - self.dimensions.margin.top
+                    - self.dimensions.margin.bottom
+                    - self.dimensions.border.top
+                    - self.dimensions.border.bottom
+                    - self.dimensions.padding.top
+                    - self.dimensions.padding.bottom;
+                self.dimensions.content.height = available_height.max(0.0);
+            }
+
+            // Position from top
+            self.dimensions.content.y = containing_block.content.y
+                + top
+                + self.dimensions.margin.top
+                + self.dimensions.border.top
+                + self.dimensions.padding.top;
+        } else if let Some(top) = self.offsets.top {
             self.dimensions.content.y = containing_block.content.y
                 + top
                 + self.dimensions.margin.top
@@ -2189,8 +2246,10 @@ impl DisplayList {
     /// Render background.
     /// For multi-layer backgrounds (e.g., `background: gradient, color`),
     /// the solid color is the bottom layer, painted first, then gradient on top.
+    /// Respects background-clip property (border-box, padding-box, content-box).
     fn render_background(&mut self, layout_box: &LayoutBox) {
-        let rect = layout_box.dimensions.border_box();
+        let d = &layout_box.dimensions;
+        let border_rect = d.border_box();
         let s = &layout_box.style;
 
         // Get font size for relative length calculations
@@ -2202,20 +2261,62 @@ impl DisplayList {
 
         // Calculate border radius once (used for both solid color and gradient clipping)
         let radius = BorderRadius {
-            top_left: s.border_top_left_radius.to_px(font_size, root_font_size, rect.width),
-            top_right: s.border_top_right_radius.to_px(font_size, root_font_size, rect.width),
-            bottom_right: s.border_bottom_right_radius.to_px(font_size, root_font_size, rect.width),
-            bottom_left: s.border_bottom_left_radius.to_px(font_size, root_font_size, rect.width),
+            top_left: s.border_top_left_radius.to_px(font_size, root_font_size, border_rect.width),
+            top_right: s.border_top_right_radius.to_px(font_size, root_font_size, border_rect.width),
+            bottom_right: s.border_bottom_right_radius.to_px(font_size, root_font_size, border_rect.width),
+            bottom_left: s.border_bottom_left_radius.to_px(font_size, root_font_size, border_rect.width),
         };
+
+        // Calculate the clipped rect based on background-clip property
+        let clip_rect = match s.background_clip {
+            rustkit_css::BackgroundClip::BorderBox => border_rect,
+            rustkit_css::BackgroundClip::PaddingBox => {
+                // Clip to padding box (inside borders)
+                Rect::new(
+                    border_rect.x + d.border.left,
+                    border_rect.y + d.border.top,
+                    border_rect.width - d.border.left - d.border.right,
+                    border_rect.height - d.border.top - d.border.bottom,
+                )
+            }
+            rustkit_css::BackgroundClip::ContentBox => {
+                // Clip to content box (inside padding)
+                Rect::new(
+                    border_rect.x + d.border.left + d.padding.left,
+                    border_rect.y + d.border.top + d.padding.top,
+                    border_rect.width - d.border.left - d.border.right - d.padding.left - d.padding.right,
+                    border_rect.height - d.border.top - d.border.bottom - d.padding.top - d.padding.bottom,
+                )
+            }
+            rustkit_css::BackgroundClip::Text => {
+                // Text clipping is handled separately in gradient text rendering
+                border_rect
+            }
+        };
+
+        // Only proceed if clip_rect has positive dimensions
+        if clip_rect.width <= 0.0 || clip_rect.height <= 0.0 {
+            return;
+        }
+
+        // Apply clipping if not border-box (the default)
+        let needs_clip = !matches!(s.background_clip, rustkit_css::BackgroundClip::BorderBox);
+        if needs_clip {
+            self.commands.push(DisplayCommand::PushClip(clip_rect));
+        }
+
+        // Use clip_rect for painting (not border_rect) to ensure proper bounds
+        let paint_rect = clip_rect;
 
         // Step 1: Paint solid background color FIRST (bottom layer)
         // This must be painted even if there's a gradient, as the gradient may be semi-transparent
         let color = s.background_color;
         if color.a > 0.0 {
-            if radius.is_zero() {
-                self.commands.push(DisplayCommand::SolidColor(color, rect));
+            if radius.is_zero() || needs_clip {
+                // When clipping, use solid rect within the clipped area
+                self.commands.push(DisplayCommand::SolidColor(color, paint_rect));
             } else {
-                self.commands.push(DisplayCommand::RoundedRect { color, rect, radius });
+                self.commands.push(DisplayCommand::RoundedRect { color, rect: paint_rect, radius });
             }
         }
 
@@ -2224,14 +2325,14 @@ impl DisplayList {
             match gradient {
                 rustkit_css::Gradient::Linear(linear) => {
                     self.commands.push(DisplayCommand::LinearGradient {
-                        rect,
+                        rect: paint_rect,
                         direction: linear.direction,
                         stops: linear.stops.clone(),
                     });
                 }
                 rustkit_css::Gradient::Radial(radial) => {
                     self.commands.push(DisplayCommand::RadialGradient {
-                        rect,
+                        rect: paint_rect,
                         shape: radial.shape,
                         size: radial.size,
                         center: radial.center,
@@ -2239,6 +2340,11 @@ impl DisplayList {
                     });
                 }
             }
+        }
+
+        // Pop the clip if we pushed one
+        if needs_clip {
+            self.commands.push(DisplayCommand::PopClip);
         }
     }
 
@@ -2307,8 +2413,36 @@ impl DisplayList {
             };
 
             let x = layout_box.dimensions.content.x;
-            let y = layout_box.dimensions.content.y;
+            let content_y = layout_box.dimensions.content.y;
             let text_width = layout_box.dimensions.content.width;
+
+            // Calculate half-leading for proper baseline alignment
+            // CSS line-height creates extra space above and below the text content
+            // The half-leading is split evenly above and below the text
+            let line_height_multiplier = if style.line_height > 0.0 {
+                style.line_height
+            } else {
+                1.2 // Default line-height
+            };
+            let line_height = font_size * line_height_multiplier;
+
+            // Get font metrics for accurate baseline calculation
+            let metrics = measure_text_advanced(
+                text,
+                &style.font_family,
+                font_size,
+                style.font_weight,
+                style.font_style,
+            );
+
+            // Content height is ascent + descent (the actual rendered text height)
+            let content_height = metrics.ascent + metrics.descent;
+
+            // Half-leading is the space above (and below) the text content
+            let half_leading = ((line_height - content_height) / 2.0).max(0.0);
+
+            // Adjust y to account for half-leading - this places the text baseline correctly
+            let y = content_y + half_leading;
 
             // Check if this is gradient text (background-clip: text with gradient and transparent fill)
             let is_gradient_text = style.background_clip == rustkit_css::BackgroundClip::Text

@@ -78,3 +78,5 @@ node tools/parity_oracle/run_oracle.mjs compare --case new_tab
 - DPI: 1x (non-Retina for consistency)
 - Font rendering: Default macOS settings
 
+
+

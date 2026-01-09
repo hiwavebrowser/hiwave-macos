@@ -1814,6 +1814,53 @@ pub fn parse_length(value: &str) -> Option<Length> {
         return Some(Length::Zero);
     }
 
+    // Handle min(), max(), clamp() CSS math functions
+    if value.starts_with("min(") && value.ends_with(')') {
+        let inner = &value[4..value.len() - 1];
+        let args = split_css_function_args(inner);
+        if args.len() >= 2 {
+            let a = parse_length(args[0])?;
+            let b = parse_length(args[1])?;
+            return Some(Length::Min(Box::new((a, b))));
+        }
+        return None;
+    }
+
+    if value.starts_with("max(") && value.ends_with(')') {
+        let inner = &value[4..value.len() - 1];
+        let args = split_css_function_args(inner);
+        if args.len() >= 2 {
+            let a = parse_length(args[0])?;
+            let b = parse_length(args[1])?;
+            return Some(Length::Max(Box::new((a, b))));
+        }
+        return None;
+    }
+
+    if value.starts_with("clamp(") && value.ends_with(')') {
+        let inner = &value[6..value.len() - 1];
+        let args = split_css_function_args(inner);
+        if args.len() >= 3 {
+            let min = parse_length(args[0])?;
+            let preferred = parse_length(args[1])?;
+            let max = parse_length(args[2])?;
+            return Some(Length::Clamp(Box::new((min, preferred, max))));
+        }
+        return None;
+    }
+
+    // Handle calc() - simplified support
+    if value.starts_with("calc(") && value.ends_with(')') {
+        // For now, try to extract a simple value from calc
+        // Full calc support would require expression parsing
+        let inner = &value[5..value.len() - 1].trim();
+        // If it's a simple value wrapped in calc, parse it
+        if let Some(len) = parse_length(inner) {
+            return Some(len);
+        }
+        return None;
+    }
+
     if value.ends_with("px") {
         let num = value.trim_end_matches("px").parse::<f32>().ok()?;
         return Some(Length::Px(num));
@@ -1826,6 +1873,22 @@ pub fn parse_length(value: &str) -> Option<Length> {
         let num = value.trim_end_matches("rem").parse::<f32>().ok()?;
         return Some(Length::Rem(num));
     }
+    if value.ends_with("vh") {
+        let num = value.trim_end_matches("vh").parse::<f32>().ok()?;
+        return Some(Length::Vh(num));
+    }
+    if value.ends_with("vw") {
+        let num = value.trim_end_matches("vw").parse::<f32>().ok()?;
+        return Some(Length::Vw(num));
+    }
+    if value.ends_with("vmin") {
+        let num = value.trim_end_matches("vmin").parse::<f32>().ok()?;
+        return Some(Length::Vmin(num));
+    }
+    if value.ends_with("vmax") {
+        let num = value.trim_end_matches("vmax").parse::<f32>().ok()?;
+        return Some(Length::Vmax(num));
+    }
     if value.ends_with('%') {
         let num = value.trim_end_matches('%').parse::<f32>().ok()?;
         return Some(Length::Percent(num));
@@ -1837,6 +1900,33 @@ pub fn parse_length(value: &str) -> Option<Length> {
     }
 
     None
+}
+
+/// Split CSS function arguments, handling nested parentheses.
+fn split_css_function_args(args: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+
+    for (i, c) in args.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                result.push(args[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+
+    // Add the last argument
+    let last = args[start..].trim();
+    if !last.is_empty() {
+        result.push(last);
+    }
+
+    result
 }
 
 /// Parse display value.
@@ -1878,6 +1968,48 @@ mod tests {
         assert_eq!(parse_length("1.5em"), Some(Length::Em(1.5)));
         assert_eq!(parse_length("50%"), Some(Length::Percent(50.0)));
         assert_eq!(parse_length("auto"), Some(Length::Auto));
+    }
+
+    #[test]
+    fn test_parse_length_math_functions() {
+        // Test min()
+        let min_result = parse_length("min(700px, 100%)");
+        assert!(min_result.is_some());
+        if let Some(Length::Min(pair)) = min_result {
+            assert_eq!(pair.0, Length::Px(700.0));
+            assert_eq!(pair.1, Length::Percent(100.0));
+        } else {
+            panic!("Expected Length::Min");
+        }
+
+        // Test max()
+        let max_result = parse_length("max(50%, 300px)");
+        assert!(max_result.is_some());
+        if let Some(Length::Max(pair)) = max_result {
+            assert_eq!(pair.0, Length::Percent(50.0));
+            assert_eq!(pair.1, Length::Px(300.0));
+        } else {
+            panic!("Expected Length::Max");
+        }
+
+        // Test clamp()
+        let clamp_result = parse_length("clamp(200px, 50%, 800px)");
+        assert!(clamp_result.is_some());
+        if let Some(Length::Clamp(triple)) = clamp_result {
+            assert_eq!(triple.0, Length::Px(200.0));
+            assert_eq!(triple.1, Length::Percent(50.0));
+            assert_eq!(triple.2, Length::Px(800.0));
+        } else {
+            panic!("Expected Length::Clamp");
+        }
+    }
+
+    #[test]
+    fn test_parse_length_viewport_units() {
+        assert_eq!(parse_length("100vh"), Some(Length::Vh(100.0)));
+        assert_eq!(parse_length("50vw"), Some(Length::Vw(50.0)));
+        assert_eq!(parse_length("10vmin"), Some(Length::Vmin(10.0)));
+        assert_eq!(parse_length("20vmax"), Some(Length::Vmax(20.0)));
     }
 
     #[test]

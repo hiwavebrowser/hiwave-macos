@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-01-07T21:57:16.697947",
+  "timestamp": "2026-01-09T10:09:37.518792",
   "config": {
     "builtins_weight": 0.6,
     "websuite_weight": 0.4,
@@ -12,30 +12,30 @@
     "tier_a_pass_rate": 1.0,
     "tier_a_builtin_pass": 1.0,
     "tier_a_websuite_pass": 1.0,
-    "tier_b_median_diff": 11.256410256410264,
-    "tier_b_weighted_mean": 11.337583408058766,
+    "tier_b_median_diff": 0.3030303030302939,
+    "tier_b_weighted_mean": 1.26176926637823,
     "worst_3_cases": [
       {
-        "case_id": "settings",
+        "case_id": "shelf",
         "type": "builtin",
-        "diff_pct": 21.763727121464218
+        "diff_pct": 6.923076923076921
       },
       {
-        "case_id": "css-selectors",
-        "type": "websuite",
-        "diff_pct": 21.074468085106375
+        "case_id": "chrome_rustkit",
+        "type": "builtin",
+        "diff_pct": 1.3114754098360604
       },
       {
-        "case_id": "image-gallery",
+        "case_id": "sticky-scroll",
         "type": "websuite",
-        "diff_pct": 16.2109375
+        "diff_pct": 1.2962962962962954
       }
     ],
-    "builtin_mean_diff": 10.960907587863753,
-    "websuite_mean_diff": 11.902597138351283
+    "builtin_mean_diff": 1.8602286281617775,
+    "websuite_mean_diff": 0.36408022370290893
   },
   "issue_clusters": {
-    "sizing_layout": 68,
+    "sizing_layout": 0,
     "paint": 0,
     "text": 0,
     "images": 0
@@ -50,28 +50,28 @@
       "frame_path": "parity-baseline/captures/new_tab.ppm",
       "layout_path": "parity-baseline/captures/new_tab.layout.json",
       "layout_stats": {
-        "total_boxes": 213,
-        "positioned": 211,
-        "sized": 199,
+        "total_boxes": 145,
+        "positioned": 142,
+        "sized": 145,
         "zero_area": 0,
-        "zero_width_only": 13,
-        "zero_height_only": 1,
-        "zero_size": 14,
-        "at_origin": 2,
+        "zero_width_only": 0,
+        "zero_height_only": 0,
+        "zero_size": 0,
+        "at_origin": 3,
         "form_controls": 1,
         "text_boxes": 65,
-        "block_boxes": 55,
-        "inline_boxes": 92,
+        "block_boxes": 54,
+        "inline_boxes": 25,
         "image_boxes": 0,
         "issues": [],
-        "sizing_rate": 0.9342723004694836,
-        "positioning_rate": 0.9906103286384976,
-        "area_sizing_rate": 0.9953051643192489
+        "sizing_rate": 1.0,
+        "positioning_rate": 0.9793103448275862,
+        "area_sizing_rate": 1.0
       },
       "perf": {},
       "error": null,
-      "capture_mode": "gpu",
-      "estimated_diff_pct": 2.3943661971830954,
+      "capture_mode": "headless",
+      "estimated_diff_pct": 0.4137931034482678,
       "issue_clusters": {
         "sizing_layout": 0,
         "paint": 0,
@@ -88,136 +88,30 @@
       "frame_path": "parity-baseline/captures/about.ppm",
       "layout_path": "parity-baseline/captures/about.layout.json",
       "layout_stats": {
-        "total_boxes": 485,
-        "positioned": 482,
-        "sized": 377,
+        "total_boxes": 328,
+        "positioned": 326,
+        "sized": 323,
         "zero_area": 0,
-        "zero_width_only": 91,
-        "zero_height_only": 17,
-        "zero_size": 108,
-        "at_origin": 3,
+        "zero_width_only": 5,
+        "zero_height_only": 0,
+        "zero_size": 5,
+        "at_origin": 2,
         "form_controls": 0,
         "text_boxes": 160,
-        "block_boxes": 123,
-        "inline_boxes": 202,
+        "block_boxes": 108,
+        "inline_boxes": 60,
         "image_boxes": 0,
-        "issues": [
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 720.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 720.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 720.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 720.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 720.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 720.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 720.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 720.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 5,
-            "width": 720.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 5,
-            "width": 720.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 5,
-            "width": 720.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 5,
-            "width": 720.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 5,
-            "width": 720.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 720.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 2,
-            "width": 800.0,
-            "height": 0.0
-          }
-        ],
-        "sizing_rate": 0.777319587628866,
-        "positioning_rate": 0.9938144329896907,
-        "area_sizing_rate": 0.9649484536082474
+        "issues": [],
+        "sizing_rate": 0.9847560975609756,
+        "positioning_rate": 0.9939024390243902,
+        "area_sizing_rate": 1.0
       },
       "perf": {},
       "error": null,
-      "capture_mode": "gpu",
-      "estimated_diff_pct": 16.05670103092784,
+      "capture_mode": "headless",
+      "estimated_diff_pct": 0.5792682926829329,
       "issue_clusters": {
-        "sizing_layout": 15,
+        "sizing_layout": 0,
         "paint": 0,
         "text": 0,
         "images": 0
@@ -232,234 +126,30 @@
       "frame_path": "parity-baseline/captures/settings.ppm",
       "layout_path": "parity-baseline/captures/settings.layout.json",
       "layout_stats": {
-        "total_boxes": 601,
-        "positioned": 600,
-        "sized": 406,
+        "total_boxes": 272,
+        "positioned": 271,
+        "sized": 272,
         "zero_area": 0,
-        "zero_width_only": 171,
-        "zero_height_only": 24,
-        "zero_size": 195,
+        "zero_width_only": 0,
+        "zero_height_only": 0,
+        "zero_size": 0,
         "at_origin": 1,
         "form_controls": 37,
         "text_boxes": 68,
-        "block_boxes": 117,
-        "inline_boxes": 379,
+        "block_boxes": 92,
+        "inline_boxes": 75,
         "image_boxes": 0,
-        "issues": [
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 700.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 700.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 700.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 700.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 6,
-            "width": 38.400001525878906,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 700.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 4,
-            "width": 660.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 700.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "form_control",
-            "depth": 7,
-            "width": 0.0,
-            "height": 19.200000762939453
-          },
-          {
-            "type": "zero_area",
-            "node_type": "form_control",
-            "depth": 7,
-            "width": 0.0,
-            "height": 19.200000762939453
-          },
-          {
-            "type": "zero_area",
-            "node_type": "form_control",
-            "depth": 7,
-            "width": 0.0,
-            "height": 19.200000762939453
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 4,
-            "width": 660.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 700.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 4,
-            "width": 660.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 700.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 4,
-            "width": 660.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 4,
-            "width": 660.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 4,
-            "width": 660.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 4,
-            "width": 660.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 4,
-            "width": 660.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 4,
-            "width": 660.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 4,
-            "width": 660.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 700.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 4,
-            "width": 660.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 700.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 4,
-            "width": 660.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 3,
-            "width": 700.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "form_control",
-            "depth": 5,
-            "width": 0.0,
-            "height": 129.60000610351562
-          },
-          {
-            "type": "zero_area",
-            "node_type": "form_control",
-            "depth": 5,
-            "width": 0.0,
-            "height": 129.60000610351562
-          }
-        ],
-        "sizing_rate": 0.6755407653910149,
-        "positioning_rate": 0.9983361064891847,
-        "area_sizing_rate": 0.9600665557404326
+        "issues": [],
+        "sizing_rate": 1.0,
+        "positioning_rate": 0.9963235294117647,
+        "area_sizing_rate": 1.0
       },
       "perf": {},
       "error": null,
-      "capture_mode": "gpu",
-      "estimated_diff_pct": 21.763727121464218,
+      "capture_mode": "headless",
+      "estimated_diff_pct": 0.07352941176470562,
       "issue_clusters": {
-        "sizing_layout": 29,
+        "sizing_layout": 0,
         "paint": 0,
         "text": 0,
         "images": 0
@@ -474,28 +164,28 @@
       "frame_path": "parity-baseline/captures/chrome_rustkit.ppm",
       "layout_path": "parity-baseline/captures/chrome_rustkit.layout.json",
       "layout_stats": {
-        "total_boxes": 117,
-        "positioned": 114,
-        "sized": 106,
+        "total_boxes": 61,
+        "positioned": 57,
+        "sized": 61,
         "zero_area": 0,
-        "zero_width_only": 11,
+        "zero_width_only": 0,
         "zero_height_only": 0,
-        "zero_size": 11,
-        "at_origin": 3,
+        "zero_size": 0,
+        "at_origin": 4,
         "form_controls": 0,
         "text_boxes": 23,
-        "block_boxes": 24,
-        "inline_boxes": 70,
+        "block_boxes": 21,
+        "inline_boxes": 17,
         "image_boxes": 0,
         "issues": [],
-        "sizing_rate": 0.905982905982906,
-        "positioning_rate": 0.9743589743589743,
+        "sizing_rate": 1.0,
+        "positioning_rate": 0.9344262295081968,
         "area_sizing_rate": 1.0
       },
       "perf": {},
       "error": null,
-      "capture_mode": "gpu",
-      "estimated_diff_pct": 3.3333333333333437,
+      "capture_mode": "headless",
+      "estimated_diff_pct": 1.3114754098360604,
       "issue_clusters": {
         "sizing_layout": 0,
         "paint": 0,
@@ -512,45 +202,30 @@
       "frame_path": "parity-baseline/captures/shelf.ppm",
       "layout_path": "parity-baseline/captures/shelf.layout.json",
       "layout_stats": {
-        "total_boxes": 39,
-        "positioned": 36,
-        "sized": 31,
+        "total_boxes": 13,
+        "positioned": 10,
+        "sized": 12,
         "zero_area": 0,
-        "zero_width_only": 6,
-        "zero_height_only": 2,
-        "zero_size": 8,
+        "zero_width_only": 1,
+        "zero_height_only": 0,
+        "zero_size": 1,
         "at_origin": 3,
         "form_controls": 2,
         "text_boxes": 2,
-        "block_boxes": 13,
-        "inline_boxes": 22,
+        "block_boxes": 7,
+        "inline_boxes": 2,
         "image_boxes": 0,
-        "issues": [
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 5,
-            "width": 19.200000762939453,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 5,
-            "width": 19.200000762939453,
-            "height": 0.0
-          }
-        ],
-        "sizing_rate": 0.7948717948717948,
-        "positioning_rate": 0.9230769230769231,
-        "area_sizing_rate": 0.9487179487179487
+        "issues": [],
+        "sizing_rate": 0.9230769230769231,
+        "positioning_rate": 0.7692307692307693,
+        "area_sizing_rate": 1.0
       },
       "perf": {},
       "error": null,
-      "capture_mode": "gpu",
-      "estimated_diff_pct": 11.256410256410264,
+      "capture_mode": "headless",
+      "estimated_diff_pct": 6.923076923076921,
       "issue_clusters": {
-        "sizing_layout": 2,
+        "sizing_layout": 0,
         "paint": 0,
         "text": 0,
         "images": 0
@@ -567,28 +242,28 @@
       "frame_path": "parity-baseline/captures/article-typography.ppm",
       "layout_path": "parity-baseline/captures/article-typography.layout.json",
       "layout_stats": {
-        "total_boxes": 175,
-        "positioned": 172,
+        "total_boxes": 120,
+        "positioned": 118,
         "sized": 120,
         "zero_area": 0,
-        "zero_width_only": 55,
+        "zero_width_only": 0,
         "zero_height_only": 0,
-        "zero_size": 55,
-        "at_origin": 3,
+        "zero_size": 0,
+        "at_origin": 2,
         "form_controls": 0,
         "text_boxes": 57,
         "block_boxes": 42,
-        "inline_boxes": 76,
+        "inline_boxes": 21,
         "image_boxes": 0,
         "issues": [],
-        "sizing_rate": 0.6857142857142857,
-        "positioning_rate": 0.9828571428571429,
+        "sizing_rate": 1.0,
+        "positioning_rate": 0.9833333333333333,
         "area_sizing_rate": 1.0
       },
       "perf": {},
       "error": null,
-      "capture_mode": "gpu",
-      "estimated_diff_pct": 9.771428571428565,
+      "capture_mode": "headless",
+      "estimated_diff_pct": 0.33333333333332993,
       "issue_clusters": {
         "sizing_layout": 0,
         "paint": 0,
@@ -605,28 +280,28 @@
       "frame_path": "parity-baseline/captures/card-grid.ppm",
       "layout_path": "parity-baseline/captures/card-grid.layout.json",
       "layout_stats": {
-        "total_boxes": 180,
-        "positioned": 179,
-        "sized": 131,
+        "total_boxes": 101,
+        "positioned": 100,
+        "sized": 101,
         "zero_area": 0,
-        "zero_width_only": 49,
+        "zero_width_only": 0,
         "zero_height_only": 0,
-        "zero_size": 49,
+        "zero_size": 0,
         "at_origin": 1,
         "form_controls": 0,
         "text_boxes": 40,
         "block_boxes": 41,
-        "inline_boxes": 99,
+        "inline_boxes": 20,
         "image_boxes": 0,
         "issues": [],
-        "sizing_rate": 0.7277777777777777,
-        "positioning_rate": 0.9944444444444445,
+        "sizing_rate": 1.0,
+        "positioning_rate": 0.9900990099009901,
         "area_sizing_rate": 1.0
       },
       "perf": {},
       "error": null,
-      "capture_mode": "gpu",
-      "estimated_diff_pct": 8.277777777777784,
+      "capture_mode": "headless",
+      "estimated_diff_pct": 0.1980198019801982,
       "issue_clusters": {
         "sizing_layout": 0,
         "paint": 0,
@@ -643,87 +318,30 @@
       "frame_path": "parity-baseline/captures/css-selectors.ppm",
       "layout_path": "parity-baseline/captures/css-selectors.layout.json",
       "layout_stats": {
-        "total_boxes": 188,
-        "positioned": 187,
+        "total_boxes": 95,
+        "positioned": 94,
         "sized": 95,
         "zero_area": 0,
-        "zero_width_only": 85,
-        "zero_height_only": 8,
-        "zero_size": 93,
+        "zero_width_only": 0,
+        "zero_height_only": 0,
+        "zero_size": 0,
         "at_origin": 1,
         "form_controls": 5,
         "text_boxes": 35,
-        "block_boxes": 60,
-        "inline_boxes": 88,
+        "block_boxes": 52,
+        "inline_boxes": 3,
         "image_boxes": 0,
-        "issues": [
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 2,
-            "width": 760.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 2,
-            "width": 760.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 2,
-            "width": 760.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 2,
-            "width": 760.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 2,
-            "width": 760.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 2,
-            "width": 760.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 2,
-            "width": 760.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 2,
-            "width": 760.0,
-            "height": 0.0
-          }
-        ],
-        "sizing_rate": 0.5053191489361702,
-        "positioning_rate": 0.9946808510638298,
-        "area_sizing_rate": 0.9574468085106383
+        "issues": [],
+        "sizing_rate": 1.0,
+        "positioning_rate": 0.9894736842105263,
+        "area_sizing_rate": 1.0
       },
       "perf": {},
       "error": null,
-      "capture_mode": "gpu",
-      "estimated_diff_pct": 21.074468085106375,
+      "capture_mode": "headless",
+      "estimated_diff_pct": 0.21052631578947212,
       "issue_clusters": {
-        "sizing_layout": 8,
+        "sizing_layout": 0,
         "paint": 0,
         "text": 0,
         "images": 0
@@ -738,80 +356,30 @@
       "frame_path": "parity-baseline/captures/flex-positioning.ppm",
       "layout_path": "parity-baseline/captures/flex-positioning.layout.json",
       "layout_stats": {
-        "total_boxes": 205,
-        "positioned": 204,
-        "sized": 156,
+        "total_boxes": 103,
+        "positioned": 102,
+        "sized": 103,
         "zero_area": 0,
-        "zero_width_only": 42,
-        "zero_height_only": 7,
-        "zero_size": 49,
+        "zero_width_only": 0,
+        "zero_height_only": 0,
+        "zero_size": 0,
         "at_origin": 1,
         "form_controls": 7,
         "text_boxes": 36,
-        "block_boxes": 64,
-        "inline_boxes": 98,
+        "block_boxes": 57,
+        "inline_boxes": 3,
         "image_boxes": 0,
-        "issues": [
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 2,
-            "width": 760.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 2,
-            "width": 760.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 2,
-            "width": 760.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 2,
-            "width": 760.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 2,
-            "width": 760.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 2,
-            "width": 760.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 2,
-            "width": 760.0,
-            "height": 0.0
-          }
-        ],
-        "sizing_rate": 0.7609756097560976,
-        "positioning_rate": 0.9951219512195122,
-        "area_sizing_rate": 0.9658536585365853
+        "issues": [],
+        "sizing_rate": 1.0,
+        "positioning_rate": 0.9902912621359223,
+        "area_sizing_rate": 1.0
       },
       "perf": {},
       "error": null,
-      "capture_mode": "gpu",
-      "estimated_diff_pct": 12.475609756097569,
+      "capture_mode": "headless",
+      "estimated_diff_pct": 0.1941747572815511,
       "issue_clusters": {
-        "sizing_layout": 7,
+        "sizing_layout": 0,
         "paint": 0,
         "text": 0,
         "images": 0
@@ -826,28 +394,28 @@
       "frame_path": "parity-baseline/captures/form-elements.ppm",
       "layout_path": "parity-baseline/captures/form-elements.layout.json",
       "layout_stats": {
-        "total_boxes": 177,
-        "positioned": 176,
-        "sized": 114,
+        "total_boxes": 90,
+        "positioned": 89,
+        "sized": 90,
         "zero_area": 0,
-        "zero_width_only": 63,
+        "zero_width_only": 0,
         "zero_height_only": 0,
-        "zero_size": 63,
+        "zero_size": 0,
         "at_origin": 1,
         "form_controls": 18,
         "text_boxes": 23,
         "block_boxes": 32,
-        "inline_boxes": 104,
+        "inline_boxes": 17,
         "image_boxes": 0,
         "issues": [],
-        "sizing_rate": 0.6440677966101694,
-        "positioning_rate": 0.9943502824858758,
+        "sizing_rate": 1.0,
+        "positioning_rate": 0.9888888888888889,
         "area_sizing_rate": 1.0
       },
       "perf": {},
       "error": null,
-      "capture_mode": "gpu",
-      "estimated_diff_pct": 10.790960451977405,
+      "capture_mode": "headless",
+      "estimated_diff_pct": 0.22222222222221255,
       "issue_clusters": {
         "sizing_layout": 0,
         "paint": 0,
@@ -864,28 +432,28 @@
       "frame_path": "parity-baseline/captures/gradient-backgrounds.ppm",
       "layout_path": "parity-baseline/captures/gradient-backgrounds.layout.json",
       "layout_stats": {
-        "total_boxes": 126,
-        "positioned": 125,
-        "sized": 119,
+        "total_boxes": 66,
+        "positioned": 65,
+        "sized": 66,
         "zero_area": 0,
-        "zero_width_only": 3,
-        "zero_height_only": 4,
-        "zero_size": 7,
+        "zero_width_only": 0,
+        "zero_height_only": 0,
+        "zero_size": 0,
         "at_origin": 1,
         "form_controls": 0,
         "text_boxes": 23,
         "block_boxes": 26,
-        "inline_boxes": 77,
+        "inline_boxes": 17,
         "image_boxes": 0,
         "issues": [],
-        "sizing_rate": 0.9444444444444444,
-        "positioning_rate": 0.9920634920634921,
-        "area_sizing_rate": 0.9682539682539683
+        "sizing_rate": 1.0,
+        "positioning_rate": 0.9848484848484849,
+        "area_sizing_rate": 1.0
       },
       "perf": {},
       "error": null,
-      "capture_mode": "gpu",
-      "estimated_diff_pct": 3.412698412698423,
+      "capture_mode": "headless",
+      "estimated_diff_pct": 0.3030303030302939,
       "issue_clusters": {
         "sizing_layout": 0,
         "paint": 0,
@@ -902,66 +470,30 @@
       "frame_path": "parity-baseline/captures/image-gallery.ppm",
       "layout_path": "parity-baseline/captures/image-gallery.layout.json",
       "layout_stats": {
-        "total_boxes": 256,
-        "positioned": 255,
-        "sized": 153,
+        "total_boxes": 129,
+        "positioned": 128,
+        "sized": 129,
         "zero_area": 0,
-        "zero_width_only": 95,
-        "zero_height_only": 8,
-        "zero_size": 103,
+        "zero_width_only": 0,
+        "zero_height_only": 0,
+        "zero_size": 0,
         "at_origin": 1,
         "form_controls": 0,
         "text_boxes": 46,
-        "block_boxes": 82,
-        "inline_boxes": 128,
+        "block_boxes": 77,
+        "inline_boxes": 6,
         "image_boxes": 0,
-        "issues": [
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 5,
-            "width": 227.1999969482422,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 5,
-            "width": 227.1999969482422,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 5,
-            "width": 227.1999969482422,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 5,
-            "width": 227.1999969482422,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 5,
-            "width": 227.1999969482422,
-            "height": 0.0
-          }
-        ],
-        "sizing_rate": 0.59765625,
-        "positioning_rate": 0.99609375,
-        "area_sizing_rate": 0.96875
+        "issues": [],
+        "sizing_rate": 1.0,
+        "positioning_rate": 0.9922480620155039,
+        "area_sizing_rate": 1.0
       },
       "perf": {},
       "error": null,
-      "capture_mode": "gpu",
-      "estimated_diff_pct": 16.2109375,
+      "capture_mode": "headless",
+      "estimated_diff_pct": 0.15503875968991832,
       "issue_clusters": {
-        "sizing_layout": 5,
+        "sizing_layout": 0,
         "paint": 0,
         "text": 0,
         "images": 0
@@ -976,45 +508,30 @@
       "frame_path": "parity-baseline/captures/sticky-scroll.ppm",
       "layout_path": "parity-baseline/captures/sticky-scroll.layout.json",
       "layout_stats": {
-        "total_boxes": 290,
-        "positioned": 287,
-        "sized": 179,
+        "total_boxes": 162,
+        "positioned": 159,
+        "sized": 157,
         "zero_area": 0,
-        "zero_width_only": 108,
-        "zero_height_only": 3,
-        "zero_size": 111,
+        "zero_width_only": 5,
+        "zero_height_only": 0,
+        "zero_size": 5,
         "at_origin": 3,
         "form_controls": 1,
         "text_boxes": 57,
-        "block_boxes": 80,
-        "inline_boxes": 152,
+        "block_boxes": 78,
+        "inline_boxes": 26,
         "image_boxes": 0,
-        "issues": [
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 4,
-            "width": 250.0,
-            "height": 0.0
-          },
-          {
-            "type": "zero_area",
-            "node_type": "block",
-            "depth": 4,
-            "width": 250.0,
-            "height": 0.0
-          }
-        ],
-        "sizing_rate": 0.6172413793103448,
-        "positioning_rate": 0.9896551724137931,
-        "area_sizing_rate": 0.9896551724137931
+        "issues": [],
+        "sizing_rate": 0.9691358024691358,
+        "positioning_rate": 0.9814814814814815,
+        "area_sizing_rate": 1.0
       },
       "perf": {},
       "error": null,
-      "capture_mode": "gpu",
-      "estimated_diff_pct": 13.206896551724144,
+      "capture_mode": "headless",
+      "estimated_diff_pct": 1.2962962962962954,
       "issue_clusters": {
-        "sizing_layout": 2,
+        "sizing_layout": 0,
         "paint": 0,
         "text": 0,
         "images": 0
