@@ -72,19 +72,7 @@ Power users rejoice. Everything is accessible via keyboard:
 | **Zen** | Trust the system | Full automation |
 
 ---
-
-## Download
-
-### Latest Release
-
-| Platform | Download |
-|----------|----------|
-| Windows (x64) | [zen-windows-x64.zip](#) |
-| macOS (Intel) | [zen-macos-intel.dmg](#) |
-| macOS (Apple Silicon) | [zen-macos-arm64.dmg](#) |
-| Linux (x64) | [zen-linux-x64.AppImage](#) |
-
-> **Note:** Zen is currently in alpha. Expect some rough edges!
+> **Note:** HiWave is currently in alpha. Expect some rough edges!
 
 ### Build from Source
 
@@ -217,11 +205,8 @@ If HiWave helps you focus better, consider supporting its development:
   <a href="https://github.com/sponsors/hiwavebrowser">
     <img src="https://img.shields.io/badge/sponsor-GitHub%20Sponsors-ea4aaa" alt="GitHub Sponsors" />
   </a>
-  <a href="https://ko-fi.com/YOUR_USERNAME">
+  <a href="https://ko-fi.com/hiwavebrowser">
     <img src="https://img.shields.io/badge/support-Ko--fi-ff5e5b" alt="Ko-fi" />
-  </a>
-  <a href="https://opencollective.com/hiwavebrowser">
-    <img src="https://img.shields.io/badge/support-Open%20Collective-3385ff" alt="Open Collective" />
   </a>
 </p>
 
@@ -264,6 +249,8 @@ This means:
 - ✅ Source code is open
 - ✅ You can build commercial products with it
 - ⚠️ Changes to HiWave's files must be shared under MPL-2.0
+ 
+For commercial licensing options, see COMMERCIAL-LICENSE.md.
 
 ---
 
