@@ -262,11 +262,17 @@ pub struct LinearGradient {
     pub direction: GradientDirection,
     /// Color stops.
     pub stops: Vec<ColorStop>,
+    /// Whether this is a repeating gradient.
+    pub repeating: bool,
 }
 
 impl LinearGradient {
     pub fn new(direction: GradientDirection, stops: Vec<ColorStop>) -> Self {
-        Self { direction, stops }
+        Self { direction, stops, repeating: false }
+    }
+
+    pub fn new_repeating(direction: GradientDirection, stops: Vec<ColorStop>) -> Self {
+        Self { direction, stops, repeating: true }
     }
 }
 
@@ -281,11 +287,40 @@ pub struct RadialGradient {
     pub center: (f32, f32),
     /// Color stops.
     pub stops: Vec<ColorStop>,
+    /// Whether this is a repeating gradient.
+    pub repeating: bool,
 }
 
 impl RadialGradient {
     pub fn new(shape: RadialShape, size: RadialSize, center: (f32, f32), stops: Vec<ColorStop>) -> Self {
-        Self { shape, size, center, stops }
+        Self { shape, size, center, stops, repeating: false }
+    }
+
+    pub fn new_repeating(shape: RadialShape, size: RadialSize, center: (f32, f32), stops: Vec<ColorStop>) -> Self {
+        Self { shape, size, center, stops, repeating: true }
+    }
+}
+
+/// A CSS conic gradient.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConicGradient {
+    /// Starting angle in degrees (default 0, pointing up).
+    pub from_angle: f32,
+    /// Center position (0.0 to 1.0, default 0.5).
+    pub center: (f32, f32),
+    /// Color stops (positions are in degrees or percentages).
+    pub stops: Vec<ColorStop>,
+    /// Whether this is a repeating gradient.
+    pub repeating: bool,
+}
+
+impl ConicGradient {
+    pub fn new(from_angle: f32, center: (f32, f32), stops: Vec<ColorStop>) -> Self {
+        Self { from_angle, center, stops, repeating: false }
+    }
+
+    pub fn new_repeating(from_angle: f32, center: (f32, f32), stops: Vec<ColorStop>) -> Self {
+        Self { from_angle, center, stops, repeating: true }
     }
 }
 
@@ -315,11 +350,185 @@ pub enum RadialSize {
     Explicit(f32, f32),
 }
 
-/// A CSS gradient (linear or radial).
+/// A CSS gradient (linear, radial, or conic).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Gradient {
     Linear(LinearGradient),
     Radial(RadialGradient),
+    Conic(ConicGradient),
+}
+
+// ==================== Background Layer Types ====================
+
+/// The image source for a background layer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BackgroundImage {
+    /// No image (transparent).
+    None,
+    /// A gradient.
+    Gradient(Gradient),
+    /// A URL reference to an image.
+    Url(String),
+}
+
+impl Default for BackgroundImage {
+    fn default() -> Self {
+        BackgroundImage::None
+    }
+}
+
+/// Background size specification.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BackgroundSize {
+    /// Stretch to cover the entire area.
+    Cover,
+    /// Scale to fit within the area.
+    Contain,
+    /// Explicit width and height (None = auto for that dimension).
+    Explicit { width: Option<f32>, height: Option<f32> },
+    /// Auto sizing (use intrinsic dimensions).
+    Auto,
+}
+
+impl Default for BackgroundSize {
+    fn default() -> Self {
+        BackgroundSize::Auto
+    }
+}
+
+/// Background repeat specification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundRepeat {
+    /// Repeat in both directions.
+    Repeat,
+    /// Repeat horizontally only.
+    RepeatX,
+    /// Repeat vertically only.
+    RepeatY,
+    /// No repeat.
+    NoRepeat,
+    /// Space evenly to fill.
+    Space,
+    /// Round to fill without clipping.
+    Round,
+}
+
+impl Default for BackgroundRepeat {
+    fn default() -> Self {
+        BackgroundRepeat::Repeat
+    }
+}
+
+/// Background position specification.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackgroundPosition {
+    /// Horizontal position (0.0 = left, 0.5 = center, 1.0 = right, or pixel offset).
+    pub x: BackgroundPositionValue,
+    /// Vertical position (0.0 = top, 0.5 = center, 1.0 = bottom, or pixel offset).
+    pub y: BackgroundPositionValue,
+}
+
+impl Default for BackgroundPosition {
+    fn default() -> Self {
+        BackgroundPosition {
+            x: BackgroundPositionValue::Percent(0.0),
+            y: BackgroundPositionValue::Percent(0.0),
+        }
+    }
+}
+
+/// A single dimension of background position.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BackgroundPositionValue {
+    /// Percentage (0.0 = start, 1.0 = end).
+    Percent(f32),
+    /// Pixel offset from the start.
+    Px(f32),
+}
+
+impl Default for BackgroundPositionValue {
+    fn default() -> Self {
+        BackgroundPositionValue::Percent(0.0)
+    }
+}
+
+impl BackgroundPositionValue {
+    /// Convert to a pixel offset given the container size and image size.
+    pub fn to_px(&self, container_size: f32, image_size: f32) -> f32 {
+        match self {
+            BackgroundPositionValue::Percent(pct) => {
+                // CSS background-position: percentage positions the image such that
+                // X% of the image aligns with X% of the container
+                (container_size - image_size) * pct
+            }
+            BackgroundPositionValue::Px(px) => *px,
+        }
+    }
+}
+
+/// Background origin - where the background positioning area starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackgroundOrigin {
+    /// Position relative to the border box.
+    #[default]
+    PaddingBox,
+    /// Position relative to the border box.
+    BorderBox,
+    /// Position relative to the content box.
+    ContentBox,
+}
+
+/// A single background layer combining image, position, size, and repeat.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackgroundLayer {
+    /// The background image (gradient or url).
+    pub image: BackgroundImage,
+    /// Positioning within the element.
+    pub position: BackgroundPosition,
+    /// How the background is sized.
+    pub size: BackgroundSize,
+    /// How the background repeats.
+    pub repeat: BackgroundRepeat,
+    /// Where the background positioning area starts.
+    pub origin: BackgroundOrigin,
+    /// Where the background is clipped.
+    pub clip: BackgroundClip,
+}
+
+impl Default for BackgroundLayer {
+    fn default() -> Self {
+        BackgroundLayer {
+            image: BackgroundImage::None,
+            position: BackgroundPosition::default(),
+            size: BackgroundSize::Auto,
+            repeat: BackgroundRepeat::Repeat,
+            origin: BackgroundOrigin::PaddingBox,
+            clip: BackgroundClip::BorderBox,
+        }
+    }
+}
+
+impl BackgroundLayer {
+    /// Create a new background layer with a gradient.
+    pub fn from_gradient(gradient: Gradient) -> Self {
+        BackgroundLayer {
+            image: BackgroundImage::Gradient(gradient),
+            ..Default::default()
+        }
+    }
+
+    /// Create a new background layer with a URL.
+    pub fn from_url(url: String) -> Self {
+        BackgroundLayer {
+            image: BackgroundImage::Url(url),
+            ..Default::default()
+        }
+    }
+
+    /// Check if this layer has a visible image.
+    pub fn has_image(&self) -> bool {
+        !matches!(self.image, BackgroundImage::None)
+    }
 }
 
 /// Display property values.
@@ -346,6 +555,16 @@ impl Display {
     /// Check if this is a grid container.
     pub fn is_grid(self) -> bool {
         matches!(self, Display::Grid | Display::InlineGrid)
+    }
+
+    /// Check if this is an inline-level display (inline, inline-block, inline-flex, inline-grid).
+    pub fn is_inline_level(self) -> bool {
+        matches!(self, Display::Inline | Display::InlineBlock | Display::InlineFlex | Display::InlineGrid)
+    }
+
+    /// Check if this is inline-block.
+    pub fn is_inline_block(self) -> bool {
+        matches!(self, Display::InlineBlock)
     }
 }
 
@@ -1282,6 +1501,11 @@ pub struct ComputedStyle {
     // Colors
     pub color: Color,
     pub background_color: Color,
+    /// Background layers (painted bottom-to-top, index 0 is bottom).
+    /// For backwards compatibility, also check background_gradient.
+    pub background_layers: Vec<BackgroundLayer>,
+    /// Legacy single gradient field - prefer using background_layers.
+    /// This is kept for backwards compatibility during migration.
     pub background_gradient: Option<Gradient>,
 
     // Typography - Basic

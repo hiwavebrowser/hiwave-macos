@@ -574,12 +574,16 @@ impl Renderer {
                 );
             }
 
-            DisplayCommand::LinearGradient { rect, direction, stops } => {
-                self.draw_linear_gradient(*rect, *direction, stops);
+            DisplayCommand::LinearGradient { rect, direction, stops, repeating } => {
+                self.draw_linear_gradient(*rect, *direction, stops, *repeating);
             }
 
-            DisplayCommand::RadialGradient { rect, shape, size, center, stops } => {
-                self.draw_radial_gradient(*rect, *shape, *size, *center, stops);
+            DisplayCommand::RadialGradient { rect, shape, size, center, stops, repeating } => {
+                self.draw_radial_gradient(*rect, *shape, *size, *center, stops, *repeating);
+            }
+
+            DisplayCommand::ConicGradient { rect, from_angle, center, stops, repeating } => {
+                self.draw_conic_gradient(*rect, *from_angle, *center, stops, *repeating);
             }
 
             DisplayCommand::TextInput {
@@ -1092,6 +1096,7 @@ impl Renderer {
         rect: Rect,
         direction: rustkit_css::GradientDirection,
         stops: &[rustkit_css::ColorStop],
+        repeating: bool,
     ) {
         if stops.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
             return;
@@ -1117,6 +1122,23 @@ impl Renderer {
             normalized_stops.push((pos, stop.color));
         }
 
+        // For repeating gradients, get the repeat length (last stop position)
+        let repeat_length = if repeating && !normalized_stops.is_empty() {
+            normalized_stops.last().map(|(pos, _)| *pos).unwrap_or(1.0).max(0.001)
+        } else {
+            1.0
+        };
+
+        // Helper to apply repeating logic to t value
+        let apply_t = |t: f32| -> f32 {
+            if repeating {
+                // Scale t to repeat length and use modulo for repeating
+                (t.rem_euclid(repeat_length)).min(repeat_length)
+            } else {
+                t.clamp(0.0, 1.0)
+            }
+        };
+
         // Check for axis-aligned gradients (more efficient rendering)
         let is_horizontal = (angle_deg - 90.0).abs() < 0.1 || (angle_deg - 270.0).abs() < 0.1;
         let is_vertical = angle_deg.abs() < 0.1 || (angle_deg - 180.0).abs() < 0.1;
@@ -1134,7 +1156,8 @@ impl Renderer {
                 } else {
                     (i as f32 + 0.5) / step_count as f32
                 };
-                let color = Self::interpolate_color_gamma(&normalized_stops, t);
+                let t_final = apply_t(t);
+                let color = Self::interpolate_color_gamma(&normalized_stops, t_final);
                 let x_pos = rect.x + i as f32 * strip_width;
                 self.draw_solid_rect(Rect::new(x_pos, rect.y, strip_width + 0.5, rect.height), color);
             }
@@ -1151,7 +1174,8 @@ impl Renderer {
                 } else {
                     (i as f32 + 0.5) / step_count as f32
                 };
-                let color = Self::interpolate_color_gamma(&normalized_stops, t);
+                let t_final = apply_t(t);
+                let color = Self::interpolate_color_gamma(&normalized_stops, t_final);
                 let y_pos = rect.y + i as f32 * strip_height;
                 self.draw_solid_rect(Rect::new(rect.x, y_pos, rect.width, strip_height + 0.5), color);
             }
@@ -1193,9 +1217,9 @@ impl Renderer {
 
                     // Normalize to 0-1 range
                     let t = (projection / gradient_half_length + 1.0) / 2.0;
-                    let t_clamped = t.clamp(0.0, 1.0);
+                    let t_final = apply_t(t);
 
-                    let color = Self::interpolate_color_gamma(&normalized_stops, t_clamped);
+                    let color = Self::interpolate_color_gamma(&normalized_stops, t_final);
 
                     if color.a > 0.0 {
                         self.draw_solid_rect(Rect::new(x, y, cell_w, cell_h), color);
@@ -1216,11 +1240,12 @@ impl Renderer {
         size: rustkit_css::RadialSize,
         center: (f32, f32),
         stops: &[rustkit_css::ColorStop],
+        repeating: bool,
     ) {
         if stops.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
             return;
         }
-        
+
         // Calculate center position in pixels
         let cx = rect.x + rect.width * center.0;
         let cy = rect.y + rect.height * center.1;
@@ -1294,7 +1319,14 @@ impl Renderer {
             });
             normalized_stops.push((pos, stop.color));
         }
-        
+
+        // For repeating gradients, get the repeat length (last stop position)
+        let repeat_length = if repeating && !normalized_stops.is_empty() {
+            normalized_stops.last().map(|(pos, _)| *pos).unwrap_or(1.0).max(0.001)
+        } else {
+            1.0
+        };
+
         // Adaptive step sizing to prevent GPU buffer overflow for large gradients
         // while maintaining 1px quality for small UI elements
         let area = rect.width * rect.height;
@@ -1310,26 +1342,119 @@ impl Renderer {
             let mut x = rect.x;
             while x < rect.x + rect.width {
                 let col_width = step_size.min(rect.x + rect.width - x);
-                
+
                 // Calculate distance from center (normalized to ellipse)
                 let dx = (x + col_width / 2.0 - cx) / rx.max(0.001);
                 let dy = (y + row_height / 2.0 - cy) / ry.max(0.001);
                 let t = (dx * dx + dy * dy).sqrt();
-                
+
+                // Apply repeating logic
+                let t_final = if repeating {
+                    t.rem_euclid(repeat_length)
+                } else {
+                    t.clamp(0.0, 1.0)
+                };
+
                 // Get color at this distance (gamma-correct)
-                let color = Self::interpolate_color_gamma(&normalized_stops, t);
-                
+                let color = Self::interpolate_color_gamma(&normalized_stops, t_final);
+
                 // Only draw if not fully transparent
                 if color.a > 0.0 {
                     self.draw_solid_rect(Rect::new(x, y, col_width, row_height), color);
                 }
-                
+
                 x += step_size;
             }
             y += step_size;
         }
     }
-    
+
+    /// Draw a conic gradient.
+    fn draw_conic_gradient(
+        &mut self,
+        rect: Rect,
+        from_angle: f32,
+        center: (f32, f32),
+        stops: &[rustkit_css::ColorStop],
+        repeating: bool,
+    ) {
+        if stops.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+
+        // Calculate center position in pixels
+        let cx = rect.x + rect.width * center.0;
+        let cy = rect.y + rect.height * center.1;
+
+        // Convert from_angle to radians (CSS conic gradients: 0deg = up, clockwise)
+        let from_rad = (from_angle - 90.0).to_radians();
+
+        // Normalize color stops
+        let mut normalized_stops: Vec<(f32, Color)> = Vec::with_capacity(stops.len());
+        for (i, stop) in stops.iter().enumerate() {
+            let pos = stop.position.unwrap_or_else(|| {
+                if stops.len() == 1 { 0.5 } else { i as f32 / (stops.len() - 1) as f32 }
+            });
+            normalized_stops.push((pos, stop.color));
+        }
+
+        // For repeating gradients, get the repeat length from the last stop
+        let repeat_length = if repeating && !normalized_stops.is_empty() {
+            normalized_stops.last().map(|(pos, _)| *pos).unwrap_or(1.0).max(0.001)
+        } else {
+            1.0
+        };
+
+        // Function to apply repeating logic to t value
+        let apply_t = |t: f32| -> f32 {
+            if repeating {
+                t.rem_euclid(repeat_length)
+            } else {
+                t
+            }
+        };
+
+        // Adaptive step sizing to prevent GPU buffer overflow
+        let area = rect.width * rect.height;
+        let max_cells: f32 = 100_000.0;
+        let step_size: f32 = if area > max_cells {
+            (area / max_cells).sqrt().ceil()
+        } else {
+            1.0
+        };
+
+        let mut y = rect.y;
+        while y < rect.y + rect.height {
+            let row_height = step_size.min(rect.y + rect.height - y);
+            let mut x = rect.x;
+            while x < rect.x + rect.width {
+                let col_width = step_size.min(rect.x + rect.width - x);
+
+                // Calculate angle from center
+                let dx = x + col_width / 2.0 - cx;
+                let dy = y + row_height / 2.0 - cy;
+                let angle = dy.atan2(dx) - from_rad;
+
+                // Normalize angle to 0-1 range
+                let normalized_angle = ((angle + std::f32::consts::PI) / (2.0 * std::f32::consts::PI)) % 1.0;
+                let raw_t = if normalized_angle < 0.0 { normalized_angle + 1.0 } else { normalized_angle };
+
+                // Apply repeating logic
+                let t = apply_t(raw_t);
+
+                // Get color at this angle
+                let color = Self::interpolate_color_gamma(&normalized_stops, t);
+
+                if color.a > 0.0 {
+                    self.draw_solid_rect(Rect::new(x, y, col_width, row_height), color);
+                }
+
+                x += step_size;
+            }
+            y += step_size;
+        }
+    }
+
     /// Convert sRGB to linear space for interpolation.
     #[inline]
     fn srgb_to_linear(c: f32) -> f32 {

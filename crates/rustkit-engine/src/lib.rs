@@ -1054,17 +1054,17 @@ impl Engine {
         node: &Rc<Node>,
         stylesheets: &[Stylesheet],
         css_vars: &HashMap<String, String>,
-        ancestors: &[String],
+        ancestors: &[(String, Vec<String>, Option<String>)],
     ) -> LayoutBox {
         self.build_layout_from_node_with_parent_style(node, stylesheets, css_vars, ancestors, None)
     }
-    
+
     fn build_layout_from_node_with_parent_style(
         &self,
         node: &Rc<Node>,
         stylesheets: &[Stylesheet],
         css_vars: &HashMap<String, String>,
-        ancestors: &[String],
+        ancestors: &[(String, Vec<String>, Option<String>)],
         parent_style: Option<&ComputedStyle>,
     ) -> LayoutBox {
         match &node.node_type {
@@ -1221,9 +1221,15 @@ impl Engine {
 
                 let mut layout_box = LayoutBox::new(box_type, style.clone());
 
-                // Build ancestors list for child elements
-                let mut child_ancestors = ancestors.to_vec();
-                child_ancestors.push(tag_lower.clone());
+                // Build ancestors list for child elements with class and ID info
+                // Insert at beginning so ancestors[0] is always the immediate parent
+                let classes: Vec<String> = attributes
+                    .get("class")
+                    .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
+                    .unwrap_or_default();
+                let id = attributes.get("id").cloned();
+                let mut child_ancestors = vec![(tag_lower.clone(), classes, id)];
+                child_ancestors.extend(ancestors.iter().cloned());
 
                 // Check for ::before pseudo-element
                 if let Some(before_box) = self.create_pseudo_element(
@@ -1326,7 +1332,7 @@ impl Engine {
         attributes: &std::collections::HashMap<String, String>,
         stylesheets: &[Stylesheet],
         _css_vars: &HashMap<String, String>,
-        ancestors: &[String],
+        ancestors: &[(String, Vec<String>, Option<String>)],
         pseudo: &str,
     ) -> Option<LayoutBox> {
         // Compute style for the pseudo-element by matching selectors with the pseudo suffix
@@ -1401,7 +1407,7 @@ impl Engine {
         attributes: &std::collections::HashMap<String, String>,
         stylesheets: &[Stylesheet],
         css_vars: &HashMap<String, String>,
-        ancestors: &[String],
+        ancestors: &[(String, Vec<String>, Option<String>)],
     ) -> ComputedStyle {
         let mut style = ComputedStyle::new();
         style.color = rustkit_css::Color::BLACK;
@@ -1803,22 +1809,79 @@ impl Engine {
                     style.color = color;
                 }
             }
-            "background-color" | "background" | "background-image" => {
+            "background-color" => {
+                if let Some(color) = parse_color(value) {
+                    style.background_color = color;
+                }
+            }
+            "background" | "background-image" => {
                 // Handle multiple backgrounds (comma-separated)
-                // The last layer is the bottom-most (typically the solid color)
-                let layers: Vec<&str> = split_by_comma(value);
-                
-                for layer in layers.iter().rev() {
-                    let layer = layer.trim();
-                    if layer.is_empty() {
+                // CSS background layers are painted bottom-to-top
+                // In the shorthand, the first layer is topmost, last is bottommost
+                let layer_strs: Vec<&str> = split_by_comma(value);
+
+                // Clear existing layers when setting new background
+                style.background_layers.clear();
+
+                // Process layers in reverse order so index 0 is bottommost
+                for layer_str in layer_strs.iter().rev() {
+                    let layer_str = layer_str.trim();
+                    if layer_str.is_empty() {
                         continue;
                     }
-                    
-                    // Check for gradient first
-                    if let Some(gradient) = parse_gradient(layer) {
-                        style.background_gradient = Some(gradient);
-                    } else if let Some(color) = parse_color(layer) {
+
+                    // Check for color (goes to background_color, not layers)
+                    if let Some(color) = parse_color(layer_str) {
                         style.background_color = color;
+                        continue;
+                    }
+
+                    // Parse as a background layer (gradient or url)
+                    if let Some(layer) = parse_background_layer(layer_str) {
+                        style.background_layers.push(layer.clone());
+                        // Also set legacy field for backwards compatibility
+                        if let rustkit_css::BackgroundImage::Gradient(ref gradient) = layer.image {
+                            style.background_gradient = Some(gradient.clone());
+                        }
+                    }
+                }
+            }
+            "background-size" => {
+                // Can be comma-separated for multiple layers
+                let sizes: Vec<&str> = split_by_comma(value);
+                for (i, size_str) in sizes.iter().enumerate() {
+                    let size = parse_background_size(size_str);
+                    if i < style.background_layers.len() {
+                        style.background_layers[i].size = size;
+                    }
+                }
+            }
+            "background-position" => {
+                // Can be comma-separated for multiple layers
+                let positions: Vec<&str> = split_by_comma(value);
+                for (i, pos_str) in positions.iter().enumerate() {
+                    let position = parse_background_position(pos_str);
+                    if i < style.background_layers.len() {
+                        style.background_layers[i].position = position;
+                    }
+                }
+            }
+            "background-repeat" => {
+                // Can be comma-separated for multiple layers
+                let repeats: Vec<&str> = split_by_comma(value);
+                for (i, repeat_str) in repeats.iter().enumerate() {
+                    let repeat = parse_background_repeat(repeat_str);
+                    if i < style.background_layers.len() {
+                        style.background_layers[i].repeat = repeat;
+                    }
+                }
+            }
+            "background-origin" => {
+                let origins: Vec<&str> = split_by_comma(value);
+                for (i, origin_str) in origins.iter().enumerate() {
+                    let origin = parse_background_origin(origin_str);
+                    if i < style.background_layers.len() {
+                        style.background_layers[i].origin = origin;
                     }
                 }
             }
@@ -2906,7 +2969,7 @@ impl Engine {
         selector: &str,
         tag_name: &str,
         attributes: &HashMap<String, String>,
-        ancestors: &[String],
+        ancestors: &[(String, Vec<String>, Option<String>)],
         siblings_before: &[(String, Vec<String>, Option<String>)],
         element_index: usize,
         sibling_count: usize,
@@ -2948,40 +3011,45 @@ impl Engine {
         }
         
         // Handle combinators by walking backwards through tokens
-        let current_ancestors = ancestors;
-        let current_siblings = siblings_before;
-        
+        // Track current position in ancestor chain
+        let mut ancestor_idx = 0;
+
         for i in (0..tokens.len() - 1).rev() {
             let (sel_part, combinator) = &tokens[i];
-            
+
             match combinator.as_str() {
                 " " => {
-                    // Descendant combinator: some ancestor must match
+                    // Descendant combinator: some ancestor (from current position) must match
                     let mut found = false;
-                    for ancestor in current_ancestors {
-                        if self.simple_selector_matches_tag_only(sel_part, ancestor) {
+                    let mut found_idx = ancestor_idx;
+                    for (idx, (anc_tag, anc_classes, anc_id)) in ancestors.iter().enumerate().skip(ancestor_idx) {
+                        if self.simple_selector_matches_ancestor(sel_part, anc_tag, anc_classes, anc_id.as_ref()) {
                             found = true;
+                            found_idx = idx + 1; // Next position after this ancestor
                             break;
                         }
                     }
                     if !found {
                         return false;
                     }
+                    ancestor_idx = found_idx;
                 }
                 ">" => {
-                    // Child combinator: immediate parent must match
-                    if let Some(parent) = current_ancestors.first() {
-                        if !self.simple_selector_matches_tag_only(sel_part, parent) {
+                    // Child combinator: immediate parent (at current position) must match
+                    if let Some((parent_tag, parent_classes, parent_id)) = ancestors.get(ancestor_idx) {
+                        if !self.simple_selector_matches_ancestor(sel_part, parent_tag, parent_classes, parent_id.as_ref()) {
                             return false;
                         }
+                        ancestor_idx += 1; // Move to next ancestor
                     } else {
                         return false;
                     }
                 }
                 "+" => {
                     // Adjacent sibling combinator: immediate previous sibling must match
-                    if let Some((prev_tag, _prev_classes, _prev_id)) = current_siblings.last() {
-                        if !self.simple_selector_matches_tag_only(sel_part, prev_tag) {
+                    // Note: sibling combinators only apply at the element level, not up the tree
+                    if let Some((prev_tag, prev_classes, prev_id)) = siblings_before.last() {
+                        if !self.simple_selector_matches_ancestor(sel_part, prev_tag, prev_classes, prev_id.as_ref()) {
                             return false;
                         }
                     } else {
@@ -2991,8 +3059,8 @@ impl Engine {
                 "~" => {
                     // General sibling combinator: any previous sibling must match
                     let mut found = false;
-                    for (sib_tag, _sib_classes, _sib_id) in current_siblings {
-                        if self.simple_selector_matches_tag_only(sel_part, sib_tag) {
+                    for (sib_tag, sib_classes, sib_id) in siblings_before {
+                        if self.simple_selector_matches_ancestor(sel_part, sib_tag, sib_classes, sib_id.as_ref()) {
                             found = true;
                             break;
                         }
@@ -3006,7 +3074,7 @@ impl Engine {
                 }
             }
         }
-        
+
         true
     }
     
@@ -3072,11 +3140,10 @@ impl Engine {
                     
                     if let Some(&next) = chars.peek() {
                         if next == '>' || next == '+' || next == '~' {
-                            // The combinator will be handled in the next iteration
-                            tokens.push((current.trim().to_string(), " ".to_string()));
-                            current = String::new();
+                            // Don't push yet - the actual combinator character will be handled
+                            // when we process it. Keep current intact for the combinator handler.
                         } else if next.is_alphanumeric() || next == '.' || next == '#' || next == '[' || next == ':' || next == '*' {
-                            // Descendant combinator
+                            // Descendant combinator (space between selectors)
                             tokens.push((current.trim().to_string(), " ".to_string()));
                             current = String::new();
                         }
@@ -3192,8 +3259,8 @@ impl Engine {
                 // Pseudo-class
                 let (pseudo_name, pseudo_arg, consumed) = self.parse_pseudo_class(rest);
                 remaining = &rest[consumed..];
-                
-                if !self.match_pseudo_class(&pseudo_name, pseudo_arg.as_deref(), element_index, sibling_count, attributes) {
+
+                if !self.match_pseudo_class(&pseudo_name, pseudo_arg.as_deref(), tag_name, element_index, sibling_count, attributes) {
                     return false;
                 }
             } else {
@@ -3279,6 +3346,7 @@ impl Engine {
         &self,
         name: &str,
         arg: Option<&str>,
+        tag_name: &str,
         element_index: usize,
         sibling_count: usize,
         attributes: &HashMap<String, String>,
@@ -3305,8 +3373,8 @@ impl Engine {
             "not" => {
                 if let Some(arg) = arg {
                     // :not() negates the inner selector
-                    // For simplicity, we only support simple selectors inside :not()
-                    !self.simple_selector_matches(arg, "", attributes)
+                    // Support simple selectors inside :not()
+                    !self.simple_selector_matches(arg, tag_name, attributes)
                 } else {
                     true
                 }
@@ -3380,18 +3448,98 @@ impl Engine {
         }
     }
 
-    /// Simplified selector match for ancestor checking (only checks tag and class).
-    fn simple_selector_matches_tag_only(&self, selector: &str, ancestor_tag: &str) -> bool {
+    /// Match a simple selector against an ancestor/sibling with full info.
+    fn simple_selector_matches_ancestor(
+        &self,
+        selector: &str,
+        tag_name: &str,
+        classes: &[String],
+        id: Option<&String>,
+    ) -> bool {
+        // Universal selector
         if selector == "*" {
             return true;
         }
-        if selector.starts_with('.') {
-            return false; // Can't check class for ancestors in this simplified version
+
+        // Parse selector parts: tag, classes, id
+        let mut required_tag: Option<&str> = None;
+        let mut required_classes: Vec<&str> = Vec::new();
+        let mut required_id: Option<&str> = None;
+
+        let mut i = 0;
+        let chars: Vec<char> = selector.chars().collect();
+        let mut current_start = 0;
+
+        while i <= chars.len() {
+            let at_end = i == chars.len();
+            let is_delimiter = !at_end && (chars[i] == '.' || chars[i] == '#' || chars[i] == ':' || chars[i] == '[');
+
+            if at_end || is_delimiter {
+                if i > current_start {
+                    let part = &selector[current_start..i];
+                    if current_start == 0 && !part.starts_with('.') && !part.starts_with('#') {
+                        // Tag name at the start
+                        required_tag = Some(part);
+                    }
+                }
+
+                if !at_end {
+                    if chars[i] == '.' {
+                        // Find class name
+                        let start = i + 1;
+                        i += 1;
+                        while i < chars.len() && chars[i] != '.' && chars[i] != '#' && chars[i] != ':' && chars[i] != '[' {
+                            i += 1;
+                        }
+                        if i > start {
+                            required_classes.push(&selector[start..i]);
+                        }
+                        current_start = i;
+                        continue;
+                    } else if chars[i] == '#' {
+                        // Find ID
+                        let start = i + 1;
+                        i += 1;
+                        while i < chars.len() && chars[i] != '.' && chars[i] != '#' && chars[i] != ':' && chars[i] != '[' {
+                            i += 1;
+                        }
+                        if i > start {
+                            required_id = Some(&selector[start..i]);
+                        }
+                        current_start = i;
+                        continue;
+                    } else if chars[i] == ':' || chars[i] == '[' {
+                        // Skip pseudo-classes and attribute selectors for ancestor matching
+                        break;
+                    }
+                }
+            }
+            i += 1;
         }
-        let tag_end = selector.find(|c| c == '.' || c == '#' || c == ':')
-            .unwrap_or(selector.len());
-        let tag_part = &selector[..tag_end];
-        tag_part.is_empty() || tag_part.eq_ignore_ascii_case(ancestor_tag)
+
+        // Check tag match
+        if let Some(req_tag) = required_tag {
+            if !req_tag.eq_ignore_ascii_case(tag_name) {
+                return false;
+            }
+        }
+
+        // Check class match
+        for req_class in required_classes {
+            if !classes.iter().any(|c| c == req_class) {
+                return false;
+            }
+        }
+
+        // Check ID match
+        if let Some(req_id) = required_id {
+            match id {
+                Some(el_id) if el_id == req_id => {}
+                _ => return false,
+            }
+        }
+
+        true
     }
 
     /// Calculate selector specificity for ordering.
@@ -4398,35 +4546,52 @@ fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
 /// Parse a CSS gradient value (linear-gradient or radial-gradient).
 fn parse_gradient(value: &str) -> Option<rustkit_css::Gradient> {
     let value = value.trim();
-    
+
+    // Linear gradients
     if value.starts_with("linear-gradient(") && value.ends_with(')') {
-        return parse_linear_gradient(value);
+        return parse_linear_gradient(value, false);
     }
-    
+    if value.starts_with("repeating-linear-gradient(") && value.ends_with(')') {
+        return parse_linear_gradient(value, true);
+    }
+
+    // Radial gradients
     if value.starts_with("radial-gradient(") && value.ends_with(')') {
-        return parse_radial_gradient(value);
+        return parse_radial_gradient(value, false);
     }
-    
+    if value.starts_with("repeating-radial-gradient(") && value.ends_with(')') {
+        return parse_radial_gradient(value, true);
+    }
+
+    // Conic gradients
+    if value.starts_with("conic-gradient(") && value.ends_with(')') {
+        return parse_conic_gradient(value, false);
+    }
+    if value.starts_with("repeating-conic-gradient(") && value.ends_with(')') {
+        return parse_conic_gradient(value, true);
+    }
+
     None
 }
 
 /// Parse a linear-gradient CSS function.
-fn parse_linear_gradient(value: &str) -> Option<rustkit_css::Gradient> {
-    // Strip "linear-gradient(" and ")"
+fn parse_linear_gradient(value: &str, repeating: bool) -> Option<rustkit_css::Gradient> {
+    // Strip prefix and suffix
+    let prefix = if repeating { "repeating-linear-gradient(" } else { "linear-gradient(" };
     let inner = value
-        .strip_prefix("linear-gradient(")?
+        .strip_prefix(prefix)?
         .strip_suffix(')')?
         .trim();
-    
+
     // Split by commas, being careful about nested parentheses
     let parts = split_by_comma(inner);
     if parts.is_empty() {
         return None;
     }
-    
+
     let mut direction = rustkit_css::GradientDirection::ToBottom; // default
     let mut stops_start = 0;
-    
+
     // Check if first part is a direction
     let first = parts[0].trim();
     if first.starts_with("to ") {
@@ -4438,7 +4603,7 @@ fn parse_linear_gradient(value: &str) -> Option<rustkit_css::Gradient> {
             stops_start = 1;
         }
     }
-    
+
     // Parse color stops
     let mut stops = Vec::new();
     for part in &parts[stops_start..] {
@@ -4446,32 +4611,38 @@ fn parse_linear_gradient(value: &str) -> Option<rustkit_css::Gradient> {
             stops.push(stop);
         }
     }
-    
+
     if stops.is_empty() {
         return None;
     }
-    
-    Some(rustkit_css::Gradient::Linear(rustkit_css::LinearGradient::new(direction, stops)))
+
+    let gradient = if repeating {
+        rustkit_css::LinearGradient::new_repeating(direction, stops)
+    } else {
+        rustkit_css::LinearGradient::new(direction, stops)
+    };
+    Some(rustkit_css::Gradient::Linear(gradient))
 }
 
 /// Parse a radial-gradient CSS function.
-fn parse_radial_gradient(value: &str) -> Option<rustkit_css::Gradient> {
-    // Strip "radial-gradient(" and ")"
+fn parse_radial_gradient(value: &str, repeating: bool) -> Option<rustkit_css::Gradient> {
+    // Strip prefix and suffix
+    let prefix = if repeating { "repeating-radial-gradient(" } else { "radial-gradient(" };
     let inner = value
-        .strip_prefix("radial-gradient(")?
+        .strip_prefix(prefix)?
         .strip_suffix(')')?
         .trim();
-    
+
     let parts = split_by_comma(inner);
     if parts.is_empty() {
         return None;
     }
-    
+
     let mut shape = rustkit_css::RadialShape::Ellipse;
     let size = rustkit_css::RadialSize::FarthestCorner;
     let mut center = (0.5, 0.5);
     let mut stops_start = 0;
-    
+
     // Check for shape/size/position in first part
     let first = parts[0].trim().to_lowercase();
     if first.contains("circle") || first.contains("ellipse") || first.contains("at ") {
@@ -4492,7 +4663,7 @@ fn parse_radial_gradient(value: &str) -> Option<rustkit_css::Gradient> {
         }
         stops_start = 1;
     }
-    
+
     // Parse color stops
     let mut stops = Vec::new();
     for part in &parts[stops_start..] {
@@ -4500,12 +4671,83 @@ fn parse_radial_gradient(value: &str) -> Option<rustkit_css::Gradient> {
             stops.push(stop);
         }
     }
-    
+
     if stops.is_empty() {
         return None;
     }
-    
-    Some(rustkit_css::Gradient::Radial(rustkit_css::RadialGradient::new(shape, size, center, stops)))
+
+    let gradient = if repeating {
+        rustkit_css::RadialGradient::new_repeating(shape, size, center, stops)
+    } else {
+        rustkit_css::RadialGradient::new(shape, size, center, stops)
+    };
+    Some(rustkit_css::Gradient::Radial(gradient))
+}
+
+/// Parse a conic-gradient CSS function.
+fn parse_conic_gradient(value: &str, repeating: bool) -> Option<rustkit_css::Gradient> {
+    // Strip prefix and suffix
+    let prefix = if repeating { "repeating-conic-gradient(" } else { "conic-gradient(" };
+    let inner = value
+        .strip_prefix(prefix)?
+        .strip_suffix(')')?
+        .trim();
+
+    let parts = split_by_comma(inner);
+    if parts.is_empty() {
+        return None;
+    }
+
+    let mut from_angle = 0.0;
+    let mut center = (0.5, 0.5);
+    let mut stops_start = 0;
+
+    // Check for "from" angle and "at" position in first part
+    let first = parts[0].trim().to_lowercase();
+    if first.starts_with("from ") || first.contains(" at ") {
+        // Parse "from Xdeg"
+        if first.starts_with("from ") {
+            let rest = &first[5..];
+            if let Some(deg_end) = rest.find("deg") {
+                if let Ok(deg) = rest[..deg_end].trim().parse::<f32>() {
+                    from_angle = deg;
+                }
+            }
+        }
+
+        // Parse "at X Y"
+        if let Some(at_idx) = first.find(" at ") {
+            let pos_str = &first[at_idx + 4..];
+            let pos_parts: Vec<&str> = pos_str.split_whitespace().collect();
+            if pos_parts.len() >= 2 {
+                center.0 = parse_position_value(pos_parts[0]);
+                center.1 = parse_position_value(pos_parts[1]);
+            } else if pos_parts.len() == 1 {
+                center.0 = parse_position_value(pos_parts[0]);
+                center.1 = center.0;
+            }
+        }
+        stops_start = 1;
+    }
+
+    // Parse color stops
+    let mut stops = Vec::new();
+    for part in &parts[stops_start..] {
+        if let Some(stop) = parse_color_stop(part) {
+            stops.push(stop);
+        }
+    }
+
+    if stops.is_empty() {
+        return None;
+    }
+
+    let gradient = if repeating {
+        rustkit_css::ConicGradient::new_repeating(from_angle, center, stops)
+    } else {
+        rustkit_css::ConicGradient::new(from_angle, center, stops)
+    };
+    Some(rustkit_css::Gradient::Conic(gradient))
 }
 
 /// Parse a gradient direction keyword.
@@ -4581,8 +4823,153 @@ fn split_by_comma(value: &str) -> Vec<&str> {
     if start < value.len() {
         parts.push(&value[start..]);
     }
-    
+
     parts
+}
+
+// ==================== Background Layer Parsing ====================
+
+/// Parse a background-size value.
+fn parse_background_size(value: &str) -> rustkit_css::BackgroundSize {
+    let value = value.trim().to_lowercase();
+    match value.as_str() {
+        "cover" => rustkit_css::BackgroundSize::Cover,
+        "contain" => rustkit_css::BackgroundSize::Contain,
+        "auto" => rustkit_css::BackgroundSize::Auto,
+        _ => {
+            // Parse explicit size (e.g., "100px 50px" or "50% auto")
+            let parts: Vec<&str> = value.split_whitespace().collect();
+            let width = parts.first().and_then(|s| parse_background_size_dimension(s));
+            let height = parts.get(1).and_then(|s| parse_background_size_dimension(s));
+            rustkit_css::BackgroundSize::Explicit { width, height }
+        }
+    }
+}
+
+/// Parse a single dimension for background-size (px, %, or auto).
+fn parse_background_size_dimension(value: &str) -> Option<f32> {
+    let value = value.trim();
+    if value == "auto" {
+        return None;
+    }
+    if value.ends_with("px") {
+        return value.strip_suffix("px").and_then(|s| s.parse().ok());
+    }
+    if value.ends_with('%') {
+        // Return percentage as negative value to indicate it's a percentage
+        // (will be resolved during layout)
+        return value.strip_suffix('%').and_then(|s| s.parse::<f32>().ok()).map(|p| -p);
+    }
+    value.parse().ok()
+}
+
+/// Parse a background-repeat value.
+fn parse_background_repeat(value: &str) -> rustkit_css::BackgroundRepeat {
+    match value.trim().to_lowercase().as_str() {
+        "repeat" => rustkit_css::BackgroundRepeat::Repeat,
+        "repeat-x" => rustkit_css::BackgroundRepeat::RepeatX,
+        "repeat-y" => rustkit_css::BackgroundRepeat::RepeatY,
+        "no-repeat" => rustkit_css::BackgroundRepeat::NoRepeat,
+        "space" => rustkit_css::BackgroundRepeat::Space,
+        "round" => rustkit_css::BackgroundRepeat::Round,
+        _ => rustkit_css::BackgroundRepeat::default(),
+    }
+}
+
+/// Parse a background-position value.
+fn parse_background_position(value: &str) -> rustkit_css::BackgroundPosition {
+    let value = value.trim().to_lowercase();
+    let parts: Vec<&str> = value.split_whitespace().collect();
+
+    let x = parts.first().map(|s| parse_background_position_value(s))
+        .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0));
+    let y = parts.get(1).map(|s| parse_background_position_value(s))
+        .unwrap_or_else(|| {
+            // If only one value, center the other axis for keywords, or use same for lengths
+            match &x {
+                rustkit_css::BackgroundPositionValue::Percent(_) =>
+                    rustkit_css::BackgroundPositionValue::Percent(0.5),
+                rustkit_css::BackgroundPositionValue::Px(_) =>
+                    rustkit_css::BackgroundPositionValue::Percent(0.5),
+            }
+        });
+
+    rustkit_css::BackgroundPosition { x, y }
+}
+
+/// Parse a single background-position dimension.
+fn parse_background_position_value(value: &str) -> rustkit_css::BackgroundPositionValue {
+    let value = value.trim().to_lowercase();
+    match value.as_str() {
+        "left" | "top" => rustkit_css::BackgroundPositionValue::Percent(0.0),
+        "center" => rustkit_css::BackgroundPositionValue::Percent(0.5),
+        "right" | "bottom" => rustkit_css::BackgroundPositionValue::Percent(1.0),
+        _ if value.ends_with('%') => {
+            value.strip_suffix('%')
+                .and_then(|s| s.parse::<f32>().ok())
+                .map(|p| rustkit_css::BackgroundPositionValue::Percent(p / 100.0))
+                .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0))
+        }
+        _ if value.ends_with("px") => {
+            value.strip_suffix("px")
+                .and_then(|s| s.parse::<f32>().ok())
+                .map(rustkit_css::BackgroundPositionValue::Px)
+                .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0))
+        }
+        _ => {
+            // Try parsing as a number (assumed px)
+            value.parse::<f32>().ok()
+                .map(rustkit_css::BackgroundPositionValue::Px)
+                .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0))
+        }
+    }
+}
+
+/// Parse a background-origin value.
+fn parse_background_origin(value: &str) -> rustkit_css::BackgroundOrigin {
+    match value.trim().to_lowercase().as_str() {
+        "border-box" => rustkit_css::BackgroundOrigin::BorderBox,
+        "padding-box" => rustkit_css::BackgroundOrigin::PaddingBox,
+        "content-box" => rustkit_css::BackgroundOrigin::ContentBox,
+        _ => rustkit_css::BackgroundOrigin::default(),
+    }
+}
+
+/// Parse a single background layer from CSS (may contain image, position, size, repeat).
+fn parse_background_layer(value: &str) -> Option<rustkit_css::BackgroundLayer> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let mut layer = rustkit_css::BackgroundLayer::default();
+
+    // Check for gradient
+    if let Some(gradient) = parse_gradient(value) {
+        layer.image = rustkit_css::BackgroundImage::Gradient(gradient);
+        return Some(layer);
+    }
+
+    // Check for url()
+    if value.starts_with("url(") {
+        if let Some(end) = value.find(')') {
+            let url = value[4..end].trim().trim_matches(|c| c == '"' || c == '\'');
+            layer.image = rustkit_css::BackgroundImage::Url(url.to_string());
+            return Some(layer);
+        }
+    }
+
+    // Check if it's a color (these don't create image layers)
+    if parse_color(value).is_some() {
+        return None;
+    }
+
+    // Check for keywords like "none"
+    if value == "none" {
+        return None;
+    }
+
+    None
 }
 
 /// Parse a position value (percentage, keyword, or length).
