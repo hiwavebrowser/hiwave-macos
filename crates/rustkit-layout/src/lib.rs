@@ -1231,21 +1231,79 @@ impl LayoutBox {
     /// Layout block children.
     fn layout_block_children(&mut self) {
         let mut cursor_y = 0.0;
+        let mut cursor_x = 0.0;
+        let mut line_height = 0.0_f32;
+        let container_width = self.dimensions.content.width;
 
         for child in &mut self.children {
-            // Create a containing block at current cursor position
-            let mut cb = self.dimensions.clone();
-            cb.content.height = cursor_y;
-
-            child.layout(&cb);
-
-            // Advance cursor by child's margin box height (unless floated or positioned)
-            if child.float == Float::None
-                && child.position != Position::Absolute
-                && child.position != Position::Fixed
-            {
-                cursor_y += child.dimensions.margin_box().height;
+            // Skip absolutely/fixed positioned children for flow layout
+            if child.position == Position::Absolute || child.position == Position::Fixed {
+                let mut cb = self.dimensions.clone();
+                cb.content.height = cursor_y;
+                child.layout(&cb);
+                continue;
             }
+
+            // Check if child is inline-block
+            let is_inline_block = child.style.display.is_inline_block();
+
+            if is_inline_block {
+                // Layout inline-block child to get its dimensions first
+                let mut cb = self.dimensions.clone();
+                cb.content.x = self.dimensions.content.x + cursor_x;
+                cb.content.y = self.dimensions.content.y + cursor_y;
+                child.layout(&cb);
+
+                let child_width = child.dimensions.margin_box().width;
+                let child_height = child.dimensions.margin_box().height;
+
+                // Check if child fits on current line
+                if cursor_x > 0.0 && cursor_x + child_width > container_width {
+                    // Wrap to next line
+                    cursor_y += line_height;
+                    cursor_x = 0.0;
+                    line_height = 0.0;
+
+                    // Re-layout at new position
+                    cb.content.x = self.dimensions.content.x;
+                    cb.content.y = self.dimensions.content.y + cursor_y;
+                    child.layout(&cb);
+                }
+
+                // Position the child
+                child.dimensions.content.x = self.dimensions.content.x + cursor_x + child.dimensions.margin.left;
+                child.dimensions.content.y = self.dimensions.content.y + cursor_y + child.dimensions.margin.top;
+
+                // Advance cursor
+                cursor_x += child_width;
+                line_height = line_height.max(child_height);
+
+                if child.float != Float::None {
+                    // Floated elements don't affect cursor
+                    cursor_x -= child_width;
+                }
+            } else {
+                // Regular block layout
+                // First, finish any inline-block line
+                if cursor_x > 0.0 {
+                    cursor_y += line_height;
+                    cursor_x = 0.0;
+                    line_height = 0.0;
+                }
+
+                let mut cb = self.dimensions.clone();
+                cb.content.height = cursor_y;
+                child.layout(&cb);
+
+                if child.float == Float::None {
+                    cursor_y += child.dimensions.margin_box().height;
+                }
+            }
+        }
+
+        // Account for any remaining inline-block line
+        if cursor_x > 0.0 {
+            cursor_y += line_height;
         }
 
         self.dimensions.content.height = cursor_y;
@@ -1258,22 +1316,79 @@ impl LayoutBox {
         float_context: &mut FloatContext,
     ) {
         let mut cursor_y = 0.0;
+        let mut cursor_x = 0.0;
+        let mut line_height = 0.0_f32;
+        let container_width = self.dimensions.content.width;
 
         for child in &mut self.children {
-            // Create a containing block at current cursor position
-            let mut cb = self.dimensions.clone();
-            cb.content.height = cursor_y;
-
-            child.layout_with_collapse(&cb, margin_context, float_context);
-
-            // Advance cursor by child's box height (unless floated or positioned)
-            if child.float == Float::None
-                && child.position != Position::Absolute
-                && child.position != Position::Fixed
-            {
-                // Use border box height plus margin top (bottom margin collapses with next sibling)
-                cursor_y = child.dimensions.border_box().bottom() - self.dimensions.content.y;
+            // Skip absolutely/fixed positioned children for flow layout
+            if child.position == Position::Absolute || child.position == Position::Fixed {
+                let mut cb = self.dimensions.clone();
+                cb.content.height = cursor_y;
+                child.layout_with_collapse(&cb, margin_context, float_context);
+                continue;
             }
+
+            // Check if child is inline-block
+            let is_inline_block = child.style.display.is_inline_block();
+
+            if is_inline_block {
+                // Inline-block elements don't participate in margin collapse
+                // Layout to get dimensions first
+                let mut cb = self.dimensions.clone();
+                cb.content.x = self.dimensions.content.x + cursor_x;
+                cb.content.y = self.dimensions.content.y + cursor_y;
+                child.layout_with_collapse(&cb, margin_context, float_context);
+
+                let child_width = child.dimensions.margin_box().width;
+                let child_height = child.dimensions.margin_box().height;
+
+                // Check if child fits on current line
+                if cursor_x > 0.0 && cursor_x + child_width > container_width {
+                    // Wrap to next line
+                    cursor_y += line_height;
+                    cursor_x = 0.0;
+                    line_height = 0.0;
+
+                    // Re-layout at new position
+                    cb.content.x = self.dimensions.content.x;
+                    cb.content.y = self.dimensions.content.y + cursor_y;
+                    child.layout_with_collapse(&cb, margin_context, float_context);
+                }
+
+                // Position the child
+                child.dimensions.content.x = self.dimensions.content.x + cursor_x + child.dimensions.margin.left;
+                child.dimensions.content.y = self.dimensions.content.y + cursor_y + child.dimensions.margin.top;
+
+                // Advance cursor
+                cursor_x += child_width;
+                line_height = line_height.max(child_height);
+
+                if child.float != Float::None {
+                    cursor_x -= child_width;
+                }
+            } else {
+                // Regular block layout with margin collapse
+                // First, finish any inline-block line
+                if cursor_x > 0.0 {
+                    cursor_y += line_height;
+                    cursor_x = 0.0;
+                    line_height = 0.0;
+                }
+
+                let mut cb = self.dimensions.clone();
+                cb.content.height = cursor_y;
+                child.layout_with_collapse(&cb, margin_context, float_context);
+
+                if child.float == Float::None {
+                    cursor_y = child.dimensions.border_box().bottom() - self.dimensions.content.y;
+                }
+            }
+        }
+
+        // Account for any remaining inline-block line
+        if cursor_x > 0.0 {
+            cursor_y += line_height;
         }
 
         self.dimensions.content.height = cursor_y;
@@ -1669,6 +1784,7 @@ pub enum DisplayCommand {
         rect: Rect,
         direction: rustkit_css::GradientDirection,
         stops: Vec<rustkit_css::ColorStop>,
+        repeating: bool,
     },
     /// Draw a radial gradient.
     RadialGradient {
@@ -1677,6 +1793,15 @@ pub enum DisplayCommand {
         size: rustkit_css::RadialSize,
         center: (f32, f32),
         stops: Vec<rustkit_css::ColorStop>,
+        repeating: bool,
+    },
+    /// Draw a conic gradient.
+    ConicGradient {
+        rect: Rect,
+        from_angle: f32,
+        center: (f32, f32),
+        stops: Vec<rustkit_css::ColorStop>,
+        repeating: bool,
     },
     /// Draw a text input field.
     TextInput {
@@ -2244,8 +2369,7 @@ impl DisplayList {
     }
     
     /// Render background.
-    /// For multi-layer backgrounds (e.g., `background: gradient, color`),
-    /// the solid color is the bottom layer, painted first, then gradient on top.
+    /// Supports multiple background layers painted bottom-to-top.
     /// Respects background-clip property (border-box, padding-box, content-box).
     fn render_background(&mut self, layout_box: &LayoutBox) {
         let d = &layout_box.dimensions;
@@ -2320,31 +2444,172 @@ impl DisplayList {
             }
         }
 
-        // Step 2: Paint gradient on TOP of solid color (if present)
-        if let Some(gradient) = &s.background_gradient {
-            match gradient {
-                rustkit_css::Gradient::Linear(linear) => {
-                    self.commands.push(DisplayCommand::LinearGradient {
-                        rect: paint_rect,
-                        direction: linear.direction,
-                        stops: linear.stops.clone(),
-                    });
-                }
-                rustkit_css::Gradient::Radial(radial) => {
-                    self.commands.push(DisplayCommand::RadialGradient {
-                        rect: paint_rect,
-                        shape: radial.shape,
-                        size: radial.size,
-                        center: radial.center,
-                        stops: radial.stops.clone(),
-                    });
-                }
+        // Step 2: Paint background layers (bottom-to-top, index 0 is bottommost)
+        // This is the new multi-layer background support
+        if !s.background_layers.is_empty() {
+            for layer in &s.background_layers {
+                self.render_background_layer(layer, paint_rect, font_size, root_font_size);
             }
+        } else if let Some(gradient) = &s.background_gradient {
+            // Fallback to legacy single gradient for backwards compatibility
+            self.render_gradient(gradient, paint_rect);
         }
 
         // Pop the clip if we pushed one
         if needs_clip {
             self.commands.push(DisplayCommand::PopClip);
+        }
+    }
+
+    /// Render a single background layer.
+    fn render_background_layer(
+        &mut self,
+        layer: &rustkit_css::BackgroundLayer,
+        container: Rect,
+        _font_size: f32,
+        _root_font_size: f32,
+    ) {
+        match &layer.image {
+            rustkit_css::BackgroundImage::None => {
+                // No image, nothing to render
+            }
+            rustkit_css::BackgroundImage::Gradient(gradient) => {
+                // Calculate the positioned rect for this gradient based on size/position
+                let positioned_rect = self.calculate_background_rect(
+                    container,
+                    &layer.size,
+                    &layer.position,
+                    container.width, // For gradients, use container size as "intrinsic" size
+                    container.height,
+                );
+                self.render_gradient(gradient, positioned_rect);
+            }
+            rustkit_css::BackgroundImage::Url(url) => {
+                // For URL backgrounds, emit a BackgroundImage command
+                // The actual image dimensions would come from the image cache
+                // For now, use container size as fallback
+                let size = self.convert_background_size(&layer.size);
+                let position = self.convert_background_position(&layer.position);
+                let repeat = self.convert_background_repeat(layer.repeat);
+
+                self.commands.push(DisplayCommand::BackgroundImage {
+                    url: url.clone(),
+                    rect: container,
+                    size,
+                    position,
+                    repeat,
+                });
+            }
+        }
+    }
+
+    /// Calculate the rect for a background image/gradient based on size and position.
+    fn calculate_background_rect(
+        &self,
+        container: Rect,
+        size: &rustkit_css::BackgroundSize,
+        position: &rustkit_css::BackgroundPosition,
+        intrinsic_width: f32,
+        intrinsic_height: f32,
+    ) -> Rect {
+        // Calculate the background size
+        let (bg_width, bg_height) = match size {
+            rustkit_css::BackgroundSize::Auto => (intrinsic_width, intrinsic_height),
+            rustkit_css::BackgroundSize::Cover => {
+                let scale_x = container.width / intrinsic_width;
+                let scale_y = container.height / intrinsic_height;
+                let scale = scale_x.max(scale_y);
+                (intrinsic_width * scale, intrinsic_height * scale)
+            }
+            rustkit_css::BackgroundSize::Contain => {
+                let scale_x = container.width / intrinsic_width;
+                let scale_y = container.height / intrinsic_height;
+                let scale = scale_x.min(scale_y);
+                (intrinsic_width * scale, intrinsic_height * scale)
+            }
+            rustkit_css::BackgroundSize::Explicit { width, height } => {
+                let w = width.map(|v| if v < 0.0 { container.width * (-v / 100.0) } else { v })
+                    .unwrap_or(intrinsic_width);
+                let h = height.map(|v| if v < 0.0 { container.height * (-v / 100.0) } else { v })
+                    .unwrap_or(intrinsic_height);
+                (w, h)
+            }
+        };
+
+        // Calculate position
+        let x = container.x + position.x.to_px(container.width, bg_width);
+        let y = container.y + position.y.to_px(container.height, bg_height);
+
+        Rect::new(x, y, bg_width, bg_height)
+    }
+
+    /// Render a gradient to a rect.
+    fn render_gradient(&mut self, gradient: &rustkit_css::Gradient, rect: Rect) {
+        match gradient {
+            rustkit_css::Gradient::Linear(linear) => {
+                self.commands.push(DisplayCommand::LinearGradient {
+                    rect,
+                    direction: linear.direction,
+                    stops: linear.stops.clone(),
+                    repeating: linear.repeating,
+                });
+            }
+            rustkit_css::Gradient::Radial(radial) => {
+                self.commands.push(DisplayCommand::RadialGradient {
+                    rect,
+                    shape: radial.shape,
+                    size: radial.size,
+                    center: radial.center,
+                    stops: radial.stops.clone(),
+                    repeating: radial.repeating,
+                });
+            }
+            rustkit_css::Gradient::Conic(conic) => {
+                self.commands.push(DisplayCommand::ConicGradient {
+                    rect,
+                    from_angle: conic.from_angle,
+                    center: conic.center,
+                    stops: conic.stops.clone(),
+                    repeating: conic.repeating,
+                });
+            }
+        }
+    }
+
+    /// Convert rustkit_css::BackgroundSize to layout BackgroundSize.
+    fn convert_background_size(&self, size: &rustkit_css::BackgroundSize) -> BackgroundSize {
+        match size {
+            rustkit_css::BackgroundSize::Auto => BackgroundSize::Auto,
+            rustkit_css::BackgroundSize::Cover => BackgroundSize::Cover,
+            rustkit_css::BackgroundSize::Contain => BackgroundSize::Contain,
+            rustkit_css::BackgroundSize::Explicit { width, height } => {
+                BackgroundSize::Explicit { width: *width, height: *height }
+            }
+        }
+    }
+
+    /// Convert rustkit_css::BackgroundPosition to (f32, f32) tuple.
+    fn convert_background_position(&self, pos: &rustkit_css::BackgroundPosition) -> (f32, f32) {
+        let x = match &pos.x {
+            rustkit_css::BackgroundPositionValue::Percent(p) => *p,
+            rustkit_css::BackgroundPositionValue::Px(_) => 0.0, // Will be handled in rendering
+        };
+        let y = match &pos.y {
+            rustkit_css::BackgroundPositionValue::Percent(p) => *p,
+            rustkit_css::BackgroundPositionValue::Px(_) => 0.0,
+        };
+        (x, y)
+    }
+
+    /// Convert rustkit_css::BackgroundRepeat to layout BackgroundRepeat.
+    fn convert_background_repeat(&self, repeat: rustkit_css::BackgroundRepeat) -> BackgroundRepeat {
+        match repeat {
+            rustkit_css::BackgroundRepeat::Repeat => BackgroundRepeat::Repeat,
+            rustkit_css::BackgroundRepeat::RepeatX => BackgroundRepeat::RepeatX,
+            rustkit_css::BackgroundRepeat::RepeatY => BackgroundRepeat::RepeatY,
+            rustkit_css::BackgroundRepeat::NoRepeat => BackgroundRepeat::NoRepeat,
+            rustkit_css::BackgroundRepeat::Space => BackgroundRepeat::Space,
+            rustkit_css::BackgroundRepeat::Round => BackgroundRepeat::Round,
         }
     }
 
