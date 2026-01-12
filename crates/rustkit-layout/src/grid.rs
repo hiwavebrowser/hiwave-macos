@@ -111,8 +111,10 @@ pub struct GridItem<'a> {
     pub row_start: i32,
     /// Row end line (1-based).
     pub row_end: i32,
-    /// Whether this item was auto-placed.
-    pub auto_placed: bool,
+    /// Whether this item needs auto-placement for columns.
+    pub auto_column: bool,
+    /// Whether this item needs auto-placement for rows.
+    pub auto_row: bool,
     /// Computed column span.
     pub column_span: u32,
     /// Computed row span.
@@ -130,11 +132,22 @@ impl<'a> GridItem<'a> {
             column_end: 0,
             row_start: 0,
             row_end: 0,
-            auto_placed: true,
+            auto_column: true,
+            auto_row: true,
             column_span: 1,
             row_span: 1,
             rect: Rect::default(),
         }
+    }
+
+    /// Whether this item needs any auto-placement.
+    pub fn needs_auto_placement(&self) -> bool {
+        self.auto_column || self.auto_row
+    }
+
+    /// Whether this item is fully explicitly placed (no auto-placement needed).
+    pub fn is_fully_placed(&self) -> bool {
+        !self.auto_column && !self.auto_row
     }
 
     /// Get the item's contribution to row sizing.
@@ -316,33 +329,38 @@ impl<'a> GridItem<'a> {
 
     /// Set explicit placement from style.
     pub fn set_placement(&mut self, placement: &GridPlacement) {
+        // Start with both dimensions needing auto-placement
+        self.auto_column = true;
+        self.auto_row = true;
+
         // Resolve column placement
         match (&placement.column_start, &placement.column_end) {
             (GridLine::Number(start), GridLine::Number(end)) => {
                 self.column_start = *start;
                 self.column_end = *end;
-                self.auto_placed = false;
+                self.auto_column = false;
             }
             (GridLine::Number(start), GridLine::Auto) => {
                 self.column_start = *start;
                 self.column_end = start + 1;
-                self.auto_placed = false;
+                self.auto_column = false;
             }
             (GridLine::Number(start), GridLine::Span(span)) => {
                 self.column_start = *start;
                 self.column_end = start + *span as i32;
-                self.auto_placed = false;
+                self.auto_column = false;
             }
             (GridLine::Auto, GridLine::Number(end)) => {
                 self.column_end = *end;
                 self.column_start = end - 1;
-                self.auto_placed = false;
+                self.auto_column = false;
             }
             (GridLine::Span(span), _) => {
                 self.column_span = *span;
+                // Still needs auto-placement, but with specified span
             }
             _ => {
-                // Auto placement
+                // Auto placement for columns
             }
         }
 
@@ -351,22 +369,26 @@ impl<'a> GridItem<'a> {
             (GridLine::Number(start), GridLine::Number(end)) => {
                 self.row_start = *start;
                 self.row_end = *end;
-                self.auto_placed = self.auto_placed && false;
+                self.auto_row = false;
             }
             (GridLine::Number(start), GridLine::Auto) => {
                 self.row_start = *start;
                 self.row_end = start + 1;
+                self.auto_row = false;
             }
             (GridLine::Number(start), GridLine::Span(span)) => {
                 self.row_start = *start;
                 self.row_end = start + *span as i32;
+                self.auto_row = false;
             }
             (GridLine::Auto, GridLine::Number(end)) => {
                 self.row_end = *end;
                 self.row_start = end - 1;
+                self.auto_row = false;
             }
             (GridLine::Span(span), _) => {
                 self.row_span = *span;
+                // Still needs auto-placement, but with specified span
             }
             _ => {
                 // Auto placement
@@ -536,6 +558,66 @@ impl GridLayout {
 
         (col, row)
     }
+
+    /// Find next available row at a specific column for items with explicit column placement.
+    pub fn find_next_row_at_column(&self, col_start: usize, col_span: usize, row_span: usize, occupied: &[Vec<bool>]) -> usize {
+        let mut row = 0;
+        
+        loop {
+            // Check if cells are available at this row for the given column range
+            let available = (0..row_span).all(|dr| {
+                (0..col_span).all(|dc| {
+                    let r = row + dr;
+                    let c = col_start + dc;
+                    r >= occupied.len() || c >= occupied.get(r).map_or(0, |row_vec| row_vec.len()) || !occupied[r][c]
+                })
+            });
+
+            if available {
+                return row;
+            }
+
+            row += 1;
+
+            // Safety limit
+            if row > 1000 {
+                break;
+            }
+        }
+
+        row
+    }
+
+    /// Find next available column at a specific row for items with explicit row placement.
+    pub fn find_next_column_at_row(&self, row_start: usize, col_span: usize, row_span: usize, occupied: &[Vec<bool>]) -> usize {
+        let mut col = 0;
+        
+        loop {
+            if col + col_span <= self.column_count() {
+                // Check if cells are available at this column for the given row range
+                let available = (0..row_span).all(|dr| {
+                    (0..col_span).all(|dc| {
+                        let r = row_start + dr;
+                        let c = col + dc;
+                        r >= occupied.len() || c >= occupied.get(r).map_or(0, |row_vec| row_vec.len()) || !occupied[r][c]
+                    })
+                });
+
+                if available {
+                    return col;
+                }
+            }
+
+            col += 1;
+
+            // Safety limit
+            if col > 1000 {
+                break;
+            }
+        }
+
+        col
+    }
 }
 
 // ==================== Layout Algorithm ====================
@@ -602,15 +684,33 @@ pub fn layout_grid_container(
         })
         .collect();
 
-    // Phase 1: Place items with explicit placement
+    // Helper to resolve negative grid lines (e.g., -1 = last line)
+    // In CSS Grid, negative indices count from the end: -1 is the last line
+    let resolve_line = |line: i32, track_count: usize| -> i32 {
+        if line < 0 {
+            // -1 means last line, which is track_count + 1 in 1-based indexing
+            // -2 means second-to-last, etc.
+            (track_count as i32 + 1) + line + 1
+        } else {
+            line
+        }
+    };
+
+    // Phase 1: Place items with explicit placement in BOTH dimensions
     let mut occupied: Vec<Vec<bool>> = Vec::new();
 
-    for item in items.iter_mut().filter(|i| !i.auto_placed) {
+    for item in items.iter_mut().filter(|i| i.is_fully_placed()) {
+        // Resolve negative line numbers before converting to 0-based indices
+        let resolved_col_start = resolve_line(item.column_start, grid.column_count());
+        let resolved_col_end = resolve_line(item.column_end, grid.column_count());
+        let resolved_row_start = resolve_line(item.row_start, grid.row_count());
+        let resolved_row_end = resolve_line(item.row_end, grid.row_count());
+
         // Convert to 0-based indices
-        let col_start = (item.column_start - 1).max(0) as usize;
-        let col_end = item.column_end.max(item.column_start + 1) as usize;
-        let row_start = (item.row_start - 1).max(0) as usize;
-        let row_end = item.row_end.max(item.row_start + 1) as usize;
+        let col_start = (resolved_col_start - 1).max(0) as usize;
+        let col_end = resolved_col_end.max(resolved_col_start + 1) as usize;
+        let row_start = (resolved_row_start - 1).max(0) as usize;
+        let row_end = resolved_row_end.max(resolved_row_start + 1) as usize;
 
         // Ensure grid has enough tracks
         grid.ensure_tracks(col_end, row_end, &style.grid_auto_columns, &style.grid_auto_rows);
@@ -640,8 +740,118 @@ pub fn layout_grid_container(
         item.row_end = row_end as i32 + 1;
     }
 
-    // Phase 2: Auto-place remaining items
-    for item in items.iter_mut().filter(|i| i.auto_placed) {
+    // Phase 2: Place items with explicit column but auto row (e.g., grid-column: 1 / -1)
+    for item in items.iter_mut().filter(|i| !i.auto_column && i.auto_row) {
+        // Resolve negative line numbers for columns
+        let resolved_col_start = resolve_line(item.column_start, grid.column_count());
+        let resolved_col_end = resolve_line(item.column_end, grid.column_count());
+        
+        // Convert to 0-based indices
+        let col_start = (resolved_col_start - 1).max(0) as usize;
+        let col_end = resolved_col_end.max(resolved_col_start + 1) as usize;
+        let col_span = col_end.saturating_sub(col_start).max(1);
+        let row_span = item.row_span.max(1) as usize;
+
+        // Ensure grid has enough column tracks
+        grid.ensure_tracks(col_end, grid.row_count(), &style.grid_auto_columns, &style.grid_auto_rows);
+
+        // Find the first available row at this column position
+        let row = grid.find_next_row_at_column(col_start, col_span, row_span, &occupied);
+        let row_end = row + row_span;
+
+        // Ensure grid has enough row tracks
+        grid.ensure_tracks(col_end, row_end, &style.grid_auto_columns, &style.grid_auto_rows);
+
+        // Ensure occupied grid is large enough
+        while occupied.len() < row_end {
+            occupied.push(vec![false; grid.column_count()]);
+        }
+        for occ_row in &mut occupied {
+            while occ_row.len() < grid.column_count() {
+                occ_row.push(false);
+            }
+        }
+
+        // Mark cells as occupied
+        for r in row..row_end {
+            for c in col_start..col_end {
+                if r < occupied.len() && c < occupied[r].len() {
+                    occupied[r][c] = true;
+                }
+            }
+        }
+
+        // Update item placement (1-based)
+        item.column_start = col_start as i32 + 1;
+        item.column_end = col_end as i32 + 1;
+        item.row_start = row as i32 + 1;
+        item.row_end = row_end as i32 + 1;
+        item.column_span = col_span as u32;
+        item.row_span = row_span as u32;
+
+        trace!(
+            "Placed item with explicit columns ({}-{}) at row {}",
+            col_start, col_end, row
+        );
+    }
+
+    // Phase 3: Place items with explicit row but auto column
+    for item in items.iter_mut().filter(|i| i.auto_column && !i.auto_row) {
+        // Resolve negative line numbers for rows
+        let resolved_row_start = resolve_line(item.row_start, grid.row_count());
+        let resolved_row_end = resolve_line(item.row_end, grid.row_count());
+        
+        // Convert to 0-based indices
+        let row_start = (resolved_row_start - 1).max(0) as usize;
+        let row_end = resolved_row_end.max(resolved_row_start + 1) as usize;
+        let row_span = row_end.saturating_sub(row_start).max(1);
+        let col_span = item.column_span.max(1) as usize;
+
+        // Ensure grid has enough row tracks
+        grid.ensure_tracks(grid.column_count(), row_end, &style.grid_auto_columns, &style.grid_auto_rows);
+
+        // Find the first available column at this row position
+        let col = grid.find_next_column_at_row(row_start, col_span, row_span, &occupied);
+        let col_end = col + col_span;
+
+        // Ensure grid has enough column tracks
+        grid.ensure_tracks(col_end, row_end, &style.grid_auto_columns, &style.grid_auto_rows);
+
+        // Ensure occupied grid is large enough
+        while occupied.len() < row_end {
+            occupied.push(vec![false; grid.column_count()]);
+        }
+        for occ_row in &mut occupied {
+            while occ_row.len() < grid.column_count() {
+                occ_row.push(false);
+            }
+        }
+
+        // Mark cells as occupied
+        for r in row_start..row_end {
+            for c in col..col_end {
+                if r < occupied.len() && c < occupied[r].len() {
+                    occupied[r][c] = true;
+                }
+            }
+        }
+
+        // Update item placement (1-based)
+        item.column_start = col as i32 + 1;
+        item.column_end = col_end as i32 + 1;
+        item.row_start = row_start as i32 + 1;
+        item.row_end = row_end as i32 + 1;
+        item.column_span = col_span as u32;
+        item.row_span = row_span as u32;
+
+        trace!(
+            "Placed item with explicit rows ({}-{}) at column {}",
+            row_start, row_end, col
+        );
+    }
+
+    // Phase 4: Auto-place remaining items (no explicit placement in either dimension)
+    for item in items.iter_mut().filter(|i| i.auto_column && i.auto_row) {
         let col_span = item.column_span.max(1) as usize;
         let row_span = item.row_span.max(1) as usize;
 
@@ -699,7 +909,7 @@ pub fn layout_grid_container(
         );
     }
 
-    // Phase 3: Size tracks with item contributions
+    // Phase 5: Size tracks with item contributions
     // First, collect item contributions for each row
     let mut row_contributions: Vec<f32> = vec![0.0; grid.row_count()];
     let mut col_contributions: Vec<f32> = vec![0.0; grid.column_count()];
@@ -746,7 +956,7 @@ pub fn layout_grid_container(
     size_grid_tracks(&mut grid.columns, container_width, column_gap);
     size_grid_tracks(&mut grid.rows, container_height, row_gap);
 
-    // Phase 4: Position items
+    // Phase 6: Position items
     let content_x = container.dimensions.content.x;
     let content_y = container.dimensions.content.y;
 
@@ -796,12 +1006,12 @@ pub fn layout_grid_container(
         );
     }
 
-    // Phase 5: Collect final positions (drops immutable borrow of children)
+    // Phase 7: Collect final positions (drops immutable borrow of children)
     let item_count = items.len();
     let positions: Vec<Rect> = items.iter().map(|item| item.rect.clone()).collect();
     drop(items); // Explicitly drop to release borrow
 
-    // Phase 6: Apply positions to children
+    // Phase 8: Apply positions to children
     let mut position_idx = 0;
     for child in container.children.iter_mut() {
         if child.style.display == Display::None {
@@ -871,7 +1081,7 @@ pub fn layout_grid_container(
         position_idx += 1;
     }
 
-    // Phase 7: Recursively layout children of grid items
+    // Phase 9: Recursively layout children of grid items
     for child in container.children.iter_mut() {
         if child.style.display == Display::None {
             continue;
@@ -989,6 +1199,8 @@ fn apply_justify_self(
         other => *other,
     };
 
+    // Check if width is explicitly set (not auto)
+    let has_explicit_width = !matches!(child.style.width, Length::Auto);
     let child_width = match child.style.width {
         Length::Auto => cell_width,
         Length::Px(w) => w,
@@ -1000,7 +1212,14 @@ fn apply_justify_self(
         JustifySelf::Start | JustifySelf::Auto => (cell_x, child_width),
         JustifySelf::End => (cell_x + cell_width - child_width, child_width),
         JustifySelf::Center => (cell_x + (cell_width - child_width) / 2.0, child_width),
-        JustifySelf::Stretch => (cell_x, cell_width),
+        // Per CSS spec: stretch only applies when width is auto
+        JustifySelf::Stretch => {
+            if has_explicit_width {
+                (cell_x, child_width)
+            } else {
+                (cell_x, cell_width)
+            }
+        },
     }
 }
 
@@ -1023,6 +1242,8 @@ fn apply_align_self(
         other => *other,
     };
 
+    // Check if height is explicitly set (not auto)
+    let has_explicit_height = !matches!(child.style.height, Length::Auto);
     let child_height = match child.style.height {
         Length::Auto => cell_height,
         Length::Px(h) => h,
@@ -1034,7 +1255,14 @@ fn apply_align_self(
         AlignSelf::FlexStart | AlignSelf::Auto => (cell_y, child_height),
         AlignSelf::FlexEnd => (cell_y + cell_height - child_height, child_height),
         AlignSelf::Center => (cell_y + (cell_height - child_height) / 2.0, child_height),
-        AlignSelf::Stretch => (cell_y, cell_height),
+        // Per CSS spec: stretch only applies when height is auto
+        AlignSelf::Stretch => {
+            if has_explicit_height {
+                (cell_y, child_height)
+            } else {
+                (cell_y, cell_height)
+            }
+        },
         AlignSelf::Baseline => (cell_y, child_height), // Simplified
     }
 }
@@ -1191,10 +1419,30 @@ mod tests {
         let placement = GridPlacement::from_lines(1, 3, 1, 2);
         item.set_placement(&placement);
 
-        assert!(!item.auto_placed);
+        assert!(item.is_fully_placed());
         assert_eq!(item.column_start, 1);
         assert_eq!(item.column_end, 3);
         assert_eq!(item.column_span, 2);
     }
-}
 
+    #[test]
+    fn test_grid_item_column_only_placement() {
+        let style = ComputedStyle::new();
+        let layout_box = LayoutBox::new(BoxType::Block, style);
+        let mut item = GridItem::new(&layout_box);
+
+        // Simulate grid-column: 1 / 3 with no row placement
+        let placement = GridPlacement {
+            column_start: GridLine::Number(1),
+            column_end: GridLine::Number(3),
+            row_start: GridLine::Auto,
+            row_end: GridLine::Auto,
+        };
+        item.set_placement(&placement);
+
+        assert!(!item.auto_column); // Column is explicitly placed
+        assert!(item.auto_row);     // Row needs auto-placement
+        assert!(item.needs_auto_placement()); // Overall needs auto-placement
+        assert!(!item.is_fully_placed());     // Not fully placed
+    }
+}

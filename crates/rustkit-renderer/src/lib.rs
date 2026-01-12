@@ -1157,7 +1157,7 @@ impl Renderer {
                     (i as f32 + 0.5) / step_count as f32
                 };
                 let t_final = apply_t(t);
-                let color = Self::interpolate_color_gamma(&normalized_stops, t_final);
+                let color = Self::interpolate_color(&normalized_stops, t_final);
                 let x_pos = rect.x + i as f32 * strip_width;
                 self.draw_solid_rect(Rect::new(x_pos, rect.y, strip_width + 0.5, rect.height), color);
             }
@@ -1175,7 +1175,7 @@ impl Renderer {
                     (i as f32 + 0.5) / step_count as f32
                 };
                 let t_final = apply_t(t);
-                let color = Self::interpolate_color_gamma(&normalized_stops, t_final);
+                let color = Self::interpolate_color(&normalized_stops, t_final);
                 let y_pos = rect.y + i as f32 * strip_height;
                 self.draw_solid_rect(Rect::new(rect.x, y_pos, rect.width, strip_height + 0.5), color);
             }
@@ -1219,7 +1219,7 @@ impl Renderer {
                     let t = (projection / gradient_half_length + 1.0) / 2.0;
                     let t_final = apply_t(t);
 
-                    let color = Self::interpolate_color_gamma(&normalized_stops, t_final);
+                    let color = Self::interpolate_color(&normalized_stops, t_final);
 
                     if color.a > 0.0 {
                         self.draw_solid_rect(Rect::new(x, y, cell_w, cell_h), color);
@@ -1356,7 +1356,7 @@ impl Renderer {
                 };
 
                 // Get color at this distance (gamma-correct)
-                let color = Self::interpolate_color_gamma(&normalized_stops, t_final);
+                let color = Self::interpolate_color(&normalized_stops, t_final);
 
                 // Only draw if not fully transparent
                 if color.a > 0.0 {
@@ -1443,7 +1443,7 @@ impl Renderer {
                 let t = apply_t(raw_t);
 
                 // Get color at this angle
-                let color = Self::interpolate_color_gamma(&normalized_stops, t);
+                let color = Self::interpolate_color(&normalized_stops, t);
 
                 if color.a > 0.0 {
                     self.draw_solid_rect(Rect::new(x, y, col_width, row_height), color);
@@ -1475,8 +1475,9 @@ impl Renderer {
         }
     }
     
-    /// Interpolate between color stops with gamma-correct blending.
-    /// This matches CSS spec for gradient color interpolation.
+    /// Interpolate between color stops with gamma-correct blending (linearRGB).
+    /// CSS Images 4 uses this for modern browsers, but kept for future use.
+    #[allow(dead_code)]
     fn interpolate_color_gamma(stops: &[(f32, Color)], t: f32) -> Color {
         if stops.is_empty() {
             return Color::TRANSPARENT;
@@ -1527,8 +1528,8 @@ impl Renderer {
         stops[stops.len() - 1].1
     }
     
-    /// Interpolate between color stops (legacy linear sRGB - kept for non-gradient uses).
-    #[allow(dead_code)]
+    /// Interpolate between color stops in sRGB space.
+    /// This matches Chrome's gradient rendering for CSS Images Level 3 compatibility.
     fn interpolate_color(stops: &[(f32, Color)], t: f32) -> Color {
         if stops.is_empty() {
             return Color::TRANSPARENT;
