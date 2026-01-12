@@ -606,11 +606,8 @@ def main():
             print("\nGlobal taxonomy:")
             for bucket, pct in list(report["global_taxonomy"].items())[:5]:
                 print(f"  {bucket}: {pct:.1f}%")
-        
-        # Exit code based on pass rate
-        if s["passed"] < s["total_cases"]:
-            sys.exit(1)
-    
+
+    # Always exit 0 - let parity_gate.py handle pass/fail decisions
     sys.exit(0)
 
 

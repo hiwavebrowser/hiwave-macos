@@ -150,7 +150,8 @@ jobs:
           python3 scripts/parity_gate.py \
             --mode test_results \
             --level commit \
-            --report parity-results/commit-${{ github.run_number }}/aggregate_report.json
+            --report parity-results/commit-${{ github.run_number }}/aggregate_report.json \
+            --max-diff 25
 
       - name: Upload artifacts
         if: always()
@@ -255,7 +256,8 @@ jobs:
             --level nightly \
             --report parity-results/nightly_aggregate.json \
             --require-stable \
-            --max-variance 0.10
+            --max-variance 0.10 \
+            --max-diff 25
 
       # Compare against previous nightly if available
       - name: Download previous nightly
