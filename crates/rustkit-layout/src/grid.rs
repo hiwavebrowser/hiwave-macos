@@ -18,7 +18,7 @@
 //! - [CSS Grid Layout Module Level 2](https://www.w3.org/TR/css-grid-2/)
 
 use rustkit_css::{
-    AlignItems, AlignSelf, Display, GridAutoFlow, GridLine, GridPlacement,
+    AlignItems, AlignSelf, BoxSizing, Display, GridAutoFlow, GridLine, GridPlacement,
     GridTemplate, JustifyItems, JustifySelf, Length, TrackSize,
 };
 use tracing::{debug, trace};
@@ -809,8 +809,8 @@ pub fn layout_grid_container(
         }
 
         if let Some(rect) = positions.get(position_idx) {
-            // Apply alignment
-            let (x, width) = apply_justify_self(
+            // Apply alignment - returns border-box dimensions
+            let (x, border_box_width) = apply_justify_self(
                 &child.style.justify_self,
                 &style.justify_items,
                 rect.x,
@@ -818,7 +818,7 @@ pub fn layout_grid_container(
                 child,
             );
 
-            let (y, height) = apply_align_self(
+            let (y, border_box_height) = apply_align_self(
                 &child.style.align_self,
                 &style.align_items,
                 rect.y,
@@ -826,10 +826,47 @@ pub fn layout_grid_container(
                 child,
             );
 
-            child.dimensions.content.x = x;
-            child.dimensions.content.y = y;
-            child.dimensions.content.width = width;
-            child.dimensions.content.height = height;
+            // Calculate padding and border
+            let font_size = match child.style.font_size {
+                Length::Px(px) => px,
+                _ => 16.0,
+            };
+            let padding_left = child.style.padding_left.to_px(font_size, font_size, border_box_width);
+            let padding_right = child.style.padding_right.to_px(font_size, font_size, border_box_width);
+            let padding_top = child.style.padding_top.to_px(font_size, font_size, border_box_height);
+            let padding_bottom = child.style.padding_bottom.to_px(font_size, font_size, border_box_height);
+            let border_left = child.style.border_left_width.to_px(font_size, font_size, border_box_width);
+            let border_right = child.style.border_right_width.to_px(font_size, font_size, border_box_width);
+            let border_top = child.style.border_top_width.to_px(font_size, font_size, border_box_height);
+            let border_bottom = child.style.border_bottom_width.to_px(font_size, font_size, border_box_height);
+
+            // Set padding and border dimensions
+            child.dimensions.padding.left = padding_left;
+            child.dimensions.padding.right = padding_right;
+            child.dimensions.padding.top = padding_top;
+            child.dimensions.padding.bottom = padding_bottom;
+            child.dimensions.border.left = border_left;
+            child.dimensions.border.right = border_right;
+            child.dimensions.border.top = border_top;
+            child.dimensions.border.bottom = border_bottom;
+
+            // Calculate content dimensions based on box-sizing
+            let is_border_box = child.style.box_sizing == BoxSizing::BorderBox;
+            let (content_width, content_height) = if is_border_box {
+                // With border-box, the specified size includes padding and border
+                let content_w = (border_box_width - padding_left - padding_right - border_left - border_right).max(0.0);
+                let content_h = (border_box_height - padding_top - padding_bottom - border_top - border_bottom).max(0.0);
+                (content_w, content_h)
+            } else {
+                // With content-box, the specified size is just the content
+                (border_box_width, border_box_height)
+            };
+
+            // Position includes padding and border offset
+            child.dimensions.content.x = x + padding_left + border_left;
+            child.dimensions.content.y = y + padding_top + border_top;
+            child.dimensions.content.width = content_width;
+            child.dimensions.content.height = content_height;
         }
         position_idx += 1;
     }

@@ -42,7 +42,7 @@ pub use text::{
     TextMetrics, TextShaper,
 };
 
-use rustkit_css::{Color, ComputedStyle, Length};
+use rustkit_css::{BoxSizing, Color, ComputedStyle, Length};
 use std::cmp::Ordering;
 use thiserror::Error;
 
@@ -1175,20 +1175,40 @@ impl LayoutBox {
                 // Fill available space
                 (containing_block.content.width - total_margin_border_padding).max(0.0)
             }
-            _ => self.length_to_px(&style.width, containing_block.content.width),
+            _ => {
+                let specified_width = self.length_to_px(&style.width, containing_block.content.width);
+                // With box-sizing: border-box, the specified width includes padding and border
+                if style.box_sizing == BoxSizing::BorderBox {
+                    (specified_width - padding_left - padding_right - border_left - border_right).max(0.0)
+                } else {
+                    specified_width
+                }
+            }
         };
 
-        // Apply min-width constraint
-        let min_width = self.length_to_px(&style.min_width, containing_block.content.width);
+        // Apply min-width constraint (also respects box-sizing)
+        let min_width_raw = self.length_to_px(&style.min_width, containing_block.content.width);
+        let min_width = if style.box_sizing == BoxSizing::BorderBox && min_width_raw > 0.0 {
+            (min_width_raw - padding_left - padding_right - border_left - border_right).max(0.0)
+        } else {
+            min_width_raw
+        };
         let content_width = content_width.max(min_width);
-        
-        // Apply max-width constraint
+
+        // Apply max-width constraint (also respects box-sizing)
         let max_width = match style.max_width {
             Length::Auto | Length::Zero => f32::INFINITY,
-            _ => self.length_to_px(&style.max_width, containing_block.content.width),
+            _ => {
+                let max_width_raw = self.length_to_px(&style.max_width, containing_block.content.width);
+                if style.box_sizing == BoxSizing::BorderBox {
+                    (max_width_raw - padding_left - padding_right - border_left - border_right).max(0.0)
+                } else {
+                    max_width_raw
+                }
+            }
         };
         let content_width = content_width.min(max_width);
-        
+
         self.dimensions.content.width = content_width;
         self.dimensions.margin.left = margin_left;
         self.dimensions.margin.right = margin_right;
@@ -1396,21 +1416,44 @@ impl LayoutBox {
 
     /// Calculate block height.
     fn calculate_block_height(&mut self) {
+        // Get padding and border for box-sizing calculations
+        let padding_top = self.dimensions.padding.top;
+        let padding_bottom = self.dimensions.padding.bottom;
+        let border_top = self.dimensions.border.top;
+        let border_bottom = self.dimensions.border.bottom;
+        let padding_border_height = padding_top + padding_bottom + border_top + border_bottom;
+        let is_border_box = self.style.box_sizing == BoxSizing::BorderBox;
+
         // If height is explicitly set, use it
         match self.style.height {
             Length::Px(h) => {
-                self.dimensions.content.height = h;
+                // With box-sizing: border-box, specified height includes padding and border
+                self.dimensions.content.height = if is_border_box {
+                    (h - padding_border_height).max(0.0)
+                } else {
+                    h
+                };
             }
             Length::Percent(pct) => {
                 // Percent height requires a known containing block height
                 // For now, use viewport height as fallback
                 if self.viewport.1 > 0.0 {
-                    self.dimensions.content.height = pct / 100.0 * self.viewport.1;
+                    let specified = pct / 100.0 * self.viewport.1;
+                    self.dimensions.content.height = if is_border_box {
+                        (specified - padding_border_height).max(0.0)
+                    } else {
+                        specified
+                    };
                 }
             }
             Length::Vh(vh) => {
                 if self.viewport.1 > 0.0 {
-                    self.dimensions.content.height = vh / 100.0 * self.viewport.1;
+                    let specified = vh / 100.0 * self.viewport.1;
+                    self.dimensions.content.height = if is_border_box {
+                        (specified - padding_border_height).max(0.0)
+                    } else {
+                        specified
+                    };
                 }
             }
             Length::Em(em) => {
@@ -1418,10 +1461,20 @@ impl LayoutBox {
                     Length::Px(px) => px,
                     _ => 16.0,
                 };
-                self.dimensions.content.height = em * font_size;
+                let specified = em * font_size;
+                self.dimensions.content.height = if is_border_box {
+                    (specified - padding_border_height).max(0.0)
+                } else {
+                    specified
+                };
             }
             Length::Rem(rem) => {
-                self.dimensions.content.height = rem * 16.0; // Root font size
+                let specified = rem * 16.0; // Root font size
+                self.dimensions.content.height = if is_border_box {
+                    (specified - padding_border_height).max(0.0)
+                } else {
+                    specified
+                };
             }
             _ => {
                 // Auto or Zero - content.height was set by layout_block_children
@@ -1433,24 +1486,34 @@ impl LayoutBox {
                 }
             }
         }
-        
-        // Apply min-height constraint
-        let min_height = match self.style.min_height {
+
+        // Apply min-height constraint (also respects box-sizing)
+        let min_height_raw = match self.style.min_height {
             Length::Px(px) => px,
             Length::Vh(vh) => vh / 100.0 * self.viewport.1,
             Length::Percent(pct) => pct / 100.0 * self.viewport.1,
             _ => 0.0,
         };
+        let min_height = if is_border_box && min_height_raw > 0.0 {
+            (min_height_raw - padding_border_height).max(0.0)
+        } else {
+            min_height_raw
+        };
         if self.dimensions.content.height < min_height {
             self.dimensions.content.height = min_height;
         }
-        
-        // Apply max-height constraint
-        let max_height = match self.style.max_height {
+
+        // Apply max-height constraint (also respects box-sizing)
+        let max_height_raw = match self.style.max_height {
             Length::Px(px) => px,
             Length::Vh(vh) => vh / 100.0 * self.viewport.1,
             Length::Percent(pct) => pct / 100.0 * self.viewport.1,
             _ => f32::INFINITY,
+        };
+        let max_height = if is_border_box && max_height_raw < f32::INFINITY {
+            (max_height_raw - padding_border_height).max(0.0)
+        } else {
+            max_height_raw
         };
         if self.dimensions.content.height > max_height {
             self.dimensions.content.height = max_height;
