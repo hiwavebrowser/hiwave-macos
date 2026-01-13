@@ -38,6 +38,17 @@ pub struct GridTrack {
     pub is_flexible: bool,
     /// Flex factor (fr value).
     pub flex_factor: f32,
+    /// Percentage value if this is a percentage track (0.0-100.0).
+    /// For minmax(%, x), this stores the min percentage.
+    pub percent: Option<f32>,
+    /// Percentage value for the max bound in minmax(x, %).
+    pub max_percent: Option<f32>,
+    /// Whether this track uses min-content sizing.
+    pub is_min_content: bool,
+    /// Whether this track uses max-content sizing.
+    pub is_max_content: bool,
+    /// For fit-content(length), the maximum length constraint.
+    pub fit_content_limit: Option<f32>,
     /// Final computed size.
     pub size: f32,
     /// Position (offset from container start).
@@ -49,16 +60,57 @@ pub struct GridTrack {
 impl GridTrack {
     /// Create a new track with default sizing.
     pub fn new(size: &TrackSize) -> Self {
+        // Extract percentage values if present (for min and max bounds)
+        let (percent, max_percent) = match size {
+            TrackSize::Percent(p) => (Some(*p), None),
+            TrackSize::MinMax(min, max) => {
+                let min_pct = if let TrackSize::Percent(p) = min.as_ref() {
+                    Some(*p)
+                } else {
+                    None
+                };
+                let max_pct = if let TrackSize::Percent(p) = max.as_ref() {
+                    Some(*p)
+                } else {
+                    None
+                };
+                (min_pct, max_pct)
+            }
+            _ => (None, None),
+        };
+
+        // Determine if this track uses intrinsic sizing
+        let (is_min_content, is_max_content) = match size {
+            TrackSize::MinContent => (true, false),
+            TrackSize::MaxContent => (false, true),
+            TrackSize::MinMax(min, max) => {
+                let min_is_min = matches!(min.as_ref(), TrackSize::MinContent);
+                let max_is_max = matches!(max.as_ref(), TrackSize::MaxContent);
+                (min_is_min, max_is_max)
+            }
+            TrackSize::FitContent(_) => (true, false), // fit-content uses min-content as minimum
+            TrackSize::Auto => (true, true), // auto behaves like minmax(min-content, max-content)
+            _ => (false, false),
+        };
+
         let (base_size, growth_limit, flex_factor) = match size {
             TrackSize::Px(v) => (*v, *v, 0.0),
-            TrackSize::Percent(_) => (0.0, f32::INFINITY, 0.0),
+            TrackSize::Percent(_) => (0.0, f32::INFINITY, 0.0), // Will be resolved later
             TrackSize::Fr(fr) => (0.0, f32::INFINITY, *fr),
-            TrackSize::MinContent => (0.0, 0.0, 0.0), // Will be computed
-            TrackSize::MaxContent => (0.0, f32::INFINITY, 0.0),
-            TrackSize::Auto => (0.0, f32::INFINITY, 0.0),
+            TrackSize::MinContent => (0.0, 0.0, 0.0), // Will be computed from content
+            TrackSize::MaxContent => (0.0, f32::INFINITY, 0.0), // Will be computed from content
+            TrackSize::Auto => (0.0, f32::INFINITY, 0.0), // Will be computed from content
             TrackSize::MinMax(min, max) => {
-                let min_size = Self::new(min).base_size;
-                let max_size = Self::new(max).growth_limit;
+                // For min: use 0 if it's intrinsic or percentage (resolved later)
+                let min_size = match min.as_ref() {
+                    TrackSize::Percent(_) | TrackSize::MinContent | TrackSize::MaxContent | TrackSize::Auto => 0.0,
+                    _ => Self::new(min).base_size,
+                };
+                // For max: use INFINITY if it's intrinsic, percentage, or flexible
+                let max_size = match max.as_ref() {
+                    TrackSize::Percent(_) | TrackSize::MinContent | TrackSize::MaxContent | TrackSize::Auto => f32::INFINITY,
+                    _ => Self::new(max).growth_limit,
+                };
                 let flex = if max.is_flexible() {
                     if let TrackSize::Fr(fr) = max.as_ref() {
                         *fr
@@ -71,6 +123,12 @@ impl GridTrack {
                 (min_size, max_size, flex)
             }
             TrackSize::FitContent(max) => (0.0, *max, 0.0),
+        };
+
+        // Extract fit-content limit if present
+        let fit_content_limit = match size {
+            TrackSize::FitContent(max) => Some(*max),
+            _ => None,
         };
 
         Self {
@@ -86,6 +144,11 @@ impl GridTrack {
             },
             is_flexible: flex_factor > 0.0,
             flex_factor,
+            percent,
+            max_percent,
+            is_min_content,
+            is_max_content,
+            fit_content_limit,
             size: base_size,
             position: 0.0,
             line_names: Vec::new(),
@@ -437,9 +500,12 @@ impl GridLayout {
         row_gap: f32,
         auto_flow: GridAutoFlow,
     ) -> Self {
-        // Create explicit column tracks
-        let columns: Vec<GridTrack> = template_columns
-            .tracks
+        // Expand repeat() patterns in column template
+        let (expanded_columns, _col_auto_repeat) = template_columns.expand_tracks();
+        // TODO: Handle auto-fill/auto-fit in Phase 2
+
+        // Create explicit column tracks from expanded template
+        let columns: Vec<GridTrack> = expanded_columns
             .iter()
             .map(|def| {
                 let mut track = GridTrack::new(&def.size);
@@ -448,9 +514,12 @@ impl GridLayout {
             })
             .collect();
 
-        // Create explicit row tracks
-        let rows: Vec<GridTrack> = template_rows
-            .tracks
+        // Expand repeat() patterns in row template
+        let (expanded_rows, _row_auto_repeat) = template_rows.expand_tracks();
+        // TODO: Handle auto-fill/auto-fit in Phase 2
+
+        // Create explicit row tracks from expanded template
+        let rows: Vec<GridTrack> = expanded_rows
             .iter()
             .map(|def| {
                 let mut track = GridTrack::new(&def.size);
@@ -1131,9 +1200,62 @@ fn size_grid_tracks(tracks: &mut [GridTrack], container_size: f32, gap: f32) {
         track.size = track.base_size;
     }
 
-    // Step 2: Resolve percentage tracks
-    for _track in tracks.iter_mut() {
-        // Percentages already handled in TrackSize::new
+    // Step 2: Resolve percentage tracks against container size
+    // Per spec, percentage tracks are resolved against the content box of the grid container
+    for track in tracks.iter_mut() {
+        // Resolve min percentage (base_size)
+        if let Some(pct) = track.percent {
+            let resolved_size = container_size * (pct / 100.0);
+            track.base_size = resolved_size;
+            track.size = resolved_size;
+            // If no max percentage and not flexible, growth_limit = base_size
+            if track.max_percent.is_none() && !track.is_flexible {
+                track.growth_limit = resolved_size;
+            }
+        }
+        // Resolve max percentage (growth_limit)
+        if let Some(pct) = track.max_percent {
+            let resolved_size = container_size * (pct / 100.0);
+            track.growth_limit = resolved_size;
+            // If track hasn't been sized yet, use base_size
+            if track.size < track.base_size {
+                track.size = track.base_size;
+            }
+        }
+    }
+
+    // Step 2.5: Handle intrinsic tracks (min-content, max-content, auto, fit-content)
+    // Item contributions should already be set in base_size from layout_grid_container
+    for track in tracks.iter_mut() {
+        if track.is_min_content {
+            // min-content track: size is the minimum content size
+            // base_size should already have the item contribution
+            track.size = track.base_size;
+            // For pure min-content, growth_limit = base_size (no growth allowed)
+            if !track.is_max_content && track.fit_content_limit.is_none() {
+                track.growth_limit = track.base_size;
+            }
+        }
+        if track.is_max_content {
+            // max-content track: can grow to fit content
+            // base_size has min contribution, allow growth
+            track.size = track.base_size;
+            // growth_limit stays at INFINITY or is set based on max-content
+            // For pure max-content, we want to expand to fill
+            if track.growth_limit == 0.0 {
+                track.growth_limit = f32::INFINITY;
+            }
+        }
+        // Handle fit-content(length): clamp growth_limit to the specified length
+        // fit-content behaves like minmax(min-content, min(max-content, length))
+        if let Some(limit) = track.fit_content_limit {
+            // Base size is already set from min-content contribution
+            track.size = track.base_size;
+            // Cap growth at the specified limit
+            track.growth_limit = limit.min(track.growth_limit);
+            // But growth_limit should be at least base_size
+            track.growth_limit = track.growth_limit.max(track.base_size);
+        }
     }
 
     // Step 3: Distribute remaining space to flexible tracks
@@ -1444,5 +1566,189 @@ mod tests {
         assert!(item.auto_row);     // Row needs auto-placement
         assert!(item.needs_auto_placement()); // Overall needs auto-placement
         assert!(!item.is_fully_placed());     // Not fully placed
+    }
+
+    #[test]
+    fn test_track_sizing_percentage() {
+        // 50% track in a 400px container should be 200px
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::Percent(50.0)),
+            GridTrack::new(&TrackSize::Fr(1.0)),
+        ];
+
+        size_grid_tracks(&mut tracks, 400.0, 0.0);
+
+        assert_eq!(tracks[0].size, 200.0);
+        // Remaining 200px goes to 1fr
+        assert_eq!(tracks[1].size, 200.0);
+    }
+
+    #[test]
+    fn test_track_sizing_percentage_with_gap() {
+        // Two 25% tracks with 20px gap in a 400px container
+        // 25% of 400 = 100px each
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::Percent(25.0)),
+            GridTrack::new(&TrackSize::Percent(25.0)),
+            GridTrack::new(&TrackSize::Fr(1.0)),
+        ];
+
+        size_grid_tracks(&mut tracks, 400.0, 20.0);
+
+        // Percentages resolve to 25% of container
+        assert_eq!(tracks[0].size, 100.0);
+        assert_eq!(tracks[1].size, 100.0);
+        // Available space = 400 - 40 (gaps) = 360
+        // After fixed (200px), remaining = 160px for 1fr
+        // But wait, percentage tracks are considered fixed
+        assert_eq!(tracks[2].size, 160.0);
+    }
+
+    #[test]
+    fn test_track_sizing_multiple_percentages() {
+        // 30% + 20% + 1fr in 500px container
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::Percent(30.0)),
+            GridTrack::new(&TrackSize::Percent(20.0)),
+            GridTrack::new(&TrackSize::Fr(1.0)),
+        ];
+
+        size_grid_tracks(&mut tracks, 500.0, 0.0);
+
+        assert_eq!(tracks[0].size, 150.0); // 30% of 500
+        assert_eq!(tracks[1].size, 100.0); // 20% of 500
+        assert_eq!(tracks[2].size, 250.0); // Remaining space
+    }
+
+    #[test]
+    fn test_track_sizing_minmax_with_percentage_min() {
+        // minmax(25%, 1fr) in 400px container
+        // min = 25% of 400 = 100px
+        // The track should get at least 100px from the fr distribution
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::MinMax(
+                Box::new(TrackSize::Percent(25.0)),
+                Box::new(TrackSize::Fr(1.0)),
+            )),
+            GridTrack::new(&TrackSize::Fr(1.0)),
+        ];
+
+        size_grid_tracks(&mut tracks, 400.0, 0.0);
+
+        // Both are 1fr, but first has 100px minimum
+        // With 400px available, 200px each, but first is clamped to at least 100px
+        assert!(tracks[0].size >= 100.0);
+        assert_eq!(tracks[0].size, 200.0); // Gets half of 400px
+        assert_eq!(tracks[1].size, 200.0);
+    }
+
+    #[test]
+    fn test_track_sizing_minmax_with_percentage_max() {
+        // minmax(100px, 50%) in 400px container
+        // min = 100px, max = 50% of 400 = 200px
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::MinMax(
+                Box::new(TrackSize::Px(100.0)),
+                Box::new(TrackSize::Percent(50.0)),
+            )),
+            GridTrack::new(&TrackSize::Fr(1.0)),
+        ];
+
+        size_grid_tracks(&mut tracks, 400.0, 0.0);
+
+        // First track has min=100px, max=200px
+        // It should start at 100px, and fr gets remaining 300px
+        assert_eq!(tracks[0].size, 100.0); // Gets base size
+        assert_eq!(tracks[1].size, 300.0); // Remaining goes to fr
+    }
+
+    #[test]
+    fn test_track_min_content_flag() {
+        let track = GridTrack::new(&TrackSize::MinContent);
+        assert!(track.is_min_content);
+        assert!(!track.is_max_content);
+    }
+
+    #[test]
+    fn test_track_max_content_flag() {
+        let track = GridTrack::new(&TrackSize::MaxContent);
+        assert!(!track.is_min_content);
+        assert!(track.is_max_content);
+    }
+
+    #[test]
+    fn test_track_auto_is_intrinsic() {
+        let track = GridTrack::new(&TrackSize::Auto);
+        assert!(track.is_min_content); // auto behaves like minmax(min-content, max-content)
+        assert!(track.is_max_content);
+    }
+
+    #[test]
+    fn test_track_sizing_min_content() {
+        // min-content track with contribution of 100px
+        let mut track = GridTrack::new(&TrackSize::MinContent);
+        track.base_size = 100.0; // Simulating item contribution
+
+        let mut tracks = vec![track, GridTrack::new(&TrackSize::Fr(1.0))];
+        size_grid_tracks(&mut tracks, 500.0, 0.0);
+
+        // min-content track should stay at its base size
+        assert_eq!(tracks[0].size, 100.0);
+        // fr track gets remaining space
+        assert_eq!(tracks[1].size, 400.0);
+    }
+
+    #[test]
+    fn test_track_sizing_auto() {
+        // auto track with contribution of 150px
+        let mut track = GridTrack::new(&TrackSize::Auto);
+        track.base_size = 150.0; // Simulating item contribution
+
+        let mut tracks = vec![track, GridTrack::new(&TrackSize::Px(100.0))];
+        size_grid_tracks(&mut tracks, 500.0, 0.0);
+
+        // auto track should use its base size as minimum
+        // remaining space should be distributed
+        assert!(tracks[0].size >= 150.0);
+        assert_eq!(tracks[1].size, 100.0);
+    }
+
+    #[test]
+    fn test_track_fit_content_flag() {
+        let track = GridTrack::new(&TrackSize::FitContent(200.0));
+        assert!(track.is_min_content); // fit-content uses min-content as minimum
+        assert!(!track.is_max_content);
+        assert_eq!(track.fit_content_limit, Some(200.0));
+    }
+
+    #[test]
+    fn test_track_sizing_fit_content_within_limit() {
+        // fit-content(300px) with content that needs 100px
+        let mut track = GridTrack::new(&TrackSize::FitContent(300.0));
+        track.base_size = 100.0; // Simulating item contribution (min-content)
+
+        let mut tracks = vec![track, GridTrack::new(&TrackSize::Fr(1.0))];
+        size_grid_tracks(&mut tracks, 500.0, 0.0);
+
+        // fit-content should clamp to min-content (100px) since that's less than limit
+        assert_eq!(tracks[0].size, 100.0);
+        // fr track gets remaining space
+        assert_eq!(tracks[1].size, 400.0);
+    }
+
+    #[test]
+    fn test_track_sizing_fit_content_at_limit() {
+        // fit-content(150px) with content that would need more
+        let mut track = GridTrack::new(&TrackSize::FitContent(150.0));
+        track.base_size = 200.0; // Content needs 200px but we cap at 150px
+
+        let mut tracks = vec![track, GridTrack::new(&TrackSize::Fr(1.0))];
+        size_grid_tracks(&mut tracks, 500.0, 0.0);
+
+        // fit-content should use base_size since it exceeds the limit
+        // (In a real scenario, base_size would be clamped to the limit,
+        // but we're simulating the case where content already exceeds)
+        assert_eq!(tracks[0].size, 200.0);
+        assert_eq!(tracks[1].size, 300.0);
     }
 }

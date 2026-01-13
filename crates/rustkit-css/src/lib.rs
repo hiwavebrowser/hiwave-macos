@@ -801,6 +801,69 @@ impl GridTemplate {
     pub fn track_count(&self) -> usize {
         self.tracks.len()
     }
+
+    /// Expand repeat() patterns into a flat list of track definitions.
+    ///
+    /// This handles `repeat(N, ...)` patterns by expanding them inline.
+    /// For `auto-fill` and `auto-fit`, returns them unexpanded (handled at layout time
+    /// when container size is known).
+    ///
+    /// # Returns
+    /// A tuple of (expanded_tracks, has_auto_repeat) where:
+    /// - expanded_tracks: All tracks with Count repeats expanded
+    /// - has_auto_repeat: Whether an auto-fill/auto-fit needs layout-time expansion
+    pub fn expand_tracks(&self) -> (Vec<TrackDefinition>, Option<&TrackRepeat>) {
+        if self.repeats.is_empty() {
+            return (self.tracks.clone(), None);
+        }
+
+        let mut result = Vec::new();
+        let mut auto_repeat = None;
+        let mut track_idx = 0;
+
+        // Sort repeats by insert position
+        let mut sorted_repeats: Vec<_> = self.repeats.iter().collect();
+        sorted_repeats.sort_by_key(|(pos, _)| *pos);
+
+        for (insert_pos, repeat) in &sorted_repeats {
+            // Add any tracks before this repeat position
+            while track_idx < *insert_pos && track_idx < self.tracks.len() {
+                result.push(self.tracks[track_idx].clone());
+                track_idx += 1;
+            }
+
+            match repeat {
+                TrackRepeat::Count(count, tracks) => {
+                    // Expand: repeat(N, track1 track2...) → N copies of the track list
+                    for _ in 0..*count {
+                        for track in tracks {
+                            result.push(track.clone());
+                        }
+                    }
+                }
+                TrackRepeat::AutoFill(_) | TrackRepeat::AutoFit(_) => {
+                    // Auto-fill/auto-fit need container size to expand
+                    // Store for layout-time handling
+                    auto_repeat = Some(repeat);
+                }
+            }
+        }
+
+        // Add remaining tracks after last repeat
+        while track_idx < self.tracks.len() {
+            result.push(self.tracks[track_idx].clone());
+            track_idx += 1;
+        }
+
+        (result, auto_repeat)
+    }
+
+    /// Get the number of tracks after repeat expansion.
+    /// For auto-fill/auto-fit, returns the count with repeat not expanded.
+    pub fn expanded_track_count(&self) -> usize {
+        let (expanded, _) = self.expand_tracks();
+        expanded.len()
+    }
 }
 
 /// Named grid area.
@@ -2291,5 +2354,154 @@ mod tests {
         assert_eq!(child.font_size, parent.font_size);
         // Non-inherited properties should be default
         assert_eq!(child.display, Display::Block);
+    }
+
+    // Grid template expansion tests
+    #[test]
+    fn test_expand_tracks_no_repeat() {
+        // Template without any repeats should return tracks unchanged
+        let template = GridTemplate {
+            tracks: vec![
+                TrackDefinition::simple(TrackSize::Fr(1.0)),
+                TrackDefinition::simple(TrackSize::Fr(1.0)),
+            ],
+            repeats: vec![],
+            final_line_names: vec![],
+        };
+
+        let (expanded, auto_repeat) = template.expand_tracks();
+        assert_eq!(expanded.len(), 2);
+        assert!(auto_repeat.is_none());
+    }
+
+    #[test]
+    fn test_expand_tracks_repeat_count() {
+        // repeat(3, 1fr) should expand to 3 tracks
+        let template = GridTemplate {
+            tracks: vec![],
+            repeats: vec![(
+                0,
+                TrackRepeat::Count(3, vec![TrackDefinition::simple(TrackSize::Fr(1.0))]),
+            )],
+            final_line_names: vec![],
+        };
+
+        let (expanded, auto_repeat) = template.expand_tracks();
+        assert_eq!(expanded.len(), 3);
+        assert!(auto_repeat.is_none());
+        for track in &expanded {
+            assert_eq!(track.size, TrackSize::Fr(1.0));
+        }
+    }
+
+    #[test]
+    fn test_expand_tracks_repeat_multiple_tracks() {
+        // repeat(2, 100px 1fr) should expand to 4 tracks: 100px, 1fr, 100px, 1fr
+        let template = GridTemplate {
+            tracks: vec![],
+            repeats: vec![(
+                0,
+                TrackRepeat::Count(
+                    2,
+                    vec![
+                        TrackDefinition::simple(TrackSize::Px(100.0)),
+                        TrackDefinition::simple(TrackSize::Fr(1.0)),
+                    ],
+                ),
+            )],
+            final_line_names: vec![],
+        };
+
+        let (expanded, auto_repeat) = template.expand_tracks();
+        assert_eq!(expanded.len(), 4);
+        assert_eq!(expanded[0].size, TrackSize::Px(100.0));
+        assert_eq!(expanded[1].size, TrackSize::Fr(1.0));
+        assert_eq!(expanded[2].size, TrackSize::Px(100.0));
+        assert_eq!(expanded[3].size, TrackSize::Fr(1.0));
+    }
+
+    #[test]
+    fn test_expand_tracks_mixed() {
+        // 100px repeat(2, 1fr) 200px -> 100px 1fr 1fr 200px
+        let template = GridTemplate {
+            tracks: vec![
+                TrackDefinition::simple(TrackSize::Px(100.0)),
+                TrackDefinition::simple(TrackSize::Px(200.0)),
+            ],
+            repeats: vec![(
+                1, // Insert at position 1 (after first track)
+                TrackRepeat::Count(2, vec![TrackDefinition::simple(TrackSize::Fr(1.0))]),
+            )],
+            final_line_names: vec![],
+        };
+
+        let (expanded, auto_repeat) = template.expand_tracks();
+        assert_eq!(expanded.len(), 4);
+        assert_eq!(expanded[0].size, TrackSize::Px(100.0));
+        assert_eq!(expanded[1].size, TrackSize::Fr(1.0));
+        assert_eq!(expanded[2].size, TrackSize::Fr(1.0));
+        assert_eq!(expanded[3].size, TrackSize::Px(200.0));
+    }
+
+    #[test]
+    fn test_expand_tracks_auto_fill_returns_unexpanded() {
+        // auto-fill should be marked for layout-time expansion
+        let template = GridTemplate {
+            tracks: vec![],
+            repeats: vec![(
+                0,
+                TrackRepeat::AutoFill(vec![TrackDefinition::simple(TrackSize::Px(200.0))]),
+            )],
+            final_line_names: vec![],
+        };
+
+        let (expanded, auto_repeat) = template.expand_tracks();
+        assert_eq!(expanded.len(), 0); // No tracks expanded yet
+        assert!(auto_repeat.is_some());
+        match auto_repeat.unwrap() {
+            TrackRepeat::AutoFill(_) => {}
+            _ => panic!("Expected AutoFill"),
+        }
+    }
+
+    #[test]
+    fn test_expand_tracks_auto_fit_returns_unexpanded() {
+        // auto-fit should be marked for layout-time expansion
+        let template = GridTemplate {
+            tracks: vec![],
+            repeats: vec![(
+                0,
+                TrackRepeat::AutoFit(vec![TrackDefinition::simple(TrackSize::Px(200.0))]),
+            )],
+            final_line_names: vec![],
+        };
+
+        let (expanded, auto_repeat) = template.expand_tracks();
+        assert_eq!(expanded.len(), 0);
+        assert!(auto_repeat.is_some());
+        match auto_repeat.unwrap() {
+            TrackRepeat::AutoFit(_) => {}
+            _ => panic!("Expected AutoFit"),
+        }
+    }
+
+    #[test]
+    fn test_expand_tracks_with_line_names() {
+        // Named lines should be preserved during expansion
+        let track_with_names = TrackDefinition {
+            size: TrackSize::Fr(1.0),
+            line_names: vec!["col-start".to_string()],
+        };
+
+        let template = GridTemplate {
+            tracks: vec![],
+            repeats: vec![(0, TrackRepeat::Count(2, vec![track_with_names]))],
+            final_line_names: vec![],
+        };
+
+        let (expanded, _) = template.expand_tracks();
+        assert_eq!(expanded.len(), 2);
+        assert_eq!(expanded[0].line_names, vec!["col-start".to_string()]);
+        assert_eq!(expanded[1].line_names, vec!["col-start".to_string()]);
     }
 }
