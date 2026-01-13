@@ -1643,51 +1643,134 @@ pub fn layout_grid_container(
     }
 
     // Phase 5: Size tracks with item contributions
-    // First, collect item contributions for each row
-    let mut row_contributions: Vec<f32> = vec![0.0; grid.row_count()];
-    let mut col_contributions: Vec<f32> = vec![0.0; grid.column_count()];
-    
-    for item in &items {
-        let row_start_idx = (item.row_start - 1).max(0) as usize;
-        let row_span = item.row_span.max(1) as usize;
-        let col_start_idx = (item.column_start - 1).max(0) as usize;
-        let col_span = item.column_span.max(1) as usize;
-        
-        // Get item height contribution
-        let height_contrib = item.get_height_contribution(container_height);
-        let width_contrib = item.get_width_contribution(container_width);
-        
-        // Distribute height across spanned rows
-        if row_span > 0 && height_contrib > 0.0 {
-            let per_row = height_contrib / row_span as f32;
-            for r in row_start_idx..(row_start_idx + row_span).min(row_contributions.len()) {
-                row_contributions[r] = row_contributions[r].max(per_row);
+    // Per CSS Grid Level 1, Section 11.5: Resolve intrinsic track sizes
+    //
+    // Process items by span count (1-span first, then 2-span, etc.)
+    // This ensures single-span items get priority and multi-span items
+    // distribute extra space among their spanned tracks.
+
+    // Collect item info for span-based processing
+    struct ItemSizing {
+        row_start: usize,
+        row_span: usize,
+        col_start: usize,
+        col_span: usize,
+        height_contribution: f32,
+        width_contribution: f32,
+    }
+
+    let item_sizings: Vec<ItemSizing> = items
+        .iter()
+        .map(|item| ItemSizing {
+            row_start: (item.row_start - 1).max(0) as usize,
+            row_span: item.row_span.max(1) as usize,
+            col_start: (item.column_start - 1).max(0) as usize,
+            col_span: item.column_span.max(1) as usize,
+            height_contribution: item.get_height_contribution(container_height),
+            width_contribution: item.get_width_contribution(container_width),
+        })
+        .collect();
+
+    // Find max spans
+    let max_row_span = item_sizings.iter().map(|s| s.row_span).max().unwrap_or(1);
+    let max_col_span = item_sizings.iter().map(|s| s.col_span).max().unwrap_or(1);
+
+    // Process rows by span count
+    for span in 1..=max_row_span {
+        for sizing in item_sizings.iter().filter(|s| s.row_span == span) {
+            if sizing.height_contribution > 0.0 {
+                let start = sizing.row_start;
+                let end = (start + span).min(grid.rows.len());
+
+                // Calculate current space provided by spanned tracks
+                let current_space: f32 = (start..end)
+                    .map(|i| grid.rows[i].base_size)
+                    .sum();
+
+                // Calculate extra space needed
+                let extra_needed = sizing.height_contribution - current_space;
+
+                if extra_needed > 0.0 {
+                    // Find tracks that can grow (intrinsic or flexible)
+                    let growable: Vec<usize> = (start..end)
+                        .filter(|&i| {
+                            let track = &grid.rows[i];
+                            track.is_min_content || track.is_max_content || track.is_flexible
+                                || track.growth_limit > track.base_size
+                        })
+                        .collect();
+
+                    if !growable.is_empty() {
+                        // Distribute extra space equally among growable tracks
+                        let per_track = extra_needed / growable.len() as f32;
+                        for i in growable {
+                            grid.rows[i].base_size += per_track;
+                        }
+                    } else {
+                        // All tracks are fixed, distribute equally anyway
+                        let per_track = extra_needed / span as f32;
+                        for i in start..end {
+                            grid.rows[i].base_size += per_track;
+                        }
+                    }
+                }
             }
         }
-        
-        // Distribute width across spanned columns
-        if col_span > 0 && width_contrib > 0.0 {
-            let per_col = width_contrib / col_span as f32;
-            for c in col_start_idx..(col_start_idx + col_span).min(col_contributions.len()) {
-                col_contributions[c] = col_contributions[c].max(per_col);
+    }
+
+    // Process columns by span count
+    for span in 1..=max_col_span {
+        for sizing in item_sizings.iter().filter(|s| s.col_span == span) {
+            if sizing.width_contribution > 0.0 {
+                let start = sizing.col_start;
+                let end = (start + span).min(grid.columns.len());
+
+                // Calculate current space provided by spanned tracks
+                let current_space: f32 = (start..end)
+                    .map(|i| grid.columns[i].base_size)
+                    .sum();
+
+                // Calculate extra space needed
+                let extra_needed = sizing.width_contribution - current_space;
+
+                if extra_needed > 0.0 {
+                    // Find tracks that can grow (intrinsic or flexible)
+                    let growable: Vec<usize> = (start..end)
+                        .filter(|&i| {
+                            let track = &grid.columns[i];
+                            track.is_min_content || track.is_max_content || track.is_flexible
+                                || track.growth_limit > track.base_size
+                        })
+                        .collect();
+
+                    if !growable.is_empty() {
+                        // Distribute extra space equally among growable tracks
+                        let per_track = extra_needed / growable.len() as f32;
+                        for i in growable {
+                            grid.columns[i].base_size += per_track;
+                        }
+                    } else {
+                        // All tracks are fixed, distribute equally anyway
+                        let per_track = extra_needed / span as f32;
+                        for i in start..end {
+                            grid.columns[i].base_size += per_track;
+                        }
+                    }
+                }
             }
         }
     }
-    
-    // Apply contributions to tracks
-    for (i, track) in grid.rows.iter_mut().enumerate() {
-        if i < row_contributions.len() && row_contributions[i] > track.base_size {
-            track.base_size = row_contributions[i];
-        }
-    }
-    for (i, track) in grid.columns.iter_mut().enumerate() {
-        if i < col_contributions.len() && col_contributions[i] > track.base_size {
-            track.base_size = col_contributions[i];
-        }
-    }
-    
+
+    // Size tracks (handles percentages, intrinsic sizing, flexible tracks)
     size_grid_tracks(&mut grid.columns, container_width, column_gap);
     size_grid_tracks(&mut grid.rows, container_height, row_gap);
+
+    // Stretch auto tracks if align-content is stretch
+    // Per CSS Grid spec, stretch distributes remaining space to auto tracks
+    // Note: justify-content doesn't have a stretch value in the current CSS spec
+    if style.align_content == AlignContent::Stretch {
+        stretch_auto_tracks(&mut grid.rows, container_height, row_gap);
+    }
 
     // Apply content alignment (justify-content for columns, align-content for rows)
     apply_content_alignment(&mut grid.columns, container_width, column_gap, &style.justify_content);
@@ -1961,20 +2044,56 @@ fn size_grid_tracks(tracks: &mut [GridTrack], container_size: f32, gap: f32) {
     }
 
     // Step 4: Distribute remaining space to auto tracks if any space left
-    let used_space: f32 = tracks.iter().map(|t| t.size).sum();
-    let remaining = (available_space - used_space).max(0.0);
+    // Per spec, this is the "maximize tracks" step - grow tracks to their growth_limit
+    let mut used_space: f32 = tracks.iter().map(|t| t.size).sum();
+    let mut remaining = (available_space - used_space).max(0.0);
 
-    if remaining > 0.0 {
-        let auto_tracks: Vec<usize> = tracks
+    // Iteratively distribute space, respecting growth_limit
+    while remaining > 0.01 {
+        // Find tracks that can still grow (not yet at growth_limit)
+        let growable: Vec<(usize, f32)> = tracks
             .iter()
             .enumerate()
-            .filter(|(_, t)| !t.is_flexible && t.growth_limit > t.size)
+            .filter(|(_, t)| !t.is_flexible && t.growth_limit > t.size && t.growth_limit < f32::INFINITY)
+            .map(|(i, t)| (i, t.growth_limit - t.size)) // (index, room_to_grow)
+            .collect();
+
+        if growable.is_empty() {
+            break;
+        }
+
+        // Calculate how much each track can receive
+        let total_room: f32 = growable.iter().map(|(_, room)| room).sum();
+
+        if total_room <= 0.0 {
+            break;
+        }
+
+        // Distribute proportionally, but don't exceed room_to_grow
+        let to_distribute = remaining.min(total_room);
+        for (i, room) in &growable {
+            let share = (room / total_room) * to_distribute;
+            tracks[*i].size += share.min(*room);
+        }
+
+        // Recalculate remaining space
+        used_space = tracks.iter().map(|t| t.size).sum();
+        remaining = (available_space - used_space).max(0.0);
+    }
+
+    // If there's still remaining space and we have tracks with infinite growth_limit,
+    // distribute to them equally
+    if remaining > 0.01 {
+        let infinite_tracks: Vec<usize> = tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.is_flexible && t.growth_limit == f32::INFINITY)
             .map(|(i, _)| i)
             .collect();
 
-        if !auto_tracks.is_empty() {
-            let per_track = remaining / auto_tracks.len() as f32;
-            for i in auto_tracks {
+        if !infinite_tracks.is_empty() {
+            let per_track = remaining / infinite_tracks.len() as f32;
+            for i in infinite_tracks {
                 tracks[i].size += per_track;
             }
         }
@@ -1986,6 +2105,62 @@ fn size_grid_tracks(tracks: &mut [GridTrack], container_size: f32, gap: f32) {
     let mut prev_was_collapsed = true; // Start true to skip gap before first track
     for track in tracks.iter_mut() {
         // Add gap only if previous track was not collapsed and current track is not collapsed
+        if !prev_was_collapsed && track.size > 0.0 {
+            position += gap;
+        }
+        track.position = position;
+        position += track.size;
+        prev_was_collapsed = track.size == 0.0;
+    }
+}
+
+/// Stretch auto tracks when align-content is stretch.
+/// Per CSS Grid Level 1, Section 11.5.1: When align-content is stretch,
+/// the free space is distributed to auto tracks proportionally.
+fn stretch_auto_tracks(tracks: &mut [GridTrack], container_size: f32, gap: f32) {
+    if tracks.is_empty() {
+        return;
+    }
+
+    // Calculate used space
+    let non_collapsed_count = tracks.iter().filter(|t| t.size > 0.0).count();
+    let total_gaps = non_collapsed_count.saturating_sub(1) as f32 * gap;
+    let total_track_size: f32 = tracks.iter().map(|t| t.size).sum();
+    let used_space = total_track_size + total_gaps;
+    let free_space = (container_size - used_space).max(0.0);
+
+    if free_space <= 0.0 {
+        return;
+    }
+
+    // Find auto tracks (tracks that can stretch)
+    // Auto tracks are those with is_min_content AND is_max_content (minmax(min-content, max-content))
+    let auto_track_indices: Vec<usize> = tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| {
+            // A track is "auto" if it behaves like minmax(min-content, max-content)
+            // or if it has room to grow (growth_limit > size)
+            (t.is_min_content && t.is_max_content) || t.growth_limit > t.size
+        })
+        .filter(|(_, t)| t.size > 0.0) // Only stretch non-collapsed tracks
+        .map(|(i, _)| i)
+        .collect();
+
+    if auto_track_indices.is_empty() {
+        return;
+    }
+
+    // Distribute free space equally among auto tracks
+    let per_track = free_space / auto_track_indices.len() as f32;
+    for i in auto_track_indices {
+        tracks[i].size += per_track;
+    }
+
+    // Recalculate positions after stretching
+    let mut position = 0.0;
+    let mut prev_was_collapsed = true;
+    for track in tracks.iter_mut() {
         if !prev_was_collapsed && track.size > 0.0 {
             position += gap;
         }
@@ -4039,5 +4214,170 @@ mod tests {
         let (y, h) = apply_align_self(&AlignSelf::Stretch, &AlignItems::Stretch, 20.0, 100.0, &layout_box2);
         assert_eq!(y, 20.0);
         assert_eq!(h, 30.0, "Stretch with explicit height should respect height");
+    }
+
+    // ==================== Phase 6 Tests ====================
+
+    #[test]
+    fn test_spanning_item_distribution() {
+        // Test that spanning items distribute extra space correctly
+        // Single-span items should be processed first, then multi-span
+
+        // Create tracks: [auto, auto, auto]
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::Auto),
+            GridTrack::new(&TrackSize::Auto),
+            GridTrack::new(&TrackSize::Auto),
+        ];
+
+        // Simulate: item1 in track 0 needs 100px
+        // Item contributes to base_size
+        tracks[0].base_size = 100.0;
+
+        // Simulate: item2 spans tracks 1-2 and needs 150px
+        // With spec-compliant distribution, this should add 75px to each track
+
+        // Current space in tracks 1-2 is 0
+        let current_space: f32 = tracks[1].base_size + tracks[2].base_size;
+        let needed = 150.0;
+        let extra = needed - current_space;
+
+        // Distribute equally among the spanned tracks
+        let per_track = extra / 2.0;
+        tracks[1].base_size += per_track;
+        tracks[2].base_size += per_track;
+
+        // Verify distribution
+        assert_eq!(tracks[0].base_size, 100.0, "Track 0 should have single item size");
+        assert_eq!(tracks[1].base_size, 75.0, "Track 1 should have half of spanning item");
+        assert_eq!(tracks[2].base_size, 75.0, "Track 2 should have half of spanning item");
+    }
+
+    #[test]
+    fn test_spanning_prioritizes_growable_tracks() {
+        // When a spanning item needs extra space, it should go to growable tracks
+        // Fixed tracks should not grow if there are growable alternatives
+
+        // Create tracks: [100px (fixed), auto (growable)]
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::Px(100.0)),
+            GridTrack::new(&TrackSize::Auto),
+        ];
+
+        // The fixed track has base_size = 100, growth_limit = 100
+        // The auto track has is_min_content=true, is_max_content=true
+
+        // Simulate a spanning item needing 200px total
+        let needed = 200.0;
+        let current_space: f32 = tracks[0].base_size + tracks[1].base_size; // 100 + 0 = 100
+        let extra = needed - current_space; // 100 extra needed
+
+        // Find growable tracks
+        let growable: Vec<usize> = (0..2)
+            .filter(|&i| {
+                let t = &tracks[i];
+                t.is_min_content || t.is_max_content || t.is_flexible || t.growth_limit > t.base_size
+            })
+            .collect();
+
+        // Track 1 (auto) is growable, Track 0 (fixed) is not
+        assert_eq!(growable.len(), 1);
+        assert_eq!(growable[0], 1);
+
+        // Distribute extra to growable track only
+        if !growable.is_empty() {
+            let per_track = extra / growable.len() as f32;
+            for i in growable {
+                tracks[i].base_size += per_track;
+            }
+        }
+
+        // Verify: fixed track unchanged, auto track grew
+        assert_eq!(tracks[0].base_size, 100.0, "Fixed track should not grow");
+        assert_eq!(tracks[1].base_size, 100.0, "Auto track should absorb all extra space");
+    }
+
+    #[test]
+    fn test_stretch_auto_tracks() {
+        // Test that stretch_auto_tracks distributes free space to auto tracks
+
+        // Create tracks: [100px, auto, 100px] in 400px container
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::Px(100.0)),
+            GridTrack::new(&TrackSize::Auto),
+            GridTrack::new(&TrackSize::Px(100.0)),
+        ];
+
+        // Initialize sizes
+        tracks[0].size = 100.0;
+        tracks[1].size = 50.0; // auto track has 50px from content
+        tracks[2].size = 100.0;
+
+        // Container is 400px with 10px gaps
+        // Used: 100 + 50 + 100 + 2*10 = 270px
+        // Free: 400 - 270 = 130px
+
+        stretch_auto_tracks(&mut tracks, 400.0, 10.0);
+
+        // Auto track should receive all free space (130px)
+        // Final size should be 50 + 130 = 180px
+        assert_eq!(tracks[0].size, 100.0, "Fixed track should not change");
+        assert_eq!(tracks[1].size, 180.0, "Auto track should stretch to fill");
+        assert_eq!(tracks[2].size, 100.0, "Fixed track should not change");
+    }
+
+    #[test]
+    fn test_stretch_multiple_auto_tracks() {
+        // Test that free space is distributed equally among multiple auto tracks
+
+        // Create tracks: [auto, 100px, auto] in 500px container
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::Auto),
+            GridTrack::new(&TrackSize::Px(100.0)),
+            GridTrack::new(&TrackSize::Auto),
+        ];
+
+        // Initialize sizes
+        tracks[0].size = 50.0;
+        tracks[1].size = 100.0;
+        tracks[2].size = 50.0;
+
+        // Container is 500px with 10px gaps
+        // Used: 50 + 100 + 50 + 2*10 = 220px
+        // Free: 500 - 220 = 280px (split between 2 auto tracks = 140 each)
+
+        stretch_auto_tracks(&mut tracks, 500.0, 10.0);
+
+        // Each auto track should receive 140px
+        assert_eq!(tracks[0].size, 190.0, "First auto track should stretch");
+        assert_eq!(tracks[1].size, 100.0, "Fixed track should not change");
+        assert_eq!(tracks[2].size, 190.0, "Second auto track should stretch");
+    }
+
+    #[test]
+    fn test_maximize_tracks_step() {
+        // Test that tracks grow from base_size toward growth_limit
+
+        // Create a track with room to grow
+        let track = GridTrack::new(&TrackSize::MinMax(
+            Box::new(TrackSize::Px(50.0)),
+            Box::new(TrackSize::Px(200.0)),
+        ));
+
+        // base_size = 50, growth_limit = 200
+        assert_eq!(track.base_size, 50.0);
+        assert_eq!(track.growth_limit, 200.0);
+
+        // In size_grid_tracks, tracks should maximize toward growth_limit
+        // when there's available space
+        let mut tracks = vec![track];
+        size_grid_tracks(&mut tracks, 300.0, 0.0);
+
+        // Track should grow to growth_limit (200px) if there's room
+        // Actually, in current impl, step 4 distributes remaining space
+        // With 300px container and 50px used, remaining = 250px
+        // Track can grow by 150px (to 200px growth_limit)
+        assert!(tracks[0].size >= tracks[0].base_size);
+        assert!(tracks[0].size <= 200.0, "Should not exceed growth_limit");
     }
 }

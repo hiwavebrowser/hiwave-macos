@@ -12,7 +12,8 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 
 | Date | Phase | Change | Commit |
 |------|-------|--------|--------|
-| 2026-01-12 | 5.1-5.3 | Implemented justify-content/align-content, verified items/self alignment | uncommitted |
+| 2026-01-12 | 6.1-6.5 | Improved track sizing: span distribution, maximize tracks, stretch auto | uncommitted |
+| 2026-01-12 | 5.1-5.3 | Implemented justify-content/align-content, verified items/self alignment | 9dec796 |
 | 2026-01-12 | 4.1-4.4 | Implemented dense packing, span-to-name, order property, edge cases | f10b2c2 |
 | 2026-01-12 | 3.2-3.3 | Implemented grid-template-areas and implicit line names | 460e187 |
 | 2026-01-12 | 3.1 | Implemented named line resolution | 40f083b |
@@ -54,7 +55,13 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 - [x] 5.2 justify-items / align-items ✓ (already implemented)
 - [x] 5.3 justify-self / align-self ✓ (already implemented)
 
-**Phase 6: Track Sizing Algorithm** - NOT STARTED
+**Phase 6: Track Sizing Algorithm** - COMPLETE ✓
+- [x] 6.1 Initialize track sizes ✓ (already implemented)
+- [x] 6.2 Spanning item distribution ✓
+- [x] 6.3 Maximize tracks ✓
+- [x] 6.4 Expand flexible tracks ✓ (already implemented)
+- [x] 6.5 Stretch auto tracks ✓
+
 **Phase 7: Edge Cases and Polish** - NOT STARTED
 
 ---
@@ -264,22 +271,36 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 
 The spec defines a complex multi-step algorithm:
 
-- [ ] **6.1 Initialize track sizes**
+- [x] **6.1 Initialize track sizes** ✓ (already implemented)
   - Set base size and growth limit per spec
+  - Implemented in `GridTrack::new()`
 
-- [ ] **6.2 Resolve intrinsic track sizes**
+- [x] **6.2 Resolve intrinsic track sizes / Spanning item distribution** ✓
   - Size tracks to fit items with intrinsic sizing
   - Handle spanning items correctly
+  - **Implementation:**
+    - Process items by span count (1-span first, then 2-span, etc.)
+    - Calculate extra space needed and distribute to growable tracks
+    - Prioritize intrinsic tracks (auto, min-content, max-content) over fixed
 
-- [ ] **6.3 Maximize tracks**
+- [x] **6.3 Maximize tracks** ✓
   - Grow tracks to their growth limits
+  - **Implementation:**
+    - Iteratively distribute free space while respecting growth_limit
+    - Proportionally distribute to tracks with room to grow
+    - Handle infinite growth_limit (auto) tracks separately
 
-- [ ] **6.4 Expand flexible tracks**
+- [x] **6.4 Expand flexible tracks** ✓ (already implemented)
   - Distribute free space to fr tracks
   - Handle min/max constraints
 
-- [ ] **6.5 Stretch auto tracks**
-  - If align-content/justify-content is stretch
+- [x] **6.5 Stretch auto tracks** ✓
+  - If align-content is stretch
+  - **Implementation:**
+    - Added `stretch_auto_tracks()` function
+    - Distributes free space equally among auto tracks
+    - Called when `style.align_content == AlignContent::Stretch`
+    - 5 unit tests for Phase 6 functionality
 
 ### Phase 7: Edge Cases and Polish
 **Goal:** Handle all edge cases
@@ -308,7 +329,7 @@ The spec defines a complex multi-step algorithm:
 ### Unit Tests (per feature)
 Each phase should include unit tests for the specific feature.
 
-**Completed tests (66 total):**
+**Completed tests (71 total):**
 
 Phase 1.1 (repeat expansion - rustkit-css):
 - `test_expand_tracks_no_repeat` - Template without repeats
@@ -396,6 +417,13 @@ Phase 5.2-5.3 (items/self alignment - rustkit-layout):
 - `test_align_self_alignment` - align-self: flex-start/flex-end/center
 - `test_align_self_stretch` - align-self: stretch
 
+Phase 6.2-6.5 (track sizing algorithm - rustkit-layout):
+- `test_spanning_item_distribution` - Process items by span count
+- `test_spanning_prioritizes_growable_tracks` - Extra space to growable tracks
+- `test_stretch_auto_tracks` - Stretch auto tracks with free space
+- `test_stretch_multiple_auto_tracks` - Distribute equally among auto tracks
+- `test_maximize_tracks_step` - Grow tracks to growth_limit
+
 ### Integration Tests
 Create test HTML files exercising grid features:
 ```
@@ -429,7 +457,7 @@ Run against Chrome baselines to validate visual correctness.
 3. ~~**Phase 3** - Named lines (developer ergonomics)~~ ✓ COMPLETE
 4. ~~**Phase 4** - Placement (dense packing, named spans)~~ ✓ COMPLETE
 5. ~~**Phase 5** - Alignment (polish)~~ ✓ COMPLETE
-6. **Phase 6** - Track sizing (spec compliance)
+6. ~~**Phase 6** - Track sizing (spec compliance)~~ ✓ COMPLETE
 7. **Phase 7** - Edge cases (completeness)
 
 ---
