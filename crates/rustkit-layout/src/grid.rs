@@ -19,7 +19,7 @@
 
 use rustkit_css::{
     AlignItems, AlignSelf, BoxSizing, Display, GridAutoFlow, GridLine, GridPlacement,
-    GridTemplate, JustifyItems, JustifySelf, Length, TrackSize,
+    GridTemplate, JustifyItems, JustifySelf, Length, TrackDefinition, TrackRepeat, TrackSize,
 };
 use tracing::{debug, trace};
 
@@ -49,6 +49,8 @@ pub struct GridTrack {
     pub is_max_content: bool,
     /// For fit-content(length), the maximum length constraint.
     pub fit_content_limit: Option<f32>,
+    /// Whether this track is from auto-fit (should collapse if empty).
+    pub is_auto_fit: bool,
     /// Final computed size.
     pub size: f32,
     /// Position (offset from container start).
@@ -149,6 +151,7 @@ impl GridTrack {
             is_min_content,
             is_max_content,
             fit_content_limit,
+            is_auto_fit: false,
             size: base_size,
             position: 0.0,
             line_names: Vec::new(),
@@ -468,6 +471,17 @@ impl<'a> GridItem<'a> {
     }
 }
 
+/// Stored auto-repeat pattern for layout-time expansion.
+#[derive(Debug, Clone)]
+pub struct AutoRepeatPattern {
+    /// Track definitions to repeat.
+    pub tracks: Vec<TrackDefinition>,
+    /// Whether this is auto-fit (collapse empty) vs auto-fill.
+    pub is_auto_fit: bool,
+    /// Insert position in the track list.
+    pub insert_position: usize,
+}
+
 /// Grid layout state.
 #[derive(Debug)]
 pub struct GridLayout {
@@ -487,6 +501,10 @@ pub struct GridLayout {
     pub explicit_columns: usize,
     /// Number of explicit rows.
     pub explicit_rows: usize,
+    /// Pending auto-repeat for columns (resolved at layout time).
+    pub column_auto_repeat: Option<AutoRepeatPattern>,
+    /// Pending auto-repeat for rows (resolved at layout time).
+    pub row_auto_repeat: Option<AutoRepeatPattern>,
 }
 
 impl GridLayout {
@@ -501,8 +519,10 @@ impl GridLayout {
         auto_flow: GridAutoFlow,
     ) -> Self {
         // Expand repeat() patterns in column template
-        let (expanded_columns, _col_auto_repeat) = template_columns.expand_tracks();
-        // TODO: Handle auto-fill/auto-fit in Phase 2
+        let (expanded_columns, col_auto_repeat) = template_columns.expand_tracks();
+
+        // Extract auto-repeat pattern for columns if present
+        let column_auto_repeat = Self::extract_auto_repeat(template_columns, col_auto_repeat);
 
         // Create explicit column tracks from expanded template
         let columns: Vec<GridTrack> = expanded_columns
@@ -515,8 +535,10 @@ impl GridLayout {
             .collect();
 
         // Expand repeat() patterns in row template
-        let (expanded_rows, _row_auto_repeat) = template_rows.expand_tracks();
-        // TODO: Handle auto-fill/auto-fit in Phase 2
+        let (expanded_rows, row_auto_repeat) = template_rows.expand_tracks();
+
+        // Extract auto-repeat pattern for rows if present
+        let row_auto_repeat = Self::extract_auto_repeat(template_rows, row_auto_repeat);
 
         // Create explicit row tracks from expanded template
         let rows: Vec<GridTrack> = expanded_rows
@@ -540,6 +562,221 @@ impl GridLayout {
             cursor: (0, 0),
             explicit_columns,
             explicit_rows,
+            column_auto_repeat,
+            row_auto_repeat,
+        }
+    }
+
+    /// Extract auto-repeat pattern from template.
+    fn extract_auto_repeat(
+        template: &GridTemplate,
+        auto_repeat: Option<&TrackRepeat>,
+    ) -> Option<AutoRepeatPattern> {
+        auto_repeat.and_then(|repeat| {
+            // Find insert position from template repeats
+            let insert_pos = template
+                .repeats
+                .iter()
+                .find_map(|(pos, r)| {
+                    if matches!(r, TrackRepeat::AutoFill(_) | TrackRepeat::AutoFit(_)) {
+                        Some(*pos)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+
+            match repeat {
+                TrackRepeat::AutoFill(tracks) => Some(AutoRepeatPattern {
+                    tracks: tracks.clone(),
+                    is_auto_fit: false,
+                    insert_position: insert_pos,
+                }),
+                TrackRepeat::AutoFit(tracks) => Some(AutoRepeatPattern {
+                    tracks: tracks.clone(),
+                    is_auto_fit: true,
+                    insert_position: insert_pos,
+                }),
+                TrackRepeat::Count(_, _) => None, // Already expanded
+            }
+        })
+    }
+
+    /// Expand auto-fill/auto-fit patterns now that we have container size.
+    ///
+    /// Per CSS Grid spec:
+    /// - Calculate how many repetitions fit in the available space
+    /// - Insert the repeated tracks at the stored insert position
+    /// - For auto-fit, empty tracks will be collapsed to 0 during sizing
+    pub fn expand_auto_repeats(&mut self, container_width: f32, container_height: f32) {
+        // Expand column auto-repeat
+        if let Some(pattern) = self.column_auto_repeat.take() {
+            let available = container_width - (self.columns.len().saturating_sub(1)) as f32 * self.column_gap;
+            let new_tracks = Self::calculate_auto_repeat_tracks(&pattern, available, self.column_gap);
+
+            // Insert at the stored position
+            let insert_at = pattern.insert_position.min(self.columns.len());
+            for (i, track) in new_tracks.into_iter().enumerate() {
+                self.columns.insert(insert_at + i, track);
+            }
+            self.explicit_columns = self.columns.len();
+        }
+
+        // Expand row auto-repeat
+        if let Some(pattern) = self.row_auto_repeat.take() {
+            let available = container_height - (self.rows.len().saturating_sub(1)) as f32 * self.row_gap;
+            let new_tracks = Self::calculate_auto_repeat_tracks(&pattern, available, self.row_gap);
+
+            // Insert at the stored position
+            let insert_at = pattern.insert_position.min(self.rows.len());
+            for (i, track) in new_tracks.into_iter().enumerate() {
+                self.rows.insert(insert_at + i, track);
+            }
+            self.explicit_rows = self.rows.len();
+        }
+    }
+
+    /// Calculate how many tracks to create for auto-fill/auto-fit.
+    ///
+    /// Returns a Vec of GridTrack to insert.
+    fn calculate_auto_repeat_tracks(
+        pattern: &AutoRepeatPattern,
+        available_space: f32,
+        gap: f32,
+    ) -> Vec<GridTrack> {
+        if pattern.tracks.is_empty() {
+            return Vec::new();
+        }
+
+        // Calculate the fixed size of one repetition of the pattern
+        let pattern_fixed_size: f32 = pattern
+            .tracks
+            .iter()
+            .map(|def| Self::get_track_definite_size(&def.size))
+            .sum();
+
+        // Include gaps between tracks in one repetition
+        let pattern_gaps = if pattern.tracks.len() > 1 {
+            (pattern.tracks.len() - 1) as f32 * gap
+        } else {
+            0.0
+        };
+
+        let single_repetition_size = pattern_fixed_size + pattern_gaps;
+
+        // If pattern has no definite size (all fr units), create exactly 1 repetition
+        if single_repetition_size <= 0.0 {
+            let tracks: Vec<GridTrack> = pattern
+                .tracks
+                .iter()
+                .map(|def| {
+                    let mut track = GridTrack::new(&def.size);
+                    track.line_names = def.line_names.clone();
+                    track
+                })
+                .collect();
+            return tracks;
+        }
+
+        // Calculate how many repetitions fit
+        // Account for gaps between repetitions
+        let mut repetitions = 1u32;
+        let mut total_size = single_repetition_size;
+
+        while total_size + gap + single_repetition_size <= available_space {
+            repetitions += 1;
+            total_size += gap + single_repetition_size;
+        }
+
+        // Per spec, at least 1 repetition
+        repetitions = repetitions.max(1);
+
+        trace!(
+            "auto-repeat: {} repetitions fit in {}px (pattern size: {}px)",
+            repetitions,
+            available_space,
+            single_repetition_size
+        );
+
+        // Create the tracks
+        let mut result = Vec::with_capacity(repetitions as usize * pattern.tracks.len());
+        for _ in 0..repetitions {
+            for def in &pattern.tracks {
+                let mut track = GridTrack::new(&def.size);
+                track.line_names = def.line_names.clone();
+                // Mark for auto-fit collapsing (handled during sizing)
+                if pattern.is_auto_fit {
+                    track.is_auto_fit = true;
+                }
+                result.push(track);
+            }
+        }
+
+        result
+    }
+
+    /// Get the definite (fixed) size of a track for auto-repeat calculations.
+    /// Returns 0 for flexible tracks (fr) since they don't contribute to fixed size.
+    fn get_track_definite_size(size: &TrackSize) -> f32 {
+        match size {
+            TrackSize::Px(px) => *px,
+            TrackSize::MinMax(min, max) => {
+                // Use the definite bound
+                let min_size = Self::get_track_definite_size(min);
+                let max_size = Self::get_track_definite_size(max);
+                // If max is definite, use it; otherwise use min
+                if max_size > 0.0 {
+                    max_size
+                } else {
+                    min_size
+                }
+            }
+            TrackSize::FitContent(max) => *max,
+            // Flexible and intrinsic sizes are not definite
+            TrackSize::Fr(_)
+            | TrackSize::Percent(_)
+            | TrackSize::MinContent
+            | TrackSize::MaxContent
+            | TrackSize::Auto => 0.0,
+        }
+    }
+
+    /// Collapse empty auto-fit column tracks.
+    ///
+    /// For auto-fit, empty tracks (tracks with no items spanning them)
+    /// should be treated as having a fixed sizing function of 0px.
+    pub fn collapse_empty_auto_fit_columns(&mut self, column_occupied: &[bool]) {
+        for (i, track) in self.columns.iter_mut().enumerate() {
+            if track.is_auto_fit {
+                let has_items = column_occupied.get(i).copied().unwrap_or(false);
+                if !has_items {
+                    // Collapse this track to 0
+                    track.base_size = 0.0;
+                    track.growth_limit = 0.0;
+                    track.size = 0.0;
+                    track.is_flexible = false;
+                    track.flex_factor = 0.0;
+                    trace!("Collapsed empty auto-fit column track {}", i);
+                }
+            }
+        }
+    }
+
+    /// Collapse empty auto-fit row tracks.
+    pub fn collapse_empty_auto_fit_rows(&mut self, row_occupied: &[bool]) {
+        for (i, track) in self.rows.iter_mut().enumerate() {
+            if track.is_auto_fit {
+                let has_items = row_occupied.get(i).copied().unwrap_or(false);
+                if !has_items {
+                    // Collapse this track to 0
+                    track.base_size = 0.0;
+                    track.growth_limit = 0.0;
+                    track.size = 0.0;
+                    track.is_flexible = false;
+                    track.flex_factor = 0.0;
+                    trace!("Collapsed empty auto-fit row track {}", i);
+                }
+            }
         }
     }
 
@@ -725,6 +962,9 @@ pub fn layout_grid_container(
         row_gap,
         style.grid_auto_flow,
     );
+
+    // Expand auto-fill/auto-fit patterns now that we have container size
+    grid.expand_auto_repeats(container_width, container_height);
 
     // Ensure at least one column and row
     if grid.columns.is_empty() {
@@ -978,6 +1218,32 @@ pub fn layout_grid_container(
         );
     }
 
+    // Phase 4.5: Collapse empty auto-fit tracks
+    // For auto-fit, tracks with no items spanning them collapse to 0
+    {
+        // Calculate which columns have items
+        let mut column_occupied = vec![false; grid.column_count()];
+        let mut row_occupied = vec![false; grid.row_count()];
+
+        for item in &items {
+            let col_start = (item.column_start - 1).max(0) as usize;
+            let col_end = (item.column_end - 1).max(0) as usize;
+            let row_start = (item.row_start - 1).max(0) as usize;
+            let row_end = (item.row_end - 1).max(0) as usize;
+
+            for c in col_start..col_end.min(column_occupied.len()) {
+                column_occupied[c] = true;
+            }
+            for r in row_start..row_end.min(row_occupied.len()) {
+                row_occupied[r] = true;
+            }
+        }
+
+        // Collapse empty auto-fit tracks
+        grid.collapse_empty_auto_fit_columns(&column_occupied);
+        grid.collapse_empty_auto_fit_rows(&row_occupied);
+    }
+
     // Phase 5: Size tracks with item contributions
     // First, collect item contributions for each row
     let mut row_contributions: Vec<f32> = vec![0.0; grid.row_count()];
@@ -1192,7 +1458,24 @@ fn size_grid_tracks(tracks: &mut [GridTrack], container_size: f32, gap: f32) {
         return;
     }
 
-    let total_gaps = (tracks.len().saturating_sub(1)) as f32 * gap;
+    // Count non-collapsed tracks for gap calculation
+    // Collapsed (auto-fit empty) tracks are explicitly marked is_auto_fit and have all sizing zeroed
+    // A track is collapsed only if it's an auto-fit track with no content
+    let non_collapsed_count = tracks
+        .iter()
+        .filter(|t| {
+            // A track is NOT collapsed if:
+            // - It's not an auto-fit track, OR
+            // - It has some size (base_size, growth_limit, percent, flex)
+            !t.is_auto_fit
+                || t.base_size > 0.0
+                || t.growth_limit > 0.0
+                || t.is_flexible
+                || t.percent.is_some()
+                || t.max_percent.is_some()
+        })
+        .count();
+    let total_gaps = non_collapsed_count.saturating_sub(1) as f32 * gap;
     let available_space = (container_size - total_gaps).max(0.0);
 
     // Step 1: Initialize base sizes
@@ -1296,10 +1579,17 @@ fn size_grid_tracks(tracks: &mut [GridTrack], container_size: f32, gap: f32) {
     }
 
     // Step 5: Calculate positions
+    // For auto-fit, collapsed tracks (size = 0) should not have gaps
     let mut position = 0.0;
+    let mut prev_was_collapsed = true; // Start true to skip gap before first track
     for track in tracks.iter_mut() {
+        // Add gap only if previous track was not collapsed and current track is not collapsed
+        if !prev_was_collapsed && track.size > 0.0 {
+            position += gap;
+        }
         track.position = position;
-        position += track.size + gap;
+        position += track.size;
+        prev_was_collapsed = track.size == 0.0;
     }
 }
 
@@ -1750,5 +2040,325 @@ mod tests {
         // but we're simulating the case where content already exceeds)
         assert_eq!(tracks[0].size, 200.0);
         assert_eq!(tracks[1].size, 300.0);
+    }
+
+    // ==================== Phase 2: Auto-fill/Auto-fit Tests ====================
+
+    #[test]
+    fn test_auto_repeat_pattern_creation() {
+        // Create a template with auto-fill
+        let mut template = GridTemplate::default();
+        template.repeats.push((
+            0,
+            TrackRepeat::AutoFill(vec![TrackDefinition::simple(TrackSize::Px(100.0))]),
+        ));
+
+        let (expanded, auto_repeat) = template.expand_tracks();
+
+        // Expanded tracks should be empty (auto-fill not expanded yet)
+        assert_eq!(expanded.len(), 0);
+        // Auto-repeat should be present
+        assert!(auto_repeat.is_some());
+    }
+
+    #[test]
+    fn test_auto_fill_expansion_basic() {
+        // repeat(auto-fill, 100px) in 500px container should create 5 tracks
+        let pattern = AutoRepeatPattern {
+            tracks: vec![TrackDefinition::simple(TrackSize::Px(100.0))],
+            is_auto_fit: false,
+            insert_position: 0,
+        };
+
+        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 0.0);
+
+        assert_eq!(tracks.len(), 5);
+        for track in &tracks {
+            assert_eq!(track.base_size, 100.0);
+            assert!(!track.is_auto_fit);
+        }
+    }
+
+    #[test]
+    fn test_auto_fill_expansion_with_gap() {
+        // repeat(auto-fill, 100px) in 500px container with 20px gap
+        // 100 + 20 + 100 + 20 + 100 + 20 + 100 = 460, can fit 4 tracks
+        let pattern = AutoRepeatPattern {
+            tracks: vec![TrackDefinition::simple(TrackSize::Px(100.0))],
+            is_auto_fit: false,
+            insert_position: 0,
+        };
+
+        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 20.0);
+
+        assert_eq!(tracks.len(), 4);
+    }
+
+    #[test]
+    fn test_auto_fill_expansion_minmax() {
+        // repeat(auto-fill, minmax(100px, 1fr)) in 500px container
+        // The definite size is 100px (min), so we get 5 tracks
+        let pattern = AutoRepeatPattern {
+            tracks: vec![TrackDefinition::simple(TrackSize::MinMax(
+                Box::new(TrackSize::Px(100.0)),
+                Box::new(TrackSize::Fr(1.0)),
+            ))],
+            is_auto_fit: false,
+            insert_position: 0,
+        };
+
+        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 0.0);
+
+        assert_eq!(tracks.len(), 5);
+        // Each track should be flexible
+        for track in &tracks {
+            assert!(track.is_flexible);
+            assert_eq!(track.base_size, 100.0);
+        }
+    }
+
+    #[test]
+    fn test_auto_fill_expansion_multiple_tracks() {
+        // repeat(auto-fill, 100px 50px) in 500px container
+        // One repetition = 150px, can fit 3 repetitions = 450px
+        let pattern = AutoRepeatPattern {
+            tracks: vec![
+                TrackDefinition::simple(TrackSize::Px(100.0)),
+                TrackDefinition::simple(TrackSize::Px(50.0)),
+            ],
+            is_auto_fit: false,
+            insert_position: 0,
+        };
+
+        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 0.0);
+
+        // 3 repetitions * 2 tracks = 6 tracks
+        assert_eq!(tracks.len(), 6);
+        assert_eq!(tracks[0].base_size, 100.0);
+        assert_eq!(tracks[1].base_size, 50.0);
+        assert_eq!(tracks[2].base_size, 100.0);
+        assert_eq!(tracks[3].base_size, 50.0);
+    }
+
+    #[test]
+    fn test_auto_fill_minimum_one_repetition() {
+        // repeat(auto-fill, 200px) in 100px container should still create 1 track
+        let pattern = AutoRepeatPattern {
+            tracks: vec![TrackDefinition::simple(TrackSize::Px(200.0))],
+            is_auto_fit: false,
+            insert_position: 0,
+        };
+
+        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 100.0, 0.0);
+
+        // At least 1 repetition per spec
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].base_size, 200.0);
+    }
+
+    #[test]
+    fn test_auto_fit_flag_set() {
+        // auto-fit tracks should have is_auto_fit = true
+        let pattern = AutoRepeatPattern {
+            tracks: vec![TrackDefinition::simple(TrackSize::Px(100.0))],
+            is_auto_fit: true,
+            insert_position: 0,
+        };
+
+        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 0.0);
+
+        assert_eq!(tracks.len(), 5);
+        for track in &tracks {
+            assert!(track.is_auto_fit);
+        }
+    }
+
+    #[test]
+    fn test_auto_fill_with_fr_only() {
+        // repeat(auto-fill, 1fr) - no definite size, should create 1 repetition
+        let pattern = AutoRepeatPattern {
+            tracks: vec![TrackDefinition::simple(TrackSize::Fr(1.0))],
+            is_auto_fit: false,
+            insert_position: 0,
+        };
+
+        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 0.0);
+
+        // With no definite size, we get exactly 1 repetition
+        assert_eq!(tracks.len(), 1);
+        assert!(tracks[0].is_flexible);
+    }
+
+    #[test]
+    fn test_grid_layout_expand_auto_repeats() {
+        // Test that GridLayout properly expands auto-repeat patterns
+        let mut template = GridTemplate::default();
+        template.repeats.push((
+            0,
+            TrackRepeat::AutoFill(vec![TrackDefinition::simple(TrackSize::Px(100.0))]),
+        ));
+
+        let mut grid = GridLayout::new(
+            &template,
+            &GridTemplate::from_sizes(vec![TrackSize::Auto]),
+            &TrackSize::Auto,
+            &TrackSize::Auto,
+            0.0,
+            0.0,
+            GridAutoFlow::Row,
+        );
+
+        // Before expansion, columns should be empty (auto-fill not expanded)
+        assert_eq!(grid.columns.len(), 0);
+
+        // Expand with 500px container width
+        grid.expand_auto_repeats(500.0, 100.0);
+
+        // Now should have 5 columns
+        assert_eq!(grid.columns.len(), 5);
+        for col in &grid.columns {
+            assert_eq!(col.base_size, 100.0);
+        }
+    }
+
+    #[test]
+    fn test_auto_fit_collapse_empty_tracks() {
+        // Test that auto-fit collapses empty tracks
+        let pattern = AutoRepeatPattern {
+            tracks: vec![TrackDefinition::simple(TrackSize::Px(100.0))],
+            is_auto_fit: true,
+            insert_position: 0,
+        };
+
+        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 500.0, 0.0);
+
+        // Should have 5 tracks, all marked as auto-fit
+        assert_eq!(tracks.len(), 5);
+        for track in &tracks {
+            assert!(track.is_auto_fit);
+        }
+    }
+
+    #[test]
+    fn test_auto_fit_collapse_method() {
+        // Create a grid with auto-fit tracks
+        let mut grid = GridLayout {
+            columns: vec![
+                {
+                    let mut t = GridTrack::new(&TrackSize::Px(100.0));
+                    t.is_auto_fit = true;
+                    t
+                },
+                {
+                    let mut t = GridTrack::new(&TrackSize::Px(100.0));
+                    t.is_auto_fit = true;
+                    t
+                },
+                {
+                    let mut t = GridTrack::new(&TrackSize::Px(100.0));
+                    t.is_auto_fit = true;
+                    t
+                },
+            ],
+            rows: vec![GridTrack::new(&TrackSize::Auto)],
+            column_gap: 10.0,
+            row_gap: 10.0,
+            auto_flow: GridAutoFlow::Row,
+            cursor: (0, 0),
+            explicit_columns: 3,
+            explicit_rows: 1,
+            column_auto_repeat: None,
+            row_auto_repeat: None,
+        };
+
+        // Mark only the first and third columns as occupied
+        let column_occupied = vec![true, false, true];
+        grid.collapse_empty_auto_fit_columns(&column_occupied);
+
+        // First column should be intact
+        assert_eq!(grid.columns[0].base_size, 100.0);
+        assert_eq!(grid.columns[0].size, 100.0);
+
+        // Second column (empty) should be collapsed
+        assert_eq!(grid.columns[1].base_size, 0.0);
+        assert_eq!(grid.columns[1].size, 0.0);
+        assert_eq!(grid.columns[1].growth_limit, 0.0);
+
+        // Third column should be intact
+        assert_eq!(grid.columns[2].base_size, 100.0);
+        assert_eq!(grid.columns[2].size, 100.0);
+    }
+
+    #[test]
+    fn test_auto_fit_gap_collapsing() {
+        // Test that gaps around collapsed tracks also collapse
+        // Per CSS spec: "the gutters on either side of it collapse"
+        let mut tracks = vec![
+            {
+                let mut t = GridTrack::new(&TrackSize::Px(100.0));
+                t.is_auto_fit = true;
+                t
+            },
+            {
+                // This one will be collapsed
+                let mut t = GridTrack::new(&TrackSize::Px(100.0));
+                t.is_auto_fit = true;
+                t.base_size = 0.0;
+                t.size = 0.0;
+                t.growth_limit = 0.0;
+                t
+            },
+            {
+                let mut t = GridTrack::new(&TrackSize::Px(100.0));
+                t.is_auto_fit = true;
+                t
+            },
+        ];
+
+        // Size with 20px gap
+        size_grid_tracks(&mut tracks, 500.0, 20.0);
+
+        // First track at position 0
+        assert_eq!(tracks[0].position, 0.0);
+
+        // Second track (collapsed) should be at position 100 (no gap added after first track
+        // because next track is collapsed)
+        assert_eq!(tracks[1].position, 100.0);
+        assert_eq!(tracks[1].size, 0.0);
+
+        // Third track should be at position 100 (no gap because previous was collapsed)
+        // The gutters on EITHER SIDE of a collapsed track collapse
+        assert_eq!(tracks[2].position, 100.0);
+    }
+
+    #[test]
+    fn test_auto_fit_all_collapsed() {
+        // Test when all auto-fit tracks are collapsed
+        let mut tracks = vec![
+            {
+                let mut t = GridTrack::new(&TrackSize::Px(100.0));
+                t.is_auto_fit = true;
+                t.base_size = 0.0;
+                t.size = 0.0;
+                t.growth_limit = 0.0;
+                t
+            },
+            {
+                let mut t = GridTrack::new(&TrackSize::Px(100.0));
+                t.is_auto_fit = true;
+                t.base_size = 0.0;
+                t.size = 0.0;
+                t.growth_limit = 0.0;
+                t
+            },
+        ];
+
+        size_grid_tracks(&mut tracks, 500.0, 20.0);
+
+        // All tracks should be at position 0 with size 0
+        assert_eq!(tracks[0].position, 0.0);
+        assert_eq!(tracks[0].size, 0.0);
+        assert_eq!(tracks[1].position, 0.0);
+        assert_eq!(tracks[1].size, 0.0);
     }
 }

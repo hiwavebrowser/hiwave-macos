@@ -12,10 +12,12 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 
 | Date | Phase | Change | Commit |
 |------|-------|--------|--------|
-| 2026-01-12 | 1.4 | Implemented fit-content() with limit tracking | pending |
-| 2026-01-12 | 1.3 | Added min-content/max-content intrinsic sizing flags | pending |
-| 2026-01-12 | 1.2 | Added percentage track resolution with minmax support | pending |
-| 2026-01-12 | 1.1 | Added `expand_tracks()` to GridTemplate, updated GridLayout to use it | pending |
+| 2026-01-12 | 2.2 | Implemented auto-fit with empty track collapsing and gap handling | pending |
+| 2026-01-12 | 2.1 | Implemented auto-fill expansion with container size calculation | pending |
+| 2026-01-12 | 1.4 | Implemented fit-content() with limit tracking | f309c95 |
+| 2026-01-12 | 1.3 | Added min-content/max-content intrinsic sizing flags | f309c95 |
+| 2026-01-12 | 1.2 | Added percentage track resolution with minmax support | f309c95 |
+| 2026-01-12 | 1.1 | Added `expand_tracks()` to GridTemplate, updated GridLayout to use it | f309c95 |
 | 2026-01-12 | - | Created implementation plan | - |
 | 2026-01-12 | - | Fixed grid auto-placement for partial explicit placement | 33a5560 |
 
@@ -27,7 +29,11 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 - [x] 1.3 Intrinsic sizing (min-content, max-content) ✓
 - [x] 1.4 fit-content(length) proper implementation ✓
 
-**Phase 2: Auto-fill and Auto-fit** - NOT STARTED
+**Phase 2: Auto-fill and Auto-fit** - COMPLETE ✓
+- [x] 2.1 auto-fill implementation ✓
+- [x] 2.2 auto-fit implementation (with empty track collapsing) ✓
+- [x] 2.3 Gap collapsing for empty tracks ✓
+
 **Phase 3: Named Lines and Areas** - NOT STARTED
 **Phase 4: Placement Algorithm Completion** - PARTIALLY COMPLETE (auto-placement fixed)
 **Phase 5: Alignment Properties** - NOT STARTED
@@ -119,19 +125,30 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 ### Phase 2: Auto-fill and Auto-fit
 **Goal:** Dynamic track creation
 
-- [ ] **2.1 auto-fill implementation**
+- [x] **2.1 auto-fill implementation** ✓
   - Calculate how many tracks fit in available space
   - Generate that many tracks
   - Handle minmax() in auto-fill
-  - **Files:** `rustkit-layout/src/grid.rs` (GridLayout::new or separate method)
+  - **Implementation:**
+    - Added `AutoRepeatPattern` struct to store pattern info
+    - Added `column_auto_repeat` and `row_auto_repeat` fields to `GridLayout`
+    - `extract_auto_repeat()` extracts pattern from template
+    - `calculate_auto_repeat_tracks()` calculates repetitions based on container size
+    - `expand_auto_repeats()` called in `layout_grid_container()`
+    - 8 unit tests for auto-fill
 
-- [ ] **2.2 auto-fit implementation**
+- [x] **2.2 auto-fit implementation** ✓
   - Same as auto-fill but collapse empty tracks
   - Collapsed tracks have zero size but exist for placement
+  - **Implementation:**
+    - Added `is_auto_fit` field to `GridTrack`
+    - `collapse_empty_auto_fit_columns()` and `collapse_empty_auto_fit_rows()` methods
+    - Phase 4.5 in `layout_grid_container()` collapses empty tracks
+    - Gap collapsing handled in `size_grid_tracks()` Step 5
+    - 5 unit tests for auto-fit
 
-- [ ] **2.3 Tests for responsive grids**
-  - `repeat(auto-fill, minmax(200px, 1fr))`
-  - `repeat(auto-fit, minmax(200px, 1fr))`
+- [x] **2.3 Tests for responsive grids** ✓
+  - All 13 Phase 2 tests passing
 
 ### Phase 3: Named Lines and Areas
 **Goal:** Full named grid support
@@ -236,7 +253,7 @@ The spec defines a complex multi-step algorithm:
 ### Unit Tests (per feature)
 Each phase should include unit tests for the specific feature.
 
-**Completed tests (22 total):**
+**Completed tests (35 total):**
 
 Phase 1.1 (repeat expansion - rustkit-css):
 - `test_expand_tracks_no_repeat` - Template without repeats
@@ -266,6 +283,23 @@ Phase 1.4 (fit-content - rustkit-layout):
 - `test_track_sizing_fit_content_within_limit` - Content below limit
 - `test_track_sizing_fit_content_at_limit` - Content at/above limit
 
+Phase 2.1 (auto-fill - rustkit-layout):
+- `test_auto_repeat_pattern_creation` - Template with auto-fill returns unexpanded
+- `test_auto_fill_expansion_basic` - Basic auto-fill with fixed tracks
+- `test_auto_fill_expansion_with_gap` - Auto-fill accounting for gaps
+- `test_auto_fill_expansion_minmax` - Auto-fill with minmax(px, 1fr)
+- `test_auto_fill_expansion_multiple_tracks` - Auto-fill pattern with multiple tracks
+- `test_auto_fill_minimum_one_repetition` - At least 1 track when container is too small
+- `test_auto_fill_with_fr_only` - Pure fr tracks create single repetition
+- `test_grid_layout_expand_auto_repeats` - Full integration test
+
+Phase 2.2 (auto-fit - rustkit-layout):
+- `test_auto_fit_flag_set` - Tracks created from auto-fit have flag set
+- `test_auto_fit_collapse_empty_tracks` - Empty tracks collapse to 0
+- `test_auto_fit_collapse_method` - Collapse method works correctly
+- `test_auto_fit_gap_collapsing` - Gaps collapse around empty tracks
+- `test_auto_fit_all_collapsed` - All tracks collapsed case
+
 ### Integration Tests
 Create test HTML files exercising grid features:
 ```
@@ -294,12 +328,12 @@ Run against Chrome baselines to validate visual correctness.
 
 ## Priority Order
 
-1. **Phase 1** - Foundation (most impactful for basic grids) ← CURRENT
-2. **Phase 6** - Track sizing (correctness)
-3. **Phase 4** - Placement (correctness)
-4. **Phase 2** - Auto-fill/fit (responsive layouts)
-5. **Phase 3** - Named lines (developer ergonomics)
-6. **Phase 5** - Alignment (polish)
+1. ~~**Phase 1** - Foundation (most impactful for basic grids)~~ ✓ COMPLETE
+2. ~~**Phase 2** - Auto-fill/fit (responsive layouts)~~ ✓ COMPLETE
+3. **Phase 3** - Named lines (developer ergonomics) ← NEXT
+4. **Phase 4** - Placement (dense packing, named spans)
+5. **Phase 5** - Alignment (polish)
+6. **Phase 6** - Track sizing (spec compliance)
 7. **Phase 7** - Edge cases (completeness)
 
 ---
