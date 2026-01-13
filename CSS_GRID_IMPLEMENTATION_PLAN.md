@@ -12,7 +12,8 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 
 | Date | Phase | Change | Commit |
 |------|-------|--------|--------|
-| 2026-01-12 | 3.1 | Implemented named line resolution | pending |
+| 2026-01-12 | 3.2-3.3 | Implemented grid-template-areas and implicit line names | 460e187 |
+| 2026-01-12 | 3.1 | Implemented named line resolution | 40f083b |
 | 2026-01-12 | 2.2 | Implemented auto-fit with empty track collapsing and gap handling | 8fbed45 |
 | 2026-01-12 | 2.1 | Implemented auto-fill expansion with container size calculation | 8fbed45 |
 | 2026-01-12 | 1.4 | Implemented fit-content() with limit tracking | f309c95 |
@@ -35,8 +36,10 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 - [x] 2.2 auto-fit implementation (with empty track collapsing) ✓
 - [x] 2.3 Gap collapsing for empty tracks ✓
 
-**Phase 3: Named Lines and Areas** - IN PROGRESS
+**Phase 3: Named Lines and Areas** - COMPLETE ✓
 - [x] 3.1 Named line resolution ✓
+- [x] 3.2 grid-template-areas integration ✓
+- [x] 3.3 Implicit line names from areas ✓
 **Phase 4: Placement Algorithm Completion** - PARTIALLY COMPLETE (auto-placement fixed)
 **Phase 5: Alignment Properties** - NOT STARTED
 **Phase 6: Track Sizing Algorithm** - NOT STARTED
@@ -73,7 +76,7 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 1. ~~**repeat() function expansion** - parsed but not expanded~~ ✓ DONE (Phase 1.1)
 2. ~~**auto-fill/auto-fit** - parsed, marked for layout-time expansion~~ ✓ DONE (Phase 2)
 3. ~~**Named line resolution** - GridLine::Name not resolved~~ ✓ DONE (Phase 3.1)
-4. **grid-template-areas integration** - areas parsed but not used in placement
+4. ~~**grid-template-areas integration** - areas parsed but not used in placement~~ ✓ DONE (Phase 3.2-3.3)
 5. ~~**min-content/max-content intrinsic sizing** - not properly computed~~ ✓ DONE (Phase 1.3)
 6. **Subgrid** - Level 2 feature, out of scope
 7. **justify-content, align-content** - grid container alignment
@@ -165,13 +168,21 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
     - Updated `layout_grid_container()` to use named line resolution
     - 4 unit tests for named line resolution
 
-- [ ] **3.2 grid-template-areas integration**
+- [x] **3.2 grid-template-areas integration** ✓
   - Generate implicit named lines from areas
   - Place items using `grid-area: header`
-  - Validate area rectangularity
+  - **Implementation:**
+    - Added `template_areas` field to GridLayout
+    - Added `set_template_areas()` and `get_area()` methods
+    - Updated `find_column_line_by_name()` and `find_row_line_by_name()` to check area names
+    - Added `resolve_column_start_line()`, `resolve_column_end_line()` etc for position-aware resolve
+    - Updated `set_placement_with_grid()` to use position-aware resolve
+    - Updated `layout_grid_container()` to set template_areas from style
+    - 4 unit tests for template areas
 
-- [ ] **3.3 Implicit line names from areas**
+- [x] **3.3 Implicit line names from areas** ✓
   - Area "header" creates lines "header-start" and "header-end"
+  - Implemented as part of 3.2 - implicit line name lookup checks template-areas
 
 ### Phase 4: Placement Algorithm Completion
 **Goal:** Spec-compliant item placement
@@ -259,7 +270,7 @@ The spec defines a complex multi-step algorithm:
 ### Unit Tests (per feature)
 Each phase should include unit tests for the specific feature.
 
-**Completed tests (39 total):**
+**Completed tests (43 total):**
 
 Phase 1.1 (repeat expansion - rustkit-css):
 - `test_expand_tracks_no_repeat` - Template without repeats
@@ -312,6 +323,12 @@ Phase 3.1 (named lines - rustkit-layout):
 - `test_set_placement_with_named_lines` - Place item using named lines
 - `test_named_line_mixed_with_numbers` - Mix named lines and numbers
 
+Phase 3.2-3.3 (template areas - rustkit-layout):
+- `test_grid_template_areas_placement` - Area lookup and coordinates
+- `test_placement_with_area_name` - Place item using grid-area: name
+- `test_implicit_line_names_from_areas` - area-start/area-end implicit lines
+- `test_placement_with_implicit_line_names` - Place using header-start/header-end
+
 ### Integration Tests
 Create test HTML files exercising grid features:
 ```
@@ -342,7 +359,7 @@ Run against Chrome baselines to validate visual correctness.
 
 1. ~~**Phase 1** - Foundation (most impactful for basic grids)~~ ✓ COMPLETE
 2. ~~**Phase 2** - Auto-fill/fit (responsive layouts)~~ ✓ COMPLETE
-3. **Phase 3** - Named lines (developer ergonomics) ← IN PROGRESS (3.1 done)
+3. ~~**Phase 3** - Named lines (developer ergonomics)~~ ✓ COMPLETE
 4. **Phase 4** - Placement (dense packing, named spans)
 5. **Phase 5** - Alignment (polish)
 6. **Phase 6** - Track sizing (spec compliance)

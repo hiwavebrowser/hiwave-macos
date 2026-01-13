@@ -19,7 +19,8 @@
 
 use rustkit_css::{
     AlignItems, AlignSelf, BoxSizing, Display, GridAutoFlow, GridLine, GridPlacement,
-    GridTemplate, JustifyItems, JustifySelf, Length, TrackDefinition, TrackRepeat, TrackSize,
+    GridTemplate, GridTemplateAreas, JustifyItems, JustifySelf, Length, TrackDefinition,
+    TrackRepeat, TrackSize,
 };
 use tracing::{debug, trace};
 
@@ -480,8 +481,11 @@ impl<'a> GridItem<'a> {
         self.auto_row = true;
 
         // Resolve column placement using grid's named line lookup
-        let col_start = grid.resolve_column_line(&placement.column_start);
-        let col_end = grid.resolve_column_line(&placement.column_end);
+        // Use position-aware resolve to correctly handle area names:
+        // - For start: area name returns area.column_start
+        // - For end: area name returns area.column_end
+        let col_start = grid.resolve_column_start_line(&placement.column_start);
+        let col_end = grid.resolve_column_end_line(&placement.column_end);
 
         match (col_start, col_end) {
             // Both start and end are explicit (number or resolved name)
@@ -517,9 +521,9 @@ impl<'a> GridItem<'a> {
             }
         }
 
-        // Resolve row placement
-        let row_start = grid.resolve_row_line(&placement.row_start);
-        let row_end = grid.resolve_row_line(&placement.row_end);
+        // Resolve row placement using position-aware resolve
+        let row_start = grid.resolve_row_start_line(&placement.row_start);
+        let row_end = grid.resolve_row_end_line(&placement.row_end);
 
         match (row_start, row_end) {
             // Both start and end are explicit
@@ -599,6 +603,8 @@ pub struct GridLayout {
     pub column_auto_repeat: Option<AutoRepeatPattern>,
     /// Pending auto-repeat for rows (resolved at layout time).
     pub row_auto_repeat: Option<AutoRepeatPattern>,
+    /// Template areas for named area placement.
+    pub template_areas: Option<GridTemplateAreas>,
 }
 
 impl GridLayout {
@@ -658,7 +664,18 @@ impl GridLayout {
             explicit_rows,
             column_auto_repeat,
             row_auto_repeat,
+            template_areas: None,
         }
+    }
+
+    /// Set template areas for named area placement.
+    pub fn set_template_areas(&mut self, areas: Option<GridTemplateAreas>) {
+        self.template_areas = areas;
+    }
+
+    /// Get an area by name from template-areas.
+    pub fn get_area(&self, name: &str) -> Option<&rustkit_css::GridArea> {
+        self.template_areas.as_ref().and_then(|ta| ta.get_area(name))
     }
 
     /// Extract auto-repeat pattern from template.
@@ -899,25 +916,75 @@ impl GridLayout {
     /// Line names are stored on the track that follows them, so line N
     /// corresponds to track N-1's line_names (0-indexed).
     /// Returns the 1-based line number if found.
+    ///
+    /// Also checks implicit line names from template-areas:
+    /// - "area-name-start" → column_start of the named area
+    /// - "area-name-end" → column_end of the named area
     pub fn find_column_line_by_name(&self, name: &str) -> Option<i32> {
+        // First check explicit line names on tracks
         for (track_idx, track) in self.columns.iter().enumerate() {
             // Line before track at index `track_idx` is line number `track_idx + 1` (1-based)
             if track.line_names.iter().any(|n| n == name) {
                 return Some((track_idx + 1) as i32);
             }
         }
-        // Also check the last line (after all tracks)
-        // This would require storing line names at the end, which we don't currently do
+
+        // Check implicit line names from template-areas
+        if let Some(ref areas) = self.template_areas {
+            // Check for "area-start" pattern
+            if let Some(area_name) = name.strip_suffix("-start") {
+                if let Some(area) = areas.get_area(area_name) {
+                    return Some(area.column_start);
+                }
+            }
+            // Check for "area-end" pattern
+            if let Some(area_name) = name.strip_suffix("-end") {
+                if let Some(area) = areas.get_area(area_name) {
+                    return Some(area.column_end);
+                }
+            }
+            // Check if the name itself is an area name (returns the start line)
+            if let Some(area) = areas.get_area(name) {
+                return Some(area.column_start);
+            }
+        }
+
         None
     }
 
     /// Find a row line by name.
+    ///
+    /// Also checks implicit line names from template-areas:
+    /// - "area-name-start" → row_start of the named area
+    /// - "area-name-end" → row_end of the named area
     pub fn find_row_line_by_name(&self, name: &str) -> Option<i32> {
+        // First check explicit line names on tracks
         for (track_idx, track) in self.rows.iter().enumerate() {
             if track.line_names.iter().any(|n| n == name) {
                 return Some((track_idx + 1) as i32);
             }
         }
+
+        // Check implicit line names from template-areas
+        if let Some(ref areas) = self.template_areas {
+            // Check for "area-start" pattern
+            if let Some(area_name) = name.strip_suffix("-start") {
+                if let Some(area) = areas.get_area(area_name) {
+                    return Some(area.row_start);
+                }
+            }
+            // Check for "area-end" pattern
+            if let Some(area_name) = name.strip_suffix("-end") {
+                if let Some(area) = areas.get_area(area_name) {
+                    return Some(area.row_end);
+                }
+            }
+            // Check if the name itself is an area name (returns the start line)
+            if let Some(area) = areas.get_area(name) {
+                return Some(area.row_start);
+            }
+        }
+
         None
     }
 
@@ -928,14 +995,43 @@ impl GridLayout {
     /// - is_auto: whether this needs auto-placement
     /// - span: optional span count
     pub fn resolve_column_line(&self, line: &GridLine) -> (i32, bool, Option<u32>) {
+        self.resolve_column_line_impl(line, true) // Default to start position
+    }
+
+    /// Resolve a GridLine to a line number for column start position.
+    /// For area names, returns the column_start of the area.
+    pub fn resolve_column_start_line(&self, line: &GridLine) -> (i32, bool, Option<u32>) {
+        self.resolve_column_line_impl(line, true)
+    }
+
+    /// Resolve a GridLine to a line number for column end position.
+    /// For area names, returns the column_end of the area.
+    pub fn resolve_column_end_line(&self, line: &GridLine) -> (i32, bool, Option<u32>) {
+        self.resolve_column_line_impl(line, false)
+    }
+
+    fn resolve_column_line_impl(&self, line: &GridLine, is_start: bool) -> (i32, bool, Option<u32>) {
         match line {
             GridLine::Auto => (0, true, None),
             GridLine::Number(n) => (*n, false, None),
             GridLine::Name(name) => {
+                // First check for explicit line names
+                if let Some(n) = self.find_explicit_column_line_by_name(name) {
+                    return (n, false, None);
+                }
+                // Then check if this is an area name
+                if let Some(area) = self.get_area(name) {
+                    let line_num = if is_start {
+                        area.column_start
+                    } else {
+                        area.column_end
+                    };
+                    return (line_num, false, None);
+                }
+                // Then check for implicit line names (area-start, area-end)
                 if let Some(n) = self.find_column_line_by_name(name) {
                     (n, false, None)
                 } else {
-                    // Name not found, treat as auto
                     trace!("Column line name '{}' not found, using auto", name);
                     (0, true, None)
                 }
@@ -953,12 +1049,62 @@ impl GridLayout {
         }
     }
 
+    /// Find explicit column line by name (only checks track line_names, not area names).
+    fn find_explicit_column_line_by_name(&self, name: &str) -> Option<i32> {
+        for (track_idx, track) in self.columns.iter().enumerate() {
+            if track.line_names.iter().any(|n| n == name) {
+                return Some((track_idx + 1) as i32);
+            }
+        }
+        None
+    }
+
+    /// Find explicit row line by name (only checks track line_names, not area names).
+    fn find_explicit_row_line_by_name(&self, name: &str) -> Option<i32> {
+        for (track_idx, track) in self.rows.iter().enumerate() {
+            if track.line_names.iter().any(|n| n == name) {
+                return Some((track_idx + 1) as i32);
+            }
+        }
+        None
+    }
+
     /// Resolve a GridLine to a line number for rows.
     pub fn resolve_row_line(&self, line: &GridLine) -> (i32, bool, Option<u32>) {
+        self.resolve_row_line_impl(line, true) // Default to start position
+    }
+
+    /// Resolve a GridLine to a line number for row start position.
+    /// For area names, returns the row_start of the area.
+    pub fn resolve_row_start_line(&self, line: &GridLine) -> (i32, bool, Option<u32>) {
+        self.resolve_row_line_impl(line, true)
+    }
+
+    /// Resolve a GridLine to a line number for row end position.
+    /// For area names, returns the row_end of the area.
+    pub fn resolve_row_end_line(&self, line: &GridLine) -> (i32, bool, Option<u32>) {
+        self.resolve_row_line_impl(line, false)
+    }
+
+    fn resolve_row_line_impl(&self, line: &GridLine, is_start: bool) -> (i32, bool, Option<u32>) {
         match line {
             GridLine::Auto => (0, true, None),
             GridLine::Number(n) => (*n, false, None),
             GridLine::Name(name) => {
+                // First check for explicit line names
+                if let Some(n) = self.find_explicit_row_line_by_name(name) {
+                    return (n, false, None);
+                }
+                // Then check if this is an area name
+                if let Some(area) = self.get_area(name) {
+                    let line_num = if is_start {
+                        area.row_start
+                    } else {
+                        area.row_end
+                    };
+                    return (line_num, false, None);
+                }
+                // Then check for implicit line names (area-start, area-end)
                 if let Some(n) = self.find_row_line_by_name(name) {
                     (n, false, None)
                 } else {
@@ -1140,6 +1286,9 @@ pub fn layout_grid_container(
         row_gap,
         style.grid_auto_flow,
     );
+
+    // Set template areas for named area placement
+    grid.set_template_areas(style.grid_template_areas.clone());
 
     // Expand auto-fill/auto-fit patterns now that we have container size
     grid.expand_auto_repeats(container_width, container_height);
@@ -2448,6 +2597,7 @@ mod tests {
             explicit_rows: 1,
             column_auto_repeat: None,
             row_auto_repeat: None,
+            template_areas: None,
         };
 
         // Mark only the first and third columns as occupied
@@ -2573,6 +2723,7 @@ mod tests {
             explicit_rows: 1,
             column_auto_repeat: None,
             row_auto_repeat: None,
+            template_areas: None,
         };
 
         // Find lines by name
@@ -2608,6 +2759,7 @@ mod tests {
             explicit_rows: 1,
             column_auto_repeat: None,
             row_auto_repeat: None,
+            template_areas: None,
         };
 
         // Test resolve_column_line with named line
@@ -2666,6 +2818,7 @@ mod tests {
             explicit_rows: 2,
             column_auto_repeat: None,
             row_auto_repeat: None,
+            template_areas: None,
         };
 
         let style = ComputedStyle::new();
@@ -2717,6 +2870,7 @@ mod tests {
             explicit_rows: 1,
             column_auto_repeat: None,
             row_auto_repeat: None,
+            template_areas: None,
         };
 
         let style = ComputedStyle::new();
@@ -2737,5 +2891,194 @@ mod tests {
         assert_eq!(item.column_start, 1);
         assert_eq!(item.column_end, 4);
         assert_eq!(item.column_span, 3);
+    }
+
+    // ==================== Phase 3.2: Template Areas Tests ====================
+
+    #[test]
+    fn test_grid_template_areas_placement() {
+        // Create template areas
+        let areas = GridTemplateAreas::parse(
+            "\"header header header\"
+             \"nav main main\"
+             \"footer footer footer\""
+        ).unwrap();
+
+        // Create a grid with the template areas
+        let grid = GridLayout {
+            columns: vec![
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(200.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+            ],
+            rows: vec![
+                GridTrack::new(&TrackSize::Px(50.0)),
+                GridTrack::new(&TrackSize::Px(200.0)),
+                GridTrack::new(&TrackSize::Px(50.0)),
+            ],
+            column_gap: 0.0,
+            row_gap: 0.0,
+            auto_flow: GridAutoFlow::Row,
+            cursor: (0, 0),
+            explicit_columns: 3,
+            explicit_rows: 3,
+            column_auto_repeat: None,
+            row_auto_repeat: None,
+            template_areas: Some(areas),
+        };
+
+        // Test area lookup
+        let header = grid.get_area("header").unwrap();
+        assert_eq!(header.column_start, 1);
+        assert_eq!(header.column_end, 4);
+        assert_eq!(header.row_start, 1);
+        assert_eq!(header.row_end, 2);
+
+        let main = grid.get_area("main").unwrap();
+        assert_eq!(main.column_start, 2);
+        assert_eq!(main.column_end, 4);
+        assert_eq!(main.row_start, 2);
+        assert_eq!(main.row_end, 3);
+    }
+
+    #[test]
+    fn test_placement_with_area_name() {
+        // Create template areas
+        let areas = GridTemplateAreas::parse(
+            "\"header header\"
+             \"main sidebar\""
+        ).unwrap();
+
+        let grid = GridLayout {
+            columns: vec![
+                GridTrack::new(&TrackSize::Px(200.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+            ],
+            rows: vec![
+                GridTrack::new(&TrackSize::Px(50.0)),
+                GridTrack::new(&TrackSize::Px(200.0)),
+            ],
+            column_gap: 0.0,
+            row_gap: 0.0,
+            auto_flow: GridAutoFlow::Row,
+            cursor: (0, 0),
+            explicit_columns: 2,
+            explicit_rows: 2,
+            column_auto_repeat: None,
+            row_auto_repeat: None,
+            template_areas: Some(areas),
+        };
+
+        let style = ComputedStyle::new();
+        let layout_box = LayoutBox::new(BoxType::Block, style);
+        let mut item = GridItem::new(&layout_box);
+
+        // Place using grid-area: header (expands to header / header / header / header)
+        // which means grid-column: header / header; grid-row: header / header
+        // For start position, "header" resolves to column_start=1, row_start=1
+        // For end position, "header" resolves to column_end=3, row_end=2
+        let placement = GridPlacement {
+            column_start: GridLine::Name("header".to_string()),
+            column_end: GridLine::Name("header".to_string()),
+            row_start: GridLine::Name("header".to_string()),
+            row_end: GridLine::Name("header".to_string()),
+        };
+        item.set_placement_with_grid(&placement, &grid);
+
+        assert!(!item.auto_column);
+        assert!(!item.auto_row);
+        assert_eq!(item.column_start, 1); // header column_start
+        assert_eq!(item.column_end, 3);   // header column_end
+        assert_eq!(item.row_start, 1);    // header row_start
+        assert_eq!(item.row_end, 2);      // header row_end
+    }
+
+    #[test]
+    fn test_implicit_line_names_from_areas() {
+        // Create template areas
+        let areas = GridTemplateAreas::parse(
+            "\"header header\"
+             \"main sidebar\""
+        ).unwrap();
+
+        let grid = GridLayout {
+            columns: vec![
+                GridTrack::new(&TrackSize::Px(200.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+            ],
+            rows: vec![
+                GridTrack::new(&TrackSize::Px(50.0)),
+                GridTrack::new(&TrackSize::Px(200.0)),
+            ],
+            column_gap: 0.0,
+            row_gap: 0.0,
+            auto_flow: GridAutoFlow::Row,
+            cursor: (0, 0),
+            explicit_columns: 2,
+            explicit_rows: 2,
+            column_auto_repeat: None,
+            row_auto_repeat: None,
+            template_areas: Some(areas),
+        };
+
+        // Test implicit line names
+        assert_eq!(grid.find_column_line_by_name("header-start"), Some(1));
+        assert_eq!(grid.find_column_line_by_name("header-end"), Some(3));
+        assert_eq!(grid.find_row_line_by_name("header-start"), Some(1));
+        assert_eq!(grid.find_row_line_by_name("header-end"), Some(2));
+
+        assert_eq!(grid.find_column_line_by_name("main-start"), Some(1));
+        assert_eq!(grid.find_column_line_by_name("main-end"), Some(2));
+        assert_eq!(grid.find_column_line_by_name("sidebar-start"), Some(2));
+        assert_eq!(grid.find_column_line_by_name("sidebar-end"), Some(3));
+    }
+
+    #[test]
+    fn test_placement_with_implicit_line_names() {
+        // Create template areas
+        let areas = GridTemplateAreas::parse(
+            "\"header header\"
+             \"nav content\""
+        ).unwrap();
+
+        let grid = GridLayout {
+            columns: vec![
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(200.0)),
+            ],
+            rows: vec![
+                GridTrack::new(&TrackSize::Px(50.0)),
+                GridTrack::new(&TrackSize::Px(200.0)),
+            ],
+            column_gap: 0.0,
+            row_gap: 0.0,
+            auto_flow: GridAutoFlow::Row,
+            cursor: (0, 0),
+            explicit_columns: 2,
+            explicit_rows: 2,
+            column_auto_repeat: None,
+            row_auto_repeat: None,
+            template_areas: Some(areas),
+        };
+
+        let style = ComputedStyle::new();
+        let layout_box = LayoutBox::new(BoxType::Block, style);
+        let mut item = GridItem::new(&layout_box);
+
+        // Place using implicit line names: grid-column: header-start / header-end
+        let placement = GridPlacement {
+            column_start: GridLine::Name("header-start".to_string()),
+            column_end: GridLine::Name("header-end".to_string()),
+            row_start: GridLine::Name("content-start".to_string()),
+            row_end: GridLine::Name("content-end".to_string()),
+        };
+        item.set_placement_with_grid(&placement, &grid);
+
+        assert!(!item.auto_column);
+        assert!(!item.auto_row);
+        assert_eq!(item.column_start, 1); // header-start
+        assert_eq!(item.column_end, 3);   // header-end
+        assert_eq!(item.row_start, 2);    // content-start
+        assert_eq!(item.row_end, 3);      // content-end
     }
 }
