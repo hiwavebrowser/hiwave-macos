@@ -12,6 +12,7 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 
 | Date | Phase | Change | Commit |
 |------|-------|--------|--------|
+| 2026-01-12 | 4.1-4.4 | Implemented dense packing, span-to-name, order property, edge cases | uncommitted |
 | 2026-01-12 | 3.2-3.3 | Implemented grid-template-areas and implicit line names | 460e187 |
 | 2026-01-12 | 3.1 | Implemented named line resolution | 40f083b |
 | 2026-01-12 | 2.2 | Implemented auto-fit with empty track collapsing and gap handling | 8fbed45 |
@@ -40,7 +41,13 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 - [x] 3.1 Named line resolution ✓
 - [x] 3.2 grid-template-areas integration ✓
 - [x] 3.3 Implicit line names from areas ✓
-**Phase 4: Placement Algorithm Completion** - PARTIALLY COMPLETE (auto-placement fixed)
+
+**Phase 4: Placement Algorithm Completion** - COMPLETE ✓
+- [x] 4.1 Dense packing algorithm ✓
+- [x] 4.2 Span to named line (SpanName resolution) ✓
+- [x] 4.3 Order property (sort items before placement) ✓
+- [x] 4.4 Placement edge cases (implicit tracks, overlapping) ✓
+
 **Phase 5: Alignment Properties** - NOT STARTED
 **Phase 6: Track Sizing Algorithm** - NOT STARTED
 **Phase 7: Edge Cases and Polish** - NOT STARTED
@@ -191,21 +198,40 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 - Four-phase placement (explicit both, column-only, row-only, full auto)
 - `auto_row` and `auto_column` tracking on GridItem
 
-- [ ] **4.1 Dense packing algorithm**
+- [x] **4.1 Dense packing algorithm** ✓
   - Implement `grid-auto-flow: row dense` / `column dense`
   - Backfill earlier gaps
+  - **Implementation:**
+    - Added `find_next_cell_dense()` that starts from (0,0) instead of cursor
+    - Refactored `find_next_cell()` to use shared `find_next_cell_impl()` with dense param
+    - Updated Phase 4 auto-placement to use dense method when `auto_flow.is_dense()`
+    - 3 unit tests for dense packing
 
-- [ ] **4.2 span to named line**
+- [x] **4.2 span to named line** ✓
   - `grid-column: span header` - span until "header" line
   - `GridLine::SpanName` handling
+  - **Implementation:**
+    - Updated `SpanName` resolution to return target line number (not span count)
+    - Added support for area names in SpanName (position-aware: start vs end)
+    - Added support for implicit line names (e.g., "sidebar-end")
+    - 3 unit tests for SpanName
 
-- [ ] **4.3 order property**
+- [x] **4.3 order property** ✓
   - Sort items by order before placement
   - Maintain DOM order for equal order values
+  - **Implementation:**
+    - Added `order()` method to GridItem (reads from layout_box.style.order)
+    - Added stable sort by order before placement phases
+    - 2 unit tests for order sorting
 
-- [ ] **4.4 Placement edge cases**
+- [x] **4.4 Placement edge cases** ✓
   - Items placed beyond explicit grid
   - Overlapping items (z-index consideration)
+  - **Implementation:**
+    - Verified `ensure_tracks()` adds implicit tracks correctly
+    - Verified overlapping explicitly-placed items are allowed
+    - Verified negative line numbers are preserved for later resolution
+    - 3 unit tests for edge cases
 
 ### Phase 5: Alignment Properties
 **Goal:** Full alignment support

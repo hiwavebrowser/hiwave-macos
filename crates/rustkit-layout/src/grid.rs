@@ -217,6 +217,12 @@ impl<'a> GridItem<'a> {
         !self.auto_column && !self.auto_row
     }
 
+    /// Get the order property value for this item.
+    /// Used for sorting items before auto-placement.
+    pub fn order(&self) -> i32 {
+        self.layout_box.style.order
+    }
+
     /// Get the item's contribution to row sizing.
     /// This considers explicit heights, min-heights, and intrinsic content.
     pub fn get_height_contribution(&self, container_height: f32) -> f32 {
@@ -1038,9 +1044,29 @@ impl GridLayout {
             }
             GridLine::Span(count) => (0, true, Some(*count)),
             GridLine::SpanName(name) => {
-                // Span to the named line
+                // SpanName resolves to the target line number.
+                // Per CSS Grid spec, `span <name>` means "span to the named line".
+                // The actual span count is calculated by set_placement_with_grid as (end - start).
+                // We also check area names (e.g., "span header" finds header-start or header-end).
+
+                // First check explicit line names
+                if let Some(n) = self.find_explicit_column_line_by_name(name) {
+                    return (n, false, None);
+                }
+                // Then check if this is an area name
+                if let Some(area) = self.get_area(name) {
+                    // For SpanName used at end position, return the area's end
+                    // For SpanName used at start position, return the area's start
+                    let line_num = if is_start {
+                        area.column_start
+                    } else {
+                        area.column_end
+                    };
+                    return (line_num, false, None);
+                }
+                // Then check implicit line names (area-start, area-end)
                 if let Some(n) = self.find_column_line_by_name(name) {
-                    (n, false, Some(1)) // Span=1 means span to this line
+                    (n, false, None)
                 } else {
                     trace!("Column span name '{}' not found, using span 1", name);
                     (0, true, Some(1))
@@ -1114,8 +1140,25 @@ impl GridLayout {
             }
             GridLine::Span(count) => (0, true, Some(*count)),
             GridLine::SpanName(name) => {
+                // SpanName resolves to the target line number.
+                // Per CSS Grid spec, `span <name>` means "span to the named line".
+
+                // First check explicit line names
+                if let Some(n) = self.find_explicit_row_line_by_name(name) {
+                    return (n, false, None);
+                }
+                // Then check if this is an area name
+                if let Some(area) = self.get_area(name) {
+                    let line_num = if is_start {
+                        area.row_start
+                    } else {
+                        area.row_end
+                    };
+                    return (line_num, false, None);
+                }
+                // Then check implicit line names (area-start, area-end)
                 if let Some(n) = self.find_row_line_by_name(name) {
-                    (n, false, Some(1))
+                    (n, false, None)
                 } else {
                     trace!("Row span name '{}' not found, using span 1", name);
                     (0, true, Some(1))
@@ -1125,8 +1168,22 @@ impl GridLayout {
     }
 
     /// Find next available cell for auto-placement.
+    ///
+    /// For sparse packing (default), uses the cursor position.
+    /// For dense packing, starts from (0,0) to backfill gaps.
     pub fn find_next_cell(&self, col_span: usize, row_span: usize, occupied: &[Vec<bool>]) -> (usize, usize) {
-        let (mut col, mut row) = self.cursor;
+        self.find_next_cell_impl(col_span, row_span, occupied, false)
+    }
+
+    /// Find next available cell with dense packing (backfill gaps).
+    pub fn find_next_cell_dense(&self, col_span: usize, row_span: usize, occupied: &[Vec<bool>]) -> (usize, usize) {
+        self.find_next_cell_impl(col_span, row_span, occupied, true)
+    }
+
+    fn find_next_cell_impl(&self, col_span: usize, row_span: usize, occupied: &[Vec<bool>], dense: bool) -> (usize, usize) {
+        // For dense packing, always start from (0,0) to backfill gaps
+        // For sparse packing, start from cursor position
+        let (mut col, mut row) = if dense { (0, 0) } else { self.cursor };
 
         if self.auto_flow.is_row() {
             // Row-major placement
@@ -1333,6 +1390,11 @@ pub fn layout_grid_container(
         }
     };
 
+    // Sort items by order property (stable sort to preserve document order for equal values).
+    // Per CSS Grid spec, items are placed in "order-modified document order".
+    // Items with lower order values are placed before items with higher order values.
+    items.sort_by_key(|item| item.order());
+
     // Phase 1: Place items with explicit placement in BOTH dimensions
     let mut occupied: Vec<Vec<bool>> = Vec::new();
 
@@ -1501,7 +1563,13 @@ pub fn layout_grid_container(
         );
 
         // Find next available position
-        let (col, row) = grid.find_next_cell(col_span, row_span, &occupied);
+        // For dense packing, backfill gaps by searching from (0,0)
+        // For sparse packing (default), continue from cursor
+        let (col, row) = if grid.auto_flow.is_dense() {
+            grid.find_next_cell_dense(col_span, row_span, &occupied)
+        } else {
+            grid.find_next_cell(col_span, row_span, &occupied)
+        };
 
         // Ensure tracks exist
         grid.ensure_tracks(col + col_span, row + row_span, &style.grid_auto_columns, &style.grid_auto_rows);
@@ -1533,7 +1601,9 @@ pub fn layout_grid_container(
         item.column_span = col_span as u32;
         item.row_span = row_span as u32;
 
-        // Update cursor
+        // Update cursor (for sparse packing, this is used for the next item)
+        // For dense packing, the cursor is not used but we still update it
+        // to maintain consistency
         grid.cursor = if grid.auto_flow.is_row() {
             (col + col_span, row)
         } else {
@@ -1541,8 +1611,8 @@ pub fn layout_grid_container(
         };
 
         trace!(
-            "Auto-placed item at ({}, {}) span ({}, {})",
-            col, row, col_span, row_span
+            "Auto-placed item at ({}, {}) span ({}, {}) dense={}",
+            col, row, col_span, row_span, grid.auto_flow.is_dense()
         );
     }
 
@@ -3080,5 +3150,535 @@ mod tests {
         assert_eq!(item.column_end, 3);   // header-end
         assert_eq!(item.row_start, 2);    // content-start
         assert_eq!(item.row_end, 3);      // content-end
+    }
+
+    // ==================== Phase 4: Placement Algorithm Tests ====================
+
+    #[test]
+    fn test_dense_packing_backfills_gaps() {
+        // Test that dense packing fills gaps left by earlier items
+        // Grid: 3 columns, auto rows
+        // Item 1: spans 2 columns (occupies cols 0-1)
+        // Item 2: spans 1 column (should go to col 2 in sparse, col 2 in dense)
+        // Item 3: spans 2 columns (in sparse: new row; in dense: fills row 0 cols 0-1 if gap exists)
+
+        let grid = GridLayout {
+            columns: vec![
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+            ],
+            rows: vec![GridTrack::new(&TrackSize::Auto)],
+            column_gap: 0.0,
+            row_gap: 0.0,
+            auto_flow: GridAutoFlow::RowDense,
+            cursor: (0, 0),
+            explicit_columns: 3,
+            explicit_rows: 1,
+            column_auto_repeat: None,
+            row_auto_repeat: None,
+            template_areas: None,
+        };
+
+        // Simulate occupied grid:
+        // Row 0: [X, X, _] (item spanning cols 0-1)
+        let occupied = vec![
+            vec![true, true, false],
+        ];
+
+        // Find cell for 1-column item - should go to col 2
+        let (col, row) = grid.find_next_cell_dense(1, 1, &occupied);
+        assert_eq!((col, row), (2, 0), "1-col item should fill col 2 in row 0");
+    }
+
+    #[test]
+    fn test_dense_packing_vs_sparse() {
+        // Compare dense vs sparse packing behavior
+        let grid_sparse = GridLayout {
+            columns: vec![
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+            ],
+            rows: vec![GridTrack::new(&TrackSize::Auto)],
+            column_gap: 0.0,
+            row_gap: 0.0,
+            auto_flow: GridAutoFlow::Row, // Sparse (default)
+            cursor: (2, 0), // Cursor at col 2, row 0
+            explicit_columns: 3,
+            explicit_rows: 1,
+            column_auto_repeat: None,
+            row_auto_repeat: None,
+            template_areas: None,
+        };
+
+        let grid_dense = GridLayout {
+            columns: vec![
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+            ],
+            rows: vec![GridTrack::new(&TrackSize::Auto)],
+            column_gap: 0.0,
+            row_gap: 0.0,
+            auto_flow: GridAutoFlow::RowDense,
+            cursor: (2, 0), // Same cursor
+            explicit_columns: 3,
+            explicit_rows: 1,
+            column_auto_repeat: None,
+            row_auto_repeat: None,
+            template_areas: None,
+        };
+
+        // Occupied: col 0 taken, col 1 free, col 2 cursor position
+        let occupied = vec![
+            vec![true, false, false],
+        ];
+
+        // Sparse: starts from cursor (2, 0), wraps to next row since col 2 + 1 col = 3 > 3
+        // Actually, col 2 fits a 1-col item
+        let (sparse_col, sparse_row) = grid_sparse.find_next_cell(1, 1, &occupied);
+
+        // Dense: starts from (0, 0), finds col 1 is free
+        let (dense_col, dense_row) = grid_dense.find_next_cell_dense(1, 1, &occupied);
+
+        // Sparse starts at cursor (2,0), finds col 2 available
+        assert_eq!((sparse_col, sparse_row), (2, 0), "Sparse should use cursor position (col 2)");
+
+        // Dense starts at (0,0), finds first free cell at col 1
+        assert_eq!((dense_col, dense_row), (1, 0), "Dense should backfill to col 1");
+    }
+
+    #[test]
+    fn test_dense_packing_column_flow() {
+        // Test dense packing with column flow
+        let grid = GridLayout {
+            columns: vec![GridTrack::new(&TrackSize::Auto)],
+            rows: vec![
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+            ],
+            column_gap: 0.0,
+            row_gap: 0.0,
+            auto_flow: GridAutoFlow::ColumnDense,
+            cursor: (0, 0),
+            explicit_columns: 1,
+            explicit_rows: 3,
+            column_auto_repeat: None,
+            row_auto_repeat: None,
+            template_areas: None,
+        };
+
+        // Occupied: row 0 taken, row 1 free
+        let occupied = vec![
+            vec![true],
+            vec![false],
+        ];
+
+        // Dense should find row 1 (backfill)
+        let (col, row) = grid.find_next_cell_dense(1, 1, &occupied);
+        assert_eq!((col, row), (0, 1), "Dense column flow should backfill to row 1");
+    }
+
+    #[test]
+    fn test_span_name_with_explicit_line_names() {
+        // Test grid-column: 1 / span main (where "main" is at line 2)
+        let col1 = GridTrack::new(&TrackSize::Px(100.0));
+        let mut col2 = GridTrack::new(&TrackSize::Px(100.0));
+        col2.line_names.push("main".to_string());
+        let col3 = GridTrack::new(&TrackSize::Px(100.0));
+
+        let grid = GridLayout {
+            columns: vec![col1, col2, col3],
+            rows: vec![GridTrack::new(&TrackSize::Auto)],
+            column_gap: 0.0,
+            row_gap: 0.0,
+            auto_flow: GridAutoFlow::Row,
+            cursor: (0, 0),
+            explicit_columns: 3,
+            explicit_rows: 1,
+            column_auto_repeat: None,
+            row_auto_repeat: None,
+            template_areas: None,
+        };
+
+        // Test resolving SpanName for column end position
+        // "main" is at line 2 (1-indexed, before track index 1)
+        let (line, is_auto, span) = grid.resolve_column_end_line(&GridLine::SpanName("main".to_string()));
+        assert_eq!(line, 2, "SpanName 'main' should resolve to line 2");
+        assert!(!is_auto, "SpanName should not be auto");
+        assert!(span.is_none(), "SpanName should resolve to explicit line, not span");
+
+        // Test placement: grid-column: 1 / span main
+        let placement = GridPlacement {
+            column_start: GridLine::Number(1),
+            column_end: GridLine::SpanName("main".to_string()),
+            row_start: GridLine::Auto,
+            row_end: GridLine::Auto,
+        };
+
+        let style = ComputedStyle::new();
+        let layout_box = LayoutBox::new(BoxType::Block, style);
+        let mut item = GridItem::new(&layout_box);
+        item.set_placement_with_grid(&placement, &grid);
+
+        assert_eq!(item.column_start, 1, "Column start should be 1");
+        assert_eq!(item.column_end, 2, "Column end should be 2 (span main)");
+        assert!(!item.auto_column, "Column should be explicitly placed");
+    }
+
+    #[test]
+    fn test_span_name_with_area_name() {
+        // Test grid-column: 2 / span header (using area name)
+        // Parse template areas to create header spanning columns 1-4
+        let areas = GridTemplateAreas::parse(
+            "\"header header header\"
+             \"nav main main\""
+        ).unwrap();
+
+        let grid = GridLayout {
+            columns: vec![
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+            ],
+            rows: vec![
+                GridTrack::new(&TrackSize::Px(50.0)),
+                GridTrack::new(&TrackSize::Px(50.0)),
+            ],
+            column_gap: 0.0,
+            row_gap: 0.0,
+            auto_flow: GridAutoFlow::Row,
+            cursor: (0, 0),
+            explicit_columns: 3,
+            explicit_rows: 2,
+            column_auto_repeat: None,
+            row_auto_repeat: None,
+            template_areas: Some(areas),
+        };
+
+        // Test "span header" at column end - should resolve to header's column_end (4)
+        let (line, is_auto, span) = grid.resolve_column_end_line(&GridLine::SpanName("header".to_string()));
+        assert_eq!(line, 4, "SpanName 'header' at end should resolve to column 4");
+        assert!(!is_auto);
+        assert!(span.is_none());
+
+        // Test "span header" at column start - should resolve to header's column_start (1)
+        let (line, is_auto, span) = grid.resolve_column_start_line(&GridLine::SpanName("header".to_string()));
+        assert_eq!(line, 1, "SpanName 'header' at start should resolve to column 1");
+        assert!(!is_auto);
+        assert!(span.is_none());
+
+        // Test placement: grid-column: 2 / span header (should span from 2 to header's end at 4)
+        let placement = GridPlacement {
+            column_start: GridLine::Number(2),
+            column_end: GridLine::SpanName("header".to_string()),
+            row_start: GridLine::Auto,
+            row_end: GridLine::Auto,
+        };
+
+        let style = ComputedStyle::new();
+        let layout_box = LayoutBox::new(BoxType::Block, style);
+        let mut item = GridItem::new(&layout_box);
+        item.set_placement_with_grid(&placement, &grid);
+
+        assert_eq!(item.column_start, 2, "Column start should be 2");
+        assert_eq!(item.column_end, 4, "Column end should be 4 (span header)");
+        assert_eq!(item.column_span, 2, "Span should be 2 tracks (from line 2 to line 4)");
+    }
+
+    #[test]
+    fn test_span_name_row_with_implicit_lines() {
+        // Test grid-row: 1 / span sidebar-end (using implicit line name from area)
+        // Create a grid with sidebar area spanning rows 1-3
+        let areas = GridTemplateAreas::parse(
+            "\"sidebar main\"
+             \"sidebar main\"
+             \"footer footer\""
+        ).unwrap();
+
+        let grid = GridLayout {
+            columns: vec![
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(200.0)),
+            ],
+            rows: vec![
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+            ],
+            column_gap: 0.0,
+            row_gap: 0.0,
+            auto_flow: GridAutoFlow::Row,
+            cursor: (0, 0),
+            explicit_columns: 2,
+            explicit_rows: 3,
+            column_auto_repeat: None,
+            row_auto_repeat: None,
+            template_areas: Some(areas),
+        };
+
+        // Verify sidebar area bounds
+        let sidebar = grid.get_area("sidebar").unwrap();
+        assert_eq!(sidebar.row_start, 1, "sidebar row_start");
+        assert_eq!(sidebar.row_end, 3, "sidebar row_end");
+
+        // "sidebar-end" is an implicit line name pointing to row_end (line 3)
+        let (line, is_auto, span) = grid.resolve_row_end_line(&GridLine::SpanName("sidebar-end".to_string()));
+        assert_eq!(line, 3, "SpanName 'sidebar-end' should resolve to row line 3");
+        assert!(!is_auto);
+        assert!(span.is_none());
+
+        // Test placement: grid-row: 1 / span sidebar-end
+        let placement = GridPlacement {
+            column_start: GridLine::Auto,
+            column_end: GridLine::Auto,
+            row_start: GridLine::Number(1),
+            row_end: GridLine::SpanName("sidebar-end".to_string()),
+        };
+
+        let style = ComputedStyle::new();
+        let layout_box = LayoutBox::new(BoxType::Block, style);
+        let mut item = GridItem::new(&layout_box);
+        item.set_placement_with_grid(&placement, &grid);
+
+        assert_eq!(item.row_start, 1, "Row start should be 1");
+        assert_eq!(item.row_end, 3, "Row end should be 3 (span sidebar-end)");
+        assert_eq!(item.row_span, 2, "Span should be 2 tracks");
+    }
+
+    #[test]
+    fn test_order_property_sorting() {
+        // Test that GridItem.order() returns the correct value from the layout box
+        let mut style1 = ComputedStyle::new();
+        style1.order = 2;
+        let layout_box1 = LayoutBox::new(BoxType::Block, style1);
+        let item1 = GridItem::new(&layout_box1);
+        assert_eq!(item1.order(), 2, "Item1 should have order 2");
+
+        let mut style2 = ComputedStyle::new();
+        style2.order = -1;
+        let layout_box2 = LayoutBox::new(BoxType::Block, style2);
+        let item2 = GridItem::new(&layout_box2);
+        assert_eq!(item2.order(), -1, "Item2 should have order -1");
+
+        let style3 = ComputedStyle::new(); // Default order is 0
+        let layout_box3 = LayoutBox::new(BoxType::Block, style3);
+        let item3 = GridItem::new(&layout_box3);
+        assert_eq!(item3.order(), 0, "Item3 should have order 0");
+
+        // Create a vector and sort by order
+        let mut items = vec![item1, item2, item3];
+        items.sort_by_key(|item| item.order());
+
+        // Verify order after sorting: -1, 0, 2
+        assert_eq!(items[0].order(), -1, "First item should have order -1");
+        assert_eq!(items[1].order(), 0, "Second item should have order 0");
+        assert_eq!(items[2].order(), 2, "Third item should have order 2");
+    }
+
+    #[test]
+    fn test_order_property_stable_sort() {
+        // Test that items with equal order values maintain document order (stable sort)
+        let mut style_a = ComputedStyle::new();
+        style_a.order = 1;
+        let layout_box_a = LayoutBox::new(BoxType::Block, style_a);
+
+        let mut style_b = ComputedStyle::new();
+        style_b.order = 1;
+        let layout_box_b = LayoutBox::new(BoxType::Block, style_b);
+
+        let mut style_c = ComputedStyle::new();
+        style_c.order = 0;
+        let layout_box_c = LayoutBox::new(BoxType::Block, style_c);
+
+        // Items in "document order": A, B, C
+        // After sorting by order: C (order 0), A (order 1), B (order 1)
+        // A and B have same order, so A should come before B (stable)
+        let item_a = GridItem::new(&layout_box_a);
+        let item_b = GridItem::new(&layout_box_b);
+        let item_c = GridItem::new(&layout_box_c);
+
+        let mut items = vec![item_a, item_b, item_c];
+
+        // Store original positions by pointer comparison
+        let ptr_a = items[0].layout_box as *const _;
+        let ptr_b = items[1].layout_box as *const _;
+        let ptr_c = items[2].layout_box as *const _;
+
+        items.sort_by_key(|item| item.order());
+
+        // C (order 0) should be first
+        assert_eq!(items[0].layout_box as *const _, ptr_c, "C (order 0) should be first");
+        // A and B both have order 1, but A was before B in document order
+        assert_eq!(items[1].layout_box as *const _, ptr_a, "A (order 1) should be second (stable)");
+        assert_eq!(items[2].layout_box as *const _, ptr_b, "B (order 1) should be third (stable)");
+    }
+
+    #[test]
+    fn test_items_beyond_explicit_grid() {
+        // Test that items placed beyond the explicit grid create implicit tracks
+        let mut grid = GridLayout {
+            columns: vec![
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+            ],
+            rows: vec![
+                GridTrack::new(&TrackSize::Px(50.0)),
+            ],
+            column_gap: 0.0,
+            row_gap: 0.0,
+            auto_flow: GridAutoFlow::Row,
+            cursor: (0, 0),
+            explicit_columns: 2,
+            explicit_rows: 1,
+            column_auto_repeat: None,
+            row_auto_repeat: None,
+            template_areas: None,
+        };
+
+        // Initial grid: 2 columns, 1 row
+        assert_eq!(grid.column_count(), 2, "Initial columns");
+        assert_eq!(grid.row_count(), 1, "Initial rows");
+        assert_eq!(grid.explicit_columns, 2, "Explicit columns tracked");
+        assert_eq!(grid.explicit_rows, 1, "Explicit rows tracked");
+
+        // Place item at column 5, row 3 (beyond explicit grid)
+        grid.ensure_tracks(5, 3, &TrackSize::Auto, &TrackSize::Auto);
+
+        // Grid should now have 5 columns, 3 rows
+        assert_eq!(grid.column_count(), 5, "Columns after ensure_tracks");
+        assert_eq!(grid.row_count(), 3, "Rows after ensure_tracks");
+
+        // Explicit counts remain the same (they track template-defined tracks)
+        assert_eq!(grid.explicit_columns, 2, "Explicit column count unchanged");
+        assert_eq!(grid.explicit_rows, 1, "Explicit row count unchanged");
+
+        // Implicit tracks (beyond explicit) are columns 3-5 and rows 2-3
+        // We can't easily distinguish them by field, but the count difference tells us
+        let implicit_columns = grid.column_count() - grid.explicit_columns;
+        let implicit_rows = grid.row_count() - grid.explicit_rows;
+        assert_eq!(implicit_columns, 3, "3 implicit columns added");
+        assert_eq!(implicit_rows, 2, "2 implicit rows added");
+    }
+
+    #[test]
+    fn test_overlapping_explicit_placement() {
+        // Test that explicitly placed items can overlap
+        let grid = GridLayout {
+            columns: vec![
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+            ],
+            rows: vec![
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+            ],
+            column_gap: 0.0,
+            row_gap: 0.0,
+            auto_flow: GridAutoFlow::Row,
+            cursor: (0, 0),
+            explicit_columns: 2,
+            explicit_rows: 2,
+            column_auto_repeat: None,
+            row_auto_repeat: None,
+            template_areas: None,
+        };
+
+        // Item 1: grid-column: 1 / 3; grid-row: 1 / 2; (spans both columns, row 1)
+        let placement1 = GridPlacement {
+            column_start: GridLine::Number(1),
+            column_end: GridLine::Number(3),
+            row_start: GridLine::Number(1),
+            row_end: GridLine::Number(2),
+        };
+
+        // Item 2: grid-column: 1 / 2; grid-row: 1 / 3; (column 1, spans both rows)
+        // This overlaps with Item 1 at cell (0, 0)
+        let placement2 = GridPlacement {
+            column_start: GridLine::Number(1),
+            column_end: GridLine::Number(2),
+            row_start: GridLine::Number(1),
+            row_end: GridLine::Number(3),
+        };
+
+        let style = ComputedStyle::new();
+        let layout_box1 = LayoutBox::new(BoxType::Block, style.clone());
+        let layout_box2 = LayoutBox::new(BoxType::Block, style);
+
+        let mut item1 = GridItem::new(&layout_box1);
+        let mut item2 = GridItem::new(&layout_box2);
+
+        item1.set_placement_with_grid(&placement1, &grid);
+        item2.set_placement_with_grid(&placement2, &grid);
+
+        // Both items should be fully placed (not needing auto-placement)
+        assert!(item1.is_fully_placed(), "Item 1 should be fully placed");
+        assert!(item2.is_fully_placed(), "Item 2 should be fully placed");
+
+        // Item 1: columns 1-3, row 1-2
+        assert_eq!(item1.column_start, 1);
+        assert_eq!(item1.column_end, 3);
+        assert_eq!(item1.row_start, 1);
+        assert_eq!(item1.row_end, 2);
+
+        // Item 2: column 1-2, rows 1-3
+        assert_eq!(item2.column_start, 1);
+        assert_eq!(item2.column_end, 2);
+        assert_eq!(item2.row_start, 1);
+        assert_eq!(item2.row_end, 3);
+
+        // Both items occupy cell (0, 0) - this is valid overlapping
+    }
+
+    #[test]
+    fn test_negative_line_numbers() {
+        // Test that negative line numbers work correctly
+        let grid = GridLayout {
+            columns: vec![
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+            ],
+            rows: vec![
+                GridTrack::new(&TrackSize::Px(100.0)),
+                GridTrack::new(&TrackSize::Px(100.0)),
+            ],
+            column_gap: 0.0,
+            row_gap: 0.0,
+            auto_flow: GridAutoFlow::Row,
+            cursor: (0, 0),
+            explicit_columns: 3,
+            explicit_rows: 2,
+            column_auto_repeat: None,
+            row_auto_repeat: None,
+            template_areas: None,
+        };
+
+        // Test resolving -1 (last line) for columns
+        // With 3 columns, lines are: 1, 2, 3, 4 (4 is after the last track)
+        // -1 should resolve to line 4
+        let (line, is_auto, _) = grid.resolve_column_end_line(&GridLine::Number(-1));
+        assert_eq!(line, -1, "GridLine::Number(-1) should stay as -1 for later resolution");
+        assert!(!is_auto);
+
+        // Test a placement with grid-column: 1 / -1 (all columns)
+        let placement = GridPlacement {
+            column_start: GridLine::Number(1),
+            column_end: GridLine::Number(-1),
+            row_start: GridLine::Number(1),
+            row_end: GridLine::Number(2),
+        };
+
+        let style = ComputedStyle::new();
+        let layout_box = LayoutBox::new(BoxType::Block, style);
+        let mut item = GridItem::new(&layout_box);
+        item.set_placement_with_grid(&placement, &grid);
+
+        // The item should span from column 1 to column -1
+        // Negative line resolution happens in layout_grid_container, not set_placement_with_grid
+        assert_eq!(item.column_start, 1);
+        assert_eq!(item.column_end, -1);  // Will be resolved later to 4
     }
 }
