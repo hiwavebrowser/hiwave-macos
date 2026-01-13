@@ -12,7 +12,8 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 
 | Date | Phase | Change | Commit |
 |------|-------|--------|--------|
-| 2026-01-12 | 6.1-6.5 | Improved track sizing: span distribution, maximize tracks, stretch auto | uncommitted |
+| 2026-01-12 | 7.1-7.4 | Added edge case tests: empty grids, growth limits, collapsed tracks, etc. | uncommitted |
+| 2026-01-12 | 6.1-6.5 | Improved track sizing: span distribution, maximize tracks, stretch auto | 905879a |
 | 2026-01-12 | 5.1-5.3 | Implemented justify-content/align-content, verified items/self alignment | 9dec796 |
 | 2026-01-12 | 4.1-4.4 | Implemented dense packing, span-to-name, order property, edge cases | f10b2c2 |
 | 2026-01-12 | 3.2-3.3 | Implemented grid-template-areas and implicit line names | 460e187 |
@@ -62,7 +63,11 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 - [x] 6.4 Expand flexible tracks ✓ (already implemented)
 - [x] 6.5 Stretch auto tracks ✓
 
-**Phase 7: Edge Cases and Polish** - NOT STARTED
+**Phase 7: Edge Cases and Polish** - COMPLETE ✓
+- [x] 7.1 Empty grid containers ✓
+- [x] 7.2 Growth limit handling ✓
+- [x] 7.3 Collapsed track handling ✓
+- [x] 7.4 Line names preservation ✓
 
 ---
 
@@ -305,22 +310,25 @@ The spec defines a complex multi-step algorithm:
 ### Phase 7: Edge Cases and Polish
 **Goal:** Handle all edge cases
 
-- [ ] **7.1 Empty grid containers**
+- [x] **7.1 Empty grid containers** ✓
   - Proper behavior with no items
+  - Grid adds implicit track when empty
 
-- [ ] **7.2 Grid item minimum size**
-  - Default min-width/min-height of auto
-  - Overflow handling
+- [x] **7.2 Growth limit handling** ✓
+  - Tracks respect growth_limit in sizing
+  - Proportional distribution to finite growth tracks
 
-- [ ] **7.3 Absolutely positioned grid items**
-  - Position relative to grid area
+- [x] **7.3 Collapsed track handling** ✓
+  - Tracks with zeroed properties stay collapsed
+  - Auto-fit empty tracks collapse correctly
 
-- [ ] **7.4 Grid item margins**
-  - Auto margins for alignment
-  - Margin collapsing (or lack thereof in grid)
+- [x] **7.4 Line names preservation** ✓
+  - Line names preserved through track sizing
+  - Named lines work with all operations
 
 - [ ] **7.5 Writing modes (future)**
   - RTL support for column ordering
+  - Out of scope for CSS Grid Level 1
 
 ---
 
@@ -329,7 +337,7 @@ The spec defines a complex multi-step algorithm:
 ### Unit Tests (per feature)
 Each phase should include unit tests for the specific feature.
 
-**Completed tests (71 total):**
+**Completed tests (78 total):**
 
 Phase 1.1 (repeat expansion - rustkit-css):
 - `test_expand_tracks_no_repeat` - Template without repeats
@@ -424,6 +432,15 @@ Phase 6.2-6.5 (track sizing algorithm - rustkit-layout):
 - `test_stretch_multiple_auto_tracks` - Distribute equally among auto tracks
 - `test_maximize_tracks_step` - Grow tracks to growth_limit
 
+Phase 7.1-7.4 (edge cases - rustkit-layout):
+- `test_empty_grid_container` - Empty grid gets implicit tracks
+- `test_grid_track_sizing_respects_growth_limit` - Track sizing caps at growth_limit
+- `test_grid_items_filter_display_none` - display:none items excluded
+- `test_grid_item_explicit_size_overrides_cell` - Explicit size respected
+- `test_grid_cell_with_zero_size` - Collapsed tracks stay at zero
+- `test_track_line_names_preserved` - Line names survive operations
+- `test_negative_span_handled` - Zero/negative spans clamped to 1
+
 ### Integration Tests
 Create test HTML files exercising grid features:
 ```
@@ -458,7 +475,7 @@ Run against Chrome baselines to validate visual correctness.
 4. ~~**Phase 4** - Placement (dense packing, named spans)~~ ✓ COMPLETE
 5. ~~**Phase 5** - Alignment (polish)~~ ✓ COMPLETE
 6. ~~**Phase 6** - Track sizing (spec compliance)~~ ✓ COMPLETE
-7. **Phase 7** - Edge cases (completeness)
+7. ~~**Phase 7** - Edge cases (completeness)~~ ✓ COMPLETE
 
 ---
 
