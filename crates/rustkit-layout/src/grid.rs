@@ -469,6 +469,100 @@ impl<'a> GridItem<'a> {
             self.row_span = (self.row_end - self.row_start).unsigned_abs();
         }
     }
+
+    /// Set placement with grid context for named line resolution.
+    ///
+    /// This should be called after the grid tracks are created so that
+    /// named lines can be resolved to their actual positions.
+    pub fn set_placement_with_grid(&mut self, placement: &GridPlacement, grid: &GridLayout) {
+        // Start with both dimensions needing auto-placement
+        self.auto_column = true;
+        self.auto_row = true;
+
+        // Resolve column placement using grid's named line lookup
+        let col_start = grid.resolve_column_line(&placement.column_start);
+        let col_end = grid.resolve_column_line(&placement.column_end);
+
+        match (col_start, col_end) {
+            // Both start and end are explicit (number or resolved name)
+            ((start, false, None), (end, false, None)) if start != 0 && end != 0 => {
+                self.column_start = start;
+                self.column_end = end;
+                self.auto_column = false;
+            }
+            // Start is explicit, end is auto
+            ((start, false, None), (_, true, None)) if start != 0 => {
+                self.column_start = start;
+                self.column_end = start + 1;
+                self.auto_column = false;
+            }
+            // Start is explicit, end is a span
+            ((start, false, None), (_, _, Some(span))) if start != 0 => {
+                self.column_start = start;
+                self.column_end = start + span as i32;
+                self.auto_column = false;
+            }
+            // End is explicit, start is auto
+            ((_, true, None), (end, false, None)) if end != 0 => {
+                self.column_end = end;
+                self.column_start = end - 1;
+                self.auto_column = false;
+            }
+            // Start is a span (auto-place but with span)
+            ((_, _, Some(span)), _) => {
+                self.column_span = span;
+            }
+            _ => {
+                // Auto placement for columns
+            }
+        }
+
+        // Resolve row placement
+        let row_start = grid.resolve_row_line(&placement.row_start);
+        let row_end = grid.resolve_row_line(&placement.row_end);
+
+        match (row_start, row_end) {
+            // Both start and end are explicit
+            ((start, false, None), (end, false, None)) if start != 0 && end != 0 => {
+                self.row_start = start;
+                self.row_end = end;
+                self.auto_row = false;
+            }
+            // Start is explicit, end is auto
+            ((start, false, None), (_, true, None)) if start != 0 => {
+                self.row_start = start;
+                self.row_end = start + 1;
+                self.auto_row = false;
+            }
+            // Start is explicit, end is a span
+            ((start, false, None), (_, _, Some(span))) if start != 0 => {
+                self.row_start = start;
+                self.row_end = start + span as i32;
+                self.auto_row = false;
+            }
+            // End is explicit, start is auto
+            ((_, true, None), (end, false, None)) if end != 0 => {
+                self.row_end = end;
+                self.row_start = end - 1;
+                self.auto_row = false;
+            }
+            // Start is a span
+            ((_, _, Some(span)), _) => {
+                self.row_span = span;
+            }
+            _ => {
+                // Auto placement for rows
+            }
+        }
+
+        // Update spans from placement
+        if self.column_start != 0 && self.column_end != 0 {
+            self.column_span = (self.column_end - self.column_start).unsigned_abs();
+        }
+        if self.row_start != 0 && self.row_end != 0 {
+            self.row_span = (self.row_end - self.row_start).unsigned_abs();
+        }
+    }
 }
 
 /// Stored auto-repeat pattern for layout-time expansion.
@@ -800,6 +894,90 @@ impl GridLayout {
         self.rows.len()
     }
 
+    /// Find a column line by name.
+    ///
+    /// Line names are stored on the track that follows them, so line N
+    /// corresponds to track N-1's line_names (0-indexed).
+    /// Returns the 1-based line number if found.
+    pub fn find_column_line_by_name(&self, name: &str) -> Option<i32> {
+        for (track_idx, track) in self.columns.iter().enumerate() {
+            // Line before track at index `track_idx` is line number `track_idx + 1` (1-based)
+            if track.line_names.iter().any(|n| n == name) {
+                return Some((track_idx + 1) as i32);
+            }
+        }
+        // Also check the last line (after all tracks)
+        // This would require storing line names at the end, which we don't currently do
+        None
+    }
+
+    /// Find a row line by name.
+    pub fn find_row_line_by_name(&self, name: &str) -> Option<i32> {
+        for (track_idx, track) in self.rows.iter().enumerate() {
+            if track.line_names.iter().any(|n| n == name) {
+                return Some((track_idx + 1) as i32);
+            }
+        }
+        None
+    }
+
+    /// Resolve a GridLine to a line number for columns.
+    ///
+    /// Returns (line_number, is_auto, span) where:
+    /// - line_number: 1-based line number (may be 0 if not resolved)
+    /// - is_auto: whether this needs auto-placement
+    /// - span: optional span count
+    pub fn resolve_column_line(&self, line: &GridLine) -> (i32, bool, Option<u32>) {
+        match line {
+            GridLine::Auto => (0, true, None),
+            GridLine::Number(n) => (*n, false, None),
+            GridLine::Name(name) => {
+                if let Some(n) = self.find_column_line_by_name(name) {
+                    (n, false, None)
+                } else {
+                    // Name not found, treat as auto
+                    trace!("Column line name '{}' not found, using auto", name);
+                    (0, true, None)
+                }
+            }
+            GridLine::Span(count) => (0, true, Some(*count)),
+            GridLine::SpanName(name) => {
+                // Span to the named line
+                if let Some(n) = self.find_column_line_by_name(name) {
+                    (n, false, Some(1)) // Span=1 means span to this line
+                } else {
+                    trace!("Column span name '{}' not found, using span 1", name);
+                    (0, true, Some(1))
+                }
+            }
+        }
+    }
+
+    /// Resolve a GridLine to a line number for rows.
+    pub fn resolve_row_line(&self, line: &GridLine) -> (i32, bool, Option<u32>) {
+        match line {
+            GridLine::Auto => (0, true, None),
+            GridLine::Number(n) => (*n, false, None),
+            GridLine::Name(name) => {
+                if let Some(n) = self.find_row_line_by_name(name) {
+                    (n, false, None)
+                } else {
+                    trace!("Row line name '{}' not found, using auto", name);
+                    (0, true, None)
+                }
+            }
+            GridLine::Span(count) => (0, true, Some(*count)),
+            GridLine::SpanName(name) => {
+                if let Some(n) = self.find_row_line_by_name(name) {
+                    (n, false, Some(1))
+                } else {
+                    trace!("Row span name '{}' not found, using span 1", name);
+                    (0, true, Some(1))
+                }
+            }
+        }
+    }
+
     /// Find next available cell for auto-placement.
     pub fn find_next_cell(&self, col_span: usize, row_span: usize, occupied: &[Vec<bool>]) -> (usize, usize) {
         let (mut col, mut row) = self.cursor;
@@ -975,20 +1153,21 @@ pub fn layout_grid_container(
     }
 
     // Collect items with placement info
+    // Use set_placement_with_grid to resolve named lines
     let mut items: Vec<GridItem> = container
         .children
         .iter()
         .filter(|child| child.style.display != Display::None)
         .map(|child| {
             let mut item = GridItem::new(child);
-            // Set placement from style
+            // Set placement from style, resolving named lines via grid
             let placement = GridPlacement {
                 column_start: child.style.grid_column_start.clone(),
                 column_end: child.style.grid_column_end.clone(),
                 row_start: child.style.grid_row_start.clone(),
                 row_end: child.style.grid_row_end.clone(),
             };
-            item.set_placement(&placement);
+            item.set_placement_with_grid(&placement, &grid);
             item
         })
         .collect();
@@ -2360,5 +2539,203 @@ mod tests {
         assert_eq!(tracks[0].size, 0.0);
         assert_eq!(tracks[1].position, 0.0);
         assert_eq!(tracks[1].size, 0.0);
+    }
+
+    // ==================== Phase 3: Named Lines Tests ====================
+
+    #[test]
+    fn test_find_column_line_by_name() {
+        // Create a grid with named lines
+        let grid = GridLayout {
+            columns: vec![
+                {
+                    let mut t = GridTrack::new(&TrackSize::Px(100.0));
+                    t.line_names = vec!["main-start".to_string(), "content-start".to_string()];
+                    t
+                },
+                {
+                    let mut t = GridTrack::new(&TrackSize::Px(100.0));
+                    t.line_names = vec!["sidebar-start".to_string()];
+                    t
+                },
+                {
+                    let mut t = GridTrack::new(&TrackSize::Px(100.0));
+                    t.line_names = vec!["sidebar-end".to_string(), "main-end".to_string()];
+                    t
+                },
+            ],
+            rows: vec![GridTrack::new(&TrackSize::Auto)],
+            column_gap: 0.0,
+            row_gap: 0.0,
+            auto_flow: GridAutoFlow::Row,
+            cursor: (0, 0),
+            explicit_columns: 3,
+            explicit_rows: 1,
+            column_auto_repeat: None,
+            row_auto_repeat: None,
+        };
+
+        // Find lines by name
+        assert_eq!(grid.find_column_line_by_name("main-start"), Some(1));
+        assert_eq!(grid.find_column_line_by_name("content-start"), Some(1));
+        assert_eq!(grid.find_column_line_by_name("sidebar-start"), Some(2));
+        assert_eq!(grid.find_column_line_by_name("sidebar-end"), Some(3));
+        assert_eq!(grid.find_column_line_by_name("main-end"), Some(3));
+        assert_eq!(grid.find_column_line_by_name("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_resolve_column_line_by_name() {
+        let grid = GridLayout {
+            columns: vec![
+                {
+                    let mut t = GridTrack::new(&TrackSize::Px(100.0));
+                    t.line_names = vec!["header-start".to_string()];
+                    t
+                },
+                {
+                    let mut t = GridTrack::new(&TrackSize::Px(100.0));
+                    t.line_names = vec!["header-end".to_string()];
+                    t
+                },
+            ],
+            rows: vec![GridTrack::new(&TrackSize::Auto)],
+            column_gap: 0.0,
+            row_gap: 0.0,
+            auto_flow: GridAutoFlow::Row,
+            cursor: (0, 0),
+            explicit_columns: 2,
+            explicit_rows: 1,
+            column_auto_repeat: None,
+            row_auto_repeat: None,
+        };
+
+        // Test resolve_column_line with named line
+        let (line, is_auto, span) = grid.resolve_column_line(&GridLine::Name("header-start".to_string()));
+        assert_eq!(line, 1);
+        assert!(!is_auto);
+        assert!(span.is_none());
+
+        let (line2, is_auto2, _) = grid.resolve_column_line(&GridLine::Name("header-end".to_string()));
+        assert_eq!(line2, 2);
+        assert!(!is_auto2);
+
+        // Unknown name falls back to auto
+        let (line3, is_auto3, _) = grid.resolve_column_line(&GridLine::Name("unknown".to_string()));
+        assert_eq!(line3, 0);
+        assert!(is_auto3);
+    }
+
+    #[test]
+    fn test_set_placement_with_named_lines() {
+        let grid = GridLayout {
+            columns: vec![
+                {
+                    let mut t = GridTrack::new(&TrackSize::Px(100.0));
+                    t.line_names = vec!["col-a".to_string()];
+                    t
+                },
+                {
+                    let mut t = GridTrack::new(&TrackSize::Px(100.0));
+                    t.line_names = vec!["col-b".to_string()];
+                    t
+                },
+                {
+                    let mut t = GridTrack::new(&TrackSize::Px(100.0));
+                    t.line_names = vec!["col-c".to_string()];
+                    t
+                },
+            ],
+            rows: vec![
+                {
+                    let mut t = GridTrack::new(&TrackSize::Px(50.0));
+                    t.line_names = vec!["row-1".to_string()];
+                    t
+                },
+                {
+                    let mut t = GridTrack::new(&TrackSize::Px(50.0));
+                    t.line_names = vec!["row-2".to_string()];
+                    t
+                },
+            ],
+            column_gap: 0.0,
+            row_gap: 0.0,
+            auto_flow: GridAutoFlow::Row,
+            cursor: (0, 0),
+            explicit_columns: 3,
+            explicit_rows: 2,
+            column_auto_repeat: None,
+            row_auto_repeat: None,
+        };
+
+        let style = ComputedStyle::new();
+        let layout_box = LayoutBox::new(BoxType::Block, style);
+        let mut item = GridItem::new(&layout_box);
+
+        // Place using named lines: grid-column: col-a / col-c; grid-row: row-1 / row-2
+        let placement = GridPlacement {
+            column_start: GridLine::Name("col-a".to_string()),
+            column_end: GridLine::Name("col-c".to_string()),
+            row_start: GridLine::Name("row-1".to_string()),
+            row_end: GridLine::Name("row-2".to_string()),
+        };
+        item.set_placement_with_grid(&placement, &grid);
+
+        // Should be fully placed
+        assert!(!item.auto_column);
+        assert!(!item.auto_row);
+        assert_eq!(item.column_start, 1);
+        assert_eq!(item.column_end, 3);
+        assert_eq!(item.row_start, 1);
+        assert_eq!(item.row_end, 2);
+        assert_eq!(item.column_span, 2);
+        assert_eq!(item.row_span, 1);
+    }
+
+    #[test]
+    fn test_named_line_mixed_with_numbers() {
+        let grid = GridLayout {
+            columns: vec![
+                {
+                    let mut t = GridTrack::new(&TrackSize::Px(100.0));
+                    t.line_names = vec!["start".to_string()];
+                    t
+                },
+                GridTrack::new(&TrackSize::Px(100.0)),
+                {
+                    let mut t = GridTrack::new(&TrackSize::Px(100.0));
+                    t.line_names = vec!["end".to_string()];
+                    t
+                },
+            ],
+            rows: vec![GridTrack::new(&TrackSize::Auto)],
+            column_gap: 0.0,
+            row_gap: 0.0,
+            auto_flow: GridAutoFlow::Row,
+            cursor: (0, 0),
+            explicit_columns: 3,
+            explicit_rows: 1,
+            column_auto_repeat: None,
+            row_auto_repeat: None,
+        };
+
+        let style = ComputedStyle::new();
+        let layout_box = LayoutBox::new(BoxType::Block, style);
+        let mut item = GridItem::new(&layout_box);
+
+        // Mix named line start with numeric end
+        let placement = GridPlacement {
+            column_start: GridLine::Name("start".to_string()),
+            column_end: GridLine::Number(4),
+            row_start: GridLine::Number(1),
+            row_end: GridLine::Auto,
+        };
+        item.set_placement_with_grid(&placement, &grid);
+
+        assert!(!item.auto_column);
+        assert!(!item.auto_row);
+        assert_eq!(item.column_start, 1);
+        assert_eq!(item.column_end, 4);
+        assert_eq!(item.column_span, 3);
     }
 }

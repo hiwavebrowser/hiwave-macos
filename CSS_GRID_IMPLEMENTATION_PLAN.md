@@ -12,8 +12,9 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 
 | Date | Phase | Change | Commit |
 |------|-------|--------|--------|
-| 2026-01-12 | 2.2 | Implemented auto-fit with empty track collapsing and gap handling | pending |
-| 2026-01-12 | 2.1 | Implemented auto-fill expansion with container size calculation | pending |
+| 2026-01-12 | 3.1 | Implemented named line resolution | pending |
+| 2026-01-12 | 2.2 | Implemented auto-fit with empty track collapsing and gap handling | 8fbed45 |
+| 2026-01-12 | 2.1 | Implemented auto-fill expansion with container size calculation | 8fbed45 |
 | 2026-01-12 | 1.4 | Implemented fit-content() with limit tracking | f309c95 |
 | 2026-01-12 | 1.3 | Added min-content/max-content intrinsic sizing flags | f309c95 |
 | 2026-01-12 | 1.2 | Added percentage track resolution with minmax support | f309c95 |
@@ -34,7 +35,8 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 - [x] 2.2 auto-fit implementation (with empty track collapsing) ✓
 - [x] 2.3 Gap collapsing for empty tracks ✓
 
-**Phase 3: Named Lines and Areas** - NOT STARTED
+**Phase 3: Named Lines and Areas** - IN PROGRESS
+- [x] 3.1 Named line resolution ✓
 **Phase 4: Placement Algorithm Completion** - PARTIALLY COMPLETE (auto-placement fixed)
 **Phase 5: Alignment Properties** - NOT STARTED
 **Phase 6: Track Sizing Algorithm** - NOT STARTED
@@ -69,8 +71,8 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 ### What's Missing or Incomplete
 
 1. ~~**repeat() function expansion** - parsed but not expanded~~ ✓ DONE (Phase 1.1)
-2. **auto-fill/auto-fit** - parsed, marked for layout-time expansion (Phase 2)
-3. **Named line resolution** - GridLine::Name not resolved
+2. ~~**auto-fill/auto-fit** - parsed, marked for layout-time expansion~~ ✓ DONE (Phase 2)
+3. ~~**Named line resolution** - GridLine::Name not resolved~~ ✓ DONE (Phase 3.1)
 4. **grid-template-areas integration** - areas parsed but not used in placement
 5. ~~**min-content/max-content intrinsic sizing** - not properly computed~~ ✓ DONE (Phase 1.3)
 6. **Subgrid** - Level 2 feature, out of scope
@@ -153,11 +155,15 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 ### Phase 3: Named Lines and Areas
 **Goal:** Full named grid support
 
-- [ ] **3.1 Named line resolution**
+- [x] **3.1 Named line resolution** ✓
   - Resolve `GridLine::Name("header-start")` to line number
   - Support multiple names per line
-  - Support implicit names from areas (e.g., "header-start", "header-end")
-  - **Files:** `rustkit-layout/src/grid.rs` (resolve_line_to_number)
+  - **Implementation:**
+    - Added `find_column_line_by_name()` and `find_row_line_by_name()` to GridLayout
+    - Added `resolve_column_line()` and `resolve_row_line()` for full GridLine resolution
+    - Added `set_placement_with_grid()` to GridItem for placement with grid context
+    - Updated `layout_grid_container()` to use named line resolution
+    - 4 unit tests for named line resolution
 
 - [ ] **3.2 grid-template-areas integration**
   - Generate implicit named lines from areas
@@ -253,7 +259,7 @@ The spec defines a complex multi-step algorithm:
 ### Unit Tests (per feature)
 Each phase should include unit tests for the specific feature.
 
-**Completed tests (35 total):**
+**Completed tests (39 total):**
 
 Phase 1.1 (repeat expansion - rustkit-css):
 - `test_expand_tracks_no_repeat` - Template without repeats
@@ -300,6 +306,12 @@ Phase 2.2 (auto-fit - rustkit-layout):
 - `test_auto_fit_gap_collapsing` - Gaps collapse around empty tracks
 - `test_auto_fit_all_collapsed` - All tracks collapsed case
 
+Phase 3.1 (named lines - rustkit-layout):
+- `test_find_column_line_by_name` - Find line by name in grid
+- `test_resolve_column_line_by_name` - Resolve GridLine::Name to number
+- `test_set_placement_with_named_lines` - Place item using named lines
+- `test_named_line_mixed_with_numbers` - Mix named lines and numbers
+
 ### Integration Tests
 Create test HTML files exercising grid features:
 ```
@@ -330,7 +342,7 @@ Run against Chrome baselines to validate visual correctness.
 
 1. ~~**Phase 1** - Foundation (most impactful for basic grids)~~ ✓ COMPLETE
 2. ~~**Phase 2** - Auto-fill/fit (responsive layouts)~~ ✓ COMPLETE
-3. **Phase 3** - Named lines (developer ergonomics) ← NEXT
+3. **Phase 3** - Named lines (developer ergonomics) ← IN PROGRESS (3.1 done)
 4. **Phase 4** - Placement (dense packing, named spans)
 5. **Phase 5** - Alignment (polish)
 6. **Phase 6** - Track sizing (spec compliance)
