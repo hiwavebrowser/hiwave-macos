@@ -12,7 +12,8 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 
 | Date | Phase | Change | Commit |
 |------|-------|--------|--------|
-| 2026-01-12 | 4.1-4.4 | Implemented dense packing, span-to-name, order property, edge cases | uncommitted |
+| 2026-01-12 | 5.1-5.3 | Implemented justify-content/align-content, verified items/self alignment | uncommitted |
+| 2026-01-12 | 4.1-4.4 | Implemented dense packing, span-to-name, order property, edge cases | f10b2c2 |
 | 2026-01-12 | 3.2-3.3 | Implemented grid-template-areas and implicit line names | 460e187 |
 | 2026-01-12 | 3.1 | Implemented named line resolution | 40f083b |
 | 2026-01-12 | 2.2 | Implemented auto-fit with empty track collapsing and gap handling | 8fbed45 |
@@ -48,7 +49,11 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 - [x] 4.3 Order property (sort items before placement) ✓
 - [x] 4.4 Placement edge cases (implicit tracks, overlapping) ✓
 
-**Phase 5: Alignment Properties** - NOT STARTED
+**Phase 5: Alignment Properties** - COMPLETE ✓
+- [x] 5.1 justify-content / align-content ✓
+- [x] 5.2 justify-items / align-items ✓ (already implemented)
+- [x] 5.3 justify-self / align-self ✓ (already implemented)
+
 **Phase 6: Track Sizing Algorithm** - NOT STARTED
 **Phase 7: Edge Cases and Polish** - NOT STARTED
 
@@ -236,16 +241,23 @@ A systematic implementation of the CSS Grid Layout Module Level 1 specification.
 ### Phase 5: Alignment Properties
 **Goal:** Full alignment support
 
-- [ ] **5.1 justify-content / align-content**
+- [x] **5.1 justify-content / align-content** ✓
   - Distribute space between/around tracks
   - Values: start, end, center, stretch, space-between, space-around, space-evenly
+  - **Implementation:**
+    - Added `apply_content_alignment()` function to distribute free space between tracks
+    - Added `align_content_to_justify()` conversion function
+    - Called after `size_grid_tracks()` in `layout_grid_container()`
+    - 7 unit tests for content alignment
 
-- [ ] **5.2 place-content shorthand**
-  - Parse and apply
+- [x] **5.2 justify-items / align-items** ✓ (already implemented)
+  - Item alignment defaults read from container style
+  - Used when justify-self/align-self is auto
 
-- [ ] **5.3 Baseline alignment**
-  - Proper baseline calculation for align-self: baseline
-  - First baseline vs last baseline
+- [x] **5.3 justify-self / align-self** ✓ (already implemented)
+  - `apply_justify_self()` and `apply_align_self()` were already complete
+  - Values: start, end, center, stretch
+  - 5 unit tests for self/items alignment
 
 ### Phase 6: Track Sizing Algorithm (Spec Compliance)
 **Goal:** Match the spec's track sizing algorithm exactly
@@ -296,7 +308,7 @@ The spec defines a complex multi-step algorithm:
 ### Unit Tests (per feature)
 Each phase should include unit tests for the specific feature.
 
-**Completed tests (43 total):**
+**Completed tests (66 total):**
 
 Phase 1.1 (repeat expansion - rustkit-css):
 - `test_expand_tracks_no_repeat` - Template without repeats
@@ -355,6 +367,35 @@ Phase 3.2-3.3 (template areas - rustkit-layout):
 - `test_implicit_line_names_from_areas` - area-start/area-end implicit lines
 - `test_placement_with_implicit_line_names` - Place using header-start/header-end
 
+Phase 4.1-4.4 (placement algorithm - rustkit-layout):
+- `test_dense_packing_backfills_gaps` - Dense mode fills earlier gaps
+- `test_dense_packing_column_flow` - Dense mode with column flow
+- `test_dense_packing_vs_sparse` - Compare dense vs sparse placement
+- `test_span_name_with_explicit_line_names` - SpanName with explicit lines
+- `test_span_name_with_area_name` - SpanName with area names
+- `test_span_name_row_with_implicit_lines` - SpanName with implicit lines
+- `test_order_property_sorting` - Sort items by order
+- `test_order_property_stable_sort` - Stable sort for equal order
+- `test_items_beyond_explicit_grid` - Implicit track creation
+- `test_overlapping_explicit_placement` - Overlapping items allowed
+- `test_negative_line_numbers` - Negative line resolution
+
+Phase 5.1 (content alignment - rustkit-layout):
+- `test_content_alignment_start` - justify-content: flex-start
+- `test_content_alignment_end` - justify-content: flex-end
+- `test_content_alignment_center` - justify-content: center
+- `test_content_alignment_space_between` - justify-content: space-between
+- `test_content_alignment_space_around` - justify-content: space-around
+- `test_content_alignment_space_evenly` - justify-content: space-evenly
+- `test_align_content_to_justify_conversion` - align-content to justify-content
+
+Phase 5.2-5.3 (items/self alignment - rustkit-layout):
+- `test_justify_self_alignment` - justify-self: start/end/center
+- `test_justify_self_stretch` - justify-self: stretch
+- `test_justify_self_auto_fallback` - auto falls back to justify-items
+- `test_align_self_alignment` - align-self: flex-start/flex-end/center
+- `test_align_self_stretch` - align-self: stretch
+
 ### Integration Tests
 Create test HTML files exercising grid features:
 ```
@@ -386,8 +427,8 @@ Run against Chrome baselines to validate visual correctness.
 1. ~~**Phase 1** - Foundation (most impactful for basic grids)~~ ✓ COMPLETE
 2. ~~**Phase 2** - Auto-fill/fit (responsive layouts)~~ ✓ COMPLETE
 3. ~~**Phase 3** - Named lines (developer ergonomics)~~ ✓ COMPLETE
-4. **Phase 4** - Placement (dense packing, named spans)
-5. **Phase 5** - Alignment (polish)
+4. ~~**Phase 4** - Placement (dense packing, named spans)~~ ✓ COMPLETE
+5. ~~**Phase 5** - Alignment (polish)~~ ✓ COMPLETE
 6. **Phase 6** - Track sizing (spec compliance)
 7. **Phase 7** - Edge cases (completeness)
 

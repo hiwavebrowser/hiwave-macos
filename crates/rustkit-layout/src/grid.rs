@@ -18,9 +18,9 @@
 //! - [CSS Grid Layout Module Level 2](https://www.w3.org/TR/css-grid-2/)
 
 use rustkit_css::{
-    AlignItems, AlignSelf, BoxSizing, Display, GridAutoFlow, GridLine, GridPlacement,
-    GridTemplate, GridTemplateAreas, JustifyItems, JustifySelf, Length, TrackDefinition,
-    TrackRepeat, TrackSize,
+    AlignContent, AlignItems, AlignSelf, BoxSizing, Display, GridAutoFlow, GridLine,
+    GridPlacement, GridTemplate, GridTemplateAreas, JustifyContent, JustifyItems, JustifySelf,
+    Length, TrackDefinition, TrackRepeat, TrackSize,
 };
 use tracing::{debug, trace};
 
@@ -1689,6 +1689,10 @@ pub fn layout_grid_container(
     size_grid_tracks(&mut grid.columns, container_width, column_gap);
     size_grid_tracks(&mut grid.rows, container_height, row_gap);
 
+    // Apply content alignment (justify-content for columns, align-content for rows)
+    apply_content_alignment(&mut grid.columns, container_width, column_gap, &style.justify_content);
+    apply_content_alignment(&mut grid.rows, container_height, row_gap, &align_content_to_justify(&style.align_content));
+
     // Phase 6: Position items
     let content_x = container.dimensions.content.x;
     let content_y = container.dimensions.content.y;
@@ -1976,7 +1980,7 @@ fn size_grid_tracks(tracks: &mut [GridTrack], container_size: f32, gap: f32) {
         }
     }
 
-    // Step 5: Calculate positions
+    // Step 5: Calculate positions (starting from 0, alignment applied separately)
     // For auto-fit, collapsed tracks (size = 0) should not have gaps
     let mut position = 0.0;
     let mut prev_was_collapsed = true; // Start true to skip gap before first track
@@ -1988,6 +1992,121 @@ fn size_grid_tracks(tracks: &mut [GridTrack], container_size: f32, gap: f32) {
         track.position = position;
         position += track.size;
         prev_was_collapsed = track.size == 0.0;
+    }
+}
+
+/// Apply content alignment (justify-content/align-content) to tracks.
+/// This adjusts track positions to distribute free space according to the alignment.
+fn apply_content_alignment(tracks: &mut [GridTrack], container_size: f32, gap: f32, alignment: &JustifyContent) {
+    if tracks.is_empty() {
+        return;
+    }
+
+    // Calculate total used space (tracks + gaps)
+    let non_collapsed_tracks: Vec<usize> = tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.size > 0.0)
+        .map(|(i, _)| i)
+        .collect();
+
+    let track_count = non_collapsed_tracks.len();
+    if track_count == 0 {
+        return;
+    }
+
+    let total_track_size: f32 = tracks.iter().map(|t| t.size).sum();
+    let total_gaps = track_count.saturating_sub(1) as f32 * gap;
+    let used_space = total_track_size + total_gaps;
+    let free_space = (container_size - used_space).max(0.0);
+
+    if free_space <= 0.0 {
+        // No free space to distribute
+        return;
+    }
+
+    match alignment {
+        JustifyContent::FlexStart => {
+            // Tracks already at start, nothing to do
+        }
+        JustifyContent::FlexEnd => {
+            // Shift all tracks to end
+            for track in tracks.iter_mut() {
+                track.position += free_space;
+            }
+        }
+        JustifyContent::Center => {
+            // Center tracks
+            let offset = free_space / 2.0;
+            for track in tracks.iter_mut() {
+                track.position += offset;
+            }
+        }
+        JustifyContent::SpaceBetween => {
+            // Distribute free space between tracks
+            if track_count > 1 {
+                let extra_gap = free_space / (track_count - 1) as f32;
+                let mut cumulative_offset = 0.0;
+                for (i, track) in tracks.iter_mut().enumerate() {
+                    if track.size > 0.0 {
+                        track.position += cumulative_offset;
+                        // Add gap after each non-collapsed track except the last
+                        let is_last_non_collapsed = non_collapsed_tracks.last() == Some(&i);
+                        if !is_last_non_collapsed {
+                            cumulative_offset += extra_gap;
+                        }
+                    } else {
+                        // Collapsed track - just shift it
+                        track.position += cumulative_offset;
+                    }
+                }
+            }
+            // If only one track, it stays at start (no space-between)
+        }
+        JustifyContent::SpaceAround => {
+            // Each track gets half the gap on each side
+            if track_count > 0 {
+                let gap_per_side = free_space / (track_count * 2) as f32;
+                let mut cumulative_offset = gap_per_side; // Start with half gap
+                for track in tracks.iter_mut() {
+                    if track.size > 0.0 {
+                        track.position += cumulative_offset;
+                        cumulative_offset += gap_per_side * 2.0; // Full gap between tracks
+                    } else {
+                        track.position += cumulative_offset;
+                    }
+                }
+            }
+        }
+        JustifyContent::SpaceEvenly => {
+            // Equal space between and around all tracks
+            if track_count > 0 {
+                let space = free_space / (track_count + 1) as f32;
+                let mut cumulative_offset = space; // Start with one unit of space
+                for track in tracks.iter_mut() {
+                    if track.size > 0.0 {
+                        track.position += cumulative_offset;
+                        cumulative_offset += space;
+                    } else {
+                        track.position += cumulative_offset;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Convert AlignContent to JustifyContent for unified handling.
+/// Both enums have the same values, just different naming conventions.
+fn align_content_to_justify(align: &AlignContent) -> JustifyContent {
+    match align {
+        AlignContent::Stretch => JustifyContent::FlexStart, // Stretch is handled separately
+        AlignContent::FlexStart => JustifyContent::FlexStart,
+        AlignContent::FlexEnd => JustifyContent::FlexEnd,
+        AlignContent::Center => JustifyContent::Center,
+        AlignContent::SpaceBetween => JustifyContent::SpaceBetween,
+        AlignContent::SpaceAround => JustifyContent::SpaceAround,
+        AlignContent::SpaceEvenly => JustifyContent::SpaceEvenly,
     }
 }
 
@@ -3680,5 +3799,245 @@ mod tests {
         // Negative line resolution happens in layout_grid_container, not set_placement_with_grid
         assert_eq!(item.column_start, 1);
         assert_eq!(item.column_end, -1);  // Will be resolved later to 4
+    }
+
+    // ==================== Phase 5: Alignment Tests ====================
+
+    #[test]
+    fn test_content_alignment_start() {
+        // Test justify-content: flex-start (default)
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::Px(100.0)),
+            GridTrack::new(&TrackSize::Px(100.0)),
+        ];
+
+        // Size tracks first
+        size_grid_tracks(&mut tracks, 400.0, 10.0);
+
+        // Initial positions: 0, 110 (100 + 10 gap)
+        assert_eq!(tracks[0].position, 0.0);
+        assert_eq!(tracks[1].position, 110.0);
+
+        // Apply flex-start alignment (should not change positions)
+        apply_content_alignment(&mut tracks, 400.0, 10.0, &JustifyContent::FlexStart);
+
+        assert_eq!(tracks[0].position, 0.0);
+        assert_eq!(tracks[1].position, 110.0);
+    }
+
+    #[test]
+    fn test_content_alignment_end() {
+        // Test justify-content: flex-end
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::Px(100.0)),
+            GridTrack::new(&TrackSize::Px(100.0)),
+        ];
+
+        size_grid_tracks(&mut tracks, 400.0, 10.0);
+
+        // Total used: 100 + 10 + 100 = 210
+        // Free space: 400 - 210 = 190
+        apply_content_alignment(&mut tracks, 400.0, 10.0, &JustifyContent::FlexEnd);
+
+        // Tracks should be shifted by 190
+        assert_eq!(tracks[0].position, 190.0);
+        assert_eq!(tracks[1].position, 300.0); // 190 + 100 + 10
+    }
+
+    #[test]
+    fn test_content_alignment_center() {
+        // Test justify-content: center
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::Px(100.0)),
+            GridTrack::new(&TrackSize::Px(100.0)),
+        ];
+
+        size_grid_tracks(&mut tracks, 400.0, 10.0);
+
+        // Free space: 190, center offset: 95
+        apply_content_alignment(&mut tracks, 400.0, 10.0, &JustifyContent::Center);
+
+        assert_eq!(tracks[0].position, 95.0);
+        assert_eq!(tracks[1].position, 205.0); // 95 + 100 + 10
+    }
+
+    #[test]
+    fn test_content_alignment_space_between() {
+        // Test justify-content: space-between
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::Px(100.0)),
+            GridTrack::new(&TrackSize::Px(100.0)),
+        ];
+
+        size_grid_tracks(&mut tracks, 400.0, 10.0);
+
+        // Free space: 190, distributed between 2 tracks = 190 extra gap
+        apply_content_alignment(&mut tracks, 400.0, 10.0, &JustifyContent::SpaceBetween);
+
+        // First track at start, last track at end
+        assert_eq!(tracks[0].position, 0.0);
+        assert_eq!(tracks[1].position, 300.0); // 0 + 100 + 10 + 190
+    }
+
+    #[test]
+    fn test_content_alignment_space_around() {
+        // Test justify-content: space-around
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::Px(100.0)),
+            GridTrack::new(&TrackSize::Px(100.0)),
+        ];
+
+        size_grid_tracks(&mut tracks, 400.0, 10.0);
+
+        // Free space: 190, 2 tracks = 4 half-gaps = 190/4 = 47.5 per half-gap
+        apply_content_alignment(&mut tracks, 400.0, 10.0, &JustifyContent::SpaceAround);
+
+        // First track offset by half-gap (47.5)
+        // Second track offset by half-gap + full gap (47.5 + 95 = 142.5 from first)
+        assert!((tracks[0].position - 47.5).abs() < 0.01);
+        assert!((tracks[1].position - 252.5).abs() < 0.01); // 47.5 + 100 + 10 + 95
+    }
+
+    #[test]
+    fn test_content_alignment_space_evenly() {
+        // Test justify-content: space-evenly
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::Px(100.0)),
+            GridTrack::new(&TrackSize::Px(100.0)),
+        ];
+
+        size_grid_tracks(&mut tracks, 400.0, 10.0);
+
+        // Free space: 190, 2 tracks = 3 spaces = 190/3 ≈ 63.33 per space
+        apply_content_alignment(&mut tracks, 400.0, 10.0, &JustifyContent::SpaceEvenly);
+
+        let space = 190.0 / 3.0;
+        assert!((tracks[0].position - space).abs() < 0.01);
+        // Second track: space + 100 + 10 + space
+        assert!((tracks[1].position - (space + 100.0 + 10.0 + space)).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_align_content_to_justify_conversion() {
+        // Test the conversion function
+        assert_eq!(align_content_to_justify(&AlignContent::FlexStart), JustifyContent::FlexStart);
+        assert_eq!(align_content_to_justify(&AlignContent::FlexEnd), JustifyContent::FlexEnd);
+        assert_eq!(align_content_to_justify(&AlignContent::Center), JustifyContent::Center);
+        assert_eq!(align_content_to_justify(&AlignContent::SpaceBetween), JustifyContent::SpaceBetween);
+        assert_eq!(align_content_to_justify(&AlignContent::SpaceAround), JustifyContent::SpaceAround);
+        assert_eq!(align_content_to_justify(&AlignContent::SpaceEvenly), JustifyContent::SpaceEvenly);
+        assert_eq!(align_content_to_justify(&AlignContent::Stretch), JustifyContent::FlexStart);
+    }
+
+    #[test]
+    fn test_justify_self_alignment() {
+        // Test justify-self: start (default from justify-items: start)
+        let mut style = ComputedStyle::new();
+        style.width = Length::Px(50.0); // Explicit width
+        let layout_box = LayoutBox::new(BoxType::Block, style);
+
+        // Cell: x=10, width=100
+        // Child width: 50
+
+        // justify-self: start
+        let (x, w) = apply_justify_self(&JustifySelf::Start, &JustifyItems::Start, 10.0, 100.0, &layout_box);
+        assert_eq!(x, 10.0, "justify-self: start should position at cell start");
+        assert_eq!(w, 50.0, "Width should match explicit width");
+
+        // justify-self: end
+        let (x, w) = apply_justify_self(&JustifySelf::End, &JustifyItems::Start, 10.0, 100.0, &layout_box);
+        assert_eq!(x, 60.0, "justify-self: end should position at cell end - width (10 + 100 - 50)");
+        assert_eq!(w, 50.0);
+
+        // justify-self: center
+        let (x, w) = apply_justify_self(&JustifySelf::Center, &JustifyItems::Start, 10.0, 100.0, &layout_box);
+        assert_eq!(x, 35.0, "justify-self: center should center (10 + (100-50)/2)");
+        assert_eq!(w, 50.0);
+    }
+
+    #[test]
+    fn test_justify_self_stretch() {
+        // Test justify-self: stretch with auto width
+        let mut style = ComputedStyle::new();
+        style.width = Length::Auto;
+        let layout_box = LayoutBox::new(BoxType::Block, style);
+
+        // With auto width, stretch should use cell width
+        let (x, w) = apply_justify_self(&JustifySelf::Stretch, &JustifyItems::Stretch, 10.0, 100.0, &layout_box);
+        assert_eq!(x, 10.0);
+        assert_eq!(w, 100.0, "Stretch with auto width should fill cell");
+
+        // With explicit width, stretch should use explicit width
+        let mut style2 = ComputedStyle::new();
+        style2.width = Length::Px(50.0);
+        let layout_box2 = LayoutBox::new(BoxType::Block, style2);
+
+        let (x, w) = apply_justify_self(&JustifySelf::Stretch, &JustifyItems::Stretch, 10.0, 100.0, &layout_box2);
+        assert_eq!(x, 10.0);
+        assert_eq!(w, 50.0, "Stretch with explicit width should respect width");
+    }
+
+    #[test]
+    fn test_justify_self_auto_fallback() {
+        // Test justify-self: auto falls back to justify-items
+        let mut style = ComputedStyle::new();
+        style.width = Length::Px(50.0);
+        let layout_box = LayoutBox::new(BoxType::Block, style);
+
+        // justify-self: auto, justify-items: end -> should align end
+        let (x, _) = apply_justify_self(&JustifySelf::Auto, &JustifyItems::End, 10.0, 100.0, &layout_box);
+        assert_eq!(x, 60.0, "Auto should fall back to justify-items: end");
+
+        // justify-self: auto, justify-items: center -> should center
+        let (x, _) = apply_justify_self(&JustifySelf::Auto, &JustifyItems::Center, 10.0, 100.0, &layout_box);
+        assert_eq!(x, 35.0, "Auto should fall back to justify-items: center");
+    }
+
+    #[test]
+    fn test_align_self_alignment() {
+        // Test align-self alignment
+        let mut style = ComputedStyle::new();
+        style.height = Length::Px(30.0); // Explicit height
+        let layout_box = LayoutBox::new(BoxType::Block, style);
+
+        // Cell: y=20, height=100
+        // Child height: 30
+
+        // align-self: flex-start
+        let (y, h) = apply_align_self(&AlignSelf::FlexStart, &AlignItems::Stretch, 20.0, 100.0, &layout_box);
+        assert_eq!(y, 20.0, "align-self: flex-start should position at cell start");
+        assert_eq!(h, 30.0);
+
+        // align-self: flex-end
+        let (y, h) = apply_align_self(&AlignSelf::FlexEnd, &AlignItems::Stretch, 20.0, 100.0, &layout_box);
+        assert_eq!(y, 90.0, "align-self: flex-end should position at cell end - height (20 + 100 - 30)");
+        assert_eq!(h, 30.0);
+
+        // align-self: center
+        let (y, h) = apply_align_self(&AlignSelf::Center, &AlignItems::Stretch, 20.0, 100.0, &layout_box);
+        assert_eq!(y, 55.0, "align-self: center should center (20 + (100-30)/2)");
+        assert_eq!(h, 30.0);
+    }
+
+    #[test]
+    fn test_align_self_stretch() {
+        // Test align-self: stretch with auto height
+        let mut style = ComputedStyle::new();
+        style.height = Length::Auto;
+        let layout_box = LayoutBox::new(BoxType::Block, style);
+
+        // With auto height, stretch should use cell height
+        let (y, h) = apply_align_self(&AlignSelf::Stretch, &AlignItems::Stretch, 20.0, 100.0, &layout_box);
+        assert_eq!(y, 20.0);
+        assert_eq!(h, 100.0, "Stretch with auto height should fill cell");
+
+        // With explicit height, stretch should use explicit height
+        let mut style2 = ComputedStyle::new();
+        style2.height = Length::Px(30.0);
+        let layout_box2 = LayoutBox::new(BoxType::Block, style2);
+
+        let (y, h) = apply_align_self(&AlignSelf::Stretch, &AlignItems::Stretch, 20.0, 100.0, &layout_box2);
+        assert_eq!(y, 20.0);
+        assert_eq!(h, 30.0, "Stretch with explicit height should respect height");
     }
 }
