@@ -292,6 +292,15 @@ pub struct Renderer {
     // Pipelines
     color_pipeline: wgpu::RenderPipeline,
     texture_pipeline: wgpu::RenderPipeline,
+    // Texture pipeline for Rgba8Unorm targets (used for blitting to filter textures)
+    texture_pipeline_rgba: wgpu::RenderPipeline,
+    // Blit pipeline for copying RGBA textures (unlike texture_pipeline which treats R as alpha)
+    blit_pipeline: wgpu::RenderPipeline,
+    // Blit pipeline for Rgba8Unorm targets (for blitting to filter textures)
+    blit_pipeline_rgba: wgpu::RenderPipeline,
+
+    // Backdrop filter pipelines (compute shaders for blur + color filters)
+    backdrop_filter_pipelines: pipeline::BackdropFilterPipelines,
 
     // Uniform buffer
     uniform_buffer: wgpu::Buffer,
@@ -316,7 +325,19 @@ pub struct Renderer {
     glyph_cache: GlyphCache,
 
     // Texture bind group layout (for sharing)
-    _texture_bind_group_layout: wgpu::BindGroupLayout,
+    texture_bind_group_layout: wgpu::BindGroupLayout,
+
+    // Intermediate render texture for backdrop filter operations
+    // Created lazily when needed, resized to match viewport
+    intermediate_texture: Option<wgpu::Texture>,
+    intermediate_view: Option<wgpu::TextureView>,
+    intermediate_size: (u32, u32),
+
+    // Sampler for drawing filtered textures back to screen
+    filter_sampler: wgpu::Sampler,
+
+    // Surface format for creating compatible textures
+    surface_format: wgpu::TextureFormat,
 }
 
 /// A stacking context for z-ordering.
@@ -407,15 +428,57 @@ impl Renderer {
             &texture_bind_group_layout,
         );
 
+        // Create texture pipeline for Rgba8Unorm targets (blitting to filter textures)
+        let texture_pipeline_rgba = create_texture_pipeline(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            &uniform_bind_group_layout,
+            &texture_bind_group_layout,
+        );
+
+        // Create blit pipeline for copying RGBA textures (properly samples all 4 channels)
+        let blit_pipeline = pipeline::create_blit_pipeline(
+            &device,
+            surface_format,
+            &uniform_bind_group_layout,
+            &texture_bind_group_layout,
+        );
+
+        // Create blit pipeline for Rgba8Unorm targets (blitting to filter textures)
+        let blit_pipeline_rgba = pipeline::create_blit_pipeline(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            &uniform_bind_group_layout,
+            &texture_bind_group_layout,
+        );
+
+        // Create backdrop filter pipelines (compute shaders for blur + color filters)
+        let backdrop_filter_pipelines = pipeline::create_backdrop_filter_pipelines(&device);
+
         // Create caches
         let texture_cache = TextureCache::new(&device, texture_bind_group_layout.clone());
         let glyph_cache = GlyphCache::new(&device, &queue, texture_bind_group_layout.clone())?;
+
+        // Create sampler for drawing filtered textures
+        let filter_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
 
         Ok(Self {
             device,
             queue,
             color_pipeline,
             texture_pipeline,
+            texture_pipeline_rgba,
+            blit_pipeline,
+            blit_pipeline_rgba,
+            backdrop_filter_pipelines,
             uniform_buffer,
             uniform_bind_group,
             viewport_size: (800, 600),
@@ -428,7 +491,12 @@ impl Renderer {
             transform_stack: Vec::new(),
             texture_cache,
             glyph_cache,
-            _texture_bind_group_layout: texture_bind_group_layout,
+            texture_bind_group_layout,
+            intermediate_texture: None,
+            intermediate_view: None,
+            intermediate_size: (0, 0),
+            filter_sampler,
+            surface_format,
         })
     }
 
@@ -442,6 +510,384 @@ impl Renderer {
         };
 
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+    }
+
+    /// Create an intermediate texture for backdrop filter operations.
+    /// Returns (texture, view) pair. The texture supports both reading and storage writes.
+    fn create_filter_texture(&self, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Filter Intermediate Texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    }
+
+    /// Ensure intermediate render texture exists and matches viewport size.
+    /// Uses surface format (typically Bgra8Unorm) for compatibility with render pipelines.
+    /// Returns the texture view for rendering.
+    fn ensure_intermediate_texture(&mut self) -> &wgpu::TextureView {
+        let (width, height) = self.viewport_size;
+
+        // Recreate if size changed or doesn't exist
+        if self.intermediate_texture.is_none() || self.intermediate_size != (width, height) {
+            // Use surface format so we can render with existing pipelines
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Intermediate Render Texture"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.surface_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.intermediate_texture = Some(texture);
+            self.intermediate_view = Some(view);
+            self.intermediate_size = (width, height);
+        }
+
+        self.intermediate_view.as_ref().unwrap()
+    }
+
+    /// Flush current batched vertices to the target without clearing.
+    /// Used for incremental rendering when backdrop filters are present.
+    fn flush_batches_to(&mut self, target: &wgpu::TextureView, clear: bool) {
+        if self.color_vertices.is_empty() && self.texture_vertices.is_empty() {
+            return;
+        }
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Batch Flush Encoder"),
+        });
+
+        {
+            let load_op = if clear {
+                wgpu::LoadOp::Clear(wgpu::Color::WHITE)
+            } else {
+                wgpu::LoadOp::Load
+            };
+
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Batch Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: load_op,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            // Draw solid colors
+            if !self.color_vertices.is_empty() {
+                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Color Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&self.color_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+
+                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Color Index Buffer"),
+                    contents: bytemuck::cast_slice(&self.color_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+                render_pass.set_pipeline(&self.color_pipeline);
+                render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..self.color_indices.len() as u32, 0, 0..1);
+            }
+
+            // Draw textured quads
+            if !self.texture_vertices.is_empty() {
+                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Texture Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&self.texture_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+
+                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Texture Index Buffer"),
+                    contents: bytemuck::cast_slice(&self.texture_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+                render_pass.set_pipeline(&self.texture_pipeline);
+                render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                render_pass.set_bind_group(1, self.glyph_cache.bind_group(), &[]);
+                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..self.texture_indices.len() as u32, 0, 0..1);
+            }
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Clear batches after flushing
+        self.color_vertices.clear();
+        self.color_indices.clear();
+        self.texture_vertices.clear();
+        self.texture_indices.clear();
+    }
+
+    /// Draw a textured quad from a filtered texture to the render target immediately.
+    /// This renders with a custom bind group, bypassing the batch system.
+    fn draw_filtered_texture_to(
+        &self,
+        texture_view: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+        rect: Rect,
+    ) {
+        // Create bind group for this texture
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Filtered Texture Bind Group"),
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.filter_sampler),
+                },
+            ],
+        });
+
+        // Create vertices for the quad - normalized tex coords to sample region
+        let x = rect.x;
+        let y = rect.y;
+        let w = rect.width;
+        let h = rect.height;
+
+        // Calculate tex coords based on position in viewport
+        let (vw, vh) = self.viewport_size;
+        let u0 = rect.x / vw as f32;
+        let v0 = rect.y / vh as f32;
+        let u1 = (rect.x + rect.width) / vw as f32;
+        let v1 = (rect.y + rect.height) / vh as f32;
+
+        let white = [1.0, 1.0, 1.0, 1.0];
+
+        let vertices = [
+            TextureVertex { position: [x, y], tex_coords: [u0, v0], color: white },
+            TextureVertex { position: [x + w, y], tex_coords: [u1, v0], color: white },
+            TextureVertex { position: [x + w, y + h], tex_coords: [u1, v1], color: white },
+            TextureVertex { position: [x, y + h], tex_coords: [u0, v1], color: white },
+        ];
+        let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Filtered Quad Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Filtered Quad Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Filtered Texture Encoder"),
+        });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Filtered Texture Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            // Use blit_pipeline to properly sample RGBA texture
+            // (texture_pipeline treats red channel as alpha for glyph rendering)
+            render_pass.set_pipeline(&self.blit_pipeline);
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            render_pass.set_bind_group(1, &bind_group, &[]);
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..6, 0, 0..1);
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Create a bind group for backdrop filter compute shader operations.
+    fn create_filter_bind_group(
+        &self,
+        input_view: &wgpu::TextureView,
+        output_view: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Filter Bind Group"),
+            layout: &self.backdrop_filter_pipelines.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.backdrop_filter_pipelines.uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(input_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(output_view),
+                },
+            ],
+        })
+    }
+
+    /// Run Gaussian blur on a texture using compute shaders.
+    /// Performs two passes: horizontal then vertical blur.
+    fn run_blur_compute(
+        &self,
+        source_view: &wgpu::TextureView,
+        intermediate_view: &wgpu::TextureView,
+        dest_view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        blur_radius: f32,
+    ) {
+        // Update filter params uniform
+        let params = FilterParams {
+            blur_radius,
+            filter_type: 0, // Not used for blur
+            filter_amount: 1.0,
+            texture_width: width as f32,
+            texture_height: height as f32,
+            _padding0: 0.0,
+            _padding1: 0.0,
+            _padding2: 0.0,
+        };
+        self.queue.write_buffer(
+            &self.backdrop_filter_pipelines.uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[params]),
+        );
+
+        // Calculate workgroup counts (16x16 workgroups)
+        let workgroups_x = (width + 15) / 16;
+        let workgroups_y = (height + 15) / 16;
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Blur Compute Encoder"),
+        });
+
+        // Pass 1: Horizontal blur (source -> intermediate)
+        {
+            let bind_group = self.create_filter_bind_group(source_view, intermediate_view);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Horizontal Blur Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.backdrop_filter_pipelines.blur_h_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+        }
+
+        // Pass 2: Vertical blur (intermediate -> dest)
+        {
+            let bind_group = self.create_filter_bind_group(intermediate_view, dest_view);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Vertical Blur Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.backdrop_filter_pipelines.blur_v_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Run a color filter (grayscale, sepia, brightness) on a texture.
+    fn run_color_filter_compute(
+        &self,
+        source_view: &wgpu::TextureView,
+        dest_view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        filter_type: u32,
+        amount: f32,
+    ) {
+        // Update filter params uniform
+        let params = FilterParams {
+            blur_radius: 0.0,
+            filter_type,
+            filter_amount: amount,
+            texture_width: width as f32,
+            texture_height: height as f32,
+            _padding0: 0.0,
+            _padding1: 0.0,
+            _padding2: 0.0,
+        };
+        self.queue.write_buffer(
+            &self.backdrop_filter_pipelines.uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[params]),
+        );
+
+        // Calculate workgroup counts
+        let workgroups_x = (width + 15) / 16;
+        let workgroups_y = (height + 15) / 16;
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Color Filter Compute Encoder"),
+        });
+
+        {
+            let bind_group = self.create_filter_bind_group(source_view, dest_view);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Color Filter Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.backdrop_filter_pipelines.color_filter_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
     }
 
     /// Execute a display list and render to a target.
@@ -459,15 +905,257 @@ impl Renderer {
         self.stacking_contexts.clear();
         self.transform_stack.clear();
 
-        // Process commands
+        // Check if there are any blur backdrop filters that need GPU processing
+        let has_blur_filters = commands.iter().any(|cmd| {
+            matches!(cmd, DisplayCommand::BackdropFilter {
+                filter: rustkit_css::BackdropFilter::Blur(r), ..
+            } if *r > 0.0)
+        });
+
+        if has_blur_filters {
+            // Use GPU blur path - render to intermediate texture with GPU blur processing
+            self.execute_with_gpu_blur(commands, target)?;
+        } else {
+            // Fast path - no backdrop blur, process normally
+            for cmd in commands {
+                self.process_command(cmd);
+            }
+            self.flush_to(target)?;
+        }
+
+        Ok(())
+    }
+
+    /// Execute commands with GPU blur support for backdrop filters.
+    fn execute_with_gpu_blur(
+        &mut self,
+        commands: &[DisplayCommand],
+        target: &wgpu::TextureView,
+    ) -> Result<(), RendererError> {
+        // Ensure intermediate texture exists
+        let _ = self.ensure_intermediate_texture();
+        let intermediate_view = self.intermediate_view.as_ref().unwrap().clone();
+
+        let mut is_first_flush = true;
+
         for cmd in commands {
+            // Check if this is a blur backdrop filter
+            if let DisplayCommand::BackdropFilter {
+                rect,
+                border_radius: _,
+                filter: rustkit_css::BackdropFilter::Blur(radius),
+            } = cmd
+            {
+                if *radius > 0.0 {
+                    // Flush current batches to intermediate texture
+                    self.flush_batches_to(&intermediate_view, is_first_flush);
+                    is_first_flush = false;
+
+                    // Apply GPU blur
+                    self.apply_gpu_blur(&intermediate_view, *rect, *radius);
+
+                    continue;
+                }
+            }
+
+            // Process command normally (including non-blur backdrop filters)
             self.process_command(cmd);
         }
 
-        // Render
-        self.flush_to(target)?;
+        // Flush remaining batches to intermediate
+        if !self.color_vertices.is_empty() || !self.texture_vertices.is_empty() {
+            self.flush_batches_to(&intermediate_view, is_first_flush);
+        }
+
+        // Copy intermediate to final target
+        self.copy_texture_to_target(&intermediate_view, target);
 
         Ok(())
+    }
+
+    /// Blit from intermediate texture (surface format) to a filter texture (Rgba8Unorm).
+    /// This performs format conversion during the render pass.
+    fn blit_to_filter_texture(&self, dest_view: &wgpu::TextureView) {
+        let (vw, vh) = self.viewport_size;
+
+        // Create bind group for sampling the intermediate texture
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Blit Texture Bind Group"),
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(
+                        self.intermediate_view.as_ref().unwrap(),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.filter_sampler),
+                },
+            ],
+        });
+
+        // Full-screen quad vertices
+        let vertices = [
+            TextureVertex { position: [0.0, 0.0], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0] },
+            TextureVertex { position: [vw as f32, 0.0], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0] },
+            TextureVertex { position: [vw as f32, vh as f32], tex_coords: [1.0, 1.0], color: [1.0, 1.0, 1.0, 1.0] },
+            TextureVertex { position: [0.0, vh as f32], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0] },
+        ];
+        let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Blit Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Blit Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Blit to Filter Encoder"),
+        });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Blit to Filter Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: dest_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            // Use blit_pipeline_rgba for rendering to Rgba8Unorm target
+            // (properly samples all 4 RGBA channels, unlike texture_pipeline which treats R as alpha)
+            render_pass.set_pipeline(&self.blit_pipeline_rgba);
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            render_pass.set_bind_group(1, &bind_group, &[]);
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..6, 0, 0..1);
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Apply GPU Gaussian blur to a region of the intermediate texture.
+    fn apply_gpu_blur(
+        &self,
+        render_target: &wgpu::TextureView,
+        rect: Rect,
+        blur_radius: f32,
+    ) {
+        let (vw, vh) = self.viewport_size;
+
+        // Create filter textures for the blur passes (full viewport size for simplicity)
+        let (_filter_tex_a, filter_view_a) = self.create_filter_texture(vw, vh);
+        let (_filter_tex_b, filter_view_b) = self.create_filter_texture(vw, vh);
+
+        // Blit from intermediate texture (Bgra8Unorm) to filter texture A (Rgba8Unorm)
+        // This performs format conversion via the blit_pipeline_rgba
+        self.blit_to_filter_texture(&filter_view_a);
+
+        // Run the blur compute passes: A -> B (horizontal), B -> A (vertical)
+        self.run_blur_compute(
+            &filter_view_a,
+            &filter_view_b,
+            &filter_view_a,
+            vw,
+            vh,
+            blur_radius,
+        );
+
+        // Draw the blurred result back to the render target at the specified rect
+        self.draw_filtered_texture_to(&filter_view_a, render_target, rect);
+    }
+
+    /// Copy the intermediate texture to the final target.
+    fn copy_texture_to_target(
+        &self,
+        source: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+    ) {
+        let (vw, vh) = self.viewport_size;
+
+        // Draw the entire intermediate texture to the target
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Copy Texture Bind Group"),
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.filter_sampler),
+                },
+            ],
+        });
+
+        let vertices = [
+            TextureVertex { position: [0.0, 0.0], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0] },
+            TextureVertex { position: [vw as f32, 0.0], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0] },
+            TextureVertex { position: [vw as f32, vh as f32], tex_coords: [1.0, 1.0], color: [1.0, 1.0, 1.0, 1.0] },
+            TextureVertex { position: [0.0, vh as f32], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0] },
+        ];
+        let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Copy Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Copy Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Copy to Target Encoder"),
+        });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Copy to Target Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            // Use blit_pipeline instead of texture_pipeline to properly sample RGBA
+            // (texture_pipeline treats red channel as alpha for glyph rendering)
+            render_pass.set_pipeline(&self.blit_pipeline);
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            render_pass.set_bind_group(1, &bind_group, &[]);
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..6, 0, 0..1);
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
     }
 
     /// Process a single display command.
@@ -574,16 +1262,20 @@ impl Renderer {
                 );
             }
 
-            DisplayCommand::LinearGradient { rect, direction, stops, repeating } => {
-                self.draw_linear_gradient(*rect, *direction, stops, *repeating);
+            DisplayCommand::BackdropFilter { rect, border_radius, filter } => {
+                self.apply_backdrop_filter(*rect, *border_radius, *filter);
             }
 
-            DisplayCommand::RadialGradient { rect, shape, size, center, stops, repeating } => {
-                self.draw_radial_gradient(*rect, *shape, *size, *center, stops, *repeating);
+            DisplayCommand::LinearGradient { rect, direction, stops, repeating, border_radius } => {
+                self.draw_linear_gradient(*rect, *direction, stops, *repeating, *border_radius);
             }
 
-            DisplayCommand::ConicGradient { rect, from_angle, center, stops, repeating } => {
-                self.draw_conic_gradient(*rect, *from_angle, *center, stops, *repeating);
+            DisplayCommand::RadialGradient { rect, shape, size, center, stops, repeating, border_radius } => {
+                self.draw_radial_gradient(*rect, *shape, *size, *center, stops, *repeating, *border_radius);
+            }
+
+            DisplayCommand::ConicGradient { rect, from_angle, center, stops, repeating, border_radius } => {
+                self.draw_conic_gradient(*rect, *from_angle, *center, stops, *repeating, *border_radius);
             }
 
             DisplayCommand::TextInput {
@@ -910,6 +1602,90 @@ impl Renderer {
         self.draw_rounded_corner(rect.x, rect.y + rect.height - r_bl, r_bl, color, 3); // bottom-left
     }
 
+    /// Check if a point is inside a rounded rectangle and return the alpha coverage.
+    /// Returns 1.0 if fully inside, 0.0 if fully outside, values in between for AA at corners.
+    #[inline]
+    fn point_in_rounded_rect(
+        px: f32,
+        py: f32,
+        rect: Rect,
+        radius: rustkit_layout::BorderRadius,
+    ) -> f32 {
+        // Quick check: outside bounding rect
+        if px < rect.x || px > rect.x + rect.width || py < rect.y || py > rect.y + rect.height {
+            return 0.0;
+        }
+
+        // If no border radius, point is inside
+        if radius.is_zero() {
+            return 1.0;
+        }
+
+        // Clamp radii to half the rect dimensions
+        let max_r = (rect.width / 2.0).min(rect.height / 2.0);
+        let r_tl = radius.top_left.min(max_r);
+        let r_tr = radius.top_right.min(max_r);
+        let r_br = radius.bottom_right.min(max_r);
+        let r_bl = radius.bottom_left.min(max_r);
+
+        // Check each corner
+        let local_x = px - rect.x;
+        let local_y = py - rect.y;
+        let right_x = rect.width - local_x;
+        let bottom_y = rect.height - local_y;
+
+        // Top-left corner
+        if local_x < r_tl && local_y < r_tl {
+            let dx = r_tl - local_x;
+            let dy = r_tl - local_y;
+            let dist = (dx * dx + dy * dy).sqrt();
+            if dist > r_tl + 0.5 {
+                return 0.0;
+            } else if dist > r_tl - 0.5 {
+                return 1.0 - (dist - (r_tl - 0.5));
+            }
+        }
+
+        // Top-right corner
+        if right_x < r_tr && local_y < r_tr {
+            let dx = r_tr - right_x;
+            let dy = r_tr - local_y;
+            let dist = (dx * dx + dy * dy).sqrt();
+            if dist > r_tr + 0.5 {
+                return 0.0;
+            } else if dist > r_tr - 0.5 {
+                return 1.0 - (dist - (r_tr - 0.5));
+            }
+        }
+
+        // Bottom-right corner
+        if right_x < r_br && bottom_y < r_br {
+            let dx = r_br - right_x;
+            let dy = r_br - bottom_y;
+            let dist = (dx * dx + dy * dy).sqrt();
+            if dist > r_br + 0.5 {
+                return 0.0;
+            } else if dist > r_br - 0.5 {
+                return 1.0 - (dist - (r_br - 0.5));
+            }
+        }
+
+        // Bottom-left corner
+        if local_x < r_bl && bottom_y < r_bl {
+            let dx = r_bl - local_x;
+            let dy = r_bl - bottom_y;
+            let dist = (dx * dx + dy * dy).sqrt();
+            if dist > r_bl + 0.5 {
+                return 0.0;
+            } else if dist > r_bl - 0.5 {
+                return 1.0 - (dist - (r_bl - 0.5));
+            }
+        }
+
+        // Inside the rect, not in a corner region
+        1.0
+    }
+
     /// Draw a single rounded corner using pixel-based SDF with anti-aliasing.
     /// quadrant: 0=top-left, 1=top-right, 2=bottom-right, 3=bottom-left
     fn draw_rounded_corner(&mut self, x: f32, y: f32, radius: f32, color: Color, quadrant: u8) {
@@ -1090,13 +1866,147 @@ impl Renderer {
         }
     }
 
-    /// Draw a linear gradient.
+    /// Apply a backdrop filter (blur, grayscale, etc.) to pixels behind the element.
+    ///
+    /// ## GPU Infrastructure (Available)
+    ///
+    /// The following GPU compute pipeline infrastructure is in place:
+    /// - `backdrop_filter_pipelines`: Compute pipelines for blur (horizontal/vertical) and color filters
+    /// - `create_filter_texture()`: Creates storage textures for compute operations
+    /// - `run_blur_compute()`: Executes Gaussian blur via 2-pass separable filter
+    /// - `run_color_filter_compute()`: Executes grayscale/sepia/brightness filters
+    ///
+    /// ## Current Limitation
+    ///
+    /// Full GPU backdrop filter requires render-to-texture support:
+    /// 1. Rendering commands up to this point to an intermediate texture
+    /// 2. Copying the backdrop region
+    /// 3. Running compute shader passes
+    /// 4. Drawing the filtered result
+    ///
+    /// The current architecture batches all commands and renders once at the end of `execute()`,
+    /// making mid-frame capture non-trivial. For now, we use overlay approximations.
+    ///
+    /// ## Future Integration Path
+    ///
+    /// To enable true GPU filters:
+    /// 1. Modify `execute()` to split rendering at BackdropFilter commands
+    /// 2. Create intermediate render texture with `COPY_SRC` usage
+    /// 3. Flush batched commands before each backdrop filter
+    /// 4. Copy region, run compute, draw result, continue batching
+    fn apply_backdrop_filter(
+        &mut self,
+        rect: Rect,
+        border_radius: rustkit_layout::BorderRadius,
+        filter: rustkit_css::BackdropFilter,
+    ) {
+        use rustkit_css::BackdropFilter;
+
+        // Apply clipping
+        let rect = if let Some(clip) = self.current_clip() {
+            if let Some(clipped) = rect.intersect(&clip) {
+                clipped
+            } else {
+                return; // Fully clipped
+            }
+        } else {
+            rect
+        };
+
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+
+        match filter {
+            BackdropFilter::None => {}
+
+            BackdropFilter::Blur(radius) => {
+                // Proper backdrop blur requires render-to-texture and compute shaders.
+                // For now, we simulate it with a semi-transparent white/gray overlay
+                // which approximates the "frosted glass" effect.
+                if radius > 0.0 {
+                    // The heavier the blur, the more opaque the overlay (0.0-1.0 range)
+                    let opacity = (radius / 20.0).min(0.5) * 0.3;
+                    let overlay_color = Color::new(255, 255, 255, opacity);
+
+                    if border_radius.is_zero() {
+                        self.draw_solid_rect(rect, overlay_color);
+                    } else {
+                        self.draw_rounded_rect(rect, overlay_color, border_radius);
+                    }
+                }
+            }
+
+            BackdropFilter::Grayscale(amount) => {
+                // Approximate grayscale by drawing a gray overlay
+                // This isn't accurate but provides visual feedback
+                if amount > 0.0 {
+                    let gray_value = 128;
+                    // Alpha in 0.0-1.0 range
+                    let overlay_color = Color::new(gray_value, gray_value, gray_value, amount * 0.4);
+
+                    if border_radius.is_zero() {
+                        self.draw_solid_rect(rect, overlay_color);
+                    } else {
+                        self.draw_rounded_rect(rect, overlay_color, border_radius);
+                    }
+                }
+            }
+
+            BackdropFilter::Brightness(amount) => {
+                // Brightness > 1.0 = lighter, < 1.0 = darker
+                if amount != 1.0 {
+                    let color = if amount > 1.0 {
+                        // Lighten with white overlay (alpha in 0.0-1.0 range)
+                        let intensity = ((amount - 1.0) * 0.4).min(0.8);
+                        Color::new(255, 255, 255, intensity)
+                    } else {
+                        // Darken with black overlay (alpha in 0.0-1.0 range)
+                        let intensity = ((1.0 - amount) * 0.8).min(0.8);
+                        Color::new(0, 0, 0, intensity)
+                    };
+
+                    if border_radius.is_zero() {
+                        self.draw_solid_rect(rect, color);
+                    } else {
+                        self.draw_rounded_rect(rect, color, border_radius);
+                    }
+                }
+            }
+
+            BackdropFilter::Contrast(_) => {
+                // Contrast adjustment would require per-pixel operations
+                // No simple overlay approximation exists
+            }
+
+            BackdropFilter::Saturate(_) => {
+                // Saturation adjustment would require per-pixel color manipulation
+                // No simple overlay approximation exists
+            }
+
+            BackdropFilter::Sepia(amount) => {
+                // Approximate sepia with a brownish overlay (alpha in 0.0-1.0 range)
+                if amount > 0.0 {
+                    let sepia_color = Color::new(112, 66, 20, amount * 0.3);
+
+                    if border_radius.is_zero() {
+                        self.draw_solid_rect(rect, sepia_color);
+                    } else {
+                        self.draw_rounded_rect(rect, sepia_color, border_radius);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Draw a linear gradient with optional border-radius clipping.
     fn draw_linear_gradient(
         &mut self,
         rect: Rect,
         direction: rustkit_css::GradientDirection,
         stops: &[rustkit_css::ColorStop],
         repeating: bool,
+        border_radius: rustkit_layout::BorderRadius,
     ) {
         if stops.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
             return;
@@ -1142,10 +2052,11 @@ impl Renderer {
         // Check for axis-aligned gradients (more efficient rendering)
         let is_horizontal = (angle_deg - 90.0).abs() < 0.1 || (angle_deg - 270.0).abs() < 0.1;
         let is_vertical = angle_deg.abs() < 0.1 || (angle_deg - 180.0).abs() < 0.1;
+        let has_radius = !border_radius.is_zero();
 
-        if is_horizontal {
-            // Horizontal gradient (left to right or right to left)
-            // Quality-first: 1px sampling for smooth gradients
+        // If we have border-radius, we need cell-by-cell rendering for proper clipping
+        if !has_radius && is_horizontal {
+            // Horizontal gradient (left to right or right to left) - fast path
             let reverse = angle_deg > 180.0;
             let step_count = rect.width.max(2.0) as usize;
             let strip_width = rect.width / step_count as f32;
@@ -1161,9 +2072,8 @@ impl Renderer {
                 let x_pos = rect.x + i as f32 * strip_width;
                 self.draw_solid_rect(Rect::new(x_pos, rect.y, strip_width + 0.5, rect.height), color);
             }
-        } else if is_vertical {
-            // Vertical gradient (top to bottom or bottom to top)
-            // Quality-first: 1px sampling for smooth gradients
+        } else if !has_radius && is_vertical {
+            // Vertical gradient (top to bottom or bottom to top) - fast path
             let reverse = angle_deg < 90.0 || angle_deg > 270.0;
             let step_count = rect.height.max(2.0) as usize;
             let strip_height = rect.height / step_count as f32;
@@ -1180,7 +2090,7 @@ impl Renderer {
                 self.draw_solid_rect(Rect::new(rect.x, y_pos, rect.width, strip_height + 0.5), color);
             }
         } else {
-            // Diagonal gradient - render using cells for proper angular gradients
+            // Diagonal gradient or gradient with border-radius - render using cells
             // Use adaptive cell sizing to prevent GPU buffer overflow for large gradients
             // while maintaining 1px quality for small UI elements
             let area = rect.width * rect.height;
@@ -1206,23 +2116,40 @@ impl Renderer {
 
                 while x < rect.x + rect.width {
                     let cell_w = cell_size.min(rect.x + rect.width - x);
+                    let cell_center_x = x + cell_w / 2.0;
+                    let cell_center_y = y + cell_h / 2.0;
 
-                    // Calculate position relative to center of rect
-                    let px = x + cell_w / 2.0 - rect.x - half_width;
-                    let py = y + cell_h / 2.0 - rect.y - half_height;
+                    // Check border-radius clipping
+                    let alpha_coverage = Self::point_in_rounded_rect(
+                        cell_center_x,
+                        cell_center_y,
+                        rect,
+                        border_radius,
+                    );
 
-                    // Project point onto gradient line
-                    // Gradient direction: (sin_a, -cos_a) where angle 0 is "to top"
-                    let projection = px * sin_a + py * (-cos_a);
+                    if alpha_coverage > 0.0 {
+                        // Calculate position relative to center of rect
+                        let px = cell_center_x - rect.x - half_width;
+                        let py = cell_center_y - rect.y - half_height;
 
-                    // Normalize to 0-1 range
-                    let t = (projection / gradient_half_length + 1.0) / 2.0;
-                    let t_final = apply_t(t);
+                        // Project point onto gradient line
+                        // Gradient direction: (sin_a, -cos_a) where angle 0 is "to top"
+                        let projection = px * sin_a + py * (-cos_a);
 
-                    let color = Self::interpolate_color(&normalized_stops, t_final);
+                        // Normalize to 0-1 range
+                        let t = (projection / gradient_half_length + 1.0) / 2.0;
+                        let t_final = apply_t(t);
 
-                    if color.a > 0.0 {
-                        self.draw_solid_rect(Rect::new(x, y, cell_w, cell_h), color);
+                        let mut color = Self::interpolate_color(&normalized_stops, t_final);
+
+                        // Apply border-radius alpha
+                        if alpha_coverage < 1.0 {
+                            color = Color::new(color.r, color.g, color.b, color.a * alpha_coverage);
+                        }
+
+                        if color.a > 0.0 {
+                            self.draw_solid_rect(Rect::new(x, y, cell_w, cell_h), color);
+                        }
                     }
 
                     x += cell_size;
@@ -1232,7 +2159,7 @@ impl Renderer {
         }
     }
     
-    /// Draw a radial gradient.
+    /// Draw a radial gradient with optional border-radius clipping.
     fn draw_radial_gradient(
         &mut self,
         rect: Rect,
@@ -1241,6 +2168,7 @@ impl Renderer {
         center: (f32, f32),
         stops: &[rustkit_css::ColorStop],
         repeating: bool,
+        border_radius: rustkit_layout::BorderRadius,
     ) {
         if stops.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
             return;
@@ -1342,25 +2270,42 @@ impl Renderer {
             let mut x = rect.x;
             while x < rect.x + rect.width {
                 let col_width = step_size.min(rect.x + rect.width - x);
+                let cell_center_x = x + col_width / 2.0;
+                let cell_center_y = y + row_height / 2.0;
 
-                // Calculate distance from center (normalized to ellipse)
-                let dx = (x + col_width / 2.0 - cx) / rx.max(0.001);
-                let dy = (y + row_height / 2.0 - cy) / ry.max(0.001);
-                let t = (dx * dx + dy * dy).sqrt();
+                // Check border-radius clipping
+                let alpha_coverage = Self::point_in_rounded_rect(
+                    cell_center_x,
+                    cell_center_y,
+                    rect,
+                    border_radius,
+                );
 
-                // Apply repeating logic
-                let t_final = if repeating {
-                    t.rem_euclid(repeat_length)
-                } else {
-                    t.clamp(0.0, 1.0)
-                };
+                if alpha_coverage > 0.0 {
+                    // Calculate distance from center (normalized to ellipse)
+                    let dx = (cell_center_x - cx) / rx.max(0.001);
+                    let dy = (cell_center_y - cy) / ry.max(0.001);
+                    let t = (dx * dx + dy * dy).sqrt();
 
-                // Get color at this distance (gamma-correct)
-                let color = Self::interpolate_color(&normalized_stops, t_final);
+                    // Apply repeating logic
+                    let t_final = if repeating {
+                        t.rem_euclid(repeat_length)
+                    } else {
+                        t.clamp(0.0, 1.0)
+                    };
 
-                // Only draw if not fully transparent
-                if color.a > 0.0 {
-                    self.draw_solid_rect(Rect::new(x, y, col_width, row_height), color);
+                    // Get color at this distance
+                    let mut color = Self::interpolate_color(&normalized_stops, t_final);
+
+                    // Apply border-radius alpha
+                    if alpha_coverage < 1.0 {
+                        color = Color::new(color.r, color.g, color.b, color.a * alpha_coverage);
+                    }
+
+                    // Only draw if not fully transparent
+                    if color.a > 0.0 {
+                        self.draw_solid_rect(Rect::new(x, y, col_width, row_height), color);
+                    }
                 }
 
                 x += step_size;
@@ -1369,7 +2314,7 @@ impl Renderer {
         }
     }
 
-    /// Draw a conic gradient.
+    /// Draw a conic gradient with optional border-radius clipping.
     fn draw_conic_gradient(
         &mut self,
         rect: Rect,
@@ -1377,6 +2322,7 @@ impl Renderer {
         center: (f32, f32),
         stops: &[rustkit_css::ColorStop],
         repeating: bool,
+        border_radius: rustkit_layout::BorderRadius,
     ) {
         if stops.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
             return;
@@ -1429,24 +2375,41 @@ impl Renderer {
             let mut x = rect.x;
             while x < rect.x + rect.width {
                 let col_width = step_size.min(rect.x + rect.width - x);
+                let cell_center_x = x + col_width / 2.0;
+                let cell_center_y = y + row_height / 2.0;
 
-                // Calculate angle from center
-                let dx = x + col_width / 2.0 - cx;
-                let dy = y + row_height / 2.0 - cy;
-                let angle = dy.atan2(dx) - from_rad;
+                // Check border-radius clipping
+                let alpha_coverage = Self::point_in_rounded_rect(
+                    cell_center_x,
+                    cell_center_y,
+                    rect,
+                    border_radius,
+                );
 
-                // Normalize angle to 0-1 range
-                let normalized_angle = ((angle + std::f32::consts::PI) / (2.0 * std::f32::consts::PI)) % 1.0;
-                let raw_t = if normalized_angle < 0.0 { normalized_angle + 1.0 } else { normalized_angle };
+                if alpha_coverage > 0.0 {
+                    // Calculate angle from center
+                    let dx = cell_center_x - cx;
+                    let dy = cell_center_y - cy;
+                    let angle = dy.atan2(dx) - from_rad;
 
-                // Apply repeating logic
-                let t = apply_t(raw_t);
+                    // Normalize angle to 0-1 range
+                    let normalized_angle = ((angle + std::f32::consts::PI) / (2.0 * std::f32::consts::PI)) % 1.0;
+                    let raw_t = if normalized_angle < 0.0 { normalized_angle + 1.0 } else { normalized_angle };
 
-                // Get color at this angle
-                let color = Self::interpolate_color(&normalized_stops, t);
+                    // Apply repeating logic
+                    let t = apply_t(raw_t);
 
-                if color.a > 0.0 {
-                    self.draw_solid_rect(Rect::new(x, y, col_width, row_height), color);
+                    // Get color at this angle
+                    let mut color = Self::interpolate_color(&normalized_stops, t);
+
+                    // Apply border-radius alpha
+                    if alpha_coverage < 1.0 {
+                        color = Color::new(color.r, color.g, color.b, color.a * alpha_coverage);
+                    }
+
+                    if color.a > 0.0 {
+                        self.draw_solid_rect(Rect::new(x, y, col_width, row_height), color);
+                    }
                 }
 
                 x += step_size;
@@ -1464,7 +2427,7 @@ impl Renderer {
             ((c + 0.055) / 1.055).powf(2.4)
         }
     }
-    
+
     /// Convert linear to sRGB space after interpolation.
     #[inline]
     fn linear_to_srgb(c: f32) -> f32 {
@@ -1474,62 +2437,54 @@ impl Renderer {
             1.055 * c.powf(1.0 / 2.4) - 0.055
         }
     }
-    
-    /// Interpolate between color stops with gamma-correct blending (linearRGB).
-    /// CSS Images 4 uses this for modern browsers, but kept for future use.
-    #[allow(dead_code)]
-    fn interpolate_color_gamma(stops: &[(f32, Color)], t: f32) -> Color {
-        if stops.is_empty() {
-            return Color::TRANSPARENT;
-        }
-        if stops.len() == 1 || t <= stops[0].0 {
-            return stops[0].1;
-        }
-        if t >= stops[stops.len() - 1].0 {
-            return stops[stops.len() - 1].1;
-        }
-        
-        // Find the two stops surrounding t
-        for i in 0..stops.len() - 1 {
-            let (pos0, color0) = stops[i];
-            let (pos1, color1) = stops[i + 1];
-            if t >= pos0 && t <= pos1 {
-                let local_t = if (pos1 - pos0).abs() < 0.0001 {
-                    0.0
-                } else {
-                    (t - pos0) / (pos1 - pos0)
-                };
-                
-                // Convert to linear space (0-1 range)
-                let r0 = Self::srgb_to_linear(color0.r as f32 / 255.0);
-                let g0 = Self::srgb_to_linear(color0.g as f32 / 255.0);
-                let b0 = Self::srgb_to_linear(color0.b as f32 / 255.0);
-                
-                let r1 = Self::srgb_to_linear(color1.r as f32 / 255.0);
-                let g1 = Self::srgb_to_linear(color1.g as f32 / 255.0);
-                let b1 = Self::srgb_to_linear(color1.b as f32 / 255.0);
-                
-                // Interpolate in linear space
-                let r_lin = (1.0 - local_t) * r0 + local_t * r1;
-                let g_lin = (1.0 - local_t) * g0 + local_t * g1;
-                let b_lin = (1.0 - local_t) * b0 + local_t * b1;
-                
-                // Convert back to sRGB
-                let r = (Self::linear_to_srgb(r_lin) * 255.0).round() as u8;
-                let g = (Self::linear_to_srgb(g_lin) * 255.0).round() as u8;
-                let b = (Self::linear_to_srgb(b_lin) * 255.0).round() as u8;
-                
-                // Alpha is linear
-                let a = (1.0 - local_t) * color0.a + local_t * color1.a;
-                
-                return Color::new(r, g, b, a);
-            }
-        }
-        stops[stops.len() - 1].1
+
+    /// Convert linear RGB to oklab color space.
+    /// Returns (L, a, b) where L is lightness, a is green-red, b is blue-yellow.
+    #[inline]
+    fn linear_rgb_to_oklab(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+        // Convert to LMS (long, medium, short cone response)
+        let l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b;
+        let m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b;
+        let s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b;
+
+        // Apply cube root (non-linear response)
+        let l_ = l.cbrt();
+        let m_ = m.cbrt();
+        let s_ = s.cbrt();
+
+        // Convert to oklab
+        let ok_l = 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_;
+        let ok_a = 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_;
+        let ok_b = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_;
+
+        (ok_l, ok_a, ok_b)
     }
-    
-    /// Interpolate between color stops in sRGB space.
-    /// This matches Chrome's gradient rendering for CSS Images Level 3 compatibility.
+
+    /// Convert oklab to linear RGB color space.
+    #[inline]
+    fn oklab_to_linear_rgb(ok_l: f32, ok_a: f32, ok_b: f32) -> (f32, f32, f32) {
+        // Convert from oklab to LMS (cube root space)
+        let l_ = ok_l + 0.3963377774 * ok_a + 0.2158037573 * ok_b;
+        let m_ = ok_l - 0.1055613458 * ok_a - 0.0638541728 * ok_b;
+        let s_ = ok_l - 0.0894841775 * ok_a - 1.2914855480 * ok_b;
+
+        // Cube to get linear LMS
+        let l = l_ * l_ * l_;
+        let m = m_ * m_ * m_;
+        let s = s_ * s_ * s_;
+
+        // Convert LMS to linear RGB
+        let r = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
+        let g = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
+        let b = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s;
+
+        (r, g, b)
+    }
+
+    /// Interpolate between color stops in sRGB space (gamma-encoded).
+    /// This matches Chrome's default gradient interpolation behavior.
+    /// CSS Images Level 3 specifies sRGB interpolation; CSS Color Level 4
+    /// allows specifying oklab via `in oklab` but defaults to sRGB.
     fn interpolate_color(stops: &[(f32, Color)], t: f32) -> Color {
         if stops.is_empty() {
             return Color::TRANSPARENT;
@@ -1540,7 +2495,7 @@ impl Renderer {
         if t >= stops[stops.len() - 1].0 {
             return stops[stops.len() - 1].1;
         }
-        
+
         // Find the two stops surrounding t
         for i in 0..stops.len() - 1 {
             let (pos0, color0) = stops[i];
@@ -1557,6 +2512,67 @@ impl Renderer {
                     ((1.0 - local_t) * color0.b as f32 + local_t * color1.b as f32).round() as u8,
                     (1.0 - local_t) * color0.a + local_t * color1.a,
                 );
+            }
+        }
+        stops[stops.len() - 1].1
+    }
+
+    /// Interpolate between color stops using oklab color space.
+    /// This provides perceptually uniform gradients but doesn't match Chrome's default.
+    /// Use for CSS `linear-gradient(in oklab, ...)` when that syntax is supported.
+    #[allow(dead_code)]
+    fn interpolate_color_oklab(stops: &[(f32, Color)], t: f32) -> Color {
+        if stops.is_empty() {
+            return Color::TRANSPARENT;
+        }
+        if stops.len() == 1 || t <= stops[0].0 {
+            return stops[0].1;
+        }
+        if t >= stops[stops.len() - 1].0 {
+            return stops[stops.len() - 1].1;
+        }
+
+        // Find the two stops surrounding t
+        for i in 0..stops.len() - 1 {
+            let (pos0, color0) = stops[i];
+            let (pos1, color1) = stops[i + 1];
+            if t >= pos0 && t <= pos1 {
+                let local_t = if (pos1 - pos0).abs() < 0.0001 {
+                    0.0
+                } else {
+                    (t - pos0) / (pos1 - pos0)
+                };
+
+                // Convert sRGB to linear RGB
+                let r0 = Self::srgb_to_linear(color0.r as f32 / 255.0);
+                let g0 = Self::srgb_to_linear(color0.g as f32 / 255.0);
+                let b0 = Self::srgb_to_linear(color0.b as f32 / 255.0);
+
+                let r1 = Self::srgb_to_linear(color1.r as f32 / 255.0);
+                let g1 = Self::srgb_to_linear(color1.g as f32 / 255.0);
+                let b1 = Self::srgb_to_linear(color1.b as f32 / 255.0);
+
+                // Convert to oklab
+                let (l0, a0, b0_ok) = Self::linear_rgb_to_oklab(r0, g0, b0);
+                let (l1, a1, b1_ok) = Self::linear_rgb_to_oklab(r1, g1, b1);
+
+                // Interpolate in oklab space
+                let l_interp = (1.0 - local_t) * l0 + local_t * l1;
+                let a_interp = (1.0 - local_t) * a0 + local_t * a1;
+                let b_interp = (1.0 - local_t) * b0_ok + local_t * b1_ok;
+
+                // Convert back to linear RGB
+                let (r_lin, g_lin, b_lin) = Self::oklab_to_linear_rgb(l_interp, a_interp, b_interp);
+
+                // Clamp to valid range and convert to sRGB
+                let r = (Self::linear_to_srgb(r_lin.clamp(0.0, 1.0)) * 255.0).round() as u8;
+                let g = (Self::linear_to_srgb(g_lin.clamp(0.0, 1.0)) * 255.0).round() as u8;
+                let b = (Self::linear_to_srgb(b_lin.clamp(0.0, 1.0)) * 255.0).round() as u8;
+
+                // Alpha is interpolated linearly
+                let a = (1.0 - local_t) * color0.a + local_t * color1.a;
+
+                return Color::new(r, g, b, a);
             }
         }
         stops[stops.len() - 1].1
