@@ -42,7 +42,7 @@ pub use text::{
     TextMetrics, TextShaper,
 };
 
-use rustkit_css::{BoxSizing, Color, ComputedStyle, Length};
+use rustkit_css::{BoxSizing, Color, ComputedStyle, Length, TextAlign};
 use std::cmp::Ordering;
 use thiserror::Error;
 
@@ -417,6 +417,8 @@ pub struct LayoutBox {
     pub containing_block_index: Option<usize>,
     /// Viewport dimensions for resolving vh/vw units.
     pub viewport: (f32, f32),
+    /// Sticky positioning state (for position: sticky elements).
+    pub sticky_state: Option<StickyState>,
 }
 
 impl LayoutBox {
@@ -435,6 +437,7 @@ impl LayoutBox {
             stacking_context: None,
             containing_block_index: None,
             viewport: (0.0, 0.0),
+            sticky_state: None,
         }
     }
 
@@ -483,6 +486,80 @@ impl LayoutBox {
             bottom,
             left,
         };
+    }
+
+    /// Update sticky positions based on scroll state.
+    ///
+    /// This should be called before building the display list when scroll has changed.
+    /// It recursively updates all sticky elements in the tree based on the current
+    /// scroll position relative to their containing blocks.
+    pub fn update_sticky_positions(&mut self, scroll_x: f32, scroll_y: f32, container_rect: Rect) {
+        // Update this element's sticky state if it's sticky
+        if let Some(ref mut sticky_state) = self.sticky_state {
+            sticky_state.update(scroll_y, container_rect);
+
+            // Apply the sticky adjustment to dimensions if stuck
+            if sticky_state.is_stuck {
+                if let Some(stuck_rect) = sticky_state.stuck_rect {
+                    // Adjust content position to the stuck position
+                    // We need to account for margin/border/padding
+                    let border_box = self.dimensions.border_box();
+                    let dy = stuck_rect.y - border_box.y;
+                    self.dimensions.content.y += dy;
+
+                    // Handle horizontal sticky if applicable
+                    if sticky_state.offsets.left.is_some() || sticky_state.offsets.right.is_some() {
+                        let dx = stuck_rect.x - border_box.x;
+                        self.dimensions.content.x += dx;
+                    }
+                }
+            }
+        }
+
+        // Determine the container rect for children
+        // For scroll containers, use the content rect; otherwise pass through
+        let child_container = if is_scroll_container(
+            self.style.overflow_x,
+            self.style.overflow_y,
+        ) {
+            self.dimensions.content
+        } else {
+            container_rect
+        };
+
+        // Recursively update children
+        for child in &mut self.children {
+            child.update_sticky_positions(scroll_x, scroll_y, child_container);
+        }
+    }
+
+    /// Reset sticky positions to their original normal flow positions.
+    ///
+    /// Call this before relayout or when scroll position is reset.
+    pub fn reset_sticky_positions(&mut self) {
+        if let Some(ref sticky_state) = self.sticky_state {
+            // Restore original position
+            let original = sticky_state.original_rect;
+            let border_box = self.dimensions.border_box();
+
+            // Calculate offset from current to original
+            let dx = original.x - border_box.x;
+            let dy = original.y - border_box.y;
+
+            self.dimensions.content.x += dx;
+            self.dimensions.content.y += dy;
+        }
+
+        // Reset sticky state
+        if let Some(ref mut sticky_state) = self.sticky_state {
+            sticky_state.is_stuck = false;
+            sticky_state.stuck_rect = None;
+        }
+
+        // Recursively reset children
+        for child in &mut self.children {
+            child.reset_sticky_positions();
+        }
     }
 
     /// Perform layout within the given containing block.
@@ -647,24 +724,54 @@ impl LayoutBox {
             Length::Px(px) => px,
             _ => 16.0,
         };
-        
-        // Use proper text measurement for width
-        let metrics = measure_text_advanced(
+
+        // Get letter-spacing and word-spacing in pixels
+        // CSS "normal" keyword (Auto/Zero) maps to 0.0 via the wildcard
+        let letter_spacing = match self.style.letter_spacing {
+            Length::Px(px) => px,
+            Length::Em(em) => em * font_size,
+            Length::Rem(rem) => rem * 16.0, // Root font size assumed 16px
+            _ => 0.0,
+        };
+        let word_spacing = match self.style.word_spacing {
+            Length::Px(px) => px,
+            Length::Em(em) => em * font_size,
+            Length::Rem(rem) => rem * 16.0,
+            _ => 0.0,
+        };
+
+        // Use proper text measurement for width with spacing
+        let metrics = measure_text_with_spacing(
             &text,
             &self.style.font_family,
             font_size,
             self.style.font_weight,
             self.style.font_style,
+            letter_spacing,
+            word_spacing,
         );
         let text_width = metrics.width;
-        
-        // Position at containing block's content area
-        self.dimensions.content.x = containing_block.content.x;
+
+        // Calculate text-align offset
+        let container_width = containing_block.content.width;
+        let text_align_offset = if container_width > text_width {
+            match self.style.text_align {
+                TextAlign::Left => 0.0,
+                TextAlign::Right => container_width - text_width,
+                TextAlign::Center => (container_width - text_width) / 2.0,
+                TextAlign::Justify => 0.0, // Single text run doesn't justify
+            }
+        } else {
+            0.0
+        };
+
+        // Position at containing block's content area with text-align offset
+        self.dimensions.content.x = containing_block.content.x + text_align_offset;
         self.dimensions.content.y = containing_block.content.y + containing_block.content.height;
         // Use text width, clamping to containing block only if it has a meaningful width
         // This prevents text from collapsing to 0 width in intrinsic sizing scenarios
-        self.dimensions.content.width = if containing_block.content.width > 0.0 {
-            text_width.min(containing_block.content.width)
+        self.dimensions.content.width = if container_width > 0.0 {
+            text_width.min(container_width)
         } else {
             text_width // Don't clamp if containing block has no width yet
         };
@@ -1050,14 +1157,23 @@ impl LayoutBox {
                 self.apply_position_offsets_absolute(containing_block);
             }
             Position::Sticky => {
-                // Hybrid of relative and fixed
-                // For now, treat like relative
-                if let Some(top) = self.offsets.top {
-                    self.dimensions.content.y += top;
-                }
-                if let Some(left) = self.offsets.left {
-                    self.dimensions.content.x += left;
-                }
+                // Sticky positioning: element stays in normal flow but can "stick"
+                // when scrolled past its threshold.
+                //
+                // The offsets (top, left, etc.) define the sticky threshold, not
+                // an initial offset like relative positioning.
+                //
+                // Store the original position and sticky offsets in StickyState.
+                // The actual sticky adjustment happens during rendering based on scroll.
+                let original_rect = self.dimensions.border_box();
+                let sticky_offsets = StickyOffsets {
+                    top: self.offsets.top,
+                    right: self.offsets.right,
+                    bottom: self.offsets.bottom,
+                    left: self.offsets.left,
+                };
+                self.sticky_state = Some(StickyState::new(original_rect, sticky_offsets));
+                // Position stays at normal flow - no offset applied during layout
             }
         }
     }
@@ -1254,8 +1370,14 @@ impl LayoutBox {
         let mut cursor_x = 0.0;
         let mut line_height = 0.0_f32;
         let container_width = self.dimensions.content.width;
+        let text_align = self.style.text_align;
 
-        for child in &mut self.children {
+        // Track lines for text-align adjustment after layout: (start_index, end_index, line_width)
+        let mut lines: Vec<(usize, usize, f32)> = Vec::new();
+        let mut line_start_index: Option<usize> = None;
+        let mut line_width = 0.0_f32;
+
+        for (i, child) in self.children.iter_mut().enumerate() {
             // Skip absolutely/fixed positioned children for flow layout
             if child.position == Position::Absolute || child.position == Position::Fixed {
                 let mut cb = self.dimensions.clone();
@@ -1279,15 +1401,27 @@ impl LayoutBox {
 
                 // Check if child fits on current line
                 if cursor_x > 0.0 && cursor_x + child_width > container_width {
+                    // Record completed line for text-align
+                    if let Some(start) = line_start_index {
+                        lines.push((start, i, line_width));
+                    }
+
                     // Wrap to next line
                     cursor_y += line_height;
                     cursor_x = 0.0;
                     line_height = 0.0;
+                    line_start_index = Some(i);
+                    line_width = 0.0;
 
                     // Re-layout at new position
                     cb.content.x = self.dimensions.content.x;
                     cb.content.y = self.dimensions.content.y + cursor_y;
                     child.layout(&cb);
+                }
+
+                // Track line start
+                if line_start_index.is_none() {
+                    line_start_index = Some(i);
                 }
 
                 // Position the child
@@ -1296,19 +1430,26 @@ impl LayoutBox {
 
                 // Advance cursor
                 cursor_x += child_width;
+                line_width += child_width;
                 line_height = line_height.max(child_height);
 
                 if child.float != Float::None {
                     // Floated elements don't affect cursor
                     cursor_x -= child_width;
+                    line_width -= child_width;
                 }
             } else {
                 // Regular block layout
                 // First, finish any inline-block line
                 if cursor_x > 0.0 {
+                    if let Some(start) = line_start_index {
+                        lines.push((start, i, line_width));
+                    }
                     cursor_y += line_height;
                     cursor_x = 0.0;
                     line_height = 0.0;
+                    line_start_index = None;
+                    line_width = 0.0;
                 }
 
                 let mut cb = self.dimensions.clone();
@@ -1321,12 +1462,43 @@ impl LayoutBox {
             }
         }
 
-        // Account for any remaining inline-block line
+        // Record any remaining inline-block line
         if cursor_x > 0.0 {
+            if let Some(start) = line_start_index {
+                lines.push((start, self.children.len(), line_width));
+            }
             cursor_y += line_height;
         }
 
+        // Apply text-align to all recorded lines
+        for (start, end, width) in lines {
+            Self::apply_text_align_offset(&mut self.children[start..end], width, container_width, text_align);
+        }
+
         self.dimensions.content.height = cursor_y;
+    }
+
+    /// Apply text-align offset to inline children on a line.
+    fn apply_text_align_offset(
+        children: &mut [LayoutBox],
+        line_width: f32,
+        container_width: f32,
+        text_align: TextAlign,
+    ) {
+        let offset = match text_align {
+            TextAlign::Left => 0.0,
+            TextAlign::Right => (container_width - line_width).max(0.0),
+            TextAlign::Center => ((container_width - line_width) / 2.0).max(0.0),
+            TextAlign::Justify => 0.0, // Justify would need gap distribution (complex)
+        };
+
+        if offset > 0.0 {
+            for child in children {
+                if child.style.display.is_inline_block() {
+                    child.dimensions.content.x += offset;
+                }
+            }
+        }
     }
 
     /// Layout block children with margin collapse.
@@ -1339,8 +1511,14 @@ impl LayoutBox {
         let mut cursor_x = 0.0;
         let mut line_height = 0.0_f32;
         let container_width = self.dimensions.content.width;
+        let text_align = self.style.text_align;
 
-        for child in &mut self.children {
+        // Track lines for text-align adjustment after layout: (start_index, end_index, line_width)
+        let mut lines: Vec<(usize, usize, f32)> = Vec::new();
+        let mut line_start_index: Option<usize> = None;
+        let mut line_width = 0.0_f32;
+
+        for (i, child) in self.children.iter_mut().enumerate() {
             // Skip absolutely/fixed positioned children for flow layout
             if child.position == Position::Absolute || child.position == Position::Fixed {
                 let mut cb = self.dimensions.clone();
@@ -1365,15 +1543,27 @@ impl LayoutBox {
 
                 // Check if child fits on current line
                 if cursor_x > 0.0 && cursor_x + child_width > container_width {
+                    // Record completed line for text-align
+                    if let Some(start) = line_start_index {
+                        lines.push((start, i, line_width));
+                    }
+
                     // Wrap to next line
                     cursor_y += line_height;
                     cursor_x = 0.0;
                     line_height = 0.0;
+                    line_start_index = Some(i);
+                    line_width = 0.0;
 
                     // Re-layout at new position
                     cb.content.x = self.dimensions.content.x;
                     cb.content.y = self.dimensions.content.y + cursor_y;
                     child.layout_with_collapse(&cb, margin_context, float_context);
+                }
+
+                // Track line start
+                if line_start_index.is_none() {
+                    line_start_index = Some(i);
                 }
 
                 // Position the child
@@ -1382,18 +1572,25 @@ impl LayoutBox {
 
                 // Advance cursor
                 cursor_x += child_width;
+                line_width += child_width;
                 line_height = line_height.max(child_height);
 
                 if child.float != Float::None {
                     cursor_x -= child_width;
+                    line_width -= child_width;
                 }
             } else {
                 // Regular block layout with margin collapse
                 // First, finish any inline-block line
                 if cursor_x > 0.0 {
+                    if let Some(start) = line_start_index {
+                        lines.push((start, i, line_width));
+                    }
                     cursor_y += line_height;
                     cursor_x = 0.0;
                     line_height = 0.0;
+                    line_start_index = None;
+                    line_width = 0.0;
                 }
 
                 let mut cb = self.dimensions.clone();
@@ -1406,9 +1603,17 @@ impl LayoutBox {
             }
         }
 
-        // Account for any remaining inline-block line
+        // Record any remaining inline-block line
         if cursor_x > 0.0 {
+            if let Some(start) = line_start_index {
+                lines.push((start, self.children.len(), line_width));
+            }
             cursor_y += line_height;
+        }
+
+        // Apply text-align to all recorded lines
+        for (start, end, width) in lines {
+            Self::apply_text_align_offset(&mut self.children[start..end], width, container_width, text_align);
         }
 
         self.dimensions.content.height = cursor_y;
@@ -1842,12 +2047,22 @@ pub enum DisplayCommand {
         /// Whether this is an inset shadow
         inset: bool,
     },
+    /// Apply a backdrop filter (blur, grayscale, etc.) to the pixels behind this rectangle.
+    BackdropFilter {
+        /// The rectangle to apply the filter to.
+        rect: Rect,
+        /// Border radius for clipping.
+        border_radius: BorderRadius,
+        /// The filter to apply.
+        filter: rustkit_css::BackdropFilter,
+    },
     /// Draw a linear gradient.
     LinearGradient {
         rect: Rect,
         direction: rustkit_css::GradientDirection,
         stops: Vec<rustkit_css::ColorStop>,
         repeating: bool,
+        border_radius: BorderRadius,
     },
     /// Draw a radial gradient.
     RadialGradient {
@@ -1857,6 +2072,7 @@ pub enum DisplayCommand {
         center: (f32, f32),
         stops: Vec<rustkit_css::ColorStop>,
         repeating: bool,
+        border_radius: BorderRadius,
     },
     /// Draw a conic gradient.
     ConicGradient {
@@ -1865,6 +2081,7 @@ pub enum DisplayCommand {
         center: (f32, f32),
         stops: Vec<rustkit_css::ColorStop>,
         repeating: bool,
+        border_radius: BorderRadius,
     },
     /// Draw a text input field.
     TextInput {
@@ -2248,6 +2465,26 @@ impl DisplayList {
         list
     }
 
+    /// Build display list from a layout box with scroll state applied.
+    ///
+    /// This updates sticky positions based on the scroll state before building
+    /// the display list. Use this when the scroll position has changed and
+    /// sticky elements need to be repositioned.
+    pub fn build_with_scroll(
+        root: &mut LayoutBox,
+        scroll_x: f32,
+        scroll_y: f32,
+        viewport: Rect,
+    ) -> Self {
+        // Update sticky positions based on scroll
+        root.update_sticky_positions(scroll_x, scroll_y, viewport);
+
+        // Build the display list
+        let mut list = DisplayList::new();
+        list.render_stacking_context(root, 0, &mut 0);
+        list
+    }
+
     /// Render a stacking context with proper z-ordering.
     fn render_stacking_context(&mut self, layout_box: &LayoutBox, parent_z: i32, layer: &mut u32) {
         let z_index = if layout_box.position != Position::Static {
@@ -2495,6 +2732,16 @@ impl DisplayList {
         // Use clip_rect for painting (not border_rect) to ensure proper bounds
         let paint_rect = clip_rect;
 
+        // Step 0: Apply backdrop-filter if set (must be done BEFORE any background painting)
+        // Backdrop filter applies to pixels that are already rendered behind this element
+        if !s.backdrop_filter.is_none() {
+            self.commands.push(DisplayCommand::BackdropFilter {
+                rect: paint_rect,
+                border_radius: radius,
+                filter: s.backdrop_filter,
+            });
+        }
+
         // Step 1: Paint solid background color FIRST (bottom layer)
         // This must be painted even if there's a gradient, as the gradient may be semi-transparent
         let color = s.background_color;
@@ -2511,11 +2758,11 @@ impl DisplayList {
         // This is the new multi-layer background support
         if !s.background_layers.is_empty() {
             for layer in &s.background_layers {
-                self.render_background_layer(layer, paint_rect, font_size, root_font_size);
+                self.render_background_layer(layer, paint_rect, font_size, root_font_size, radius);
             }
         } else if let Some(gradient) = &s.background_gradient {
             // Fallback to legacy single gradient for backwards compatibility
-            self.render_gradient(gradient, paint_rect);
+            self.render_gradient(gradient, paint_rect, radius);
         }
 
         // Pop the clip if we pushed one
@@ -2531,6 +2778,7 @@ impl DisplayList {
         container: Rect,
         _font_size: f32,
         _root_font_size: f32,
+        border_radius: BorderRadius,
     ) {
         match &layer.image {
             rustkit_css::BackgroundImage::None => {
@@ -2545,7 +2793,7 @@ impl DisplayList {
                     container.width, // For gradients, use container size as "intrinsic" size
                     container.height,
                 );
-                self.render_gradient(gradient, positioned_rect);
+                self.render_gradient(gradient, positioned_rect, border_radius);
             }
             rustkit_css::BackgroundImage::Url(url) => {
                 // For URL backgrounds, emit a BackgroundImage command
@@ -2606,8 +2854,8 @@ impl DisplayList {
         Rect::new(x, y, bg_width, bg_height)
     }
 
-    /// Render a gradient to a rect.
-    fn render_gradient(&mut self, gradient: &rustkit_css::Gradient, rect: Rect) {
+    /// Render a gradient to a rect with optional border-radius clipping.
+    fn render_gradient(&mut self, gradient: &rustkit_css::Gradient, rect: Rect, border_radius: BorderRadius) {
         match gradient {
             rustkit_css::Gradient::Linear(linear) => {
                 self.commands.push(DisplayCommand::LinearGradient {
@@ -2615,6 +2863,7 @@ impl DisplayList {
                     direction: linear.direction,
                     stops: linear.stops.clone(),
                     repeating: linear.repeating,
+                    border_radius,
                 });
             }
             rustkit_css::Gradient::Radial(radial) => {
@@ -2625,6 +2874,7 @@ impl DisplayList {
                     center: radial.center,
                     stops: radial.stops.clone(),
                     repeating: radial.repeating,
+                    border_radius,
                 });
             }
             rustkit_css::Gradient::Conic(conic) => {
@@ -2634,6 +2884,7 @@ impl DisplayList {
                     center: conic.center,
                     stops: conic.stops.clone(),
                     repeating: conic.repeating,
+                    border_radius,
                 });
             }
         }
@@ -3107,6 +3358,22 @@ pub fn measure_text_advanced(
     font_weight: rustkit_css::FontWeight,
     font_style: rustkit_css::FontStyle,
 ) -> TextMetrics {
+    measure_text_with_spacing(text, font_family, font_size, font_weight, font_style, 0.0, 0.0)
+}
+
+/// Measure text using the text shaper with letter-spacing and word-spacing.
+///
+/// This provides accurate text measurement using DirectWrite on Windows,
+/// with support for CSS letter-spacing and word-spacing properties.
+pub fn measure_text_with_spacing(
+    text: &str,
+    font_family: &str,
+    font_size: f32,
+    font_weight: rustkit_css::FontWeight,
+    font_style: rustkit_css::FontStyle,
+    letter_spacing: f32,
+    word_spacing: f32,
+) -> TextMetrics {
     let shaper = TextShaper::new();
     let chain = FontFamilyChain::from_css_value(font_family);
 
@@ -3118,10 +3385,21 @@ pub fn measure_text_advanced(
         rustkit_css::FontStretch::Normal,
         font_size,
     ) {
-        Ok(run) => run.metrics,
+        Ok(mut run) => {
+            // Apply letter-spacing and word-spacing
+            run.apply_spacing(letter_spacing, word_spacing);
+            run.metrics
+        }
         Err(_) => {
-            // Fallback to simple measurement
-            measure_text_simple(text, font_size)
+            // Fallback to simple measurement with spacing
+            let mut metrics = measure_text_simple(text, font_size);
+            // Apply letter-spacing (one per character)
+            let char_count = text.chars().count();
+            metrics.width += letter_spacing * char_count as f32;
+            // Apply word-spacing (one per whitespace)
+            let space_count = text.chars().filter(|c| c.is_whitespace()).count();
+            metrics.width += word_spacing * space_count as f32;
+            metrics
         }
     }
 }
@@ -3308,7 +3586,9 @@ mod tests {
         let mut style = ComputedStyle::new();
         style.background_color = Color::from_rgb(255, 255, 255);
 
-        let layout_box = LayoutBox::new(BoxType::Block, style);
+        let mut layout_box = LayoutBox::new(BoxType::Block, style);
+        // Set dimensions - render_background skips zero-sized boxes
+        layout_box.dimensions.content = Rect::new(0.0, 0.0, 100.0, 100.0);
         let display_list = DisplayList::build(&layout_box);
 
         assert!(!display_list.commands.is_empty());
@@ -3356,5 +3636,147 @@ mod tests {
         assert_eq!(paint_order[0].z_index, -1);
         assert_eq!(paint_order[1].position, Position::Static);
         assert_eq!(paint_order[2].z_index, 1);
+    }
+
+    #[test]
+    fn test_sticky_positioning_state_initialization() {
+        let style = ComputedStyle::new();
+        let mut layout_box = LayoutBox::with_position(BoxType::Block, style, Position::Sticky);
+
+        // Set position offsets (sticky threshold)
+        layout_box.set_offsets(Some(10.0), None, None, None);
+
+        // Set dimensions as if layout happened
+        layout_box.dimensions.content.x = 0.0;
+        layout_box.dimensions.content.y = 100.0;
+        layout_box.dimensions.content.width = 200.0;
+        layout_box.dimensions.content.height = 50.0;
+
+        // Create containing block
+        let containing_block = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+
+        // Apply position offsets - this should initialize sticky_state
+        layout_box.apply_position_offsets(&containing_block);
+
+        // Verify sticky_state was created
+        assert!(layout_box.sticky_state.is_some());
+
+        let sticky = layout_box.sticky_state.as_ref().unwrap();
+        assert!(!sticky.is_stuck);
+        assert!(sticky.offsets.top.is_some());
+        assert_eq!(sticky.offsets.top.unwrap(), 10.0);
+    }
+
+    #[test]
+    fn test_sticky_update_not_stuck() {
+        let style = ComputedStyle::new();
+        let mut layout_box = LayoutBox::with_position(BoxType::Block, style, Position::Sticky);
+
+        layout_box.set_offsets(Some(10.0), None, None, None);
+
+        // Element at y=100
+        layout_box.dimensions.content.y = 100.0;
+        layout_box.dimensions.content.height = 50.0;
+        layout_box.dimensions.content.width = 200.0;
+
+        let containing_block = Dimensions::default();
+        layout_box.apply_position_offsets(&containing_block);
+
+        let container = Rect::new(0.0, 0.0, 800.0, 600.0);
+
+        // Scroll position is 0 - element should not be stuck
+        // Threshold is original_y - top_offset = 100 - 10 = 90
+        layout_box.update_sticky_positions(0.0, 0.0, container);
+
+        let sticky = layout_box.sticky_state.as_ref().unwrap();
+        assert!(!sticky.is_stuck);
+    }
+
+    #[test]
+    fn test_sticky_update_stuck() {
+        let style = ComputedStyle::new();
+        let mut layout_box = LayoutBox::with_position(BoxType::Block, style, Position::Sticky);
+
+        layout_box.set_offsets(Some(10.0), None, None, None);
+
+        // Element at y=100
+        layout_box.dimensions.content.y = 100.0;
+        layout_box.dimensions.content.height = 50.0;
+        layout_box.dimensions.content.width = 200.0;
+
+        let containing_block = Dimensions::default();
+        layout_box.apply_position_offsets(&containing_block);
+
+        let container = Rect::new(0.0, 0.0, 800.0, 600.0);
+
+        // Scroll position is 150 - element should be stuck
+        // Threshold is original_y - top_offset = 100 - 10 = 90
+        // scroll_y (150) > threshold (90), so should stick
+        layout_box.update_sticky_positions(0.0, 150.0, container);
+
+        let sticky = layout_box.sticky_state.as_ref().unwrap();
+        assert!(sticky.is_stuck);
+    }
+
+    #[test]
+    fn test_sticky_reset() {
+        let style = ComputedStyle::new();
+        let mut layout_box = LayoutBox::with_position(BoxType::Block, style, Position::Sticky);
+
+        layout_box.set_offsets(Some(10.0), None, None, None);
+
+        layout_box.dimensions.content.y = 100.0;
+        layout_box.dimensions.content.height = 50.0;
+        layout_box.dimensions.content.width = 200.0;
+
+        let containing_block = Dimensions::default();
+        layout_box.apply_position_offsets(&containing_block);
+
+        let container = Rect::new(0.0, 0.0, 800.0, 600.0);
+
+        // First, make it stuck
+        layout_box.update_sticky_positions(0.0, 150.0, container);
+        assert!(layout_box.sticky_state.as_ref().unwrap().is_stuck);
+
+        // Reset
+        layout_box.reset_sticky_positions();
+        assert!(!layout_box.sticky_state.as_ref().unwrap().is_stuck);
+    }
+
+    #[test]
+    fn test_display_list_build_with_scroll() {
+        let style = ComputedStyle::new();
+        let mut layout_box = LayoutBox::new(BoxType::Block, style.clone());
+        layout_box.dimensions.content = Rect::new(0.0, 0.0, 800.0, 600.0);
+
+        // Add a sticky child
+        let mut sticky_child =
+            LayoutBox::with_position(BoxType::Block, style, Position::Sticky);
+        sticky_child.set_offsets(Some(10.0), None, None, None);
+        sticky_child.dimensions.content = Rect::new(0.0, 100.0, 200.0, 50.0);
+
+        let containing_block = Dimensions::default();
+        sticky_child.apply_position_offsets(&containing_block);
+
+        layout_box.children.push(sticky_child);
+
+        let viewport = Rect::new(0.0, 0.0, 800.0, 600.0);
+
+        // Build with scroll = 0 (not stuck)
+        let _display_list = DisplayList::build_with_scroll(&mut layout_box, 0.0, 0.0, viewport);
+
+        // Verify sticky child is not stuck
+        let sticky = layout_box.children[0].sticky_state.as_ref().unwrap();
+        assert!(!sticky.is_stuck);
+
+        // Build with scroll = 150 (should be stuck)
+        let _display_list = DisplayList::build_with_scroll(&mut layout_box, 0.0, 150.0, viewport);
+
+        // Verify sticky child is now stuck
+        let sticky = layout_box.children[0].sticky_state.as_ref().unwrap();
+        assert!(sticky.is_stuck);
     }
 }

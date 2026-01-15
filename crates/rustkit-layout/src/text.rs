@@ -143,6 +143,25 @@ impl FontFamilyChain {
             .with_fallback("monospace")
     }
 
+    /// Create system-ui font chain (platform-specific).
+    #[cfg(target_os = "macos")]
+    pub fn system_ui() -> Self {
+        Self::new(".AppleSystemUIFont")
+            .with_fallback("SF Pro")
+            .with_fallback("Helvetica Neue")
+            .with_fallback("Helvetica")
+            .with_fallback("Arial")
+    }
+
+    /// Create system-ui font chain (platform-specific).
+    #[cfg(not(target_os = "macos"))]
+    pub fn system_ui() -> Self {
+        Self::new("Segoe UI")
+            .with_fallback("Roboto")
+            .with_fallback("Arial")
+            .with_fallback("Noto Sans")
+    }
+
     /// Resolve a CSS font-family value to a chain.
     pub fn from_css_value(value: &str) -> Self {
         let families: Vec<&str> = value
@@ -161,21 +180,41 @@ impl FontFamilyChain {
             "sans-serif" => Self::sans_serif(),
             "serif" => Self::serif(),
             "monospace" => Self::monospace(),
+            "system-ui" | "-apple-system" | "blinkmacsystemfont" => Self::system_ui(),
             "cursive" => Self::new("Comic Sans MS")
                 .with_fallback("Brush Script MT")
                 .with_fallback("cursive"),
             "fantasy" => Self::new("Impact")
                 .with_fallback("Papyrus")
                 .with_fallback("fantasy"),
-            "system-ui" => Self::new("Segoe UI").with_fallback("system-ui"),
             _ => {
                 let mut chain = Self::new(primary);
                 for fallback in families.iter().skip(1) {
-                    chain.fallbacks.push(fallback.to_string());
+                    // Recursively handle generic families in fallback chain
+                    let lower = fallback.to_lowercase();
+                    if lower == "system-ui" || lower == "-apple-system" || lower == "blinkmacsystemfont" {
+                        let sys_chain = Self::system_ui();
+                        chain.fallbacks.push(sys_chain.primary);
+                        chain.fallbacks.extend(sys_chain.fallbacks);
+                    } else if lower == "sans-serif" {
+                        let sans_chain = Self::sans_serif();
+                        chain.fallbacks.push(sans_chain.primary);
+                        chain.fallbacks.extend(sans_chain.fallbacks);
+                    } else {
+                        chain.fallbacks.push(fallback.to_string());
+                    }
                 }
-                // Always add system fallbacks
-                chain.fallbacks.push("Segoe UI".to_string());
-                chain.fallbacks.push("Arial".to_string());
+                // Add platform-specific system fallbacks
+                #[cfg(target_os = "macos")]
+                {
+                    chain.fallbacks.push(".AppleSystemUIFont".to_string());
+                    chain.fallbacks.push("Helvetica".to_string());
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    chain.fallbacks.push("Segoe UI".to_string());
+                    chain.fallbacks.push("Arial".to_string());
+                }
                 chain
             }
         }
@@ -276,6 +315,57 @@ impl ShapedRun {
     /// Get the height of the run.
     pub fn height(&self) -> f32 {
         self.metrics.height
+    }
+
+    /// Apply letter-spacing to the shaped run.
+    /// Letter-spacing adds extra space after each character.
+    pub fn apply_letter_spacing(&mut self, letter_spacing: f32) {
+        if letter_spacing == 0.0 || self.glyphs.is_empty() {
+            return;
+        }
+
+        let mut accumulated_offset = 0.0;
+        for glyph in &mut self.glyphs {
+            // Shift glyph position by accumulated offset
+            glyph.x += accumulated_offset;
+            // Add letter-spacing to advance
+            glyph.advance += letter_spacing;
+            accumulated_offset += letter_spacing;
+        }
+
+        // Update total width
+        self.metrics.width += accumulated_offset;
+    }
+
+    /// Apply word-spacing to the shaped run.
+    /// Word-spacing adds extra space to whitespace characters.
+    pub fn apply_word_spacing(&mut self, word_spacing: f32) {
+        if word_spacing == 0.0 || self.glyphs.is_empty() {
+            return;
+        }
+
+        let mut accumulated_offset = 0.0;
+        for glyph in &mut self.glyphs {
+            // Shift glyph position by accumulated offset
+            glyph.x += accumulated_offset;
+
+            // Add word-spacing to whitespace characters
+            if glyph.character.is_whitespace() {
+                glyph.advance += word_spacing;
+                accumulated_offset += word_spacing;
+            }
+        }
+
+        // Update total width
+        self.metrics.width += accumulated_offset;
+    }
+
+    /// Apply both letter-spacing and word-spacing.
+    pub fn apply_spacing(&mut self, letter_spacing: f32, word_spacing: f32) {
+        // Apply word-spacing first, then letter-spacing
+        // This matches CSS specification behavior
+        self.apply_word_spacing(word_spacing);
+        self.apply_letter_spacing(letter_spacing);
     }
 }
 
@@ -1199,6 +1289,19 @@ mod tests {
         assert_eq!(mono.primary, "SF Mono");
         #[cfg(not(target_os = "macos"))]
         assert_eq!(mono.primary, "Cascadia Code");
+
+        // Test system-ui and vendor-prefixed variants
+        let system = FontFamilyChain::from_css_value("system-ui");
+        #[cfg(target_os = "macos")]
+        assert_eq!(system.primary, ".AppleSystemUIFont");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(system.primary, "Segoe UI");
+
+        let apple = FontFamilyChain::from_css_value("-apple-system");
+        #[cfg(target_os = "macos")]
+        assert_eq!(apple.primary, ".AppleSystemUIFont");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(apple.primary, "Segoe UI");
     }
 
     #[test]
