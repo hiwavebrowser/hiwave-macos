@@ -100,6 +100,10 @@ pub struct FlexItem<'a> {
 
     /// Outer margin on cross axis end.
     pub cross_margin_end: f32,
+
+    /// Whether the item has an explicit cross size (not auto).
+    /// If true, stretch should not apply per CSS spec.
+    pub has_explicit_cross_size: bool,
 }
 
 impl<'a> FlexItem<'a> {
@@ -442,6 +446,13 @@ fn create_flex_item<'a>(
     // Hypothetical main size (clamped)
     let hypothetical_main_size = flex_basis.max(min_main).min(max_main);
 
+    // Check if the cross size is explicitly set (not auto)
+    // Per CSS spec, items with explicit cross size should NOT be stretched
+    let has_explicit_cross_size = match main_axis {
+        Axis::Horizontal => !matches!(layout_box.style.height, rustkit_css::Length::Auto),
+        Axis::Vertical => !matches!(layout_box.style.width, rustkit_css::Length::Auto),
+    };
+
     FlexItem {
         layout_box,
         order,
@@ -463,6 +474,7 @@ fn create_flex_item<'a>(
         main_margin_end,
         cross_margin_start,
         cross_margin_end,
+        has_explicit_cross_size,
     }
 }
 
@@ -620,8 +632,10 @@ fn calculate_cross_sizes(line: &mut FlexLine, container_cross: f32, align_items:
 
         // First, compute the content-based cross size (hypothetical cross size)
         let content_cross_size = get_content_cross_size(item.layout_box);
-        
-        if align == AlignItems::Stretch {
+
+        // Per CSS spec: stretch only applies if cross size is "auto"
+        // Items with explicit height/width should NOT be stretched
+        if align == AlignItems::Stretch && !item.has_explicit_cross_size {
             // Stretch to fill line (will be adjusted later)
             // But ensure we have at least the content size
             let stretch_size = container_cross - item.cross_margin_start - item.cross_margin_end;
