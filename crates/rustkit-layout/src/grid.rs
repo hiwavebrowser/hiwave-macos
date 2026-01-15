@@ -1406,10 +1406,12 @@ pub fn layout_grid_container(
         let resolved_row_end = resolve_line(item.row_end, grid.row_count());
 
         // Convert to 0-based indices
+        // Line numbers are 1-based, indices are 0-based
+        // For exclusive end indices: line N means "after column N-1" = index N-1 (exclusive)
         let col_start = (resolved_col_start - 1).max(0) as usize;
-        let col_end = resolved_col_end.max(resolved_col_start + 1) as usize;
+        let col_end = ((resolved_col_end - 1).max(0) as usize).max(col_start + 1);
         let row_start = (resolved_row_start - 1).max(0) as usize;
-        let row_end = resolved_row_end.max(resolved_row_start + 1) as usize;
+        let row_end = ((resolved_row_end - 1).max(0) as usize).max(row_start + 1);
 
         // Ensure grid has enough tracks
         grid.ensure_tracks(col_end, row_end, &style.grid_auto_columns, &style.grid_auto_rows);
@@ -1444,10 +1446,12 @@ pub fn layout_grid_container(
         // Resolve negative line numbers for columns
         let resolved_col_start = resolve_line(item.column_start, grid.column_count());
         let resolved_col_end = resolve_line(item.column_end, grid.column_count());
-        
+
         // Convert to 0-based indices
+        // Line numbers are 1-based, indices are 0-based
+        // For exclusive end indices: line N means "after column N-1" = index N-1 (exclusive)
         let col_start = (resolved_col_start - 1).max(0) as usize;
-        let col_end = resolved_col_end.max(resolved_col_start + 1) as usize;
+        let col_end = ((resolved_col_end - 1).max(0) as usize).max(col_start + 1);
         let col_span = col_end.saturating_sub(col_start).max(1);
         let row_span = item.row_span.max(1) as usize;
 
@@ -1499,10 +1503,12 @@ pub fn layout_grid_container(
         // Resolve negative line numbers for rows
         let resolved_row_start = resolve_line(item.row_start, grid.row_count());
         let resolved_row_end = resolve_line(item.row_end, grid.row_count());
-        
+
         // Convert to 0-based indices
+        // Line numbers are 1-based, indices are 0-based
+        // For exclusive end indices: line N means "after row N-1" = index N-1 (exclusive)
         let row_start = (resolved_row_start - 1).max(0) as usize;
-        let row_end = resolved_row_end.max(resolved_row_start + 1) as usize;
+        let row_end = ((resolved_row_end - 1).max(0) as usize).max(row_start + 1);
         let row_span = row_end.saturating_sub(row_start).max(1);
         let col_span = item.column_span.max(1) as usize;
 
