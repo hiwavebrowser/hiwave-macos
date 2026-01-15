@@ -1441,28 +1441,62 @@ pub fn layout_grid_container(
         item.row_end = row_end as i32 + 1;
     }
 
-    // Phase 2: Place items with explicit column but auto row (e.g., grid-column: 1 / -1)
-    for item in items.iter_mut().filter(|i| !i.auto_column && i.auto_row) {
-        // Resolve negative line numbers for columns
-        let resolved_col_start = resolve_line(item.column_start, grid.column_count());
-        let resolved_col_end = resolve_line(item.column_end, grid.column_count());
+    // Phase 2-4 Combined: Place remaining items in DOM order
+    // CSS Grid spec requires items to maintain document order during auto-placement.
+    // Items with partial explicit placement (explicit column OR explicit row) are
+    // interleaved with fully auto-placed items in their source order.
+    for item in items.iter_mut().filter(|i| !i.is_fully_placed()) {
+        let (col, row, col_span, row_span) = if !item.auto_column && item.auto_row {
+            // Item has explicit column, auto row (e.g., grid-column: 1 / -1)
+            let resolved_col_start = resolve_line(item.column_start, grid.column_count());
+            let resolved_col_end = resolve_line(item.column_end, grid.column_count());
+            let col_start = (resolved_col_start - 1).max(0) as usize;
+            let col_end = ((resolved_col_end - 1).max(0) as usize).max(col_start + 1);
+            let col_span = col_end.saturating_sub(col_start).max(1);
+            let row_span = item.row_span.max(1) as usize;
 
-        // Convert to 0-based indices
-        // Line numbers are 1-based, indices are 0-based
-        // For exclusive end indices: line N means "after column N-1" = index N-1 (exclusive)
-        let col_start = (resolved_col_start - 1).max(0) as usize;
-        let col_end = ((resolved_col_end - 1).max(0) as usize).max(col_start + 1);
-        let col_span = col_end.saturating_sub(col_start).max(1);
-        let row_span = item.row_span.max(1) as usize;
+            grid.ensure_tracks(col_end, grid.row_count(), &style.grid_auto_columns, &style.grid_auto_rows);
+            let row = grid.find_next_row_at_column(col_start, col_span, row_span, &occupied);
 
-        // Ensure grid has enough column tracks
-        grid.ensure_tracks(col_end, grid.row_count(), &style.grid_auto_columns, &style.grid_auto_rows);
+            (col_start, row, col_span, row_span)
+        } else if item.auto_column && !item.auto_row {
+            // Item has auto column, explicit row
+            let resolved_row_start = resolve_line(item.row_start, grid.row_count());
+            let resolved_row_end = resolve_line(item.row_end, grid.row_count());
+            let row_start = (resolved_row_start - 1).max(0) as usize;
+            let row_end = ((resolved_row_end - 1).max(0) as usize).max(row_start + 1);
+            let row_span = row_end.saturating_sub(row_start).max(1);
+            let col_span = item.column_span.max(1) as usize;
 
-        // Find the first available row at this column position
-        let row = grid.find_next_row_at_column(col_start, col_span, row_span, &occupied);
+            grid.ensure_tracks(grid.column_count(), row_end, &style.grid_auto_columns, &style.grid_auto_rows);
+            let col = grid.find_next_column_at_row(row_start, col_span, row_span, &occupied);
+
+            (col, row_start, col_span, row_span)
+        } else {
+            // Fully auto-placed item
+            let col_span = item.column_span.max(1) as usize;
+            let row_span = item.row_span.max(1) as usize;
+
+            grid.ensure_tracks(
+                grid.column_count().max(col_span),
+                grid.row_count().max(row_span),
+                &style.grid_auto_columns,
+                &style.grid_auto_rows,
+            );
+
+            let (col, row) = if grid.auto_flow.is_dense() {
+                grid.find_next_cell_dense(col_span, row_span, &occupied)
+            } else {
+                grid.find_next_cell(col_span, row_span, &occupied)
+            };
+
+            (col, row, col_span, row_span)
+        };
+
+        let col_end = col + col_span;
         let row_end = row + row_span;
 
-        // Ensure grid has enough row tracks
+        // Ensure tracks exist
         grid.ensure_tracks(col_end, row_end, &style.grid_auto_columns, &style.grid_auto_rows);
 
         // Ensure occupied grid is large enough
@@ -1477,63 +1511,6 @@ pub fn layout_grid_container(
 
         // Mark cells as occupied
         for r in row..row_end {
-            for c in col_start..col_end {
-                if r < occupied.len() && c < occupied[r].len() {
-                    occupied[r][c] = true;
-                }
-            }
-        }
-
-        // Update item placement (1-based)
-        item.column_start = col_start as i32 + 1;
-        item.column_end = col_end as i32 + 1;
-        item.row_start = row as i32 + 1;
-        item.row_end = row_end as i32 + 1;
-        item.column_span = col_span as u32;
-        item.row_span = row_span as u32;
-
-        trace!(
-            "Placed item with explicit columns ({}-{}) at row {}",
-            col_start, col_end, row
-        );
-    }
-
-    // Phase 3: Place items with explicit row but auto column
-    for item in items.iter_mut().filter(|i| i.auto_column && !i.auto_row) {
-        // Resolve negative line numbers for rows
-        let resolved_row_start = resolve_line(item.row_start, grid.row_count());
-        let resolved_row_end = resolve_line(item.row_end, grid.row_count());
-
-        // Convert to 0-based indices
-        // Line numbers are 1-based, indices are 0-based
-        // For exclusive end indices: line N means "after row N-1" = index N-1 (exclusive)
-        let row_start = (resolved_row_start - 1).max(0) as usize;
-        let row_end = ((resolved_row_end - 1).max(0) as usize).max(row_start + 1);
-        let row_span = row_end.saturating_sub(row_start).max(1);
-        let col_span = item.column_span.max(1) as usize;
-
-        // Ensure grid has enough row tracks
-        grid.ensure_tracks(grid.column_count(), row_end, &style.grid_auto_columns, &style.grid_auto_rows);
-
-        // Find the first available column at this row position
-        let col = grid.find_next_column_at_row(row_start, col_span, row_span, &occupied);
-        let col_end = col + col_span;
-
-        // Ensure grid has enough column tracks
-        grid.ensure_tracks(col_end, row_end, &style.grid_auto_columns, &style.grid_auto_rows);
-
-        // Ensure occupied grid is large enough
-        while occupied.len() < row_end {
-            occupied.push(vec![false; grid.column_count()]);
-        }
-        for occ_row in &mut occupied {
-            while occ_row.len() < grid.column_count() {
-                occ_row.push(false);
-            }
-        }
-
-        // Mark cells as occupied
-        for r in row_start..row_end {
             for c in col..col_end {
                 if r < occupied.len() && c < occupied[r].len() {
                     occupied[r][c] = true;
@@ -1544,72 +1521,12 @@ pub fn layout_grid_container(
         // Update item placement (1-based)
         item.column_start = col as i32 + 1;
         item.column_end = col_end as i32 + 1;
-        item.row_start = row_start as i32 + 1;
+        item.row_start = row as i32 + 1;
         item.row_end = row_end as i32 + 1;
         item.column_span = col_span as u32;
         item.row_span = row_span as u32;
 
-        trace!(
-            "Placed item with explicit rows ({}-{}) at column {}",
-            row_start, row_end, col
-        );
-    }
-
-    // Phase 4: Auto-place remaining items (no explicit placement in either dimension)
-    for item in items.iter_mut().filter(|i| i.auto_column && i.auto_row) {
-        let col_span = item.column_span.max(1) as usize;
-        let row_span = item.row_span.max(1) as usize;
-
-        // Ensure grid has enough tracks
-        grid.ensure_tracks(
-            grid.column_count().max(col_span),
-            grid.row_count().max(row_span),
-            &style.grid_auto_columns,
-            &style.grid_auto_rows,
-        );
-
-        // Find next available position
-        // For dense packing, backfill gaps by searching from (0,0)
-        // For sparse packing (default), continue from cursor
-        let (col, row) = if grid.auto_flow.is_dense() {
-            grid.find_next_cell_dense(col_span, row_span, &occupied)
-        } else {
-            grid.find_next_cell(col_span, row_span, &occupied)
-        };
-
-        // Ensure tracks exist
-        grid.ensure_tracks(col + col_span, row + row_span, &style.grid_auto_columns, &style.grid_auto_rows);
-
-        // Ensure occupied grid is large enough
-        while occupied.len() < row + row_span {
-            occupied.push(vec![false; grid.column_count()]);
-        }
-        for occ_row in &mut occupied {
-            while occ_row.len() < grid.column_count() {
-                occ_row.push(false);
-            }
-        }
-
-        // Mark cells as occupied
-        for r in row..row + row_span {
-            for c in col..col + col_span {
-                if r < occupied.len() && c < occupied[r].len() {
-                    occupied[r][c] = true;
-                }
-            }
-        }
-
-        // Update item placement (1-based)
-        item.column_start = col as i32 + 1;
-        item.column_end = (col + col_span) as i32 + 1;
-        item.row_start = row as i32 + 1;
-        item.row_end = (row + row_span) as i32 + 1;
-        item.column_span = col_span as u32;
-        item.row_span = row_span as u32;
-
-        // Update cursor (for sparse packing, this is used for the next item)
-        // For dense packing, the cursor is not used but we still update it
-        // to maintain consistency
+        // Update cursor for sparse packing
         grid.cursor = if grid.auto_flow.is_row() {
             (col + col_span, row)
         } else {
@@ -1617,8 +1534,8 @@ pub fn layout_grid_container(
         };
 
         trace!(
-            "Auto-placed item at ({}, {}) span ({}, {}) dense={}",
-            col, row, col_span, row_span, grid.auto_flow.is_dense()
+            "Placed item at ({}, {}) span ({}, {})",
+            col, row, col_span, row_span
         );
     }
 
