@@ -103,6 +103,7 @@ struct Args {
     perf_output: Option<String>,
     multisurface: bool,
     dump_chrome_frame: Option<String>,
+    fullscreen: bool,
 }
 
 impl Args {
@@ -116,6 +117,7 @@ impl Args {
         let mut perf_output = None;
         let mut multisurface = false;
         let mut dump_chrome_frame = None;
+        let mut fullscreen = false;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -149,6 +151,9 @@ impl Args {
                 "--dump-chrome-frame" => {
                     dump_chrome_frame = args.next();
                 }
+                "--fullscreen" => {
+                    fullscreen = true;
+                }
                 _ => {}
             }
         }
@@ -162,6 +167,7 @@ impl Args {
             perf_output,
             multisurface,
             dump_chrome_frame,
+            fullscreen,
         }
     }
     
@@ -277,21 +283,41 @@ fn main() {
         html_file = ?args.html_file,
         width = args.width,
         height = args.height,
+        fullscreen = args.fullscreen,
         "Starting HiWave Smoke Harness (RustKit)"
     );
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 
-    let window = WindowBuilder::new()
+    // Use args dimensions for window size
+    let window_width = args.width as f64;
+    let window_height = args.height as f64 + 72.0; // Add chrome bar height
+
+    let mut window_builder = WindowBuilder::new()
         .with_title("HiWave Smoke Harness (RustKit)")
-        .with_inner_size(tao::dpi::LogicalSize::new(1100.0, 760.0))
-        .with_visible(true)
+        .with_inner_size(tao::dpi::LogicalSize::new(window_width, window_height))
+        .with_visible(true);
+
+    // Apply fullscreen if requested
+    if args.fullscreen {
+        window_builder = window_builder.with_fullscreen(Some(tao::window::Fullscreen::Borderless(None)));
+    }
+
+    let window = window_builder
         .build(&event_loop)
         .expect("Failed to create window");
-    
+
     // Ensure window is visible before creating child webviews
     window.set_visible(true);
+
+    // Get actual window size (may differ from requested if fullscreen)
+    let inner_size = window.inner_size();
+    let actual_width = inner_size.width as f64 / window.scale_factor();
+    let actual_height = inner_size.height as f64 / window.scale_factor();
+
+    // Chrome bar height constant
+    let chrome_height = 72.0;
 
     // Chrome bar (using WRY for simple UI)
     let chrome = WebViewBuilder::new()
@@ -301,11 +327,11 @@ fn main() {
               chrome
             </body>"#,
         )
-        .with_bounds(rect(0.0, 0.0, 1100.0, 72.0))
+        .with_bounds(rect(0.0, 0.0, actual_width, chrome_height))
         .build_as_child(&window)
         .expect("Failed to create chrome webview");
 
-    // Shelf (using WRY for simple UI)
+    // Shelf (using WRY for simple UI) - positioned at bottom
     let shelf = WebViewBuilder::new()
         .with_html(
             r#"<!doctype html><meta charset='utf-8'/>
@@ -313,7 +339,7 @@ fn main() {
               shelf
             </body>"#,
         )
-        .with_bounds(rect(0.0, 760.0, 1100.0, 0.0))
+        .with_bounds(rect(0.0, actual_height, actual_width, 0.0))
         .build_as_child(&window)
         .expect("Failed to create shelf webview");
 
@@ -336,13 +362,12 @@ fn main() {
         .expect("Failed to get window handle")
         .as_raw();
 
-    // Use standardized content bounds from args for deterministic capture
-    let chrome_height = 72u32;
+    // Use actual window size for content bounds (important for fullscreen)
     let content_bounds = Bounds {
         x: 0,
         y: chrome_height as i32,
-        width: args.width,
-        height: args.height.saturating_sub(chrome_height),
+        width: actual_width as u32,
+        height: (actual_height - chrome_height).max(0.0) as u32,
     };
 
     let view_start = Instant::now();
