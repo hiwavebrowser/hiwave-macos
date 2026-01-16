@@ -1,7 +1,7 @@
 {
   "case_id": "gradient-backgrounds",
-  "generated_at": "2026-01-07T20:15:47.020667",
-  "estimated_diff_pct": 3.412698412698423,
+  "generated_at": "2026-01-10T22:29:45.613081",
+  "estimated_diff_pct": 0.3030303030302939,
   "html_path": "websuite/cases/gradient-backgrounds/index.html",
   "dimensions": {
     "width": 800,
@@ -9,23 +9,23 @@
   },
   "rustkit_frame": "parity-baseline/failure_packets/gradient-backgrounds/rustkit_frame.ppm",
   "layout_stats": {
-    "total_boxes": 126,
-    "positioned": 125,
-    "sized": 119,
+    "total_boxes": 66,
+    "positioned": 65,
+    "sized": 66,
     "zero_area": 0,
-    "zero_width_only": 3,
-    "zero_height_only": 4,
-    "zero_size": 7,
+    "zero_width_only": 0,
+    "zero_height_only": 0,
+    "zero_size": 0,
     "at_origin": 1,
     "form_controls": 0,
     "text_boxes": 23,
     "block_boxes": 26,
-    "inline_boxes": 77,
+    "inline_boxes": 17,
     "image_boxes": 0,
     "issues": [],
-    "sizing_rate": 0.9444444444444444,
-    "positioning_rate": 0.9920634920634921,
-    "area_sizing_rate": 0.9682539682539683
+    "sizing_rate": 1.0,
+    "positioning_rate": 0.9848484848484849,
+    "area_sizing_rate": 1.0
   },
   "issue_clusters": {
     "sizing_layout": 0,
