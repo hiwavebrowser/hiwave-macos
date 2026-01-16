@@ -269,12 +269,8 @@ impl<'a> GridItem<'a> {
             _ => 16.0,
         };
 
-        // Get line height
-        let line_height = if self.layout_box.style.line_height > 0.0 {
-            self.layout_box.style.line_height
-        } else {
-            1.2
-        };
+        // Get line height in pixels
+        let line_height_px = self.layout_box.style.line_height.to_px(font_size);
 
         // Count text children (simplified)
         let text_lines = self.count_text_lines();
@@ -284,7 +280,7 @@ impl<'a> GridItem<'a> {
         let padding_bottom = self.layout_box.style.padding_bottom.to_px(font_size, font_size, 0.0);
 
         let text_content = if text_lines > 0 {
-            font_size * line_height * text_lines as f32
+            line_height_px * text_lines as f32
         } else {
             0.0
         };
@@ -325,15 +321,11 @@ impl<'a> GridItem<'a> {
                 Length::Px(px) => px,
                 _ => font_size,
             };
-            let child_line_height = if child_style.line_height > 0.0 {
-                child_style.line_height
-            } else {
-                1.2
-            };
+            let child_line_height_px = child_style.line_height.to_px(child_font_size);
 
             // Estimate child's content height
             let child_content_height = if let crate::BoxType::Text(_) = &child.box_type {
-                child_font_size * child_line_height
+                child_line_height_px
             } else {
                 // Recursively estimate children
                 let nested_height: f32 = child.children.iter()

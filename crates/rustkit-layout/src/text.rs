@@ -248,10 +248,12 @@ pub struct TextMetrics {
 
 impl TextMetrics {
     /// Create metrics with baseline values.
+    /// Ratios based on typical system font metrics (SF Pro, Helvetica, Arial).
+    /// Chrome uses approximately 0.88 ascent, 0.24 descent, 0.0 leading.
     pub fn with_font_size(font_size: f32) -> Self {
-        let ascent = font_size * 0.8;
-        let descent = font_size * 0.2;
-        let leading = font_size * 0.15;
+        let ascent = font_size * 0.88;
+        let descent = font_size * 0.24;
+        let leading = 0.0; // Chrome typically uses 0 leading
 
         Self {
             width: 0.0,

@@ -887,13 +887,8 @@ impl LayoutBox {
             Length::Px(px) => px,
             _ => 16.0,
         };
-        // Use line_height from style (which is a multiplier), or default to 1.2
-        let line_height_multiplier = if self.style.line_height > 0.0 {
-            self.style.line_height
-        } else {
-            1.2
-        };
-        font_size * line_height_multiplier
+        // Use the LineHeight enum's to_px method for proper calculation
+        self.style.line_height.to_px(font_size)
     }
 
     /// Perform layout with margin collapse context.
@@ -3031,12 +3026,7 @@ impl DisplayList {
             // Calculate half-leading for proper baseline alignment
             // CSS line-height creates extra space above and below the text content
             // The half-leading is split evenly above and below the text
-            let line_height_multiplier = if style.line_height > 0.0 {
-                style.line_height
-            } else {
-                1.2 // Default line-height
-            };
-            let line_height = font_size * line_height_multiplier;
+            let line_height = style.line_height.to_px(font_size);
 
             // Get font metrics for accurate baseline calculation
             let metrics = measure_text_advanced(

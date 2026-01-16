@@ -1908,15 +1908,35 @@ impl Engine {
                 }
             }
             "line-height" => {
-                // line_height is an f32 (multiplier), parse it
-                if let Ok(lh) = value.parse::<f32>() {
-                    style.line_height = lh;
+                // CSS line-height can be:
+                // - "normal" (use font metrics)
+                // - a unitless number (multiplier of font-size)
+                // - a length with units (absolute value)
+                // - a percentage (of font-size, treated as multiplier)
+                if value == "normal" {
+                    style.line_height = rustkit_css::LineHeight::Normal;
+                } else if let Ok(lh) = value.parse::<f32>() {
+                    // Unitless number - multiplier
+                    style.line_height = rustkit_css::LineHeight::Number(lh);
                 } else if let Some(length) = parse_length(value) {
-                    // Convert length to a multiplier (very rough approximation)
                     match length {
-                        rustkit_css::Length::Px(px) => style.line_height = px / 16.0,
-                        rustkit_css::Length::Em(em) => style.line_height = em,
-                        rustkit_css::Length::Percent(pct) => style.line_height = pct / 100.0,
+                        // Absolute pixel value
+                        rustkit_css::Length::Px(px) => {
+                            style.line_height = rustkit_css::LineHeight::Px(px);
+                        }
+                        // Em is relative to font-size, so treat as multiplier
+                        rustkit_css::Length::Em(em) => {
+                            style.line_height = rustkit_css::LineHeight::Number(em);
+                        }
+                        // Percentage is relative to font-size, treat as multiplier
+                        rustkit_css::Length::Percent(pct) => {
+                            style.line_height = rustkit_css::LineHeight::Number(pct / 100.0);
+                        }
+                        // Rem - convert to multiplier (assuming 16px root font)
+                        rustkit_css::Length::Rem(rem) => {
+                            // This is approximate - ideally we'd track actual root font size
+                            style.line_height = rustkit_css::LineHeight::Px(rem * 16.0);
+                        }
                         _ => {}
                     }
                 }
@@ -2663,7 +2683,7 @@ impl Engine {
             "font-weight" => style.font_weight = rustkit_css::FontWeight::NORMAL,
             "font-style" => style.font_style = rustkit_css::FontStyle::Normal,
             "font-family" => style.font_family = String::new(),
-            "line-height" => style.line_height = 1.2,
+            "line-height" => style.line_height = rustkit_css::LineHeight::Normal,
             "margin" | "margin-top" => style.margin_top = rustkit_css::Length::Zero,
             "margin-right" => style.margin_right = rustkit_css::Length::Zero,
             "margin-bottom" => style.margin_bottom = rustkit_css::Length::Zero,
@@ -3373,8 +3393,11 @@ impl Engine {
             "not" => {
                 if let Some(arg) = arg {
                     // :not() negates the inner selector
-                    // Support simple selectors inside :not()
-                    !self.simple_selector_matches(arg, tag_name, attributes)
+                    // Pass element_index and sibling_count for pseudo-class support inside :not()
+                    // This enables :not(:first-child), :not(:nth-child(2)), etc.
+                    !self.simple_selector_matches_with_pseudo(
+                        arg, tag_name, attributes, element_index, sibling_count
+                    )
                 } else {
                     true
                 }
