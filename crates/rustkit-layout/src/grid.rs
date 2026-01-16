@@ -1730,8 +1730,12 @@ pub fn layout_grid_container(
     }
 
     // Apply content alignment (justify-content for columns, align-content for rows)
+    // For auto-height containers, skip row alignment - there's no "free space" to distribute
+    // when the container sizes to its content.
     apply_content_alignment(&mut grid.columns, container_width, column_gap, &style.justify_content);
-    apply_content_alignment(&mut grid.rows, container_height, row_gap, &align_content_to_justify(&style.align_content));
+    if has_definite_height {
+        apply_content_alignment(&mut grid.rows, container_height, row_gap, &align_content_to_justify(&style.align_content));
+    }
 
     // Update container height when auto-sized
     // When the container has auto height, the block layout algorithm incorrectly computes height
