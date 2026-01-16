@@ -185,6 +185,12 @@ cat parity-baseline/diffs/flex-positioning/run-1/attribution.json | jq '.taxonom
 - **Tests:** All parity tests pass (12/23, 16.2% avg diff - unchanged)
 - **Other findings:** No similar bugs found; calc() limitation is documented and known
 
+### 2026-01-15 Session (CI Fix)
+- **GitHub Actions Fix:** `parity-metrics.yml` was failing because `parity_test.py` exits 1 on any test failure
+  - This workflow is for metrics collection, not gating (separate `parity.yml` does gating)
+  - Added `continue-on-error: true` to parity test step
+  - Metrics will still be collected and reported even when tests fail thresholds
+
 ### 2026-01-15 Session (Earlier)
 - Identified flexbox stretch bug where auto-height containers stretched items to parent height
 - Fixed by implementing two-pass cross-size calculation
