@@ -248,12 +248,14 @@ pub struct TextMetrics {
 
 impl TextMetrics {
     /// Create metrics with baseline values.
-    /// Ratios based on typical system font metrics (SF Pro, Helvetica, Arial).
-    /// Chrome uses approximately 0.88 ascent, 0.24 descent, 0.0 leading.
+    /// Ratios based on SF Pro font metrics (macOS system font).
+    /// SF Pro: ~0.82 ascent, ~0.21 descent (measured from actual Core Text metrics).
+    /// Previous values (0.88/0.24) were too large and caused baseline shifts.
     pub fn with_font_size(font_size: f32) -> Self {
-        let ascent = font_size * 0.88;
-        let descent = font_size * 0.24;
-        let leading = 0.0; // Chrome typically uses 0 leading
+        // Use SF Pro ratios as default - these match macOS system font better
+        let ascent = font_size * 0.82;
+        let descent = font_size * 0.21;
+        let leading = 0.0;
 
         Self {
             width: 0.0,
@@ -265,6 +267,32 @@ impl TextMetrics {
             underline_thickness: font_size / 14.0,
             strikethrough_offset: -ascent * 0.35,
             strikethrough_thickness: font_size / 14.0,
+            overline_offset: -ascent,
+        }
+    }
+
+    /// Create metrics from a Core Text font (macOS).
+    /// This provides accurate metrics directly from the font.
+    #[cfg(target_os = "macos")]
+    pub fn from_core_text_font(ct_font: &core_text::font::CTFont, width: f32) -> Self {
+        let ascent = ct_font.ascent() as f32;
+        let descent = ct_font.descent() as f32;
+        let leading = ct_font.leading() as f32;
+        let underline_position = ct_font.underline_position() as f32;
+        let underline_thickness = ct_font.underline_thickness() as f32;
+        let x_height = ct_font.x_height() as f32;
+        let strikethrough_offset = x_height * 0.5;
+
+        Self {
+            width,
+            height: ascent + descent + leading,
+            ascent,
+            descent,
+            leading,
+            underline_offset: underline_position,
+            underline_thickness,
+            strikethrough_offset,
+            strikethrough_thickness: underline_thickness,
             overline_offset: -ascent,
         }
     }
@@ -667,7 +695,30 @@ impl FontCache {
         Ok(TextMetrics::with_font_size(size))
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    pub fn get_metrics(
+        &self,
+        family: &str,
+        weight: FontWeight,
+        style: FontStyle,
+        _stretch: FontStretch,
+        size: f32,
+    ) -> Result<TextMetrics, TextError> {
+        // Try to get real Core Text metrics for the requested font
+        if let Ok(font) = TextShaper::create_ct_font_with_traits(family, size, weight.0, style == FontStyle::Italic) {
+            return Ok(TextMetrics::from_core_text_font(&font, 0.0));
+        }
+
+        // Try system font as fallback
+        if let Ok(font) = ct_font::new_from_name("Helvetica", size as f64) {
+            return Ok(TextMetrics::from_core_text_font(&font, 0.0));
+        }
+
+        // Ultimate fallback to computed metrics
+        Ok(TextMetrics::with_font_size(size))
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
     pub fn get_metrics(
         &self,
         _family: &str,
@@ -676,7 +727,7 @@ impl FontCache {
         _stretch: FontStretch,
         size: f32,
     ) -> Result<TextMetrics, TextError> {
-        // Fallback metrics for non-Windows platforms
+        // Fallback metrics for other platforms (Linux, etc.)
         Ok(TextMetrics::with_font_size(size))
     }
 }

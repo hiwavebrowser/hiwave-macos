@@ -150,9 +150,44 @@ impl ColorF32 {
         }
     }
 
-    /// Linear interpolation between two colors.
+    /// Linear interpolation between two colors using premultiplied alpha.
+    /// Chrome/Skia uses premultiplied alpha interpolation for gradients, which
+    /// prevents color bleeding from transparent color stops.
     #[inline]
     pub fn lerp(&self, other: &ColorF32, t: f32) -> ColorF32 {
+        // Convert to premultiplied alpha
+        let pre1_r = self.r * self.a;
+        let pre1_g = self.g * self.a;
+        let pre1_b = self.b * self.a;
+
+        let pre2_r = other.r * other.a;
+        let pre2_g = other.g * other.a;
+        let pre2_b = other.b * other.a;
+
+        // Interpolate in premultiplied space
+        let pre_r = pre1_r + (pre2_r - pre1_r) * t;
+        let pre_g = pre1_g + (pre2_g - pre1_g) * t;
+        let pre_b = pre1_b + (pre2_b - pre1_b) * t;
+        let a = self.a + (other.a - self.a) * t;
+
+        // Convert back from premultiplied (avoid division by zero)
+        if a > 0.0001 {
+            ColorF32 {
+                r: pre_r / a,
+                g: pre_g / a,
+                b: pre_b / a,
+                a,
+            }
+        } else {
+            // Fully transparent - color doesn't matter
+            ColorF32 { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
+        }
+    }
+
+    /// Linear interpolation using straight (unpremultiplied) alpha.
+    /// Use this when premultiplied interpolation is not desired.
+    #[inline]
+    pub fn lerp_straight(&self, other: &ColorF32, t: f32) -> ColorF32 {
         ColorF32 {
             r: self.r + (other.r - self.r) * t,
             g: self.g + (other.g - self.g) * t,
