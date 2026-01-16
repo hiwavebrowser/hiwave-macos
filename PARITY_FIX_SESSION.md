@@ -185,6 +185,56 @@ cat parity-baseline/diffs/flex-positioning/run-1/attribution.json | jq '.taxonom
 - **Tests:** All parity tests pass (12/23, 16.2% avg diff - unchanged)
 - **Other findings:** No similar bugs found; calc() limitation is documented and known
 
+### 2026-01-15 Session (Gradient Rendering Investigation)
+- **Gradient Code Review:** Verified gradient rendering logic is correct:
+  - Angle conversion: Correct (0deg = to top, 90deg = to right, 180deg = to bottom)
+  - Direction vector calculation: Correct (`sin_a, -cos_a` for gradient direction)
+  - Gradient line length: Correct (follows CSS spec for corner-to-corner diagonal)
+  - Color interpolation: Correct (sRGB space, matches Chrome behavior)
+  - Color stop parsing: Correct (percentage positions normalized to 0.0-1.0)
+
+- **Root Cause of Gradient Diff (~47%):** Anti-aliasing and subpixel rendering differences
+  - Chrome uses Skia with hardware-accelerated gradient rendering
+  - RustKit uses cell-by-cell CPU rendering with discrete color sampling
+  - These produce visually similar but pixel-different results
+
+- **nth-child Logic:** Verified correct for all formula patterns:
+  - `-n+3` (negative a): Works correctly (matches 1, 2, 3)
+  - `3n-1` (negative b): Works correctly (matches 2, 5, 8...)
+  - `odd`, `even`, `3n`, `2n+1`: All verified correct
+
+- **Attribution Confirmation:** pseudo-classes test shows 76.92% text_metrics
+  - Selectors ARE working correctly
+  - All diff is from font rendering differences
+
+- **Quick Win Analysis:** Checked all failing tests for opportunities
+  - combinators: 15.41% (0.41% over) - 86.35% text_metrics - no fix available
+  - images-intrinsic: 12.92% (2.92% over) - 78.80% text_metrics - no fix available
+  - All other failing tests: >75% text_metrics attribution
+  - **Conclusion:** No quick wins available - all require deeper changes
+
+### 2026-01-15 Future Work: Deeper Rendering Changes Needed
+
+**For gradient parity improvement:**
+1. **Hardware-accelerated gradients:** Use GPU shaders instead of cell-by-cell rendering
+   - Would need wgpu shader pipeline for gradient primitives
+   - Could use linear interpolation in shader for smooth gradients
+
+2. **Dithering:** Add dithering to prevent banding in gradients
+   - Chrome/Skia uses ordered dithering for smooth gradients
+
+3. **Subpixel precision:** Use floating-point precision throughout pipeline
+   - Current code uses f32 but renders to discrete cells
+
+**For text parity improvement:**
+1. **Skia integration:** Replace Core Text with Skia for text rendering
+   - Major architectural change (~weeks of work)
+   - Would match Chrome's exact glyph rendering
+
+2. **Alternative:** Accept text rendering differences as architectural divergence
+   - Core Text produces high-quality rendering on macOS
+   - Just different from Chrome's Skia rendering
+
 ### 2026-01-15 Session (CI Fix)
 - **GitHub Actions Fix:** `parity-metrics.yml` was failing because `parity_test.py` exits 1 on any test failure
   - This workflow is for metrics collection, not gating (separate `parity.yml` does gating)
