@@ -1,0 +1,10 @@
+{
+  "timestamp": "2026-01-08T03:37:26.070Z",
+  "threshold": 25,
+  "cases": {
+    "new_tab": {
+      "success": false,
+      "error": "No Chrome baseline"
+    }
+  }
+}

@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="../../common/parity-reset.css">
+  <title>Background Properties Test</title>
+  <style>
+    /* Reset */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; padding: 20px; background: #f5f5f5; }
+    
+    h2 { margin: 20px 0 10px; font-size: 14px; }
+    
+    .test-box {
+      width: 200px;
+      height: 100px;
+      margin: 10px;
+      display: inline-block;
+      border: 2px solid #333;
+    }
+    
+    /* ============================================
+       TEST 1: Solid background colors
+       ============================================ */
+    .test1a { background-color: red; }
+    .test1b { background-color: #3498db; }
+    .test1c { background-color: rgb(46, 204, 113); }
+    .test1d { background-color: rgba(155, 89, 182, 0.7); }
+    
+    /* ============================================
+       TEST 2: Background with transparency
+       ============================================ */
+    .test2-container {
+      background: repeating-linear-gradient(
+        45deg,
+        #ccc,
+        #ccc 10px,
+        #fff 10px,
+        #fff 20px
+      );
+      padding: 10px;
+    }
+    .test2a { background-color: rgba(231, 76, 60, 0.3); }
+    .test2b { background-color: rgba(52, 152, 219, 0.5); }
+    .test2c { background-color: rgba(46, 204, 113, 0.7); }
+    .test2d { background-color: rgba(155, 89, 182, 0.9); }
+    
+    /* ============================================
+       TEST 3: background-clip
+       ============================================ */
+    .test3-base {
+      padding: 20px;
+      border: 10px dashed #333;
+    }
+    .test3a { background: #e74c3c; background-clip: border-box; }
+    .test3b { background: #3498db; background-clip: padding-box; }
+    .test3c { background: #2ecc71; background-clip: content-box; }
+    
+    /* ============================================
+       TEST 4: Multiple backgrounds
+       ============================================ */
+    .test4 {
+      background: 
+        linear-gradient(rgba(255,0,0,0.5), rgba(255,0,0,0.5)),
+        linear-gradient(90deg, blue, green);
+    }
+    
+    /* ============================================
+       TEST 5: Background position
+       ============================================ */
+    .test5-base {
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='50' height='50'%3E%3Ccircle cx='25' cy='25' r='20' fill='%23e74c3c'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-color: #eee;
+    }
+    .test5a { background-position: left top; }
+    .test5b { background-position: center center; }
+    .test5c { background-position: right bottom; }
+    .test5d { background-position: 25% 75%; }
+    
+    /* ============================================
+       TEST 6: Background size
+       ============================================ */
+    .test6-base {
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect fill='%233498db' width='100' height='100'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-color: #eee;
+    }
+    .test6a { background-size: auto; }
+    .test6b { background-size: contain; }
+    .test6c { background-size: cover; }
+    .test6d { background-size: 50px 50px; }
+    
+    /* ============================================
+       TEST 7: Background repeat
+       ============================================ */
+    .test7-base {
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Crect fill='%232ecc71' width='20' height='20'/%3E%3C/svg%3E");
+      background-color: #eee;
+    }
+    .test7a { background-repeat: repeat; }
+    .test7b { background-repeat: no-repeat; }
+    .test7c { background-repeat: repeat-x; }
+    .test7d { background-repeat: repeat-y; }
+  </style>
+</head>
+<body>
+  <h1>Background Properties Test</h1>
+  
+  <h2>1. Solid background colors</h2>
+  <div>
+    <div class="test-box test1a"></div>
+    <div class="test-box test1b"></div>
+    <div class="test-box test1c"></div>
+    <div class="test-box test1d"></div>
+  </div>
+  
+  <h2>2. Background with transparency (on checkered bg)</h2>
+  <div class="test2-container">
+    <div class="test-box test2a"></div>
+    <div class="test-box test2b"></div>
+    <div class="test-box test2c"></div>
+    <div class="test-box test2d"></div>
+  </div>
+  
+  <h2>3. background-clip (border-box, padding-box, content-box)</h2>
+  <div>
+    <div class="test-box test3-base test3a"></div>
+    <div class="test-box test3-base test3b"></div>
+    <div class="test-box test3-base test3c"></div>
+  </div>
+  
+  <h2>4. Multiple backgrounds (layered)</h2>
+  <div>
+    <div class="test-box test4"></div>
+  </div>
+  
+  <h2>5. Background position</h2>
+  <div>
+    <div class="test-box test5-base test5a"></div>
+    <div class="test-box test5-base test5b"></div>
+    <div class="test-box test5-base test5c"></div>
+    <div class="test-box test5-base test5d"></div>
+  </div>
+  
+  <h2>6. Background size (auto, contain, cover, explicit)</h2>
+  <div>
+    <div class="test-box test6-base test6a"></div>
+    <div class="test-box test6-base test6b"></div>
+    <div class="test-box test6-base test6c"></div>
+    <div class="test-box test6-base test6d"></div>
+  </div>
+  
+  <h2>7. Background repeat</h2>
+  <div>
+    <div class="test-box test7-base test7a"></div>
+    <div class="test-box test7-base test7b"></div>
+    <div class="test-box test7-base test7c"></div>
+    <div class="test-box test7-base test7d"></div>
+  </div>
+</body>
+</html>
+
+
+

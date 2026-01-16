@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="../../common/parity-reset.css">
+  <title>CSS Pseudo-Class Test</title>
+  <style>
+    /* Reset */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; padding: 20px; background: #f5f5f5; }
+    
+    /* Test containers */
+    .test-box {
+      width: 100px;
+      height: 40px;
+      margin: 5px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      color: white;
+      background: #ccc;
+    }
+    
+    .container {
+      border: 2px solid #333;
+      padding: 10px;
+      margin: 10px 0;
+    }
+    
+    h2 { margin: 20px 0 10px; font-size: 14px; }
+    
+    /* ============================================
+       TEST 1: :first-child
+       First item should be green
+       ============================================ */
+    .test1 .test-box:first-child { background: green; }
+    
+    /* ============================================
+       TEST 2: :last-child
+       Last item should be green
+       ============================================ */
+    .test2 .test-box:last-child { background: green; }
+    
+    /* ============================================
+       TEST 3: :nth-child(2)
+       Second item should be green
+       ============================================ */
+    .test3 .test-box:nth-child(2) { background: green; }
+    
+    /* ============================================
+       TEST 4: :nth-child(odd)
+       1st, 3rd, 5th items should be green
+       ============================================ */
+    .test4 .test-box:nth-child(odd) { background: green; }
+    
+    /* ============================================
+       TEST 5: :nth-child(even)
+       2nd, 4th items should be green
+       ============================================ */
+    .test5 .test-box:nth-child(even) { background: green; }
+    
+    /* ============================================
+       TEST 6: :nth-child(3n)
+       3rd, 6th items should be green (multiples of 3)
+       ============================================ */
+    .test6 .test-box:nth-child(3n) { background: green; }
+    
+    /* ============================================
+       TEST 7: :nth-child(2n+1)
+       Same as odd: 1st, 3rd, 5th should be green
+       ============================================ */
+    .test7 .test-box:nth-child(2n+1) { background: green; }
+    
+    /* ============================================
+       TEST 8: :only-child
+       Single child should be green
+       ============================================ */
+    .test8 .test-box:only-child { background: green; }
+    
+    /* ============================================
+       TEST 9: :not(.skip)
+       All except .skip should be green
+       ============================================ */
+    .test9 .test-box:not(.skip) { background: green; }
+    
+    /* ============================================
+       TEST 10: :nth-last-child(1)
+       Last item should be green
+       ============================================ */
+    .test10 .test-box:nth-last-child(1) { background: green; }
+    
+    /* ============================================
+       TEST 11: Combined pseudo-classes
+       First child that is not .skip should be green
+       ============================================ */
+    .test11 .test-box:first-child:not(.skip) { background: green; }
+    
+    /* ============================================
+       TEST 12: :nth-child with negative offset
+       :nth-child(3n-1) = 2, 5, 8... should be green
+       ============================================ */
+    .test12 .test-box:nth-child(3n-1) { background: green; }
+  </style>
+</head>
+<body>
+  <h1>CSS Pseudo-Class Test</h1>
+  
+  <h2>1. :first-child - First should be green</h2>
+  <div class="container test1">
+    <div class="test-box">1st</div>
+    <div class="test-box">2nd</div>
+    <div class="test-box">3rd</div>
+  </div>
+  
+  <h2>2. :last-child - Last should be green</h2>
+  <div class="container test2">
+    <div class="test-box">1st</div>
+    <div class="test-box">2nd</div>
+    <div class="test-box">3rd</div>
+  </div>
+  
+  <h2>3. :nth-child(2) - 2nd should be green</h2>
+  <div class="container test3">
+    <div class="test-box">1st</div>
+    <div class="test-box">2nd</div>
+    <div class="test-box">3rd</div>
+  </div>
+  
+  <h2>4. :nth-child(odd) - 1st, 3rd, 5th should be green</h2>
+  <div class="container test4">
+    <div class="test-box">1st</div>
+    <div class="test-box">2nd</div>
+    <div class="test-box">3rd</div>
+    <div class="test-box">4th</div>
+    <div class="test-box">5th</div>
+  </div>
+  
+  <h2>5. :nth-child(even) - 2nd, 4th should be green</h2>
+  <div class="container test5">
+    <div class="test-box">1st</div>
+    <div class="test-box">2nd</div>
+    <div class="test-box">3rd</div>
+    <div class="test-box">4th</div>
+  </div>
+  
+  <h2>6. :nth-child(3n) - 3rd, 6th should be green</h2>
+  <div class="container test6">
+    <div class="test-box">1st</div>
+    <div class="test-box">2nd</div>
+    <div class="test-box">3rd</div>
+    <div class="test-box">4th</div>
+    <div class="test-box">5th</div>
+    <div class="test-box">6th</div>
+  </div>
+  
+  <h2>7. :nth-child(2n+1) - 1st, 3rd, 5th should be green</h2>
+  <div class="container test7">
+    <div class="test-box">1st</div>
+    <div class="test-box">2nd</div>
+    <div class="test-box">3rd</div>
+    <div class="test-box">4th</div>
+    <div class="test-box">5th</div>
+  </div>
+  
+  <h2>8. :only-child - Single child should be green</h2>
+  <div class="container test8">
+    <div class="test-box">Only</div>
+  </div>
+  
+  <h2>9. :not(.skip) - All except .skip should be green</h2>
+  <div class="container test9">
+    <div class="test-box">Yes</div>
+    <div class="test-box skip">Skip</div>
+    <div class="test-box">Yes</div>
+  </div>
+  
+  <h2>10. :nth-last-child(1) - Last should be green</h2>
+  <div class="container test10">
+    <div class="test-box">1st</div>
+    <div class="test-box">2nd</div>
+    <div class="test-box">3rd</div>
+  </div>
+  
+  <h2>11. :first-child:not(.skip) - First non-skip should be green</h2>
+  <div class="container test11">
+    <div class="test-box">1st</div>
+    <div class="test-box">2nd</div>
+  </div>
+  
+  <h2>12. :nth-child(3n-1) - 2nd, 5th should be green</h2>
+  <div class="container test12">
+    <div class="test-box">1st</div>
+    <div class="test-box">2nd</div>
+    <div class="test-box">3rd</div>
+    <div class="test-box">4th</div>
+    <div class="test-box">5th</div>
+    <div class="test-box">6th</div>
+  </div>
+</body>
+</html>
+
+
+

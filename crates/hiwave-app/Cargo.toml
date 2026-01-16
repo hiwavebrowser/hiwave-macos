@@ -1,0 +1,87 @@
+[package]
+name = "hiwave-app"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "HiWave browser application with RustKit engine"
+
+[[bin]]
+name = "hiwave"
+path = "src/main.rs"
+
+[features]
+# Default to RustKit hybrid mode on macOS (RustKit for content, WRY for Chrome/Shelf)
+default = ["rustkit"]
+# RustKit: Pure Rust browser engine for content rendering (hybrid mode)
+# WRY is still used for Chrome UI and Shelf components
+rustkit = [
+  "rustkit-engine",
+  "rustkit-viewhost",
+  "rustkit-text",
+  "rustkit-compositor",
+  "rustkit-net",
+  "wgpu",
+  "tokio",
+]
+# WebView fallback: Uses system WebKit for everything (no RustKit)
+webview-fallback = []
+
+[dependencies]
+# WebView (for Chrome UI, Shelf, and secondary windows)
+wry = { workspace = true }
+tao = { workspace = true }
+muda = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Logging
+log = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-log = { workspace = true }
+
+# URL handling
+url = { workspace = true }
+urlencoding = "2.1"
+
+# Platform
+dirs = { workspace = true }
+
+# File dialogs
+rfd = { workspace = true }
+
+# Workspace crates
+hiwave-core = { workspace = true }
+hiwave-shell = { workspace = true }
+hiwave-shield = { workspace = true }
+hiwave-vault = { workspace = true }
+hiwave-analytics = { workspace = true }
+
+# RustKit engine (macOS only)
+[target.'cfg(target_os = "macos")'.dependencies]
+rustkit-engine = { workspace = true, optional = true }
+rustkit-viewhost = { workspace = true, optional = true }
+rustkit-text = { workspace = true, optional = true }
+rustkit-compositor = { workspace = true, optional = true }
+rustkit-net = { workspace = true, optional = true }
+wgpu = { version = "24", optional = true }
+tokio = { version = "1.42", features = ["rt", "time"], optional = true }
+
+# Enable headless mode for integration tests
+[target.'cfg(target_os = "macos")'.dev-dependencies.rustkit-engine]
+workspace = true
+features = ["headless"]
+
+# HTTP types for shield adapter tests
+[dev-dependencies]
+http = "1.0"
+tempfile = "3.13"
+raw-window-handle = "0.6"
+
+# macOS test window creation
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+cocoa = "0.25"
+objc = "0.2"

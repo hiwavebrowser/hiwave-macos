@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=800, height=600">
+  <title>Micro Test: Image Intrinsic Sizing</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      padding: 20px;
+      margin: 0;
+      background: #f5f5f5;
+    }
+    
+    h1 {
+      font-size: 18px;
+      margin-bottom: 20px;
+    }
+    
+    .test-case {
+      background: white;
+      padding: 15px;
+      margin-bottom: 15px;
+      border-radius: 4px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    
+    .label {
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 10px;
+    }
+    
+    .container {
+      border: 2px dashed #ccc;
+      padding: 10px;
+      display: inline-block;
+    }
+    
+    /* Placeholder images using SVG data URIs */
+    .img-placeholder {
+      display: inline-block;
+      background: linear-gradient(45deg, #4a90d9, #67b26f);
+    }
+    
+    /* Test cases */
+    .test-natural {
+      /* No explicit size - should use natural size */
+    }
+    
+    .test-width-only {
+      width: 100px;
+      /* Height should scale proportionally */
+    }
+    
+    .test-height-only {
+      height: 75px;
+      /* Width should scale proportionally */
+    }
+    
+    .test-both {
+      width: 150px;
+      height: 100px;
+      /* Explicit dimensions */
+    }
+    
+    .test-max-width {
+      max-width: 80px;
+      /* Should constrain but maintain ratio */
+    }
+    
+    .test-min-width {
+      min-width: 200px;
+      /* Should expand but maintain ratio */
+    }
+    
+    .test-percent-width {
+      width: 50%;
+      /* Percentage of container */
+    }
+    
+    .test-aspect-ratio {
+      width: 120px;
+      aspect-ratio: 16 / 9;
+      background: #4a90d9;
+    }
+  </style>
+</head>
+<body>
+  <h1>Image Intrinsic Sizing Tests</h1>
+  
+  <div class="test-case">
+    <div class="label">Test 1: Natural size (200x150) - should be 200x150px</div>
+    <div class="container">
+      <!-- SVG placeholder 200x150 -->
+      <svg class="img-placeholder test-natural" width="200" height="150" viewBox="0 0 200 150">
+        <rect fill="#4a90d9" width="200" height="150"/>
+        <text x="100" y="75" text-anchor="middle" fill="white" font-size="14">200×150</text>
+      </svg>
+    </div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 2: Width only (100px) - height should scale to 75px</div>
+    <div class="container">
+      <svg class="img-placeholder test-width-only" width="200" height="150" viewBox="0 0 200 150">
+        <rect fill="#67b26f" width="200" height="150"/>
+        <text x="100" y="75" text-anchor="middle" fill="white" font-size="14">100×75?</text>
+      </svg>
+    </div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 3: Height only (75px) - width should scale to 100px</div>
+    <div class="container">
+      <svg class="img-placeholder test-height-only" width="200" height="150" viewBox="0 0 200 150">
+        <rect fill="#d9534f" width="200" height="150"/>
+        <text x="100" y="75" text-anchor="middle" fill="white" font-size="14">100?×75</text>
+      </svg>
+    </div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 4: Both dimensions (150x100) - explicit size</div>
+    <div class="container">
+      <svg class="img-placeholder test-both" width="200" height="150" viewBox="0 0 200 150">
+        <rect fill="#f0ad4e" width="200" height="150"/>
+        <text x="100" y="75" text-anchor="middle" fill="white" font-size="14">150×100</text>
+      </svg>
+    </div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 5: max-width (80px) - should constrain to 80x60</div>
+    <div class="container">
+      <svg class="img-placeholder test-max-width" width="200" height="150" viewBox="0 0 200 150">
+        <rect fill="#5bc0de" width="200" height="150"/>
+        <text x="100" y="75" text-anchor="middle" fill="white" font-size="14">80×60?</text>
+      </svg>
+    </div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 6: min-width (200px) - should expand to 200x150</div>
+    <div class="container">
+      <svg class="img-placeholder test-min-width" width="100" height="75" viewBox="0 0 100 75">
+        <rect fill="#9b59b6" width="100" height="75"/>
+        <text x="50" y="40" text-anchor="middle" fill="white" font-size="12">200×150?</text>
+      </svg>
+    </div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 7: Percentage width (50% of 300px container)</div>
+    <div class="container" style="width: 300px;">
+      <svg class="img-placeholder test-percent-width" width="200" height="150" viewBox="0 0 200 150">
+        <rect fill="#e74c3c" width="200" height="150"/>
+        <text x="100" y="75" text-anchor="middle" fill="white" font-size="14">150×?</text>
+      </svg>
+    </div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 8: CSS aspect-ratio (120px wide, 16:9) - should be 120x67.5</div>
+    <div class="container">
+      <div class="test-aspect-ratio">
+        <span style="color: white; font-size: 12px;">120×67.5?</span>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+
+
+

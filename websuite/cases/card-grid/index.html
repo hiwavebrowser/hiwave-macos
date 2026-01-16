@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Card Grid Layout Test</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 40px;
+        }
+        
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            font-weight: 700;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+        
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+        
+        .grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 24px;
+            max-width: 1200px;
+            margin: 0 auto;
+            justify-content: center;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 16px;
+            padding: 24px;
+            width: 300px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+        
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+        }
+        
+        .card-icon {
+            width: 60px;
+            height: 60px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            margin-bottom: 16px;
+        }
+        
+        .card-icon.purple { background: linear-gradient(135deg, #667eea, #764ba2); }
+        .card-icon.blue { background: linear-gradient(135deg, #4facfe, #00f2fe); }
+        .card-icon.orange { background: linear-gradient(135deg, #f093fb, #f5576c); }
+        .card-icon.green { background: linear-gradient(135deg, #4facfe, #43e97b); }
+        .card-icon.red { background: linear-gradient(135deg, #ff0844, #ffb199); }
+        .card-icon.teal { background: linear-gradient(135deg, #30cfd0, #330867); }
+        
+        .card h3 {
+            font-size: 1.25em;
+            color: #333;
+            margin-bottom: 8px;
+        }
+        
+        .card p {
+            color: #666;
+            font-size: 0.95em;
+            line-height: 1.5;
+            margin-bottom: 16px;
+        }
+        
+        .card-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-top: 16px;
+            border-top: 1px solid #eee;
+        }
+        
+        .tag {
+            background: #f0f0f0;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 0.8em;
+            color: #666;
+        }
+        
+        .arrow {
+            color: #667eea;
+            font-weight: bold;
+        }
+        
+        /* Feature cards with different styles */
+        .card.featured {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .card.featured h3,
+        .card.featured p {
+            color: white;
+        }
+        
+        .card.featured .card-footer {
+            border-color: rgba(255,255,255,0.2);
+        }
+        
+        .card.featured .tag {
+            background: rgba(255,255,255,0.2);
+            color: white;
+        }
+        
+        .card.featured .arrow {
+            color: white;
+        }
+        
+        /* Bordered card style */
+        .card.bordered {
+            border: 2px solid #667eea;
+            box-shadow: none;
+        }
+        
+        .card.bordered:hover {
+            background: #f8f8ff;
+        }
+        
+        /* Stats row */
+        .stats {
+            display: flex;
+            gap: 40px;
+            justify-content: center;
+            margin-top: 40px;
+            padding: 30px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 16px;
+            max-width: 800px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        
+        .stat {
+            text-align: center;
+            color: white;
+        }
+        
+        .stat-value {
+            font-size: 2.5em;
+            font-weight: 700;
+            display: block;
+        }
+        
+        .stat-label {
+            font-size: 0.9em;
+            opacity: 0.8;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Product Features</h1>
+        <p>Explore our comprehensive suite of tools designed for developers</p>
+    </div>
+    
+    <div class="grid">
+        <div class="card">
+            <div class="card-icon purple">🚀</div>
+            <h3>Fast Performance</h3>
+            <p>Lightning-fast rendering with optimized algorithms and GPU acceleration.</p>
+            <div class="card-footer">
+                <span class="tag">Core Feature</span>
+                <span class="arrow">→</span>
+            </div>
+        </div>
+        
+        <div class="card featured">
+            <div class="card-icon" style="background: rgba(255,255,255,0.2);">⭐</div>
+            <h3>Premium Features</h3>
+            <p>Access exclusive tools and priority support with our premium tier.</p>
+            <div class="card-footer">
+                <span class="tag">Premium</span>
+                <span class="arrow">→</span>
+            </div>
+        </div>
+        
+        <div class="card">
+            <div class="card-icon blue">🔒</div>
+            <h3>Secure by Default</h3>
+            <p>Enterprise-grade security with end-to-end encryption and audit logs.</p>
+            <div class="card-footer">
+                <span class="tag">Security</span>
+                <span class="arrow">→</span>
+            </div>
+        </div>
+        
+        <div class="card bordered">
+            <div class="card-icon orange">🎨</div>
+            <h3>Custom Themes</h3>
+            <p>Personalize your experience with beautiful custom themes and colors.</p>
+            <div class="card-footer">
+                <span class="tag">Customization</span>
+                <span class="arrow">→</span>
+            </div>
+        </div>
+        
+        <div class="card">
+            <div class="card-icon green">📊</div>
+            <h3>Analytics Dashboard</h3>
+            <p>Comprehensive insights and metrics to track your performance.</p>
+            <div class="card-footer">
+                <span class="tag">Analytics</span>
+                <span class="arrow">→</span>
+            </div>
+        </div>
+        
+        <div class="card">
+            <div class="card-icon teal">🔌</div>
+            <h3>API Integration</h3>
+            <p>Connect with your favorite tools through our robust REST API.</p>
+            <div class="card-footer">
+                <span class="tag">Integration</span>
+                <span class="arrow">→</span>
+            </div>
+        </div>
+    </div>
+    
+    <div class="stats">
+        <div class="stat">
+            <span class="stat-value">10K+</span>
+            <span class="stat-label">Active Users</span>
+        </div>
+        <div class="stat">
+            <span class="stat-value">99.9%</span>
+            <span class="stat-label">Uptime</span>
+        </div>
+        <div class="stat">
+            <span class="stat-value">50+</span>
+            <span class="stat-label">Integrations</span>
+        </div>
+        <div class="stat">
+            <span class="stat-value">24/7</span>
+            <span class="stat-label">Support</span>
+        </div>
+    </div>
+</body>
+</html>
+

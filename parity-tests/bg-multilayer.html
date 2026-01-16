@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Multi-layer Background Test</title>
+  <style>
+    :root {
+      --bg-primary: #0f172a;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      min-height: 100vh;
+      /* Multi-layer background: gradient on top, solid color on bottom */
+      background: radial-gradient(ellipse at top, rgba(6, 182, 212, 0.15), transparent 50%),
+                  var(--bg-primary);
+    }
+
+    .test-box {
+      width: 200px;
+      height: 200px;
+      margin: 50px auto;
+      /* Another multi-layer test: linear gradient over solid */
+      background: linear-gradient(135deg, rgba(255,255,255,0.2), transparent),
+                  #1e40af;
+      border-radius: 8px;
+    }
+
+    .solid-only {
+      width: 200px;
+      height: 100px;
+      margin: 20px auto;
+      background: #10b981;
+    }
+
+    .gradient-only {
+      width: 200px;
+      height: 100px;
+      margin: 20px auto;
+      background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+    }
+  </style>
+</head>
+<body>
+  <div class="test-box"></div>
+  <div class="solid-only"></div>
+  <div class="gradient-only"></div>
+</body>
+</html>

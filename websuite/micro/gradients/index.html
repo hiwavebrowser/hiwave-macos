@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="../../common/parity-reset.css">
+  <title>Gradient Test</title>
+  <style>
+    /* Reset */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; padding: 20px; background: #f5f5f5; }
+    
+    h2 { margin: 20px 0 10px; font-size: 14px; }
+    
+    .test-box {
+      width: 200px;
+      height: 100px;
+      margin: 10px;
+      display: inline-block;
+      border: 1px solid #333;
+    }
+    
+    /* ============================================
+       TEST 1: Linear gradient angles
+       ============================================ */
+    .test1a { background: linear-gradient(to right, red, blue); }
+    .test1b { background: linear-gradient(to bottom, red, blue); }
+    .test1c { background: linear-gradient(45deg, red, blue); }
+    .test1d { background: linear-gradient(135deg, red, blue); }
+    
+    /* ============================================
+       TEST 2: Linear gradient with multiple stops
+       ============================================ */
+    .test2a { background: linear-gradient(to right, red, yellow, green); }
+    .test2b { background: linear-gradient(to right, red, orange, yellow, green, blue, purple); }
+    .test2c { background: linear-gradient(to right, red 0%, red 50%, blue 50%, blue 100%); }
+    .test2d { background: linear-gradient(to right, red 20%, yellow 40%, green 60%, blue 80%); }
+    
+    /* ============================================
+       TEST 3: Radial gradient shapes
+       ============================================ */
+    .test3a { background: radial-gradient(circle, red, blue); }
+    .test3b { background: radial-gradient(ellipse, red, blue); }
+    .test3c { background: radial-gradient(circle at top left, red, blue); }
+    .test3d { background: radial-gradient(circle at 75% 25%, red, blue); }
+    
+    /* ============================================
+       TEST 4: Radial gradient sizes
+       ============================================ */
+    .test4a { background: radial-gradient(circle closest-side, red, blue); }
+    .test4b { background: radial-gradient(circle farthest-side, red, blue); }
+    .test4c { background: radial-gradient(circle closest-corner, red, blue); }
+    .test4d { background: radial-gradient(circle farthest-corner, red, blue); }
+    
+    /* ============================================
+       TEST 5: Gradient with transparency
+       ============================================ */
+    .test5-container {
+      background: repeating-linear-gradient(
+        45deg,
+        #ccc,
+        #ccc 10px,
+        #fff 10px,
+        #fff 20px
+      );
+      padding: 10px;
+    }
+    .test5a { background: linear-gradient(to right, rgba(255,0,0,0.8), rgba(0,0,255,0.2)); }
+    .test5b { background: linear-gradient(to right, red, transparent, blue); }
+    .test5c { background: radial-gradient(circle, rgba(255,0,0,0.8), transparent); }
+    
+    /* ============================================
+       TEST 6: Repeating gradients
+       ============================================ */
+    .test6a { background: repeating-linear-gradient(45deg, red, red 10px, blue 10px, blue 20px); }
+    .test6b { background: repeating-linear-gradient(to right, red, yellow 20px, green 40px); }
+    .test6c { background: repeating-radial-gradient(circle, red, red 10px, blue 10px, blue 20px); }
+    
+    /* ============================================
+       TEST 7: Conic gradient
+       ============================================ */
+    .test7a { background: conic-gradient(red, yellow, green, blue, red); }
+    .test7b { background: conic-gradient(from 45deg, red, blue); }
+    .test7c { background: conic-gradient(at 25% 25%, red, yellow, green, blue, red); }
+  </style>
+</head>
+<body>
+  <h1>Gradient Test</h1>
+  
+  <h2>1. Linear gradient angles</h2>
+  <div>
+    <div class="test-box test1a"></div>
+    <div class="test-box test1b"></div>
+    <div class="test-box test1c"></div>
+    <div class="test-box test1d"></div>
+  </div>
+  
+  <h2>2. Linear gradient with multiple stops</h2>
+  <div>
+    <div class="test-box test2a"></div>
+    <div class="test-box test2b"></div>
+    <div class="test-box test2c"></div>
+    <div class="test-box test2d"></div>
+  </div>
+  
+  <h2>3. Radial gradient shapes and positions</h2>
+  <div>
+    <div class="test-box test3a"></div>
+    <div class="test-box test3b"></div>
+    <div class="test-box test3c"></div>
+    <div class="test-box test3d"></div>
+  </div>
+  
+  <h2>4. Radial gradient sizes</h2>
+  <div>
+    <div class="test-box test4a"></div>
+    <div class="test-box test4b"></div>
+    <div class="test-box test4c"></div>
+    <div class="test-box test4d"></div>
+  </div>
+  
+  <h2>5. Gradient with transparency (on checkered bg)</h2>
+  <div class="test5-container">
+    <div class="test-box test5a"></div>
+    <div class="test-box test5b"></div>
+    <div class="test-box test5c"></div>
+  </div>
+  
+  <h2>6. Repeating gradients</h2>
+  <div>
+    <div class="test-box test6a"></div>
+    <div class="test-box test6b"></div>
+    <div class="test-box test6c"></div>
+  </div>
+  
+  <h2>7. Conic gradient</h2>
+  <div>
+    <div class="test-box test7a"></div>
+    <div class="test-box test7b"></div>
+    <div class="test-box test7c"></div>
+  </div>
+</body>
+</html>
+
+
+

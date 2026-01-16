@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Typography Test</title>
+    <style>
+        body {
+            font-family: Helvetica, Arial, sans-serif;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        .normal { font-weight: 400; }
+        .bold { font-weight: 700; }
+        .heavy { font-weight: 900; }
+        .light { font-weight: 300; }
+        
+        .italic { font-style: italic; }
+        
+        .size-small { font-size: 12px; }
+        .size-normal { font-size: 16px; }
+        .size-large { font-size: 24px; }
+        .size-xlarge { font-size: 36px; }
+        
+        .underline { text-decoration: underline; }
+        .overline { text-decoration: overline; }
+        .strikethrough { text-decoration: line-through; }
+        .underline-wavy { 
+            text-decoration: underline wavy;
+            text-decoration-color: red;
+        }
+        
+        .uppercase { text-transform: uppercase; }
+        .lowercase { text-transform: lowercase; }
+        .capitalize { text-transform: capitalize; }
+        
+        .letter-spaced { letter-spacing: 3px; }
+        .word-spaced { word-spacing: 10px; }
+        
+        .nowrap { white-space: nowrap; }
+        .pre { white-space: pre; }
+        
+        .opacity-half { opacity: 0.5; }
+        .opacity-quarter { opacity: 0.25; }
+        
+        .section {
+            margin-bottom: 20px;
+            padding: 15px;
+            background-color: white;
+            border: 1px solid #ddd;
+        }
+        
+        h2 {
+            color: #333;
+            margin-bottom: 10px;
+            border-bottom: 2px solid #007acc;
+            padding-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Typography Test Suite</h1>
+    
+    <div class="section">
+        <h2>Font Weights</h2>
+        <p class="light">Light weight (300)</p>
+        <p class="normal">Normal weight (400)</p>
+        <p class="bold">Bold weight (700)</p>
+        <p class="heavy">Heavy weight (900)</p>
+    </div>
+    
+    <div class="section">
+        <h2>Font Sizes</h2>
+        <p class="size-small">Small text (12px)</p>
+        <p class="size-normal">Normal text (16px)</p>
+        <p class="size-large">Large text (24px)</p>
+        <p class="size-xlarge">Extra Large (36px)</p>
+    </div>
+    
+    <div class="section">
+        <h2>Font Styles</h2>
+        <p>Normal text</p>
+        <p class="italic">Italic text</p>
+        <p class="bold italic">Bold italic text</p>
+    </div>
+    
+    <div class="section">
+        <h2>Text Decorations</h2>
+        <p class="underline">Underlined text</p>
+        <p class="overline">Overlined text</p>
+        <p class="strikethrough">Strikethrough text</p>
+        <p class="underline-wavy">Wavy underline in red</p>
+    </div>
+    
+    <div class="section">
+        <h2>Text Transforms</h2>
+        <p class="uppercase">uppercase text here</p>
+        <p class="lowercase">LOWERCASE TEXT HERE</p>
+        <p class="capitalize">capitalize each word</p>
+    </div>
+    
+    <div class="section">
+        <h2>Spacing</h2>
+        <p class="letter-spaced">Letter spacing applied</p>
+        <p class="word-spaced">Word spacing is applied to this sentence</p>
+    </div>
+    
+    <div class="section">
+        <h2>Opacity</h2>
+        <p>Full opacity (1.0)</p>
+        <p class="opacity-half">Half opacity (0.5)</p>
+        <p class="opacity-quarter">Quarter opacity (0.25)</p>
+    </div>
+</body>
+</html>
+

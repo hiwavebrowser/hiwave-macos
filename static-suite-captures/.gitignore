@@ -1,0 +1,5 @@
+# Static suite captures are regenerated on demand
+*.ppm
+*.perf.json
+summary.json
+

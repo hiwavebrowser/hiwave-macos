@@ -1,0 +1,33 @@
+[package]
+name = "rustkit-bindings"
+version = "0.1.0"
+edition = "2021"
+description = "JavaScript-to-DOM bindings for RustKit browser engine"
+authors = ["HiWave Team"]
+license = "MIT"
+
+[dependencies]
+# Core crates
+rustkit-dom = { path = "../rustkit-dom" }
+rustkit-js = { path = "../rustkit-js" }
+rustkit-core = { path = "../rustkit-core" }
+
+# Error handling
+thiserror = "1.0"
+
+# Tracing
+tracing = "0.1"
+
+# URL handling
+url = "2.5"
+
+# System info
+num_cpus = "1.16"
+
+# Serialization (for IPC)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+

@@ -1,0 +1,24 @@
+[package]
+name = "rustkit-css"
+version = "0.1.0"
+edition = "2021"
+description = "CSS parsing and style computation for RustKit browser engine"
+authors = ["HiWave Team"]
+license = "MIT"
+
+[dependencies]
+# CSS parsing (RustKit-owned)
+rustkit-cssparser = { path = "../rustkit-cssparser" }
+
+# Error handling
+thiserror = "1.0"
+
+# Tracing
+tracing = "0.1"
+
+# Small vectors
+smallvec = "1.13"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+

@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="../../common/parity-reset.css">
+  <title>Image Intrinsic Sizing Test</title>
+  <style>
+    /* Reset */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; padding: 20px; background: #f5f5f5; }
+    
+    h2 { margin: 20px 0 10px; font-size: 14px; }
+    
+    .container {
+      border: 2px solid #333;
+      padding: 10px;
+      margin: 10px 0;
+      background: white;
+    }
+    
+    .test-img {
+      border: 1px solid red;
+      background: #eee;
+    }
+    
+    /* ============================================
+       TEST 1: No dimensions - use natural size
+       Image should be 100x100 (natural size)
+       ============================================ */
+    
+    /* ============================================
+       TEST 2: Width only - height maintains aspect ratio
+       Image should be 200x200 (2:1 aspect preserved)
+       ============================================ */
+    .test2 img { width: 200px; }
+    
+    /* ============================================
+       TEST 3: Height only - width maintains aspect ratio
+       Image should be 50x50 (1:1 aspect preserved)
+       ============================================ */
+    .test3 img { height: 50px; }
+    
+    /* ============================================
+       TEST 4: Both dimensions - stretch to fit
+       Image should be 150x75 (stretched)
+       ============================================ */
+    .test4 img { width: 150px; height: 75px; }
+    
+    /* ============================================
+       TEST 5: max-width constraint
+       Image should be 80x80 (constrained by max-width)
+       ============================================ */
+    .test5 img { max-width: 80px; }
+    
+    /* ============================================
+       TEST 6: max-height constraint
+       Image should be 60x60 (constrained by max-height)
+       ============================================ */
+    .test6 img { max-height: 60px; }
+    
+    /* ============================================
+       TEST 7: Percentage width in container
+       Image should be 50% of container width
+       ============================================ */
+    .test7 { width: 300px; }
+    .test7 img { width: 50%; }
+    
+    /* ============================================
+       TEST 8: object-fit: contain
+       Image fits within box, preserving aspect ratio
+       ============================================ */
+    .test8 img {
+      width: 200px;
+      height: 100px;
+      object-fit: contain;
+      background: #ddd;
+    }
+    
+    /* ============================================
+       TEST 9: object-fit: cover
+       Image covers box, cropping if needed
+       ============================================ */
+    .test9 img {
+      width: 100px;
+      height: 150px;
+      object-fit: cover;
+    }
+    
+    /* ============================================
+       TEST 10: object-fit: fill
+       Image stretches to fill box
+       ============================================ */
+    .test10 img {
+      width: 150px;
+      height: 75px;
+      object-fit: fill;
+    }
+    
+    /* ============================================
+       TEST 11: aspect-ratio property
+       Box maintains 16:9 aspect ratio
+       ============================================ */
+    .test11 img {
+      width: 160px;
+      aspect-ratio: 16 / 9;
+      object-fit: cover;
+    }
+    
+    /* ============================================
+       TEST 12: Image in flex container
+       Image should size correctly in flex
+       ============================================ */
+    .test12 {
+      display: flex;
+      gap: 10px;
+    }
+    .test12 img { width: 80px; }
+  </style>
+</head>
+<body>
+  <h1>Image Intrinsic Sizing Test</h1>
+  
+  <!-- Use a data URI for a simple 100x100 red square -->
+  <!-- This ensures the test works without external resources -->
+  
+  <h2>1. No dimensions - natural size (100x100)</h2>
+  <div class="container test1">
+    <img class="test-img" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect fill='%23e74c3c' width='100' height='100'/%3E%3C/svg%3E" alt="Red square">
+  </div>
+  
+  <h2>2. Width only (200px) - height auto</h2>
+  <div class="container test2">
+    <img class="test-img" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect fill='%233498db' width='100' height='100'/%3E%3C/svg%3E" alt="Blue square">
+  </div>
+  
+  <h2>3. Height only (50px) - width auto</h2>
+  <div class="container test3">
+    <img class="test-img" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect fill='%232ecc71' width='100' height='100'/%3E%3C/svg%3E" alt="Green square">
+  </div>
+  
+  <h2>4. Both dimensions (150x75) - stretched</h2>
+  <div class="container test4">
+    <img class="test-img" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect fill='%239b59b6' width='100' height='100'/%3E%3C/svg%3E" alt="Purple square">
+  </div>
+  
+  <h2>5. max-width: 80px</h2>
+  <div class="container test5">
+    <img class="test-img" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect fill='%23f39c12' width='100' height='100'/%3E%3C/svg%3E" alt="Orange square">
+  </div>
+  
+  <h2>6. max-height: 60px</h2>
+  <div class="container test6">
+    <img class="test-img" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect fill='%231abc9c' width='100' height='100'/%3E%3C/svg%3E" alt="Teal square">
+  </div>
+  
+  <h2>7. Percentage width (50% of 300px container)</h2>
+  <div class="container test7">
+    <img class="test-img" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect fill='%2334495e' width='100' height='100'/%3E%3C/svg%3E" alt="Dark square">
+  </div>
+  
+  <h2>8. object-fit: contain (200x100 box)</h2>
+  <div class="container test8">
+    <img class="test-img" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect fill='%23e74c3c' width='100' height='100'/%3E%3C/svg%3E" alt="Red square">
+  </div>
+  
+  <h2>9. object-fit: cover (100x150 box)</h2>
+  <div class="container test9">
+    <img class="test-img" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect fill='%233498db' width='100' height='100'/%3E%3C/svg%3E" alt="Blue square">
+  </div>
+  
+  <h2>10. object-fit: fill (150x75 box)</h2>
+  <div class="container test10">
+    <img class="test-img" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect fill='%232ecc71' width='100' height='100'/%3E%3C/svg%3E" alt="Green square">
+  </div>
+  
+  <h2>11. aspect-ratio: 16/9 (160px wide)</h2>
+  <div class="container test11">
+    <img class="test-img" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect fill='%239b59b6' width='100' height='100'/%3E%3C/svg%3E" alt="Purple square">
+  </div>
+  
+  <h2>12. Images in flex container</h2>
+  <div class="container test12">
+    <img class="test-img" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect fill='%23e74c3c' width='100' height='100'/%3E%3C/svg%3E" alt="Red">
+    <img class="test-img" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect fill='%233498db' width='100' height='100'/%3E%3C/svg%3E" alt="Blue">
+    <img class="test-img" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect fill='%232ecc71' width='100' height='100'/%3E%3C/svg%3E" alt="Green">
+  </div>
+</body>
+</html>
+
+
+

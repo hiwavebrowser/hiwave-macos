@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>New Tab - HiWave</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            /* Backgrounds (dark slate) */
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-tertiary: #334155;
+            --bg-elevated: #475569;
+
+            /* Teal/Cyan Accent */
+            --accent: #06b6d4;
+            --accent-hover: #22d3ee;
+            --accent-dark: #0891b2;
+            --accent-subtle: rgba(6, 182, 212, 0.08);
+            --accent-medium: rgba(6, 182, 212, 0.15);
+
+            /* Text */
+            --text-primary: #f1f5f9;
+            --text-secondary: #cbd5e1;
+            --text-muted: #94a3b8;
+            --text-disabled: #64748b;
+
+            /* Borders */
+            --border: #1f2937;
+            --border-subtle: #16213e;
+            --border-focus: #475569;
+        }
+
+        @keyframes logoShimmer {
+            0% { background-position: -200% center; }
+            100% { background-position: 200% center; }
+        }
+
+        @keyframes ambientGlow {
+            0%, 100% { opacity: 0.4; }
+            50% { opacity: 0.7; }
+        }
+
+        @keyframes floatIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        /* Ripple effect for search input */
+        @keyframes ripple {
+            from {
+                transform: scale(0);
+                opacity: 0.6;
+            }
+            to {
+                transform: scale(4);
+                opacity: 0;
+            }
+        }
+
+        .ripple {
+            position: absolute;
+            border-radius: 50%;
+            background: var(--accent);
+            pointer-events: none;
+            animation: ripple 0.6s ease-out;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            user-select: none;
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* Ambient teal glow */
+        .ambient-glow {
+            position: fixed;
+            top: -50%;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 800px;
+            height: 800px;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(6, 182, 212, 0.15) 0%, transparent 70%);
+            animation: ambientGlow 4s ease-in-out infinite;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .container {
+            text-align: center;
+            max-width: 600px;
+            padding: 2rem;
+            position: relative;
+            z-index: 1;
+            animation: floatIn 0.6s ease-out;
+        }
+
+        .logo-wrapper {
+            position: relative;
+            display: inline-block;
+            margin-bottom: 0.5rem;
+        }
+
+        .logo {
+            font-size: 3rem;
+            font-weight: 300;
+            letter-spacing: 0.5rem;
+            background: linear-gradient(135deg, #0891b2 0%, #06b6d4 25%, #22d3ee 50%, #06b6d4 75%, #0891b2 100%);
+            background-size: 200% auto;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            position: relative;
+            cursor: default;
+            transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+
+        .logo:hover {
+            animation: logoShimmer 2s linear infinite;
+            transform: scale(1.05);
+        }
+
+        .tagline {
+            color: var(--text-secondary);
+            font-size: 1rem;
+            margin-bottom: 3rem;
+            font-weight: 300;
+            opacity: 0.9;
+        }
+
+        .search-container {
+            position: relative;
+            width: 100%;
+            max-width: 500px;
+            margin: 0 auto 2rem;
+            overflow: hidden;
+        }
+
+        .search-input {
+            width: 100%;
+            padding: 1rem 1.5rem;
+            font-size: 1rem;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            outline: none;
+            transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+            position: relative;
+        }
+
+        .search-input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.2),
+                        0 0 40px rgba(6, 182, 212, 0.1);
+            transform: translateY(-2px);
+        }
+
+        .search-input::placeholder {
+            color: var(--text-secondary);
+        }
+
+        /* Enhanced shortcuts section */
+        .shortcuts-section {
+            margin-top: 3rem;
+        }
+
+        .shortcuts-title {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1rem;
+            color: var(--text-muted);
+            margin-bottom: 1.5rem;
+            font-weight: 600;
+        }
+
+        .shortcuts {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 0.75rem;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .shortcut {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.75rem 1rem;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+            transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+            position: relative;
+            overflow: hidden;
+            cursor: default;
+        }
+
+        .shortcut::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 3px;
+            height: 100%;
+            background: var(--accent);
+            transform: scaleY(0);
+            transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+
+        .shortcut:hover {
+            background: var(--bg-tertiary);
+            border-color: var(--accent);
+            transform: translateX(4px) scale(1.02);
+        }
+
+        .shortcut:hover::before {
+            transform: scaleY(1);
+        }
+
+        .shortcut:active {
+            transform: translateX(4px) scale(0.98);
+        }
+
+        .shortcut kbd {
+            background: var(--bg-primary);
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.75rem;
+            border: 1px solid var(--border-subtle);
+            color: var(--accent-hover);
+            font-weight: 600;
+            transition: all 0.2s ease;
+        }
+
+        .shortcut:hover kbd {
+            transform: scale(1.05);
+            box-shadow: 0 2px 8px rgba(6, 182, 212, 0.2);
+        }
+
+        .shortcut-label {
+            flex: 1;
+            text-align: left;
+        }
+
+        .footer {
+            position: fixed;
+            bottom: 1rem;
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            z-index: 1;
+        }
+
+        .footer a {
+            color: var(--accent);
+            text-decoration: none;
+            transition: all 0.2s ease;
+        }
+
+        .footer a:hover {
+            color: var(--accent-hover);
+            text-decoration: underline;
+            transform: translateY(-1px);
+        }
+
+        /* Stagger animation for shortcuts */
+        .shortcut {
+            animation: floatIn 0.4s ease-out backwards;
+        }
+
+        .shortcut:nth-child(1) { animation-delay: 0.1s; }
+        .shortcut:nth-child(2) { animation-delay: 0.15s; }
+        .shortcut:nth-child(3) { animation-delay: 0.2s; }
+        .shortcut:nth-child(4) { animation-delay: 0.25s; }
+        .shortcut:nth-child(5) { animation-delay: 0.3s; }
+        .shortcut:nth-child(6) { animation-delay: 0.35s; }
+        .shortcut:nth-child(7) { animation-delay: 0.4s; }
+        .shortcut:nth-child(8) { animation-delay: 0.45s; }
+        .shortcut:nth-child(9) { animation-delay: 0.5s; }
+        .shortcut:nth-child(10) { animation-delay: 0.55s; }
+        .shortcut:nth-child(11) { animation-delay: 0.6s; }
+        .shortcut:nth-child(12) { animation-delay: 0.65s; }
+
+        /* Reduced motion support */
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
+
+            .logo:hover {
+                animation: none;
+                transform: none;
+            }
+
+            .shortcut:hover {
+                transform: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="ambient-glow"></div>
+
+    <div class="container">
+        <div class="logo-wrapper">
+            <h1 class="logo">HIWAVE</h1>
+        </div>
+        <p class="tagline">Freedom. Flow. Focus. Your wave, your choice.</p>
+
+        <div class="search-container">
+            <input
+                type="text"
+                class="search-input"
+                placeholder="Search or enter URL..."
+                id="searchInput"
+                autofocus
+            >
+        </div>
+
+        <div class="shortcuts-section">
+            <div class="shortcuts-title">Keyboard Shortcuts</div>
+            <div class="shortcuts">
+                <div class="shortcut">
+                    <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>K</kbd>
+                    <span class="shortcut-label">Command Palette</span>
+                </div>
+                <div class="shortcut">
+                    <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>T</kbd>
+                    <span class="shortcut-label">New Tab</span>
+                </div>
+                <div class="shortcut">
+                    <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>W</kbd>
+                    <span class="shortcut-label">Close Tab</span>
+                </div>
+                <div class="shortcut">
+                    <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd>
+                    <span class="shortcut-label">Shelve Tab</span>
+                </div>
+                <div class="shortcut">
+                    <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>L</kbd>
+                    <span class="shortcut-label">Address Bar</span>
+                </div>
+                <div class="shortcut">
+                    <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>R</kbd>
+                    <span class="shortcut-label">Reload (F5)</span>
+                </div>
+                <div class="shortcut">
+                    <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>B</kbd>
+                    <span class="shortcut-label">Toggle Sidebar</span>
+                </div>
+                <div class="shortcut">
+                    <kbd>Alt</kbd>+<kbd>Left</kbd>
+                    <span class="shortcut-label">Back</span>
+                </div>
+                <div class="shortcut">
+                    <kbd>Alt</kbd>+<kbd>Right</kbd>
+                    <span class="shortcut-label">Forward</span>
+                </div>
+                <div class="shortcut">
+                    <kbd>Alt</kbd>+<kbd>Home</kbd>
+                    <span class="shortcut-label">Home</span>
+                </div>
+                <div class="shortcut">
+                    <kbd>Ctrl</kbd>+<kbd>1-9</kbd>
+                    <span class="shortcut-label">Switch Tabs</span>
+                </div>
+                <div class="shortcut">
+                    <kbd>Esc</kbd>
+                    <span class="shortcut-label">Stop/Close Sidebar</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer">
+        HiWave v0.1.0 - <a href="#">Settings</a>
+    </div>
+
+    <script>
+        // Create ripple effect on search input click
+        function createRipple(event) {
+            const container = event.currentTarget;
+            const ripple = document.createElement('span');
+            const rect = container.getBoundingClientRect();
+
+            const size = Math.max(rect.width, rect.height);
+            const x = event.clientX - rect.left - size / 2;
+            const y = event.clientY - rect.top - size / 2;
+
+            ripple.classList.add('ripple');
+            ripple.style.width = ripple.style.height = size + 'px';
+            ripple.style.left = x + 'px';
+            ripple.style.top = y + 'px';
+
+            container.appendChild(ripple);
+
+            setTimeout(() => ripple.remove(), 600);
+        }
+
+        // Handle search input
+        const searchInput = document.getElementById('searchInput');
+
+        // Add ripple on focus
+        searchInput.addEventListener('mousedown', createRipple);
+
+        searchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                const value = searchInput.value.trim();
+                if (value) {
+                    // Check if it looks like a URL
+                    if (value.includes('.') && !value.includes(' ')) {
+                        const url = value.startsWith('http') ? value : 'https://' + value;
+                        // Send navigation request via IPC
+                        if (window.ipc) {
+                            window.ipc.postMessage(JSON.stringify({
+                                cmd: 'navigate',
+                                url: url
+                            }));
+                        } else {
+                            window.location.href = url;
+                        }
+                    } else {
+                        // Treat as search query
+                        const searchUrl = 'https://duckduckgo.com/?q=' + encodeURIComponent(value);
+                        if (window.ipc) {
+                            window.ipc.postMessage(JSON.stringify({
+                                cmd: 'navigate',
+                                url: searchUrl
+                            }));
+                        } else {
+                            window.location.href = searchUrl;
+                        }
+                    }
+                }
+            }
+        });
+
+        // Listen for keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            // Ctrl/Cmd+K - Command Palette
+            if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+                e.preventDefault();
+                if (window.ipc) {
+                    window.ipc.postMessage(JSON.stringify({
+                        cmd: 'open_command_palette'
+                    }));
+                }
+                console.log('Command Palette requested');
+            }
+        });
+
+        // Easter egg: Konami code for extra delight
+        let konamiCode = [];
+        const konamiPattern = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'b', 'a'];
+
+        document.addEventListener('keydown', (e) => {
+            if (e.target === searchInput) return; // Don't trigger while typing
+
+            konamiCode.push(e.key);
+            if (konamiCode.length > konamiPattern.length) {
+                konamiCode.shift();
+            }
+
+            if (konamiCode.join(',') === konamiPattern.join(',')) {
+                // Trigger special animation
+                document.body.style.animation = 'none';
+                setTimeout(() => {
+                    document.body.style.animation = 'floatIn 0.6s ease-out';
+                    const glow = document.querySelector('.ambient-glow');
+                    glow.style.background = 'radial-gradient(circle, rgba(6, 182, 212, 0.5) 0%, transparent 70%)';
+                    setTimeout(() => {
+                        glow.style.background = 'radial-gradient(circle, rgba(6, 182, 212, 0.15) 0%, transparent 70%)';
+                    }, 2000);
+                }, 10);
+                konamiCode = [];
+            }
+        });
+    </script>
+</body>
+</html>

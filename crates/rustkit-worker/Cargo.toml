@@ -1,0 +1,31 @@
+[package]
+name = "rustkit-worker"
+version = "0.1.0"
+edition = "2021"
+description = "Web Workers implementation for RustKit browser engine"
+authors = ["HiWave Team"]
+license = "MIT"
+
+[dependencies]
+# RustKit crates
+rustkit-common = { path = "../rustkit-common" }
+
+# Core
+thiserror = "1.0"
+tracing = "0.1"
+url = "2.5"
+
+# Async
+tokio = { version = "1.42", features = ["sync", "time", "rt"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Collections
+hashbrown = "0.14"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
+

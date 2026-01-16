@@ -1,0 +1,154 @@
+name: Parity Metrics
+
+on:
+  push:
+    branches: ['**']  # Run on all branches
+  workflow_dispatch:  # Allow manual triggers
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  collect-metrics:
+    runs-on: macos-14
+    timeout-minutes: 30
+    permissions:
+      contents: write  # Needed to push metrics
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for metrics branch
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install oracle deps
+        working-directory: tools/parity_oracle
+        run: npm ci
+
+      - name: Build Rust
+        run: cargo build --release -p parity-capture
+
+      - name: Run parity tests
+        continue-on-error: true  # Don't fail workflow on test threshold failures - this is for metrics collection
+        run: |
+          python3 scripts/parity_test.py \
+            --scope all \
+            --iterations 1 \
+            --output parity-baseline/parity_test_results.json
+
+      - name: Extract metrics
+        id: metrics
+        run: |
+          python3 scripts/extract_parity_metrics.py \
+            --input parity-baseline/parity_test_results.json \
+            --output parity-metrics.json \
+            --commit ${{ github.sha }} \
+            --branch ${{ github.ref_name }}
+
+      - name: Generate Job Summary
+        run: |
+          python3 scripts/extract_parity_metrics.py \
+            --input parity-baseline/parity_test_results.json \
+            --format markdown >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload metrics artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-metrics-${{ github.sha }}
+          path: parity-metrics.json
+          retention-days: 90
+
+      # Store metrics history in a separate branch
+      - name: Update metrics history
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+        run: |
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create or checkout metrics branch
+          git fetch origin metrics-history:metrics-history 2>/dev/null || true
+          git checkout metrics-history 2>/dev/null || git checkout --orphan metrics-history
+
+          # Create metrics directory if it doesn't exist
+          mkdir -p metrics
+
+          # Copy new metrics with timestamp
+          TIMESTAMP=$(date -u +"%Y%m%d_%H%M%S")
+          cp parity-metrics.json "metrics/${TIMESTAMP}_${{ github.sha }}.json"
+
+          # Append to history CSV for easy charting
+          python3 -c "
+          import json
+          import csv
+          import os
+
+          with open('parity-metrics.json') as f:
+              m = json.load(f)
+
+          csv_file = 'metrics/history.csv'
+          file_exists = os.path.exists(csv_file)
+
+          with open(csv_file, 'a', newline='') as f:
+              writer = csv.writer(f)
+              if not file_exists:
+                  writer.writerow(['timestamp', 'commit', 'branch', 'avg_diff', 'passed', 'failed', 'total', 'worst_case', 'worst_diff'])
+              writer.writerow([
+                  m['timestamp'],
+                  m['commit'][:8],
+                  m['branch'],
+                  round(m['average_diff'], 2),
+                  m['passed'],
+                  m['failed'],
+                  m['total'],
+                  m['worst_case']['name'],
+                  round(m['worst_case']['diff'], 2)
+              ])
+          "
+
+          # Commit and push
+          git add metrics/
+          git commit -m "Add parity metrics for ${{ github.sha }}" || echo "No changes to commit"
+          git push origin metrics-history || echo "Push failed - may need to rebase"
+
+      - name: Comment on PR with metrics
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const metrics = JSON.parse(fs.readFileSync('parity-metrics.json', 'utf8'));
+
+            const body = `## 📊 Parity Metrics
+
+            | Metric | Value |
+            |--------|-------|
+            | Average Diff | **${metrics.average_diff.toFixed(2)}%** |
+            | Passed | ${metrics.passed}/${metrics.total} |
+            | Failed | ${metrics.failed}/${metrics.total} |
+            | Worst Case | ${metrics.worst_case.name} (${metrics.worst_case.diff.toFixed(2)}%) |
+
+            <details>
+            <summary>All Test Results</summary>
+
+            | Test | Diff % | Status |
+            |------|--------|--------|
+            ${metrics.tests.map(t => `| ${t.name} | ${t.diff.toFixed(2)}% | ${t.passed ? '✅' : '❌'} |`).join('\n')}
+
+            </details>
+
+            _Commit: ${metrics.commit}_`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });

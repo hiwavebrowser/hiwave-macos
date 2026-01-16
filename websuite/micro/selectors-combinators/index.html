@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=800, height=600">
+  <title>Micro Test: CSS Selector Combinators</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      padding: 20px;
+      margin: 0;
+      background: #f5f5f5;
+    }
+    
+    h1 {
+      font-size: 18px;
+      margin-bottom: 20px;
+    }
+    
+    .test-case {
+      background: white;
+      padding: 15px;
+      margin-bottom: 15px;
+      border-radius: 4px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    
+    .label {
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 5px;
+    }
+    
+    .target {
+      padding: 10px;
+      background: #eee;
+    }
+    
+    /* === Combinator Tests === */
+    
+    /* Test 1: Descendant combinator (space) */
+    .descendant .target { color: green; background: #d4edda; }
+    
+    /* Test 2: Child combinator (>) */
+    .child > .target { color: green; background: #d4edda; }
+    .child .nested .target { color: red; background: #f8d7da; }
+    
+    /* Test 3: Adjacent sibling (+) */
+    .adjacent + .target { color: green; background: #d4edda; }
+    
+    /* Test 4: General sibling (~) */
+    .general ~ .target { color: green; background: #d4edda; }
+    
+    /* Test 5: Multiple combinators */
+    .multi > div .target { color: green; background: #d4edda; }
+    
+    /* Test 6: Descendant depth */
+    .deep .target { color: green; background: #d4edda; }
+    
+    /* Test 7: Child combinator specificity */
+    .child-spec .target { color: red; }
+    .child-spec > div > .target { color: green; background: #d4edda; }
+    
+    /* Test 8: Adjacent vs general sibling */
+    .sibling-test + .first-sib { color: green; background: #d4edda; }
+    .sibling-test ~ .other-sib { color: blue; background: #cce5ff; }
+  </style>
+</head>
+<body>
+  <h1>CSS Selector Combinator Tests</h1>
+  
+  <div class="test-case">
+    <div class="label">Test 1: Descendant (space) - target should be GREEN</div>
+    <div class="descendant">
+      <div>
+        <span class="target">Nested descendant</span>
+      </div>
+    </div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 2: Child (>) - direct child GREEN, nested RED</div>
+    <div class="child">
+      <div class="target">Direct child (GREEN)</div>
+      <div class="nested">
+        <div class="target">Nested (RED)</div>
+      </div>
+    </div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 3: Adjacent sibling (+) - should be GREEN</div>
+    <div>
+      <div class="adjacent">Previous</div>
+      <div class="target">Adjacent sibling (GREEN)</div>
+      <div class="target" style="background: #eee; color: inherit;">Not adjacent (default)</div>
+    </div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 4: General sibling (~) - all following should be GREEN</div>
+    <div>
+      <div class="target" style="background: #eee; color: inherit;">Before (default)</div>
+      <div class="general">Trigger</div>
+      <div class="target">Following 1 (GREEN)</div>
+      <div class="target">Following 2 (GREEN)</div>
+    </div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 5: Multiple combinators - should be GREEN</div>
+    <div class="multi">
+      <div>
+        <span class="target">Matched by .multi > div .target</span>
+      </div>
+    </div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 6: Deep nesting - should be GREEN</div>
+    <div class="deep">
+      <div>
+        <div>
+          <div>
+            <div class="target">Deeply nested descendant</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 7: Child combinator specificity - should be GREEN</div>
+    <div class="child-spec">
+      <div>
+        <div class="target">More specific child path</div>
+      </div>
+    </div>
+  </div>
+  
+  <div class="test-case">
+    <div class="label">Test 8: Adjacent vs General - first GREEN, others BLUE</div>
+    <div>
+      <div class="sibling-test">Trigger</div>
+      <div class="first-sib">Adjacent (GREEN)</div>
+      <div class="other-sib">General 1 (BLUE)</div>
+      <div class="other-sib">General 2 (BLUE)</div>
+    </div>
+  </div>
+</body>
+</html>
+
+
+

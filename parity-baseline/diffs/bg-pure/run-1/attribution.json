@@ -1,0 +1,162 @@
+{
+  "width": 800,
+  "height": 600,
+  "diffPercent": 0.0825,
+  "totalDiffPixels": 480000,
+  "unattributedDiffPixels": 0,
+  "taxonomy": {
+    "text_metrics": 73.02083333333331
+  },
+  "topContributors": [
+    {
+      "selector": "body > div.row:nth-of-type(3)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 260,
+        "width": 800,
+        "height": 130
+      },
+      "diff_pixels": 74000,
+      "contribution_percent": 15.416666666666668,
+      "element_diff_percent": 71.15384615384616,
+      "corner_ratio": 0.007783783783783783,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.row:nth-of-type(4)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 390,
+        "width": 800,
+        "height": 130
+      },
+      "diff_pixels": 74000,
+      "contribution_percent": 15.416666666666668,
+      "element_diff_percent": 71.15384615384616,
+      "corner_ratio": 0.007783783783783783,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.row:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 800,
+        "height": 130
+      },
+      "diff_pixels": 54000,
+      "contribution_percent": 11.25,
+      "element_diff_percent": 51.92307692307693,
+      "corner_ratio": 0.010666666666666666,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.row:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 130,
+        "width": 800,
+        "height": 130
+      },
+      "diff_pixels": 54000,
+      "contribution_percent": 11.25,
+      "element_diff_percent": 51.92307692307693,
+      "corner_ratio": 0.010666666666666666,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.row:nth-of-type(5)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 520,
+        "width": 800,
+        "height": 130
+      },
+      "diff_pixels": 44500,
+      "contribution_percent": 9.270833333333334,
+      "element_diff_percent": 42.78846153846153,
+      "corner_ratio": 0.0064719101123595505,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.row:nth-of-type(1) > div.box red:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 15,
+        "y": 15,
+        "width": 100,
+        "height": 100
+      },
+      "diff_pixels": 10000,
+      "contribution_percent": 2.083333333333333,
+      "element_diff_percent": 100,
+      "corner_ratio": 0.0576,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.row:nth-of-type(1) > div.box green:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 125,
+        "y": 15,
+        "width": 100,
+        "height": 100
+      },
+      "diff_pixels": 10000,
+      "contribution_percent": 2.083333333333333,
+      "element_diff_percent": 100,
+      "corner_ratio": 0.0576,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.row:nth-of-type(1) > div.box blue:nth-of-type(3)",
+      "tag": "div",
+      "rect": {
+        "x": 235,
+        "y": 15,
+        "width": 100,
+        "height": 100
+      },
+      "diff_pixels": 10000,
+      "contribution_percent": 2.083333333333333,
+      "element_diff_percent": 100,
+      "corner_ratio": 0.0576,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.row:nth-of-type(1) > div.box black:nth-of-type(4)",
+      "tag": "div",
+      "rect": {
+        "x": 345,
+        "y": 15,
+        "width": 100,
+        "height": 100
+      },
+      "diff_pixels": 10000,
+      "contribution_percent": 2.083333333333333,
+      "element_diff_percent": 100,
+      "corner_ratio": 0.0576,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.row:nth-of-type(1) > div.box white:nth-of-type(5)",
+      "tag": "div",
+      "rect": {
+        "x": 455,
+        "y": 15,
+        "width": 100,
+        "height": 100
+      },
+      "diff_pixels": 10000,
+      "contribution_percent": 2.083333333333333,
+      "element_diff_percent": 100,
+      "corner_ratio": 0.0576,
+      "likely_cause": "text_metrics"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+[package]
+name = "rustkit-codecs"
+version = "0.1.0"
+edition = "2021"
+description = "RustKit-owned image codec layer (PNG/JPEG/GIF subset) to replace the image crate"
+authors = ["HiWave Team"]
+license = "MIT"
+
+[dependencies]
+thiserror = "1.0"
+
+# Minimal codec building blocks (pure Rust)
+png = "0.17"
+jpeg-decoder = "0.3"
+gif = "0.13"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+

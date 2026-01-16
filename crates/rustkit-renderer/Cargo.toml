@@ -1,0 +1,32 @@
+[package]
+name = "rustkit-renderer"
+version = "0.1.0"
+edition = "2021"
+description = "GPU display list renderer for RustKit browser engine"
+authors = ["HiWave Team"]
+license = "MIT"
+
+[dependencies]
+# RustKit crates
+rustkit-layout = { path = "../rustkit-layout" }
+rustkit-css = { path = "../rustkit-css" }
+# rustkit-svg = { path = "../rustkit-svg" }
+rustkit-common = { path = "../rustkit-common" }
+
+# GPU rendering
+wgpu = "24"
+bytemuck = { version = "1", features = ["derive"] }
+
+# Text rendering
+rustkit-text = { path = "../rustkit-text" }
+
+# Core
+thiserror = "1.0"
+tracing = "0.1"
+
+# Collections
+hashbrown = "0.14"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+

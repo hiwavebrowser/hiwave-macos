@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="../../common/parity-reset.css">
+  <title>CSS Specificity Test</title>
+  <style>
+    /* Reset */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; padding: 20px; background: #f5f5f5; }
+    
+    /* Test containers */
+    .test-box {
+      width: 200px;
+      height: 50px;
+      margin: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      color: white;
+    }
+    
+    /* ============================================
+       TEST 1: Type vs Class vs ID
+       Expected: ID wins (red background)
+       ============================================ */
+    div { background: blue; }           /* (0,0,1) */
+    .test1 { background: green; }       /* (0,1,0) */
+    #test1 { background: red; }         /* (1,0,0) */
+    
+    /* ============================================
+       TEST 2: Multiple classes vs single ID
+       Expected: ID wins (red background)
+       ============================================ */
+    .a.b.c.d.e { background: green; }   /* (0,5,0) */
+    #test2 { background: red; }         /* (1,0,0) */
+    
+    /* ============================================
+       TEST 3: Class + type vs class alone
+       Expected: div.test3 wins (green background)
+       ============================================ */
+    .test3 { background: blue; }        /* (0,1,0) */
+    div.test3 { background: green; }    /* (0,1,1) */
+    
+    /* ============================================
+       TEST 4: Pseudo-class specificity
+       Expected: .test4:first-child wins (green background)
+       ============================================ */
+    .test4 { background: blue; }                /* (0,1,0) */
+    .test4:first-child { background: green; }   /* (0,2,0) */
+    
+    /* ============================================
+       TEST 5: !important override
+       Expected: !important wins (red background)
+       ============================================ */
+    #test5 { background: green; }               /* (1,0,0) */
+    .test5 { background: red !important; }      /* (0,1,0) + !important */
+    
+    /* ============================================
+       TEST 6: Attribute selector
+       Expected: [data-test] wins (green background)
+       ============================================ */
+    .test6 { background: blue; }                /* (0,1,0) */
+    .test6[data-test] { background: green; }    /* (0,2,0) */
+    
+    /* ============================================
+       TEST 7: Descendant specificity
+       Expected: body .test7 wins (green background)
+       ============================================ */
+    .test7 { background: blue; }                /* (0,1,0) */
+    body .test7 { background: green; }          /* (0,1,1) */
+    
+    /* ============================================
+       TEST 8: Same specificity - last wins
+       Expected: second rule wins (green background)
+       ============================================ */
+    .test8a { background: blue; }               /* (0,1,0) */
+    .test8b { background: green; }              /* (0,1,0) - same, but later */
+    
+    /* ============================================
+       TEST 9: :not() pseudo-class
+       Expected: :not(.other) wins (green background)
+       ============================================ */
+    .test9 { background: blue; }                /* (0,1,0) */
+    .test9:not(.other) { background: green; }   /* (0,2,0) - :not() adds specificity of its argument */
+    
+    /* ============================================
+       TEST 10: Chained classes
+       Expected: .test10.extra wins (green background)
+       ============================================ */
+    .test10 { background: blue; }               /* (0,1,0) */
+    .test10.extra { background: green; }        /* (0,2,0) */
+  </style>
+</head>
+<body>
+  <h1>CSS Specificity Test</h1>
+  <p>Each box should be the color indicated in the comment.</p>
+  
+  <div class="test-box test1" id="test1">1: ID wins (red)</div>
+  <div class="test-box a b c d e" id="test2">2: ID wins (red)</div>
+  <div class="test-box test3">3: div.class wins (green)</div>
+  <div class="test-box test4">4: :first-child wins (green)</div>
+  <div class="test-box test5" id="test5">5: !important wins (red)</div>
+  <div class="test-box test6" data-test="true">6: [attr] wins (green)</div>
+  <div class="test-box test7">7: body .class wins (green)</div>
+  <div class="test-box test8a test8b">8: Last rule wins (green)</div>
+  <div class="test-box test9">9: :not() wins (green)</div>
+  <div class="test-box test10 extra">10: Chained wins (green)</div>
+</body>
+</html>
+
+
+

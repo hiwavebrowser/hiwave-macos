@@ -1,0 +1,4 @@
+# Chromium baselines are regenerated on demand
+*.png
+summary.json
+

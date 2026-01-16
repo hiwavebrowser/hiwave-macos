@@ -1,0 +1,31 @@
+[package]
+name = "rustkit-a11y"
+version = "0.1.0"
+edition = "2021"
+description = "Accessibility implementation for RustKit browser engine"
+authors = ["HiWave Team"]
+license = "MIT"
+
+[dependencies]
+# RustKit crates
+rustkit-common = { path = "../rustkit-common" }
+rustkit-dom = { path = "../rustkit-dom" }
+
+# Core
+thiserror = "1.0"
+tracing = "0.1"
+
+# Collections
+hashbrown = "0.14"
+
+# Windows
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_UI_Accessibility",
+    "Win32_Foundation",
+    "Win32_System_Com",
+] }
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+

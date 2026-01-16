@@ -1,0 +1,23 @@
+{
+  "name": "parity-oracle",
+  "version": "1.0.0",
+  "description": "Chromium baseline capture and pixel diff tool for RustKit parity testing",
+  "type": "module",
+  "scripts": {
+    "capture": "node run_oracle.mjs capture",
+    "compare": "node run_oracle.mjs compare",
+    "full": "node run_oracle.mjs full",
+    "styles": "node run_oracle.mjs styles"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0",
+    "pngjs": "^7.0.0",
+    "pixelmatch": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+
+
+

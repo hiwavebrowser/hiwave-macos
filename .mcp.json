@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "hiwave-parity": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "/Users/petecopeland/Repos/hiwave/hiwave-macos/.ralph/dist/mcp-server-hiwave-parity.js"
+      ],
+      "env": {}
+    }
+  }
+}

@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>CSS Combinator Test</title>
+  <style>
+    /* Reset */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; padding: 20px; background: #f5f5f5; }
+    
+    /* Test containers */
+    .test-box {
+      width: 150px;
+      height: 40px;
+      margin: 5px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      color: white;
+      background: #ccc;
+    }
+    
+    .container {
+      border: 2px solid #333;
+      padding: 10px;
+      margin: 10px 0;
+    }
+    
+    h2 { margin: 20px 0 10px; font-size: 16px; }
+    
+    /* ============================================
+       TEST 1: Descendant combinator (space)
+       .parent .child should match nested children
+       ============================================ */
+    .test1 .child { background: green; }
+    
+    /* ============================================
+       TEST 2: Child combinator (>)
+       .parent > .child should only match direct children
+       ============================================ */
+    .test2 > .child { background: green; }
+    
+    /* ============================================
+       TEST 3: Adjacent sibling combinator (+)
+       .first + .second should match element immediately after
+       ============================================ */
+    .test3 .first + .second { background: green; }
+    
+    /* ============================================
+       TEST 4: General sibling combinator (~)
+       .first ~ .sibling should match all following siblings
+       ============================================ */
+    .test4 .first ~ .sibling { background: green; }
+    
+    /* ============================================
+       TEST 5: Chained combinators
+       body > .container > .test5 .nested should work
+       ============================================ */
+    body > .container > .test5 .nested { background: green; }
+    
+    /* ============================================
+       TEST 6: Mixed combinators
+       .test6 > div + div should match second direct child div
+       ============================================ */
+    .test6 > div + div { background: green; }
+    
+    /* ============================================
+       TEST 7: Deep nesting with descendant
+       .test7 div div div should match deeply nested
+       ============================================ */
+    .test7 div div div { background: green; }
+    
+    /* ============================================
+       TEST 8: Type + class with combinator
+       div.parent > span.child should be specific
+       ============================================ */
+    div.test8 > span.child { background: green; }
+  </style>
+</head>
+<body>
+  <h1>CSS Combinator Test</h1>
+  
+  <h2>1. Descendant (space) - All nested .child should be green</h2>
+  <div class="container test1">
+    <div class="test-box child">Direct child</div>
+    <div>
+      <div class="test-box child">Nested child</div>
+    </div>
+  </div>
+  
+  <h2>2. Child (>) - Only direct .child should be green</h2>
+  <div class="container test2">
+    <div class="test-box child">Direct child (green)</div>
+    <div>
+      <div class="test-box child">Nested child (gray)</div>
+    </div>
+  </div>
+  
+  <h2>3. Adjacent sibling (+) - Only .second after .first should be green</h2>
+  <div class="container test3">
+    <div class="test-box first">First</div>
+    <div class="test-box second">Second (green)</div>
+    <div class="test-box second">Third (gray)</div>
+  </div>
+  
+  <h2>4. General sibling (~) - All .sibling after .first should be green</h2>
+  <div class="container test4">
+    <div class="test-box sibling">Before (gray)</div>
+    <div class="test-box first">First</div>
+    <div class="test-box sibling">After 1 (green)</div>
+    <div class="test-box sibling">After 2 (green)</div>
+  </div>
+  
+  <h2>5. Chained combinators - .nested should be green</h2>
+  <div class="container test5">
+    <div>
+      <div class="test-box nested">Nested (green)</div>
+    </div>
+  </div>
+  
+  <h2>6. Mixed combinators - Second div should be green</h2>
+  <div class="container test6">
+    <div class="test-box">First div (gray)</div>
+    <div class="test-box">Second div (green)</div>
+    <div class="test-box">Third div (gray)</div>
+  </div>
+  
+  <h2>7. Deep nesting - Deepest div should be green</h2>
+  <div class="container test7">
+    <div>
+      <div>
+        <div class="test-box">Deep nested (green)</div>
+      </div>
+    </div>
+  </div>
+  
+  <h2>8. Type + class - span.child should be green</h2>
+  <div class="container test8">
+    <span class="test-box child">Span child (green)</span>
+    <div class="test-box child">Div child (gray)</div>
+  </div>
+</body>
+</html>
+
+
+

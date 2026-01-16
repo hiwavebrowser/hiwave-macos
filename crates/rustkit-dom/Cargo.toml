@@ -1,0 +1,30 @@
+[package]
+name = "rustkit-dom"
+version = "0.1.0"
+edition = "2021"
+description = "DOM implementation for RustKit browser engine"
+authors = ["HiWave Team"]
+license = "MIT"
+
+[dependencies]
+# HTML parsing
+rustkit-html = { path = "../rustkit-html" }
+
+# String interning
+string_cache = "0.8"
+
+# Error handling
+thiserror = "1.0"
+
+# Tracing
+tracing = "0.1"
+
+# URL handling
+url = "2.5"
+urlencoding = "2.1"
+
+# Image support
+rustkit-image = { path = "../rustkit-image" }
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

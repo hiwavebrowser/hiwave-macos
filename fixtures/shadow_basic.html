@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Box Shadow Test</title>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            margin: 40px;
+            background: #e8e8e8;
+        }
+        .box {
+            width: 150px;
+            height: 100px;
+            margin: 30px;
+            background: white;
+            display: inline-block;
+        }
+        .shadow-simple {
+            box-shadow: 5px 5px 10px rgba(0, 0, 0, 0.3);
+        }
+        .shadow-spread {
+            box-shadow: 0 0 20px 5px rgba(0, 100, 255, 0.4);
+        }
+        .shadow-inset {
+            box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.5);
+        }
+        .shadow-offset {
+            box-shadow: 10px 10px 0 #ccc;
+        }
+    </style>
+</head>
+<body>
+    <h1>Box Shadow Tests</h1>
+    <div class="box shadow-simple">Simple shadow</div>
+    <div class="box shadow-spread">Spread shadow</div>
+    <div class="box shadow-inset">Inset shadow</div>
+    <div class="box shadow-offset">Offset shadow</div>
+</body>
+</html>
+

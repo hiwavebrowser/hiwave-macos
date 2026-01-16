@@ -1,0 +1,25 @@
+[package]
+name = "rustkit-common"
+version = "0.1.0"
+edition = "2021"
+description = "Common utilities, error types, and logging for RustKit"
+authors = ["HiWave Team"]
+license = "MIT"
+
+[dependencies]
+# Error handling
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "chrono"] }
+
+# Async
+tokio = { version = "1.42", features = ["time"] }
+
+# Backtrace
+backtrace = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
+

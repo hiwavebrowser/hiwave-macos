@@ -1,0 +1,1618 @@
+{
+  "timestamp": "2026-01-08T03:37:03.469Z",
+  "viewport": {
+    "width": 1280,
+    "height": 800
+  },
+  "elementCount": 67,
+  "elements": [
+    {
+      "selector": "html > body",
+      "tag": "body",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 800,
+        "top": 0,
+        "right": 1280,
+        "bottom": 800,
+        "left": 0
+      },
+      "client": {
+        "width": 1280,
+        "height": 800
+      },
+      "scroll": {
+        "width": 1280,
+        "height": 800,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.ambient-glow:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 240,
+        "y": -400,
+        "width": 800,
+        "height": 800,
+        "top": -400,
+        "right": 1040,
+        "bottom": 400,
+        "left": 240
+      },
+      "client": {
+        "width": 800,
+        "height": 800
+      },
+      "scroll": {
+        "width": 800,
+        "height": 800,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 340,
+        "y": 33.5,
+        "width": 600,
+        "height": 733,
+        "top": 33.5,
+        "right": 940,
+        "bottom": 766.5,
+        "left": 340
+      },
+      "client": {
+        "width": 600,
+        "height": 733
+      },
+      "scroll": {
+        "width": 600,
+        "height": 733,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.logo-wrapper:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 532.59375,
+        "y": 65.5,
+        "width": 214.796875,
+        "height": 56,
+        "top": 65.5,
+        "right": 747.390625,
+        "bottom": 121.5,
+        "left": 532.59375
+      },
+      "client": {
+        "width": 215,
+        "height": 56
+      },
+      "scroll": {
+        "width": 215,
+        "height": 56,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.logo-wrapper:nth-of-type(1) > h1.logo",
+      "tag": "h1",
+      "rect": {
+        "x": 532.59375,
+        "y": 65.5,
+        "width": 214.796875,
+        "height": 56,
+        "top": 65.5,
+        "right": 747.390625,
+        "bottom": 121.5,
+        "left": 532.59375
+      },
+      "client": {
+        "width": 215,
+        "height": 56
+      },
+      "scroll": {
+        "width": 215,
+        "height": 56,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > p.tagline",
+      "tag": "p",
+      "rect": {
+        "x": 372,
+        "y": 129.5,
+        "width": 536,
+        "height": 18,
+        "top": 129.5,
+        "right": 908,
+        "bottom": 147.5,
+        "left": 372
+      },
+      "client": {
+        "width": 536,
+        "height": 18
+      },
+      "scroll": {
+        "width": 536,
+        "height": 18,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.search-container:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 390,
+        "y": 195.5,
+        "width": 500,
+        "height": 52,
+        "top": 195.5,
+        "right": 890,
+        "bottom": 247.5,
+        "left": 390
+      },
+      "client": {
+        "width": 500,
+        "height": 52
+      },
+      "scroll": {
+        "width": 500,
+        "height": 52,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "#searchInput",
+      "tag": "input",
+      "rect": {
+        "x": 390,
+        "y": 193.5,
+        "width": 500,
+        "height": 52,
+        "top": 193.5,
+        "right": 890,
+        "bottom": 245.5,
+        "left": 390
+      },
+      "client": {
+        "width": 498,
+        "height": 50
+      },
+      "scroll": {
+        "width": 498,
+        "height": 50,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3)",
+      "tag": "div",
+      "rect": {
+        "x": 372,
+        "y": 295.5,
+        "width": 536,
+        "height": 439,
+        "top": 295.5,
+        "right": 908,
+        "bottom": 734.5,
+        "left": 372
+      },
+      "client": {
+        "width": 536,
+        "height": 439
+      },
+      "scroll": {
+        "width": 536,
+        "height": 439,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts-title:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 372,
+        "y": 295.5,
+        "width": 536,
+        "height": 15,
+        "top": 295.5,
+        "right": 908,
+        "bottom": 310.5,
+        "left": 372
+      },
+      "client": {
+        "width": 536,
+        "height": 15
+      },
+      "scroll": {
+        "width": 536,
+        "height": 15,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 372,
+        "y": 334.5,
+        "width": 536,
+        "height": 400,
+        "top": 334.5,
+        "right": 908,
+        "bottom": 734.5,
+        "left": 372
+      },
+      "client": {
+        "width": 536,
+        "height": 400
+      },
+      "scroll": {
+        "width": 536,
+        "height": 400,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 372,
+        "y": 334.5,
+        "width": 262,
+        "height": 60,
+        "top": 334.5,
+        "right": 634,
+        "bottom": 394.5,
+        "left": 372
+      },
+      "client": {
+        "width": 260,
+        "height": 58
+      },
+      "scroll": {
+        "width": 263,
+        "height": 58,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(1) > kbd:nth-of-type(1)",
+      "tag": "kbd",
+      "rect": {
+        "x": 389,
+        "y": 352.5,
+        "width": 46.8125,
+        "height": 24,
+        "top": 352.5,
+        "right": 435.8125,
+        "bottom": 376.5,
+        "left": 389
+      },
+      "client": {
+        "width": 45,
+        "height": 22
+      },
+      "scroll": {
+        "width": 45,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(1) > kbd:nth-of-type(2)",
+      "tag": "kbd",
+      "rect": {
+        "x": 455.9375,
+        "y": 352.5,
+        "width": 39.609375,
+        "height": 24,
+        "top": 352.5,
+        "right": 495.546875,
+        "bottom": 376.5,
+        "left": 455.9375
+      },
+      "client": {
+        "width": 38,
+        "height": 22
+      },
+      "scroll": {
+        "width": 38,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(1) > kbd:nth-of-type(3)",
+      "tag": "kbd",
+      "rect": {
+        "x": 520.21875,
+        "y": 352.5,
+        "width": 25.203125,
+        "height": 24,
+        "top": 352.5,
+        "right": 545.421875,
+        "bottom": 376.5,
+        "left": 520.21875
+      },
+      "client": {
+        "width": 23,
+        "height": 22
+      },
+      "scroll": {
+        "width": 23,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(1) > span.shortcut-label",
+      "tag": "span",
+      "rect": {
+        "x": 553.421875,
+        "y": 347.5,
+        "width": 66.109375,
+        "height": 34,
+        "top": 347.5,
+        "right": 619.53125,
+        "bottom": 381.5,
+        "left": 553.421875
+      },
+      "client": {
+        "width": 66,
+        "height": 34
+      },
+      "scroll": {
+        "width": 66,
+        "height": 34,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 646,
+        "y": 334.5,
+        "width": 262,
+        "height": 60,
+        "top": 334.5,
+        "right": 908,
+        "bottom": 394.5,
+        "left": 646
+      },
+      "client": {
+        "width": 260,
+        "height": 58
+      },
+      "scroll": {
+        "width": 260,
+        "height": 58,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(2) > kbd:nth-of-type(1)",
+      "tag": "kbd",
+      "rect": {
+        "x": 663,
+        "y": 352.5,
+        "width": 46.8125,
+        "height": 24,
+        "top": 352.5,
+        "right": 709.8125,
+        "bottom": 376.5,
+        "left": 663
+      },
+      "client": {
+        "width": 45,
+        "height": 22
+      },
+      "scroll": {
+        "width": 45,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(2) > kbd:nth-of-type(2)",
+      "tag": "kbd",
+      "rect": {
+        "x": 729.9375,
+        "y": 352.5,
+        "width": 39.609375,
+        "height": 24,
+        "top": 352.5,
+        "right": 769.546875,
+        "bottom": 376.5,
+        "left": 729.9375
+      },
+      "client": {
+        "width": 38,
+        "height": 22
+      },
+      "scroll": {
+        "width": 38,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(2) > kbd:nth-of-type(3)",
+      "tag": "kbd",
+      "rect": {
+        "x": 794.21875,
+        "y": 352.5,
+        "width": 25.203125,
+        "height": 24,
+        "top": 352.5,
+        "right": 819.421875,
+        "bottom": 376.5,
+        "left": 794.21875
+      },
+      "client": {
+        "width": 23,
+        "height": 22
+      },
+      "scroll": {
+        "width": 23,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(2) > span.shortcut-label",
+      "tag": "span",
+      "rect": {
+        "x": 827.421875,
+        "y": 356,
+        "width": 63.578125,
+        "height": 17,
+        "top": 356,
+        "right": 891,
+        "bottom": 373,
+        "left": 827.421875
+      },
+      "client": {
+        "width": 64,
+        "height": 17
+      },
+      "scroll": {
+        "width": 64,
+        "height": 17,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(3)",
+      "tag": "div",
+      "rect": {
+        "x": 372,
+        "y": 406.5,
+        "width": 262,
+        "height": 60,
+        "top": 406.5,
+        "right": 634,
+        "bottom": 466.5,
+        "left": 372
+      },
+      "client": {
+        "width": 260,
+        "height": 58
+      },
+      "scroll": {
+        "width": 260,
+        "height": 58,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(3) > kbd:nth-of-type(1)",
+      "tag": "kbd",
+      "rect": {
+        "x": 389,
+        "y": 424.5,
+        "width": 46.8125,
+        "height": 24,
+        "top": 424.5,
+        "right": 435.8125,
+        "bottom": 448.5,
+        "left": 389
+      },
+      "client": {
+        "width": 45,
+        "height": 22
+      },
+      "scroll": {
+        "width": 45,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(3) > kbd:nth-of-type(2)",
+      "tag": "kbd",
+      "rect": {
+        "x": 455.9375,
+        "y": 424.5,
+        "width": 39.609375,
+        "height": 24,
+        "top": 424.5,
+        "right": 495.546875,
+        "bottom": 448.5,
+        "left": 455.9375
+      },
+      "client": {
+        "width": 38,
+        "height": 22
+      },
+      "scroll": {
+        "width": 38,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(3) > kbd:nth-of-type(3)",
+      "tag": "kbd",
+      "rect": {
+        "x": 520.21875,
+        "y": 424.5,
+        "width": 25.203125,
+        "height": 24,
+        "top": 424.5,
+        "right": 545.421875,
+        "bottom": 448.5,
+        "left": 520.21875
+      },
+      "client": {
+        "width": 23,
+        "height": 22
+      },
+      "scroll": {
+        "width": 23,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(3) > span.shortcut-label",
+      "tag": "span",
+      "rect": {
+        "x": 553.421875,
+        "y": 428,
+        "width": 63.578125,
+        "height": 17,
+        "top": 428,
+        "right": 617,
+        "bottom": 445,
+        "left": 553.421875
+      },
+      "client": {
+        "width": 64,
+        "height": 17
+      },
+      "scroll": {
+        "width": 64,
+        "height": 17,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(4)",
+      "tag": "div",
+      "rect": {
+        "x": 646,
+        "y": 406.5,
+        "width": 262,
+        "height": 60,
+        "top": 406.5,
+        "right": 908,
+        "bottom": 466.5,
+        "left": 646
+      },
+      "client": {
+        "width": 260,
+        "height": 58
+      },
+      "scroll": {
+        "width": 260,
+        "height": 58,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(4) > kbd:nth-of-type(1)",
+      "tag": "kbd",
+      "rect": {
+        "x": 663,
+        "y": 424.5,
+        "width": 46.8125,
+        "height": 24,
+        "top": 424.5,
+        "right": 709.8125,
+        "bottom": 448.5,
+        "left": 663
+      },
+      "client": {
+        "width": 45,
+        "height": 22
+      },
+      "scroll": {
+        "width": 45,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(4) > kbd:nth-of-type(2)",
+      "tag": "kbd",
+      "rect": {
+        "x": 734.484375,
+        "y": 424.5,
+        "width": 54.015625,
+        "height": 24,
+        "top": 424.5,
+        "right": 788.5,
+        "bottom": 448.5,
+        "left": 734.484375
+      },
+      "client": {
+        "width": 52,
+        "height": 22
+      },
+      "scroll": {
+        "width": 52,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(4) > kbd:nth-of-type(3)",
+      "tag": "kbd",
+      "rect": {
+        "x": 813.171875,
+        "y": 424.5,
+        "width": 25.203125,
+        "height": 24,
+        "top": 424.5,
+        "right": 838.375,
+        "bottom": 448.5,
+        "left": 813.171875
+      },
+      "client": {
+        "width": 23,
+        "height": 22
+      },
+      "scroll": {
+        "width": 23,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(4) > span.shortcut-label",
+      "tag": "span",
+      "rect": {
+        "x": 846.375,
+        "y": 419.5,
+        "width": 44.625,
+        "height": 34,
+        "top": 419.5,
+        "right": 891,
+        "bottom": 453.5,
+        "left": 846.375
+      },
+      "client": {
+        "width": 45,
+        "height": 34
+      },
+      "scroll": {
+        "width": 45,
+        "height": 34,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(5)",
+      "tag": "div",
+      "rect": {
+        "x": 372,
+        "y": 478.5,
+        "width": 262,
+        "height": 60,
+        "top": 478.5,
+        "right": 634,
+        "bottom": 538.5,
+        "left": 372
+      },
+      "client": {
+        "width": 260,
+        "height": 58
+      },
+      "scroll": {
+        "width": 260,
+        "height": 58,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(5) > kbd:nth-of-type(1)",
+      "tag": "kbd",
+      "rect": {
+        "x": 389,
+        "y": 496.5,
+        "width": 46.8125,
+        "height": 24,
+        "top": 496.5,
+        "right": 435.8125,
+        "bottom": 520.5,
+        "left": 389
+      },
+      "client": {
+        "width": 45,
+        "height": 22
+      },
+      "scroll": {
+        "width": 45,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(5) > kbd:nth-of-type(2)",
+      "tag": "kbd",
+      "rect": {
+        "x": 455.9375,
+        "y": 496.5,
+        "width": 39.609375,
+        "height": 24,
+        "top": 496.5,
+        "right": 495.546875,
+        "bottom": 520.5,
+        "left": 455.9375
+      },
+      "client": {
+        "width": 38,
+        "height": 22
+      },
+      "scroll": {
+        "width": 38,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(5) > kbd:nth-of-type(3)",
+      "tag": "kbd",
+      "rect": {
+        "x": 520.21875,
+        "y": 496.5,
+        "width": 25.203125,
+        "height": 24,
+        "top": 496.5,
+        "right": 545.421875,
+        "bottom": 520.5,
+        "left": 520.21875
+      },
+      "client": {
+        "width": 23,
+        "height": 22
+      },
+      "scroll": {
+        "width": 23,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(5) > span.shortcut-label",
+      "tag": "span",
+      "rect": {
+        "x": 553.421875,
+        "y": 491.5,
+        "width": 63.578125,
+        "height": 34,
+        "top": 491.5,
+        "right": 617,
+        "bottom": 525.5,
+        "left": 553.421875
+      },
+      "client": {
+        "width": 64,
+        "height": 34
+      },
+      "scroll": {
+        "width": 64,
+        "height": 34,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(6)",
+      "tag": "div",
+      "rect": {
+        "x": 646,
+        "y": 478.5,
+        "width": 262,
+        "height": 60,
+        "top": 478.5,
+        "right": 908,
+        "bottom": 538.5,
+        "left": 646
+      },
+      "client": {
+        "width": 260,
+        "height": 58
+      },
+      "scroll": {
+        "width": 260,
+        "height": 58,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(6) > kbd:nth-of-type(1)",
+      "tag": "kbd",
+      "rect": {
+        "x": 663,
+        "y": 496.5,
+        "width": 46.8125,
+        "height": 24,
+        "top": 496.5,
+        "right": 709.8125,
+        "bottom": 520.5,
+        "left": 663
+      },
+      "client": {
+        "width": 45,
+        "height": 22
+      },
+      "scroll": {
+        "width": 45,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(6) > kbd:nth-of-type(2)",
+      "tag": "kbd",
+      "rect": {
+        "x": 729.9375,
+        "y": 496.5,
+        "width": 39.609375,
+        "height": 24,
+        "top": 496.5,
+        "right": 769.546875,
+        "bottom": 520.5,
+        "left": 729.9375
+      },
+      "client": {
+        "width": 38,
+        "height": 22
+      },
+      "scroll": {
+        "width": 38,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(6) > kbd:nth-of-type(3)",
+      "tag": "kbd",
+      "rect": {
+        "x": 794.21875,
+        "y": 496.5,
+        "width": 25.203125,
+        "height": 24,
+        "top": 496.5,
+        "right": 819.421875,
+        "bottom": 520.5,
+        "left": 794.21875
+      },
+      "client": {
+        "width": 23,
+        "height": 22
+      },
+      "scroll": {
+        "width": 23,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(6) > span.shortcut-label",
+      "tag": "span",
+      "rect": {
+        "x": 827.421875,
+        "y": 491.5,
+        "width": 63.578125,
+        "height": 34,
+        "top": 491.5,
+        "right": 891,
+        "bottom": 525.5,
+        "left": 827.421875
+      },
+      "client": {
+        "width": 64,
+        "height": 34
+      },
+      "scroll": {
+        "width": 64,
+        "height": 34,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(7)",
+      "tag": "div",
+      "rect": {
+        "x": 372,
+        "y": 550.5,
+        "width": 262,
+        "height": 60,
+        "top": 550.5,
+        "right": 634,
+        "bottom": 610.5,
+        "left": 372
+      },
+      "client": {
+        "width": 260,
+        "height": 58
+      },
+      "scroll": {
+        "width": 260,
+        "height": 58,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(7) > kbd:nth-of-type(1)",
+      "tag": "kbd",
+      "rect": {
+        "x": 389,
+        "y": 568.5,
+        "width": 46.8125,
+        "height": 24,
+        "top": 568.5,
+        "right": 435.8125,
+        "bottom": 592.5,
+        "left": 389
+      },
+      "client": {
+        "width": 45,
+        "height": 22
+      },
+      "scroll": {
+        "width": 45,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(7) > kbd:nth-of-type(2)",
+      "tag": "kbd",
+      "rect": {
+        "x": 455.9375,
+        "y": 568.5,
+        "width": 39.609375,
+        "height": 24,
+        "top": 568.5,
+        "right": 495.546875,
+        "bottom": 592.5,
+        "left": 455.9375
+      },
+      "client": {
+        "width": 38,
+        "height": 22
+      },
+      "scroll": {
+        "width": 38,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(7) > kbd:nth-of-type(3)",
+      "tag": "kbd",
+      "rect": {
+        "x": 520.21875,
+        "y": 568.5,
+        "width": 25.203125,
+        "height": 24,
+        "top": 568.5,
+        "right": 545.421875,
+        "bottom": 592.5,
+        "left": 520.21875
+      },
+      "client": {
+        "width": 23,
+        "height": 22
+      },
+      "scroll": {
+        "width": 23,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(7) > span.shortcut-label",
+      "tag": "span",
+      "rect": {
+        "x": 553.421875,
+        "y": 563.5,
+        "width": 63.578125,
+        "height": 34,
+        "top": 563.5,
+        "right": 617,
+        "bottom": 597.5,
+        "left": 553.421875
+      },
+      "client": {
+        "width": 64,
+        "height": 34
+      },
+      "scroll": {
+        "width": 64,
+        "height": 34,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(8)",
+      "tag": "div",
+      "rect": {
+        "x": 646,
+        "y": 550.5,
+        "width": 262,
+        "height": 60,
+        "top": 550.5,
+        "right": 908,
+        "bottom": 610.5,
+        "left": 646
+      },
+      "client": {
+        "width": 260,
+        "height": 58
+      },
+      "scroll": {
+        "width": 260,
+        "height": 58,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(8) > kbd:nth-of-type(1)",
+      "tag": "kbd",
+      "rect": {
+        "x": 663,
+        "y": 568.5,
+        "width": 39.609375,
+        "height": 24,
+        "top": 568.5,
+        "right": 702.609375,
+        "bottom": 592.5,
+        "left": 663
+      },
+      "client": {
+        "width": 38,
+        "height": 22
+      },
+      "scroll": {
+        "width": 38,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(8) > kbd:nth-of-type(2)",
+      "tag": "kbd",
+      "rect": {
+        "x": 727.28125,
+        "y": 568.5,
+        "width": 46.8125,
+        "height": 24,
+        "top": 568.5,
+        "right": 774.09375,
+        "bottom": 592.5,
+        "left": 727.28125
+      },
+      "client": {
+        "width": 45,
+        "height": 22
+      },
+      "scroll": {
+        "width": 45,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(8) > span.shortcut-label",
+      "tag": "span",
+      "rect": {
+        "x": 782.09375,
+        "y": 572,
+        "width": 108.90625,
+        "height": 17,
+        "top": 572,
+        "right": 891,
+        "bottom": 589,
+        "left": 782.09375
+      },
+      "client": {
+        "width": 109,
+        "height": 17
+      },
+      "scroll": {
+        "width": 109,
+        "height": 17,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(9)",
+      "tag": "div",
+      "rect": {
+        "x": 372,
+        "y": 622.5,
+        "width": 262,
+        "height": 50,
+        "top": 622.5,
+        "right": 634,
+        "bottom": 672.5,
+        "left": 372
+      },
+      "client": {
+        "width": 260,
+        "height": 48
+      },
+      "scroll": {
+        "width": 260,
+        "height": 48,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(9) > kbd:nth-of-type(1)",
+      "tag": "kbd",
+      "rect": {
+        "x": 389,
+        "y": 635.5,
+        "width": 39.609375,
+        "height": 24,
+        "top": 635.5,
+        "right": 428.609375,
+        "bottom": 659.5,
+        "left": 389
+      },
+      "client": {
+        "width": 38,
+        "height": 22
+      },
+      "scroll": {
+        "width": 38,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(9) > kbd:nth-of-type(2)",
+      "tag": "kbd",
+      "rect": {
+        "x": 453.28125,
+        "y": 635.5,
+        "width": 54.015625,
+        "height": 24,
+        "top": 635.5,
+        "right": 507.296875,
+        "bottom": 659.5,
+        "left": 453.28125
+      },
+      "client": {
+        "width": 52,
+        "height": 22
+      },
+      "scroll": {
+        "width": 52,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(9) > span.shortcut-label",
+      "tag": "span",
+      "rect": {
+        "x": 515.296875,
+        "y": 639,
+        "width": 101.703125,
+        "height": 17,
+        "top": 639,
+        "right": 617,
+        "bottom": 656,
+        "left": 515.296875
+      },
+      "client": {
+        "width": 102,
+        "height": 17
+      },
+      "scroll": {
+        "width": 102,
+        "height": 17,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(10)",
+      "tag": "div",
+      "rect": {
+        "x": 646,
+        "y": 622.5,
+        "width": 262,
+        "height": 50,
+        "top": 622.5,
+        "right": 908,
+        "bottom": 672.5,
+        "left": 646
+      },
+      "client": {
+        "width": 260,
+        "height": 48
+      },
+      "scroll": {
+        "width": 260,
+        "height": 48,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(10) > kbd:nth-of-type(1)",
+      "tag": "kbd",
+      "rect": {
+        "x": 663,
+        "y": 635.5,
+        "width": 39.609375,
+        "height": 24,
+        "top": 635.5,
+        "right": 702.609375,
+        "bottom": 659.5,
+        "left": 663
+      },
+      "client": {
+        "width": 38,
+        "height": 22
+      },
+      "scroll": {
+        "width": 38,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(10) > kbd:nth-of-type(2)",
+      "tag": "kbd",
+      "rect": {
+        "x": 727.28125,
+        "y": 635.5,
+        "width": 46.8125,
+        "height": 24,
+        "top": 635.5,
+        "right": 774.09375,
+        "bottom": 659.5,
+        "left": 727.28125
+      },
+      "client": {
+        "width": 45,
+        "height": 22
+      },
+      "scroll": {
+        "width": 45,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(10) > span.shortcut-label",
+      "tag": "span",
+      "rect": {
+        "x": 782.09375,
+        "y": 639,
+        "width": 108.90625,
+        "height": 17,
+        "top": 639,
+        "right": 891,
+        "bottom": 656,
+        "left": 782.09375
+      },
+      "client": {
+        "width": 109,
+        "height": 17
+      },
+      "scroll": {
+        "width": 109,
+        "height": 17,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(11)",
+      "tag": "div",
+      "rect": {
+        "x": 372,
+        "y": 684.5,
+        "width": 262,
+        "height": 50,
+        "top": 684.5,
+        "right": 634,
+        "bottom": 734.5,
+        "left": 372
+      },
+      "client": {
+        "width": 260,
+        "height": 48
+      },
+      "scroll": {
+        "width": 260,
+        "height": 48,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(11) > kbd:nth-of-type(1)",
+      "tag": "kbd",
+      "rect": {
+        "x": 389,
+        "y": 697.5,
+        "width": 46.8125,
+        "height": 24,
+        "top": 697.5,
+        "right": 435.8125,
+        "bottom": 721.5,
+        "left": 389
+      },
+      "client": {
+        "width": 45,
+        "height": 22
+      },
+      "scroll": {
+        "width": 45,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(11) > kbd:nth-of-type(2)",
+      "tag": "kbd",
+      "rect": {
+        "x": 460.484375,
+        "y": 697.5,
+        "width": 39.609375,
+        "height": 24,
+        "top": 697.5,
+        "right": 500.09375,
+        "bottom": 721.5,
+        "left": 460.484375
+      },
+      "client": {
+        "width": 38,
+        "height": 22
+      },
+      "scroll": {
+        "width": 38,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(11) > span.shortcut-label",
+      "tag": "span",
+      "rect": {
+        "x": 508.09375,
+        "y": 701,
+        "width": 108.90625,
+        "height": 17,
+        "top": 701,
+        "right": 617,
+        "bottom": 718,
+        "left": 508.09375
+      },
+      "client": {
+        "width": 109,
+        "height": 17
+      },
+      "scroll": {
+        "width": 109,
+        "height": 17,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(12)",
+      "tag": "div",
+      "rect": {
+        "x": 646,
+        "y": 684.5160522460938,
+        "width": 262,
+        "height": 50,
+        "top": 684.5160522460938,
+        "right": 908,
+        "bottom": 734.5160522460938,
+        "left": 646
+      },
+      "client": {
+        "width": 260,
+        "height": 48
+      },
+      "scroll": {
+        "width": 260,
+        "height": 48,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(12) > kbd",
+      "tag": "kbd",
+      "rect": {
+        "x": 663,
+        "y": 697.5160522460938,
+        "width": 39.609375,
+        "height": 24,
+        "top": 697.5160522460938,
+        "right": 702.609375,
+        "bottom": 721.5160522460938,
+        "left": 663
+      },
+      "client": {
+        "width": 38,
+        "height": 22
+      },
+      "scroll": {
+        "width": 38,
+        "height": 22,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.container:nth-of-type(2) > div.shortcuts-section:nth-of-type(3) > div.shortcuts:nth-of-type(2) > div.shortcut:nth-of-type(12) > span.shortcut-label",
+      "tag": "span",
+      "rect": {
+        "x": 710.609375,
+        "y": 701.0160522460938,
+        "width": 180.390625,
+        "height": 17,
+        "top": 701.0160522460938,
+        "right": 891,
+        "bottom": 718.0160522460938,
+        "left": 710.609375
+      },
+      "client": {
+        "width": 180,
+        "height": 17
+      },
+      "scroll": {
+        "width": 180,
+        "height": 17,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.footer:nth-of-type(3)",
+      "tag": "div",
+      "rect": {
+        "x": 571.203125,
+        "y": 769,
+        "width": 137.59375,
+        "height": 15,
+        "top": 769,
+        "right": 708.796875,
+        "bottom": 784,
+        "left": 571.203125
+      },
+      "client": {
+        "width": 138,
+        "height": 15
+      },
+      "scroll": {
+        "width": 138,
+        "height": 15,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.footer:nth-of-type(3) > a",
+      "tag": "a",
+      "rect": {
+        "x": 662.015625,
+        "y": 769,
+        "width": 46.78125,
+        "height": 15,
+        "top": 769,
+        "right": 708.796875,
+        "bottom": 784,
+        "left": 662.015625
+      },
+      "client": {
+        "width": 0,
+        "height": 0
+      },
+      "scroll": {
+        "width": 0,
+        "height": 0,
+        "top": 0,
+        "left": 0
+      }
+    }
+  ]
+}

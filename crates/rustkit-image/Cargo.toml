@@ -1,0 +1,46 @@
+[package]
+name = "rustkit-image"
+version = "0.1.0"
+edition = "2021"
+description = "Image loading, decoding, and caching for RustKit browser engine"
+license = "MIT"
+
+[dependencies]
+# Image decoding (RustKit-owned)
+rustkit-codecs = { path = "../rustkit-codecs" }
+
+# Async runtime
+tokio = { version = "1", features = ["sync", "time"] }
+
+# HTTP client for loading (RustKit-owned)
+rustkit-http = { path = "../rustkit-http" }
+
+# URL handling
+url = "2"
+
+# Caching
+lru = "0.12"
+
+# Logging
+tracing = "0.1"
+
+# Error handling
+thiserror = "1"
+
+# Serialization for cache metadata
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# GPU texture upload
+wgpu = "23"
+
+# Async utilities
+futures = "0.3"
+
+# Data URL support
+base64 = "0.22"
+urlencoding = "2.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+

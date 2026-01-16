@@ -1,0 +1,3538 @@
+{
+  "root": {
+    "border": {
+      "bottom": 0.0,
+      "left": 0.0,
+      "right": 0.0,
+      "top": 0.0
+    },
+    "border_box": {
+      "height": 2390.99951171875,
+      "width": 1280.0,
+      "x": 0.0,
+      "y": 0.0
+    },
+    "children": [
+      {
+        "border": {
+          "bottom": 0.0,
+          "left": 0.0,
+          "right": 0.0,
+          "top": 0.0
+        },
+        "border_box": {
+          "height": 2390.99951171875,
+          "width": 1280.0,
+          "x": 0.0,
+          "y": 0.0
+        },
+        "children": [
+          {
+            "border": {
+              "bottom": 0.0,
+              "left": 0.0,
+              "right": 0.0,
+              "top": 0.0
+            },
+            "border_box": {
+              "height": 2390.99951171875,
+              "width": 840.0,
+              "x": 0.0,
+              "y": 0.0
+            },
+            "children": [
+              {
+                "border": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "border_box": {
+                  "height": 219.39999389648438,
+                  "width": 800.0,
+                  "x": 20.0,
+                  "y": 40.0
+                },
+                "children": [
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 40.0
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 159.1875,
+                          "x": 20.0,
+                          "y": 40.0
+                        },
+                        "text": "The Art of Typography",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 40.0
+                    },
+                    "margin": {
+                      "bottom": 10.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "margin_box": {
+                      "height": 29.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 40.0
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 40.0
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 69.19999694824219
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 477.6328125,
+                          "x": 20.0,
+                          "y": 69.19999694824219
+                        },
+                        "text": "A comprehensive exploration of typeface design and",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 69.19999694824219
+                    },
+                    "margin": {
+                      "bottom": 20.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "margin_box": {
+                      "height": 39.20000076293945,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 69.19999694824219
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 69.19999694824219
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 96.0,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 123.4000015258789
+                    },
+                    "children": [
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 19.200000762939453,
+                          "width": 126.2890625,
+                          "x": 20.0,
+                          "y": 123.4000015258789
+                        },
+                        "children": [
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 126.2890625,
+                              "x": 20.0,
+                              "y": 123.4000015258789
+                            },
+                            "text": "By Jane Designer",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 19.200000762939453,
+                          "width": 126.2890625,
+                          "x": 20.0,
+                          "y": 123.4000015258789
+                        },
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 19.200000762939453,
+                          "width": 126.2890625,
+                          "x": 20.0,
+                          "y": 123.4000015258789
+                        },
+                        "padding": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "padding_box": {
+                          "height": 19.200000762939453,
+                          "width": 126.2890625,
+                          "x": 20.0,
+                          "y": 123.4000015258789
+                        },
+                        "type": "inline"
+                      },
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 19.200000762939453,
+                          "width": 5.6015625,
+                          "x": 20.0,
+                          "y": 142.60000610351562
+                        },
+                        "children": [
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 5.6015625,
+                              "x": 20.0,
+                              "y": 142.60000610351562
+                            },
+                            "text": "•",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 19.200000762939453,
+                          "width": 5.6015625,
+                          "x": 20.0,
+                          "y": 142.60000610351562
+                        },
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 19.200000762939453,
+                          "width": 5.6015625,
+                          "x": 20.0,
+                          "y": 142.60000610351562
+                        },
+                        "padding": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "padding_box": {
+                          "height": 19.200000762939453,
+                          "width": 5.6015625,
+                          "x": 20.0,
+                          "y": 142.60000610351562
+                        },
+                        "type": "inline"
+                      },
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 19.200000762939453,
+                          "width": 114.75,
+                          "x": 20.0,
+                          "y": 161.8000030517578
+                        },
+                        "children": [
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 114.75,
+                              "x": 20.0,
+                              "y": 161.8000030517578
+                            },
+                            "text": "January 6, 2026",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 19.200000762939453,
+                          "width": 114.75,
+                          "x": 20.0,
+                          "y": 161.8000030517578
+                        },
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 19.200000762939453,
+                          "width": 114.75,
+                          "x": 20.0,
+                          "y": 161.8000030517578
+                        },
+                        "padding": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "padding_box": {
+                          "height": 19.200000762939453,
+                          "width": 114.75,
+                          "x": 20.0,
+                          "y": 161.8000030517578
+                        },
+                        "type": "inline"
+                      },
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 19.200000762939453,
+                          "width": 5.6015625,
+                          "x": 20.0,
+                          "y": 181.0
+                        },
+                        "children": [
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 5.6015625,
+                              "x": 20.0,
+                              "y": 181.0
+                            },
+                            "text": "•",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 19.200000762939453,
+                          "width": 5.6015625,
+                          "x": 20.0,
+                          "y": 181.0
+                        },
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 19.200000762939453,
+                          "width": 5.6015625,
+                          "x": 20.0,
+                          "y": 181.0
+                        },
+                        "padding": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "padding_box": {
+                          "height": 19.200000762939453,
+                          "width": 5.6015625,
+                          "x": 20.0,
+                          "y": 181.0
+                        },
+                        "type": "inline"
+                      },
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 19.200000762939453,
+                          "width": 84.4921875,
+                          "x": 20.0,
+                          "y": 200.20001220703125
+                        },
+                        "children": [
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 84.4921875,
+                              "x": 20.0,
+                              "y": 200.20001220703125
+                            },
+                            "text": "12 min read",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 19.200000762939453,
+                          "width": 84.4921875,
+                          "x": 20.0,
+                          "y": 200.20001220703125
+                        },
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 19.200000762939453,
+                          "width": 84.4921875,
+                          "x": 20.0,
+                          "y": 200.20001220703125
+                        },
+                        "padding": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "padding_box": {
+                          "height": 19.200000762939453,
+                          "width": 84.4921875,
+                          "x": 20.0,
+                          "y": 200.20001220703125
+                        },
+                        "type": "inline"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 96.0,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 123.4000015258789
+                    },
+                    "margin": {
+                      "bottom": 20.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 15.0
+                    },
+                    "margin_box": {
+                      "height": 131.0,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 108.4000015258789
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 96.0,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 123.4000015258789
+                    },
+                    "type": "block"
+                  }
+                ],
+                "content_rect": {
+                  "height": 199.39999389648438,
+                  "width": 800.0,
+                  "x": 20.0,
+                  "y": 40.0
+                },
+                "margin": {
+                  "bottom": 40.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "margin_box": {
+                  "height": 259.3999938964844,
+                  "width": 800.0,
+                  "x": 20.0,
+                  "y": 40.0
+                },
+                "padding": {
+                  "bottom": 20.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "padding_box": {
+                  "height": 219.39999389648438,
+                  "width": 800.0,
+                  "x": 20.0,
+                  "y": 40.0
+                },
+                "type": "block"
+              },
+              {
+                "border": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "border_box": {
+                  "height": 1942.3995361328125,
+                  "width": 800.0,
+                  "x": 20.0,
+                  "y": 299.3999938964844
+                },
+                "children": [
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 299.3999938964844
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 800.0,
+                          "x": 20.0,
+                          "y": 299.3999938964844
+                        },
+                        "text": "Typography is the art and technique of arranging t",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 299.3999938964844
+                    },
+                    "margin": {
+                      "bottom": 30.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "margin_box": {
+                      "height": 49.20000076293945,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 299.3999938964844
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 299.3999938964844
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 12.800000190734863,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 348.6000061035156
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 12.800000190734863,
+                          "width": 790.0,
+                          "x": 20.0,
+                          "y": 348.6000061035156
+                        },
+                        "text": "The arrangement of type involves selecting typefac",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 12.800000190734863,
+                      "width": 790.0,
+                      "x": 20.0,
+                      "y": 348.6000061035156
+                    },
+                    "margin": {
+                      "bottom": 20.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "margin_box": {
+                      "height": 32.79999923706055,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 348.6000061035156
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 10.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 12.800000190734863,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 348.6000061035156
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 411.3999938964844
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 213.4453125,
+                          "x": 20.0,
+                          "y": 411.3999938964844
+                        },
+                        "text": "Fundamentals of Type Design",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 411.3999938964844
+                    },
+                    "margin": {
+                      "bottom": 15.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 30.0
+                    },
+                    "margin_box": {
+                      "height": 64.19999694824219,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 381.3999938964844
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 411.3999938964844
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 57.60000228881836,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 445.5999755859375
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 800.0,
+                          "x": 20.0,
+                          "y": 445.5999755859375
+                        },
+                        "text": "Type design is a closely related craft, sometimes ",
+                        "type": "text"
+                      },
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 19.200000762939453,
+                          "width": 240.1484375,
+                          "x": 20.0,
+                          "y": 464.79998779296875
+                        },
+                        "children": [
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 240.1484375,
+                              "x": 20.0,
+                              "y": 464.79998779296875
+                            },
+                            "text": "ornamental and decorative device",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 19.200000762939453,
+                          "width": 240.1484375,
+                          "x": 20.0,
+                          "y": 464.79998779296875
+                        },
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 19.200000762939453,
+                          "width": 240.1484375,
+                          "x": 20.0,
+                          "y": 464.79998779296875
+                        },
+                        "padding": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "padding_box": {
+                          "height": 19.200000762939453,
+                          "width": 240.1484375,
+                          "x": 20.0,
+                          "y": 464.79998779296875
+                        },
+                        "type": "inline"
+                      },
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 337.9609375,
+                          "x": 20.0,
+                          "y": 483.9999694824219
+                        },
+                        "text": ", unrelated to the communication of information.",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 57.60000228881836,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 445.5999755859375
+                    },
+                    "margin": {
+                      "bottom": 20.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "margin_box": {
+                      "height": 77.60000610351562,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 445.5999755859375
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 57.60000228881836,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 445.5999755859375
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 78.4000015258789,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 553.2000122070312
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 295.078125,
+                          "x": 50.0,
+                          "y": 573.2000122070312
+                        },
+                        "text": "\"Typography is what language looks like.\"",
+                        "type": "text"
+                      },
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 19.200000762939453,
+                          "width": 242.796875,
+                          "x": 50.0,
+                          "y": 592.4000244140625
+                        },
+                        "children": [
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 242.796875,
+                              "x": 50.0,
+                              "y": 592.4000244140625
+                            },
+                            "text": "— Ellen Lupton, Graphic Designer",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 19.200000762939453,
+                          "width": 242.796875,
+                          "x": 50.0,
+                          "y": 592.4000244140625
+                        },
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 19.200000762939453,
+                          "width": 242.796875,
+                          "x": 50.0,
+                          "y": 592.4000244140625
+                        },
+                        "padding": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "padding_box": {
+                          "height": 19.200000762939453,
+                          "width": 242.796875,
+                          "x": 50.0,
+                          "y": 592.4000244140625
+                        },
+                        "type": "inline"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 38.400001525878906,
+                      "width": 740.0,
+                      "x": 50.0,
+                      "y": 573.2000122070312
+                    },
+                    "margin": {
+                      "bottom": 30.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 30.0
+                    },
+                    "margin_box": {
+                      "height": 138.39999389648438,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 523.2000122070312
+                    },
+                    "padding": {
+                      "bottom": 20.0,
+                      "left": 30.0,
+                      "right": 30.0,
+                      "top": 20.0
+                    },
+                    "padding_box": {
+                      "height": 78.4000015258789,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 553.2000122070312
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 686.5999755859375
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 101.375,
+                          "x": 20.0,
+                          "y": 686.5999755859375
+                        },
+                        "text": "Key Principles",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 686.5999755859375
+                    },
+                    "margin": {
+                      "bottom": 10.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 25.0
+                    },
+                    "margin_box": {
+                      "height": 54.20000076293945,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 661.5999755859375
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 686.5999755859375
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 185.60000610351562,
+                      "width": 770.0,
+                      "x": 50.0,
+                      "y": 735.800048828125
+                    },
+                    "children": [
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 50.0,
+                          "y": 735.800048828125
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 19.200000762939453,
+                              "width": 72.90625,
+                              "x": 50.0,
+                              "y": 735.800048828125
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 19.200000762939453,
+                                  "width": 72.90625,
+                                  "x": 50.0,
+                                  "y": 735.800048828125
+                                },
+                                "text": "Hierarchy:",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 19.200000762939453,
+                              "width": 72.90625,
+                              "x": 50.0,
+                              "y": 735.800048828125
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 19.200000762939453,
+                              "width": 72.90625,
+                              "x": 50.0,
+                              "y": 735.800048828125
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 19.200000762939453,
+                              "width": 72.90625,
+                              "x": 50.0,
+                              "y": 735.800048828125
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 457.1484375,
+                              "x": 50.0,
+                              "y": 755.0000610351562
+                            },
+                            "text": "Establishing visual importance through size, weigh",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 50.0,
+                          "y": 735.800048828125
+                        },
+                        "margin": {
+                          "bottom": 8.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 46.400001525878906,
+                          "width": 770.0,
+                          "x": 50.0,
+                          "y": 735.800048828125
+                        },
+                        "padding": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "padding_box": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 50.0,
+                          "y": 735.800048828125
+                        },
+                        "type": "block"
+                      },
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 50.0,
+                          "y": 782.2000732421875
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 19.200000762939453,
+                              "width": 64.9140625,
+                              "x": 50.0,
+                              "y": 782.2000732421875
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 19.200000762939453,
+                                  "width": 64.9140625,
+                                  "x": 50.0,
+                                  "y": 782.2000732421875
+                                },
+                                "text": "Contrast:",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 19.200000762939453,
+                              "width": 64.9140625,
+                              "x": 50.0,
+                              "y": 782.2000732421875
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 19.200000762939453,
+                              "width": 64.9140625,
+                              "x": 50.0,
+                              "y": 782.2000732421875
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 19.200000762939453,
+                              "width": 64.9140625,
+                              "x": 50.0,
+                              "y": 782.2000732421875
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 273.0234375,
+                              "x": 50.0,
+                              "y": 801.4000854492188
+                            },
+                            "text": "Creating visual interest through variety",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 50.0,
+                          "y": 782.2000732421875
+                        },
+                        "margin": {
+                          "bottom": 8.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 46.400001525878906,
+                          "width": 770.0,
+                          "x": 50.0,
+                          "y": 782.2000732421875
+                        },
+                        "padding": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "padding_box": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 50.0,
+                          "y": 782.2000732421875
+                        },
+                        "type": "block"
+                      },
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 50.0,
+                          "y": 828.6000366210938
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 19.200000762939453,
+                              "width": 62.265625,
+                              "x": 50.0,
+                              "y": 828.6000366210938
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 19.200000762939453,
+                                  "width": 62.265625,
+                                  "x": 50.0,
+                                  "y": 828.6000366210938
+                                },
+                                "text": "Balance:",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 19.200000762939453,
+                              "width": 62.265625,
+                              "x": 50.0,
+                              "y": 828.6000366210938
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 19.200000762939453,
+                              "width": 62.265625,
+                              "x": 50.0,
+                              "y": 828.6000366210938
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 19.200000762939453,
+                              "width": 62.265625,
+                              "x": 50.0,
+                              "y": 828.6000366210938
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 329.9453125,
+                              "x": 50.0,
+                              "y": 847.800048828125
+                            },
+                            "text": "Distributing elements evenly across the design",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 50.0,
+                          "y": 828.6000366210938
+                        },
+                        "margin": {
+                          "bottom": 8.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 46.400001525878906,
+                          "width": 770.0,
+                          "x": 50.0,
+                          "y": 828.6000366210938
+                        },
+                        "padding": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "padding_box": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 50.0,
+                          "y": 828.6000366210938
+                        },
+                        "type": "block"
+                      },
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 50.0,
+                          "y": 875.0000610351562
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 19.200000762939453,
+                              "width": 75.59375,
+                              "x": 50.0,
+                              "y": 875.0000610351562
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 19.200000762939453,
+                                  "width": 75.59375,
+                                  "x": 50.0,
+                                  "y": 875.0000610351562
+                                },
+                                "text": "Alignment:",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 19.200000762939453,
+                              "width": 75.59375,
+                              "x": 50.0,
+                              "y": 875.0000610351562
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 19.200000762939453,
+                              "width": 75.59375,
+                              "x": 50.0,
+                              "y": 875.0000610351562
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 19.200000762939453,
+                              "width": 75.59375,
+                              "x": 50.0,
+                              "y": 875.0000610351562
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 225.03125,
+                              "x": 50.0,
+                              "y": 894.2000732421875
+                            },
+                            "text": "Creating order and organization",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 50.0,
+                          "y": 875.0000610351562
+                        },
+                        "margin": {
+                          "bottom": 8.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 46.400001525878906,
+                          "width": 770.0,
+                          "x": 50.0,
+                          "y": 875.0000610351562
+                        },
+                        "padding": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "padding_box": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 50.0,
+                          "y": 875.0000610351562
+                        },
+                        "type": "block"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 185.60000610351562,
+                      "width": 770.0,
+                      "x": 50.0,
+                      "y": 735.800048828125
+                    },
+                    "margin": {
+                      "bottom": 20.0,
+                      "left": 30.0,
+                      "right": 0.0,
+                      "top": 20.0
+                    },
+                    "margin_box": {
+                      "height": 225.60000610351562,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 715.800048828125
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 185.60000610351562,
+                      "width": 770.0,
+                      "x": 50.0,
+                      "y": 735.800048828125
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 971.4000244140625
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 179.6484375,
+                          "x": 20.0,
+                          "y": 971.4000244140625
+                        },
+                        "text": "Technical Considerations",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 971.4000244140625
+                    },
+                    "margin": {
+                      "bottom": 15.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 30.0
+                    },
+                    "margin_box": {
+                      "height": 64.19999694824219,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 941.4000244140625
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 971.4000244140625
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 188.79998779296875,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1005.5999755859375
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 276.5859375,
+                          "x": 20.0,
+                          "y": 1005.5999755859375
+                        },
+                        "text": "In digital typography, we must consider",
+                        "type": "text"
+                      },
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 23.200000762939453,
+                          "width": 117.9609375,
+                          "x": 20.0,
+                          "y": 1022.7999267578125
+                        },
+                        "children": [
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 105.9609375,
+                              "x": 26.0,
+                              "y": 1024.7999267578125
+                            },
+                            "text": "font-family",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 19.200000762939453,
+                          "width": 105.9609375,
+                          "x": 26.0,
+                          "y": 1024.7999267578125
+                        },
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 23.200000762939453,
+                          "width": 117.9609375,
+                          "x": 20.0,
+                          "y": 1022.7999267578125
+                        },
+                        "padding": {
+                          "bottom": 2.0,
+                          "left": 6.0,
+                          "right": 6.0,
+                          "top": 2.0
+                        },
+                        "padding_box": {
+                          "height": 23.200000762939453,
+                          "width": 117.9609375,
+                          "x": 20.0,
+                          "y": 1022.7999267578125
+                        },
+                        "type": "inline"
+                      },
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 4.4453125,
+                          "x": 20.0,
+                          "y": 1048.0
+                        },
+                        "text": ",",
+                        "type": "text"
+                      },
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 23.200000762939453,
+                          "width": 98.6953125,
+                          "x": 20.0,
+                          "y": 1065.199951171875
+                        },
+                        "children": [
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 86.6953125,
+                              "x": 26.0,
+                              "y": 1067.199951171875
+                            },
+                            "text": "font-size",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 19.200000762939453,
+                          "width": 86.6953125,
+                          "x": 26.0,
+                          "y": 1067.199951171875
+                        },
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 23.200000762939453,
+                          "width": 98.6953125,
+                          "x": 20.0,
+                          "y": 1065.199951171875
+                        },
+                        "padding": {
+                          "bottom": 2.0,
+                          "left": 6.0,
+                          "right": 6.0,
+                          "top": 2.0
+                        },
+                        "padding_box": {
+                          "height": 23.200000762939453,
+                          "width": 98.6953125,
+                          "x": 20.0,
+                          "y": 1065.199951171875
+                        },
+                        "type": "inline"
+                      },
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 4.4453125,
+                          "x": 20.0,
+                          "y": 1090.4000244140625
+                        },
+                        "text": ",",
+                        "type": "text"
+                      },
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 23.200000762939453,
+                          "width": 117.9609375,
+                          "x": 20.0,
+                          "y": 1107.5999755859375
+                        },
+                        "children": [
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 105.9609375,
+                              "x": 26.0,
+                              "y": 1109.5999755859375
+                            },
+                            "text": "line-height",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 19.200000762939453,
+                          "width": 105.9609375,
+                          "x": 26.0,
+                          "y": 1109.5999755859375
+                        },
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 23.200000762939453,
+                          "width": 117.9609375,
+                          "x": 20.0,
+                          "y": 1107.5999755859375
+                        },
+                        "padding": {
+                          "bottom": 2.0,
+                          "left": 6.0,
+                          "right": 6.0,
+                          "top": 2.0
+                        },
+                        "padding_box": {
+                          "height": 23.200000762939453,
+                          "width": 117.9609375,
+                          "x": 20.0,
+                          "y": 1107.5999755859375
+                        },
+                        "type": "inline"
+                      },
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 35.5859375,
+                          "x": 20.0,
+                          "y": 1132.7999267578125
+                        },
+                        "text": ", and",
+                        "type": "text"
+                      },
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 23.200000762939453,
+                          "width": 146.859375,
+                          "x": 20.0,
+                          "y": 1150.0
+                        },
+                        "children": [
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 134.859375,
+                              "x": 26.0,
+                              "y": 1152.0
+                            },
+                            "text": "letter-spacing",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 19.200000762939453,
+                          "width": 134.859375,
+                          "x": 26.0,
+                          "y": 1152.0
+                        },
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 23.200000762939453,
+                          "width": 146.859375,
+                          "x": 20.0,
+                          "y": 1150.0
+                        },
+                        "padding": {
+                          "bottom": 2.0,
+                          "left": 6.0,
+                          "right": 6.0,
+                          "top": 2.0
+                        },
+                        "padding_box": {
+                          "height": 23.200000762939453,
+                          "width": 146.859375,
+                          "x": 20.0,
+                          "y": 1150.0
+                        },
+                        "type": "inline"
+                      },
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 286.375,
+                          "x": 20.0,
+                          "y": 1175.199951171875
+                        },
+                        "text": "properties to achieve optimal readability.",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 188.79998779296875,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1005.5999755859375
+                    },
+                    "margin": {
+                      "bottom": 20.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "margin_box": {
+                      "height": 208.79998779296875,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1005.5999755859375
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 188.79998779296875,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1005.5999755859375
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 59.20000076293945,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1239.4000244140625
+                    },
+                    "children": [
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 19.200000762939453,
+                          "width": 760.0,
+                          "x": 40.0,
+                          "y": 1259.4000244140625
+                        },
+                        "children": [
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 760.0,
+                              "x": 40.0,
+                              "y": 1259.4000244140625
+                            },
+                            "text": "body {\n    font-family: Georgia, serif;\n    font-s",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 19.200000762939453,
+                          "width": 760.0,
+                          "x": 40.0,
+                          "y": 1259.4000244140625
+                        },
+                        "margin": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 19.200000762939453,
+                          "width": 760.0,
+                          "x": 40.0,
+                          "y": 1259.4000244140625
+                        },
+                        "padding": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "padding_box": {
+                          "height": 19.200000762939453,
+                          "width": 760.0,
+                          "x": 40.0,
+                          "y": 1259.4000244140625
+                        },
+                        "type": "inline"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 19.200000762939453,
+                      "width": 760.0,
+                      "x": 40.0,
+                      "y": 1259.4000244140625
+                    },
+                    "margin": {
+                      "bottom": 25.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 25.0
+                    },
+                    "margin_box": {
+                      "height": 109.19999694824219,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1214.4000244140625
+                    },
+                    "padding": {
+                      "bottom": 20.0,
+                      "left": 20.0,
+                      "right": 20.0,
+                      "top": 20.0
+                    },
+                    "padding_box": {
+                      "height": 59.20000076293945,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1239.4000244140625
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 78.4000015258789,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1353.5999755859375
+                    },
+                    "children": [
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 19.200000762939453,
+                          "width": 800.0,
+                          "x": 20.0,
+                          "y": 1353.5999755859375
+                        },
+                        "children": [
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 800.0,
+                              "x": 20.0,
+                              "y": 1353.5999755859375
+                            },
+                            "text": "Multi-column layouts have been used in print for c",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 19.200000762939453,
+                          "width": 800.0,
+                          "x": 20.0,
+                          "y": 1353.5999755859375
+                        },
+                        "margin": {
+                          "bottom": 20.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 39.20000076293945,
+                          "width": 800.0,
+                          "x": 20.0,
+                          "y": 1353.5999755859375
+                        },
+                        "padding": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "padding_box": {
+                          "height": 19.200000762939453,
+                          "width": 800.0,
+                          "x": 20.0,
+                          "y": 1353.5999755859375
+                        },
+                        "type": "block"
+                      },
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 19.200000762939453,
+                          "width": 800.0,
+                          "x": 20.0,
+                          "y": 1392.7999267578125
+                        },
+                        "children": [
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 800.0,
+                              "x": 20.0,
+                              "y": 1392.7999267578125
+                            },
+                            "text": "The key to successful column layouts is finding th",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 19.200000762939453,
+                          "width": 800.0,
+                          "x": 20.0,
+                          "y": 1392.7999267578125
+                        },
+                        "margin": {
+                          "bottom": 20.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 39.20000076293945,
+                          "width": 800.0,
+                          "x": 20.0,
+                          "y": 1392.7999267578125
+                        },
+                        "padding": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "padding_box": {
+                          "height": 19.200000762939453,
+                          "width": 800.0,
+                          "x": 20.0,
+                          "y": 1392.7999267578125
+                        },
+                        "type": "block"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 78.4000015258789,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1353.5999755859375
+                    },
+                    "margin": {
+                      "bottom": 30.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 30.0
+                    },
+                    "margin_box": {
+                      "height": 138.39999389648438,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1323.5999755859375
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 78.4000015258789,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1353.5999755859375
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1492.0
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 187.6328125,
+                          "x": 20.0,
+                          "y": 1492.0
+                        },
+                        "text": "Text Decoration Examples",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1492.0
+                    },
+                    "margin": {
+                      "bottom": 15.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 30.0
+                    },
+                    "margin_box": {
+                      "height": 64.19999694824219,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1462.0
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1492.0
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 322.0,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1546.199951171875
+                    },
+                    "children": [
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1561.199951171875
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 19.200000762939453,
+                              "width": 107.6171875,
+                              "x": 35.0,
+                              "y": 1561.199951171875
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 19.200000762939453,
+                                  "width": 107.6171875,
+                                  "x": 35.0,
+                                  "y": 1561.199951171875
+                                },
+                                "text": "Underlined text",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 19.200000762939453,
+                              "width": 107.6171875,
+                              "x": 35.0,
+                              "y": 1561.199951171875
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 19.200000762939453,
+                              "width": 107.6171875,
+                              "x": 35.0,
+                              "y": 1561.199951171875
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 19.200000762939453,
+                              "width": 107.6171875,
+                              "x": 35.0,
+                              "y": 1561.199951171875
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 91.59375,
+                              "x": 35.0,
+                              "y": 1580.39990234375
+                            },
+                            "text": "for emphasis",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1561.199951171875
+                        },
+                        "margin": {
+                          "bottom": 20.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 58.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1561.199951171875
+                        },
+                        "padding": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "padding_box": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1561.199951171875
+                        },
+                        "type": "block"
+                      },
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1619.5999755859375
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 19.200000762939453,
+                              "width": 125.3984375,
+                              "x": 35.0,
+                              "y": 1619.5999755859375
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 19.200000762939453,
+                                  "width": 125.3984375,
+                                  "x": 35.0,
+                                  "y": 1619.5999755859375
+                                },
+                                "text": "Strikethrough text",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 19.200000762939453,
+                              "width": 125.3984375,
+                              "x": 35.0,
+                              "y": 1619.5999755859375
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 19.200000762939453,
+                              "width": 125.3984375,
+                              "x": 35.0,
+                              "y": 1619.5999755859375
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 19.200000762939453,
+                              "width": 125.3984375,
+                              "x": 35.0,
+                              "y": 1619.5999755859375
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 87.1640625,
+                              "x": 35.0,
+                              "y": 1638.7999267578125
+                            },
+                            "text": "for deletions",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1619.5999755859375
+                        },
+                        "margin": {
+                          "bottom": 20.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 58.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1619.5999755859375
+                        },
+                        "padding": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "padding_box": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1619.5999755859375
+                        },
+                        "type": "block"
+                      },
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1678.0
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 19.200000762939453,
+                              "width": 98.7109375,
+                              "x": 35.0,
+                              "y": 1678.0
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 19.200000762939453,
+                                  "width": 98.7109375,
+                                  "x": 35.0,
+                                  "y": 1678.0
+                                },
+                                "text": "Overlined text",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 19.200000762939453,
+                              "width": 98.7109375,
+                              "x": 35.0,
+                              "y": 1678.0
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 19.200000762939453,
+                              "width": 98.7109375,
+                              "x": 35.0,
+                              "y": 1678.0
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 19.200000762939453,
+                              "width": 98.7109375,
+                              "x": 35.0,
+                              "y": 1678.0
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 134.3046875,
+                              "x": 35.0,
+                              "y": 1697.199951171875
+                            },
+                            "text": "for special notation",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1678.0
+                        },
+                        "margin": {
+                          "bottom": 20.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 58.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1678.0
+                        },
+                        "padding": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "padding_box": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1678.0
+                        },
+                        "type": "block"
+                      },
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1736.39990234375
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 19.200000762939453,
+                              "width": 117.3671875,
+                              "x": 35.0,
+                              "y": 1736.39990234375
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 19.200000762939453,
+                                  "width": 117.3671875,
+                                  "x": 35.0,
+                                  "y": 1736.39990234375
+                                },
+                                "text": "Small Caps Text",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 19.200000762939453,
+                              "width": 117.3671875,
+                              "x": 35.0,
+                              "y": 1736.39990234375
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 19.200000762939453,
+                              "width": 117.3671875,
+                              "x": 35.0,
+                              "y": 1736.39990234375
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 19.200000762939453,
+                              "width": 117.3671875,
+                              "x": 35.0,
+                              "y": 1736.39990234375
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 126.2421875,
+                              "x": 35.0,
+                              "y": 1755.599853515625
+                            },
+                            "text": "for stylistic variety",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1736.39990234375
+                        },
+                        "margin": {
+                          "bottom": 20.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 58.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1736.39990234375
+                        },
+                        "padding": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "padding_box": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1736.39990234375
+                        },
+                        "type": "block"
+                      },
+                      {
+                        "border": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "border_box": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1794.7999267578125
+                        },
+                        "children": [
+                          {
+                            "border": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "border_box": {
+                              "height": 19.200000762939453,
+                              "width": 95.140625,
+                              "x": 35.0,
+                              "y": 1794.7999267578125
+                            },
+                            "children": [
+                              {
+                                "rect": {
+                                  "height": 19.200000762939453,
+                                  "width": 95.140625,
+                                  "x": 35.0,
+                                  "y": 1794.7999267578125
+                                },
+                                "text": "All Caps Text",
+                                "type": "text"
+                              }
+                            ],
+                            "content_rect": {
+                              "height": 19.200000762939453,
+                              "width": 95.140625,
+                              "x": 35.0,
+                              "y": 1794.7999267578125
+                            },
+                            "margin": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "margin_box": {
+                              "height": 19.200000762939453,
+                              "width": 95.140625,
+                              "x": 35.0,
+                              "y": 1794.7999267578125
+                            },
+                            "padding": {
+                              "bottom": 0.0,
+                              "left": 0.0,
+                              "right": 0.0,
+                              "top": 0.0
+                            },
+                            "padding_box": {
+                              "height": 19.200000762939453,
+                              "width": 95.140625,
+                              "x": 35.0,
+                              "y": 1794.7999267578125
+                            },
+                            "type": "inline"
+                          },
+                          {
+                            "rect": {
+                              "height": 19.200000762939453,
+                              "width": 88.0625,
+                              "x": 35.0,
+                              "y": 1813.9998779296875
+                            },
+                            "text": "for headings",
+                            "type": "text"
+                          }
+                        ],
+                        "content_rect": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1794.7999267578125
+                        },
+                        "margin": {
+                          "bottom": 20.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "margin_box": {
+                          "height": 58.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1794.7999267578125
+                        },
+                        "padding": {
+                          "bottom": 0.0,
+                          "left": 0.0,
+                          "right": 0.0,
+                          "top": 0.0
+                        },
+                        "padding_box": {
+                          "height": 38.400001525878906,
+                          "width": 770.0,
+                          "x": 35.0,
+                          "y": 1794.7999267578125
+                        },
+                        "type": "block"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 292.0,
+                      "width": 770.0,
+                      "x": 35.0,
+                      "y": 1561.199951171875
+                    },
+                    "margin": {
+                      "bottom": 20.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 20.0
+                    },
+                    "margin_box": {
+                      "height": 362.0,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1526.199951171875
+                    },
+                    "padding": {
+                      "bottom": 15.0,
+                      "left": 15.0,
+                      "right": 15.0,
+                      "top": 15.0
+                    },
+                    "padding_box": {
+                      "height": 322.0,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1546.199951171875
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1913.199951171875
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 161.8515625,
+                          "x": 20.0,
+                          "y": 1913.199951171875
+                        },
+                        "text": "Font Weight Variations",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1913.199951171875
+                    },
+                    "margin": {
+                      "bottom": 10.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 25.0
+                    },
+                    "margin_box": {
+                      "height": 54.20000076293945,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1888.199951171875
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1913.199951171875
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1942.39990234375
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 213.4453125,
+                          "x": 20.0,
+                          "y": 1942.39990234375
+                        },
+                        "text": "Light weight (300) text sample",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1942.39990234375
+                    },
+                    "margin": {
+                      "bottom": 20.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "margin_box": {
+                      "height": 39.20000076293945,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1942.39990234375
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1942.39990234375
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1981.599853515625
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 234.78125,
+                          "x": 20.0,
+                          "y": 1981.599853515625
+                        },
+                        "text": "Regular weight (400) text sample",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1981.599853515625
+                    },
+                    "margin": {
+                      "bottom": 20.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "margin_box": {
+                      "height": 39.20000076293945,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1981.599853515625
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 1981.599853515625
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2020.7998046875
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 235.65625,
+                          "x": 20.0,
+                          "y": 2020.7998046875
+                        },
+                        "text": "Medium weight (500) text sample",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2020.7998046875
+                    },
+                    "margin": {
+                      "bottom": 20.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "margin_box": {
+                      "height": 39.20000076293945,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2020.7998046875
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2020.7998046875
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2059.999755859375
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 245.453125,
+                          "x": 20.0,
+                          "y": 2059.999755859375
+                        },
+                        "text": "Semibold weight (600) text sample",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2059.999755859375
+                    },
+                    "margin": {
+                      "bottom": 20.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "margin_box": {
+                      "height": 39.20000076293945,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2059.999755859375
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2059.999755859375
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2099.19970703125
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 210.7734375,
+                          "x": 20.0,
+                          "y": 2099.19970703125
+                        },
+                        "text": "Bold weight (700) text sample",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2099.19970703125
+                    },
+                    "margin": {
+                      "bottom": 20.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "margin_box": {
+                      "height": 39.20000076293945,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2099.19970703125
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2099.19970703125
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2168.399658203125
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 79.15625,
+                          "x": 20.0,
+                          "y": 2168.399658203125
+                        },
+                        "text": "Conclusion",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2168.399658203125
+                    },
+                    "margin": {
+                      "bottom": 15.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 30.0
+                    },
+                    "margin_box": {
+                      "height": 64.19999694824219,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2138.399658203125
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2168.399658203125
+                    },
+                    "type": "block"
+                  },
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2202.599609375
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 800.0,
+                          "x": 20.0,
+                          "y": 2202.599609375
+                        },
+                        "text": "Good typography enhances readability and creates a",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2202.599609375
+                    },
+                    "margin": {
+                      "bottom": 20.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "margin_box": {
+                      "height": 39.20000076293945,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2202.599609375
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2202.599609375
+                    },
+                    "type": "block"
+                  }
+                ],
+                "content_rect": {
+                  "height": 1942.3995361328125,
+                  "width": 800.0,
+                  "x": 20.0,
+                  "y": 299.3999938964844
+                },
+                "margin": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "margin_box": {
+                  "height": 1942.3995361328125,
+                  "width": 800.0,
+                  "x": 20.0,
+                  "y": 299.3999938964844
+                },
+                "padding": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "padding_box": {
+                  "height": 1942.3995361328125,
+                  "width": 800.0,
+                  "x": 20.0,
+                  "y": 299.3999938964844
+                },
+                "type": "block"
+              },
+              {
+                "border": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 0.0
+                },
+                "border_box": {
+                  "height": 59.20000076293945,
+                  "width": 800.0,
+                  "x": 20.0,
+                  "y": 2291.799560546875
+                },
+                "children": [
+                  {
+                    "border": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "border_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2311.799560546875
+                    },
+                    "children": [
+                      {
+                        "rect": {
+                          "height": 19.200000762939453,
+                          "width": 339.9609375,
+                          "x": 20.0,
+                          "y": 2311.799560546875
+                        },
+                        "text": "© 2026 Typography Studies. All rights reserved.",
+                        "type": "text"
+                      }
+                    ],
+                    "content_rect": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2311.799560546875
+                    },
+                    "margin": {
+                      "bottom": 20.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "margin_box": {
+                      "height": 39.20000076293945,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2311.799560546875
+                    },
+                    "padding": {
+                      "bottom": 0.0,
+                      "left": 0.0,
+                      "right": 0.0,
+                      "top": 0.0
+                    },
+                    "padding_box": {
+                      "height": 19.200000762939453,
+                      "width": 800.0,
+                      "x": 20.0,
+                      "y": 2311.799560546875
+                    },
+                    "type": "block"
+                  }
+                ],
+                "content_rect": {
+                  "height": 39.20000076293945,
+                  "width": 800.0,
+                  "x": 20.0,
+                  "y": 2311.799560546875
+                },
+                "margin": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 50.0
+                },
+                "margin_box": {
+                  "height": 109.19999694824219,
+                  "width": 800.0,
+                  "x": 20.0,
+                  "y": 2241.799560546875
+                },
+                "padding": {
+                  "bottom": 0.0,
+                  "left": 0.0,
+                  "right": 0.0,
+                  "top": 20.0
+                },
+                "padding_box": {
+                  "height": 59.20000076293945,
+                  "width": 800.0,
+                  "x": 20.0,
+                  "y": 2291.799560546875
+                },
+                "type": "block"
+              }
+            ],
+            "content_rect": {
+              "height": 2310.99951171875,
+              "width": 800.0,
+              "x": 20.0,
+              "y": 40.0
+            },
+            "margin": {
+              "bottom": 0.0,
+              "left": 0.0,
+              "right": 0.0,
+              "top": 0.0
+            },
+            "margin_box": {
+              "height": 2390.99951171875,
+              "width": 840.0,
+              "x": 0.0,
+              "y": 0.0
+            },
+            "padding": {
+              "bottom": 40.0,
+              "left": 20.0,
+              "right": 20.0,
+              "top": 40.0
+            },
+            "padding_box": {
+              "height": 2390.99951171875,
+              "width": 840.0,
+              "x": 0.0,
+              "y": 0.0
+            },
+            "type": "block"
+          }
+        ],
+        "content_rect": {
+          "height": 2390.99951171875,
+          "width": 1280.0,
+          "x": 0.0,
+          "y": 0.0
+        },
+        "margin": {
+          "bottom": 0.0,
+          "left": 0.0,
+          "right": 0.0,
+          "top": 0.0
+        },
+        "margin_box": {
+          "height": 2390.99951171875,
+          "width": 1280.0,
+          "x": 0.0,
+          "y": 0.0
+        },
+        "padding": {
+          "bottom": 0.0,
+          "left": 0.0,
+          "right": 0.0,
+          "top": 0.0
+        },
+        "padding_box": {
+          "height": 2390.99951171875,
+          "width": 1280.0,
+          "x": 0.0,
+          "y": 0.0
+        },
+        "type": "block"
+      }
+    ],
+    "content_rect": {
+      "height": 2390.99951171875,
+      "width": 1280.0,
+      "x": 0.0,
+      "y": 0.0
+    },
+    "margin": {
+      "bottom": 0.0,
+      "left": 0.0,
+      "right": 0.0,
+      "top": 0.0
+    },
+    "margin_box": {
+      "height": 2390.99951171875,
+      "width": 1280.0,
+      "x": 0.0,
+      "y": 0.0
+    },
+    "padding": {
+      "bottom": 0.0,
+      "left": 0.0,
+      "right": 0.0,
+      "top": 0.0
+    },
+    "padding_box": {
+      "height": 2390.99951171875,
+      "width": 1280.0,
+      "x": 0.0,
+      "y": 0.0
+    },
+    "type": "block"
+  },
+  "version": 1,
+  "viewport": {
+    "height": 800,
+    "width": 1280
+  }
+}

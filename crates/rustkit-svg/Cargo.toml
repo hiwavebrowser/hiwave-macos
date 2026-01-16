@@ -1,0 +1,21 @@
+[package]
+name = "rustkit-svg"
+version = "0.1.0"
+edition = "2021"
+description = "SVG parsing and rendering for RustKit browser engine"
+authors = ["HiWave Team"]
+license = "MIT"
+
+[dependencies]
+# RustKit crates
+rustkit-css = { path = "../rustkit-css" }
+rustkit-dom = { path = "../rustkit-dom" }
+rustkit-layout = { path = "../rustkit-layout" }
+
+# Core
+thiserror = "1.0"
+tracing = "0.1"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+

@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Gallery Test</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background: #1a1a2e;
+            padding: 40px;
+            color: white;
+        }
+        
+        h1 {
+            text-align: center;
+            font-size: 2em;
+            margin-bottom: 10px;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #888;
+            margin-bottom: 40px;
+        }
+        
+        /* Masonry-style grid */
+        .gallery {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        .gallery-item {
+            position: relative;
+            border-radius: 12px;
+            overflow: hidden;
+            background: #2d2d44;
+        }
+        
+        .gallery-item.tall {
+            grid-row: span 2;
+        }
+        
+        .gallery-item.wide {
+            grid-column: span 2;
+        }
+        
+        /* Use CSS gradients as image placeholders */
+        .image-placeholder {
+            width: 100%;
+            height: 100%;
+            min-height: 200px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 3em;
+            position: relative;
+        }
+        
+        .image-placeholder.tall {
+            min-height: 416px;
+        }
+        
+        .image-placeholder.wide {
+            min-height: 200px;
+        }
+        
+        /* Different gradient backgrounds */
+        .gradient-1 { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+        .gradient-2 { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); }
+        .gradient-3 { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); }
+        .gradient-4 { background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); }
+        .gradient-5 { background: linear-gradient(135deg, #fa709a 0%, #fee140 100%); }
+        .gradient-6 { background: linear-gradient(135deg, #a18cd1 0%, #fbc2eb 100%); }
+        .gradient-7 { background: linear-gradient(135deg, #ff0844 0%, #ffb199 100%); }
+        .gradient-8 { background: linear-gradient(135deg, #30cfd0 0%, #330867 100%); }
+        
+        /* Image overlay */
+        .image-overlay {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            padding: 15px;
+            background: linear-gradient(transparent, rgba(0,0,0,0.7));
+        }
+        
+        .image-overlay h3 {
+            font-size: 1em;
+            margin-bottom: 4px;
+        }
+        
+        .image-overlay p {
+            font-size: 0.8em;
+            color: #ccc;
+        }
+        
+        /* Aspect ratio boxes */
+        .aspect-section {
+            margin-top: 50px;
+            max-width: 1200px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        
+        .aspect-section h2 {
+            margin-bottom: 20px;
+            font-size: 1.3em;
+        }
+        
+        .aspect-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+        }
+        
+        .aspect-box {
+            background: #2d2d44;
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        /* Different aspect ratios */
+        .aspect-1-1 { aspect-ratio: 1 / 1; }
+        .aspect-16-9 { aspect-ratio: 16 / 9; }
+        .aspect-4-3 { aspect-ratio: 4 / 3; }
+        .aspect-3-2 { aspect-ratio: 3 / 2; }
+        
+        .aspect-box .content {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            font-size: 0.9em;
+        }
+        
+        .aspect-box .content span {
+            color: #888;
+            font-size: 0.8em;
+        }
+        
+        /* Object-fit demo */
+        .object-fit-section {
+            margin-top: 50px;
+            max-width: 1200px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        
+        .object-fit-grid {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 16px;
+        }
+        
+        .object-fit-box {
+            height: 150px;
+            background: #2d2d44;
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        .object-fit-box .placeholder {
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        
+        /* Simulate different object-fit behaviors with pseudo-elements */
+        .fit-fill .placeholder { 
+            background-size: 100% 100%;
+        }
+        
+        .fit-contain .placeholder {
+            background-size: contain;
+            background-repeat: no-repeat;
+            background-position: center;
+        }
+        
+        .fit-cover .placeholder {
+            background-size: cover;
+            background-position: center;
+        }
+        
+        .fit-none .placeholder {
+            background-size: auto;
+            background-position: center;
+        }
+        
+        .fit-scale-down .placeholder {
+            background-size: contain;
+            background-repeat: no-repeat;
+            background-position: center;
+        }
+        
+        .object-fit-box .label {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            padding: 8px;
+            background: rgba(0,0,0,0.7);
+            text-align: center;
+            font-size: 0.75em;
+        }
+        
+        /* Loading states */
+        .loading-section {
+            margin-top: 50px;
+            max-width: 1200px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        
+        .loading-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+        }
+        
+        .loading-box {
+            height: 200px;
+            background: #2d2d44;
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        .shimmer {
+            background: linear-gradient(
+                90deg,
+                #2d2d44 0%,
+                #3d3d54 50%,
+                #2d2d44 100%
+            );
+            background-size: 200% 100%;
+        }
+        
+        .loaded {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 2em;
+        }
+        
+        .error-state {
+            background: #3d2d2d;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            color: #ff6b6b;
+        }
+        
+        .error-state .icon {
+            font-size: 2em;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Image Gallery</h1>
+    <p class="subtitle">Testing image layouts, aspect ratios, and object-fit</p>
+    
+    <div class="gallery">
+        <div class="gallery-item tall">
+            <div class="image-placeholder gradient-1 tall">🏔️</div>
+            <div class="image-overlay">
+                <h3>Mountain Vista</h3>
+                <p>Portrait orientation</p>
+            </div>
+        </div>
+        
+        <div class="gallery-item">
+            <div class="image-placeholder gradient-2">🌅</div>
+            <div class="image-overlay">
+                <h3>Sunset</h3>
+                <p>Square</p>
+            </div>
+        </div>
+        
+        <div class="gallery-item wide">
+            <div class="image-placeholder gradient-3 wide">🏖️</div>
+            <div class="image-overlay">
+                <h3>Beach Panorama</h3>
+                <p>Wide format</p>
+            </div>
+        </div>
+        
+        <div class="gallery-item">
+            <div class="image-placeholder gradient-4">🌲</div>
+            <div class="image-overlay">
+                <h3>Forest</h3>
+                <p>Square</p>
+            </div>
+        </div>
+        
+        <div class="gallery-item">
+            <div class="image-placeholder gradient-5">🌸</div>
+            <div class="image-overlay">
+                <h3>Cherry Blossoms</h3>
+                <p>Square</p>
+            </div>
+        </div>
+        
+        <div class="gallery-item">
+            <div class="image-placeholder gradient-6">🌊</div>
+            <div class="image-overlay">
+                <h3>Ocean Waves</h3>
+                <p>Square</p>
+            </div>
+        </div>
+        
+        <div class="gallery-item wide">
+            <div class="image-placeholder gradient-7 wide">🌆</div>
+            <div class="image-overlay">
+                <h3>City Skyline</h3>
+                <p>Panoramic</p>
+            </div>
+        </div>
+        
+        <div class="gallery-item tall">
+            <div class="image-placeholder gradient-8 tall">🗼</div>
+            <div class="image-overlay">
+                <h3>Tower</h3>
+                <p>Portrait</p>
+            </div>
+        </div>
+    </div>
+    
+    <div class="aspect-section">
+        <h2>Aspect Ratios</h2>
+        <div class="aspect-grid">
+            <div class="aspect-box aspect-1-1 gradient-1">
+                <div class="content">
+                    1:1
+                    <span>Square</span>
+                </div>
+            </div>
+            <div class="aspect-box aspect-16-9 gradient-2">
+                <div class="content">
+                    16:9
+                    <span>Widescreen</span>
+                </div>
+            </div>
+            <div class="aspect-box aspect-4-3 gradient-3">
+                <div class="content">
+                    4:3
+                    <span>Standard</span>
+                </div>
+            </div>
+            <div class="aspect-box aspect-3-2 gradient-4">
+                <div class="content">
+                    3:2
+                    <span>Photo</span>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="object-fit-section">
+        <h2>Object Fit Behaviors</h2>
+        <div class="object-fit-grid">
+            <div class="object-fit-box fit-fill">
+                <div class="placeholder"></div>
+                <div class="label">fill</div>
+            </div>
+            <div class="object-fit-box fit-contain">
+                <div class="placeholder"></div>
+                <div class="label">contain</div>
+            </div>
+            <div class="object-fit-box fit-cover">
+                <div class="placeholder"></div>
+                <div class="label">cover</div>
+            </div>
+            <div class="object-fit-box fit-none">
+                <div class="placeholder"></div>
+                <div class="label">none</div>
+            </div>
+            <div class="object-fit-box fit-scale-down">
+                <div class="placeholder"></div>
+                <div class="label">scale-down</div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="loading-section">
+        <h2>Loading States</h2>
+        <div class="loading-grid">
+            <div class="loading-box shimmer">
+                <div class="content">
+                    <span style="color:#666">Loading...</span>
+                </div>
+            </div>
+            <div class="loading-box loaded">✅</div>
+            <div class="loading-box error-state">
+                <div class="icon">❌</div>
+                <span>Failed to load</span>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+

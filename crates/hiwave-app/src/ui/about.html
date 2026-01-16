@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>About HiWave</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            /* Backgrounds (dark slate) */
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-tertiary: #334155;
+            --bg-elevated: #475569;
+
+            /* Teal/Cyan Accent */
+            --accent: #06b6d4;
+            --accent-hover: #22d3ee;
+            --accent-dark: #0891b2;
+            --accent-subtle: rgba(6, 182, 212, 0.08);
+            --accent-medium: rgba(6, 182, 212, 0.15);
+
+            /* Text */
+            --text-primary: #f1f5f9;
+            --text-secondary: #cbd5e1;
+            --text-muted: #94a3b8;
+            --text-disabled: #64748b;
+
+            /* Semantic */
+            --success: #10b981;
+            --warning: #f59e0b;
+            --error: #ef4444;
+
+            /* Borders */
+            --border: #1f2937;
+            --border-subtle: #16213e;
+            --border-focus: #475569;
+        }
+
+        @keyframes logoShimmer {
+            0% { background-position: -200% center; }
+            100% { background-position: 200% center; }
+        }
+
+        @keyframes heroGlow {
+            0%, 100% { opacity: 0.3; }
+            50% { opacity: 0.6; }
+        }
+
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes shimmerFlow {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
+
+        html, body {
+            height: 100%;
+            margin: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: radial-gradient(ellipse at top, rgba(6, 182, 212, 0.15), transparent 50%),
+                        var(--bg-primary);
+            color: var(--text-primary);
+            overflow-y: auto;
+        }
+
+        .container {
+            max-width: 720px;
+            margin: 0 auto;
+            padding: 48px 24px;
+        }
+
+        /* Hero Section with Glow */
+        .hero {
+            text-align: center;
+            margin-bottom: 48px;
+            position: relative;
+            animation: fadeInUp 0.6s ease-out;
+        }
+
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 300px;
+            height: 300px;
+            background: radial-gradient(circle, rgba(6, 182, 212, 0.2) 0%, transparent 70%);
+            animation: heroGlow 3s ease-in-out infinite;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .logo {
+            font-size: 4rem;
+            font-weight: 200;
+            letter-spacing: 1rem;
+            margin-bottom: 8px;
+            background: linear-gradient(135deg, #0891b2 0%, #06b6d4 25%, #22d3ee 50%, #06b6d4 75%, #0891b2 100%);
+            background-size: 200% auto;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            position: relative;
+            z-index: 1;
+            cursor: default;
+            transition: transform 0.3s ease;
+        }
+
+        .logo:hover {
+            animation: logoShimmer 2s linear infinite;
+            transform: scale(1.02);
+        }
+
+        .tagline {
+            font-size: 1.25rem;
+            color: var(--text-secondary);
+            font-weight: 300;
+            margin-bottom: 16px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .version {
+            display: inline-block;
+            padding: 4px 12px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            font-size: 0.875rem;
+            color: var(--text-muted);
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Enhanced Section Cards */
+        .card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 24px;
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s ease;
+            animation: fadeInUp 0.6s ease-out backwards;
+        }
+
+        .card:nth-child(2) { animation-delay: 0.1s; }
+        .card:nth-child(3) { animation-delay: 0.2s; }
+        .card:nth-child(4) { animation-delay: 0.3s; }
+        .card:nth-child(5) { animation-delay: 0.4s; }
+        .card:nth-child(6) { animation-delay: 0.5s; }
+
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg,
+                transparent,
+                rgba(6, 182, 212, 0.05),
+                transparent
+            );
+            transition: left 0.5s ease;
+        }
+
+        .card:hover {
+            border-color: rgba(6, 182, 212, 0.3);
+            box-shadow: 0 8px 32px rgba(6, 182, 212, 0.1);
+            transform: translateY(-2px);
+        }
+
+        .card:hover::before {
+            left: 100%;
+        }
+
+        .card-title {
+            font-size: 1.125rem;
+            font-weight: 600;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .card-title .icon {
+            font-size: 1.25rem;
+        }
+
+        .card p {
+            color: var(--text-secondary);
+            line-height: 1.7;
+            margin-bottom: 12px;
+        }
+
+        .card p:last-child {
+            margin-bottom: 0;
+        }
+
+        /* Enhanced Feature Cards */
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 12px;
+            margin-top: 16px;
+        }
+
+        .feature {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px;
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            font-size: 0.875rem;
+            border: 1px solid transparent;
+            transition: all 0.2s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .feature::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 3px;
+            height: 100%;
+            background: var(--accent);
+            transform: scaleY(0);
+            transition: transform 0.2s ease;
+        }
+
+        .feature:hover {
+            background: var(--bg-elevated);
+            border-color: var(--accent);
+            transform: translateX(3px);
+        }
+
+        .feature:hover::before {
+            transform: scaleY(1);
+        }
+
+        .feature-icon {
+            font-size: 1.125rem;
+        }
+
+        /* Support Section */
+        .support-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-top: 20px;
+        }
+
+        .support-option {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 24px 16px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            text-decoration: none;
+            color: inherit;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .support-option::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: radial-gradient(circle at center, rgba(6, 182, 212, 0.1), transparent);
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .support-option:hover {
+            border-color: var(--accent);
+            transform: translateY(-4px);
+            box-shadow: 0 12px 32px rgba(6, 182, 212, 0.25);
+        }
+
+        .support-option:hover::before {
+            opacity: 1;
+        }
+
+        .support-icon {
+            font-size: 2rem;
+            margin-bottom: 12px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .support-title {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 4px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .support-desc {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            text-align: center;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Sponsor Button */
+        .sponsor-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 24px;
+            background: linear-gradient(135deg, var(--accent-dark), var(--accent-hover));
+            border: none;
+            border-radius: 8px;
+            color: white;
+            font-size: 1rem;
+            font-weight: 500;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.3s ease;
+            margin-top: 16px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .sponsor-btn::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(135deg, transparent, rgba(255,255,255,0.2), transparent);
+            transform: translateX(-100%);
+            transition: transform 0.6s ease;
+        }
+
+        .sponsor-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(6, 182, 212, 0.4);
+        }
+
+        .sponsor-btn:hover::before {
+            transform: translateX(100%);
+        }
+
+        /* Links */
+        .links {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px;
+            margin-top: 16px;
+        }
+
+        .link {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--accent-hover);
+            text-decoration: none;
+            font-size: 0.9rem;
+            transition: all 0.2s ease;
+            position: relative;
+        }
+
+        .link::after {
+            content: '';
+            position: absolute;
+            bottom: -2px;
+            left: 0;
+            width: 0;
+            height: 2px;
+            background: var(--accent);
+            transition: width 0.2s ease;
+        }
+
+        .link:hover {
+            color: var(--accent);
+            transform: translateX(2px);
+        }
+
+        .link:hover::after {
+            width: 100%;
+        }
+
+        /* Team */
+        .team-member {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 16px;
+            background: var(--bg-tertiary);
+            border-radius: 12px;
+            margin-top: 16px;
+            border: 1px solid transparent;
+            transition: all 0.3s ease;
+        }
+
+        .team-member:hover {
+            border-color: var(--accent);
+            box-shadow: 0 4px 16px rgba(6, 182, 212, 0.15);
+        }
+
+        .avatar {
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--accent-dark), var(--accent-hover));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.25rem;
+            font-weight: 600;
+            box-shadow: 0 4px 12px rgba(6, 182, 212, 0.3);
+        }
+
+        .member-info {
+            flex: 1;
+        }
+
+        .member-name {
+            font-weight: 600;
+            margin-bottom: 2px;
+        }
+
+        .member-role {
+            font-size: 0.875rem;
+            color: var(--text-muted);
+        }
+
+        /* Credits */
+        .credits {
+            margin-top: 16px;
+            font-size: 0.875rem;
+            color: var(--text-muted);
+        }
+
+        .credits strong {
+            color: var(--text-secondary);
+        }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            padding: 24px;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            border-top: 1px solid var(--border);
+            margin-top: 48px;
+        }
+
+        .footer a {
+            color: var(--accent-hover);
+            text-decoration: none;
+            transition: color 0.2s ease;
+        }
+
+        .footer a:hover {
+            color: var(--accent);
+            text-decoration: underline;
+        }
+
+        /* Keyboard hint */
+        kbd {
+            display: inline-block;
+            padding: 2px 6px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.75rem;
+        }
+
+        /* Quote */
+        .quote {
+            font-style: italic;
+            color: var(--text-secondary);
+            border-left: 3px solid var(--accent);
+            padding-left: 16px;
+            margin: 20px 0;
+            position: relative;
+        }
+
+        .quote::before {
+            content: '';
+            position: absolute;
+            left: -3px;
+            top: 0;
+            width: 3px;
+            height: 100%;
+            background: linear-gradient(180deg, var(--accent-hover), var(--accent-dark));
+            animation: shimmerFlow 2s ease-in-out infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Hero -->
+        <div class="hero">
+            <h1 class="logo">HIWAVE</h1>
+            <p class="tagline">A browser that doesn't track you. Doesn't sell you. Doesn't belong to Google.</p>
+            <span class="version" id="versionBadge">v0.1.0-alpha</span>
+        </div>
+
+        <!-- Single Donation CTA -->
+        <div style="text-align: center; margin: 32px 0 48px 0;">
+            <a href="https://ko-fi.com/hiwavebrowser" class="sponsor-btn" target="_blank">
+                ☕ Support Independent Development
+            </a>
+        </div>
+
+        <!-- Why HiWave Exists -->
+        <div class="card">
+            <h2 class="card-title">
+                <span class="icon">🎯</span>
+                Why HiWave Exists
+            </h2>
+            <p>
+                Chrome is Chromium. Edge is Chromium. Brave is Chromium. Opera is Chromium.
+            </p>
+            <p>
+                Chromium is Google. Google's business model is surveillance advertising.
+                Every site you visit, every click you make, every ad you see—tracked, profiled, sold.
+            </p>
+            <p>
+                Even "privacy-focused" Chromium browsers inherit Google's codebase and its priorities.
+            </p>
+            <p>
+                <strong>HiWave is built from scratch on Rust.</strong> No Chromium. No Google code.
+                No ad company calling the shots.
+            </p>
+        </div>
+
+        <!-- Features -->
+        <div class="card">
+            <h2 class="card-title">
+                <span class="icon">✨</span>
+                What Makes HiWave Different
+            </h2>
+            <p style="color: var(--text-secondary); margin-bottom: 16px;">
+                Every feature is designed around privacy, control, and independence.
+            </p>
+            <div class="features">
+                <div class="feature">
+                    <span class="feature-icon">🛡️</span>
+                    <span>Shield - Native ad/tracker blocking</span>
+                </div>
+                <div class="feature">
+                    <span class="feature-icon">🔐</span>
+                    <span>Vault - Local-only password encryption</span>
+                </div>
+                <div class="feature">
+                    <span class="feature-icon">📚</span>
+                    <span>Shelf - Privacy-respecting tab management</span>
+                </div>
+                <div class="feature">
+                    <span class="feature-icon">🗂️</span>
+                    <span>Workspaces - Isolated browsing contexts</span>
+                </div>
+                <div class="feature">
+                    <span class="feature-icon">⏰</span>
+                    <span>Tab Decay - Auto-cleanup without hoarding</span>
+                </div>
+                <div class="feature">
+                    <span class="feature-icon">⌨️</span>
+                    <span>Keyboard First - No telemetry tracking</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Rust Advantage -->
+        <div class="card">
+            <h2 class="card-title">
+                <span class="icon">⚙️</span>
+                Built on Rust, Not Chromium
+            </h2>
+            <div class="features">
+                <div class="feature">
+                    <span class="feature-icon">🔒</span>
+                    <span>Memory Safety</span>
+                </div>
+                <div class="feature">
+                    <span class="feature-icon">⚡</span>
+                    <span>Low Resource Usage</span>
+                </div>
+                <div class="feature">
+                    <span class="feature-icon">🧹</span>
+                    <span>No Legacy Baggage</span>
+                </div>
+                <div class="feature">
+                    <span class="feature-icon">🆓</span>
+                    <span>Independent</span>
+                </div>
+            </div>
+            <p style="margin-top: 16px;">
+                Rust eliminates entire classes of security vulnerabilities that plague C++ browsers.
+                HiWave is fast, efficient, and not beholden to Google's roadmap or business model.
+            </p>
+        </div>
+
+        <!-- Open Source -->
+        <div class="card">
+            <h2 class="card-title">
+                <span class="icon">🔓</span>
+                Open Source
+            </h2>
+            <p>
+                HiWave is open source under MPL-2.0. Verify for yourself.
+            </p>
+            <div class="links">
+                <a href="https://github.com/hiwavebrowser/hiwave" class="link" target="_blank">
+                    📂 Source Code
+                </a>
+                <a href="https://github.com/hiwavebrowser/hiwave/issues" class="link" target="_blank">
+                    🐛 Report Issues
+                </a>
+                <a href="https://github.com/hiwavebrowser/hiwave/blob/main/CONTRIBUTING.md" class="link" target="_blank">
+                    🤝 Contribute
+                </a>
+                <a href="https://github.com/hiwavebrowser/hiwave/releases" class="link" target="_blank">
+                    📦 Releases
+                </a>
+            </div>
+        </div>
+
+        <!-- Credits -->
+        <div class="card">
+            <h2 class="card-title">
+                <span class="icon">🙏</span>
+                Credits & Thanks
+            </h2>
+
+            <div class="team-member">
+                <div class="avatar">P</div>
+                <div class="member-info">
+                    <div class="member-name">Pete Copeland</div>
+                    <div class="member-role">Creator & Lead Developer</div>
+                </div>
+            </div>
+
+            <div class="credits">
+                <p><strong>Built With:</strong></p>
+                <p>
+                    Rust • Tauri/WRY • WebKit/WebView2 •
+                    <a href="https://github.com/brave/adblock-rust" target="_blank">Brave's adblock-rust</a>
+                </p>
+            </div>
+        </div>
+
+        <!-- Keyboard Shortcuts -->
+        <div class="card">
+            <h2 class="card-title">
+                <span class="icon">⌨️</span>
+                Keyboard Shortcuts Reference
+            </h2>
+            <p style="color: var(--text-muted); margin-bottom: 16px; font-size: 0.9rem;">
+                HiWave is keyboard-first. Most actions are faster with shortcuts.
+                On macOS, use <kbd>⌘</kbd> instead of <kbd>Ctrl</kbd>.
+            </p>
+
+            <h3 style="font-size: 0.95rem; margin-top: 20px; margin-bottom: 8px; color: var(--accent-hover);">Navigation & Tabs</h3>
+            <p style="line-height: 2;">
+                <kbd>Ctrl</kbd>+<kbd>K</kbd> Command Palette &nbsp;•&nbsp;
+                <kbd>Ctrl</kbd>+<kbd>T</kbd> New Tab &nbsp;•&nbsp;
+                <kbd>Ctrl</kbd>+<kbd>W</kbd> Close Tab<br>
+                <kbd>Ctrl</kbd>+<kbd>1-9</kbd> Switch to Tab 1-9 &nbsp;•&nbsp;
+                <kbd>Ctrl</kbd>+<kbd>L</kbd> Focus Address Bar<br>
+                <kbd>Alt</kbd>+<kbd>←</kbd> Go Back &nbsp;•&nbsp;
+                <kbd>Alt</kbd>+<kbd>→</kbd> Go Forward &nbsp;•&nbsp;
+                <kbd>Alt</kbd>+<kbd>Home</kbd> Go Home
+            </p>
+
+            <h3 style="font-size: 0.95rem; margin-top: 20px; margin-bottom: 8px; color: var(--accent-hover);">Workspace & Organization</h3>
+            <p style="line-height: 2;">
+                <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> Shelve Tab &nbsp;•&nbsp;
+                <kbd>Ctrl</kbd>+<kbd>B</kbd> Toggle Sidebar
+            </p>
+
+            <h3 style="font-size: 0.95rem; margin-top: 20px; margin-bottom: 8px; color: var(--accent-hover);">Page Actions</h3>
+            <p style="line-height: 2;">
+                <kbd>Ctrl</kbd>+<kbd>R</kbd> or <kbd>F5</kbd> Reload &nbsp;•&nbsp;
+                <kbd>Ctrl</kbd>+<kbd>F</kbd> Find on Page &nbsp;•&nbsp;
+                <kbd>F3</kbd> Find Next<br>
+                <kbd>Ctrl</kbd>+<kbd>P</kbd> Print Page &nbsp;•&nbsp;
+                <kbd>Ctrl</kbd>+<kbd>H</kbd> Toggle History
+            </p>
+
+            <h3 style="font-size: 0.95rem; margin-top: 20px; margin-bottom: 8px; color: var(--accent-hover);">Zoom & Display</h3>
+            <p style="line-height: 2;">
+                <kbd>Ctrl</kbd>+<kbd>+</kbd> Zoom In &nbsp;•&nbsp;
+                <kbd>Ctrl</kbd>+<kbd>-</kbd> Zoom Out &nbsp;•&nbsp;
+                <kbd>Ctrl</kbd>+<kbd>0</kbd> Reset Zoom
+            </p>
+
+            <h3 style="font-size: 0.95rem; margin-top: 20px; margin-bottom: 8px; color: var(--accent-hover);">Focus & Privacy</h3>
+            <p style="line-height: 2;">
+                <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> or <kbd>F11</kbd> Toggle Focus Mode<br>
+                <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> Autofill Password (from Vault)<br>
+                <kbd>Esc</kbd> Close Panels / Exit Focus Mode
+            </p>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <p>
+                <a href="https://www.hiwavebrowser.com">www.hiwavebrowser.com</a> &nbsp;•&nbsp;
+                <a href="https://github.com/hiwavebrowser/hiwave">GitHub</a> &nbsp;•&nbsp;
+                <a href="https://twitter.com/hiwavebrowser">Twitter</a>
+            </p>
+            <p style="margin-top: 16px; font-size: 0.7rem;">
+                © 2024 HiWave. Licensed under MPL-2.0.
+            </p>
+        </div>
+    </div>
+
+    <script>
+        // Get version from IPC if available
+        if (window.ipc) {
+            // Request version info
+            window.ipc.postMessage(JSON.stringify({ cmd: 'get_version' }));
+        }
+
+        // Expose version update function
+        window.hiwaveAbout = {
+            setVersion: function(version) {
+                document.getElementById('versionBadge').textContent = version;
+            }
+        };
+
+        // Handle link clicks - open externally
+        document.querySelectorAll('a[target="_blank"]').forEach(link => {
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                const url = link.href;
+                if (window.ipc) {
+                    window.ipc.postMessage(JSON.stringify({
+                        cmd: 'open_external',
+                        url: url
+                    }));
+                } else {
+                    window.open(url, '_blank');
+                }
+            });
+        });
+    </script>
+</body>
+</html>

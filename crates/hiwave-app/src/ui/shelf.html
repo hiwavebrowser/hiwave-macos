@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HiWave Shelf</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            /* Backgrounds (dark slate) */
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-tertiary: #334155;
+            --bg-elevated: #475569;
+
+            /* Teal/Cyan Accent */
+            --accent: #06b6d4;
+            --accent-hover: #22d3ee;
+            --accent-dark: #0891b2;
+            --accent-subtle: rgba(6, 182, 212, 0.08);
+            --accent-medium: rgba(6, 182, 212, 0.15);
+
+            /* Text */
+            --text-primary: #f1f5f9;
+            --text-secondary: #cbd5e1;
+            --text-muted: #94a3b8;
+            --text-disabled: #64748b;
+
+            /* Borders */
+            --border: #1f2937;
+            --border-subtle: #16213e;
+            --border-focus: #475569;
+        }
+
+        @keyframes flowGlow {
+            0%, 100% { box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.2); }
+            50% { box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.4), 0 0 20px rgba(6, 182, 212, 0.2); }
+        }
+
+        @keyframes ripple {
+            0% {
+                transform: scale(0.8);
+                opacity: 0.8;
+            }
+            100% {
+                transform: scale(2);
+                opacity: 0;
+            }
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        html, body {
+            height: 100%;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            user-select: none;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Shelf header with drag handle */
+        .shelf-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 16px;
+            background: var(--bg-tertiary);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .shelf-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-secondary);
+        }
+
+        .shelf-close {
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            border-radius: 4px;
+            font-size: 16px;
+            transition: all 0.2s ease;
+        }
+
+        .shelf-close:hover {
+            background: var(--bg-primary);
+            color: var(--accent-hover);
+            transform: rotate(90deg);
+        }
+
+        /* Command palette */
+        .command-palette {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            padding: 12px 16px;
+        }
+
+        .command-input-wrapper {
+            display: flex;
+            align-items: center;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 0 12px;
+            margin-bottom: 12px;
+            transition: all 0.3s ease;
+            position: relative;
+        }
+
+        .command-input-wrapper::after {
+            content: '';
+            position: absolute;
+            inset: -2px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+            opacity: 0;
+            z-index: -1;
+            transition: opacity 0.3s ease;
+        }
+
+        .command-input-wrapper:focus-within {
+            border-color: var(--accent);
+            animation: flowGlow 2s ease-in-out infinite;
+        }
+
+        .command-input-wrapper:focus-within::after {
+            opacity: 0.15;
+        }
+
+        .command-input-icon {
+            color: var(--text-muted);
+            margin-right: 10px;
+            transition: color 0.2s ease;
+        }
+
+        .command-input-wrapper:focus-within .command-input-icon {
+            color: var(--accent-hover);
+        }
+
+        .command-input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            outline: none;
+            color: var(--text-primary);
+            font-size: 14px;
+            padding: 12px 0;
+            font-family: inherit;
+        }
+
+        .command-input::placeholder {
+            color: var(--text-muted);
+        }
+
+        .command-results {
+            flex: 1;
+            overflow-y: auto;
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 4px;
+            align-content: start;
+            animation: slideIn 0.3s ease-out;
+        }
+
+        .command-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 10px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            background: var(--bg-tertiary);
+            min-width: 0;
+            border: 1px solid transparent;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .command-item::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 0;
+            height: 0;
+            border-radius: 50%;
+            background: rgba(6, 182, 212, 0.3);
+            transform: translate(-50%, -50%);
+            transition: width 0.3s ease, height 0.3s ease;
+        }
+
+        .command-item:hover {
+            background: var(--bg-elevated);
+            border-color: rgba(6, 182, 212, 0.3);
+            transform: translateX(2px);
+        }
+
+        .command-item.selected {
+            background: var(--accent);
+            border-color: var(--accent-hover);
+            box-shadow: 0 4px 12px rgba(6, 182, 212, 0.3);
+        }
+
+        .command-item.selected::before {
+            width: 100%;
+            height: 100%;
+            animation: ripple 0.6s ease-out;
+        }
+
+        .command-item-left {
+            display: flex;
+            flex-direction: column;
+            gap: 1px;
+            min-width: 0;
+            flex: 1;
+            position: relative;
+            z-index: 1;
+        }
+
+        .command-item-name {
+            font-size: 12px;
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .command-item-category {
+            font-size: 9px;
+            color: var(--text-muted);
+            transition: color 0.2s ease;
+        }
+
+        .command-item:hover .command-item-category,
+        .command-item.selected .command-item-category {
+            color: rgba(255,255,255,0.7);
+        }
+
+        .command-item-shortcut {
+            font-size: 10px;
+            color: var(--text-muted);
+            font-family: monospace;
+            background: var(--bg-primary);
+            padding: 2px 5px;
+            border-radius: 3px;
+            margin-left: 6px;
+            flex-shrink: 0;
+            position: relative;
+            z-index: 1;
+            transition: all 0.2s ease;
+        }
+
+        .command-item:hover .command-item-shortcut {
+            background: rgba(0, 0, 0, 0.3);
+            color: var(--text-secondary);
+        }
+
+        .command-item.selected .command-item-shortcut {
+            background: rgba(255,255,255,0.2);
+            color: white;
+        }
+
+        .command-empty {
+            grid-column: 1 / -1;
+            padding: 20px;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 13px;
+        }
+
+        /* Shelf tabs placeholder (for future aged tabs) */
+        .shelf-tabs {
+            display: none; /* Hidden for now */
+            padding: 12px 16px;
+            border-top: 1px solid var(--border);
+        }
+
+        .shelf-tabs-title {
+            font-size: 11px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+
+        /* Custom scrollbar */
+        .command-results::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .command-results::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .command-results::-webkit-scrollbar-thumb {
+            background: var(--bg-elevated);
+            border-radius: 4px;
+        }
+
+        .command-results::-webkit-scrollbar-thumb:hover {
+            background: var(--accent);
+        }
+    </style>
+</head>
+<body>
+    <div class="shelf-header">
+        <span class="shelf-title">Command Palette</span>
+        <button class="shelf-close" id="closeBtn">&times;</button>
+    </div>
+
+    <div class="command-palette">
+        <div class="command-input-wrapper">
+            <svg class="command-input-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"/>
+                <path d="M21 21l-4.35-4.35"/>
+            </svg>
+            <input type="text" class="command-input" id="commandInput" placeholder="Type a command or search..." autocomplete="off" spellcheck="false">
+        </div>
+        <div class="command-results" id="commandResults">
+            <div class="command-empty">Type to search commands</div>
+        </div>
+    </div>
+
+    <!-- Future: Aged tabs section -->
+    <div class="shelf-tabs" id="shelfTabs">
+        <div class="shelf-tabs-title">Aging Tabs</div>
+        <!-- Aged tabs will be rendered here -->
+    </div>
+
+    <script>
+        let commandResults = [];
+        let selectedIndex = 0;
+
+        // Shelf controller exposed to Rust
+        window.hiwaveShelf = {
+            showCommands: function(commands) {
+                commandResults = commands;
+                selectedIndex = 0;
+                renderResults();
+            },
+
+            focus: function() {
+                document.getElementById('commandInput').focus();
+            },
+
+            clear: function() {
+                document.getElementById('commandInput').value = '';
+                commandResults = [];
+                selectedIndex = 0;
+                renderResults();
+            }
+        };
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function sendIpc(cmd, data = {}) {
+            const message = { cmd, ...data };
+            window.ipc.postMessage(JSON.stringify(message));
+        }
+
+        function renderResults() {
+            const container = document.getElementById('commandResults');
+
+            if (commandResults.length === 0) {
+                container.innerHTML = '<div class="command-empty">No commands found</div>';
+                return;
+            }
+
+            container.innerHTML = commandResults.map((cmd, i) => `
+                <div class="command-item${i === selectedIndex ? ' selected' : ''}" data-id="${cmd.id}">
+                    <div class="command-item-left">
+                        <span class="command-item-name">${escapeHtml(cmd.label)}</span>
+                        <span class="command-item-category">${escapeHtml(cmd.category)}</span>
+                    </div>
+                    ${cmd.shortcut ? `<span class="command-item-shortcut">${escapeHtml(cmd.shortcut)}</span>` : ''}
+                </div>
+            `).join('');
+        }
+
+        function executeSelected() {
+            if (commandResults.length > 0 && commandResults[selectedIndex]) {
+                sendIpc('execute_command', { id: commandResults[selectedIndex].id });
+            }
+        }
+
+        function close() {
+            sendIpc('collapse_shelf');
+        }
+
+        // Close button
+        document.getElementById('closeBtn').addEventListener('click', close);
+
+        // Command input
+        const commandInput = document.getElementById('commandInput');
+        commandInput.addEventListener('input', (e) => {
+            sendIpc('search_commands', { query: e.target.value });
+        });
+
+        // Results click
+        document.getElementById('commandResults').addEventListener('click', (e) => {
+            const item = e.target.closest('.command-item');
+            if (item) {
+                sendIpc('execute_command', { id: item.dataset.id });
+            }
+        });
+
+        // Get number of columns in grid
+        function getGridColumns() {
+            const container = document.getElementById('commandResults');
+            if (!container || commandResults.length === 0) return 1;
+            const containerWidth = container.clientWidth;
+            // Each item is minmax(200px, 1fr) with 4px gap
+            return Math.max(1, Math.floor((containerWidth + 4) / 204));
+        }
+
+        // Keyboard navigation (2D grid)
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                close();
+                return;
+            }
+
+            const cols = getGridColumns();
+
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                const newIndex = selectedIndex + cols;
+                if (newIndex < commandResults.length) {
+                    selectedIndex = newIndex;
+                    renderResults();
+                }
+                return;
+            }
+
+            if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                const newIndex = selectedIndex - cols;
+                if (newIndex >= 0) {
+                    selectedIndex = newIndex;
+                    renderResults();
+                }
+                return;
+            }
+
+            if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                if (selectedIndex < commandResults.length - 1) {
+                    selectedIndex++;
+                    renderResults();
+                }
+                return;
+            }
+
+            if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                if (selectedIndex > 0) {
+                    selectedIndex--;
+                    renderResults();
+                }
+                return;
+            }
+
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                executeSelected();
+                return;
+            }
+        });
+
+        // Request initial commands when focused
+        commandInput.addEventListener('focus', () => {
+            sendIpc('search_commands', { query: commandInput.value });
+        });
+
+        console.log('HiWave Shelf initialized');
+    </script>
+</body>
+</html>

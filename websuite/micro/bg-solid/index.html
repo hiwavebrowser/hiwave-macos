@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="../../common/parity-reset.css">
+  <title>Solid Background Test</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; padding: 20px; background: #f5f5f5; }
+    h2 { margin: 20px 0 10px; font-size: 14px; }
+    
+    .box {
+      width: 200px;
+      height: 100px;
+      margin: 10px;
+      display: inline-block;
+      border: 1px solid #333;
+    }
+    
+    .red { background-color: red; }
+    .hex { background-color: #3498db; }
+    .rgb { background-color: rgb(46, 204, 113); }
+    .rgba { background-color: rgba(155, 89, 182, 0.7); }
+    .named { background-color: coral; }
+    .hsl { background-color: hsl(120, 50%, 50%); }
+    .hsla { background-color: hsla(240, 50%, 50%, 0.5); }
+  </style>
+</head>
+<body>
+  <h1>Solid Background Colors</h1>
+  
+  <h2>Named colors</h2>
+  <div class="box red"></div>
+  <div class="box named"></div>
+  
+  <h2>Hex colors</h2>
+  <div class="box hex"></div>
+  
+  <h2>RGB colors</h2>
+  <div class="box rgb"></div>
+  <div class="box rgba"></div>
+  
+  <h2>HSL colors</h2>
+  <div class="box hsl"></div>
+  <div class="box hsla"></div>
+</body>
+</html>
+
+
+

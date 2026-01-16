@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Transform: Scale</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 40px;
+            background: #f0f0f0;
+        }
+        .box {
+            width: 100px;
+            height: 100px;
+            background: #e74c3c;
+            margin: 40px;
+            display: inline-block;
+        }
+        .scale-up {
+            transform: scale(1.5);
+        }
+        .scale-down {
+            transform: scale(0.5);
+        }
+        .scale-x {
+            transform: scaleX(2);
+        }
+        .scale-y {
+            transform: scaleY(0.5);
+        }
+    </style>
+</head>
+<body>
+    <div class="box">Normal</div>
+    <div class="box scale-up">scale(1.5)</div>
+    <div class="box scale-down">scale(0.5)</div>
+    <div class="box scale-x">scaleX(2)</div>
+    <div class="box scale-y">scaleY(0.5)</div>
+</body>
+</html>
+
+
+

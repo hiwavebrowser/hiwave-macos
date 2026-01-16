@@ -1,0 +1,42 @@
+[package]
+name = "rustkit-bench"
+version = "0.1.0"
+edition = "2021"
+description = "Performance benchmarking for RustKit browser engine"
+authors = ["HiWave Team"]
+license = "MIT"
+
+[dependencies]
+# RustKit crates
+rustkit-dom = { path = "../rustkit-dom" }
+rustkit-css = { path = "../rustkit-css" }
+rustkit-layout = { path = "../rustkit-layout" }
+rustkit-js = { path = "../rustkit-js" }
+
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# Utilities
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Timing
+instant = "0.1"
+
+# Stats
+statistical = "1.0"
+
+# Error handling
+thiserror = "1.0"
+
+# Tracing
+tracing = "0.1"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bench]]
+name = "rustkit"
+path = "../../benches/rustkit.rs"
+harness = false
+

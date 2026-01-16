@@ -1,0 +1,298 @@
+{
+  "timestamp": "2026-01-08T03:37:18.748Z",
+  "viewport": {
+    "width": 1280,
+    "height": 120
+  },
+  "elementCount": 12,
+  "elements": [
+    {
+      "selector": "html > body",
+      "tag": "body",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 120,
+        "top": 0,
+        "right": 1280,
+        "bottom": 120,
+        "left": 0
+      },
+      "client": {
+        "width": 1280,
+        "height": 120
+      },
+      "scroll": {
+        "width": 1280,
+        "height": 176,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.shelf-header:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 41,
+        "top": 0,
+        "right": 1280,
+        "bottom": 41,
+        "left": 0
+      },
+      "client": {
+        "width": 1280,
+        "height": 40
+      },
+      "scroll": {
+        "width": 1280,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.shelf-header:nth-of-type(1) > span.shelf-title",
+      "tag": "span",
+      "rect": {
+        "x": 16,
+        "y": 12.5,
+        "width": 104.78125,
+        "height": 15,
+        "top": 12.5,
+        "right": 120.78125,
+        "bottom": 27.5,
+        "left": 16
+      },
+      "client": {
+        "width": 105,
+        "height": 15
+      },
+      "scroll": {
+        "width": 105,
+        "height": 15,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "#closeBtn",
+      "tag": "button",
+      "rect": {
+        "x": 1240,
+        "y": 8,
+        "width": 24,
+        "height": 24,
+        "top": 8,
+        "right": 1264,
+        "bottom": 32,
+        "left": 1240
+      },
+      "client": {
+        "width": 24,
+        "height": 24
+      },
+      "scroll": {
+        "width": 24,
+        "height": 24,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.command-palette:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 41,
+        "width": 1280,
+        "height": 135,
+        "top": 41,
+        "right": 1280,
+        "bottom": 176,
+        "left": 0
+      },
+      "client": {
+        "width": 1280,
+        "height": 135
+      },
+      "scroll": {
+        "width": 1280,
+        "height": 135,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.command-palette:nth-of-type(2) > div.command-input-wrapper:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 16,
+        "y": 53,
+        "width": 1248,
+        "height": 43,
+        "top": 53,
+        "right": 1264,
+        "bottom": 96,
+        "left": 16
+      },
+      "client": {
+        "width": 1246,
+        "height": 41
+      },
+      "scroll": {
+        "width": 1248,
+        "height": 43,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.command-palette:nth-of-type(2) > div.command-input-wrapper:nth-of-type(1) > svg",
+      "tag": "svg",
+      "rect": {
+        "x": 29,
+        "y": 67.5,
+        "width": 14,
+        "height": 14,
+        "top": 67.5,
+        "right": 43,
+        "bottom": 81.5,
+        "left": 29
+      },
+      "client": {
+        "width": 14,
+        "height": 14
+      },
+      "scroll": {
+        "width": 14,
+        "height": 14,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.command-palette:nth-of-type(2) > div.command-input-wrapper:nth-of-type(1) > svg > circle",
+      "tag": "circle",
+      "rect": {
+        "x": 30.75,
+        "y": 69.25,
+        "width": 9.333332061767578,
+        "height": 9.333335876464844,
+        "top": 69.25,
+        "right": 40.08333206176758,
+        "bottom": 78.58333587646484,
+        "left": 30.75
+      },
+      "client": {
+        "width": 0,
+        "height": 0
+      },
+      "scroll": {
+        "width": 0,
+        "height": 0,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.command-palette:nth-of-type(2) > div.command-input-wrapper:nth-of-type(1) > svg > path",
+      "tag": "path",
+      "rect": {
+        "x": 38.712501525878906,
+        "y": 77.2125015258789,
+        "width": 2.5374984741210938,
+        "height": 2.5374984741210938,
+        "top": 77.2125015258789,
+        "right": 41.25,
+        "bottom": 79.75,
+        "left": 38.712501525878906
+      },
+      "client": {
+        "width": 0,
+        "height": 0
+      },
+      "scroll": {
+        "width": 0,
+        "height": 0,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "#commandInput",
+      "tag": "input",
+      "rect": {
+        "x": 53,
+        "y": 54,
+        "width": 1198,
+        "height": 41,
+        "top": 54,
+        "right": 1251,
+        "bottom": 95,
+        "left": 53
+      },
+      "client": {
+        "width": 1198,
+        "height": 41
+      },
+      "scroll": {
+        "width": 1198,
+        "height": 41,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "#commandResults",
+      "tag": "div",
+      "rect": {
+        "x": 16,
+        "y": 108,
+        "width": 1248,
+        "height": 56,
+        "top": 108,
+        "right": 1264,
+        "bottom": 164,
+        "left": 16
+      },
+      "client": {
+        "width": 1248,
+        "height": 56
+      },
+      "scroll": {
+        "width": 1248,
+        "height": 56,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.command-palette:nth-of-type(2) > div.command-results:nth-of-type(2) > div.command-empty",
+      "tag": "div",
+      "rect": {
+        "x": 16,
+        "y": 108,
+        "width": 1248,
+        "height": 56,
+        "top": 108,
+        "right": 1264,
+        "bottom": 164,
+        "left": 16
+      },
+      "client": {
+        "width": 1248,
+        "height": 56
+      },
+      "scroll": {
+        "width": 1248,
+        "height": 56,
+        "top": 0,
+        "left": 0
+      }
+    }
+  ]
+}

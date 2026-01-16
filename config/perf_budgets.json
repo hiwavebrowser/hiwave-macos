@@ -1,0 +1,80 @@
+{
+  "version": "1.0",
+  "description": "Performance budgets for RustKit rendering pipeline",
+  
+  "budgets": {
+    "engine_init": {
+      "description": "Engine initialization time",
+      "budget_ms": 50,
+      "warning_threshold": 0.8,
+      "fail_threshold": 1.5
+    },
+    "view_create": {
+      "description": "View creation time",
+      "budget_ms": 20,
+      "warning_threshold": 0.8,
+      "fail_threshold": 1.5
+    },
+    "html_load": {
+      "description": "HTML parsing and DOM construction",
+      "budget_ms": 100,
+      "warning_threshold": 0.8,
+      "fail_threshold": 1.5
+    },
+    "layout": {
+      "description": "Layout calculation (per frame)",
+      "budget_ms": 16,
+      "warning_threshold": 0.8,
+      "fail_threshold": 2.0
+    },
+    "paint": {
+      "description": "Display list generation (per frame)",
+      "budget_ms": 8,
+      "warning_threshold": 0.8,
+      "fail_threshold": 2.0
+    },
+    "render": {
+      "description": "GPU render (per frame avg, includes first paint spike)",
+      "budget_ms": 50,
+      "warning_threshold": 0.8,
+      "fail_threshold": 1.5,
+      "notes": "First frame is slow due to shader compilation; optimize later"
+    },
+    "frame_capture": {
+      "description": "Frame capture to file",
+      "budget_ms": 50,
+      "warning_threshold": 0.8,
+      "fail_threshold": 2.0
+    },
+    "total_first_paint": {
+      "description": "Total time to first meaningful paint",
+      "budget_ms": 200,
+      "warning_threshold": 0.8,
+      "fail_threshold": 1.5
+    }
+  },
+  
+  "regression_detection": {
+    "enabled": true,
+    "baseline_file": "perf_baseline.json",
+    "regression_threshold": 1.2,
+    "improvement_threshold": 0.8,
+    "min_samples": 3
+  },
+  
+  "per_suite_overrides": {
+    "builtins": {
+      "total_first_paint": {
+        "budget_ms": 150,
+        "notes": "Built-in pages should render faster"
+      }
+    },
+    "websuite": {
+      "html_load": {
+        "budget_ms": 200,
+        "notes": "Websuite pages may have more complex DOM"
+      }
+    }
+  }
+}
+

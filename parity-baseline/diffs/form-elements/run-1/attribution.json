@@ -1,0 +1,163 @@
+{
+  "width": 800,
+  "height": 600,
+  "diffPercent": 5.789166666666667,
+  "totalDiffPixels": 480000,
+  "unattributedDiffPixels": 0,
+  "taxonomy": {
+    "text_metrics": 65.35,
+    "form_control": 19.8
+  },
+  "topContributors": [
+    {
+      "selector": "html > body",
+      "tag": "body",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 800,
+        "height": 1699
+      },
+      "diff_pixels": 144000,
+      "contribution_percent": 30,
+      "element_diff_percent": 10.59446733372572,
+      "corner_ratio": 0.002,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.container > div.form-card:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 100,
+        "y": 104,
+        "width": 600,
+        "height": 519
+      },
+      "diff_pixels": 103740,
+      "contribution_percent": 21.6125,
+      "element_diff_percent": 33.3140655105973,
+      "corner_ratio": 0.002776171197223829,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "#name",
+      "tag": "input",
+      "rect": {
+        "x": 130,
+        "y": 211,
+        "width": 540,
+        "height": 44
+      },
+      "diff_pixels": 23760,
+      "contribution_percent": 4.95,
+      "element_diff_percent": 100,
+      "corner_ratio": 0.024242424242424242,
+      "likely_cause": "form_control"
+    },
+    {
+      "selector": "#email",
+      "tag": "input",
+      "rect": {
+        "x": 130,
+        "y": 298,
+        "width": 540,
+        "height": 44
+      },
+      "diff_pixels": 23760,
+      "contribution_percent": 4.95,
+      "element_diff_percent": 100,
+      "corner_ratio": 0.024242424242424242,
+      "likely_cause": "form_control"
+    },
+    {
+      "selector": "#password",
+      "tag": "input",
+      "rect": {
+        "x": 130,
+        "y": 404,
+        "width": 540,
+        "height": 44
+      },
+      "diff_pixels": 23760,
+      "contribution_percent": 4.95,
+      "element_diff_percent": 100,
+      "corner_ratio": 0.024242424242424242,
+      "likely_cause": "form_control"
+    },
+    {
+      "selector": "#username",
+      "tag": "input",
+      "rect": {
+        "x": 130,
+        "y": 510,
+        "width": 540,
+        "height": 44
+      },
+      "diff_pixels": 23760,
+      "contribution_percent": 4.95,
+      "element_diff_percent": 100,
+      "corner_ratio": 0.024242424242424242,
+      "likely_cause": "form_control"
+    },
+    {
+      "selector": "body > div.container > h1",
+      "tag": "h1",
+      "rect": {
+        "x": 100,
+        "y": 40,
+        "width": 600,
+        "height": 34
+      },
+      "diff_pixels": 20400,
+      "contribution_percent": 4.25,
+      "element_diff_percent": 100,
+      "corner_ratio": 0.02823529411764706,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.container > div.form-card:nth-of-type(1) > h2",
+      "tag": "h2",
+      "rect": {
+        "x": 130,
+        "y": 134,
+        "width": 540,
+        "height": 34
+      },
+      "diff_pixels": 18360,
+      "contribution_percent": 3.8249999999999997,
+      "element_diff_percent": 100,
+      "corner_ratio": 0.03137254901960784,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.container",
+      "tag": "div",
+      "rect": {
+        "x": 100,
+        "y": 40,
+        "width": 600,
+        "height": 1599
+      },
+      "diff_pixels": 18000,
+      "contribution_percent": 3.75,
+      "element_diff_percent": 1.876172607879925,
+      "corner_ratio": 0,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.container > div.form-card:nth-of-type(1) > div.form-group:nth-of-type(1) > label",
+      "tag": "label",
+      "rect": {
+        "x": 130,
+        "y": 188,
+        "width": 540,
+        "height": 17
+      },
+      "diff_pixels": 9180,
+      "contribution_percent": 1.9124999999999999,
+      "element_diff_percent": 100,
+      "corner_ratio": 0.044444444444444446,
+      "likely_cause": "text_metrics"
+    }
+  ]
+}

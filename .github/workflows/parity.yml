@@ -1,0 +1,302 @@
+name: Parity Gate
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+  schedule:
+    - cron: "0 9 * * *"
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ===========================================================================
+  # PR Gate: Sharded swarm (~30m total)
+  # ===========================================================================
+  pr-swarm:
+    if: github.event_name == 'pull_request'
+    runs-on: macos-14
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install oracle deps
+        working-directory: tools/parity_oracle
+        run: npm ci
+
+      - name: Build Rust
+        run: cargo build --release -p parity-capture
+
+      - name: Run swarm shard ${{ matrix.shard }}
+        run: |
+          python3 scripts/parity_swarm.py \
+            --jobs 2 \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count 4 \
+            --scope all \
+            --iterations 1 \
+            --exploit-top 3 \
+            --exploit-iterations 2 \
+            --exploit-viewports 800x600,1280x800 \
+            --run-id pr-${{ github.run_number }}-shard-${{ matrix.shard }}
+
+      - name: Upload shard artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-shard-${{ matrix.shard }}
+          path: parity-results/pr-${{ github.run_number }}-shard-${{ matrix.shard }}/
+          retention-days: 7
+
+  pr-aggregate:
+    if: github.event_name == 'pull_request'
+    needs: pr-swarm
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download all shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: parity-shard-*
+          path: parity-results/
+          merge-multiple: false
+
+      - name: Aggregate shards
+        run: |
+          # Find all shard run IDs
+          RUNS=$(ls -d parity-results/parity-shard-*/pr-* 2>/dev/null | xargs -n1 basename | sort -u | tr '\n' ',' | sed 's/,$//')
+          echo "Merging runs: $RUNS"
+          python3 scripts/parity_aggregate.py \
+            --runs "$RUNS" \
+            --results-root parity-results \
+            --output parity-results/aggregate_report.json
+
+      - name: Gate check
+        run: |
+          python3 scripts/parity_gate.py \
+            --mode test_results \
+            --level pr_merge \
+            --report parity-results/aggregate_report.json \
+            --max-diff 25
+
+      - name: Upload aggregate report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-aggregate
+          path: |
+            parity-results/aggregate_report.json
+          retention-days: 30
+
+  # ===========================================================================
+  # Commit Gate: Quick sanity check on push to main
+  # ===========================================================================
+  commit-gate:
+    if: github.event_name == 'push'
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install oracle deps
+        working-directory: tools/parity_oracle
+        run: npm ci
+
+      - name: Build Rust
+        run: cargo build --release -p parity-capture
+
+      - name: Run swarm (quick)
+        run: |
+          python3 scripts/parity_swarm.py \
+            --jobs 4 \
+            --scope all \
+            --iterations 1 \
+            --run-id commit-${{ github.run_number }}
+
+      - name: Aggregate
+        run: |
+          python3 scripts/parity_aggregate.py \
+            --run-id commit-${{ github.run_number }} \
+            --output parity-results/commit-${{ github.run_number }}/aggregate_report.json
+
+      - name: Gate check
+        run: |
+          python3 scripts/parity_gate.py \
+            --mode test_results \
+            --level commit \
+            --report parity-results/commit-${{ github.run_number }}/aggregate_report.json \
+            --max-diff 25
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-commit
+          path: parity-results/commit-${{ github.run_number }}/
+          retention-days: 14
+
+      # Notify umbrella repo to update metrics visualizations
+      - name: Trigger umbrella metrics update
+        if: success()
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.UMBRELLA_PAT }}
+          repository: hiwavebrowser/hiwave
+          event-type: metrics-updated
+          client-payload: '{"platform": "macos", "run_id": "${{ github.run_number }}"}'
+
+  # ===========================================================================
+  # Nightly: Full swarm with stability testing
+  # ===========================================================================
+  nightly-swarm:
+    if: github.event_name == 'schedule'
+    runs-on: macos-14
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install oracle deps
+        working-directory: tools/parity_oracle
+        run: npm ci
+
+      - name: Build Rust
+        run: cargo build --release -p parity-capture
+
+      - name: Run nightly swarm shard ${{ matrix.shard }}
+        run: |
+          python3 scripts/parity_swarm.py \
+            --jobs 2 \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count 4 \
+            --scope all \
+            --iterations 1 \
+            --exploit-top 10 \
+            --exploit-iterations 3 \
+            --exploit-viewports 800x600,1280x800,1920x1080 \
+            --max-variance 0.10 \
+            --run-id nightly-${{ github.run_number }}-shard-${{ matrix.shard }}
+
+      - name: Upload shard artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-shard-${{ matrix.shard }}
+          path: parity-results/nightly-${{ github.run_number }}-shard-${{ matrix.shard }}/
+          retention-days: 30
+
+  nightly-aggregate:
+    if: github.event_name == 'schedule'
+    needs: nightly-swarm
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download all shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nightly-shard-*
+          path: parity-results/
+          merge-multiple: false
+
+      - name: Aggregate shards
+        run: |
+          RUNS=$(ls -d parity-results/nightly-shard-*/nightly-* 2>/dev/null | xargs -n1 basename | sort -u | tr '\n' ',' | sed 's/,$//')
+          echo "Merging runs: $RUNS"
+          python3 scripts/parity_aggregate.py \
+            --runs "$RUNS" \
+            --results-root parity-results \
+            --output parity-results/nightly_aggregate.json
+
+      - name: Gate check (nightly)
+        run: |
+          python3 scripts/parity_gate.py \
+            --mode test_results \
+            --level nightly \
+            --report parity-results/nightly_aggregate.json \
+            --require-stable \
+            --max-variance 0.10 \
+            --max-diff 25
+
+      # Compare against previous nightly if available
+      - name: Download previous nightly
+        continue-on-error: true
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: parity.yml
+          name: nightly-aggregate
+          path: parity-results/previous/
+          search_artifacts: true
+          workflow_conclusion: success
+          if_no_artifact_found: ignore
+
+      - name: Regression check
+        if: hashFiles('parity-results/previous/nightly_aggregate.json') != ''
+        run: |
+          python3 scripts/parity_aggregate.py \
+            --compare \
+            --baseline parity-results/previous/nightly_aggregate.json \
+            --current parity-results/nightly_aggregate.json \
+            --regression-budget 0.5 \
+            --output parity-results/regression_report.json
+
+      - name: Upload nightly report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-aggregate
+          path: |
+            parity-results/nightly_aggregate.json
+            parity-results/regression_report.json
+          retention-days: 90
+
+      # Notify umbrella repo to update metrics visualizations
+      - name: Trigger umbrella metrics update
+        if: success()
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.UMBRELLA_PAT }}
+          repository: hiwavebrowser/hiwave
+          event-type: metrics-updated
+          client-payload: '{"platform": "macos", "run_id": "${{ github.run_number }}"}'

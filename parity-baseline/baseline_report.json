@@ -1,0 +1,75 @@
+{
+  "timestamp": "2026-01-10T22:29:45.612258",
+  "config": {
+    "builtins_weight": 0.6,
+    "websuite_weight": 0.4,
+    "tier_a_threshold": 25,
+    "oracle_enabled": false,
+    "oracle_scope": null
+  },
+  "metrics": {
+    "tier_a_threshold": 25,
+    "tier_a_pass_rate": 0.4,
+    "tier_a_builtin_pass": 0.0,
+    "tier_a_websuite_pass": 1.0,
+    "tier_b_median_diff": 0.3030303030302939,
+    "tier_b_weighted_mean": 0.12121212121211755,
+    "worst_3_cases": [
+      {
+        "case_id": "gradient-backgrounds",
+        "type": "websuite",
+        "diff_pct": 0.3030303030302939
+      }
+    ],
+    "builtin_mean_diff": 0.0,
+    "websuite_mean_diff": 0.3030303030302939
+  },
+  "issue_clusters": {
+    "sizing_layout": 0,
+    "paint": 0,
+    "text": 0,
+    "images": 0
+  },
+  "builtin_results": [],
+  "websuite_results": [
+    {
+      "case_id": "gradient-backgrounds",
+      "html_path": "websuite/cases/gradient-backgrounds/index.html",
+      "width": 800,
+      "height": 600,
+      "success": true,
+      "frame_path": "parity-baseline/captures/gradient-backgrounds.ppm",
+      "layout_path": "parity-baseline/captures/gradient-backgrounds.layout.json",
+      "layout_stats": {
+        "total_boxes": 66,
+        "positioned": 65,
+        "sized": 66,
+        "zero_area": 0,
+        "zero_width_only": 0,
+        "zero_height_only": 0,
+        "zero_size": 0,
+        "at_origin": 1,
+        "form_controls": 0,
+        "text_boxes": 23,
+        "block_boxes": 26,
+        "inline_boxes": 17,
+        "image_boxes": 0,
+        "issues": [],
+        "sizing_rate": 1.0,
+        "positioning_rate": 0.9848484848484849,
+        "area_sizing_rate": 1.0
+      },
+      "perf": {},
+      "error": null,
+      "capture_mode": "headless",
+      "estimated_diff_pct": 0.3030303030302939,
+      "issue_clusters": {
+        "sizing_layout": 0,
+        "paint": 0,
+        "text": 0,
+        "images": 0
+      }
+    }
+  ],
+  "oracle_results": null
+}

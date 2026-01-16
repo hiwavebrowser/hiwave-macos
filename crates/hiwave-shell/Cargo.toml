@@ -1,0 +1,15 @@
+[package]
+name = "hiwave-shell"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hiwave-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+fuzzy-matcher = { workspace = true }
+url = { workspace = true }

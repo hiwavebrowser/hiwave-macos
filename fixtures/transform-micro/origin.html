@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Transform: Origin</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 60px;
+            background: #f0f0f0;
+        }
+        .box {
+            width: 100px;
+            height: 100px;
+            background: #9b59b6;
+            margin: 60px;
+            display: inline-block;
+            transform: rotate(45deg);
+        }
+        .origin-center {
+            transform-origin: center;
+        }
+        .origin-top-left {
+            transform-origin: top left;
+        }
+        .origin-bottom-right {
+            transform-origin: bottom right;
+        }
+        .origin-custom {
+            transform-origin: 25% 75%;
+        }
+    </style>
+</head>
+<body>
+    <div class="box origin-center">Center (default)</div>
+    <div class="box origin-top-left">Top Left</div>
+    <div class="box origin-bottom-right">Bottom Right</div>
+    <div class="box origin-custom">25% 75%</div>
+</body>
+</html>
+
+
+

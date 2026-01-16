@@ -1,0 +1,1450 @@
+{
+  "timestamp": "2026-01-09T03:16:36.516Z",
+  "viewport": {
+    "width": 1280,
+    "height": 800
+  },
+  "elementCount": 60,
+  "elements": [
+    {
+      "selector": "html > body",
+      "tag": "body",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 949.78125,
+        "top": 0,
+        "right": 1280,
+        "bottom": 949.78125,
+        "left": 0
+      },
+      "client": {
+        "width": 1280,
+        "height": 950
+      },
+      "scroll": {
+        "width": 1280,
+        "height": 950,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.header:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 40,
+        "y": 40,
+        "width": 1200,
+        "height": 78,
+        "top": 40,
+        "right": 1240,
+        "bottom": 118,
+        "left": 40
+      },
+      "client": {
+        "width": 1200,
+        "height": 78
+      },
+      "scroll": {
+        "width": 1200,
+        "height": 78,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.header:nth-of-type(1) > h1",
+      "tag": "h1",
+      "rect": {
+        "x": 40,
+        "y": 40,
+        "width": 1200,
+        "height": 47,
+        "top": 40,
+        "right": 1240,
+        "bottom": 87,
+        "left": 40
+      },
+      "client": {
+        "width": 1200,
+        "height": 47
+      },
+      "scroll": {
+        "width": 1200,
+        "height": 47,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.header:nth-of-type(1) > p",
+      "tag": "p",
+      "rect": {
+        "x": 40,
+        "y": 97,
+        "width": 1200,
+        "height": 21,
+        "top": 97,
+        "right": 1240,
+        "bottom": 118,
+        "left": 40
+      },
+      "client": {
+        "width": 1200,
+        "height": 21
+      },
+      "scroll": {
+        "width": 1200,
+        "height": 21,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 40,
+        "y": 158,
+        "width": 1200,
+        "height": 586.78125,
+        "top": 158,
+        "right": 1240,
+        "bottom": 744.78125,
+        "left": 40
+      },
+      "client": {
+        "width": 1200,
+        "height": 587
+      },
+      "scroll": {
+        "width": 1200,
+        "height": 587,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 166,
+        "y": 158,
+        "width": 300,
+        "height": 279.390625,
+        "top": 158,
+        "right": 466,
+        "bottom": 437.390625,
+        "left": 166
+      },
+      "client": {
+        "width": 300,
+        "height": 279
+      },
+      "scroll": {
+        "width": 300,
+        "height": 279,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(1) > div.card-icon purple:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 190,
+        "y": 182,
+        "width": 60,
+        "height": 60,
+        "top": 182,
+        "right": 250,
+        "bottom": 242,
+        "left": 190
+      },
+      "client": {
+        "width": 60,
+        "height": 60
+      },
+      "scroll": {
+        "width": 60,
+        "height": 60,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(1) > h3",
+      "tag": "h3",
+      "rect": {
+        "x": 190,
+        "y": 258,
+        "width": 252,
+        "height": 23,
+        "top": 258,
+        "right": 442,
+        "bottom": 281,
+        "left": 190
+      },
+      "client": {
+        "width": 252,
+        "height": 23
+      },
+      "scroll": {
+        "width": 252,
+        "height": 23,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(1) > p",
+      "tag": "p",
+      "rect": {
+        "x": 190,
+        "y": 289,
+        "width": 252,
+        "height": 68.390625,
+        "top": 289,
+        "right": 442,
+        "bottom": 357.390625,
+        "left": 190
+      },
+      "client": {
+        "width": 252,
+        "height": 68
+      },
+      "scroll": {
+        "width": 252,
+        "height": 68,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(1) > div.card-footer:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 190,
+        "y": 373.390625,
+        "width": 252,
+        "height": 40,
+        "top": 373.390625,
+        "right": 442,
+        "bottom": 413.390625,
+        "left": 190
+      },
+      "client": {
+        "width": 252,
+        "height": 39
+      },
+      "scroll": {
+        "width": 252,
+        "height": 39,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(1) > div.card-footer:nth-of-type(2) > span.tag:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 190,
+        "y": 390.390625,
+        "width": 97.4375,
+        "height": 23,
+        "top": 390.390625,
+        "right": 287.4375,
+        "bottom": 413.390625,
+        "left": 190
+      },
+      "client": {
+        "width": 97,
+        "height": 23
+      },
+      "scroll": {
+        "width": 97,
+        "height": 23,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(1) > div.card-footer:nth-of-type(2) > span.arrow:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 427.21875,
+        "y": 392.890625,
+        "width": 14.78125,
+        "height": 18,
+        "top": 392.890625,
+        "right": 442,
+        "bottom": 410.890625,
+        "left": 427.21875
+      },
+      "client": {
+        "width": 15,
+        "height": 18
+      },
+      "scroll": {
+        "width": 15,
+        "height": 18,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card featured:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 490,
+        "y": 158,
+        "width": 300,
+        "height": 279.390625,
+        "top": 158,
+        "right": 790,
+        "bottom": 437.390625,
+        "left": 490
+      },
+      "client": {
+        "width": 300,
+        "height": 279
+      },
+      "scroll": {
+        "width": 300,
+        "height": 279,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card featured:nth-of-type(2) > div.card-icon:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 514,
+        "y": 182,
+        "width": 60,
+        "height": 60,
+        "top": 182,
+        "right": 574,
+        "bottom": 242,
+        "left": 514
+      },
+      "client": {
+        "width": 60,
+        "height": 60
+      },
+      "scroll": {
+        "width": 60,
+        "height": 60,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card featured:nth-of-type(2) > h3",
+      "tag": "h3",
+      "rect": {
+        "x": 514,
+        "y": 258,
+        "width": 252,
+        "height": 23,
+        "top": 258,
+        "right": 766,
+        "bottom": 281,
+        "left": 514
+      },
+      "client": {
+        "width": 252,
+        "height": 23
+      },
+      "scroll": {
+        "width": 252,
+        "height": 23,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card featured:nth-of-type(2) > p",
+      "tag": "p",
+      "rect": {
+        "x": 514,
+        "y": 289,
+        "width": 252,
+        "height": 45.59375,
+        "top": 289,
+        "right": 766,
+        "bottom": 334.59375,
+        "left": 514
+      },
+      "client": {
+        "width": 252,
+        "height": 46
+      },
+      "scroll": {
+        "width": 252,
+        "height": 46,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card featured:nth-of-type(2) > div.card-footer:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 514,
+        "y": 350.59375,
+        "width": 252,
+        "height": 40,
+        "top": 350.59375,
+        "right": 766,
+        "bottom": 390.59375,
+        "left": 514
+      },
+      "client": {
+        "width": 252,
+        "height": 39
+      },
+      "scroll": {
+        "width": 252,
+        "height": 39,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card featured:nth-of-type(2) > div.card-footer:nth-of-type(2) > span.tag:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 514,
+        "y": 367.59375,
+        "width": 72.625,
+        "height": 23,
+        "top": 367.59375,
+        "right": 586.625,
+        "bottom": 390.59375,
+        "left": 514
+      },
+      "client": {
+        "width": 73,
+        "height": 23
+      },
+      "scroll": {
+        "width": 73,
+        "height": 23,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card featured:nth-of-type(2) > div.card-footer:nth-of-type(2) > span.arrow:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 751.21875,
+        "y": 370.09375,
+        "width": 14.78125,
+        "height": 18,
+        "top": 370.09375,
+        "right": 766,
+        "bottom": 388.09375,
+        "left": 751.21875
+      },
+      "client": {
+        "width": 15,
+        "height": 18
+      },
+      "scroll": {
+        "width": 15,
+        "height": 18,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(3)",
+      "tag": "div",
+      "rect": {
+        "x": 814,
+        "y": 158,
+        "width": 300,
+        "height": 279.390625,
+        "top": 158,
+        "right": 1114,
+        "bottom": 437.390625,
+        "left": 814
+      },
+      "client": {
+        "width": 300,
+        "height": 279
+      },
+      "scroll": {
+        "width": 300,
+        "height": 279,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(3) > div.card-icon blue:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 838,
+        "y": 182,
+        "width": 60,
+        "height": 60,
+        "top": 182,
+        "right": 898,
+        "bottom": 242,
+        "left": 838
+      },
+      "client": {
+        "width": 60,
+        "height": 60
+      },
+      "scroll": {
+        "width": 60,
+        "height": 60,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(3) > h3",
+      "tag": "h3",
+      "rect": {
+        "x": 838,
+        "y": 258,
+        "width": 252,
+        "height": 23,
+        "top": 258,
+        "right": 1090,
+        "bottom": 281,
+        "left": 838
+      },
+      "client": {
+        "width": 252,
+        "height": 23
+      },
+      "scroll": {
+        "width": 252,
+        "height": 23,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(3) > p",
+      "tag": "p",
+      "rect": {
+        "x": 838,
+        "y": 289,
+        "width": 252,
+        "height": 45.59375,
+        "top": 289,
+        "right": 1090,
+        "bottom": 334.59375,
+        "left": 838
+      },
+      "client": {
+        "width": 252,
+        "height": 46
+      },
+      "scroll": {
+        "width": 252,
+        "height": 46,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(3) > div.card-footer:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 838,
+        "y": 350.59375,
+        "width": 252,
+        "height": 40,
+        "top": 350.59375,
+        "right": 1090,
+        "bottom": 390.59375,
+        "left": 838
+      },
+      "client": {
+        "width": 252,
+        "height": 39
+      },
+      "scroll": {
+        "width": 252,
+        "height": 39,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(3) > div.card-footer:nth-of-type(2) > span.tag:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 838,
+        "y": 367.59375,
+        "width": 69.265625,
+        "height": 23,
+        "top": 367.59375,
+        "right": 907.265625,
+        "bottom": 390.59375,
+        "left": 838
+      },
+      "client": {
+        "width": 69,
+        "height": 23
+      },
+      "scroll": {
+        "width": 69,
+        "height": 23,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(3) > div.card-footer:nth-of-type(2) > span.arrow:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 1075.21875,
+        "y": 370.09375,
+        "width": 14.78125,
+        "height": 18,
+        "top": 370.09375,
+        "right": 1090,
+        "bottom": 388.09375,
+        "left": 1075.21875
+      },
+      "client": {
+        "width": 15,
+        "height": 18
+      },
+      "scroll": {
+        "width": 15,
+        "height": 18,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card bordered:nth-of-type(4)",
+      "tag": "div",
+      "rect": {
+        "x": 166,
+        "y": 461.390625,
+        "width": 300,
+        "height": 283.390625,
+        "top": 461.390625,
+        "right": 466,
+        "bottom": 744.78125,
+        "left": 166
+      },
+      "client": {
+        "width": 296,
+        "height": 279
+      },
+      "scroll": {
+        "width": 296,
+        "height": 279,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card bordered:nth-of-type(4) > div.card-icon orange:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 192,
+        "y": 487.390625,
+        "width": 60,
+        "height": 60,
+        "top": 487.390625,
+        "right": 252,
+        "bottom": 547.390625,
+        "left": 192
+      },
+      "client": {
+        "width": 60,
+        "height": 60
+      },
+      "scroll": {
+        "width": 60,
+        "height": 60,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card bordered:nth-of-type(4) > h3",
+      "tag": "h3",
+      "rect": {
+        "x": 192,
+        "y": 563.390625,
+        "width": 248,
+        "height": 23,
+        "top": 563.390625,
+        "right": 440,
+        "bottom": 586.390625,
+        "left": 192
+      },
+      "client": {
+        "width": 248,
+        "height": 23
+      },
+      "scroll": {
+        "width": 248,
+        "height": 23,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card bordered:nth-of-type(4) > p",
+      "tag": "p",
+      "rect": {
+        "x": 192,
+        "y": 594.390625,
+        "width": 248,
+        "height": 68.390625,
+        "top": 594.390625,
+        "right": 440,
+        "bottom": 662.78125,
+        "left": 192
+      },
+      "client": {
+        "width": 248,
+        "height": 68
+      },
+      "scroll": {
+        "width": 248,
+        "height": 68,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card bordered:nth-of-type(4) > div.card-footer:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 192,
+        "y": 678.78125,
+        "width": 248,
+        "height": 40,
+        "top": 678.78125,
+        "right": 440,
+        "bottom": 718.78125,
+        "left": 192
+      },
+      "client": {
+        "width": 248,
+        "height": 39
+      },
+      "scroll": {
+        "width": 248,
+        "height": 39,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card bordered:nth-of-type(4) > div.card-footer:nth-of-type(2) > span.tag:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 192,
+        "y": 695.78125,
+        "width": 105.71875,
+        "height": 23,
+        "top": 695.78125,
+        "right": 297.71875,
+        "bottom": 718.78125,
+        "left": 192
+      },
+      "client": {
+        "width": 106,
+        "height": 23
+      },
+      "scroll": {
+        "width": 106,
+        "height": 23,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card bordered:nth-of-type(4) > div.card-footer:nth-of-type(2) > span.arrow:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 425.21875,
+        "y": 698.28125,
+        "width": 14.78125,
+        "height": 18,
+        "top": 698.28125,
+        "right": 440,
+        "bottom": 716.28125,
+        "left": 425.21875
+      },
+      "client": {
+        "width": 15,
+        "height": 18
+      },
+      "scroll": {
+        "width": 15,
+        "height": 18,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(5)",
+      "tag": "div",
+      "rect": {
+        "x": 490,
+        "y": 461.390625,
+        "width": 300,
+        "height": 283.390625,
+        "top": 461.390625,
+        "right": 790,
+        "bottom": 744.78125,
+        "left": 490
+      },
+      "client": {
+        "width": 300,
+        "height": 283
+      },
+      "scroll": {
+        "width": 300,
+        "height": 283,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(5) > div.card-icon green:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 514,
+        "y": 485.390625,
+        "width": 60,
+        "height": 60,
+        "top": 485.390625,
+        "right": 574,
+        "bottom": 545.390625,
+        "left": 514
+      },
+      "client": {
+        "width": 60,
+        "height": 60
+      },
+      "scroll": {
+        "width": 60,
+        "height": 60,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(5) > h3",
+      "tag": "h3",
+      "rect": {
+        "x": 514,
+        "y": 561.390625,
+        "width": 252,
+        "height": 23,
+        "top": 561.390625,
+        "right": 766,
+        "bottom": 584.390625,
+        "left": 514
+      },
+      "client": {
+        "width": 252,
+        "height": 23
+      },
+      "scroll": {
+        "width": 252,
+        "height": 23,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(5) > p",
+      "tag": "p",
+      "rect": {
+        "x": 514,
+        "y": 592.390625,
+        "width": 252,
+        "height": 45.59375,
+        "top": 592.390625,
+        "right": 766,
+        "bottom": 637.984375,
+        "left": 514
+      },
+      "client": {
+        "width": 252,
+        "height": 46
+      },
+      "scroll": {
+        "width": 252,
+        "height": 46,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(5) > div.card-footer:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 514,
+        "y": 653.984375,
+        "width": 252,
+        "height": 40,
+        "top": 653.984375,
+        "right": 766,
+        "bottom": 693.984375,
+        "left": 514
+      },
+      "client": {
+        "width": 252,
+        "height": 39
+      },
+      "scroll": {
+        "width": 252,
+        "height": 39,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(5) > div.card-footer:nth-of-type(2) > span.tag:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 514,
+        "y": 670.984375,
+        "width": 74.484375,
+        "height": 23,
+        "top": 670.984375,
+        "right": 588.484375,
+        "bottom": 693.984375,
+        "left": 514
+      },
+      "client": {
+        "width": 74,
+        "height": 23
+      },
+      "scroll": {
+        "width": 74,
+        "height": 23,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(5) > div.card-footer:nth-of-type(2) > span.arrow:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 751.21875,
+        "y": 673.484375,
+        "width": 14.78125,
+        "height": 18,
+        "top": 673.484375,
+        "right": 766,
+        "bottom": 691.484375,
+        "left": 751.21875
+      },
+      "client": {
+        "width": 15,
+        "height": 18
+      },
+      "scroll": {
+        "width": 15,
+        "height": 18,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(6)",
+      "tag": "div",
+      "rect": {
+        "x": 814,
+        "y": 461.390625,
+        "width": 300,
+        "height": 283.390625,
+        "top": 461.390625,
+        "right": 1114,
+        "bottom": 744.78125,
+        "left": 814
+      },
+      "client": {
+        "width": 300,
+        "height": 283
+      },
+      "scroll": {
+        "width": 300,
+        "height": 283,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(6) > div.card-icon teal:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 838,
+        "y": 485.390625,
+        "width": 60,
+        "height": 60,
+        "top": 485.390625,
+        "right": 898,
+        "bottom": 545.390625,
+        "left": 838
+      },
+      "client": {
+        "width": 60,
+        "height": 60
+      },
+      "scroll": {
+        "width": 60,
+        "height": 60,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(6) > h3",
+      "tag": "h3",
+      "rect": {
+        "x": 838,
+        "y": 561.390625,
+        "width": 252,
+        "height": 23,
+        "top": 561.390625,
+        "right": 1090,
+        "bottom": 584.390625,
+        "left": 838
+      },
+      "client": {
+        "width": 252,
+        "height": 23
+      },
+      "scroll": {
+        "width": 252,
+        "height": 23,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(6) > p",
+      "tag": "p",
+      "rect": {
+        "x": 838,
+        "y": 592.390625,
+        "width": 252,
+        "height": 45.59375,
+        "top": 592.390625,
+        "right": 1090,
+        "bottom": 637.984375,
+        "left": 838
+      },
+      "client": {
+        "width": 252,
+        "height": 46
+      },
+      "scroll": {
+        "width": 252,
+        "height": 46,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(6) > div.card-footer:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 838,
+        "y": 653.984375,
+        "width": 252,
+        "height": 40,
+        "top": 653.984375,
+        "right": 1090,
+        "bottom": 693.984375,
+        "left": 838
+      },
+      "client": {
+        "width": 252,
+        "height": 39
+      },
+      "scroll": {
+        "width": 252,
+        "height": 39,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(6) > div.card-footer:nth-of-type(2) > span.tag:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 838,
+        "y": 670.984375,
+        "width": 84.6875,
+        "height": 23,
+        "top": 670.984375,
+        "right": 922.6875,
+        "bottom": 693.984375,
+        "left": 838
+      },
+      "client": {
+        "width": 85,
+        "height": 23
+      },
+      "scroll": {
+        "width": 85,
+        "height": 23,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.grid:nth-of-type(2) > div.card:nth-of-type(6) > div.card-footer:nth-of-type(2) > span.arrow:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 1075.21875,
+        "y": 673.484375,
+        "width": 14.78125,
+        "height": 18,
+        "top": 673.484375,
+        "right": 1090,
+        "bottom": 691.484375,
+        "left": 1075.21875
+      },
+      "client": {
+        "width": 15,
+        "height": 18
+      },
+      "scroll": {
+        "width": 15,
+        "height": 18,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.stats:nth-of-type(3)",
+      "tag": "div",
+      "rect": {
+        "x": 240,
+        "y": 784.78125,
+        "width": 800,
+        "height": 125,
+        "top": 784.78125,
+        "right": 1040,
+        "bottom": 909.78125,
+        "left": 240
+      },
+      "client": {
+        "width": 800,
+        "height": 125
+      },
+      "scroll": {
+        "width": 800,
+        "height": 125,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.stats:nth-of-type(3) > div.stat:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 387.109375,
+        "y": 814.78125,
+        "width": 96.6875,
+        "height": 65,
+        "top": 814.78125,
+        "right": 483.796875,
+        "bottom": 879.78125,
+        "left": 387.109375
+      },
+      "client": {
+        "width": 97,
+        "height": 65
+      },
+      "scroll": {
+        "width": 97,
+        "height": 65,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.stats:nth-of-type(3) > div.stat:nth-of-type(1) > span.stat-value:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 387.109375,
+        "y": 814.78125,
+        "width": 96.6875,
+        "height": 47,
+        "top": 814.78125,
+        "right": 483.796875,
+        "bottom": 861.78125,
+        "left": 387.109375
+      },
+      "client": {
+        "width": 97,
+        "height": 47
+      },
+      "scroll": {
+        "width": 97,
+        "height": 47,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.stats:nth-of-type(3) > div.stat:nth-of-type(1) > span.stat-label:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 393.875,
+        "y": 862.78125,
+        "width": 83.140625,
+        "height": 17,
+        "top": 862.78125,
+        "right": 477.015625,
+        "bottom": 879.78125,
+        "left": 393.875
+      },
+      "client": {
+        "width": 0,
+        "height": 0
+      },
+      "scroll": {
+        "width": 0,
+        "height": 0,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.stats:nth-of-type(3) > div.stat:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 523.796875,
+        "y": 814.78125,
+        "width": 124.203125,
+        "height": 65,
+        "top": 814.78125,
+        "right": 648,
+        "bottom": 879.78125,
+        "left": 523.796875
+      },
+      "client": {
+        "width": 124,
+        "height": 65
+      },
+      "scroll": {
+        "width": 124,
+        "height": 65,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.stats:nth-of-type(3) > div.stat:nth-of-type(2) > span.stat-value:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 523.796875,
+        "y": 814.78125,
+        "width": 124.203125,
+        "height": 47,
+        "top": 814.78125,
+        "right": 648,
+        "bottom": 861.78125,
+        "left": 523.796875
+      },
+      "client": {
+        "width": 124,
+        "height": 47
+      },
+      "scroll": {
+        "width": 124,
+        "height": 47,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.stats:nth-of-type(3) > div.stat:nth-of-type(2) > span.stat-label:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 561.96875,
+        "y": 862.78125,
+        "width": 47.859375,
+        "height": 17,
+        "top": 862.78125,
+        "right": 609.828125,
+        "bottom": 879.78125,
+        "left": 561.96875
+      },
+      "client": {
+        "width": 0,
+        "height": 0
+      },
+      "scroll": {
+        "width": 0,
+        "height": 0,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.stats:nth-of-type(3) > div.stat:nth-of-type(3)",
+      "tag": "div",
+      "rect": {
+        "x": 688,
+        "y": 814.78125,
+        "width": 78.859375,
+        "height": 65,
+        "top": 814.78125,
+        "right": 766.859375,
+        "bottom": 879.78125,
+        "left": 688
+      },
+      "client": {
+        "width": 79,
+        "height": 65
+      },
+      "scroll": {
+        "width": 79,
+        "height": 65,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.stats:nth-of-type(3) > div.stat:nth-of-type(3) > span.stat-value:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 688,
+        "y": 814.78125,
+        "width": 78.859375,
+        "height": 47,
+        "top": 814.78125,
+        "right": 766.859375,
+        "bottom": 861.78125,
+        "left": 688
+      },
+      "client": {
+        "width": 79,
+        "height": 47
+      },
+      "scroll": {
+        "width": 79,
+        "height": 47,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.stats:nth-of-type(3) > div.stat:nth-of-type(3) > span.stat-label:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 688,
+        "y": 862.78125,
+        "width": 78.859375,
+        "height": 17,
+        "top": 862.78125,
+        "right": 766.859375,
+        "bottom": 879.78125,
+        "left": 688
+      },
+      "client": {
+        "width": 0,
+        "height": 0
+      },
+      "scroll": {
+        "width": 0,
+        "height": 0,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.stats:nth-of-type(3) > div.stat:nth-of-type(4)",
+      "tag": "div",
+      "rect": {
+        "x": 806.859375,
+        "y": 814.78125,
+        "width": 86.015625,
+        "height": 65,
+        "top": 814.78125,
+        "right": 892.875,
+        "bottom": 879.78125,
+        "left": 806.859375
+      },
+      "client": {
+        "width": 86,
+        "height": 65
+      },
+      "scroll": {
+        "width": 86,
+        "height": 65,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.stats:nth-of-type(3) > div.stat:nth-of-type(4) > span.stat-value:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 806.859375,
+        "y": 814.78125,
+        "width": 86.015625,
+        "height": 47,
+        "top": 814.78125,
+        "right": 892.875,
+        "bottom": 861.78125,
+        "left": 806.859375
+      },
+      "client": {
+        "width": 86,
+        "height": 47
+      },
+      "scroll": {
+        "width": 86,
+        "height": 47,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.stats:nth-of-type(3) > div.stat:nth-of-type(4) > span.stat-label:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 823.234375,
+        "y": 862.78125,
+        "width": 53.25,
+        "height": 17,
+        "top": 862.78125,
+        "right": 876.484375,
+        "bottom": 879.78125,
+        "left": 823.234375
+      },
+      "client": {
+        "width": 0,
+        "height": 0
+      },
+      "scroll": {
+        "width": 0,
+        "height": 0,
+        "top": 0,
+        "left": 0
+      }
+    }
+  ]
+}

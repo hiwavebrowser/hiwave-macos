@@ -1,0 +1,36 @@
+[package]
+name = "rustkit-http"
+version = "0.1.0"
+edition = "2021"
+description = "HTTP client for RustKit browser engine"
+license = "MIT"
+
+[dependencies]
+# TLS (using native-tls for simplicity on Windows)
+native-tls = "0.2"
+tokio-native-tls = "0.3"
+
+# Async runtime
+tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt"] }
+
+# HTTP types
+http = "1.2"
+bytes = "1.9"
+
+# URL parsing
+url = "2"
+
+# Error handling
+thiserror = "1"
+
+# Logging
+tracing = "0.1"
+
+# Futures
+futures = "0.3"
+
+# Base64 for auth
+base64 = "0.22"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

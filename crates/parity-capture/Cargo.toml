@@ -1,0 +1,21 @@
+[package]
+name = "parity-capture"
+version = "0.1.0"
+edition = "2021"
+description = "Headless frame capture tool for parity testing"
+
+[[bin]]
+name = "parity-capture"
+path = "src/main.rs"
+
+[dependencies]
+rustkit-engine = { path = "../rustkit-engine", features = ["headless"] }
+rustkit-viewhost = { path = "../rustkit-viewhost" }
+rustkit-layout = { path = "../rustkit-layout" }
+
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+

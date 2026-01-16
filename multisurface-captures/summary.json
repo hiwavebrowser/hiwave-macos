@@ -1,0 +1,25 @@
+{
+  "timestamp": "2026-01-05T21:11:57.413059",
+  "status": "pass",
+  "surfaces": {
+    "chrome": {
+      "status": "ok",
+      "dimensions": {
+        "width": 1100,
+        "height": 72
+      },
+      "frame": "chrome.ppm",
+      "perf": {}
+    },
+    "content": {
+      "status": "ok",
+      "dimensions": {
+        "width": 1100,
+        "height": 600
+      },
+      "frame": "content.ppm",
+      "perf": {}
+    }
+  },
+  "notes": "Separate captures - compositor integration pending"
+}

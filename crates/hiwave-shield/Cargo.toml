@@ -1,0 +1,15 @@
+[package]
+name = "hiwave-shield"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hiwave-core = { workspace = true }
+adblock = { workspace = true }
+log = { workspace = true }
+url = { workspace = true }
+reqwest = { workspace = true }
+dirs = { workspace = true }

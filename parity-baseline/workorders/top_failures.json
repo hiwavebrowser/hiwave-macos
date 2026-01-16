@@ -1,0 +1,18 @@
+{
+  "id": "parity-top-failures-20260110",
+  "title": "Fix Top 3 Worst Parity Cases",
+  "description": "Focus on the three cases with highest pixel diff.",
+  "priority": "critical",
+  "cases": [
+    {
+      "case_id": "gradient-backgrounds",
+      "type": "websuite",
+      "diff_pct": 0.3030303030302939
+    }
+  ],
+  "acceptance_criteria": [
+    "Reduce diff% for gradient-backgrounds below 25%",
+    "All three cases show measurable improvement"
+  ],
+  "created": "2026-01-10T22:29:45.612793"
+}

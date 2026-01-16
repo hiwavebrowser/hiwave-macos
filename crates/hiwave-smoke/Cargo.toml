@@ -1,0 +1,27 @@
+[package]
+name = "hiwave-smoke"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "hiwave-smoke"
+path = "src/main.rs"
+
+[dependencies]
+wry.workspace = true
+tao.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# RustKit engine for content rendering
+rustkit-engine = { path = "../rustkit-engine" }
+rustkit-compositor = { path = "../rustkit-compositor" }
+rustkit-viewhost = { path = "../rustkit-viewhost" }
+
+# For window handle conversion
+raw-window-handle = "0.6"
+

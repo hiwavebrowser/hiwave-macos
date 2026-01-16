@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Text Decoration Test</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif;
+            background: white;
+            padding: 20px;
+        }
+        .test-section {
+            margin-bottom: 30px;
+        }
+        .test-section h2 {
+            font-size: 14px;
+            color: #333;
+            margin-bottom: 10px;
+        }
+        .deco-row {
+            font-size: 24px;
+            background: #f5f5f5;
+            padding: 15px;
+            margin-bottom: 10px;
+        }
+        .deco-row span {
+            margin-right: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1 style="margin-bottom: 30px;">Text Decoration Test</h1>
+    
+    <!-- Basic Decorations -->
+    <div class="test-section">
+        <h2>Basic Text Decorations</h2>
+        <div class="deco-row">
+            <span style="text-decoration: none;">None</span>
+            <span style="text-decoration: underline;">Underline</span>
+            <span style="text-decoration: overline;">Overline</span>
+            <span style="text-decoration: line-through;">Line-through</span>
+        </div>
+    </div>
+    
+    <!-- Decoration Colors -->
+    <div class="test-section">
+        <h2>Decoration Colors</h2>
+        <div class="deco-row">
+            <span style="text-decoration: underline; text-decoration-color: red;">Red underline</span>
+            <span style="text-decoration: underline; text-decoration-color: blue;">Blue underline</span>
+            <span style="text-decoration: underline; text-decoration-color: green;">Green underline</span>
+            <span style="text-decoration: underline; text-decoration-color: #ff6600;">Orange underline</span>
+        </div>
+    </div>
+    
+    <!-- Decoration Styles -->
+    <div class="test-section">
+        <h2>Decoration Styles</h2>
+        <div class="deco-row">
+            <span style="text-decoration: underline solid;">Solid</span>
+            <span style="text-decoration: underline double;">Double</span>
+            <span style="text-decoration: underline dotted;">Dotted</span>
+            <span style="text-decoration: underline dashed;">Dashed</span>
+            <span style="text-decoration: underline wavy;">Wavy</span>
+        </div>
+    </div>
+    
+    <!-- Decoration Thickness -->
+    <div class="test-section">
+        <h2>Decoration Thickness</h2>
+        <div class="deco-row">
+            <span style="text-decoration: underline; text-decoration-thickness: 1px;">1px</span>
+            <span style="text-decoration: underline; text-decoration-thickness: 2px;">2px</span>
+            <span style="text-decoration: underline; text-decoration-thickness: 3px;">3px</span>
+            <span style="text-decoration: underline; text-decoration-thickness: 5px;">5px</span>
+            <span style="text-decoration: underline; text-decoration-thickness: from-font;">from-font</span>
+        </div>
+    </div>
+    
+    <!-- Underline Offset -->
+    <div class="test-section">
+        <h2>Underline Offset</h2>
+        <div class="deco-row">
+            <span style="text-decoration: underline; text-underline-offset: auto;">auto</span>
+            <span style="text-decoration: underline; text-underline-offset: 0;">0</span>
+            <span style="text-decoration: underline; text-underline-offset: 2px;">2px</span>
+            <span style="text-decoration: underline; text-underline-offset: 5px;">5px</span>
+            <span style="text-decoration: underline; text-underline-offset: 0.2em;">0.2em</span>
+        </div>
+    </div>
+    
+    <!-- Multiple Decorations -->
+    <div class="test-section">
+        <h2>Multiple Decorations</h2>
+        <div class="deco-row">
+            <span style="text-decoration: underline overline;">Under + Over</span>
+            <span style="text-decoration: underline line-through;">Under + Through</span>
+            <span style="text-decoration: underline overline line-through;">All three</span>
+        </div>
+    </div>
+    
+    <!-- Text Transform -->
+    <div class="test-section">
+        <h2>Text Transform</h2>
+        <div class="deco-row">
+            <span style="text-transform: none;">normal text</span>
+            <span style="text-transform: uppercase;">uppercase text</span>
+            <span style="text-transform: lowercase;">LOWERCASE TEXT</span>
+            <span style="text-transform: capitalize;">capitalize text</span>
+        </div>
+    </div>
+    
+    <!-- Font Variant -->
+    <div class="test-section">
+        <h2>Font Variant</h2>
+        <div class="deco-row">
+            <span style="font-variant: normal;">Normal 0123</span>
+            <span style="font-variant: small-caps;">Small Caps</span>
+            <span style="font-variant-numeric: oldstyle-nums;">Oldstyle 0123</span>
+            <span style="font-variant-numeric: tabular-nums;">Tabular 0123</span>
+        </div>
+    </div>
+    
+    <!-- Text Shadow -->
+    <div class="test-section">
+        <h2>Text Shadow</h2>
+        <div class="deco-row">
+            <span style="text-shadow: none;">No shadow</span>
+            <span style="text-shadow: 1px 1px 2px rgba(0,0,0,0.3);">Subtle</span>
+            <span style="text-shadow: 2px 2px 4px rgba(0,0,0,0.5);">Medium</span>
+            <span style="text-shadow: 3px 3px 6px rgba(0,0,0,0.7);">Strong</span>
+        </div>
+        <div class="deco-row">
+            <span style="text-shadow: 0 0 10px red;">Glow red</span>
+            <span style="text-shadow: 0 0 10px blue;">Glow blue</span>
+            <span style="text-shadow: 2px 2px 0 #000, -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000; color: white;">Outline</span>
+        </div>
+    </div>
+    
+    <!-- Links -->
+    <div class="test-section">
+        <h2>Link Styles</h2>
+        <div class="deco-row">
+            <a href="#" style="color: blue; text-decoration: underline;">Default link</a>
+            <a href="#" style="color: blue; text-decoration: none;">No underline</a>
+            <a href="#" style="color: #0066cc; text-decoration: underline dotted;">Dotted underline</a>
+        </div>
+    </div>
+</body>
+</html>
+

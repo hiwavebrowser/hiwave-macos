@@ -1,0 +1,24 @@
+{
+  "version": "1.0",
+  "description": "Static Web Suite for RustKit rendering validation",
+  "cases": [
+    {
+      "id": "basic-css",
+      "name": "External CSS Loading",
+      "description": "Tests loading of external stylesheets via <link rel='stylesheet'>",
+      "path": "basic-css/index.html",
+      "viewport": { "width": 1280, "height": 800 },
+      "requirements": [
+        "External CSS must be fetched and applied",
+        "Gradients must render correctly",
+        "Flexbox layout must work",
+        "Box shadows must render"
+      ]
+    }
+  ],
+  "notes": [
+    "These tests require HTTP(S) loading or file:// support",
+    "Run via local server for best results"
+  ]
+}
+

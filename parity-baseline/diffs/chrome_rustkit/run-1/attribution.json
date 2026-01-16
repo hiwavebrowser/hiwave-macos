@@ -1,0 +1,163 @@
+{
+  "width": 1280,
+  "height": 100,
+  "diffPercent": 1.9320312499999999,
+  "totalDiffPixels": 128000,
+  "unattributedDiffPixels": 0,
+  "taxonomy": {
+    "text_metrics": 93.24296874999997,
+    "clip_radius": 1.6
+  },
+  "topContributors": [
+    {
+      "selector": "body > div.chrome-container > div.tab-strip:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 40
+      },
+      "diff_pixels": 46096,
+      "contribution_percent": 36.012499999999996,
+      "element_diff_percent": 90.03125,
+      "corner_ratio": 0.010760152724748352,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "html > body",
+      "tag": "body",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 100
+      },
+      "diff_pixels": 16960,
+      "contribution_percent": 13.25,
+      "element_diff_percent": 13.25,
+      "corner_ratio": 0.008490566037735849,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 40,
+        "width": 1280,
+        "height": 44
+      },
+      "diff_pixels": 14632,
+      "contribution_percent": 11.43125,
+      "element_diff_percent": 25.98011363636364,
+      "corner_ratio": 0.029797703663203938,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.url-bar:nth-of-type(5)",
+      "tag": "div",
+      "rect": {
+        "x": 328,
+        "y": 45.5,
+        "width": 906,
+        "height": 32
+      },
+      "diff_pixels": 14334,
+      "contribution_percent": 11.198437499999999,
+      "element_diff_percent": 49.44122516556291,
+      "corner_ratio": 0.041858518208455424,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.url-bar:nth-of-type(5) > span.url-text:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 367,
+        "y": 53,
+        "width": 809,
+        "height": 17
+      },
+      "diff_pixels": 13753,
+      "contribution_percent": 10.74453125,
+      "element_diff_percent": 100,
+      "corner_ratio": 0.029666254635352288,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.sidebar-toggle:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 8,
+        "y": 40,
+        "width": 200,
+        "height": 43
+      },
+      "diff_pixels": 7864,
+      "contribution_percent": 6.14375,
+      "element_diff_percent": 91.44186046511628,
+      "corner_ratio": 0.07324516785350967,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.chrome-container > div.tab-strip:nth-of-type(1) > div.tab active:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 8,
+        "y": 3,
+        "width": 120,
+        "height": 36
+      },
+      "diff_pixels": 3004,
+      "contribution_percent": 2.346875,
+      "element_diff_percent": 69.53703703703704,
+      "corner_ratio": 0.19174434087882822,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.chrome-container > div.sidebar:nth-of-type(3)",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 84,
+        "width": 220,
+        "height": 16
+      },
+      "diff_pixels": 2708,
+      "contribution_percent": 2.115625,
+      "element_diff_percent": 76.93181818181817,
+      "corner_ratio": 0.13146233382570163,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.nav-btn disabled:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 214,
+        "y": 45.5,
+        "width": 32,
+        "height": 32
+      },
+      "diff_pixels": 1024,
+      "contribution_percent": 0.8,
+      "element_diff_percent": 100,
+      "corner_ratio": 0.5859375,
+      "likely_cause": "clip_radius"
+    },
+    {
+      "selector": "body > div.chrome-container > div.nav-bar:nth-of-type(2) > div.nav-btn disabled:nth-of-type(3)",
+      "tag": "div",
+      "rect": {
+        "x": 252,
+        "y": 45.5,
+        "width": 32,
+        "height": 32
+      },
+      "diff_pixels": 1024,
+      "contribution_percent": 0.8,
+      "element_diff_percent": 100,
+      "corner_ratio": 0.5859375,
+      "likely_cause": "clip_radius"
+    }
+  ]
+}
