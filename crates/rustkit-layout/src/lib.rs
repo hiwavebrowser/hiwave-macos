@@ -564,18 +564,25 @@ impl LayoutBox {
 
     /// Perform layout within the given containing block.
     pub fn layout(&mut self, containing_block: &Dimensions) {
+        self.layout_with_definite_height(containing_block, containing_block.content.height);
+    }
+
+    /// Perform layout with an explicit definite height for percentage resolution.
+    /// This is used by grid layout when re-laying out children - the containing_block
+    /// is used for positioning, while definite_height is used for percentage height resolution.
+    pub fn layout_with_definite_height(&mut self, containing_block: &Dimensions, definite_height: f32) {
         match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
                 // Check for flex or grid container
                 if self.style.display.is_flex() {
-                    self.layout_block(containing_block);
+                    self.layout_block_with_definite_height(containing_block, definite_height);
                     // Flex layout is applied to children
                     flex::layout_flex_container(
                         self,
                         &self.dimensions.clone(),
                     );
                 } else if self.style.display.is_grid() {
-                    self.layout_block(containing_block);
+                    self.layout_block_with_definite_height(containing_block, definite_height);
                     // Grid layout is applied to children
                     grid::layout_grid_container(
                         self,
@@ -583,7 +590,7 @@ impl LayoutBox {
                         self.dimensions.content.height,
                     );
                 } else {
-                    self.layout_block(containing_block);
+                    self.layout_block_with_definite_height(containing_block, definite_height);
                 }
             }
             BoxType::Inline => {
@@ -933,11 +940,17 @@ impl LayoutBox {
 
     /// Layout a block-level box.
     fn layout_block(&mut self, containing_block: &Dimensions) {
+        self.layout_block_with_definite_height(containing_block, containing_block.content.height);
+    }
+
+    /// Layout a block-level box with an explicit definite height for percentage resolution.
+    fn layout_block_with_definite_height(&mut self, containing_block: &Dimensions, definite_height: f32) {
         tracing::trace!(
             containing_width = containing_block.content.width,
-            "layout_block called"
+            definite_height = definite_height,
+            "layout_block_with_definite_height called"
         );
-        
+
         // Calculate width first (depends on containing block)
         self.calculate_block_width(containing_block);
 
@@ -952,8 +965,8 @@ impl LayoutBox {
         // Layout children
         self.layout_block_children();
 
-        // Height depends on children
-        self.calculate_block_height();
+        // Height depends on children - use definite_height for percentage resolution
+        self.calculate_block_height(definite_height);
     }
 
     /// Layout a block-level box with margin collapse.
@@ -1028,7 +1041,7 @@ impl LayoutBox {
         }
 
         // Height depends on children
-        self.calculate_block_height();
+        self.calculate_block_height(containing_block.content.height);
 
         // Reset margin context for next sibling, add bottom margin
         margin_context.reset();
@@ -1096,7 +1109,7 @@ impl LayoutBox {
 
         // Layout children
         self.layout_block_children();
-        self.calculate_block_height();
+        self.calculate_block_height(containing_block.content.height);
     }
 
     /// Apply position offsets for positioned elements.
@@ -1362,6 +1375,14 @@ impl LayoutBox {
             + self.dimensions.margin.top
             + self.dimensions.border.top
             + self.dimensions.padding.top;
+
+        tracing::trace!(
+            "calculate_block_position: cb.y={}, cb.height={}, margin_top={}, result_y={}",
+            containing_block.content.y,
+            containing_block.content.height,
+            self.dimensions.margin.top,
+            self.dimensions.content.y
+        );
     }
 
     /// Layout block children.
@@ -1620,7 +1641,10 @@ impl LayoutBox {
     }
 
     /// Calculate block height.
-    fn calculate_block_height(&mut self) {
+    /// The containing_block_height parameter is used for resolving percentage heights.
+    /// Per CSS spec, percentage heights resolve against the containing block's height
+    /// when the containing block has a definite height.
+    fn calculate_block_height(&mut self, containing_block_height: f32) {
         // Get padding and border for box-sizing calculations
         let padding_top = self.dimensions.padding.top;
         let padding_bottom = self.dimensions.padding.bottom;
@@ -1640,10 +1664,15 @@ impl LayoutBox {
                 };
             }
             Length::Percent(pct) => {
-                // Percent height requires a known containing block height
-                // For now, use viewport height as fallback
-                if self.viewport.1 > 0.0 {
-                    let specified = pct / 100.0 * self.viewport.1;
+                // Percent height resolves against containing block height when definite,
+                // otherwise falls back to viewport height
+                let reference_height = if containing_block_height > 0.0 {
+                    containing_block_height
+                } else {
+                    self.viewport.1
+                };
+                if reference_height > 0.0 {
+                    let specified = pct / 100.0 * reference_height;
                     self.dimensions.content.height = if is_border_box {
                         (specified - padding_border_height).max(0.0)
                     } else {
@@ -2984,8 +3013,12 @@ impl DisplayList {
 
     /// Render text with decorations.
     fn render_text(&mut self, layout_box: &LayoutBox) {
-        if let BoxType::Text(ref text) = layout_box.box_type {
+        if let BoxType::Text(ref raw_text) = layout_box.box_type {
             let style = &layout_box.style;
+
+            // Apply text-transform (uppercase, lowercase, capitalize)
+            let text = apply_text_transform(raw_text, style.text_transform);
+
             let font_size = match &style.font_size {
                 Length::Px(px) => *px,
                 _ => 16.0,
@@ -3007,7 +3040,7 @@ impl DisplayList {
 
             // Get font metrics for accurate baseline calculation
             let metrics = measure_text_advanced(
-                text,
+                &text,
                 &style.font_family,
                 font_size,
                 style.font_weight,
@@ -3081,7 +3114,7 @@ impl DisplayList {
 
                 // Get actual font metrics for accurate decoration positioning
                 let metrics = measure_text_advanced(
-                    text,
+                    &text,
                     &style.font_family,
                     font_size,
                     style.font_weight,
