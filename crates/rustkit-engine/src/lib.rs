@@ -1723,7 +1723,7 @@ impl Engine {
                 rule_index += 1;
             }
         }
-        
+
         // Sort by specificity (lower first, so they get overwritten by higher)
         matching_rules.sort_by(|a, b| {
             // Compare specificity: (ids, classes, tags)

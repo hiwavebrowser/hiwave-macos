@@ -15,7 +15,15 @@ path = "src/main.rs"
 default = ["rustkit"]
 # RustKit: Pure Rust browser engine for content rendering (hybrid mode)
 # WRY is still used for Chrome UI and Shelf components
-rustkit = []
+rustkit = [
+  "rustkit-engine",
+  "rustkit-viewhost",
+  "rustkit-text",
+  "rustkit-compositor",
+  "rustkit-net",
+  "wgpu",
+  "tokio",
+]
 # WebView fallback: Uses system WebKit for everything (no RustKit)
 webview-fallback = []
 
@@ -54,13 +62,13 @@ hiwave-analytics = { workspace = true }
 
 # RustKit engine (macOS only)
 [target.'cfg(target_os = "macos")'.dependencies]
-rustkit-engine = { workspace = true }
-rustkit-viewhost = { workspace = true }
-rustkit-text = { workspace = true }
-rustkit-compositor = { workspace = true }
-rustkit-net = { workspace = true }
-wgpu = "24"
-tokio = { version = "1.42", features = ["rt", "time"] }
+rustkit-engine = { workspace = true, optional = true }
+rustkit-viewhost = { workspace = true, optional = true }
+rustkit-text = { workspace = true, optional = true }
+rustkit-compositor = { workspace = true, optional = true }
+rustkit-net = { workspace = true, optional = true }
+wgpu = { version = "24", optional = true }
+tokio = { version = "1.42", features = ["rt", "time"], optional = true }
 
 # Enable headless mode for integration tests
 [target.'cfg(target_os = "macos")'.dev-dependencies.rustkit-engine]

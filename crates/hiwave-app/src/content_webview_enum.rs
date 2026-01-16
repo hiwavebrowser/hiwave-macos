@@ -2,8 +2,10 @@
 
 #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
 use super::webview_rustkit::RustKitView;
+#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
 use super::content_webview_trait::ContentWebViewOps;
 use std::sync::Arc;
+#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
 use wry::Rect;
 
 /// Unified content webview type (RustKit + WRY support)
@@ -78,26 +80,6 @@ impl ContentWebView {
                 // WRY handles rendering internally
             }
         }
-    }
-}
-
-// WebKit fallback mode implementation
-#[cfg(all(target_os = "macos", feature = "webview-fallback"))]
-impl ContentWebViewOps for ContentWebView {
-    fn load_url(&self, url: &str) -> Result<(), String> {
-        self.load_url(url).map_err(|e| format!("{}", e))
-    }
-
-    fn load_html(&self, html: &str) -> Result<(), String> {
-        self.load_html(html).map_err(|e| format!("{}", e))
-    }
-
-    fn evaluate_script(&self, script: &str) -> Result<(), String> {
-        self.evaluate_script(script).map_err(|e| format!("{}", e))
-    }
-
-    fn set_bounds(&self, rect: Rect) -> Result<(), String> {
-        self.set_bounds(rect).map_err(|e| format!("{}", e))
     }
 }
 

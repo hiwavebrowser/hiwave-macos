@@ -9,6 +9,7 @@ use std::sync::Arc;
 use wry::Rect;
 
 /// Trait for chrome webview operations
+#[allow(dead_code)]
 pub trait ChromeWebViewOps {
     fn evaluate_script(&self, script: &str) -> Result<(), String>;
     fn set_bounds(&self, rect: Rect) -> Result<(), String>;
@@ -24,6 +25,7 @@ pub enum ChromeWebView {
 
 /// WebKit fallback mode - just wrap WRY WebView
 #[cfg(all(target_os = "macos", feature = "webview-fallback"))]
+#[allow(dead_code)]
 pub type ChromeWebView = wry::WebView;
 
 #[cfg(not(target_os = "macos"))]
