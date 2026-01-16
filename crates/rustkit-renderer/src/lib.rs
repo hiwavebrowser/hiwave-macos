@@ -293,7 +293,8 @@ pub struct Renderer {
     color_pipeline: wgpu::RenderPipeline,
     texture_pipeline: wgpu::RenderPipeline,
     // Texture pipeline for Rgba8Unorm targets (used for blitting to filter textures)
-    texture_pipeline_rgba: wgpu::RenderPipeline,
+    // NOTE: Currently unused, kept for potential future use
+    _texture_pipeline_rgba: wgpu::RenderPipeline,
     // Blit pipeline for copying RGBA textures (unlike texture_pipeline which treats R as alpha)
     blit_pipeline: wgpu::RenderPipeline,
     // Blit pipeline for Rgba8Unorm targets (for blitting to filter textures)
@@ -301,6 +302,10 @@ pub struct Renderer {
 
     // Backdrop filter pipelines (compute shaders for blur + color filters)
     backdrop_filter_pipelines: pipeline::BackdropFilterPipelines,
+
+    // GPU gradient pipeline
+    // NOTE: Currently disabled due to bugs, using cell-by-cell rendering instead
+    _gradient_pipeline: pipeline::GradientPipeline,
 
     // Uniform buffer
     uniform_buffer: wgpu::Buffer,
@@ -312,6 +317,9 @@ pub struct Renderer {
     color_indices: Vec<u32>,
     texture_vertices: Vec<TextureVertex>,
     texture_indices: Vec<u32>,
+
+    // GPU gradient queue (currently unused, cell-by-cell rendering used instead)
+    _gradient_queue: Vec<QueuedLinearGradient>,
 
     // State stacks
     clip_stack: Vec<Rect>,
@@ -345,6 +353,18 @@ pub struct Renderer {
 pub struct StackingContext {
     pub z_index: i32,
     pub rect: Rect,
+}
+
+/// A queued linear gradient to be rendered with the GPU shader.
+/// NOTE: GPU gradient rendering is currently disabled due to bugs. Using cell-by-cell instead.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct QueuedLinearGradient {
+    rect: Rect,
+    angle_rad: f32,
+    stops: Vec<(f32, rustkit_css::ColorF32)>,
+    repeating: bool,
+    border_radius: rustkit_layout::BorderRadius,
 }
 
 impl Renderer {
@@ -455,6 +475,13 @@ impl Renderer {
         // Create backdrop filter pipelines (compute shaders for blur + color filters)
         let backdrop_filter_pipelines = pipeline::create_backdrop_filter_pipelines(&device);
 
+        // Create GPU gradient pipeline
+        let gradient_pipeline = pipeline::create_gradient_pipeline(
+            &device,
+            surface_format,
+            &uniform_bind_group_layout,
+        );
+
         // Create caches
         let texture_cache = TextureCache::new(&device, texture_bind_group_layout.clone());
         let glyph_cache = GlyphCache::new(&device, &queue, texture_bind_group_layout.clone())?;
@@ -475,10 +502,11 @@ impl Renderer {
             queue,
             color_pipeline,
             texture_pipeline,
-            texture_pipeline_rgba,
+            _texture_pipeline_rgba: texture_pipeline_rgba,
             blit_pipeline,
             blit_pipeline_rgba,
             backdrop_filter_pipelines,
+            _gradient_pipeline: gradient_pipeline,
             uniform_buffer,
             uniform_bind_group,
             viewport_size: (800, 600),
@@ -486,6 +514,7 @@ impl Renderer {
             color_indices: Vec::with_capacity(8192),
             texture_vertices: Vec::with_capacity(4096),
             texture_indices: Vec::with_capacity(8192),
+            _gradient_queue: Vec::with_capacity(64),
             clip_stack: Vec::new(),
             stacking_contexts: Vec::new(),
             transform_stack: Vec::new(),
@@ -901,6 +930,7 @@ impl Renderer {
         self.color_indices.clear();
         self.texture_vertices.clear();
         self.texture_indices.clear();
+        self._gradient_queue.clear();
         self.clip_stack.clear();
         self.stacking_contexts.clear();
         self.transform_stack.clear();
@@ -2037,6 +2067,133 @@ impl Renderer {
         }
     }
 
+    /// Render a linear gradient using the GPU shader.
+    /// This method renders the gradient immediately using a separate render pass.
+    /// Note: This may cause z-ordering issues with other content.
+    /// NOTE: Currently disabled due to bugs in the shader. Using cell-by-cell instead.
+    #[allow(dead_code)]
+    fn render_linear_gradient_gpu(
+        &self,
+        target: &wgpu::TextureView,
+        rect: Rect,
+        angle_rad: f32,
+        stops: &[(f32, rustkit_css::ColorF32)],
+        repeating: bool,
+        border_radius: rustkit_layout::BorderRadius,
+    ) {
+        if stops.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+
+        // Calculate repeat length for repeating gradients
+        let repeat_length = if repeating && !stops.is_empty() {
+            stops.last().map(|(pos, _)| *pos).unwrap_or(1.0).max(0.001)
+        } else {
+            1.0
+        };
+
+        // Update gradient parameters uniform buffer
+        let params = pipeline::GradientParams {
+            rect_x: rect.x,
+            rect_y: rect.y,
+            rect_width: rect.width,
+            rect_height: rect.height,
+            param0: angle_rad,  // linear gradient uses angle in radians
+            param1: 0.0,
+            param2: 0.5,
+            param3: 0.5,
+            gradient_type: 0,  // 0 = linear
+            repeating: if repeating { 1 } else { 0 },
+            repeat_length,
+            num_stops: stops.len().min(self._gradient_pipeline.max_stops) as u32,
+            radius_tl: border_radius.top_left,
+            radius_tr: border_radius.top_right,
+            radius_br: border_radius.bottom_right,
+            radius_bl: border_radius.bottom_left,
+        };
+
+        self.queue.write_buffer(
+            &self._gradient_pipeline.uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[params]),
+        );
+
+        // Update color stops storage buffer
+        let gpu_stops: Vec<pipeline::GradientColorStop> = stops
+            .iter()
+            .take(self._gradient_pipeline.max_stops)
+            .map(|(pos, color)| pipeline::GradientColorStop {
+                position: *pos,
+                r: color.r,
+                g: color.g,
+                b: color.b,
+                a: color.a,
+            })
+            .collect();
+
+        if !gpu_stops.is_empty() {
+            self.queue.write_buffer(
+                &self._gradient_pipeline.stops_buffer,
+                0,
+                bytemuck::cast_slice(&gpu_stops),
+            );
+        }
+
+        // Create vertices for the gradient quad
+        // We use ColorVertex but the fragment shader ignores the color
+        let dummy_color = [0.0f32, 0.0, 0.0, 1.0];
+        let vertices = [
+            ColorVertex { position: [rect.x, rect.y], color: dummy_color },
+            ColorVertex { position: [rect.x + rect.width, rect.y], color: dummy_color },
+            ColorVertex { position: [rect.x + rect.width, rect.y + rect.height], color: dummy_color },
+            ColorVertex { position: [rect.x, rect.y + rect.height], color: dummy_color },
+        ];
+        let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Gradient Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Gradient Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        // Create command encoder and render pass
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("GPU Gradient Encoder"),
+        });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("GPU Gradient Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,  // Don't clear, preserve existing content
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            render_pass.set_pipeline(&self._gradient_pipeline.pipeline);
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            render_pass.set_bind_group(1, &self._gradient_pipeline.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..6, 0, 0..1);
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
     /// Draw a linear gradient with optional border-radius clipping.
     fn draw_linear_gradient(
         &mut self,
@@ -2128,8 +2285,13 @@ impl Renderer {
                 self.draw_solid_rect_f32(Rect::new(rect.x, y_pos, rect.width, strip_height + 0.5), color);
             }
         } else {
-            // Diagonal gradient or gradient with border-radius - render using cells
-            // Use adaptive cell sizing to prevent GPU buffer overflow for large gradients
+            // Diagonal gradient - cell-by-cell rendering
+            // Uses the CSS gradient spec algorithm for proper corner-to-corner diagonal
+            let half_width = rect.width / 2.0;
+            let half_height = rect.height / 2.0;
+            let gradient_half_length = (half_width * sin_a.abs() + half_height * cos_a.abs()).max(0.001);
+
+            // Adaptive step sizing to prevent GPU buffer overflow for large gradients
             // while maintaining 1px quality for small UI elements
             let area = rect.width * rect.height;
             let max_cells: f32 = 100_000.0; // Limit cells to prevent buffer overflow
@@ -2138,61 +2300,43 @@ impl Renderer {
             } else {
                 1.0
             };
+            let cols = (rect.width / cell_size).ceil() as usize;
+            let rows = (rect.height / cell_size).ceil() as usize;
 
-            // Calculate the gradient line length (diagonal of rectangle projected onto gradient line)
-            // For CSS gradients, the gradient line goes through the center and extends to the corners
-            let half_width = rect.width / 2.0;
-            let half_height = rect.height / 2.0;
+            let center_x = rect.x + half_width;
+            let center_y = rect.y + half_height;
 
-            // The gradient length is the distance along the gradient line from corner to corner
-            let gradient_half_length = (half_width * sin_a.abs() + half_height * cos_a.abs()).max(0.001);
+            for row in 0..rows {
+                for col in 0..cols {
+                    let cell_x = rect.x + col as f32 * cell_size;
+                    let cell_y = rect.y + row as f32 * cell_size;
+                    let cell_center_x = cell_x + cell_size * 0.5;
+                    let cell_center_y = cell_y + cell_size * 0.5;
 
-            let mut y = rect.y;
-            while y < rect.y + rect.height {
-                let cell_h = cell_size.min(rect.y + rect.height - y);
-                let mut x = rect.x;
-
-                while x < rect.x + rect.width {
-                    let cell_w = cell_size.min(rect.x + rect.width - x);
-                    let cell_center_x = x + cell_w / 2.0;
-                    let cell_center_y = y + cell_h / 2.0;
-
-                    // Check border-radius clipping
-                    let alpha_coverage = Self::point_in_rounded_rect(
-                        cell_center_x,
-                        cell_center_y,
-                        rect,
-                        border_radius,
-                    );
-
-                    if alpha_coverage > 0.0 {
-                        // Calculate position relative to center of rect
-                        let px = cell_center_x - rect.x - half_width;
-                        let py = cell_center_y - rect.y - half_height;
-
-                        // Project point onto gradient line
-                        // Gradient direction: (sin_a, -cos_a) where angle 0 is "to top"
-                        let projection = px * sin_a + py * (-cos_a);
-
-                        // Normalize to 0-1 range
-                        let t = (projection / gradient_half_length + 1.0) / 2.0;
-                        let t_final = apply_t(t);
-
-                        let mut color = Self::interpolate_color_f32(&normalized_stops, t_final);
-
-                        // Apply border-radius alpha
-                        if alpha_coverage < 1.0 {
-                            color = rustkit_css::ColorF32::new(color.r, color.g, color.b, color.a * alpha_coverage);
-                        }
-
-                        if color.a > 0.0 {
-                            self.draw_solid_rect_f32(Rect::new(x, y, cell_w, cell_h), color);
-                        }
+                    // Check bounds
+                    if cell_x >= rect.x + rect.width || cell_y >= rect.y + rect.height {
+                        continue;
                     }
 
-                    x += cell_size;
+                    // Position relative to rect center
+                    let px = cell_center_x - center_x;
+                    let py = cell_center_y - center_y;
+
+                    // Project onto gradient direction (sin_a, -cos_a)
+                    let projection = px * sin_a + py * (-cos_a);
+
+                    // Normalize to 0-1 range
+                    let t = (projection / gradient_half_length + 1.0) / 2.0;
+                    let t_final = apply_t(t);
+
+                    let color = Self::interpolate_color_f32(&normalized_stops, t_final);
+
+                    // Clamp cell to rect bounds
+                    let cell_w = cell_size.min(rect.x + rect.width - cell_x);
+                    let cell_h = cell_size.min(rect.y + rect.height - cell_y);
+
+                    self.draw_solid_rect_f32(Rect::new(cell_x, cell_y, cell_w, cell_h), color);
                 }
-                y += cell_size;
             }
         }
     }
