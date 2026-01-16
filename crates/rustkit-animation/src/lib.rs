@@ -332,7 +332,8 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
-/// Interpolate between two colors.
+/// Interpolate between two colors in sRGB space.
+/// CSS color transitions use sRGB interpolation for browser compatibility.
 fn interpolate_color(a: &Color, b: &Color, t: f32) -> Color {
     Color {
         r: (lerp(a.r as f32, b.r as f32, t).round() as u8).clamp(0, 255),

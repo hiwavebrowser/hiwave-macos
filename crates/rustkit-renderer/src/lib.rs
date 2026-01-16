@@ -2481,10 +2481,10 @@ impl Renderer {
         (r, g, b)
     }
 
-    /// Interpolate between color stops in sRGB space (gamma-encoded).
-    /// This matches Chrome's default gradient interpolation behavior.
-    /// CSS Images Level 3 specifies sRGB interpolation; CSS Color Level 4
-    /// allows specifying oklab via `in oklab` but defaults to sRGB.
+    /// Interpolate between color stops in sRGB space.
+    /// CSS gradients in browsers (including Chrome) use sRGB interpolation
+    /// by default for backwards compatibility. The linear RGB approach is
+    /// more physically accurate but doesn't match browser behavior.
     fn interpolate_color(stops: &[(f32, Color)], t: f32) -> Color {
         if stops.is_empty() {
             return Color::TRANSPARENT;
@@ -2506,12 +2506,16 @@ impl Renderer {
                 } else {
                     (t - pos0) / (pos1 - pos0)
                 };
-                return Color::new(
-                    ((1.0 - local_t) * color0.r as f32 + local_t * color1.r as f32).round() as u8,
-                    ((1.0 - local_t) * color0.g as f32 + local_t * color1.g as f32).round() as u8,
-                    ((1.0 - local_t) * color0.b as f32 + local_t * color1.b as f32).round() as u8,
-                    (1.0 - local_t) * color0.a + local_t * color1.a,
-                );
+
+                // Interpolate directly in sRGB space (browser default behavior)
+                let r = ((1.0 - local_t) * color0.r as f32 + local_t * color1.r as f32).round() as u8;
+                let g = ((1.0 - local_t) * color0.g as f32 + local_t * color1.g as f32).round() as u8;
+                let b = ((1.0 - local_t) * color0.b as f32 + local_t * color1.b as f32).round() as u8;
+
+                // Alpha is interpolated linearly
+                let a = (1.0 - local_t) * color0.a + local_t * color1.a;
+
+                return Color::new(r, g, b, a);
             }
         }
         stops[stops.len() - 1].1
