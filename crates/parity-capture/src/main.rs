@@ -69,16 +69,12 @@ struct LayoutStats {
 fn main() {
     let args = Args::parse();
 
-    // Initialize tracing
-    if args.verbose {
-        tracing_subscriber::fmt()
-            .with_env_filter("info")
-            .init();
-    } else {
-        tracing_subscriber::fmt()
-            .with_env_filter("warn")
-            .init();
-    }
+    // Initialize tracing - respect RUST_LOG if set, otherwise use defaults
+    let default_filter = if args.verbose { "info" } else { "warn" };
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| default_filter.to_string());
+    tracing_subscriber::fmt()
+        .with_env_filter(&filter)
+        .init();
 
     let result = run_capture(&args);
     

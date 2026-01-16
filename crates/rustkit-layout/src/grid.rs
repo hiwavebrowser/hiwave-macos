@@ -227,28 +227,37 @@ impl<'a> GridItem<'a> {
     /// This considers explicit heights, min-heights, and intrinsic content.
     pub fn get_height_contribution(&self, container_height: f32) -> f32 {
         let style = &self.layout_box.style;
-        
+
         // Check for explicit height
         match &style.height {
-            Length::Px(h) => return *h,
+            Length::Px(h) => {
+                trace!("get_height_contribution: explicit Px height = {}", h);
+                return *h;
+            }
             Length::Percent(p) if container_height > 0.0 => {
-                return container_height * p / 100.0;
+                let result = container_height * p / 100.0;
+                trace!("get_height_contribution: Percent {}% of {} = {}", p, container_height, result);
+                return result;
             }
             _ => {}
         }
-        
+
         // Check for min-height
         let min_height = match &style.min_height {
             Length::Px(h) => *h,
             Length::Percent(p) if container_height > 0.0 => container_height * p / 100.0,
             _ => 0.0,
         };
-        
+
         // For auto height, estimate based on content
         // This is a simplified calculation - a full implementation would
         // do a layout pass to determine content height
         let content_height = self.estimate_content_height();
-        
+
+        trace!(
+            "get_height_contribution: min_height={}, content_height={}, returning={}",
+            min_height, content_height, min_height.max(content_height)
+        );
         min_height.max(content_height)
     }
 
@@ -1582,6 +1591,13 @@ pub fn layout_grid_container(
         width_contribution: f32,
     }
 
+    // For auto-height containers, use 0.0 for height contribution calculation.
+    // This prevents percentage heights from resolving against the incorrect block-flow
+    // computed height (which stacks children vertically). Items with percentage heights
+    // will contribute based on their intrinsic content height instead.
+    let has_definite_height = !matches!(style.height, Length::Auto);
+    let height_for_contributions = if has_definite_height { container_height } else { 0.0 };
+
     let item_sizings: Vec<ItemSizing> = items
         .iter()
         .map(|item| ItemSizing {
@@ -1589,7 +1605,7 @@ pub fn layout_grid_container(
             row_span: item.row_span.max(1) as usize,
             col_start: (item.column_start - 1).max(0) as usize,
             col_span: item.column_span.max(1) as usize,
-            height_contribution: item.get_height_contribution(container_height),
+            height_contribution: item.get_height_contribution(height_for_contributions),
             width_contribution: item.get_width_contribution(container_width),
         })
         .collect();
@@ -1597,6 +1613,10 @@ pub fn layout_grid_container(
     // Find max spans
     let max_row_span = item_sizings.iter().map(|s| s.row_span).max().unwrap_or(1);
     let max_col_span = item_sizings.iter().map(|s| s.col_span).max().unwrap_or(1);
+
+    // DEBUG: Uncomment to trace track sizing issues
+    // let initial_base_sizes: Vec<f32> = grid.rows.iter().map(|t| t.base_size).collect();
+    // debug!("Before contribution loop: row base_sizes = {:?}", initial_base_sizes);
 
     // Process rows by span count
     for span in 1..=max_row_span {
@@ -1684,20 +1704,45 @@ pub fn layout_grid_container(
         }
     }
 
-    // Size tracks (handles percentages, intrinsic sizing, flexible tracks)
-    size_grid_tracks(&mut grid.columns, container_width, column_gap);
-    size_grid_tracks(&mut grid.rows, container_height, row_gap);
+    // DEBUG: Uncomment to trace track sizing issues
+    // let after_base_sizes: Vec<f32> = grid.rows.iter().map(|t| t.base_size).collect();
+    // debug!("After contribution loop: row base_sizes = {:?}", after_base_sizes);
 
-    // Stretch auto tracks if align-content is stretch
+    // Size tracks (handles percentages, intrinsic sizing, flexible tracks)
+    // For auto-height containers, pass 0 as container height to prevent distributing
+    // "remaining space" that doesn't exist (the container sizes to content, not vice versa)
+    let row_container_height = if has_definite_height { container_height } else { 0.0 };
+    size_grid_tracks(&mut grid.columns, container_width, column_gap);
+    size_grid_tracks(&mut grid.rows, row_container_height, row_gap);
+
+    // DEBUG: Uncomment to trace track sizing issues
+    // let row_sizes: Vec<f32> = grid.rows.iter().map(|t| t.size).collect();
+    // debug!("After size_grid_tracks: row sizes = {:?}, row_container_height = {}", row_sizes, row_container_height);
+
+    // Stretch auto tracks if align-content is stretch AND container has definite height
     // Per CSS Grid spec, stretch distributes remaining space to auto tracks
     // Note: justify-content doesn't have a stretch value in the current CSS spec
-    if style.align_content == AlignContent::Stretch {
+    // IMPORTANT: Only stretch if the container has an explicit height (not auto).
+    // When height is auto, the grid sizes to content and there's no extra space to distribute.
+    // (has_definite_height was computed earlier for height contribution calculation)
+    if style.align_content == AlignContent::Stretch && has_definite_height {
         stretch_auto_tracks(&mut grid.rows, container_height, row_gap);
     }
 
     // Apply content alignment (justify-content for columns, align-content for rows)
     apply_content_alignment(&mut grid.columns, container_width, column_gap, &style.justify_content);
     apply_content_alignment(&mut grid.rows, container_height, row_gap, &align_content_to_justify(&style.align_content));
+
+    // Update container height when auto-sized
+    // When the container has auto height, the block layout algorithm incorrectly computes height
+    // by stacking children vertically. We need to update it to the actual grid-based height.
+    if !has_definite_height {
+        let non_collapsed_row_count = grid.rows.iter().filter(|t| t.size > 0.0).count();
+        let total_row_gaps = non_collapsed_row_count.saturating_sub(1) as f32 * row_gap;
+        let actual_grid_height: f32 = grid.rows.iter().map(|t| t.size).sum::<f32>() + total_row_gaps;
+        container.dimensions.content.height = actual_grid_height;
+        debug!("Updated auto-height grid container: {} -> {}", container_height, actual_grid_height);
+    }
 
     // Phase 6: Position items
     let content_x = container.dimensions.content.x;
@@ -1843,10 +1888,88 @@ pub fn layout_grid_container(
                     child.dimensions.content.height,
                 );
             } else {
-                // Block container: lay out children normally
+                // Block container: re-layout children with correct positioning and height resolution.
+                // The grid item's dimensions.content.height is the grid-assigned height.
+                // Children should:
+                // 1. Position at the top of the grid item (not below its height)
+                // 2. Resolve percentage heights against the grid item's actual height
+                let grid_item_height = child.dimensions.content.height;
+                let grid_item_y = child.dimensions.content.y;
+                let grid_item_x = child.dimensions.content.x;
+                let grid_item_width = child.dimensions.content.width;
+                let mut current_y = grid_item_y;
+
+                trace!(
+                    "Phase 9: Re-laying out children of grid item. grid_item_height={}, grid_item_y={}",
+                    grid_item_height, grid_item_y
+                );
+
                 for grandchild in &mut child.children {
-                    let cb = child.dimensions.clone();
-                    grandchild.layout(&cb);
+                    // DEBUG: Mark that we've been here by setting a specific height
+                    trace!("Phase 9: Processing grandchild with position={:?}", grandchild.position);
+
+                    // Skip absolutely positioned children - they don't participate in flow
+                    if grandchild.position == crate::Position::Absolute
+                        || grandchild.position == crate::Position::Fixed {
+                        trace!("Phase 9: Skipping absolute/fixed grandchild");
+                        continue;
+                    }
+
+                    // Calculate the grandchild's margin box offsets
+                    let margin_top = grandchild.dimensions.margin.top;
+                    let border_top = grandchild.dimensions.border.top;
+                    let padding_top = grandchild.dimensions.padding.top;
+                    let margin_left = grandchild.dimensions.margin.left;
+                    let border_left = grandchild.dimensions.border.left;
+                    let padding_left = grandchild.dimensions.padding.left;
+
+                    // Set the grandchild's position directly
+                    grandchild.dimensions.content.x = grid_item_x + margin_left + border_left + padding_left;
+                    grandchild.dimensions.content.y = current_y + margin_top + border_top + padding_top;
+                    grandchild.dimensions.content.width = grid_item_width - margin_left - border_left - padding_left
+                        - grandchild.dimensions.margin.right - grandchild.dimensions.border.right - grandchild.dimensions.padding.right;
+
+                    // Calculate height for percentage resolution
+                    // DEBUG: Uncomment to trace Phase 9 percentage height issues
+                    // debug!("Phase 9: grandchild style.height={:?}, grid_item_height={}, existing_height={}",
+                    //        grandchild.style.height, grid_item_height, grandchild.dimensions.content.height);
+                    let grandchild_height = match &grandchild.style.height {
+                        rustkit_css::Length::Percent(pct) => {
+                            // Resolve percentage against grid item's height
+                            (pct / 100.0 * grid_item_height).max(0.0)
+                        }
+                        rustkit_css::Length::Px(h) => *h,
+                        rustkit_css::Length::Auto => {
+                            // For auto height, use the existing computed height from children
+                            grandchild.dimensions.content.height
+                        }
+                        _ => grandchild.dimensions.content.height
+                    };
+
+                    // Apply min-height constraint
+                    let min_height = match &grandchild.style.min_height {
+                        rustkit_css::Length::Px(h) => *h,
+                        rustkit_css::Length::Percent(pct) => pct / 100.0 * grid_item_height,
+                        _ => 0.0,
+                    };
+
+                    grandchild.dimensions.content.height = grandchild_height.max(min_height);
+
+                    // Re-layout grandchild's children with the corrected dimensions
+                    if !grandchild.children.is_empty() {
+                        let grandchild_containing = grandchild.dimensions.clone();
+                        if grandchild.style.display.is_flex() {
+                            crate::flex::layout_flex_container(grandchild, &grandchild_containing);
+                        } else if grandchild.style.display.is_grid() {
+                            layout_grid_container(grandchild, grandchild.dimensions.content.width, grandchild.dimensions.content.height);
+                        }
+                        // For block, children were already laid out - we just fixed the container
+                    }
+
+                    // Update y for next sibling
+                    current_y = grandchild.dimensions.content.y + grandchild.dimensions.content.height
+                        + grandchild.dimensions.padding.bottom + grandchild.dimensions.border.bottom
+                        + grandchild.dimensions.margin.bottom;
                 }
             }
         }
