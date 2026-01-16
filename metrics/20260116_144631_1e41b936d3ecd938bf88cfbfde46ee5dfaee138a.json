@@ -1,0 +1,176 @@
+{
+  "timestamp": "2026-01-16T14:46:28.134560",
+  "commit": "1e41b936d3ecd938bf88cfbfde46ee5dfaee138a",
+  "branch": "master",
+  "total": 23,
+  "passed": 12,
+  "failed": 11,
+  "average_diff": 16.185270504442723,
+  "worst_case": {
+    "name": "sticky-scroll",
+    "diff": 50.401171874999996
+  },
+  "tests": [
+    {
+      "name": "sticky-scroll",
+      "diff": 50.401171874999996,
+      "threshold": 25,
+      "passed": false,
+      "type": "websuite"
+    },
+    {
+      "name": "card-grid",
+      "diff": 35.91220703125,
+      "threshold": 15,
+      "passed": false,
+      "type": "websuite"
+    },
+    {
+      "name": "css-selectors",
+      "diff": 29.8325,
+      "threshold": 15,
+      "passed": false,
+      "type": "websuite"
+    },
+    {
+      "name": "shelf",
+      "diff": 26.512369791666668,
+      "threshold": 15,
+      "passed": false,
+      "type": "builtins"
+    },
+    {
+      "name": "gradient-backgrounds",
+      "diff": 22.974583333333335,
+      "threshold": 15,
+      "passed": false,
+      "type": "websuite"
+    },
+    {
+      "name": "settings",
+      "diff": 21.970208333333332,
+      "threshold": 15,
+      "passed": false,
+      "type": "builtins"
+    },
+    {
+      "name": "pseudo-classes",
+      "diff": 21.736875,
+      "threshold": 15,
+      "passed": false,
+      "type": "micro"
+    },
+    {
+      "name": "backgrounds",
+      "diff": 19.502111111111113,
+      "threshold": 15,
+      "passed": false,
+      "type": "micro"
+    },
+    {
+      "name": "image-gallery",
+      "diff": 19.269335937500003,
+      "threshold": 10,
+      "passed": false,
+      "type": "websuite"
+    },
+    {
+      "name": "combinators",
+      "diff": 15.408125,
+      "threshold": 15,
+      "passed": false,
+      "type": "micro"
+    },
+    {
+      "name": "flex-positioning",
+      "diff": 13.437750000000001,
+      "threshold": 15,
+      "passed": true,
+      "type": "websuite"
+    },
+    {
+      "name": "images-intrinsic",
+      "diff": 12.91982142857143,
+      "threshold": 10,
+      "passed": false,
+      "type": "micro"
+    },
+    {
+      "name": "specificity",
+      "diff": 12.665833333333335,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro"
+    },
+    {
+      "name": "bg-solid",
+      "diff": 10.862,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro"
+    },
+    {
+      "name": "article-typography",
+      "diff": 10.66572265625,
+      "threshold": 20,
+      "passed": true,
+      "type": "websuite"
+    },
+    {
+      "name": "about",
+      "diff": 10.519166666666667,
+      "threshold": 15,
+      "passed": true,
+      "type": "builtins"
+    },
+    {
+      "name": "gradients",
+      "diff": 9.569333333333335,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro"
+    },
+    {
+      "name": "rounded-corners",
+      "diff": 9.509333333333334,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro"
+    },
+    {
+      "name": "form-controls",
+      "diff": 8.001770833333333,
+      "threshold": 12,
+      "passed": true,
+      "type": "micro"
+    },
+    {
+      "name": "form-elements",
+      "diff": 5.789166666666667,
+      "threshold": 12,
+      "passed": true,
+      "type": "websuite"
+    },
+    {
+      "name": "new_tab",
+      "diff": 2.7873046875000003,
+      "threshold": 15,
+      "passed": true,
+      "type": "builtins"
+    },
+    {
+      "name": "chrome_rustkit",
+      "diff": 1.9320312499999999,
+      "threshold": 15,
+      "passed": true,
+      "type": "builtins"
+    },
+    {
+      "name": "bg-pure",
+      "diff": 0.0825,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro"
+    }
+  ]
+}
