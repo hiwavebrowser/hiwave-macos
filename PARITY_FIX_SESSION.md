@@ -213,6 +213,34 @@ cat parity-baseline/diffs/flex-positioning/run-1/attribution.json | jq '.taxonom
   - All other failing tests: >75% text_metrics attribution
   - **Conclusion:** No quick wins available - all require deeper changes
 
+### 2026-01-16 Session (ColorF32 Subpixel Precision Pipeline)
+
+**Implemented:** High-precision f32 color pipeline for gradient rendering
+
+**Changes:**
+- Added `ColorF32` type to `rustkit-css` with:
+  - `from_color()` / `to_color()` conversion
+  - `to_color_dithered()` with Bayer 4x4 ordered dithering
+  - `lerp()` for high-precision interpolation
+- Added `interpolate_color_f32()` to renderer (f32 throughout)
+- Added `draw_solid_rect_f32()` to renderer
+- Updated all gradient functions to use f32 pipeline:
+  - `draw_linear_gradient`
+  - `draw_radial_gradient`
+  - `draw_conic_gradient`
+- Removed unused `interpolate_color()` function
+
+**Result:** No improvement to parity numbers
+
+**Finding:** The precision loss during u8 quantization was NOT the main source of gradient diff. The actual diff sources are:
+- **GPU shader vs cell-by-cell rendering:** Chrome uses GPU shaders for smooth gradient interpolation; RustKit samples one color per cell
+- **Antialiasing differences:** Chrome/Skia has different antialiasing at color transitions
+- **Subpixel positioning:** Different rounding/sampling strategies
+
+**Conclusion:** The f32 pipeline is better architecture (prevents banding from repeated quantization), but achieving gradient parity requires GPU shader-based gradient rendering to match Chrome's approach.
+
+---
+
 ### 2026-01-15 Future Work: Deeper Rendering Changes Needed
 
 **For gradient parity improvement:**

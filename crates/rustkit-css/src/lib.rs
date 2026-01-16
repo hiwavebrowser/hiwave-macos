@@ -77,6 +77,115 @@ impl Default for Color {
     }
 }
 
+/// High-precision color for internal rendering calculations.
+/// RGB components are stored as f32 in 0.0-1.0 range.
+/// Use for gradient interpolation and internal processing.
+/// Convert to Color only at final display/storage.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColorF32 {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
+
+impl ColorF32 {
+    pub const TRANSPARENT: ColorF32 = ColorF32 { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+    pub const BLACK: ColorF32 = ColorF32 { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+    pub const WHITE: ColorF32 = ColorF32 { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+
+    #[inline]
+    pub fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
+        Self { r, g, b, a }
+    }
+
+    #[inline]
+    pub fn from_rgb(r: f32, g: f32, b: f32) -> Self {
+        Self { r, g, b, a: 1.0 }
+    }
+
+    /// Convert from 8-bit Color to high-precision ColorF32.
+    #[inline]
+    pub fn from_color(c: Color) -> Self {
+        Self {
+            r: c.r as f32 / 255.0,
+            g: c.g as f32 / 255.0,
+            b: c.b as f32 / 255.0,
+            a: c.a,
+        }
+    }
+
+    /// Convert to 8-bit Color for final display.
+    /// Uses rounding for best accuracy.
+    #[inline]
+    pub fn to_color(&self) -> Color {
+        Color {
+            r: (self.r * 255.0).round().clamp(0.0, 255.0) as u8,
+            g: (self.g * 255.0).round().clamp(0.0, 255.0) as u8,
+            b: (self.b * 255.0).round().clamp(0.0, 255.0) as u8,
+            a: self.a,
+        }
+    }
+
+    /// Convert to 8-bit Color with ordered dithering to reduce banding.
+    /// `pixel_x` and `pixel_y` are the screen coordinates for dither pattern.
+    #[inline]
+    pub fn to_color_dithered(&self, pixel_x: u32, pixel_y: u32) -> Color {
+        // 4x4 Bayer ordered dithering matrix (normalized to 0.0-1.0 range)
+        const BAYER_4X4: [[f32; 4]; 4] = [
+            [0.0/16.0, 8.0/16.0, 2.0/16.0, 10.0/16.0],
+            [12.0/16.0, 4.0/16.0, 14.0/16.0, 6.0/16.0],
+            [3.0/16.0, 11.0/16.0, 1.0/16.0, 9.0/16.0],
+            [15.0/16.0, 7.0/16.0, 13.0/16.0, 5.0/16.0],
+        ];
+
+        let dither = BAYER_4X4[(pixel_y & 3) as usize][(pixel_x & 3) as usize];
+        let dither_offset = (dither - 0.5) / 255.0;
+
+        Color {
+            r: ((self.r + dither_offset) * 255.0).round().clamp(0.0, 255.0) as u8,
+            g: ((self.g + dither_offset) * 255.0).round().clamp(0.0, 255.0) as u8,
+            b: ((self.b + dither_offset) * 255.0).round().clamp(0.0, 255.0) as u8,
+            a: self.a,
+        }
+    }
+
+    /// Linear interpolation between two colors.
+    #[inline]
+    pub fn lerp(&self, other: &ColorF32, t: f32) -> ColorF32 {
+        ColorF32 {
+            r: self.r + (other.r - self.r) * t,
+            g: self.g + (other.g - self.g) * t,
+            b: self.b + (other.b - self.b) * t,
+            a: self.a + (other.a - self.a) * t,
+        }
+    }
+
+    /// Convert to array for GPU vertex buffers.
+    #[inline]
+    pub fn to_array(&self) -> [f32; 4] {
+        [self.r, self.g, self.b, self.a]
+    }
+}
+
+impl Default for ColorF32 {
+    fn default() -> Self {
+        Self::BLACK
+    }
+}
+
+impl From<Color> for ColorF32 {
+    fn from(c: Color) -> Self {
+        ColorF32::from_color(c)
+    }
+}
+
+impl From<ColorF32> for Color {
+    fn from(c: ColorF32) -> Self {
+        c.to_color()
+    }
+}
+
 /// A CSS length value.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Length {

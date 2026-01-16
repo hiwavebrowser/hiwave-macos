@@ -1554,6 +1554,44 @@ impl Renderer {
         ]);
     }
 
+    /// Draw a solid color rectangle using high-precision color.
+    /// This is the preferred internal method for gradient rendering.
+    fn draw_solid_rect_f32(&mut self, rect: Rect, color: rustkit_css::ColorF32) {
+        // Apply clipping
+        let rect = if let Some(clip) = self.current_clip() {
+            if let Some(clipped) = rect.intersect(&clip) {
+                clipped
+            } else {
+                return; // Fully clipped
+            }
+        } else {
+            rect
+        };
+
+        // Color already in normalized f32 format - no conversion needed
+        let c = color.to_array();
+
+        let base = self.color_vertices.len() as u32;
+
+        // Apply transform to corners
+        let (x0, y0) = self.transform_point(rect.x, rect.y);
+        let (x1, y1) = self.transform_point(rect.x + rect.width, rect.y);
+        let (x2, y2) = self.transform_point(rect.x + rect.width, rect.y + rect.height);
+        let (x3, y3) = self.transform_point(rect.x, rect.y + rect.height);
+
+        self.color_vertices.extend_from_slice(&[
+            ColorVertex { position: [x0, y0], color: c },
+            ColorVertex { position: [x1, y1], color: c },
+            ColorVertex { position: [x2, y2], color: c },
+            ColorVertex { position: [x3, y3], color: c },
+        ]);
+
+        self.color_indices.extend_from_slice(&[
+            base, base + 1, base + 2,
+            base, base + 2, base + 3,
+        ]);
+    }
+
     /// Draw a rounded rectangle using SDF-based rendering.
     fn draw_rounded_rect(&mut self, rect: Rect, color: Color, radius: rustkit_layout::BorderRadius) {
         // For small radii or very small rects, fall back to solid rect
@@ -2019,8 +2057,8 @@ impl Renderer {
         // Calculate gradient direction vector
         let (sin_a, cos_a) = (angle_rad.sin(), angle_rad.cos());
 
-        // Normalize color stop positions
-        let mut normalized_stops: Vec<(f32, Color)> = Vec::with_capacity(stops.len());
+        // Normalize color stop positions using high-precision colors
+        let mut normalized_stops: Vec<(f32, rustkit_css::ColorF32)> = Vec::with_capacity(stops.len());
         for (i, stop) in stops.iter().enumerate() {
             let pos = stop.position.unwrap_or_else(|| {
                 if stops.len() == 1 {
@@ -2029,7 +2067,7 @@ impl Renderer {
                     i as f32 / (stops.len() - 1) as f32
                 }
             });
-            normalized_stops.push((pos, stop.color));
+            normalized_stops.push((pos, rustkit_css::ColorF32::from_color(stop.color)));
         }
 
         // For repeating gradients, get the repeat length (last stop position)
@@ -2068,9 +2106,9 @@ impl Renderer {
                     (i as f32 + 0.5) / step_count as f32
                 };
                 let t_final = apply_t(t);
-                let color = Self::interpolate_color(&normalized_stops, t_final);
+                let color = Self::interpolate_color_f32(&normalized_stops, t_final);
                 let x_pos = rect.x + i as f32 * strip_width;
-                self.draw_solid_rect(Rect::new(x_pos, rect.y, strip_width + 0.5, rect.height), color);
+                self.draw_solid_rect_f32(Rect::new(x_pos, rect.y, strip_width + 0.5, rect.height), color);
             }
         } else if !has_radius && is_vertical {
             // Vertical gradient (top to bottom or bottom to top) - fast path
@@ -2085,9 +2123,9 @@ impl Renderer {
                     (i as f32 + 0.5) / step_count as f32
                 };
                 let t_final = apply_t(t);
-                let color = Self::interpolate_color(&normalized_stops, t_final);
+                let color = Self::interpolate_color_f32(&normalized_stops, t_final);
                 let y_pos = rect.y + i as f32 * strip_height;
-                self.draw_solid_rect(Rect::new(rect.x, y_pos, rect.width, strip_height + 0.5), color);
+                self.draw_solid_rect_f32(Rect::new(rect.x, y_pos, rect.width, strip_height + 0.5), color);
             }
         } else {
             // Diagonal gradient or gradient with border-radius - render using cells
@@ -2140,15 +2178,15 @@ impl Renderer {
                         let t = (projection / gradient_half_length + 1.0) / 2.0;
                         let t_final = apply_t(t);
 
-                        let mut color = Self::interpolate_color(&normalized_stops, t_final);
+                        let mut color = Self::interpolate_color_f32(&normalized_stops, t_final);
 
                         // Apply border-radius alpha
                         if alpha_coverage < 1.0 {
-                            color = Color::new(color.r, color.g, color.b, color.a * alpha_coverage);
+                            color = rustkit_css::ColorF32::new(color.r, color.g, color.b, color.a * alpha_coverage);
                         }
 
                         if color.a > 0.0 {
-                            self.draw_solid_rect(Rect::new(x, y, cell_w, cell_h), color);
+                            self.draw_solid_rect_f32(Rect::new(x, y, cell_w, cell_h), color);
                         }
                     }
 
@@ -2238,14 +2276,14 @@ impl Renderer {
             }
             rustkit_css::RadialSize::Explicit(r1, r2) => (r1, r2),
         };
-        
-        // Normalize color stops
-        let mut normalized_stops: Vec<(f32, Color)> = Vec::with_capacity(stops.len());
+
+        // Normalize color stops using high-precision colors
+        let mut normalized_stops: Vec<(f32, rustkit_css::ColorF32)> = Vec::with_capacity(stops.len());
         for (i, stop) in stops.iter().enumerate() {
             let pos = stop.position.unwrap_or_else(|| {
                 if stops.len() == 1 { 0.5 } else { i as f32 / (stops.len() - 1) as f32 }
             });
-            normalized_stops.push((pos, stop.color));
+            normalized_stops.push((pos, rustkit_css::ColorF32::from_color(stop.color)));
         }
 
         // For repeating gradients, get the repeat length (last stop position)
@@ -2295,16 +2333,16 @@ impl Renderer {
                     };
 
                     // Get color at this distance
-                    let mut color = Self::interpolate_color(&normalized_stops, t_final);
+                    let mut color = Self::interpolate_color_f32(&normalized_stops, t_final);
 
                     // Apply border-radius alpha
                     if alpha_coverage < 1.0 {
-                        color = Color::new(color.r, color.g, color.b, color.a * alpha_coverage);
+                        color = rustkit_css::ColorF32::new(color.r, color.g, color.b, color.a * alpha_coverage);
                     }
 
                     // Only draw if not fully transparent
                     if color.a > 0.0 {
-                        self.draw_solid_rect(Rect::new(x, y, col_width, row_height), color);
+                        self.draw_solid_rect_f32(Rect::new(x, y, col_width, row_height), color);
                     }
                 }
 
@@ -2335,13 +2373,13 @@ impl Renderer {
         // Convert from_angle to radians (CSS conic gradients: 0deg = up, clockwise)
         let from_rad = (from_angle - 90.0).to_radians();
 
-        // Normalize color stops
-        let mut normalized_stops: Vec<(f32, Color)> = Vec::with_capacity(stops.len());
+        // Normalize color stops using high-precision colors
+        let mut normalized_stops: Vec<(f32, rustkit_css::ColorF32)> = Vec::with_capacity(stops.len());
         for (i, stop) in stops.iter().enumerate() {
             let pos = stop.position.unwrap_or_else(|| {
                 if stops.len() == 1 { 0.5 } else { i as f32 / (stops.len() - 1) as f32 }
             });
-            normalized_stops.push((pos, stop.color));
+            normalized_stops.push((pos, rustkit_css::ColorF32::from_color(stop.color)));
         }
 
         // For repeating gradients, get the repeat length from the last stop
@@ -2400,15 +2438,15 @@ impl Renderer {
                     let t = apply_t(raw_t);
 
                     // Get color at this angle
-                    let mut color = Self::interpolate_color(&normalized_stops, t);
+                    let mut color = Self::interpolate_color_f32(&normalized_stops, t);
 
                     // Apply border-radius alpha
                     if alpha_coverage < 1.0 {
-                        color = Color::new(color.r, color.g, color.b, color.a * alpha_coverage);
+                        color = rustkit_css::ColorF32::new(color.r, color.g, color.b, color.a * alpha_coverage);
                     }
 
                     if color.a > 0.0 {
-                        self.draw_solid_rect(Rect::new(x, y, col_width, row_height), color);
+                        self.draw_solid_rect_f32(Rect::new(x, y, col_width, row_height), color);
                     }
                 }
 
@@ -2481,46 +2519,6 @@ impl Renderer {
         (r, g, b)
     }
 
-    /// Interpolate between color stops in sRGB space.
-    /// CSS gradients in browsers (including Chrome) use sRGB interpolation
-    /// by default for backwards compatibility. The linear RGB approach is
-    /// more physically accurate but doesn't match browser behavior.
-    fn interpolate_color(stops: &[(f32, Color)], t: f32) -> Color {
-        if stops.is_empty() {
-            return Color::TRANSPARENT;
-        }
-        if stops.len() == 1 || t <= stops[0].0 {
-            return stops[0].1;
-        }
-        if t >= stops[stops.len() - 1].0 {
-            return stops[stops.len() - 1].1;
-        }
-
-        // Find the two stops surrounding t
-        for i in 0..stops.len() - 1 {
-            let (pos0, color0) = stops[i];
-            let (pos1, color1) = stops[i + 1];
-            if t >= pos0 && t <= pos1 {
-                let local_t = if (pos1 - pos0).abs() < 0.0001 {
-                    0.0
-                } else {
-                    (t - pos0) / (pos1 - pos0)
-                };
-
-                // Interpolate directly in sRGB space (browser default behavior)
-                let r = ((1.0 - local_t) * color0.r as f32 + local_t * color1.r as f32).round() as u8;
-                let g = ((1.0 - local_t) * color0.g as f32 + local_t * color1.g as f32).round() as u8;
-                let b = ((1.0 - local_t) * color0.b as f32 + local_t * color1.b as f32).round() as u8;
-
-                // Alpha is interpolated linearly
-                let a = (1.0 - local_t) * color0.a + local_t * color1.a;
-
-                return Color::new(r, g, b, a);
-            }
-        }
-        stops[stops.len() - 1].1
-    }
-
     /// Interpolate between color stops using oklab color space.
     /// This provides perceptually uniform gradients but doesn't match Chrome's default.
     /// Use for CSS `linear-gradient(in oklab, ...)` when that syntax is supported.
@@ -2581,7 +2579,39 @@ impl Renderer {
         }
         stops[stops.len() - 1].1
     }
-    
+
+    /// Interpolate between color stops using high-precision floating point.
+    /// Returns ColorF32 to preserve precision through the pipeline.
+    /// This function keeps all color math in f32 and only quantizes at final render.
+    fn interpolate_color_f32(stops: &[(f32, rustkit_css::ColorF32)], t: f32) -> rustkit_css::ColorF32 {
+        if stops.is_empty() {
+            return rustkit_css::ColorF32::TRANSPARENT;
+        }
+        if stops.len() == 1 || t <= stops[0].0 {
+            return stops[0].1;
+        }
+        if t >= stops[stops.len() - 1].0 {
+            return stops[stops.len() - 1].1;
+        }
+
+        // Find the two stops surrounding t
+        for i in 0..stops.len() - 1 {
+            let (pos0, color0) = &stops[i];
+            let (pos1, color1) = &stops[i + 1];
+            if t >= *pos0 && t <= *pos1 {
+                let local_t = if (pos1 - pos0).abs() < 0.0001 {
+                    0.0
+                } else {
+                    (t - pos0) / (pos1 - pos0)
+                };
+
+                // Direct f32 interpolation - no quantization
+                return color0.lerp(color1, local_t);
+            }
+        }
+        stops[stops.len() - 1].1
+    }
+
     /// Draw a text input field.
     #[allow(clippy::too_many_arguments)]
     fn draw_text_input(
