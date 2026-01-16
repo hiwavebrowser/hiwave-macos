@@ -375,18 +375,77 @@ impl BackdropFilter {
     }
 }
 
+/// Position along a gradient stop.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StopPosition {
+    /// Percentage position (0.0 to 1.0).
+    Percent(f32),
+    /// Pixel position along the gradient line.
+    Pixels(f32),
+}
+
+impl StopPosition {
+    /// Convert to a normalized 0-1 position given the gradient line length in pixels.
+    /// For percentage values, returns the percentage directly.
+    /// For pixel values, divides by the gradient line length.
+    pub fn to_normalized(&self, gradient_length: f32) -> f32 {
+        match self {
+            StopPosition::Percent(p) => *p,
+            StopPosition::Pixels(px) => {
+                if gradient_length > 0.0 {
+                    *px / gradient_length
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+
+    /// Get the raw value (for calculating repeat length in pixels).
+    pub fn raw_value(&self) -> f32 {
+        match self {
+            StopPosition::Percent(p) => *p,
+            StopPosition::Pixels(px) => *px,
+        }
+    }
+
+    /// Check if this is a pixel-based position.
+    pub fn is_pixels(&self) -> bool {
+        matches!(self, StopPosition::Pixels(_))
+    }
+}
+
 /// A color stop for gradients.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ColorStop {
     /// The color at this stop.
     pub color: Color,
-    /// Position along the gradient (0.0 to 1.0, or None for auto).
-    pub position: Option<f32>,
+    /// Position along the gradient (percentage 0.0-1.0, pixels, or None for auto).
+    pub position: Option<StopPosition>,
 }
 
 impl ColorStop {
     pub fn new(color: Color, position: Option<f32>) -> Self {
-        Self { color, position }
+        Self {
+            color,
+            position: position.map(StopPosition::Percent),
+        }
+    }
+
+    /// Create a color stop with a pixel position.
+    pub fn with_pixels(color: Color, pixels: f32) -> Self {
+        Self {
+            color,
+            position: Some(StopPosition::Pixels(pixels)),
+        }
+    }
+
+    /// Create a color stop with a percentage position.
+    pub fn with_percent(color: Color, percent: f32) -> Self {
+        Self {
+            color,
+            position: Some(StopPosition::Percent(percent)),
+        }
     }
 }
 

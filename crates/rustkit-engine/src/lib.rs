@@ -1848,40 +1848,55 @@ impl Engine {
             }
             "background-size" => {
                 // Can be comma-separated for multiple layers
+                // CSS order: first size applies to first (topmost) layer
+                // Our array: index 0 is bottommost, last index is topmost
+                // So we need to apply in reverse order
                 let sizes: Vec<&str> = split_by_comma(value);
+                let num_layers = style.background_layers.len();
                 for (i, size_str) in sizes.iter().enumerate() {
                     let size = parse_background_size(size_str);
-                    if i < style.background_layers.len() {
-                        style.background_layers[i].size = size;
+                    // Map CSS index to our reversed array: CSS[0] -> layers[n-1]
+                    let layer_idx = num_layers.saturating_sub(i + 1);
+                    if layer_idx < num_layers {
+                        style.background_layers[layer_idx].size = size;
                     }
                 }
             }
             "background-position" => {
                 // Can be comma-separated for multiple layers
+                // Same reversal logic as background-size
                 let positions: Vec<&str> = split_by_comma(value);
+                let num_layers = style.background_layers.len();
                 for (i, pos_str) in positions.iter().enumerate() {
                     let position = parse_background_position(pos_str);
-                    if i < style.background_layers.len() {
-                        style.background_layers[i].position = position;
+                    let layer_idx = num_layers.saturating_sub(i + 1);
+                    if layer_idx < num_layers {
+                        style.background_layers[layer_idx].position = position;
                     }
                 }
             }
             "background-repeat" => {
                 // Can be comma-separated for multiple layers
+                // Same reversal logic as background-size
                 let repeats: Vec<&str> = split_by_comma(value);
+                let num_layers = style.background_layers.len();
                 for (i, repeat_str) in repeats.iter().enumerate() {
                     let repeat = parse_background_repeat(repeat_str);
-                    if i < style.background_layers.len() {
-                        style.background_layers[i].repeat = repeat;
+                    let layer_idx = num_layers.saturating_sub(i + 1);
+                    if layer_idx < num_layers {
+                        style.background_layers[layer_idx].repeat = repeat;
                     }
                 }
             }
             "background-origin" => {
+                // Same reversal logic as background-size
                 let origins: Vec<&str> = split_by_comma(value);
+                let num_layers = style.background_layers.len();
                 for (i, origin_str) in origins.iter().enumerate() {
                     let origin = parse_background_origin(origin_str);
-                    if i < style.background_layers.len() {
-                        style.background_layers[i].origin = origin;
+                    let layer_idx = num_layers.saturating_sub(i + 1);
+                    if layer_idx < num_layers {
+                        style.background_layers[layer_idx].origin = origin;
                     }
                 }
             }
@@ -4791,12 +4806,12 @@ fn parse_gradient_direction(value: &str) -> Option<rustkit_css::GradientDirectio
 /// Parse a color stop (color with optional position).
 fn parse_color_stop(value: &str) -> Option<rustkit_css::ColorStop> {
     let value = value.trim();
-    
+
     // Try to find where the color ends and position begins
     // This is tricky because colors can be rgb(), rgba(), etc.
     let mut paren_depth = 0;
     let mut last_space = None;
-    
+
     for (i, ch) in value.char_indices() {
         match ch {
             '(' => paren_depth += 1,
@@ -4805,24 +4820,34 @@ fn parse_color_stop(value: &str) -> Option<rustkit_css::ColorStop> {
             _ => {}
         }
     }
-    
-    let (color_str, position) = if let Some(space_idx) = last_space {
+
+    if let Some(space_idx) = last_space {
+        let color_str = &value[..space_idx];
         let pos_str = &value[space_idx + 1..];
-        let pos = if pos_str.ends_with('%') {
-            pos_str.strip_suffix('%').and_then(|s| s.parse::<f32>().ok()).map(|p| p / 100.0)
+        let color = parse_color(color_str)?;
+
+        if pos_str.ends_with('%') {
+            // Percentage position (normalized to 0-1)
+            let percent = pos_str.strip_suffix('%').and_then(|s| s.parse::<f32>().ok())?;
+            Some(rustkit_css::ColorStop::with_percent(color, percent / 100.0))
         } else if pos_str.ends_with("px") {
-            // Ignore pixel positions for now, they require container size
-            None
+            // Pixel position - store as pixels for conversion at render time
+            let pixels = pos_str.strip_suffix("px").and_then(|s| s.parse::<f32>().ok())?;
+            Some(rustkit_css::ColorStop::with_pixels(color, pixels))
         } else {
-            None
-        };
-        (&value[..space_idx], pos)
+            // No recognized unit, try parsing as a number (treat as percentage)
+            if let Ok(val) = pos_str.parse::<f32>() {
+                Some(rustkit_css::ColorStop::with_percent(color, val / 100.0))
+            } else {
+                // No valid position, just the color
+                Some(rustkit_css::ColorStop { color, position: None })
+            }
+        }
     } else {
-        (value, None)
-    };
-    
-    let color = parse_color(color_str)?;
-    Some(rustkit_css::ColorStop::new(color, position))
+        // No position, just the color
+        let color = parse_color(value)?;
+        Some(rustkit_css::ColorStop { color, position: None })
+    }
 }
 
 /// Split a string by commas, respecting parentheses.

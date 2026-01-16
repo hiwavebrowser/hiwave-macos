@@ -2214,24 +2214,68 @@ impl Renderer {
         // Calculate gradient direction vector
         let (sin_a, cos_a) = (angle_rad.sin(), angle_rad.cos());
 
-        // Normalize color stop positions using high-precision colors
+        // Calculate gradient geometry
+        let half_width = rect.width / 2.0;
+        let half_height = rect.height / 2.0;
+        let gradient_half_length = (half_width * sin_a.abs() + half_height * cos_a.abs()).max(0.001);
+
+        // Check if any stop uses pixel positions (for repeating gradients)
+        let has_pixel_positions = stops.iter().any(|s| {
+            s.position.as_ref().map(|p| p.is_pixels()).unwrap_or(false)
+        });
+
+        // For repeating gradients with pixel positions, get the repeat length in pixels
+        let repeat_length_pixels = if repeating && has_pixel_positions {
+            stops.last()
+                .and_then(|s| s.position.as_ref())
+                .map(|p| match p {
+                    rustkit_css::StopPosition::Pixels(px) => *px,
+                    rustkit_css::StopPosition::Percent(pct) => *pct * gradient_half_length * 2.0,
+                })
+                .unwrap_or(gradient_half_length * 2.0)
+                .max(0.001)
+        } else {
+            gradient_half_length * 2.0 // Full gradient length
+        };
+
+        // For pixel-based repeating gradients, normalize stops to the repeat length (not full gradient)
+        // For percentage-based gradients, normalize to 0-1
         let mut normalized_stops: Vec<(f32, rustkit_css::ColorF32)> = Vec::with_capacity(stops.len());
         for (i, stop) in stops.iter().enumerate() {
-            let pos = stop.position.unwrap_or_else(|| {
-                if stops.len() == 1 {
-                    0.5
-                } else {
-                    i as f32 / (stops.len() - 1) as f32
+            let pos = match &stop.position {
+                Some(p) => {
+                    if has_pixel_positions && repeating {
+                        // For pixel-based repeating gradients, normalize to repeat length
+                        match p {
+                            rustkit_css::StopPosition::Pixels(px) => *px / repeat_length_pixels,
+                            rustkit_css::StopPosition::Percent(pct) => *pct,
+                        }
+                    } else {
+                        // For non-repeating or percentage-based, normalize to 0-1 using gradient line
+                        match p {
+                            rustkit_css::StopPosition::Percent(pct) => *pct,
+                            rustkit_css::StopPosition::Pixels(px) => *px / (gradient_half_length * 2.0),
+                        }
+                    }
                 }
-            });
+                None => {
+                    // Auto-position: distribute evenly
+                    if stops.len() == 1 {
+                        0.5
+                    } else {
+                        i as f32 / (stops.len() - 1) as f32
+                    }
+                }
+            };
             normalized_stops.push((pos, rustkit_css::ColorF32::from_color(stop.color)));
         }
 
-        // For repeating gradients, get the repeat length (last stop position)
-        let repeat_length = if repeating && !normalized_stops.is_empty() {
-            normalized_stops.last().map(|(pos, _)| *pos).unwrap_or(1.0).max(0.001)
+        // For repeating gradients, the repeat length is 1.0 (since we normalized stops to it)
+        // For non-repeating, use the last stop position
+        let repeat_length = if repeating {
+            1.0 // Stops are already normalized to repeat length
         } else {
-            1.0
+            normalized_stops.last().map(|(pos, _)| *pos).unwrap_or(1.0).max(0.001)
         };
 
         // Helper to apply repeating logic to t value
@@ -2285,11 +2329,9 @@ impl Renderer {
                 self.draw_solid_rect_f32(Rect::new(rect.x, y_pos, rect.width, strip_height + 0.5), color);
             }
         } else {
-            // Diagonal gradient - cell-by-cell rendering
+            // Diagonal gradient or gradient with border-radius - cell-by-cell rendering
             // Uses the CSS gradient spec algorithm for proper corner-to-corner diagonal
-            let half_width = rect.width / 2.0;
-            let half_height = rect.height / 2.0;
-            let gradient_half_length = (half_width * sin_a.abs() + half_height * cos_a.abs()).max(0.001);
+            // (half_width, half_height, gradient_half_length are calculated at function start)
 
             // Adaptive step sizing to prevent GPU buffer overflow for large gradients
             // while maintaining 1px quality for small UI elements
@@ -2318,18 +2360,43 @@ impl Renderer {
                         continue;
                     }
 
+                    // Check border-radius clipping
+                    if has_radius {
+                        let coverage = Self::point_in_rounded_rect(cell_center_x, cell_center_y, rect, border_radius);
+                        if coverage <= 0.0 {
+                            continue; // Skip cells outside the rounded corners
+                        }
+                    }
+
                     // Position relative to rect center
                     let px = cell_center_x - center_x;
                     let py = cell_center_y - center_y;
 
                     // Project onto gradient direction (sin_a, -cos_a)
+                    // projection ranges from -gradient_half_length to +gradient_half_length
                     let projection = px * sin_a + py * (-cos_a);
 
-                    // Normalize to 0-1 range
-                    let t = (projection / gradient_half_length + 1.0) / 2.0;
+                    // Calculate t value
+                    let t = if repeating && has_pixel_positions {
+                        // For pixel-based repeating gradients, the 0 position is at the center
+                        // of the gradient line, and the pattern repeats in both directions.
+                        // projection is already centered at 0, so use it directly.
+                        projection / repeat_length_pixels
+                    } else {
+                        // For non-repeating or percentage-based, normalize to 0-1
+                        (projection / gradient_half_length + 1.0) / 2.0
+                    };
                     let t_final = apply_t(t);
 
-                    let color = Self::interpolate_color_f32(&normalized_stops, t_final);
+                    let mut color = Self::interpolate_color_f32(&normalized_stops, t_final);
+
+                    // Apply alpha coverage for antialiased edges at rounded corners
+                    if has_radius {
+                        let coverage = Self::point_in_rounded_rect(cell_center_x, cell_center_y, rect, border_radius);
+                        if coverage < 1.0 {
+                            color = rustkit_css::ColorF32::new(color.r, color.g, color.b, color.a * coverage);
+                        }
+                    }
 
                     // Clamp cell to rect bounds
                     let cell_w = cell_size.min(rect.x + rect.width - cell_x);
@@ -2421,18 +2488,39 @@ impl Renderer {
             rustkit_css::RadialSize::Explicit(r1, r2) => (r1, r2),
         };
 
+        // Radial gradient line length is the maximum radius
+        let radial_gradient_length = rx.max(ry);
+
+        // Check if any stop uses pixel positions
+        let has_pixel_positions = stops.iter().any(|s| {
+            s.position.as_ref().map(|p| p.is_pixels()).unwrap_or(false)
+        });
+
         // Normalize color stops using high-precision colors
+        // For pixel positions, convert to normalized using the radial gradient length
         let mut normalized_stops: Vec<(f32, rustkit_css::ColorF32)> = Vec::with_capacity(stops.len());
         for (i, stop) in stops.iter().enumerate() {
-            let pos = stop.position.unwrap_or_else(|| {
-                if stops.len() == 1 { 0.5 } else { i as f32 / (stops.len() - 1) as f32 }
-            });
+            let pos = match &stop.position {
+                Some(p) => p.to_normalized(radial_gradient_length),
+                None => {
+                    // Auto-position: distribute evenly
+                    if stops.len() == 1 { 0.5 } else { i as f32 / (stops.len() - 1) as f32 }
+                }
+            };
             normalized_stops.push((pos, rustkit_css::ColorF32::from_color(stop.color)));
         }
 
-        // For repeating gradients, get the repeat length (last stop position)
+        // For repeating gradients, calculate repeat length
         let repeat_length = if repeating && !normalized_stops.is_empty() {
-            normalized_stops.last().map(|(pos, _)| *pos).unwrap_or(1.0).max(0.001)
+            if has_pixel_positions {
+                stops.last()
+                    .and_then(|s| s.position.as_ref())
+                    .map(|p| p.to_normalized(radial_gradient_length))
+                    .unwrap_or(1.0)
+                    .max(0.001)
+            } else {
+                normalized_stops.last().map(|(pos, _)| *pos).unwrap_or(1.0).max(0.001)
+            }
         } else {
             1.0
         };
@@ -2518,11 +2606,23 @@ impl Renderer {
         let from_rad = (from_angle - 90.0).to_radians();
 
         // Normalize color stops using high-precision colors
+        // For conic gradients, positions are typically percentages (0-1) of the full sweep
+        // Pixel positions are treated as percentages for conic gradients
         let mut normalized_stops: Vec<(f32, rustkit_css::ColorF32)> = Vec::with_capacity(stops.len());
         for (i, stop) in stops.iter().enumerate() {
-            let pos = stop.position.unwrap_or_else(|| {
-                if stops.len() == 1 { 0.5 } else { i as f32 / (stops.len() - 1) as f32 }
-            });
+            let pos = match &stop.position {
+                Some(p) => {
+                    // For conic gradients, use raw value as percentage
+                    // (pixel positions don't make sense for conic, treat them as normalized)
+                    match p {
+                        rustkit_css::StopPosition::Percent(pct) => *pct,
+                        rustkit_css::StopPosition::Pixels(px) => *px / 360.0, // Treat as degrees
+                    }
+                }
+                None => {
+                    if stops.len() == 1 { 0.5 } else { i as f32 / (stops.len() - 1) as f32 }
+                }
+            };
             normalized_stops.push((pos, rustkit_css::ColorF32::from_color(stop.color)));
         }
 
