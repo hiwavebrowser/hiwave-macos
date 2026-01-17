@@ -304,8 +304,11 @@ pub struct Renderer {
     backdrop_filter_pipelines: pipeline::BackdropFilterPipelines,
 
     // GPU gradient pipeline
-    // NOTE: Currently disabled due to bugs, using cell-by-cell rendering instead
-    _gradient_pipeline: pipeline::GradientPipeline,
+    gradient_pipeline: pipeline::GradientPipeline,
+
+    /// Enable GPU gradient rendering (controlled by RUSTKIT_GPU_GRADIENTS env var)
+    /// When disabled, uses cell-by-cell rendering for gradients
+    gpu_gradients_enabled: bool,
 
     // Uniform buffer
     uniform_buffer: wgpu::Buffer,
@@ -318,8 +321,8 @@ pub struct Renderer {
     texture_vertices: Vec<TextureVertex>,
     texture_indices: Vec<u32>,
 
-    // GPU gradient queue (currently unused, cell-by-cell rendering used instead)
-    _gradient_queue: Vec<QueuedLinearGradient>,
+    // GPU gradient queue for batched rendering
+    gradient_queue: Vec<QueuedLinearGradient>,
 
     // State stacks
     clip_stack: Vec<Rect>,
@@ -356,8 +359,7 @@ pub struct StackingContext {
 }
 
 /// A queued linear gradient to be rendered with the GPU shader.
-/// NOTE: GPU gradient rendering is currently disabled due to bugs. Using cell-by-cell instead.
-#[allow(dead_code)]
+/// Enable GPU gradients via RUSTKIT_GPU_GRADIENTS=1 environment variable.
 #[derive(Debug, Clone)]
 struct QueuedLinearGradient {
     rect: Rect,
@@ -497,6 +499,9 @@ impl Renderer {
             ..Default::default()
         });
 
+        // GPU gradients enabled via environment variable (default: disabled for stability)
+        let gpu_gradients_enabled = std::env::var("RUSTKIT_GPU_GRADIENTS").is_ok();
+
         Ok(Self {
             device,
             queue,
@@ -506,7 +511,8 @@ impl Renderer {
             blit_pipeline,
             blit_pipeline_rgba,
             backdrop_filter_pipelines,
-            _gradient_pipeline: gradient_pipeline,
+            gradient_pipeline,
+            gpu_gradients_enabled,
             uniform_buffer,
             uniform_bind_group,
             viewport_size: (800, 600),
@@ -514,7 +520,7 @@ impl Renderer {
             color_indices: Vec::with_capacity(8192),
             texture_vertices: Vec::with_capacity(4096),
             texture_indices: Vec::with_capacity(8192),
-            _gradient_queue: Vec::with_capacity(64),
+            gradient_queue: Vec::with_capacity(64),
             clip_stack: Vec::new(),
             stacking_contexts: Vec::new(),
             transform_stack: Vec::new(),
@@ -930,7 +936,7 @@ impl Renderer {
         self.color_indices.clear();
         self.texture_vertices.clear();
         self.texture_indices.clear();
-        self._gradient_queue.clear();
+        self.gradient_queue.clear();
         self.clip_stack.clear();
         self.stacking_contexts.clear();
         self.transform_stack.clear();
@@ -2070,8 +2076,7 @@ impl Renderer {
     /// Render a linear gradient using the GPU shader.
     /// This method renders the gradient immediately using a separate render pass.
     /// Note: This may cause z-ordering issues with other content.
-    /// NOTE: Currently disabled due to bugs in the shader. Using cell-by-cell instead.
-    #[allow(dead_code)]
+    /// Enable via RUSTKIT_GPU_GRADIENTS=1 environment variable.
     fn render_linear_gradient_gpu(
         &self,
         target: &wgpu::TextureView,
@@ -2105,15 +2110,22 @@ impl Renderer {
             gradient_type: 0,  // 0 = linear
             repeating: if repeating { 1 } else { 0 },
             repeat_length,
-            num_stops: stops.len().min(self._gradient_pipeline.max_stops) as u32,
+            num_stops: stops.len().min(self.gradient_pipeline.max_stops) as u32,
             radius_tl: border_radius.top_left,
             radius_tr: border_radius.top_right,
             radius_br: border_radius.bottom_right,
             radius_bl: border_radius.bottom_left,
+            debug_mode: std::env::var("RUSTKIT_GPU_DEBUG")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0),
+            _padding0: 0,
+            _padding1: 0,
+            _padding2: 0,
         };
 
         self.queue.write_buffer(
-            &self._gradient_pipeline.uniform_buffer,
+            &self.gradient_pipeline.uniform_buffer,
             0,
             bytemuck::cast_slice(&[params]),
         );
@@ -2121,7 +2133,7 @@ impl Renderer {
         // Update color stops storage buffer
         let gpu_stops: Vec<pipeline::GradientColorStop> = stops
             .iter()
-            .take(self._gradient_pipeline.max_stops)
+            .take(self.gradient_pipeline.max_stops)
             .map(|(pos, color)| pipeline::GradientColorStop {
                 position: *pos,
                 r: color.r,
@@ -2133,7 +2145,7 @@ impl Renderer {
 
         if !gpu_stops.is_empty() {
             self.queue.write_buffer(
-                &self._gradient_pipeline.stops_buffer,
+                &self.gradient_pipeline.stops_buffer,
                 0,
                 bytemuck::cast_slice(&gpu_stops),
             );
@@ -2183,9 +2195,161 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            render_pass.set_pipeline(&self._gradient_pipeline.pipeline);
+            render_pass.set_pipeline(&self.gradient_pipeline.pipeline);
             render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            render_pass.set_bind_group(1, &self._gradient_pipeline.bind_group, &[]);
+            render_pass.set_bind_group(1, &self.gradient_pipeline.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..6, 0, 0..1);
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Render a linear gradient using the GPU shader with optional clear.
+    /// When clear_color is Some, the target is cleared before rendering.
+    /// When clear_color is None, existing content is preserved (LoadOp::Load).
+    fn render_linear_gradient_gpu_with_clear(
+        &self,
+        target: &wgpu::TextureView,
+        rect: Rect,
+        angle_rad: f32,
+        stops: &[(f32, rustkit_css::ColorF32)],
+        repeating: bool,
+        border_radius: rustkit_layout::BorderRadius,
+        clear_color: Option<wgpu::Color>,
+    ) {
+        if stops.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+
+        // Calculate repeat length for repeating gradients
+        let repeat_length = if repeating && !stops.is_empty() {
+            stops.last().map(|(pos, _)| *pos).unwrap_or(1.0).max(0.001)
+        } else {
+            1.0
+        };
+
+        // Update gradient parameters uniform buffer
+        let params = pipeline::GradientParams {
+            rect_x: rect.x,
+            rect_y: rect.y,
+            rect_width: rect.width,
+            rect_height: rect.height,
+            param0: angle_rad,
+            param1: 0.0,
+            param2: 0.5,
+            param3: 0.5,
+            gradient_type: 0,  // 0 = linear
+            repeating: if repeating { 1 } else { 0 },
+            repeat_length,
+            num_stops: stops.len().min(self.gradient_pipeline.max_stops) as u32,
+            radius_tl: border_radius.top_left,
+            radius_tr: border_radius.top_right,
+            radius_br: border_radius.bottom_right,
+            radius_bl: border_radius.bottom_left,
+            // Debug mode: 0=normal, 1=t-value, 2=direction, 3=position, 4=coverage, 5=raw-t
+            //            6=first-stop, 7=num-stops, 8=interp-color
+            // Set via RUSTKIT_GPU_DEBUG=N environment variable
+            debug_mode: std::env::var("RUSTKIT_GPU_DEBUG")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0),
+            _padding0: 0,
+            _padding1: 0,
+            _padding2: 0,
+        };
+
+        // Debug output for GPU gradient parameters
+        if std::env::var("RUSTKIT_GPU_TRACE").is_ok() {
+            eprintln!("GPU Gradient (with_clear): rect=({:.1}, {:.1}, {:.1}, {:.1}), angle={:.2}rad, num_stops={}, repeating={}",
+                params.rect_x, params.rect_y, params.rect_width, params.rect_height,
+                params.param0, params.num_stops, params.repeating);
+            for (i, (pos, color)) in stops.iter().enumerate() {
+                eprintln!("  Stop {}: pos={:.3}, RGBA=({:.3}, {:.3}, {:.3}, {:.3})",
+                    i, pos, color.r, color.g, color.b, color.a);
+            }
+        }
+
+        self.queue.write_buffer(
+            &self.gradient_pipeline.uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[params]),
+        );
+
+        // Update color stops storage buffer
+        let gpu_stops: Vec<pipeline::GradientColorStop> = stops
+            .iter()
+            .take(self.gradient_pipeline.max_stops)
+            .map(|(pos, color)| pipeline::GradientColorStop {
+                position: *pos,
+                r: color.r,
+                g: color.g,
+                b: color.b,
+                a: color.a,
+            })
+            .collect();
+
+        if !gpu_stops.is_empty() {
+            self.queue.write_buffer(
+                &self.gradient_pipeline.stops_buffer,
+                0,
+                bytemuck::cast_slice(&gpu_stops),
+            );
+        }
+
+        // Create vertices for the gradient quad
+        let dummy_color = [0.0f32, 0.0, 0.0, 1.0];
+
+        let vertices = [
+            ColorVertex { position: [rect.x, rect.y], color: dummy_color },
+            ColorVertex { position: [rect.x + rect.width, rect.y], color: dummy_color },
+            ColorVertex { position: [rect.x + rect.width, rect.y + rect.height], color: dummy_color },
+            ColorVertex { position: [rect.x, rect.y + rect.height], color: dummy_color },
+        ];
+        let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Gradient Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Gradient Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        // Create command encoder and render pass
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("GPU Gradient Encoder (with_clear)"),
+        });
+
+        let load_op = match clear_color {
+            Some(color) => wgpu::LoadOp::Clear(color),
+            None => wgpu::LoadOp::Load,
+        };
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("GPU Gradient Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: load_op,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            render_pass.set_pipeline(&self.gradient_pipeline.pipeline);
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.gradient_pipeline.bind_group, &[]);
             render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
             render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             render_pass.draw_indexed(0..6, 0, 0..1);
@@ -2277,6 +2441,21 @@ impl Renderer {
         } else {
             normalized_stops.last().map(|(pos, _)| *pos).unwrap_or(1.0).max(0.001)
         };
+
+        // GPU gradient path: queue for deferred rendering
+        // Enable via RUSTKIT_GPU_GRADIENTS=1 environment variable
+        if self.gpu_gradients_enabled {
+            self.gradient_queue.push(QueuedLinearGradient {
+                rect,
+                angle_rad,
+                stops: normalized_stops,
+                repeating,
+                border_radius,
+            });
+            return; // GPU will render during flush_to
+        }
+
+        // CPU path: cell-by-cell rendering (default)
 
         // Helper to apply repeating logic to t value
         let apply_t = |t: f32| -> f32 {
@@ -2849,7 +3028,8 @@ impl Renderer {
                     (t - pos0) / (pos1 - pos0)
                 };
 
-                // Direct f32 interpolation - no quantization
+                // Premultiplied alpha interpolation in sRGB space
+                // This matches Chrome's default gradient interpolation
                 return color0.lerp(color1, local_t);
             }
         }
@@ -3434,10 +3614,6 @@ impl Renderer {
 
     /// Flush all batched vertices to the target.
     fn flush_to(&mut self, target: &wgpu::TextureView) -> Result<(), RendererError> {
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Render Encoder"),
-        });
-
         // Check for debug visual mode (RUSTKIT_DEBUG_VISUAL=1)
         // When enabled, clear to magenta to prove pixels are hitting the screen
         let debug_visual = std::env::var("RUSTKIT_DEBUG_VISUAL")
@@ -3462,6 +3638,20 @@ impl Renderer {
             }
         };
 
+        // Capture GPU gradients to render AFTER batched content
+        // GPU gradients are element backgrounds, which should render AFTER parent backgrounds
+        // (batched content includes HTML/BODY backgrounds drawn in DOM order)
+        let gpu_gradients = std::mem::take(&mut self.gradient_queue);
+        let has_gpu_gradients = !gpu_gradients.is_empty();
+
+        // Phase 1: Render batched content FIRST (parent backgrounds, etc.)
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Render Encoder"),
+        });
+
+        // Always clear on first pass
+        let load_op = wgpu::LoadOp::Clear(clear_color);
+
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Main Render Pass"),
@@ -3469,7 +3659,7 @@ impl Renderer {
                     view: target,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear_color),
+                        load: load_op,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -3548,6 +3738,23 @@ impl Renderer {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Phase 2: Render GPU gradients ON TOP of batched content
+        // Gradients are element backgrounds that should appear above parent backgrounds
+        if has_gpu_gradients {
+            for gradient in gpu_gradients {
+                // Render each gradient with LoadOp::Load to preserve batched content
+                self.render_linear_gradient_gpu_with_clear(
+                    target,
+                    gradient.rect,
+                    gradient.angle_rad,
+                    &gradient.stops,
+                    gradient.repeating,
+                    gradient.border_radius,
+                    None,  // None = LoadOp::Load (preserve existing content)
+                );
+            }
+        }
 
         Ok(())
     }
@@ -3639,6 +3846,163 @@ mod tests {
         let b = Rect::new(100.0, 100.0, 50.0, 50.0);
 
         assert!(a.intersect(&b).is_none());
+    }
+
+    // ==================== Gradient Coordinate Tests ====================
+    // These tests verify the gradient math matches between CPU and GPU implementations.
+
+    /// Test gradient half-length calculation for various angles.
+    /// CSS spec: gradient line extends from corner to corner through center.
+    /// Formula: |sin(angle)| * half_width + |cos(angle)| * half_height
+    #[test]
+    fn test_gradient_half_length() {
+        let half_w = 50.0_f32;
+        let half_h = 50.0_f32;
+
+        // 0deg (to top): sin=0, cos=1 -> half_h = 50
+        let angle_rad = 0.0_f32.to_radians();
+        let result = (half_w * angle_rad.sin().abs() + half_h * angle_rad.cos().abs()).max(0.001);
+        assert!((result - 50.0).abs() < 0.01, "0deg: expected 50, got {}", result);
+
+        // 90deg (to right): sin=1, cos=0 -> half_w = 50
+        let angle_rad = 90.0_f32.to_radians();
+        let result = (half_w * angle_rad.sin().abs() + half_h * angle_rad.cos().abs()).max(0.001);
+        assert!((result - 50.0).abs() < 0.01, "90deg: expected 50, got {}", result);
+
+        // 45deg: sin=0.707, cos=0.707 -> 0.707*50 + 0.707*50 = 70.7
+        let angle_rad = 45.0_f32.to_radians();
+        let result = (half_w * angle_rad.sin().abs() + half_h * angle_rad.cos().abs()).max(0.001);
+        assert!((result - 70.71).abs() < 0.1, "45deg: expected 70.71, got {}", result);
+
+        // 180deg (to bottom): sin=0, cos=-1 -> |cos|=1 -> half_h = 50
+        let angle_rad = 180.0_f32.to_radians();
+        let result = (half_w * angle_rad.sin().abs() + half_h * angle_rad.cos().abs()).max(0.001);
+        assert!((result - 50.0).abs() < 0.01, "180deg: expected 50, got {}", result);
+    }
+
+    /// Test gradient direction vector follows CSS convention.
+    /// CSS: 0deg = "to top", 90deg = "to right", etc.
+    /// Direction vector: (sin(angle), -cos(angle))
+    #[test]
+    fn test_gradient_direction_vector() {
+        // 0deg (to top): direction = (0, -1) -> points UP
+        let angle_rad = 0.0_f32.to_radians();
+        let dir = (angle_rad.sin(), -angle_rad.cos());
+        assert!((dir.0 - 0.0).abs() < 0.001, "0deg dir.x: expected 0, got {}", dir.0);
+        assert!((dir.1 - (-1.0)).abs() < 0.001, "0deg dir.y: expected -1, got {}", dir.1);
+
+        // 90deg (to right): direction = (1, 0) -> points RIGHT
+        let angle_rad = 90.0_f32.to_radians();
+        let dir = (angle_rad.sin(), -angle_rad.cos());
+        assert!((dir.0 - 1.0).abs() < 0.001, "90deg dir.x: expected 1, got {}", dir.0);
+        assert!((dir.1 - 0.0).abs() < 0.001, "90deg dir.y: expected 0, got {}", dir.1);
+
+        // 180deg (to bottom): direction = (0, 1) -> points DOWN
+        let angle_rad = 180.0_f32.to_radians();
+        let dir = (angle_rad.sin(), -angle_rad.cos());
+        assert!((dir.0 - 0.0).abs() < 0.001, "180deg dir.x: expected 0, got {}", dir.0);
+        assert!((dir.1 - 1.0).abs() < 0.001, "180deg dir.y: expected 1, got {}", dir.1);
+
+        // 270deg (to left): direction = (-1, 0) -> points LEFT
+        let angle_rad = 270.0_f32.to_radians();
+        let dir = (angle_rad.sin(), -angle_rad.cos());
+        assert!((dir.0 - (-1.0)).abs() < 0.001, "270deg dir.x: expected -1, got {}", dir.0);
+        assert!((dir.1 - 0.0).abs() < 0.001, "270deg dir.y: expected 0, got {}", dir.1);
+    }
+
+    /// Test t-value calculation for a 0deg gradient on a 100x100 rect.
+    /// 0deg = "to top": red at BOTTOM (t=0), blue at TOP (t=1)
+    #[test]
+    fn test_gradient_t_value_vertical() {
+        let rect_x = 0.0_f32;
+        let rect_y = 0.0_f32;
+        let rect_width = 100.0_f32;
+        let rect_height = 100.0_f32;
+        let angle_deg = 0.0_f32;
+        let angle_rad = angle_deg.to_radians();
+
+        let (sin_a, cos_a) = (angle_rad.sin(), angle_rad.cos());
+        let half_w = rect_width / 2.0;
+        let half_h = rect_height / 2.0;
+        let gradient_half_length = (half_w * sin_a.abs() + half_h * cos_a.abs()).max(0.001);
+        let center_x = rect_x + half_w;
+        let center_y = rect_y + half_h;
+
+        // At top center (50, 0): should be t=1.0 (blue end)
+        let px = 50.0 - center_x;
+        let py = 0.0 - center_y; // py = -50
+        let projection = px * sin_a + py * (-cos_a); // 0 + (-50)*(-1) = 50
+        let t = (projection / gradient_half_length + 1.0) / 2.0;
+        assert!((t - 1.0).abs() < 0.01, "Top center t: expected 1.0, got {}", t);
+
+        // At bottom center (50, 100): should be t=0.0 (red end)
+        let px = 50.0 - center_x;
+        let py = 100.0 - center_y; // py = 50
+        let projection = px * sin_a + py * (-cos_a); // 0 + 50*(-1) = -50
+        let t = (projection / gradient_half_length + 1.0) / 2.0;
+        assert!((t - 0.0).abs() < 0.01, "Bottom center t: expected 0.0, got {}", t);
+
+        // At center (50, 50): should be t=0.5
+        let px = 50.0 - center_x;
+        let py = 50.0 - center_y;
+        let projection = px * sin_a + py * (-cos_a);
+        let t = (projection / gradient_half_length + 1.0) / 2.0;
+        assert!((t - 0.5).abs() < 0.01, "Center t: expected 0.5, got {}", t);
+    }
+
+    /// Test t-value calculation for a 90deg gradient on a 100x100 rect.
+    /// 90deg = "to right": red at LEFT (t=0), blue at RIGHT (t=1)
+    #[test]
+    fn test_gradient_t_value_horizontal() {
+        let rect_x = 0.0_f32;
+        let rect_y = 0.0_f32;
+        let rect_width = 100.0_f32;
+        let rect_height = 100.0_f32;
+        let angle_deg = 90.0_f32;
+        let angle_rad = angle_deg.to_radians();
+
+        let (sin_a, cos_a) = (angle_rad.sin(), angle_rad.cos());
+        let half_w = rect_width / 2.0;
+        let half_h = rect_height / 2.0;
+        let gradient_half_length = (half_w * sin_a.abs() + half_h * cos_a.abs()).max(0.001);
+        let center_x = rect_x + half_w;
+        let center_y = rect_y + half_h;
+
+        // At left center (0, 50): should be t=0.0 (red end)
+        let px = 0.0 - center_x; // px = -50
+        let py = 50.0 - center_y;
+        let projection = px * sin_a + py * (-cos_a); // -50*1 + 0 = -50
+        let t = (projection / gradient_half_length + 1.0) / 2.0;
+        assert!((t - 0.0).abs() < 0.01, "Left center t: expected 0.0, got {}", t);
+
+        // At right center (100, 50): should be t=1.0 (blue end)
+        let px = 100.0 - center_x; // px = 50
+        let py = 50.0 - center_y;
+        let projection = px * sin_a + py * (-cos_a); // 50*1 + 0 = 50
+        let t = (projection / gradient_half_length + 1.0) / 2.0;
+        assert!((t - 1.0).abs() < 0.01, "Right center t: expected 1.0, got {}", t);
+    }
+
+    /// Test GradientParams struct size matches what GPU expects.
+    #[test]
+    fn test_gradient_params_size() {
+        // GradientParams should be 80 bytes (20 x 4-byte values)
+        assert_eq!(
+            std::mem::size_of::<crate::pipeline::GradientParams>(),
+            80,
+            "GradientParams size mismatch"
+        );
+    }
+
+    /// Test GradientColorStop struct size matches what GPU expects.
+    #[test]
+    fn test_gradient_color_stop_size() {
+        // GradientColorStop should be 20 bytes (5 f32 values)
+        assert_eq!(
+            std::mem::size_of::<crate::pipeline::GradientColorStop>(),
+            20,
+            "GradientColorStop size mismatch"
+        );
     }
 }
 

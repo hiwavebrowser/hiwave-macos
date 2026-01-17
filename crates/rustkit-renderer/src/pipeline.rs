@@ -5,7 +5,7 @@ use crate::{ColorVertex, TextureVertex};
 // ==================== Gradient Pipeline ====================
 
 /// Gradient parameters uniform structure (must match gradient.wgsl).
-/// Total size: 80 bytes (20 f32 values)
+/// Total size: 80 bytes (20 values)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GradientParams {
@@ -41,6 +41,12 @@ pub struct GradientParams {
     pub radius_br: f32,
     /// Border radius: bottom-left
     pub radius_bl: f32,
+    /// Debug mode: 0=normal, 1=t-value, 2=direction, 3=position, 4=coverage, 5=raw-t
+    pub debug_mode: u32,
+    /// Padding for 16-byte alignment
+    pub _padding0: u32,
+    pub _padding1: u32,
+    pub _padding2: u32,
 }
 
 impl Default for GradientParams {
@@ -62,6 +68,10 @@ impl Default for GradientParams {
             radius_tr: 0.0,
             radius_br: 0.0,
             radius_bl: 0.0,
+            debug_mode: 0,
+            _padding0: 0,
+            _padding1: 0,
+            _padding2: 0,
         }
     }
 }

@@ -48,6 +48,12 @@ struct GradientParams {
     radius_tr: f32,
     radius_br: f32,
     radius_bl: f32,
+    // Debug mode: 0=normal, 1=t-value, 2=direction, 3=position, 4=coverage, 5=cpu-compare
+    debug_mode: u32,
+    // Padding to align to 16 bytes (wgpu uniform buffer alignment requirement)
+    _padding0: u32,
+    _padding1: u32,
+    _padding2: u32,
 };
 
 @group(1) @binding(0)
@@ -93,8 +99,22 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-// Calculate t value for linear gradient
-// Follows the exact algorithm from rustkit-renderer/src/lib.rs:2169-2178
+/// Calculate t value for linear gradient.
+/// Follows the exact algorithm from rustkit-renderer/src/lib.rs
+///
+/// Coordinate system:
+/// - Pixel coordinates: (0,0) at top-left, x increases right, y increases down
+/// - rect_x, rect_y: top-left corner of gradient box in pixels
+/// - rect_width, rect_height: dimensions in pixels
+///
+/// Angle convention (CSS Images Level 3):
+/// - 0deg = "to top" (colors flow upward)
+/// - 90deg = "to right"
+/// - 180deg = "to bottom"
+/// - 270deg = "to left"
+///
+/// Direction vector: (sin(angle), -cos(angle))
+/// - This produces (0, -1) for 0deg, which points UP in our coordinate system
 fn linear_gradient_t(pixel_pos: vec2<f32>) -> f32 {
     let angle_rad = gradient_params.param0;
     let sin_a = sin(angle_rad);
@@ -188,8 +208,18 @@ fn apply_repeat(t: f32) -> f32 {
     if gradient_params.repeating == 1u {
         // Repeating gradient: use modulo with the repeat length
         let repeat_len = max(gradient_params.repeat_length, 0.001);
-        // rem_euclid equivalent: t - floor(t / repeat_len) * repeat_len
-        let repeated = t - floor(t / repeat_len) * repeat_len;
+        
+        // Handle negative t values properly (rem_euclid equivalent)
+        var repeated = t;
+        if repeated < 0.0 {
+            // For negative values, we need to shift into positive range
+            let cycles = ceil(-repeated / repeat_len);
+            repeated = repeated + cycles * repeat_len;
+        }
+        
+        // Standard modulo for positive values
+        repeated = repeated - floor(repeated / repeat_len) * repeat_len;
+        
         return min(repeated, repeat_len);
     } else {
         // Non-repeating: clamp to 0-1
@@ -260,7 +290,7 @@ fn interpolate_color(t: f32) -> vec4<f32> {
     return vec4<f32>(s.r, s.g, s.b, s.a);
 }
 
-// Calculate alpha coverage for rounded rect clipping
+// Calculate alpha coverage for rounded rect clipping using SDF with smoothstep antialiasing
 fn point_in_rounded_rect(pixel_pos: vec2<f32>) -> f32 {
     let x = pixel_pos.x;
     let y = pixel_pos.y;
@@ -284,19 +314,14 @@ fn point_in_rounded_rect(pixel_pos: vec2<f32>) -> f32 {
         return 1.0;
     }
 
-    // Check each corner
+    // Check each corner using SDF with smoothstep antialiasing
     // Top-left corner
     if x < rx + r_tl && y < ry + r_tl {
         let dx = x - (rx + r_tl);
         let dy = y - (ry + r_tl);
         let dist = sqrt(dx * dx + dy * dy);
-        if dist > r_tl {
-            return 0.0;
-        }
-        // Soft edge for antialiasing
-        if dist > r_tl - 1.0 {
-            return r_tl - dist;
-        }
+        let sdf = dist - r_tl;
+        return 1.0 - smoothstep(-0.5, 0.5, sdf);
     }
 
     // Top-right corner
@@ -304,12 +329,8 @@ fn point_in_rounded_rect(pixel_pos: vec2<f32>) -> f32 {
         let dx = x - (rx + rw - r_tr);
         let dy = y - (ry + r_tr);
         let dist = sqrt(dx * dx + dy * dy);
-        if dist > r_tr {
-            return 0.0;
-        }
-        if dist > r_tr - 1.0 {
-            return r_tr - dist;
-        }
+        let sdf = dist - r_tr;
+        return 1.0 - smoothstep(-0.5, 0.5, sdf);
     }
 
     // Bottom-right corner
@@ -317,12 +338,8 @@ fn point_in_rounded_rect(pixel_pos: vec2<f32>) -> f32 {
         let dx = x - (rx + rw - r_br);
         let dy = y - (ry + rh - r_br);
         let dist = sqrt(dx * dx + dy * dy);
-        if dist > r_br {
-            return 0.0;
-        }
-        if dist > r_br - 1.0 {
-            return r_br - dist;
-        }
+        let sdf = dist - r_br;
+        return 1.0 - smoothstep(-0.5, 0.5, sdf);
     }
 
     // Bottom-left corner
@@ -330,15 +347,91 @@ fn point_in_rounded_rect(pixel_pos: vec2<f32>) -> f32 {
         let dx = x - (rx + r_bl);
         let dy = y - (ry + rh - r_bl);
         let dist = sqrt(dx * dx + dy * dy);
-        if dist > r_bl {
-            return 0.0;
-        }
-        if dist > r_bl - 1.0 {
-            return r_bl - dist;
-        }
+        let sdf = dist - r_bl;
+        return 1.0 - smoothstep(-0.5, 0.5, sdf);
     }
 
     return 1.0;
+}
+
+// Get debug visualization parameters for the current pixel
+fn get_debug_info(pixel_pos: vec2<f32>, t: f32) -> vec4<f32> {
+    let mode = gradient_params.debug_mode;
+    
+    // Mode 1: Visualize t-value as grayscale
+    if mode == 1u {
+        let t_vis = clamp(t, 0.0, 1.0);
+        return vec4<f32>(t_vis, t_vis, t_vis, 1.0);
+    }
+    
+    // Mode 2: Visualize direction vector as RGB (linear gradients only)
+    if mode == 2u {
+        let angle_rad = gradient_params.param0;
+        let dir_x = sin(angle_rad);
+        let dir_y = -cos(angle_rad);
+        // Map [-1, 1] to [0, 1] for visualization
+        return vec4<f32>((dir_x + 1.0) * 0.5, (dir_y + 1.0) * 0.5, 0.5, 1.0);
+    }
+    
+    // Mode 3: Visualize pixel position relative to rect (should be red/green gradient)
+    if mode == 3u {
+        let rel_x = (pixel_pos.x - gradient_params.rect_x) / gradient_params.rect_width;
+        let rel_y = (pixel_pos.y - gradient_params.rect_y) / gradient_params.rect_height;
+        return vec4<f32>(clamp(rel_x, 0.0, 1.0), clamp(rel_y, 0.0, 1.0), 0.0, 1.0);
+    }
+    
+    // Mode 4: Visualize border-radius coverage
+    if mode == 4u {
+        let coverage = point_in_rounded_rect(pixel_pos);
+        return vec4<f32>(coverage, coverage, coverage, 1.0);
+    }
+    
+    // Mode 5: Show raw t-value before clamping/repeat (can be negative or >1)
+    if mode == 5u {
+        // Map t to visible range: -1 to 2 -> 0 to 1
+        let t_vis = clamp((t + 1.0) / 3.0, 0.0, 1.0);
+        // Red for negative, green for 0-1, blue for >1
+        var r = 0.0;
+        var g = 0.0;
+        var b = 0.0;
+        if t < 0.0 {
+            r = 1.0;
+            g = t_vis;
+        } else if t <= 1.0 {
+            g = 1.0;
+            r = t;
+        } else {
+            b = 1.0;
+            g = clamp(2.0 - t, 0.0, 1.0);
+        }
+        return vec4<f32>(r, g, b, 1.0);
+    }
+
+    // Mode 6: Show first color stop directly (diagnostic: is buffer data readable?)
+    if mode == 6u {
+        if gradient_params.num_stops > 0u {
+            let s = color_stops[0];
+            return vec4<f32>(s.r, s.g, s.b, s.a);
+        } else {
+            // No stops - return cyan to indicate empty
+            return vec4<f32>(0.0, 1.0, 1.0, 1.0);
+        }
+    }
+
+    // Mode 7: Show num_stops as grayscale (0=black, 8=white)
+    if mode == 7u {
+        let n = f32(gradient_params.num_stops) / 8.0;
+        return vec4<f32>(n, n, n, 1.0);
+    }
+
+    // Mode 8: Show interpolated color (normal path for verification)
+    if mode == 8u {
+        let color = interpolate_color(t);
+        return color;
+    }
+
+    // Default: return magenta to indicate invalid debug mode
+    return vec4<f32>(1.0, 0.0, 1.0, 1.0);
 }
 
 @fragment
@@ -363,6 +456,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     } else {
         // Conic gradient
         t = conic_gradient_t(pixel_pos);
+    }
+
+    // Check for debug mode before applying repeat
+    if gradient_params.debug_mode != 0u {
+        let debug_color = get_debug_info(pixel_pos, t);
+        // Still apply border-radius alpha in debug mode
+        return vec4<f32>(debug_color.rgb, debug_color.a * alpha_coverage);
     }
 
     // Apply repeating logic
