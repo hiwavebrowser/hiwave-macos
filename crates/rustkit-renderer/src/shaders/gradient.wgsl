@@ -175,10 +175,12 @@ fn radial_gradient_t(pixel_pos: vec2<f32>) -> f32 {
 // Calculate t value for conic gradient
 fn conic_gradient_t(pixel_pos: vec2<f32>) -> f32 {
     let start_angle = gradient_params.param0;
+    let cx_frac = gradient_params.param2;
+    let cy_frac = gradient_params.param3;
 
-    // Center of the conic gradient
-    let center_x = gradient_params.rect_x + gradient_params.rect_width * 0.5;
-    let center_y = gradient_params.rect_y + gradient_params.rect_height * 0.5;
+    // Center of the conic gradient (using param2/param3 for center position)
+    let center_x = gradient_params.rect_x + gradient_params.rect_width * cx_frac;
+    let center_y = gradient_params.rect_y + gradient_params.rect_height * cy_frac;
 
     // Vector from center to pixel
     let dx = pixel_pos.x - center_x;

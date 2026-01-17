@@ -321,8 +321,10 @@ pub struct Renderer {
     texture_vertices: Vec<TextureVertex>,
     texture_indices: Vec<u32>,
 
-    // GPU gradient queue for batched rendering
+    // GPU gradient queues for batched rendering
     gradient_queue: Vec<QueuedLinearGradient>,
+    radial_gradient_queue: Vec<QueuedRadialGradient>,
+    conic_gradient_queue: Vec<QueuedConicGradient>,
 
     // State stacks
     clip_stack: Vec<Rect>,
@@ -364,6 +366,34 @@ pub struct StackingContext {
 struct QueuedLinearGradient {
     rect: Rect,
     angle_rad: f32,
+    stops: Vec<(f32, rustkit_css::ColorF32)>,
+    repeating: bool,
+    border_radius: rustkit_layout::BorderRadius,
+}
+
+/// A queued radial gradient to be rendered with the GPU shader.
+#[derive(Debug, Clone)]
+struct QueuedRadialGradient {
+    rect: Rect,
+    /// X radius in pixels
+    rx: f32,
+    /// Y radius in pixels
+    ry: f32,
+    /// Center position (0-1 normalized within rect)
+    center: (f32, f32),
+    stops: Vec<(f32, rustkit_css::ColorF32)>,
+    repeating: bool,
+    border_radius: rustkit_layout::BorderRadius,
+}
+
+/// A queued conic gradient to be rendered with the GPU shader.
+#[derive(Debug, Clone)]
+struct QueuedConicGradient {
+    rect: Rect,
+    /// Starting angle in radians
+    from_angle_rad: f32,
+    /// Center position (0-1 normalized within rect)
+    center: (f32, f32),
     stops: Vec<(f32, rustkit_css::ColorF32)>,
     repeating: bool,
     border_radius: rustkit_layout::BorderRadius,
@@ -521,6 +551,8 @@ impl Renderer {
             texture_vertices: Vec::with_capacity(4096),
             texture_indices: Vec::with_capacity(8192),
             gradient_queue: Vec::with_capacity(64),
+            radial_gradient_queue: Vec::with_capacity(16),
+            conic_gradient_queue: Vec::with_capacity(16),
             clip_stack: Vec::new(),
             stacking_contexts: Vec::new(),
             transform_stack: Vec::new(),
@@ -937,6 +969,8 @@ impl Renderer {
         self.texture_vertices.clear();
         self.texture_indices.clear();
         self.gradient_queue.clear();
+        self.radial_gradient_queue.clear();
+        self.conic_gradient_queue.clear();
         self.clip_stack.clear();
         self.stacking_contexts.clear();
         self.transform_stack.clear();
@@ -2358,6 +2392,267 @@ impl Renderer {
         self.queue.submit(std::iter::once(encoder.finish()));
     }
 
+    /// Render a radial gradient using the GPU shader.
+    fn render_radial_gradient_gpu(
+        &self,
+        target: &wgpu::TextureView,
+        rect: Rect,
+        rx: f32,
+        ry: f32,
+        center: (f32, f32),
+        stops: &[(f32, rustkit_css::ColorF32)],
+        repeating: bool,
+        border_radius: rustkit_layout::BorderRadius,
+    ) {
+        if stops.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+
+        // Calculate repeat length for repeating gradients
+        let repeat_length = if repeating && !stops.is_empty() {
+            stops.last().map(|(pos, _)| *pos).unwrap_or(1.0).max(0.001)
+        } else {
+            1.0
+        };
+
+        // Update gradient parameters uniform buffer
+        let params = pipeline::GradientParams {
+            rect_x: rect.x,
+            rect_y: rect.y,
+            rect_width: rect.width,
+            rect_height: rect.height,
+            param0: rx,  // radial: x radius in pixels
+            param1: ry,  // radial: y radius in pixels
+            param2: center.0,  // radial: center x (0-1)
+            param3: center.1,  // radial: center y (0-1)
+            gradient_type: 1,  // 1 = radial
+            repeating: if repeating { 1 } else { 0 },
+            repeat_length,
+            num_stops: stops.len().min(self.gradient_pipeline.max_stops) as u32,
+            radius_tl: border_radius.top_left,
+            radius_tr: border_radius.top_right,
+            radius_br: border_radius.bottom_right,
+            radius_bl: border_radius.bottom_left,
+            debug_mode: std::env::var("RUSTKIT_GPU_DEBUG")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0),
+            _padding0: 0,
+            _padding1: 0,
+            _padding2: 0,
+        };
+
+        self.queue.write_buffer(
+            &self.gradient_pipeline.uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[params]),
+        );
+
+        // Update color stops storage buffer
+        let gpu_stops: Vec<pipeline::GradientColorStop> = stops
+            .iter()
+            .take(self.gradient_pipeline.max_stops)
+            .map(|(pos, color)| pipeline::GradientColorStop {
+                position: *pos,
+                r: color.r,
+                g: color.g,
+                b: color.b,
+                a: color.a,
+            })
+            .collect();
+
+        if !gpu_stops.is_empty() {
+            self.queue.write_buffer(
+                &self.gradient_pipeline.stops_buffer,
+                0,
+                bytemuck::cast_slice(&gpu_stops),
+            );
+        }
+
+        // Create vertices for the gradient quad
+        let dummy_color = [0.0f32, 0.0, 0.0, 1.0];
+        let vertices = [
+            ColorVertex { position: [rect.x, rect.y], color: dummy_color },
+            ColorVertex { position: [rect.x + rect.width, rect.y], color: dummy_color },
+            ColorVertex { position: [rect.x + rect.width, rect.y + rect.height], color: dummy_color },
+            ColorVertex { position: [rect.x, rect.y + rect.height], color: dummy_color },
+        ];
+        let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Radial Gradient Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Radial Gradient Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        // Create command encoder and render pass (LoadOp::Load to preserve existing content)
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("GPU Radial Gradient Encoder"),
+        });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("GPU Radial Gradient Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            render_pass.set_pipeline(&self.gradient_pipeline.pipeline);
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.gradient_pipeline.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..6, 0, 0..1);
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Render a conic gradient using the GPU shader.
+    fn render_conic_gradient_gpu(
+        &self,
+        target: &wgpu::TextureView,
+        rect: Rect,
+        from_angle_rad: f32,
+        center: (f32, f32),
+        stops: &[(f32, rustkit_css::ColorF32)],
+        repeating: bool,
+        border_radius: rustkit_layout::BorderRadius,
+    ) {
+        if stops.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+
+        // Calculate repeat length for repeating gradients
+        let repeat_length = if repeating && !stops.is_empty() {
+            stops.last().map(|(pos, _)| *pos).unwrap_or(1.0).max(0.001)
+        } else {
+            1.0
+        };
+
+        // Update gradient parameters uniform buffer
+        let params = pipeline::GradientParams {
+            rect_x: rect.x,
+            rect_y: rect.y,
+            rect_width: rect.width,
+            rect_height: rect.height,
+            param0: from_angle_rad,  // conic: starting angle in radians
+            param1: 0.0,
+            param2: center.0,  // conic: center x (0-1)
+            param3: center.1,  // conic: center y (0-1)
+            gradient_type: 2,  // 2 = conic
+            repeating: if repeating { 1 } else { 0 },
+            repeat_length,
+            num_stops: stops.len().min(self.gradient_pipeline.max_stops) as u32,
+            radius_tl: border_radius.top_left,
+            radius_tr: border_radius.top_right,
+            radius_br: border_radius.bottom_right,
+            radius_bl: border_radius.bottom_left,
+            debug_mode: std::env::var("RUSTKIT_GPU_DEBUG")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0),
+            _padding0: 0,
+            _padding1: 0,
+            _padding2: 0,
+        };
+
+        self.queue.write_buffer(
+            &self.gradient_pipeline.uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[params]),
+        );
+
+        // Update color stops storage buffer
+        let gpu_stops: Vec<pipeline::GradientColorStop> = stops
+            .iter()
+            .take(self.gradient_pipeline.max_stops)
+            .map(|(pos, color)| pipeline::GradientColorStop {
+                position: *pos,
+                r: color.r,
+                g: color.g,
+                b: color.b,
+                a: color.a,
+            })
+            .collect();
+
+        if !gpu_stops.is_empty() {
+            self.queue.write_buffer(
+                &self.gradient_pipeline.stops_buffer,
+                0,
+                bytemuck::cast_slice(&gpu_stops),
+            );
+        }
+
+        // Create vertices for the gradient quad
+        let dummy_color = [0.0f32, 0.0, 0.0, 1.0];
+        let vertices = [
+            ColorVertex { position: [rect.x, rect.y], color: dummy_color },
+            ColorVertex { position: [rect.x + rect.width, rect.y], color: dummy_color },
+            ColorVertex { position: [rect.x + rect.width, rect.y + rect.height], color: dummy_color },
+            ColorVertex { position: [rect.x, rect.y + rect.height], color: dummy_color },
+        ];
+        let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Conic Gradient Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Conic Gradient Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        // Create command encoder and render pass (LoadOp::Load to preserve existing content)
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("GPU Conic Gradient Encoder"),
+        });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("GPU Conic Gradient Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            render_pass.set_pipeline(&self.gradient_pipeline.pipeline);
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.gradient_pipeline.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..6, 0, 0..1);
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
     /// Draw a linear gradient with optional border-radius clipping.
     fn draw_linear_gradient(
         &mut self,
@@ -2704,6 +2999,22 @@ impl Renderer {
             1.0
         };
 
+        // GPU radial gradient path: queue for deferred rendering
+        if self.gpu_gradients_enabled {
+            self.radial_gradient_queue.push(QueuedRadialGradient {
+                rect,
+                rx,
+                ry,
+                center,
+                stops: normalized_stops,
+                repeating,
+                border_radius,
+            });
+            return; // GPU will render during flush_to
+        }
+
+        // CPU path: cell-by-cell rendering
+
         // Adaptive step sizing to prevent GPU buffer overflow for large gradients
         // while maintaining 1px quality for small UI elements
         let area = rect.width * rect.height;
@@ -2811,6 +3122,21 @@ impl Renderer {
         } else {
             1.0
         };
+
+        // GPU conic gradient path: queue for deferred rendering
+        if self.gpu_gradients_enabled {
+            self.conic_gradient_queue.push(QueuedConicGradient {
+                rect,
+                from_angle_rad: from_rad,
+                center,
+                stops: normalized_stops,
+                repeating,
+                border_radius,
+            });
+            return; // GPU will render during flush_to
+        }
+
+        // CPU path: cell-by-cell rendering
 
         // Function to apply repeating logic to t value
         let apply_t = |t: f32| -> f32 {
@@ -3641,8 +3967,12 @@ impl Renderer {
         // Capture GPU gradients to render AFTER batched content
         // GPU gradients are element backgrounds, which should render AFTER parent backgrounds
         // (batched content includes HTML/BODY backgrounds drawn in DOM order)
-        let gpu_gradients = std::mem::take(&mut self.gradient_queue);
-        let has_gpu_gradients = !gpu_gradients.is_empty();
+        let gpu_linear_gradients = std::mem::take(&mut self.gradient_queue);
+        let gpu_radial_gradients = std::mem::take(&mut self.radial_gradient_queue);
+        let gpu_conic_gradients = std::mem::take(&mut self.conic_gradient_queue);
+        let has_gpu_gradients = !gpu_linear_gradients.is_empty()
+            || !gpu_radial_gradients.is_empty()
+            || !gpu_conic_gradients.is_empty();
 
         // Phase 1: Render batched content FIRST (parent backgrounds, etc.)
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -3742,8 +4072,8 @@ impl Renderer {
         // Phase 2: Render GPU gradients ON TOP of batched content
         // Gradients are element backgrounds that should appear above parent backgrounds
         if has_gpu_gradients {
-            for gradient in gpu_gradients {
-                // Render each gradient with LoadOp::Load to preserve batched content
+            // Render linear gradients
+            for gradient in gpu_linear_gradients {
                 self.render_linear_gradient_gpu_with_clear(
                     target,
                     gradient.rect,
@@ -3751,7 +4081,34 @@ impl Renderer {
                     &gradient.stops,
                     gradient.repeating,
                     gradient.border_radius,
-                    None,  // None = LoadOp::Load (preserve existing content)
+                    None, // None = LoadOp::Load (preserve existing content)
+                );
+            }
+
+            // Render radial gradients
+            for gradient in gpu_radial_gradients {
+                self.render_radial_gradient_gpu(
+                    target,
+                    gradient.rect,
+                    gradient.rx,
+                    gradient.ry,
+                    gradient.center,
+                    &gradient.stops,
+                    gradient.repeating,
+                    gradient.border_radius,
+                );
+            }
+
+            // Render conic gradients
+            for gradient in gpu_conic_gradients {
+                self.render_conic_gradient_gpu(
+                    target,
+                    gradient.rect,
+                    gradient.from_angle_rad,
+                    gradient.center,
+                    &gradient.stops,
+                    gradient.repeating,
+                    gradient.border_radius,
                 );
             }
         }
