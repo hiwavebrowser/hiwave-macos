@@ -43,7 +43,7 @@
 use bytemuck::{Pod, Zeroable};
 use hashbrown::HashMap;
 use rustkit_css::Color;
-use rustkit_layout::{DisplayCommand, Rect};
+use rustkit_layout::{BackgroundRepeat, BackgroundSize, DisplayCommand, Rect};
 use std::sync::Arc;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
@@ -1265,11 +1265,11 @@ impl Renderer {
             DisplayCommand::BackgroundImage {
                 url,
                 rect,
-                size: _,
-                position: _,
-                repeat: _,
+                size,
+                position,
+                repeat,
             } => {
-                self.draw_image(url, *rect);
+                self.draw_background_image(url, *rect, size, *position, repeat);
             }
 
             DisplayCommand::BoxShadow {
@@ -3148,7 +3148,177 @@ impl Renderer {
         }
         // If image not loaded, skip (async loading handled elsewhere)
     }
-    
+
+    /// Draw a background image with proper size, position, and repeat handling.
+    fn draw_background_image(
+        &mut self,
+        url: &str,
+        container: Rect,
+        size: &BackgroundSize,
+        position: (f32, f32),
+        repeat: &BackgroundRepeat,
+    ) {
+        // Get the texture to retrieve image dimensions
+        let (image_width, image_height) = if let Some(cached) = self.texture_cache.get(url) {
+            (cached.width as f32, cached.height as f32)
+        } else {
+            // Image not loaded yet, skip
+            return;
+        };
+
+        if image_width == 0.0 || image_height == 0.0 {
+            return;
+        }
+
+        // Calculate the background image size based on size property
+        let (bg_width, bg_height) = size.compute_size(container, image_width, image_height);
+
+        if bg_width == 0.0 || bg_height == 0.0 {
+            return;
+        }
+
+        // Calculate the starting position based on position property
+        let start_x = container.x + (container.width - bg_width) * position.0;
+        let start_y = container.y + (container.height - bg_height) * position.1;
+
+        // Determine tiling based on repeat
+        let (tile_x, tile_y) = match repeat {
+            BackgroundRepeat::Repeat => (true, true),
+            BackgroundRepeat::RepeatX => (true, false),
+            BackgroundRepeat::RepeatY => (false, true),
+            BackgroundRepeat::NoRepeat => (false, false),
+            BackgroundRepeat::Space => (true, true), // TODO: proper spacing
+            BackgroundRepeat::Round => (true, true), // TODO: proper rounding
+        };
+
+        // Generate tile positions
+        if !tile_x && !tile_y {
+            // Single image - draw at the calculated position
+            self.draw_background_image_tile(url, Rect {
+                x: start_x,
+                y: start_y,
+                width: bg_width,
+                height: bg_height,
+            }, container);
+        } else {
+            // Tiled images
+            let x_start = if tile_x {
+                // Find the leftmost position that's visible
+                let tiles_left = ((start_x - container.x) / bg_width).ceil() as i32;
+                start_x - (tiles_left as f32 * bg_width)
+            } else {
+                start_x
+            };
+
+            let y_start = if tile_y {
+                let tiles_up = ((start_y - container.y) / bg_height).ceil() as i32;
+                start_y - (tiles_up as f32 * bg_height)
+            } else {
+                start_y
+            };
+
+            let mut y = y_start;
+            while y < container.y + container.height {
+                let mut x = x_start;
+                while x < container.x + container.width {
+                    let tile_rect = Rect {
+                        x,
+                        y,
+                        width: bg_width,
+                        height: bg_height,
+                    };
+
+                    // Only draw if visible within container
+                    if tile_rect.x + tile_rect.width > container.x
+                        && tile_rect.y + tile_rect.height > container.y
+                        && tile_rect.x < container.x + container.width
+                        && tile_rect.y < container.y + container.height
+                    {
+                        self.draw_background_image_tile(url, tile_rect, container);
+                    }
+
+                    if tile_x {
+                        x += bg_width;
+                    } else {
+                        break;
+                    }
+                }
+
+                if tile_y {
+                    y += bg_height;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Draw a single tile of a background image, clipped to the container bounds.
+    fn draw_background_image_tile(&mut self, url: &str, tile_rect: Rect, container: Rect) {
+        if !self.texture_cache.contains(url) {
+            return;
+        }
+
+        // Clip tile to container bounds
+        let clip_left = (container.x - tile_rect.x).max(0.0);
+        let clip_top = (container.y - tile_rect.y).max(0.0);
+        let clip_right = (tile_rect.x + tile_rect.width - container.x - container.width).max(0.0);
+        let clip_bottom = (tile_rect.y + tile_rect.height - container.y - container.height).max(0.0);
+
+        let draw_rect = Rect {
+            x: tile_rect.x + clip_left,
+            y: tile_rect.y + clip_top,
+            width: tile_rect.width - clip_left - clip_right,
+            height: tile_rect.height - clip_top - clip_bottom,
+        };
+
+        if draw_rect.width <= 0.0 || draw_rect.height <= 0.0 {
+            return;
+        }
+
+        // Calculate texture coordinates for the clipped portion
+        let tex_left = clip_left / tile_rect.width;
+        let tex_top = clip_top / tile_rect.height;
+        let tex_right = 1.0 - clip_right / tile_rect.width;
+        let tex_bottom = 1.0 - clip_bottom / tile_rect.height;
+
+        // Apply transform to image corners
+        let (x0, y0) = self.transform_point(draw_rect.x, draw_rect.y);
+        let (x1, y1) = self.transform_point(draw_rect.x + draw_rect.width, draw_rect.y);
+        let (x2, y2) = self.transform_point(draw_rect.x + draw_rect.width, draw_rect.y + draw_rect.height);
+        let (x3, y3) = self.transform_point(draw_rect.x, draw_rect.y + draw_rect.height);
+
+        let base = self.texture_vertices.len() as u32;
+
+        self.texture_vertices.extend_from_slice(&[
+            TextureVertex {
+                position: [x0, y0],
+                tex_coords: [tex_left, tex_top],
+                color: [1.0, 1.0, 1.0, 1.0],
+            },
+            TextureVertex {
+                position: [x1, y1],
+                tex_coords: [tex_right, tex_top],
+                color: [1.0, 1.0, 1.0, 1.0],
+            },
+            TextureVertex {
+                position: [x2, y2],
+                tex_coords: [tex_right, tex_bottom],
+                color: [1.0, 1.0, 1.0, 1.0],
+            },
+            TextureVertex {
+                position: [x3, y3],
+                tex_coords: [tex_left, tex_bottom],
+                color: [1.0, 1.0, 1.0, 1.0],
+            },
+        ]);
+
+        self.texture_indices.extend_from_slice(&[
+            base, base + 1, base + 2,
+            base, base + 2, base + 3,
+        ]);
+    }
+
     /// Upload an image to the texture cache.
     /// 
     /// Call this to upload decoded image data (RGBA format) to the GPU.
