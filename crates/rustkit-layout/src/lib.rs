@@ -2817,7 +2817,92 @@ impl DisplayList {
                     container.width, // For gradients, use container size as "intrinsic" size
                     container.height,
                 );
-                self.render_gradient(gradient, positioned_rect, border_radius);
+
+                // Handle background-repeat for gradients
+                match layer.repeat {
+                    rustkit_css::BackgroundRepeat::NoRepeat => {
+                        // Render gradient at its positioned rect
+                        // Note: Large gradients extending outside container bounds will be
+                        // clipped by the viewport/wgpu. The gradient t-values are calculated
+                        // relative to the positioned_rect which preserves correct color mapping.
+                        self.render_gradient(gradient, positioned_rect, border_radius);
+                    }
+                    rustkit_css::BackgroundRepeat::Repeat |
+                    rustkit_css::BackgroundRepeat::RepeatX |
+                    rustkit_css::BackgroundRepeat::RepeatY => {
+                        // Tile the gradient
+                        let tile_width = positioned_rect.width.max(1.0);
+                        let tile_height = positioned_rect.height.max(1.0);
+
+                        // If tile is larger than container in both dimensions, just render once
+                        if tile_width >= container.width && tile_height >= container.height {
+                            self.render_gradient(gradient, positioned_rect, border_radius);
+                        } else {
+                            let repeat_x = !matches!(layer.repeat, rustkit_css::BackgroundRepeat::RepeatY);
+                            let repeat_y = !matches!(layer.repeat, rustkit_css::BackgroundRepeat::RepeatX);
+
+                            // Calculate starting tile position
+                            // The first tile's origin aligns with positioned_rect's origin
+                            // We need to find which tiles intersect the container
+                            let start_x = if repeat_x && tile_width < container.width {
+                                // Find the leftmost tile that intersects the container
+                                let offset = (positioned_rect.x - container.x).rem_euclid(tile_width);
+                                container.x - offset
+                            } else {
+                                positioned_rect.x
+                            };
+
+                            let start_y = if repeat_y && tile_height < container.height {
+                                let offset = (positioned_rect.y - container.y).rem_euclid(tile_height);
+                                container.y - offset
+                            } else {
+                                positioned_rect.y
+                            };
+
+                            // Calculate how many tiles we need
+                            let end_x = container.x + container.width;
+                            let end_y = container.y + container.height;
+
+                            let cols = if repeat_x && tile_width < container.width {
+                                ((end_x - start_x) / tile_width).ceil() as i32
+                            } else {
+                                1
+                            };
+                            let rows = if repeat_y && tile_height < container.height {
+                                ((end_y - start_y) / tile_height).ceil() as i32
+                            } else {
+                                1
+                            };
+
+                            // Limit tiles to prevent performance issues
+                            let max_tiles_per_dim = 50;
+                            let cols = cols.min(max_tiles_per_dim).max(1);
+                            let rows = rows.min(max_tiles_per_dim).max(1);
+
+                            for row in 0..rows {
+                                for col in 0..cols {
+                                    let tile_x = start_x + col as f32 * tile_width;
+                                    let tile_y = start_y + row as f32 * tile_height;
+
+                                    // Only render tiles that intersect the container
+                                    let tile_end_x = tile_x + tile_width;
+                                    let tile_end_y = tile_y + tile_height;
+
+                                    if tile_end_x > container.x && tile_x < end_x &&
+                                       tile_end_y > container.y && tile_y < end_y {
+                                        let tile_rect = Rect::new(tile_x, tile_y, tile_width, tile_height);
+                                        self.render_gradient(gradient, tile_rect, border_radius);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    rustkit_css::BackgroundRepeat::Space | rustkit_css::BackgroundRepeat::Round => {
+                        // For now, treat Space and Round like Repeat
+                        // TODO: Implement proper spacing/scaling
+                        self.render_gradient(gradient, positioned_rect, border_radius);
+                    }
+                }
             }
             rustkit_css::BackgroundImage::Url(url) => {
                 // For URL backgrounds, emit a BackgroundImage command
