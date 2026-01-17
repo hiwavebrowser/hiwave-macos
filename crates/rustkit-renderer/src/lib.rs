@@ -727,6 +727,115 @@ impl Renderer {
         self.texture_indices.clear();
     }
 
+    /// Flush batched vertices before rendering a GPU gradient.
+    /// This ensures correct z-order: batched content renders before the gradient.
+    fn flush_batches_for_gradient(&mut self, target: &wgpu::TextureView, clear: bool) {
+        if self.color_vertices.is_empty() && self.texture_vertices.is_empty() {
+            // Nothing to flush, but if this is the first call we still need to clear
+            if clear {
+                let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Clear Encoder"),
+                });
+                {
+                    let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Clear Pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: target,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                }
+                self.queue.submit(std::iter::once(encoder.finish()));
+            }
+            return;
+        }
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Gradient Interleave Flush"),
+        });
+
+        {
+            let load_op = if clear {
+                wgpu::LoadOp::Clear(wgpu::Color::WHITE)
+            } else {
+                wgpu::LoadOp::Load
+            };
+
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Batched Content Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: load_op,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            // Draw solid colors
+            if !self.color_vertices.is_empty() {
+                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Color Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&self.color_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+
+                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Color Index Buffer"),
+                    contents: bytemuck::cast_slice(&self.color_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+                render_pass.set_pipeline(&self.color_pipeline);
+                render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..self.color_indices.len() as u32, 0, 0..1);
+            }
+
+            // Draw textured quads
+            if !self.texture_vertices.is_empty() {
+                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Texture Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&self.texture_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+
+                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Texture Index Buffer"),
+                    contents: bytemuck::cast_slice(&self.texture_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+                render_pass.set_pipeline(&self.texture_pipeline);
+                render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                render_pass.set_bind_group(1, self.glyph_cache.bind_group(), &[]);
+                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..self.texture_indices.len() as u32, 0, 0..1);
+            }
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Clear batches after flushing
+        self.color_vertices.clear();
+        self.color_indices.clear();
+        self.texture_vertices.clear();
+        self.texture_indices.clear();
+    }
+
     /// Draw a textured quad from a filtered texture to the render target immediately.
     /// This renders with a custom bind group, bypassing the batch system.
     fn draw_filtered_texture_to(
@@ -982,11 +1091,23 @@ impl Renderer {
             } if *r > 0.0)
         });
 
+        // Check if there are any GPU gradients that need z-order aware rendering
+        let has_gpu_gradients = self.gpu_gradients_enabled && commands.iter().any(|cmd| {
+            matches!(cmd,
+                DisplayCommand::LinearGradient { .. } |
+                DisplayCommand::RadialGradient { .. } |
+                DisplayCommand::ConicGradient { .. }
+            )
+        });
+
         if has_blur_filters {
             // Use GPU blur path - render to intermediate texture with GPU blur processing
             self.execute_with_gpu_blur(commands, target)?;
+        } else if has_gpu_gradients {
+            // Use GPU gradient path - flush batches before each gradient for correct z-order
+            self.execute_with_gpu_gradients(commands, target)?;
         } else {
-            // Fast path - no backdrop blur, process normally
+            // Fast path - no backdrop blur or GPU gradients, process normally
             for cmd in commands {
                 self.process_command(cmd);
             }
@@ -1041,6 +1162,344 @@ impl Renderer {
         self.copy_texture_to_target(&intermediate_view, target);
 
         Ok(())
+    }
+
+    /// Execute commands with GPU gradient support for correct z-order.
+    ///
+    /// This method flushes batched content BEFORE each gradient to ensure
+    /// parent gradients render behind child content (correct DOM z-order).
+    fn execute_with_gpu_gradients(
+        &mut self,
+        commands: &[DisplayCommand],
+        target: &wgpu::TextureView,
+    ) -> Result<(), RendererError> {
+        let mut is_first_flush = true;
+
+        for cmd in commands {
+            // Check if this is a GPU gradient command
+            let is_gpu_gradient = matches!(cmd,
+                DisplayCommand::LinearGradient { .. } |
+                DisplayCommand::RadialGradient { .. } |
+                DisplayCommand::ConicGradient { .. }
+            );
+
+            if is_gpu_gradient {
+                // Flush batched content FIRST (before gradient)
+                // This ensures children render before their parent's gradient
+                self.flush_batches_for_gradient(target, is_first_flush);
+                is_first_flush = false;
+
+                // Render the gradient directly (inline, not queued)
+                self.render_gpu_gradient_inline(cmd, target);
+            } else {
+                // Process command normally (batched)
+                self.process_command(cmd);
+            }
+        }
+
+        // Flush any remaining batched content
+        if !self.color_vertices.is_empty() || !self.texture_vertices.is_empty() {
+            self.flush_batches_for_gradient(target, is_first_flush);
+        }
+
+        Ok(())
+    }
+
+    /// Render a GPU gradient inline (immediately, not queued).
+    /// Called from execute_with_gpu_gradients() for correct z-order.
+    fn render_gpu_gradient_inline(&mut self, cmd: &DisplayCommand, target: &wgpu::TextureView) {
+        match cmd {
+            DisplayCommand::LinearGradient { rect, direction, stops, repeating, border_radius } => {
+                self.render_linear_gradient_inline(*rect, *direction, stops, *repeating, *border_radius, target);
+            }
+            DisplayCommand::RadialGradient { rect, shape, size, center, stops, repeating, border_radius } => {
+                self.render_radial_gradient_inline(*rect, *shape, *size, *center, stops, *repeating, *border_radius, target);
+            }
+            DisplayCommand::ConicGradient { rect, from_angle, center, stops, repeating, border_radius } => {
+                self.render_conic_gradient_inline(*rect, *from_angle, *center, stops, *repeating, *border_radius, target);
+            }
+            _ => {}
+        }
+    }
+
+    /// Render a linear gradient directly to the target (inline GPU path).
+    fn render_linear_gradient_inline(
+        &self,
+        rect: Rect,
+        direction: rustkit_css::GradientDirection,
+        stops: &[rustkit_css::ColorStop],
+        repeating: bool,
+        border_radius: rustkit_layout::BorderRadius,
+        target: &wgpu::TextureView,
+    ) {
+        if stops.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+
+        // Convert direction to angle in radians
+        let angle_deg = direction.to_degrees();
+        let angle_rad = angle_deg.to_radians();
+
+        // Calculate gradient geometry
+        let (sin_a, cos_a) = (angle_rad.sin(), angle_rad.cos());
+        let half_width = rect.width / 2.0;
+        let half_height = rect.height / 2.0;
+        let gradient_half_length = (half_width * sin_a.abs() + half_height * cos_a.abs()).max(0.001);
+
+        // Check if any stop uses pixel positions
+        let has_pixel_positions = stops.iter().any(|s| {
+            s.position.as_ref().map(|p| p.is_pixels()).unwrap_or(false)
+        });
+
+        // Calculate repeat length for pixel-based repeating gradients
+        let repeat_length_pixels = if repeating && has_pixel_positions {
+            stops.last()
+                .and_then(|s| s.position.as_ref())
+                .map(|p| match p {
+                    rustkit_css::StopPosition::Pixels(px) => *px,
+                    rustkit_css::StopPosition::Percent(pct) => *pct * gradient_half_length * 2.0,
+                })
+                .unwrap_or(gradient_half_length * 2.0)
+                .max(0.001)
+        } else {
+            gradient_half_length * 2.0
+        };
+
+        // Normalize stops
+        let normalized_stops: Vec<(f32, rustkit_css::ColorF32)> = stops.iter().enumerate()
+            .map(|(i, stop)| {
+                let pos = match &stop.position {
+                    Some(p) => {
+                        if has_pixel_positions && repeating {
+                            match p {
+                                rustkit_css::StopPosition::Pixels(px) => *px / repeat_length_pixels,
+                                rustkit_css::StopPosition::Percent(pct) => *pct,
+                            }
+                        } else {
+                            match p {
+                                rustkit_css::StopPosition::Percent(pct) => *pct,
+                                rustkit_css::StopPosition::Pixels(px) => *px / (gradient_half_length * 2.0),
+                            }
+                        }
+                    }
+                    None => {
+                        if stops.len() == 1 { 0.5 } else { i as f32 / (stops.len() - 1) as f32 }
+                    }
+                };
+                (pos, rustkit_css::ColorF32::from_color(stop.color))
+            })
+            .collect();
+
+        // Render using GPU
+        self.render_linear_gradient_gpu_with_clear(
+            target,
+            rect,
+            angle_rad,
+            &normalized_stops,
+            repeating,
+            border_radius,
+            None, // LoadOp::Load to preserve previous content
+        );
+    }
+
+    /// Render a radial gradient directly to the target (inline GPU path).
+    fn render_radial_gradient_inline(
+        &self,
+        rect: Rect,
+        shape: rustkit_css::RadialShape,
+        size: rustkit_css::RadialSize,
+        center: (f32, f32),
+        stops: &[rustkit_css::ColorStop],
+        repeating: bool,
+        border_radius: rustkit_layout::BorderRadius,
+        target: &wgpu::TextureView,
+    ) {
+        if stops.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+
+        // Calculate radii based on shape and size
+        let (rx, ry) = self.calculate_radial_radii(rect, shape, size, center);
+
+        // Check if any stop uses pixel positions
+        let has_pixel_positions = stops.iter().any(|s| {
+            s.position.as_ref().map(|p| p.is_pixels()).unwrap_or(false)
+        });
+
+        // Calculate repeat length for pixel-based repeating gradients
+        let repeat_length_pixels = if repeating && has_pixel_positions {
+            stops.last()
+                .and_then(|s| s.position.as_ref())
+                .map(|p| match p {
+                    rustkit_css::StopPosition::Pixels(px) => *px,
+                    rustkit_css::StopPosition::Percent(pct) => *pct * rx.max(ry),
+                })
+                .unwrap_or(rx.max(ry))
+                .max(0.001)
+        } else {
+            rx.max(ry)
+        };
+
+        // Normalize stops
+        let normalized_stops: Vec<(f32, rustkit_css::ColorF32)> = stops.iter().enumerate()
+            .map(|(i, stop)| {
+                let pos = match &stop.position {
+                    Some(p) => {
+                        if has_pixel_positions && repeating {
+                            match p {
+                                rustkit_css::StopPosition::Pixels(px) => *px / repeat_length_pixels,
+                                rustkit_css::StopPosition::Percent(pct) => *pct,
+                            }
+                        } else {
+                            match p {
+                                rustkit_css::StopPosition::Percent(pct) => *pct,
+                                rustkit_css::StopPosition::Pixels(px) => *px / rx.max(ry).max(0.001),
+                            }
+                        }
+                    }
+                    None => {
+                        if stops.len() == 1 { 0.5 } else { i as f32 / (stops.len() - 1) as f32 }
+                    }
+                };
+                (pos, rustkit_css::ColorF32::from_color(stop.color))
+            })
+            .collect();
+
+        // Render using GPU
+        self.render_radial_gradient_gpu(
+            target,
+            rect,
+            rx, ry,
+            center,
+            &normalized_stops,
+            repeating,
+            border_radius,
+        );
+    }
+
+    /// Render a conic gradient directly to the target (inline GPU path).
+    fn render_conic_gradient_inline(
+        &self,
+        rect: Rect,
+        from_angle: f32,
+        center: (f32, f32),
+        stops: &[rustkit_css::ColorStop],
+        repeating: bool,
+        border_radius: rustkit_layout::BorderRadius,
+        target: &wgpu::TextureView,
+    ) {
+        if stops.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+
+        // Conic gradients use angular positions (0-360 degrees or 0-1 normalized)
+        let normalized_stops: Vec<(f32, rustkit_css::ColorF32)> = stops.iter().enumerate()
+            .map(|(i, stop)| {
+                let pos = match &stop.position {
+                    Some(p) => match p {
+                        rustkit_css::StopPosition::Percent(pct) => *pct,
+                        rustkit_css::StopPosition::Pixels(deg) => *deg / 360.0, // Degrees to 0-1
+                    },
+                    None => {
+                        if stops.len() == 1 { 0.5 } else { i as f32 / (stops.len() - 1) as f32 }
+                    }
+                };
+                (pos, rustkit_css::ColorF32::from_color(stop.color))
+            })
+            .collect();
+
+        // Convert from_angle to radians
+        let from_rad = from_angle.to_radians();
+
+        // Render using GPU
+        self.render_conic_gradient_gpu(
+            target,
+            rect,
+            from_rad,
+            center,
+            &normalized_stops,
+            repeating,
+            border_radius,
+        );
+    }
+
+    /// Calculate radial gradient radii based on shape and size.
+    fn calculate_radial_radii(
+        &self,
+        rect: Rect,
+        shape: rustkit_css::RadialShape,
+        size: rustkit_css::RadialSize,
+        center: (f32, f32),
+    ) -> (f32, f32) {
+        let cx = rect.x + rect.width * center.0;
+        let cy = rect.y + rect.height * center.1;
+
+        // Distances to each edge from center
+        let dist_left = (cx - rect.x).abs();
+        let dist_right = (rect.x + rect.width - cx).abs();
+        let dist_top = (cy - rect.y).abs();
+        let dist_bottom = (rect.y + rect.height - cy).abs();
+
+        // Distances to corners
+        let corner_tl = ((cx - rect.x).powi(2) + (cy - rect.y).powi(2)).sqrt();
+        let corner_tr = ((rect.x + rect.width - cx).powi(2) + (cy - rect.y).powi(2)).sqrt();
+        let corner_bl = ((cx - rect.x).powi(2) + (rect.y + rect.height - cy).powi(2)).sqrt();
+        let corner_br = ((rect.x + rect.width - cx).powi(2) + (rect.y + rect.height - cy).powi(2)).sqrt();
+
+        let (rx, ry) = match size {
+            rustkit_css::RadialSize::ClosestSide => {
+                let dx = dist_left.min(dist_right);
+                let dy = dist_top.min(dist_bottom);
+                match shape {
+                    rustkit_css::RadialShape::Circle => {
+                        let r = dx.min(dy);
+                        (r, r)
+                    }
+                    rustkit_css::RadialShape::Ellipse => (dx, dy),
+                }
+            }
+            rustkit_css::RadialSize::FarthestSide => {
+                let dx = dist_left.max(dist_right);
+                let dy = dist_top.max(dist_bottom);
+                match shape {
+                    rustkit_css::RadialShape::Circle => {
+                        let r = dx.max(dy);
+                        (r, r)
+                    }
+                    rustkit_css::RadialShape::Ellipse => (dx, dy),
+                }
+            }
+            rustkit_css::RadialSize::ClosestCorner => {
+                let min_corner = corner_tl.min(corner_tr).min(corner_bl).min(corner_br);
+                match shape {
+                    rustkit_css::RadialShape::Circle => (min_corner, min_corner),
+                    rustkit_css::RadialShape::Ellipse => {
+                        // Scale to maintain ellipse aspect ratio
+                        let ratio = rect.width / rect.height.max(0.001);
+                        (min_corner * ratio.sqrt(), min_corner / ratio.sqrt())
+                    }
+                }
+            }
+            rustkit_css::RadialSize::FarthestCorner => {
+                let max_corner = corner_tl.max(corner_tr).max(corner_bl).max(corner_br);
+                match shape {
+                    rustkit_css::RadialShape::Circle => (max_corner, max_corner),
+                    rustkit_css::RadialShape::Ellipse => {
+                        // Scale to maintain ellipse aspect ratio
+                        let ratio = rect.width / rect.height.max(0.001);
+                        (max_corner * ratio.sqrt(), max_corner / ratio.sqrt())
+                    }
+                }
+            }
+            rustkit_css::RadialSize::Explicit(w, h) => {
+                match shape {
+                    rustkit_css::RadialShape::Circle => (w, w),
+                    rustkit_css::RadialShape::Ellipse => (w, h),
+                }
+            }
+        };
+
+        (rx.max(0.001), ry.max(0.001))
     }
 
     /// Blit from intermediate texture (surface format) to a filter texture (Rgba8Unorm).
@@ -3964,17 +4423,13 @@ impl Renderer {
             }
         };
 
-        // Capture GPU gradients to render AFTER batched content
-        // GPU gradients are element backgrounds, which should render AFTER parent backgrounds
-        // (batched content includes HTML/BODY backgrounds drawn in DOM order)
-        let gpu_linear_gradients = std::mem::take(&mut self.gradient_queue);
-        let gpu_radial_gradients = std::mem::take(&mut self.radial_gradient_queue);
-        let gpu_conic_gradients = std::mem::take(&mut self.conic_gradient_queue);
-        let has_gpu_gradients = !gpu_linear_gradients.is_empty()
-            || !gpu_radial_gradients.is_empty()
-            || !gpu_conic_gradients.is_empty();
+        // Clear gradient queues (safety measure - they should already be empty)
+        // GPU gradients are now rendered inline via execute_with_gpu_gradients() for correct z-order
+        self.gradient_queue.clear();
+        self.radial_gradient_queue.clear();
+        self.conic_gradient_queue.clear();
 
-        // Phase 1: Render batched content FIRST (parent backgrounds, etc.)
+        // Render batched content
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
@@ -4069,49 +4524,8 @@ impl Renderer {
 
         self.queue.submit(std::iter::once(encoder.finish()));
 
-        // Phase 2: Render GPU gradients ON TOP of batched content
-        // Gradients are element backgrounds that should appear above parent backgrounds
-        if has_gpu_gradients {
-            // Render linear gradients
-            for gradient in gpu_linear_gradients {
-                self.render_linear_gradient_gpu_with_clear(
-                    target,
-                    gradient.rect,
-                    gradient.angle_rad,
-                    &gradient.stops,
-                    gradient.repeating,
-                    gradient.border_radius,
-                    None, // None = LoadOp::Load (preserve existing content)
-                );
-            }
-
-            // Render radial gradients
-            for gradient in gpu_radial_gradients {
-                self.render_radial_gradient_gpu(
-                    target,
-                    gradient.rect,
-                    gradient.rx,
-                    gradient.ry,
-                    gradient.center,
-                    &gradient.stops,
-                    gradient.repeating,
-                    gradient.border_radius,
-                );
-            }
-
-            // Render conic gradients
-            for gradient in gpu_conic_gradients {
-                self.render_conic_gradient_gpu(
-                    target,
-                    gradient.rect,
-                    gradient.from_angle_rad,
-                    gradient.center,
-                    &gradient.stops,
-                    gradient.repeating,
-                    gradient.border_radius,
-                );
-            }
-        }
+        // Note: GPU gradients are now rendered inline via execute_with_gpu_gradients()
+        // for correct z-order (gradients render in DOM order, not all-at-end)
 
         Ok(())
     }
