@@ -1,8 +1,9 @@
 # Parity Fix Session - sticky-scroll & flex-positioning
 
-## Session Status: FLEX-POSITIONING FIXED
-**Last Updated:** 2026-01-15
-**Target Tests:** sticky-scroll (50.40%), flex-positioning (13.44% - FIXED!)
+## Session Status: ABOUT FIXED (Buffer Overflow)
+**Last Updated:** 2026-01-16
+**Tests Passing:** 12/23 (was 11/23)
+**Latest Fix:** about.html diagonal gradient buffer overflow
 
 ## Results Summary
 
@@ -268,6 +269,170 @@ cat parity-baseline/diffs/flex-positioning/run-1/attribution.json | jq '.taxonom
   - This workflow is for metrics collection, not gating (separate `parity.yml` does gating)
   - Added `continue-on-error: true` to parity test step
   - Metrics will still be collected and reported even when tests fail thresholds
+
+### 2026-01-16 Session (Rendering Improvements)
+
+**Implemented Fixes:**
+
+1. **Core Text Font Metrics** (Fix 1 - committed)
+   - Added `TextMetrics::from_core_text_font()` for real macOS font metrics
+   - Added macOS-specific `get_metrics()` to use Core Text API
+   - Updated fallback ratios from 0.88/0.24 to 0.82/0.21 (SF Pro ratios)
+   - **Result:** No parity change - main shaping path already used Core Text metrics
+
+2. **Premultiplied Alpha Interpolation** (Fix 2 - committed)
+   - Changed `ColorF32::lerp()` to use premultiplied alpha space
+   - Matches Chrome/Skia behavior, prevents color bleeding from transparent stops
+   - Added `lerp_straight()` for unpremultiplied interpolation when needed
+   - **Result:** No parity change - most gradient tests use fully opaque colors
+
+3. **GPU Gradient Shader** (Fix 3 - ATTEMPTED, reverted)
+   - Created gradient.wgsl shader with linear/radial/conic support
+   - Added GradientPipeline infrastructure in pipeline.rs
+   - Integrated into renderer with queue_gradient_gpu() and render pass
+   - **Result:** Shader produced visually incorrect gradients
+     - gradient-backgrounds: 22.97% → 52.26% (regression)
+     - gradients: 9.57% → 24.14% (regression)
+   - **Root Cause Analysis:**
+     - Gradient direction calculation differs from CSS spec
+     - Gradient line length computation differs from cell-by-cell
+     - Likely coordinate space mismatches (pixel vs normalized)
+   - **Status:** Reverted to cell-by-cell approach, needs proper CSS gradient spec implementation
+
+**Remaining High-Effort Fixes:**
+
+4. **Subpixel Text Antialiasing** (Fix 4 - not implemented)
+   - Current: Grayscale antialiasing with Core Text
+   - Chrome: Subpixel (LCD) antialiasing with Skia
+   - Would require RGB color space, architectural changes to glyph cache/renderer
+   - Text accounts for 40-77% of remaining diff in most failing tests
+
+**Conclusion:** Quick wins exhausted. GPU gradient shader attempt failed due to
+CSS gradient spec complexity. Further improvements require:
+- Careful CSS gradient spec implementation for GPU path
+- Or Skia integration for text rendering parity
+
+### 2026-01-16 Session (Diagonal Gradient Fix)
+
+**Problem:** GPU gradient shader caused major regression (gradient-backgrounds: 22.97% → 52.26%)
+
+**Investigation:**
+- GPU shader infrastructure was correct (pipeline, bind groups, uniforms)
+- The shader algorithm matched the reference implementation
+- Bug: gradient_queue was being filled but never processed (missing flush_to integration)
+- After adding flush_to processing, gradients still rendered incorrectly due to unknown shader bugs
+
+**Fix Applied:**
+- Implemented cell-by-cell diagonal gradient rendering in `draw_linear_gradient()`
+- Uses exact CSS gradient spec algorithm:
+  - Direction vector: `(sin_a, -cos_a)`
+  - Gradient half-length: `|sin_a| * half_width + |cos_a| * half_height`
+  - t calculation: `(projection / gradient_half_length + 1.0) / 2.0`
+- 1-pixel cells for maximum accuracy
+
+**Result:**
+- gradient-backgrounds: 52.26% → 22.93% (restored to baseline)
+- gradients: 13.61% → 9.57% (restored to baseline)
+
+**GPU Infrastructure Status:**
+- Shader code kept in `gradient.wgsl` for future debugging
+- GradientPipeline infrastructure preserved in `pipeline.rs`
+- `render_linear_gradient_gpu` method preserved with `#[allow(dead_code)]`
+- Fields renamed with `_` prefix to suppress warnings (`_gradient_pipeline`, `_gradient_queue`)
+
+**Files Changed:**
+- `crates/rustkit-renderer/src/lib.rs`:
+  - Added cell-by-cell diagonal gradient algorithm (lines 2281-2329)
+  - Cleaned up flush_to() to remove GPU gradient processing
+  - Marked unused GPU gradient code with `#[allow(dead_code)]`
+
+### 2026-01-16 Session (Diagonal Gradient Buffer Overflow Fix)
+
+**Problem:** about.html test crashed with GPU buffer overflow:
+```
+Buffer size 2041426656 is greater than the maximum buffer size (268435456)
+```
+
+**Root Cause:** `draw_linear_gradient()` diagonal path used fixed 1px cells without limit.
+For large areas like about.html body (which has `radial-gradient` background), this created
+millions of vertices causing ~2GB buffer allocation.
+
+**Fix:** Added adaptive step sizing to diagonal gradient path (same approach already used
+in radial/conic gradients):
+```rust
+let area = rect.width * rect.height;
+let max_cells: f32 = 100_000.0;
+let cell_size: f32 = if area > max_cells {
+    (area / max_cells).sqrt().ceil()
+} else {
+    1.0
+};
+```
+
+**Result:**
+- about: CRASH → 11.93% (PASS, threshold 15%)
+- Tests: 11/23 → 12/23 passing
+
+**File Changed:** `crates/rustkit-renderer/src/lib.rs:2294-2302`
+
+### 2026-01-16 Session (Background Image Properties & Analysis)
+
+**Completed Work:**
+
+1. **Pixel-based Gradient Stop Positions** (committed & pushed)
+   - Fixed `parse_color_stop()` to properly handle pixel values in gradient stops
+   - Added `StopPosition` enum with `Percent(f32)` and `Pixels(f32)` variants
+   - Added `to_normalized()`, `raw_value()`, `is_pixels()` methods
+   - Updated `ColorStop` to use `Option<StopPosition>` instead of `Option<f32>`
+   - Updated renderer to handle pixel-based repeating gradients properly
+   - **Result:** backgrounds: 25.52% → 18.88% (improved by 6.64 percentage points)
+   - **Files:** `rustkit-css/src/lib.rs`, `rustkit-engine/src/lib.rs`, `rustkit-renderer/src/lib.rs`
+
+2. **Gradient Tiling Support** (committed & pushed)
+   - Added background-repeat tiling support for gradients in layout
+   - **Files:** `rustkit-layout/src/lib.rs`
+
+3. **Background Image Properties Implementation** (committed & pushed)
+   - Implemented `draw_background_image()` and `draw_background_image_tile()` methods
+   - Properly handles:
+     - `background-size`: cover, contain, auto, explicit dimensions
+     - `background-position`: percentage-based positioning
+     - `background-repeat`: repeat, repeat-x, repeat-y, no-repeat, space, round
+   - Clips tiles to container bounds with correct texture coordinates
+   - **Note:** Implementation is complete but won't show parity improvement until image loading pipeline is implemented (images not being loaded into texture cache)
+   - **Files:** `rustkit-renderer/src/lib.rs`
+
+**Analysis Findings:**
+
+1. **Failing Tests Root Cause Distribution:**
+   - `text_metrics`: 50-87% of diff in most failing tests
+   - `gradient_interpolation`: 16-47% in gradient-heavy tests
+   - `replaced_content`: 3-4% for tests with images (images not loading)
+
+2. **Close-to-Passing Tests:**
+   - `combinators`: 15.41% (threshold 15%) - 86.35% text_metrics, no fix possible
+   - `images-intrinsic`: 12.92% (threshold 10%) - 78.80% text_metrics, no fix possible
+
+3. **Gradient Issues Remaining:**
+   - gradient-backgrounds: 22.97% has 46.77% gradient_interpolation
+   - The gradient boxes with `border-radius: 16px` show ~92% element diff
+   - This is due to cell-by-cell rendering vs Chrome's GPU rendering
+   - Would require GPU shader (Phase 1c) to fix
+
+4. **Image Loading Pipeline:**
+   - `upload_image()` exists but is never called
+   - Data: URLs for SVG images aren't being decoded
+   - Background image tests not showing diff because images aren't rendering
+
+**Current Status:**
+- Tests passing: 12/23 (52.2%)
+- Average diff: 16.2%
+- Main blockers: text_metrics (architectural), gradient interpolation (needs GPU shader)
+
+**Next Priority:**
+- GPU gradient shader (Phase 1c) for gradient parity
+- Image loading pipeline for background-image improvements
+- Text metrics requires Skia integration (high effort)
 
 ### 2026-01-15 Session (Earlier)
 - Identified flexbox stretch bug where auto-height containers stretched items to parent height
