@@ -1,10 +1,10 @@
 {
-  "timestamp": "2026-01-16T10:11:38.325014",
+  "timestamp": "2026-01-17T21:02:28.603010",
   "scope": "all",
   "iterations": 1,
   "max_variance": 0.1,
   "passed": 12,
-  "failed": 11,
+  "failed": 12,
   "results": [
     {
       "case_id": "new_tab",
@@ -1142,9 +1142,9 @@
       "type": "builtins",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 50496,
+        "diffPixels": 45900,
         "totalPixels": 480000,
-        "diffPercent": 10.52,
+        "diffPercent": 9.5625,
         "width": 800,
         "height": 600,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/about/run-1/diff.png",
@@ -1517,14 +1517,14 @@
       },
       "passed": true,
       "pixel_runs": [
-        10.52
+        9.5625
       ],
-      "diff_pct_median": 10.52,
-      "diff_pct_min": 10.52,
-      "diff_pct_max": 10.52,
+      "diff_pct_median": 9.5625,
+      "diff_pct_min": 9.5625,
+      "diff_pct_max": 9.5625,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 10.52
+      "diff_pct": 9.5625
     },
     {
       "case_id": "settings",
@@ -8859,9 +8859,9 @@
       "type": "micro",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 175519,
+        "diffPixels": 169897,
         "totalPixels": 900000,
-        "diffPercent": 19.502111111111113,
+        "diffPercent": 18.877444444444443,
         "width": 900,
         "height": 1000,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/backgrounds/run-1/diff.png",
@@ -9360,14 +9360,14 @@
       },
       "passed": false,
       "pixel_runs": [
-        19.502111111111113
+        18.877444444444443
       ],
-      "diff_pct_median": 19.502111111111113,
-      "diff_pct_min": 19.502111111111113,
-      "diff_pct_max": 19.502111111111113,
+      "diff_pct_median": 18.877444444444443,
+      "diff_pct_min": 18.877444444444443,
+      "diff_pct_max": 18.877444444444443,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 19.502111111111113
+      "diff_pct": 18.877444444444443
     },
     {
       "case_id": "bg-solid",
@@ -12401,6 +12401,16 @@
       "diff_pct_variance": 0.0,
       "stable": false,
       "diff_pct": 9.569333333333335
+    },
+    {
+      "case_id": "gpu-gradient-regression",
+      "type": "micro",
+      "threshold": 15,
+      "pixel": null,
+      "styles": null,
+      "rects": null,
+      "passed": false,
+      "error": "No Chrome baseline"
     },
     {
       "case_id": "images-intrinsic",
