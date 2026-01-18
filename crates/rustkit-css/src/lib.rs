@@ -196,6 +196,68 @@ impl ColorF32 {
         }
     }
 
+    /// Gamma-correct interpolation for CSS gradients.
+    /// Converts sRGB to linear space, interpolates in premultiplied linear,
+    /// then converts back to sRGB. This matches Chrome's gradient rendering.
+    #[inline]
+    pub fn lerp_gamma_correct(&self, other: &ColorF32, t: f32) -> ColorF32 {
+        // Convert sRGB to linear
+        let l1_r = Self::srgb_to_linear(self.r);
+        let l1_g = Self::srgb_to_linear(self.g);
+        let l1_b = Self::srgb_to_linear(self.b);
+
+        let l2_r = Self::srgb_to_linear(other.r);
+        let l2_g = Self::srgb_to_linear(other.g);
+        let l2_b = Self::srgb_to_linear(other.b);
+
+        // Premultiply by alpha in linear space
+        let pre1_r = l1_r * self.a;
+        let pre1_g = l1_g * self.a;
+        let pre1_b = l1_b * self.a;
+
+        let pre2_r = l2_r * other.a;
+        let pre2_g = l2_g * other.a;
+        let pre2_b = l2_b * other.a;
+
+        // Interpolate in linear premultiplied space
+        let pre_r = pre1_r + (pre2_r - pre1_r) * t;
+        let pre_g = pre1_g + (pre2_g - pre1_g) * t;
+        let pre_b = pre1_b + (pre2_b - pre1_b) * t;
+        let a = self.a + (other.a - self.a) * t;
+
+        // Convert back from premultiplied and to sRGB
+        if a > 0.0001 {
+            ColorF32 {
+                r: Self::linear_to_srgb(pre_r / a),
+                g: Self::linear_to_srgb(pre_g / a),
+                b: Self::linear_to_srgb(pre_b / a),
+                a,
+            }
+        } else {
+            ColorF32 { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
+        }
+    }
+
+    /// Convert sRGB to linear space.
+    #[inline]
+    fn srgb_to_linear(c: f32) -> f32 {
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    /// Convert linear to sRGB space.
+    #[inline]
+    fn linear_to_srgb(c: f32) -> f32 {
+        if c <= 0.0031308 {
+            c * 12.92
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        }
+    }
+
     /// Convert to array for GPU vertex buffers.
     #[inline]
     pub fn to_array(&self) -> [f32; 4] {
