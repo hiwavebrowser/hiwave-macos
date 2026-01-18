@@ -1474,9 +1474,9 @@ impl Renderer {
                 match shape {
                     rustkit_css::RadialShape::Circle => (min_corner, min_corner),
                     rustkit_css::RadialShape::Ellipse => {
-                        // Scale to maintain ellipse aspect ratio
-                        let ratio = rect.width / rect.height.max(0.001);
-                        (min_corner * ratio.sqrt(), min_corner / ratio.sqrt())
+                        // Match CPU implementation: rx = dist, ry = dist / aspect
+                        let aspect = rect.width / rect.height.max(0.001);
+                        (min_corner, min_corner / aspect)
                     }
                 }
             }
@@ -1485,9 +1485,10 @@ impl Renderer {
                 match shape {
                     rustkit_css::RadialShape::Circle => (max_corner, max_corner),
                     rustkit_css::RadialShape::Ellipse => {
-                        // Scale to maintain ellipse aspect ratio
-                        let ratio = rect.width / rect.height.max(0.001);
-                        (max_corner * ratio.sqrt(), max_corner / ratio.sqrt())
+                        // Match CPU implementation: rx = dist, ry = dist / aspect
+                        // This ensures ellipse has correct aspect ratio (width:height)
+                        let aspect = rect.width / rect.height.max(0.001);
+                        (max_corner, max_corner / aspect)
                     }
                 }
             }

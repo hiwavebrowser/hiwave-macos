@@ -2867,42 +2867,44 @@ impl Engine {
     /// Load images asynchronously and store in cache.
     pub async fn load_images(&mut self, id: EngineViewId) -> Result<usize, EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
-        
+
         let Some(document) = &view.document else {
             return Ok(0);
         };
-        
+
         let base_url = view.url.as_ref();
         let images = self.discover_images(document.as_ref(), base_url);
-        
+
         let mut loaded = 0;
-        
+        let image_manager = self.image_manager.clone();
+
         for (_src, url) in images {
-            info!(%url, "Loading image");
-            
-            match self.loader.fetch(Request::get(url.clone())).await {
-                Ok(response) => {
-                    if response.ok() {
-                        match response.bytes().await {
-                            Ok(bytes) => {
-                                // Store in image cache (to be implemented)
-                                debug!(len = bytes.len(), %url, "Image loaded");
-                                loaded += 1;
-                            }
-                            Err(e) => {
-                                warn!(?e, %url, "Failed to read image body");
-                            }
-                        }
-                    } else {
-                        warn!(status = %response.status, %url, "Failed to fetch image");
-                    }
+            // Skip if already cached
+            if image_manager.is_cached(&url) {
+                debug!(%url, "Image already cached");
+                loaded += 1;
+                continue;
+            }
+
+            info!(%url, "Loading image via ImageManager");
+
+            // Use ImageManager to fetch, decode, and cache the image
+            match image_manager.load(url.clone()).await {
+                Ok(image) => {
+                    debug!(
+                        %url,
+                        width = image.natural_width,
+                        height = image.natural_height,
+                        "Image loaded and cached"
+                    );
+                    loaded += 1;
                 }
                 Err(e) => {
-                    warn!(?e, %url, "Failed to fetch image");
+                    warn!(?e, %url, "Failed to load image");
                 }
             }
         }
-        
+
         Ok(loaded)
     }
     
@@ -3934,12 +3936,16 @@ impl Engine {
     fn render(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         let _span = tracing::info_span!("render", ?id).entered();
 
-        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
-        let viewhost_id = view.viewhost_id;
-        let display_list = view.display_list.as_ref();
-        let has_display_list = display_list.is_some();
-        let cmd_count = display_list.map(|dl| dl.commands.len()).unwrap_or(0);
-        let is_headless = view.headless_bounds.is_some();
+        // Extract needed values from view, avoiding long-lived borrows
+        let (viewhost_id, has_display_list, cmd_count, is_headless) = {
+            let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+            (
+                view.viewhost_id,
+                view.display_list.is_some(),
+                view.display_list.as_ref().map(|dl| dl.commands.len()).unwrap_or(0),
+                view.headless_bounds.is_some(),
+            )
+        };
 
         trace!(?id, has_display_list, cmd_count, is_headless, "Rendering view");
 
@@ -3954,6 +3960,20 @@ impl Engine {
         if let Some(renderer) = &mut self.renderer {
             renderer.set_viewport_size(surface_width, surface_height);
         }
+
+        // Upload images from cache to renderer before drawing
+        // Need to re-borrow view here to get display_list
+        if let Some(view) = self.views.get(&id) {
+            if let Some(display_list) = &view.display_list {
+                // Clone commands to break the borrow on self.views
+                let commands = display_list.commands.clone();
+                drop(view); // Explicitly drop the borrow
+                self.upload_display_list_images(&commands);
+            }
+        }
+
+        // Re-get display_list reference for rendering
+        let display_list = self.views.get(&id).and_then(|v| v.display_list.as_ref());
 
         // Render based on whether view is headless or not
         if is_headless {
@@ -4015,6 +4035,88 @@ impl Engine {
         }
 
         Ok(())
+    }
+
+    /// Upload images referenced in display commands to the renderer's texture cache.
+    ///
+    /// This scans the display list for BackgroundImage and Image commands and ensures
+    /// any cached images are uploaded to the GPU before rendering.
+    /// For data: URLs, images are loaded synchronously on-demand.
+    fn upload_display_list_images(
+        &mut self,
+        commands: &[rustkit_layout::DisplayCommand],
+    ) {
+        use std::collections::HashSet;
+        use std::time::Duration;
+
+        // Early exit if no renderer
+        let Some(renderer) = &mut self.renderer else {
+            return;
+        };
+
+        // Collect unique image URLs from display list
+        let mut urls_to_upload: Vec<(String, std::sync::Arc<rustkit_image::LoadedImage>)> = Vec::new();
+        let mut urls_seen = HashSet::new();
+
+        for cmd in commands {
+            // Extract URL from both BackgroundImage and Image commands
+            let url = match cmd {
+                rustkit_layout::DisplayCommand::BackgroundImage { url, .. } => url,
+                rustkit_layout::DisplayCommand::Image { url, .. } => url,
+                _ => continue,
+            };
+
+            if !urls_seen.insert(url.clone()) {
+                continue; // Already processed
+            }
+
+            // Skip if already in renderer
+            if renderer.has_image(url) {
+                continue;
+            }
+
+            // Try to parse as URL
+            let Ok(parsed_url) = url::Url::parse(url) else {
+                tracing::warn!(%url, "Invalid URL for image");
+                continue;
+            };
+
+            // Try to get from cache or load data: URLs synchronously
+            let image = if let Some(cached) = self.image_manager.get_cached(&parsed_url) {
+                Some(cached)
+            } else if parsed_url.scheme() == "data" {
+                // For data: URLs, load synchronously since they don't require network
+                match self.image_manager.load_blocking(parsed_url) {
+                    Ok(img) => Some(img),
+                    Err(e) => {
+                        tracing::warn!(?e, %url, "Failed to decode data URL image");
+                        None
+                    }
+                }
+            } else {
+                // Image not cached and not a data: URL - it will render when loaded
+                None
+            };
+
+            if let Some(img) = image {
+                urls_to_upload.push((url.clone(), img));
+            }
+        }
+
+        // Now upload all collected images
+        for (url_str, image) in urls_to_upload {
+            let frame = image.current_frame(Duration::ZERO);
+            if let Err(e) = renderer.upload_image(
+                &url_str,
+                frame.width(),
+                frame.height(),
+                frame.data(),
+            ) {
+                tracing::warn!(?e, %url_str, "Failed to upload image to renderer");
+            } else {
+                tracing::debug!(%url_str, "Uploaded image to renderer");
+            }
+        }
     }
 
     /// Execute JavaScript in a view.
@@ -4695,8 +4797,23 @@ fn parse_radial_gradient(value: &str, repeating: bool) -> Option<rustkit_css::Gr
                 center.0 = parse_position_value(pos_parts[0]);
                 center.1 = parse_position_value(pos_parts[1]);
             } else if pos_parts.len() == 1 {
-                center.0 = parse_position_value(pos_parts[0]);
-                center.1 = center.0;
+                // Single keyword: interpret as axis-specific position
+                // "top"/"bottom" are vertical - horizontal stays centered
+                // "left"/"right" are horizontal - vertical stays centered
+                let keyword = pos_parts[0].trim().to_lowercase();
+                match keyword.as_str() {
+                    "top" => { center.0 = 0.5; center.1 = 0.0; }
+                    "bottom" => { center.0 = 0.5; center.1 = 1.0; }
+                    "left" => { center.0 = 0.0; center.1 = 0.5; }
+                    "right" => { center.0 = 1.0; center.1 = 0.5; }
+                    "center" => { center.0 = 0.5; center.1 = 0.5; }
+                    _ => {
+                        // Percentage or other value - apply to both
+                        let val = parse_position_value(pos_parts[0]);
+                        center.0 = val;
+                        center.1 = val;
+                    }
+                }
             }
         }
         stops_start = 1;
@@ -4761,8 +4878,20 @@ fn parse_conic_gradient(value: &str, repeating: bool) -> Option<rustkit_css::Gra
                 center.0 = parse_position_value(pos_parts[0]);
                 center.1 = parse_position_value(pos_parts[1]);
             } else if pos_parts.len() == 1 {
-                center.0 = parse_position_value(pos_parts[0]);
-                center.1 = center.0;
+                // Single keyword: interpret as axis-specific position
+                let keyword = pos_parts[0].trim().to_lowercase();
+                match keyword.as_str() {
+                    "top" => { center.0 = 0.5; center.1 = 0.0; }
+                    "bottom" => { center.0 = 0.5; center.1 = 1.0; }
+                    "left" => { center.0 = 0.0; center.1 = 0.5; }
+                    "right" => { center.0 = 1.0; center.1 = 0.5; }
+                    "center" => { center.0 = 0.5; center.1 = 0.5; }
+                    _ => {
+                        let val = parse_position_value(pos_parts[0]);
+                        center.0 = val;
+                        center.1 = val;
+                    }
+                }
             }
         }
         stops_start = 1;
