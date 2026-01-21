@@ -18,6 +18,8 @@ pub mod flex;
 pub mod forms;
 pub mod grid;
 pub mod images;
+pub mod intrinsic_cache;
+pub mod margin_collapse;
 pub mod scroll;
 pub mod text;
 
@@ -40,6 +42,11 @@ pub use text::{
     apply_text_transform, collapse_whitespace, FontCache, FontDisplay, FontFaceRule,
     FontFamilyChain, FontLoader, LineHeight, PositionedGlyph, ShapedRun, TextDecoration, TextError,
     TextMetrics, TextShaper,
+};
+pub use intrinsic_cache::IntrinsicSizingMode;
+pub use margin_collapse::{
+    collapse_margins, establishes_bfc, is_margin_collapsible_through,
+    should_collapse_with_first_child, should_collapse_with_last_child, CollapsibleMargin,
 };
 
 use rustkit_css::{BoxSizing, Color, ComputedStyle, Length, TextAlign};
@@ -419,6 +426,9 @@ pub struct LayoutBox {
     pub viewport: (f32, f32),
     /// Sticky positioning state (for position: sticky elements).
     pub sticky_state: Option<StickyState>,
+    /// Optional element ID for intrinsic sizing cache.
+    /// When set, enables caching of min-content/max-content calculations.
+    pub element_id: Option<usize>,
 }
 
 impl LayoutBox {
@@ -438,6 +448,7 @@ impl LayoutBox {
             containing_block_index: None,
             viewport: (0.0, 0.0),
             sticky_state: None,
+            element_id: None,
         }
     }
 
@@ -470,6 +481,19 @@ impl LayoutBox {
             ctx.creates_context = true;
             self.stacking_context = Some(ctx);
         }
+    }
+
+    /// Set the element ID for intrinsic sizing cache support.
+    ///
+    /// When set, enables caching of expensive min-content/max-content
+    /// calculations for this element across layout passes.
+    pub fn set_element_id(&mut self, id: usize) {
+        self.element_id = Some(id);
+    }
+
+    /// Get the element ID if set.
+    pub fn element_id(&self) -> Option<usize> {
+        self.element_id
     }
 
     /// Set position offsets.

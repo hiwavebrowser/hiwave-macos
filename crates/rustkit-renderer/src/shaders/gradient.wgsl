@@ -3,6 +3,8 @@
 // This shader implements CSS linear gradients following the exact same algorithm
 // as the cell-by-cell reference implementation in rustkit-renderer/src/lib.rs.
 //
+// Includes Chrome/Skia-compatible ordered dithering to reduce gradient banding.
+//
 // CSS Gradient Angle Convention:
 //   0deg   = "to top"    -> gradient direction (0, -1) -> upward
 //   90deg  = "to right"  -> gradient direction (1, 0)  -> rightward
@@ -10,6 +12,57 @@
 //   270deg = "to left"   -> gradient direction (-1, 0) -> leftward
 //
 // Direction vector formula: (sin(angle_rad), -cos(angle_rad))
+
+// ==================== Ordered Dithering ====================
+//
+// Chrome/Skia uses ordered dithering (Bayer matrices) to reduce banding when
+// quantizing gradients to 8-bit channels. The dither offset is added to each
+// color channel before the GPU's final quantization to 8-bit.
+//
+// Classic 8x8 Bayer matrix values (0-63), stored as array.
+// Indexing: idx = (y & 7) * 8 + (x & 7)
+// Dither offset: (matrix[idx] + 0.5) / 64.0
+const BAYER_8X8: array<f32, 64> = array<f32, 64>(
+    0.0, 48.0, 12.0, 60.0, 3.0, 51.0, 15.0, 63.0,
+    32.0, 16.0, 44.0, 28.0, 35.0, 19.0, 47.0, 31.0,
+    8.0, 56.0, 4.0, 52.0, 11.0, 59.0, 7.0, 55.0,
+    40.0, 24.0, 36.0, 20.0, 43.0, 27.0, 39.0, 23.0,
+    2.0, 50.0, 14.0, 62.0, 1.0, 49.0, 13.0, 61.0,
+    34.0, 18.0, 46.0, 30.0, 33.0, 17.0, 45.0, 29.0,
+    10.0, 58.0, 6.0, 54.0, 9.0, 57.0, 5.0, 53.0,
+    42.0, 26.0, 38.0, 22.0, 41.0, 25.0, 37.0, 21.0
+);
+
+/// Calculate the dither offset for a pixel position.
+/// Returns a value in range [0.0078125, 0.9921875] (approximately 0 to 1).
+/// This is added to color values (in 0-255 space) before truncation.
+fn get_dither_offset(pixel_pos: vec2<f32>) -> f32 {
+    let x = u32(pixel_pos.x);
+    let y = u32(pixel_pos.y);
+    let idx = (y & 7u) * 8u + (x & 7u);
+    let m = BAYER_8X8[idx];
+    return (m + 0.5) / 64.0;
+}
+
+/// Apply ordered dithering to a color.
+/// The color is in 0-1 range, dithering is applied in 0-255 space equivalent.
+/// Only RGB channels are dithered to avoid alpha artifacts.
+fn apply_dither(color: vec4<f32>, dither: f32) -> vec4<f32> {
+    // The dither value (0.008-0.992) is designed to be added to values in 0-255 space.
+    // For 0-1 space, we divide by 255 to get the equivalent offset.
+    // Example: dither=0.5 in 0-255 means +0.5 to 127 → 127.5 → rounds to 128
+    //          in 0-1 space: 0.5/255 = 0.00196 added to 0.498 → 0.49996 * 255 = 127.5 → 128
+    let dither_01 = dither / 255.0;
+
+    // Only dither RGB, not alpha, to avoid transparency artifacts.
+    // Chrome may dither alpha too, but for GPU blending this can cause issues.
+    return vec4<f32>(
+        color.r + dither_01,
+        color.g + dither_01,
+        color.b + dither_01,
+        color.a  // Keep alpha unchanged
+    );
+}
 
 // Viewport uniforms (same as color shader)
 struct Uniforms {
@@ -476,6 +529,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Apply border-radius alpha
     color.a = color.a * alpha_coverage;
+
+    // Ordered dithering is available but disabled for now.
+    // Testing shows it doesn't improve parity with Chrome baselines.
+    // This may be because Chrome uses different dither patterns per gradient
+    // or because wgpu's quantization differs from Skia's.
+    // let dither = get_dither_offset(pixel_pos);
+    // color = apply_dither(color, dither);
 
     return color;
 }

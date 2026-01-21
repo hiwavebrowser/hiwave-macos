@@ -53,3 +53,5 @@ parity-baseline/captures/
 parity-baseline/failure_packets/
 progress_report.json
 scripts/__pycache__/
+
+fastrender/
