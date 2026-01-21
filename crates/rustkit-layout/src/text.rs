@@ -11,11 +11,13 @@
 //! - **Line Height**: Proper line-height calculation with various units
 //! - **Font Variants**: Bold, italic, weights, stretches
 //! - **Metrics**: Accurate glyph and line metrics
+//! - **Bidirectional Text**: Support for mixed LTR/RTL text via UAX #9
 
 use rustkit_css::{
-    Color, FontStretch, FontStyle, FontWeight, Length, TextDecorationLine, TextDecorationStyle,
-    TextTransform, WhiteSpace,
+    Color, Direction as CssDirection, FontStretch, FontStyle, FontWeight, Length,
+    TextDecorationLine, TextDecorationStyle, TextTransform, WhiteSpace,
 };
+use rustkit_text::bidi::{BidiInfo, Direction as BidiDirection};
 use std::collections::HashMap;
 use std::sync::RwLock;
 use thiserror::Error;
@@ -334,6 +336,54 @@ pub struct ShapedRun {
     pub font_size: f32,
     /// Text metrics.
     pub metrics: TextMetrics,
+    /// Text direction (LTR or RTL).
+    pub direction: TextDirection,
+}
+
+/// Text direction for a shaped run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextDirection {
+    /// Left-to-right (Latin, Greek, Cyrillic, etc.)
+    #[default]
+    Ltr,
+    /// Right-to-left (Arabic, Hebrew, etc.)
+    Rtl,
+}
+
+impl TextDirection {
+    /// Convert from CSS Direction.
+    pub fn from_css(direction: CssDirection) -> Self {
+        match direction {
+            CssDirection::Ltr => TextDirection::Ltr,
+            CssDirection::Rtl => TextDirection::Rtl,
+        }
+    }
+
+    /// Convert from bidi Direction.
+    pub fn from_bidi(direction: BidiDirection) -> Self {
+        match direction {
+            BidiDirection::Ltr => TextDirection::Ltr,
+            BidiDirection::Rtl => TextDirection::Rtl,
+        }
+    }
+
+    /// Convert to bidi Direction.
+    pub fn to_bidi(self) -> BidiDirection {
+        match self {
+            TextDirection::Ltr => BidiDirection::Ltr,
+            TextDirection::Rtl => BidiDirection::Rtl,
+        }
+    }
+
+    /// Check if this is left-to-right.
+    pub fn is_ltr(self) -> bool {
+        self == TextDirection::Ltr
+    }
+
+    /// Check if this is right-to-left.
+    pub fn is_rtl(self) -> bool {
+        self == TextDirection::Rtl
+    }
 }
 
 impl ShapedRun {
@@ -767,6 +817,7 @@ impl TextShaper {
                 font_stretch: stretch,
                 font_size: size,
                 metrics: TextMetrics::with_font_size(size),
+                direction: TextDirection::Ltr,
             });
         }
 
@@ -865,6 +916,7 @@ impl TextShaper {
                         font_stretch: stretch,
                         font_size: size,
                         metrics,
+                        direction: TextDirection::Ltr,
                     });
                 }
             }
@@ -922,6 +974,7 @@ impl TextShaper {
             font_stretch: stretch,
             font_size: size,
             metrics,
+            direction: TextDirection::Ltr,
         })
     }
 
@@ -946,6 +999,7 @@ impl TextShaper {
                 font_stretch: stretch,
                 font_size: size,
                 metrics: TextMetrics::with_font_size(size),
+                direction: TextDirection::Ltr,
             });
         }
 
@@ -1079,10 +1133,11 @@ impl TextShaper {
                 font_stretch: stretch,
                 font_size: size,
                 metrics,
+                direction: TextDirection::Ltr,
             })
         }
     }
-    
+
     /// Create a Core Text font with specific traits.
     #[cfg(target_os = "macos")]
     fn create_ct_font_with_traits(
@@ -1168,6 +1223,7 @@ impl TextShaper {
             font_stretch: stretch,
             font_size: size,
             metrics,
+            direction: TextDirection::Ltr,
         })
     }
 
@@ -1184,6 +1240,101 @@ impl TextShaper {
         let chain = FontFamilyChain::from_css_value(font_family);
         let run = self.shape(text, &chain, weight, style, stretch, size)?;
         Ok(run.metrics)
+    }
+
+    /// Shape text with bidirectional text support.
+    ///
+    /// This function analyzes the text for bidirectional content (mixed LTR/RTL)
+    /// using the Unicode Bidirectional Algorithm (UAX #9) and produces separate
+    /// shaped runs for each directional segment in visual order.
+    ///
+    /// # Arguments
+    /// * `text` - The text to shape
+    /// * `font_chain` - Font family chain with fallbacks
+    /// * `weight` - Font weight
+    /// * `style` - Font style (normal, italic, oblique)
+    /// * `stretch` - Font stretch
+    /// * `size` - Font size in pixels
+    /// * `base_direction` - Base paragraph direction (from CSS `direction` property)
+    ///
+    /// # Returns
+    /// A vector of `ShapedRun`s in visual (display) order, each with its own direction.
+    /// For pure LTR or RTL text, this returns a single run.
+    pub fn shape_with_bidi(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        base_direction: Option<TextDirection>,
+    ) -> Result<Vec<ShapedRun>, TextError> {
+        if text.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Convert to bidi direction for analysis
+        let bidi_base = base_direction.map(|d| d.to_bidi());
+
+        // Analyze bidirectional text
+        let bidi_info = BidiInfo::with_base_direction(text, bidi_base);
+
+        // Fast path: pure LTR or RTL text with single run
+        let visual_runs = bidi_info.visual_runs();
+        if visual_runs.len() == 1 && bidi_info.is_pure_ltr() {
+            // Simple case: just shape the whole text as LTR
+            let mut run = self.shape(text, font_chain, weight, style, stretch, size)?;
+            run.direction = TextDirection::Ltr;
+            return Ok(vec![run]);
+        }
+
+        // Handle mixed-direction text
+        let mut shaped_runs = Vec::with_capacity(visual_runs.len());
+
+        for bidi_run in visual_runs {
+            let run_text = bidi_run.text(text);
+            if run_text.is_empty() {
+                continue;
+            }
+
+            // Shape this run
+            let mut shaped = self.shape(run_text, font_chain, weight, style, stretch, size)?;
+            shaped.direction = TextDirection::from_bidi(bidi_run.direction);
+
+            // For RTL runs, we may need to reverse the glyph order
+            // (depending on whether the underlying shaper already did this)
+            // Note: Core Text and DirectWrite handle RTL internally,
+            // so we typically don't need to reverse here.
+
+            shaped_runs.push(shaped);
+        }
+
+        Ok(shaped_runs)
+    }
+
+    /// Shape text with bidirectional support using CSS direction property.
+    ///
+    /// Convenience wrapper around `shape_with_bidi` that takes a CSS direction value.
+    pub fn shape_with_css_direction(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        css_direction: CssDirection,
+    ) -> Result<Vec<ShapedRun>, TextError> {
+        self.shape_with_bidi(
+            text,
+            font_chain,
+            weight,
+            style,
+            stretch,
+            size,
+            Some(TextDirection::from_css(css_direction)),
+        )
     }
 }
 
@@ -1480,5 +1631,148 @@ mod tests {
         assert!(result.is_ok());
         let run = result.unwrap();
         assert!(run.glyphs.is_empty());
+    }
+
+    #[test]
+    fn test_text_direction_conversions() {
+        use rustkit_css::Direction as CssDirection;
+        use rustkit_text::bidi::Direction as BidiDirection;
+
+        // From CSS
+        assert_eq!(TextDirection::from_css(CssDirection::Ltr), TextDirection::Ltr);
+        assert_eq!(TextDirection::from_css(CssDirection::Rtl), TextDirection::Rtl);
+
+        // From bidi
+        assert_eq!(TextDirection::from_bidi(BidiDirection::Ltr), TextDirection::Ltr);
+        assert_eq!(TextDirection::from_bidi(BidiDirection::Rtl), TextDirection::Rtl);
+
+        // To bidi
+        assert_eq!(TextDirection::Ltr.to_bidi(), BidiDirection::Ltr);
+        assert_eq!(TextDirection::Rtl.to_bidi(), BidiDirection::Rtl);
+
+        // Helper methods
+        assert!(TextDirection::Ltr.is_ltr());
+        assert!(!TextDirection::Ltr.is_rtl());
+        assert!(TextDirection::Rtl.is_rtl());
+        assert!(!TextDirection::Rtl.is_ltr());
+
+        // Default
+        assert_eq!(TextDirection::default(), TextDirection::Ltr);
+    }
+
+    #[test]
+    fn test_shape_with_bidi_empty() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let result = shaper.shape_with_bidi(
+            "",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            None,
+        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_shape_with_bidi_ltr() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let result = shaper.shape_with_bidi(
+            "Hello, world!",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            None,
+        );
+        assert!(result.is_ok());
+        let runs = result.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].direction, TextDirection::Ltr);
+        assert_eq!(runs[0].text, "Hello, world!");
+    }
+
+    #[test]
+    fn test_shape_with_bidi_rtl() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        // Hebrew: "shalom" (שלום)
+        let result = shaper.shape_with_bidi(
+            "\u{05E9}\u{05DC}\u{05D5}\u{05DD}",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            None,
+        );
+        assert!(result.is_ok());
+        let runs = result.unwrap();
+        // Pure RTL text should produce a single RTL run
+        assert!(!runs.is_empty());
+    }
+
+    #[test]
+    fn test_shape_with_bidi_mixed() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        // Mixed: "Hello שלום world"
+        let result = shaper.shape_with_bidi(
+            "Hello \u{05E9}\u{05DC}\u{05D5}\u{05DD} world",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            None,
+        );
+        assert!(result.is_ok());
+        let runs = result.unwrap();
+        // Mixed text should produce multiple runs
+        assert!(runs.len() >= 2, "Expected multiple runs for mixed text, got {}", runs.len());
+    }
+
+    #[test]
+    fn test_shape_with_css_direction() {
+        use rustkit_css::Direction as CssDirection;
+
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let result = shaper.shape_with_css_direction(
+            "Hello",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            CssDirection::Ltr,
+        );
+        assert!(result.is_ok());
+        let runs = result.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].direction, TextDirection::Ltr);
+    }
+
+    #[test]
+    fn test_shaped_run_direction_field() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let result = shaper.shape(
+            "Test",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+        );
+        assert!(result.is_ok());
+        let run = result.unwrap();
+        // Default shape() should produce LTR direction
+        assert_eq!(run.direction, TextDirection::Ltr);
     }
 }
