@@ -12,12 +12,15 @@
 //! - **Font Variants**: Bold, italic, weights, stretches
 //! - **Metrics**: Accurate glyph and line metrics
 //! - **Bidirectional Text**: Support for mixed LTR/RTL text via UAX #9
+//! - **Line Breaking**: Text wrapping with CSS word-break support via UAX #14
 
 use rustkit_css::{
     Color, Direction as CssDirection, FontStretch, FontStyle, FontWeight, Length,
     TextDecorationLine, TextDecorationStyle, TextTransform, WhiteSpace,
+    WordBreak as CssWordBreak,
 };
 use rustkit_text::bidi::{BidiInfo, Direction as BidiDirection};
+use rustkit_text::line_break::{LineBreaker, WordBreak as LineBreakWordBreak, OverflowWrap};
 use std::collections::HashMap;
 use std::sync::RwLock;
 use thiserror::Error;
@@ -1336,6 +1339,274 @@ impl TextShaper {
             Some(TextDirection::from_css(css_direction)),
         )
     }
+
+    /// Wrap text into lines that fit within the specified width.
+    ///
+    /// This function shapes text and breaks it into multiple lines based on:
+    /// - Available width
+    /// - CSS word-break property
+    /// - UAX #14 line breaking rules
+    ///
+    /// # Arguments
+    /// * `text` - The text to wrap
+    /// * `font_chain` - Font family chain with fallbacks
+    /// * `weight` - Font weight
+    /// * `style` - Font style
+    /// * `stretch` - Font stretch
+    /// * `size` - Font size in pixels
+    /// * `max_width` - Maximum line width in pixels
+    /// * `word_break` - CSS word-break property value
+    ///
+    /// # Returns
+    /// A vector of `WrappedLine` structs, each containing shaped runs for one line.
+    pub fn wrap_text(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        max_width: f32,
+        word_break: CssWordBreak,
+    ) -> Result<Vec<WrappedLine>, TextError> {
+        if text.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Convert CSS word-break to our line breaking enum
+        let lb_word_break = match word_break {
+            CssWordBreak::Normal => LineBreakWordBreak::Normal,
+            CssWordBreak::BreakAll => LineBreakWordBreak::BreakAll,
+            CssWordBreak::KeepAll => LineBreakWordBreak::KeepAll,
+            CssWordBreak::BreakWord => LineBreakWordBreak::BreakWord,
+        };
+
+        let breaker = LineBreaker::new(lb_word_break, OverflowWrap::Normal);
+        let mut lines = Vec::new();
+
+        // First, handle mandatory line breaks
+        for segment in rustkit_text::line_break::break_into_lines(text) {
+            let segment_text = segment.text_without_break();
+            if segment_text.is_empty() {
+                // Empty line (just a line break)
+                lines.push(WrappedLine {
+                    runs: vec![],
+                    width: 0.0,
+                    start_offset: segment.start,
+                    end_offset: segment.end,
+                });
+                continue;
+            }
+
+            // Now wrap this segment within max_width
+            let segment_lines = self.wrap_segment(
+                segment_text,
+                font_chain,
+                weight,
+                style,
+                stretch,
+                size,
+                max_width,
+                &breaker,
+                segment.start,
+            )?;
+
+            lines.extend(segment_lines);
+        }
+
+        // Handle case where text has no mandatory breaks
+        if lines.is_empty() && !text.is_empty() {
+            lines = self.wrap_segment(
+                text,
+                font_chain,
+                weight,
+                style,
+                stretch,
+                size,
+                max_width,
+                &breaker,
+                0,
+            )?;
+        }
+
+        Ok(lines)
+    }
+
+    /// Internal helper to wrap a single segment (no mandatory breaks).
+    fn wrap_segment(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        max_width: f32,
+        breaker: &LineBreaker,
+        base_offset: usize,
+    ) -> Result<Vec<WrappedLine>, TextError> {
+        if text.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut lines = Vec::new();
+        let mut line_start = 0;
+
+        while line_start < text.len() {
+            // Shape the remaining text to find where we need to break
+            let remaining = &text[line_start..];
+            let shaped = self.shape(remaining, font_chain, weight, style, stretch, size)?;
+
+            if shaped.metrics.width <= max_width {
+                // Entire remaining text fits on one line
+                let width = shaped.metrics.width;
+                lines.push(WrappedLine {
+                    runs: vec![shaped],
+                    width,
+                    start_offset: base_offset + line_start,
+                    end_offset: base_offset + text.len(),
+                });
+                break;
+            }
+
+            // Need to find a break point
+            // Binary search for the right break point
+            let break_offset = self.find_line_break(
+                remaining,
+                font_chain,
+                weight,
+                style,
+                stretch,
+                size,
+                max_width,
+                breaker,
+            )?;
+
+            if break_offset == 0 {
+                // Can't fit even one character - force break at first grapheme
+                let first_grapheme_end = rustkit_text::segmentation::grapheme_boundaries(remaining)
+                    .get(1)
+                    .copied()
+                    .unwrap_or(remaining.len());
+
+                let line_text = &remaining[..first_grapheme_end];
+                let shaped_line = self.shape(line_text, font_chain, weight, style, stretch, size)?;
+
+                lines.push(WrappedLine {
+                    runs: vec![shaped_line.clone()],
+                    width: shaped_line.metrics.width,
+                    start_offset: base_offset + line_start,
+                    end_offset: base_offset + line_start + first_grapheme_end,
+                });
+
+                line_start += first_grapheme_end;
+            } else {
+                let line_text = &remaining[..break_offset];
+                let shaped_line = self.shape(line_text, font_chain, weight, style, stretch, size)?;
+
+                lines.push(WrappedLine {
+                    runs: vec![shaped_line.clone()],
+                    width: shaped_line.metrics.width,
+                    start_offset: base_offset + line_start,
+                    end_offset: base_offset + line_start + break_offset,
+                });
+
+                // Skip whitespace at the break point
+                line_start += break_offset;
+                while line_start < text.len() && text[line_start..].starts_with(char::is_whitespace) {
+                    line_start += text[line_start..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                }
+            }
+        }
+
+        Ok(lines)
+    }
+
+    /// Find the best line break point within max_width.
+    fn find_line_break(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        max_width: f32,
+        breaker: &LineBreaker,
+    ) -> Result<usize, TextError> {
+        // Get all break opportunities
+        let break_offsets = breaker.break_offsets(text);
+
+        // Find the last break that fits
+        let mut best_break = 0;
+
+        for &offset in &break_offsets {
+            if offset == 0 {
+                continue;
+            }
+
+            let prefix = &text[..offset];
+            let shaped = self.shape(prefix, font_chain, weight, style, stretch, size)?;
+
+            if shaped.metrics.width <= max_width {
+                best_break = offset;
+            } else {
+                break;
+            }
+        }
+
+        Ok(best_break)
+    }
+}
+
+/// A wrapped line of text.
+#[derive(Debug, Clone)]
+pub struct WrappedLine {
+    /// Shaped runs for this line.
+    pub runs: Vec<ShapedRun>,
+    /// Total width of this line.
+    pub width: f32,
+    /// Start byte offset in the original text.
+    pub start_offset: usize,
+    /// End byte offset in the original text.
+    pub end_offset: usize,
+}
+
+impl WrappedLine {
+    /// Get the height of this line (max height of all runs).
+    pub fn height(&self) -> f32 {
+        self.runs
+            .iter()
+            .map(|r| r.metrics.height)
+            .fold(0.0f32, f32::max)
+    }
+
+    /// Get the ascent of this line (max ascent of all runs).
+    pub fn ascent(&self) -> f32 {
+        self.runs
+            .iter()
+            .map(|r| r.metrics.ascent)
+            .fold(0.0f32, f32::max)
+    }
+
+    /// Get the descent of this line (max descent of all runs).
+    pub fn descent(&self) -> f32 {
+        self.runs
+            .iter()
+            .map(|r| r.metrics.descent)
+            .fold(0.0f32, f32::max)
+    }
+
+    /// Check if this line is empty.
+    pub fn is_empty(&self) -> bool {
+        self.runs.is_empty() || self.runs.iter().all(|r| r.glyphs.is_empty())
+    }
+
+    /// Get the text content of this line.
+    pub fn text(&self) -> String {
+        self.runs.iter().map(|r| r.text.as_str()).collect()
+    }
 }
 
 impl Default for TextShaper {
@@ -1774,5 +2045,131 @@ mod tests {
         let run = result.unwrap();
         // Default shape() should produce LTR direction
         assert_eq!(run.direction, TextDirection::Ltr);
+    }
+
+    #[test]
+    fn test_wrap_text_empty() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let result = shaper.wrap_text(
+            "",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            200.0,
+            CssWordBreak::Normal,
+        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_wrap_text_single_line() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let result = shaper.wrap_text(
+            "Hello",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            1000.0, // Very wide, should fit on one line
+            CssWordBreak::Normal,
+        );
+        assert!(result.is_ok());
+        let lines = result.unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text(), "Hello");
+    }
+
+    #[test]
+    fn test_wrap_text_multiple_lines() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let result = shaper.wrap_text(
+            "Hello world this is a test",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            80.0, // Narrow width to force wrapping
+            CssWordBreak::Normal,
+        );
+        assert!(result.is_ok());
+        let lines = result.unwrap();
+        // Should have multiple lines due to narrow width
+        assert!(lines.len() > 1, "Expected multiple lines, got {}", lines.len());
+    }
+
+    #[test]
+    fn test_wrap_text_with_newlines() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let result = shaper.wrap_text(
+            "Line1\nLine2",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            1000.0,
+            CssWordBreak::Normal,
+        );
+        assert!(result.is_ok());
+        let lines = result.unwrap();
+        // Should have at least 2 lines due to newline
+        assert!(lines.len() >= 2, "Expected at least 2 lines for text with newline");
+    }
+
+    #[test]
+    fn test_wrap_text_break_all() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        // With break-all, should be able to break mid-word
+        let result = shaper.wrap_text(
+            "Supercalifragilisticexpialidocious",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            50.0, // Very narrow
+            CssWordBreak::BreakAll,
+        );
+        assert!(result.is_ok());
+        let lines = result.unwrap();
+        // Should break the long word
+        assert!(lines.len() > 1, "Expected word to be broken with break-all");
+    }
+
+    #[test]
+    fn test_wrapped_line_properties() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let result = shaper.wrap_text(
+            "Test",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            16.0,
+            1000.0,
+            CssWordBreak::Normal,
+        );
+        assert!(result.is_ok());
+        let lines = result.unwrap();
+        assert_eq!(lines.len(), 1);
+
+        let line = &lines[0];
+        assert!(line.width > 0.0);
+        assert!(line.height() > 0.0);
+        assert!(line.ascent() > 0.0);
+        assert!(!line.is_empty());
+        assert_eq!(line.start_offset, 0);
+        assert_eq!(line.end_offset, 4);
     }
 }
