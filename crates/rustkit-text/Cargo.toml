@@ -8,6 +8,8 @@ license = "MIT"
 
 [dependencies]
 thiserror = "1.0"
+unicode-bidi = "0.3"
+unicode-segmentation = "1.10"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [

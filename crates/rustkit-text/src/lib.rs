@@ -1,16 +1,24 @@
 //! # RustKit Text
 //!
-//! RustKit-owned access to fonts, metrics, and glyph indices.
+//! RustKit-owned access to fonts, metrics, glyph indices, and text processing.
 //!
-//! Bravo 2 goal: remove the external `dwrote` crate usage by using DirectWrite via the `windows` crate.
-//!
-//! Current scope:
+//! This crate provides:
 //! - System font collection lookup by family name
 //! - Match a font by weight/stretch/style
 //! - Create font face
 //! - Read font metrics (design units)
 //! - Map Unicode codepoints -> glyph indices
 //! - Read design glyph metrics (advance widths)
+//! - Bidirectional text support (UAX #9)
+//! - Text segmentation (UAX #29)
+//!
+//! ## Modules
+//!
+//! - [`bidi`]: Unicode Bidirectional Algorithm for mixed LTR/RTL text
+//! - [`segmentation`]: Grapheme cluster, word, and sentence boundaries
+
+pub mod bidi;
+pub mod segmentation;
 
 use thiserror::Error;
 
