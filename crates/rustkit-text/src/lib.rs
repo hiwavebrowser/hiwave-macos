@@ -11,13 +11,16 @@
 //! - Read design glyph metrics (advance widths)
 //! - Bidirectional text support (UAX #9)
 //! - Text segmentation (UAX #29)
+//! - Line breaking (UAX #14)
 //!
 //! ## Modules
 //!
 //! - [`bidi`]: Unicode Bidirectional Algorithm for mixed LTR/RTL text
+//! - [`line_break`]: Unicode Line Breaking Algorithm for text wrapping
 //! - [`segmentation`]: Grapheme cluster, word, and sentence boundaries
 
 pub mod bidi;
+pub mod line_break;
 pub mod segmentation;
 
 use thiserror::Error;

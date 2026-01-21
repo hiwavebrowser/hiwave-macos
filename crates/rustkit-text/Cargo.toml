@@ -9,6 +9,7 @@ license = "MIT"
 [dependencies]
 thiserror = "1.0"
 unicode-bidi = "0.3"
+unicode-linebreak = "0.1"
 unicode-segmentation = "1.10"
 
 [target.'cfg(target_os = "windows")'.dependencies]
