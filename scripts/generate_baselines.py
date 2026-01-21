@@ -43,6 +43,22 @@ WEBSUITE = [
     ("sticky-scroll", "websuite/cases/sticky-scroll/index.html", 1280, 800),
 ]
 
+MICRO = [
+    ("backgrounds", "websuite/micro/backgrounds/index.html", 900, 1000),
+    ("bg-solid", "websuite/micro/bg-solid/index.html", 800, 600),
+    ("bg-pure", "websuite/micro/bg-pure/index.html", 800, 600),
+    ("combinators", "websuite/micro/combinators/index.html", 800, 800),
+    ("form-controls", "websuite/micro/form-controls/index.html", 800, 1200),
+    ("gradients", "websuite/micro/gradients/index.html", 900, 1000),
+    ("gradient-no-radius", "websuite/micro/gradient-no-radius/index.html", 800, 600),
+    ("gradient-radius-only", "websuite/micro/gradient-radius-only/index.html", 800, 600),
+    ("gpu-gradient-regression", "websuite/micro/gpu-gradient-regression/index.html", 800, 1200),
+    ("images-intrinsic", "websuite/micro/images-intrinsic/index.html", 800, 1400),
+    ("pseudo-classes", "websuite/micro/pseudo-classes/index.html", 800, 800),
+    ("rounded-corners", "websuite/micro/rounded-corners/index.html", 900, 1000),
+    ("specificity", "websuite/micro/specificity/index.html", 800, 600),
+]
+
 REPO_ROOT = Path(__file__).parent.parent
 BASELINES_DIR = REPO_ROOT / "baselines" / "chrome-120"
 ORACLE_SCRIPT = REPO_ROOT / "tools" / "parity_oracle" / "capture_baseline.mjs"
@@ -156,10 +172,15 @@ def main():
     cases = []
     if single_case:
         # Find the case
-        all_cases = {c[0]: c for c in BUILTINS + WEBSUITE}
+        all_cases = {c[0]: c for c in BUILTINS + WEBSUITE + MICRO}
         if single_case in all_cases:
             c = all_cases[single_case]
-            case_type = "builtins" if any(b[0] == single_case for b in BUILTINS) else "websuite"
+            if any(b[0] == single_case for b in BUILTINS):
+                case_type = "builtins"
+            elif any(m[0] == single_case for m in MICRO):
+                case_type = "micro"
+            else:
+                case_type = "websuite"
             cases = [(c[0], c[1], c[2], c[3], case_type)]
         else:
             print(f"Error: Unknown case '{single_case}'")
@@ -169,9 +190,11 @@ def main():
             cases.extend([(c[0], c[1], c[2], c[3], "builtins") for c in BUILTINS])
         if scope in ["all", "websuite"]:
             cases.extend([(c[0], c[1], c[2], c[3], "websuite") for c in WEBSUITE])
+        if scope in ["all", "micro"]:
+            cases.extend([(c[0], c[1], c[2], c[3], "micro") for c in MICRO])
     
     # Capture baselines
-    results = {"builtins": {}, "websuite": {}}
+    results = {"builtins": {}, "websuite": {}, "micro": {}}
     
     for case_id, html_path, width, height, case_type in cases:
         output_dir = BASELINES_DIR / case_type

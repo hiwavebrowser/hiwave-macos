@@ -60,6 +60,8 @@ MICRO_TESTS = [
     ("combinators", "websuite/micro/combinators/index.html", 800, 800),
     ("form-controls", "websuite/micro/form-controls/index.html", 800, 1200),
     ("gradients", "websuite/micro/gradients/index.html", 900, 1000),
+    ("gradient-no-radius", "websuite/micro/gradient-no-radius/index.html", 800, 600),
+    ("gradient-radius-only", "websuite/micro/gradient-radius-only/index.html", 800, 600),
     ("gpu-gradient-regression", "websuite/micro/gpu-gradient-regression/index.html", 800, 1200),
     ("images-intrinsic", "websuite/micro/images-intrinsic/index.html", 800, 1400),
     ("pseudo-classes", "websuite/micro/pseudo-classes/index.html", 800, 800),

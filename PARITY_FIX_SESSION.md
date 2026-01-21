@@ -1,9 +1,9 @@
 # Parity Fix Session - sticky-scroll & flex-positioning
 
-## Session Status: ABOUT FIXED (Buffer Overflow)
+## Session Status: Phase 1c Investigation Complete
 **Last Updated:** 2026-01-16
-**Tests Passing:** 12/23 (was 11/23)
-**Latest Fix:** about.html diagonal gradient buffer overflow
+**Tests Passing:** 12/23 (52.2%)
+**Latest Update:** GPU gradient investigation concluded - Chrome uses sRGB interpolation
 
 ## Results Summary
 
@@ -375,6 +375,97 @@ let cell_size: f32 = if area > max_cells {
 
 **File Changed:** `crates/rustkit-renderer/src/lib.rs:2294-2302`
 
+### 2026-01-16 Session (Phase 1c: GPU Gradient Investigation - CONCLUDED)
+
+**Goal:** Investigate GPU gradient shader to improve gradient rendering parity.
+
+**Investigation Findings:**
+
+1. **GPU Gradient Infrastructure Exists But Is Disabled**
+   - Shader code: `crates/rustkit-renderer/src/shaders/gradient.wgsl` (379 lines)
+   - Supports linear, radial, and conic gradients with border-radius SDF clipping
+   - Pipeline created in `pipeline.rs` but never used
+   - Previous attempts to enable caused regressions (22.97% → 52.26%)
+   - Fields renamed with `_` prefix: `_gradient_pipeline`, `_gradient_queue`
+
+2. **Cell-by-Cell Rendering Is Current Approach**
+   - `draw_linear_gradient()` uses discrete cell sampling
+   - Adaptive cell sizing prevents buffer overflow (max 100k cells)
+   - Works correctly but differs subtly from Chrome's GPU-accelerated rendering
+
+3. **Gamma-Correct Interpolation Experiment (FAILED)**
+   - Hypothesis: Chrome might use linear RGB interpolation
+   - Added `ColorF32::lerp_gamma_correct()` with sRGB↔linear conversion
+   - Changed `interpolate_color_f32()` to use gamma-correct interpolation
+   - **Results:** MADE THINGS WORSE
+     - gradient-backgrounds: 22.97% → 28.55% (+5.58%)
+     - gradients: 9.57% → 25.20% (+15.63%)
+   - **Conclusion:** Chrome uses sRGB interpolation (browser default), NOT linear RGB
+   - Reverted all changes; kept helper methods for future reference
+
+4. **Remaining Gradient Diff Source (16.5%)**
+   - Analyzed `backgrounds` test attribution:
+     - 59.19% text_metrics (font rendering)
+     - 16.53% gradient_interpolation (one element)
+   - The gradient_interpolation diff comes from:
+     - `div.test2-container` with `repeating-linear-gradient(45deg, #ccc, #ccc 10px, #fff 10px, #fff 20px)`
+     - Diagonal (45deg) repeating gradients with pixel-based stops
+     - Cell-by-cell sampling differs from Chrome's GPU interpolation
+   - Cannot be fixed without GPU shader implementation
+
+**Conclusion:**
+- GPU gradient shader exists but has coordinate space/algorithm bugs
+- Cell-by-cell rendering is correct but produces subtle differences
+- Chrome uses sRGB interpolation (not gamma-correct linear)
+- Remaining gradient diff (~16%) requires proper GPU shader implementation
+- **Phase 1c marked as complete - investigation concluded**
+
+**Files with gamma-correct methods (kept for reference):**
+- `crates/rustkit-css/src/lib.rs`: Added `lerp_gamma_correct()`, `srgb_to_linear()`, `linear_to_srgb()` to ColorF32
+
+---
+
+### 2026-01-16 Session (Parity Analysis Summary)
+
+**Failing Test Attribution Analysis:**
+
+| Test | Diff% | text_metrics | gradient_interpolation | form_control | Other |
+|------|-------|--------------|------------------------|--------------|-------|
+| settings | 21.97% | 42.2% | 22.0% | - | - |
+| image-gallery | 19.27% | 77.0% | - | - | - |
+| shelf | 26.51% | 67.6% | - | 32.4% | 0.1% replaced |
+| backgrounds | 18.88% | 59.2% | 16.5% | - | - |
+| combinators | 15.41% | 86.4% | - | - | - |
+| images-intrinsic | 12.92% | 78.8% | - | - | 3.6% replaced |
+
+**Key Findings:**
+1. **Text metrics dominates** - 60-87% of diff in most failing tests
+2. **Form controls** - 32% contribution in shelf test (input element renders 100% different)
+3. **Gradient interpolation** - 16-22% in gradient-heavy tests, cannot fix without GPU shader
+4. **Replaced content** - Minor contributor (3-4%) where images exist
+
+**Close-to-Passing Tests (No Quick Wins):**
+- combinators: 15.41% (0.41% over threshold) - 86.35% text_metrics
+- images-intrinsic: 12.92% (2.92% over threshold) - 78.80% text_metrics
+
+**Improvement Opportunities:**
+
+| Area | Impact | Effort | Blocking Tests |
+|------|--------|--------|----------------|
+| Text Rendering (Skia) | High | Very High | Most failing tests |
+| GPU Gradient Shader | Medium | High | gradient-backgrounds, sticky-scroll |
+| Form Control Rendering | Medium | Medium | shelf |
+| Border Styles (dashed, etc.) | Low | Medium | None identified |
+| Box Shadow Blur | Low | Medium | None identified |
+
+**Conclusion:**
+Quick wins exhausted. Further parity improvements require:
+1. **Form control rendering** - Could help shelf test pass (~32% of its diff)
+2. **GPU gradient shader** - Requires proper CSS gradient spec implementation
+3. **Text rendering** - Architectural change (Skia integration) for significant improvement
+
+---
+
 ### 2026-01-16 Session (Background Image Properties & Analysis)
 
 **Completed Work:**
@@ -440,3 +531,79 @@ let cell_size: f32 = if area > max_cells {
 - flex-positioning now passes (13.44% < 15% threshold)
 - sticky-scroll remaining issues are gradient/text rendering, not layout
 - card-grid regression is expected - correct layout exposes more rendering differences
+
+### 2026-01-17 Session (Gradient Geometry Investigation - CONCLUDED)
+
+**Goal:** Investigate geometry/antialiasing as root cause of gradient diff after color space experiments failed.
+
+**Investigation Summary:**
+
+1. **Test Fixtures Created:**
+   - `gradient-no-radius/index.html` - gradients without border-radius
+   - `gradient-radius-only/index.html` - solid colors with border-radius only
+   - **Result:** gradient-no-radius shows 23.23% diff, proving border-radius is NOT the root cause
+
+2. **Critical Discovery: GPU Gradients Are Disabled by Default**
+   ```rust
+   let gpu_gradients_enabled = std::env::var("RUSTKIT_GPU_GRADIENTS").is_ok();
+   ```
+   - All parity tests use the CPU cell-by-cell rendering path
+   - GPU shader changes have NO effect on test results
+   - The shader infrastructure exists but is disabled
+
+3. **Straight Alpha Interpolation Experiment (No Effect)**
+   - Changed both GPU shader and CPU path from premultiplied to straight alpha:
+     - GPU: Modified `interpolate_color()` in `gradient.wgsl`
+     - CPU: Changed `color0.lerp(color1, t)` to `color0.lerp_straight(color1, t)`
+   - **Result:** No change to parity numbers
+   - **Reason:** Test gradients use fully opaque colors (alpha=1.0), so alpha blending mode is irrelevant
+   - Reverted both changes
+
+4. **Attribution Analysis Findings:**
+   - gradient-no-radius: 23.23% diff, 46.77% gradient_interpolation (same as with radius!)
+   - gradient-backgrounds: 22.97% diff, 46.77% gradient_interpolation
+   - Every gradient pixel shows ~100% element diff (e.g., `linear-5`: 92.84%)
+   - The "gradient_interpolation" attribution label is accurate but misleading - it's not about color math
+
+**Root Cause Confirmed:**
+
+The gradient diff is caused by **fundamental rendering architecture differences**:
+
+| Aspect | Chrome/Skia | RustKit |
+|--------|-------------|---------|
+| Rendering | GPU texture-based | CPU cell-by-cell |
+| Interpolation | Hardware shader | Discrete sampling |
+| Precision | Continuous | Per-cell |
+| Antialiasing | GPU-native | Manual per-pixel |
+
+Chrome uses GPU shaders that compute gradient colors per-fragment with hardware-accelerated interpolation. RustKit's cell-by-cell approach samples colors at discrete cell centers, producing subtly different pixel values even with identical math.
+
+**Experiments Attempted (All Inconclusive or Worse):**
+
+| Experiment | Result | Notes |
+|------------|--------|-------|
+| Border-radius isolation | No change | Gradient-no-radius still 23.23% |
+| Gamma-correct interpolation | Worse (+5.58%) | Chrome uses sRGB |
+| Straight alpha interpolation | No change | Colors are fully opaque |
+| GPU shader enable (prior) | Worse (+29%) | Shader has coordinate bugs |
+| ColorF32 precision pipeline | No change | Precision wasn't the issue |
+
+**Conclusion:**
+
+The gradient-backgrounds test **cannot be fixed** to meet the 15% threshold without either:
+1. **GPU Texture-Based Gradients:** Implement proper GPU shader rendering matching Chrome's approach
+2. **Accept Higher Threshold:** Increase threshold to 25% for gradient-heavy tests
+
+**Recommendation:** The cell-by-cell rendering is architecturally correct but fundamentally different. GPU gradient shader implementation would require:
+- Proper CSS gradient spec implementation in WGSL
+- Coordinate space alignment with render target
+- Gradient line length calculation per CSS spec
+- Color stop interpolation with hardware precision
+
+**Files Examined:**
+- `crates/rustkit-renderer/src/lib.rs` - CPU gradient rendering, GPU enable flag
+- `crates/rustkit-renderer/src/shaders/gradient.wgsl` - Disabled GPU shader
+- `crates/rustkit-css/src/lib.rs` - ColorF32::lerp, lerp_straight
+- `crates/rustkit-compositor/src/lib.rs` - Frame capture, texture formats
+
+**Status:** Investigation complete. No further quick wins available for gradient parity.

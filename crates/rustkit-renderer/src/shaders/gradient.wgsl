@@ -229,7 +229,8 @@ fn apply_repeat(t: f32) -> f32 {
     }
 }
 
-// Interpolate between color stops
+// Interpolate between color stops using premultiplied alpha interpolation in sRGB space.
+// This matches Chrome's default gradient rendering.
 fn interpolate_color(t: f32) -> vec4<f32> {
     let num = gradient_params.num_stops;
 

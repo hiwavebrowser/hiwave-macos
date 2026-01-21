@@ -2170,8 +2170,17 @@ impl Renderer {
         self.draw_rounded_corner(rect.x, rect.y + rect.height - r_bl, r_bl, color, 3); // bottom-left
     }
 
+    /// Smoothstep interpolation function matching WGSL's smoothstep.
+    /// Performs Hermite interpolation between 0 and 1 when x is in [edge0, edge1].
+    #[inline]
+    fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+        let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
+
     /// Check if a point is inside a rounded rectangle and return the alpha coverage.
     /// Returns 1.0 if fully inside, 0.0 if fully outside, values in between for AA at corners.
+    /// Uses smoothstep for antialiasing to match the GPU shader implementation.
     #[inline]
     fn point_in_rounded_rect(
         px: f32,
@@ -2202,52 +2211,40 @@ impl Renderer {
         let right_x = rect.width - local_x;
         let bottom_y = rect.height - local_y;
 
-        // Top-left corner
+        // Top-left corner: use smoothstep SDF antialiasing to match GPU shader
         if local_x < r_tl && local_y < r_tl {
             let dx = r_tl - local_x;
             let dy = r_tl - local_y;
             let dist = (dx * dx + dy * dy).sqrt();
-            if dist > r_tl + 0.5 {
-                return 0.0;
-            } else if dist > r_tl - 0.5 {
-                return 1.0 - (dist - (r_tl - 0.5));
-            }
+            let sdf = dist - r_tl;
+            return 1.0 - Self::smoothstep(-0.5, 0.5, sdf);
         }
 
-        // Top-right corner
+        // Top-right corner: use smoothstep SDF antialiasing to match GPU shader
         if right_x < r_tr && local_y < r_tr {
             let dx = r_tr - right_x;
             let dy = r_tr - local_y;
             let dist = (dx * dx + dy * dy).sqrt();
-            if dist > r_tr + 0.5 {
-                return 0.0;
-            } else if dist > r_tr - 0.5 {
-                return 1.0 - (dist - (r_tr - 0.5));
-            }
+            let sdf = dist - r_tr;
+            return 1.0 - Self::smoothstep(-0.5, 0.5, sdf);
         }
 
-        // Bottom-right corner
+        // Bottom-right corner: use smoothstep SDF antialiasing to match GPU shader
         if right_x < r_br && bottom_y < r_br {
             let dx = r_br - right_x;
             let dy = r_br - bottom_y;
             let dist = (dx * dx + dy * dy).sqrt();
-            if dist > r_br + 0.5 {
-                return 0.0;
-            } else if dist > r_br - 0.5 {
-                return 1.0 - (dist - (r_br - 0.5));
-            }
+            let sdf = dist - r_br;
+            return 1.0 - Self::smoothstep(-0.5, 0.5, sdf);
         }
 
-        // Bottom-left corner
+        // Bottom-left corner: use smoothstep SDF antialiasing to match GPU shader
         if local_x < r_bl && bottom_y < r_bl {
             let dx = r_bl - local_x;
             let dy = r_bl - bottom_y;
             let dist = (dx * dx + dy * dy).sqrt();
-            if dist > r_bl + 0.5 {
-                return 0.0;
-            } else if dist > r_bl - 0.5 {
-                return 1.0 - (dist - (r_bl - 0.5));
-            }
+            let sdf = dist - r_bl;
+            return 1.0 - Self::smoothstep(-0.5, 0.5, sdf);
         }
 
         // Inside the rect, not in a corner region
