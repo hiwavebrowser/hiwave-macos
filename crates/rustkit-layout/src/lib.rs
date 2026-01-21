@@ -186,6 +186,272 @@ impl FloatContext {
 
         clear_y
     }
+
+    /// Get the clear position for all floats (bottom of lowest float).
+    pub fn clear_all(&self) -> f32 {
+        let mut clear_y: f32 = 0.0;
+        for float in &self.left_floats {
+            clear_y = clear_y.max(float.rect.bottom());
+        }
+        for float in &self.right_floats {
+            clear_y = clear_y.max(float.rect.bottom());
+        }
+        clear_y
+    }
+
+    /// Find the best y position for a new float of the given size.
+    ///
+    /// This finds the highest position where the float can fit without
+    /// overlapping existing floats.
+    pub fn find_float_position(
+        &self,
+        float_type: Float,
+        width: f32,
+        height: f32,
+        start_y: f32,
+        container_width: f32,
+    ) -> (f32, f32) {
+        match float_type {
+            Float::Left => self.find_left_float_position(width, height, start_y, container_width),
+            Float::Right => self.find_right_float_position(width, height, start_y, container_width),
+            Float::None => (0.0, start_y),
+        }
+    }
+
+    /// Find position for a left float.
+    fn find_left_float_position(
+        &self,
+        width: f32,
+        height: f32,
+        start_y: f32,
+        container_width: f32,
+    ) -> (f32, f32) {
+        let mut y = start_y;
+        let mut iterations = 0;
+        const MAX_ITERATIONS: usize = 1000; // Prevent infinite loops
+
+        loop {
+            if iterations >= MAX_ITERATIONS {
+                break;
+            }
+            iterations += 1;
+
+            let (left_edge, right_edge) = self.available_width(y, container_width);
+            let available = right_edge - left_edge;
+
+            if available >= width {
+                // Check if this position works for the entire height of the float
+                let mut fits = true;
+                let mut check_y = y;
+                while check_y < y + height {
+                    let (l, r) = self.available_width(check_y, container_width);
+                    if r - l < width {
+                        fits = false;
+                        // Move y past this obstruction
+                        y = self.next_clear_y_after(check_y);
+                        break;
+                    }
+                    check_y += 1.0; // Check in 1px increments
+                }
+
+                if fits {
+                    return (left_edge, y);
+                }
+            } else {
+                // Not enough space, move down
+                y = self.next_clear_y_after(y);
+            }
+
+            // If we've moved past all floats, we're done
+            if y >= self.clear_all() {
+                let (left_edge, _) = self.available_width(y, container_width);
+                return (left_edge, y);
+            }
+        }
+
+        // Fallback: place at clear position
+        let (left_edge, _) = self.available_width(self.clear_all(), container_width);
+        (left_edge, self.clear_all())
+    }
+
+    /// Find position for a right float.
+    fn find_right_float_position(
+        &self,
+        width: f32,
+        height: f32,
+        start_y: f32,
+        container_width: f32,
+    ) -> (f32, f32) {
+        let mut y = start_y;
+        let mut iterations = 0;
+        const MAX_ITERATIONS: usize = 1000;
+
+        loop {
+            if iterations >= MAX_ITERATIONS {
+                break;
+            }
+            iterations += 1;
+
+            let (left_edge, right_edge) = self.available_width(y, container_width);
+            let available = right_edge - left_edge;
+
+            if available >= width {
+                let mut fits = true;
+                let mut check_y = y;
+                while check_y < y + height {
+                    let (l, r) = self.available_width(check_y, container_width);
+                    if r - l < width {
+                        fits = false;
+                        y = self.next_clear_y_after(check_y);
+                        break;
+                    }
+                    check_y += 1.0;
+                }
+
+                if fits {
+                    return (right_edge - width, y);
+                }
+            } else {
+                y = self.next_clear_y_after(y);
+            }
+
+            if y >= self.clear_all() {
+                let (_, right_edge) = self.available_width(y, container_width);
+                return (right_edge - width, y);
+            }
+        }
+
+        let (_, right_edge) = self.available_width(self.clear_all(), container_width);
+        (right_edge - width, self.clear_all())
+    }
+
+    /// Find the next y position where a float ends.
+    fn next_clear_y_after(&self, y: f32) -> f32 {
+        let mut next_y = f32::MAX;
+
+        for float in &self.left_floats {
+            if float.rect.bottom() > y {
+                next_y = next_y.min(float.rect.bottom());
+            }
+        }
+
+        for float in &self.right_floats {
+            if float.rect.bottom() > y {
+                next_y = next_y.min(float.rect.bottom());
+            }
+        }
+
+        if next_y == f32::MAX {
+            y
+        } else {
+            next_y
+        }
+    }
+
+    /// Get the available rectangle at a given y position for content.
+    ///
+    /// Returns (x, width) of the available space.
+    pub fn available_rect(&self, y: f32, height: f32, container_width: f32) -> (f32, f32) {
+        let mut min_left: f32 = 0.0;
+        let mut max_right: f32 = container_width;
+
+        // Check the entire height range
+        let mut check_y = y;
+        while check_y < y + height {
+            let (left, right) = self.available_width(check_y, container_width);
+            min_left = min_left.max(left);
+            max_right = max_right.min(right);
+            check_y += 1.0;
+        }
+
+        (min_left, (max_right - min_left).max(0.0))
+    }
+
+    /// Check if there are any active floats at the given y position.
+    pub fn has_floats_at(&self, y: f32) -> bool {
+        for float in &self.left_floats {
+            if y >= float.rect.y && y < float.rect.bottom() {
+                return true;
+            }
+        }
+        for float in &self.right_floats {
+            if y >= float.rect.y && y < float.rect.bottom() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if a float of the given size fits at the specified position.
+    pub fn float_fits(&self, x: f32, y: f32, width: f32, height: f32, container_width: f32) -> bool {
+        // Check bounds
+        if x < 0.0 || x + width > container_width {
+            return false;
+        }
+
+        // Check against existing floats
+        let float_rect = Rect {
+            x,
+            y,
+            width,
+            height,
+        };
+
+        for float in &self.left_floats {
+            if rects_overlap(&float_rect, &float.rect) {
+                return false;
+            }
+        }
+
+        for float in &self.right_floats {
+            if rects_overlap(&float_rect, &float.rect) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Get all floats that overlap with the given y range.
+    pub fn floats_in_range(&self, y_start: f32, y_end: f32) -> Vec<&FloatExclusion> {
+        let mut result = Vec::new();
+
+        for float in &self.left_floats {
+            if float.rect.y < y_end && float.rect.bottom() > y_start {
+                result.push(float);
+            }
+        }
+
+        for float in &self.right_floats {
+            if float.rect.y < y_end && float.rect.bottom() > y_start {
+                result.push(float);
+            }
+        }
+
+        result
+    }
+
+    /// Remove floats that are completely above the given y position.
+    /// This can be used to clean up floats that are no longer relevant.
+    pub fn remove_floats_above(&mut self, y: f32) {
+        self.left_floats.retain(|f| f.rect.bottom() > y);
+        self.right_floats.retain(|f| f.rect.bottom() > y);
+    }
+
+    /// Check if the context has any floats.
+    pub fn is_empty(&self) -> bool {
+        self.left_floats.is_empty() && self.right_floats.is_empty()
+    }
+
+    /// Get the total number of floats.
+    pub fn float_count(&self) -> usize {
+        self.left_floats.len() + self.right_floats.len()
+    }
+}
+
+/// Check if two rectangles overlap.
+fn rects_overlap(a: &Rect, b: &Rect) -> bool {
+    a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y
 }
 
 /// Margin collapse context.
@@ -3687,6 +3953,183 @@ mod tests {
         assert_eq!(ctx.clear(Clear::Right), 80.0);
         assert_eq!(ctx.clear(Clear::Both), 80.0);
         assert_eq!(ctx.clear(Clear::None), 0.0);
+    }
+
+    #[test]
+    fn test_float_clear_all() {
+        let mut ctx = FloatContext::new();
+        assert_eq!(ctx.clear_all(), 0.0);
+
+        ctx.add_left(Rect::new(0.0, 0.0, 100.0, 50.0));
+        assert_eq!(ctx.clear_all(), 50.0);
+
+        ctx.add_right(Rect::new(400.0, 0.0, 100.0, 80.0));
+        assert_eq!(ctx.clear_all(), 80.0);
+    }
+
+    #[test]
+    fn test_float_find_position_left() {
+        let mut ctx = FloatContext::new();
+        let container_width = 500.0;
+
+        // First float should go to left edge
+        let (x, y) = ctx.find_float_position(Float::Left, 100.0, 50.0, 0.0, container_width);
+        assert_eq!(x, 0.0);
+        assert_eq!(y, 0.0);
+
+        // Add the float
+        ctx.add_left(Rect::new(0.0, 0.0, 100.0, 50.0));
+
+        // Second float should stack beside or below
+        let (x2, y2) = ctx.find_float_position(Float::Left, 100.0, 50.0, 0.0, container_width);
+        // Should be to the right of first float
+        assert_eq!(x2, 100.0);
+        assert_eq!(y2, 0.0);
+    }
+
+    #[test]
+    fn test_float_find_position_right() {
+        let mut ctx = FloatContext::new();
+        let container_width = 500.0;
+
+        // First right float should go to right edge
+        let (x, y) = ctx.find_float_position(Float::Right, 100.0, 50.0, 0.0, container_width);
+        assert_eq!(x, 400.0); // 500 - 100
+        assert_eq!(y, 0.0);
+
+        // Add the float
+        ctx.add_right(Rect::new(400.0, 0.0, 100.0, 50.0));
+
+        // Second right float should stack beside or below
+        let (x2, y2) = ctx.find_float_position(Float::Right, 100.0, 50.0, 0.0, container_width);
+        // Should be to the left of first float
+        assert_eq!(x2, 300.0);
+        assert_eq!(y2, 0.0);
+    }
+
+    #[test]
+    fn test_float_available_rect() {
+        let mut ctx = FloatContext::new();
+        let container_width = 500.0;
+
+        ctx.add_left(Rect::new(0.0, 0.0, 100.0, 50.0));
+        ctx.add_right(Rect::new(400.0, 0.0, 100.0, 50.0));
+
+        // Available rect at y=0 should be between floats
+        let (x, width) = ctx.available_rect(0.0, 25.0, container_width);
+        assert_eq!(x, 100.0);
+        assert_eq!(width, 300.0);
+
+        // Available rect at y=60 (below both floats) should be full width
+        let (x2, width2) = ctx.available_rect(60.0, 10.0, container_width);
+        assert_eq!(x2, 0.0);
+        assert_eq!(width2, 500.0);
+    }
+
+    #[test]
+    fn test_float_has_floats_at() {
+        let mut ctx = FloatContext::new();
+
+        ctx.add_left(Rect::new(0.0, 10.0, 100.0, 50.0));
+
+        assert!(!ctx.has_floats_at(0.0));
+        assert!(!ctx.has_floats_at(5.0));
+        assert!(ctx.has_floats_at(10.0));
+        assert!(ctx.has_floats_at(30.0));
+        assert!(ctx.has_floats_at(59.0));
+        assert!(!ctx.has_floats_at(60.0));
+    }
+
+    #[test]
+    fn test_float_fits() {
+        let mut ctx = FloatContext::new();
+        let container_width = 500.0;
+
+        ctx.add_left(Rect::new(0.0, 0.0, 100.0, 50.0));
+
+        // Should fit to the right of existing float
+        assert!(ctx.float_fits(100.0, 0.0, 100.0, 50.0, container_width));
+
+        // Should not fit overlapping existing float
+        assert!(!ctx.float_fits(50.0, 25.0, 100.0, 50.0, container_width));
+
+        // Should fit below existing float
+        assert!(ctx.float_fits(0.0, 50.0, 100.0, 50.0, container_width));
+
+        // Should not fit outside container
+        assert!(!ctx.float_fits(450.0, 0.0, 100.0, 50.0, container_width));
+    }
+
+    #[test]
+    fn test_float_floats_in_range() {
+        let mut ctx = FloatContext::new();
+
+        ctx.add_left(Rect::new(0.0, 0.0, 100.0, 50.0));
+        ctx.add_right(Rect::new(400.0, 30.0, 100.0, 50.0));
+
+        // Range that includes both floats
+        let floats = ctx.floats_in_range(0.0, 80.0);
+        assert_eq!(floats.len(), 2);
+
+        // Range that only includes left float
+        let floats = ctx.floats_in_range(0.0, 25.0);
+        assert_eq!(floats.len(), 1);
+        assert_eq!(floats[0].float_type, Float::Left);
+
+        // Range below all floats
+        let floats = ctx.floats_in_range(100.0, 150.0);
+        assert!(floats.is_empty());
+    }
+
+    #[test]
+    fn test_float_remove_floats_above() {
+        let mut ctx = FloatContext::new();
+
+        ctx.add_left(Rect::new(0.0, 0.0, 100.0, 50.0));
+        ctx.add_left(Rect::new(0.0, 100.0, 100.0, 50.0));
+        ctx.add_right(Rect::new(400.0, 0.0, 100.0, 30.0));
+
+        assert_eq!(ctx.float_count(), 3);
+
+        // Remove floats that end above y=50
+        ctx.remove_floats_above(50.0);
+        assert_eq!(ctx.float_count(), 1); // Only the second left float remains
+    }
+
+    #[test]
+    fn test_float_is_empty() {
+        let mut ctx = FloatContext::new();
+        assert!(ctx.is_empty());
+
+        ctx.add_left(Rect::new(0.0, 0.0, 100.0, 50.0));
+        assert!(!ctx.is_empty());
+    }
+
+    #[test]
+    fn test_float_count() {
+        let mut ctx = FloatContext::new();
+        assert_eq!(ctx.float_count(), 0);
+
+        ctx.add_left(Rect::new(0.0, 0.0, 100.0, 50.0));
+        assert_eq!(ctx.float_count(), 1);
+
+        ctx.add_right(Rect::new(400.0, 0.0, 100.0, 50.0));
+        assert_eq!(ctx.float_count(), 2);
+    }
+
+    #[test]
+    fn test_rects_overlap() {
+        let a = Rect::new(0.0, 0.0, 100.0, 100.0);
+
+        // Overlapping
+        assert!(rects_overlap(&a, &Rect::new(50.0, 50.0, 100.0, 100.0)));
+
+        // Adjacent (not overlapping)
+        assert!(!rects_overlap(&a, &Rect::new(100.0, 0.0, 100.0, 100.0)));
+        assert!(!rects_overlap(&a, &Rect::new(0.0, 100.0, 100.0, 100.0)));
+
+        // No overlap
+        assert!(!rects_overlap(&a, &Rect::new(200.0, 200.0, 100.0, 100.0)));
     }
 
     #[test]

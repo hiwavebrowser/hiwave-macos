@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-01-17T22:58:09.966725",
+  "timestamp": "2026-01-21T14:32:05.400575",
   "scope": "all",
   "iterations": 1,
   "max_variance": 0.1,
@@ -1142,9 +1142,9 @@
       "type": "builtins",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 45908,
+        "diffPixels": 45900,
         "totalPixels": 480000,
-        "diffPercent": 9.564166666666667,
+        "diffPercent": 9.5625,
         "width": 800,
         "height": 600,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/about/run-1/diff.png",
@@ -1517,14 +1517,14 @@
       },
       "passed": true,
       "pixel_runs": [
-        9.564166666666667
+        9.5625
       ],
-      "diff_pct_median": 9.564166666666667,
-      "diff_pct_min": 9.564166666666667,
-      "diff_pct_max": 9.564166666666667,
+      "diff_pct_median": 9.5625,
+      "diff_pct_min": 9.5625,
+      "diff_pct_max": 9.5625,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 9.564166666666667
+      "diff_pct": 9.5625
     },
     {
       "case_id": "settings",
