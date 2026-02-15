@@ -498,7 +498,7 @@ impl Engine {
                 .map_err(|e| EngineError::RenderError(e.to_string()))?;
 
             // Update headless_bounds in view state
-            let view = self.views.get_mut(&id).unwrap();
+            let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
             view.headless_bounds = Some(bounds);
         } else {
             // Regular view: resize viewhost and surface
@@ -512,7 +512,7 @@ impl Engine {
         }
 
         // Re-layout if we have content
-        if self.views.get(&id).unwrap().document.is_some() {
+        if self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?.document.is_some() {
             self.relayout(id)?;
         }
 
@@ -624,7 +624,7 @@ impl Engine {
 
         if !response.ok() {
             let error = format!("HTTP {}", response.status);
-            let view = self.views.get_mut(&id).unwrap();
+            let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
             view.navigation
                 .fail_navigation(error.clone())
                 .map_err(|e| EngineError::NavigationError(e.to_string()))?;
@@ -639,7 +639,7 @@ impl Engine {
         }
 
         // Commit navigation
-        let view = self.views.get_mut(&id).unwrap();
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
         view.navigation
             .commit_navigation()
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
@@ -659,7 +659,7 @@ impl Engine {
         let title = document.title();
 
         // Store in view
-        let view = self.views.get_mut(&id).unwrap();
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
         view.url = Some(url.clone());
         view.document = Some(document.clone());
         view.title = title.clone();
@@ -679,7 +679,7 @@ impl Engine {
                 .set_location(&url)
                 .map_err(|e| EngineError::JsError(e.to_string()))?;
 
-            let view = self.views.get_mut(&id).unwrap();
+            let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
             view.bindings = Some(bindings);
         }
 
@@ -694,7 +694,7 @@ impl Engine {
         }
 
         // Finish navigation
-        let view = self.views.get_mut(&id).unwrap();
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
         view.navigation
             .finish_navigation()
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
@@ -729,6 +729,7 @@ impl Engine {
         info!(?id, len = html.len(), "Loading HTML content");
 
         // Use a synthetic about:blank URL for inline content
+        // SAFETY: "about:blank" is a constant URL that will always parse successfully
         let url = Url::parse("about:blank").unwrap();
 
         // Start navigation
@@ -762,7 +763,7 @@ impl Engine {
         let title = document.title();
 
         // Store in view
-        let view = self.views.get_mut(&id).unwrap();
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
         view.url = Some(url.clone());
         view.document = Some(document.clone());
         view.title = title.clone();
@@ -782,7 +783,7 @@ impl Engine {
                 .set_location(&url)
                 .map_err(|e| EngineError::JsError(e.to_string()))?;
 
-            let view = self.views.get_mut(&id).unwrap();
+            let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
             view.bindings = Some(bindings);
         }
 
@@ -790,7 +791,7 @@ impl Engine {
         self.relayout(id)?;
 
         // Finish navigation
-        let view = self.views.get_mut(&id).unwrap();
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
         view.navigation
             .finish_navigation()
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
@@ -930,7 +931,7 @@ impl Engine {
         let max_scroll_y = (content_height - viewport_height).max(0.0);
 
         // Store
-        let view = self.views.get_mut(&id).unwrap();
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
         view.layout = Some(root_box);
         view.display_list = Some(display_list);
         view.max_scroll_offset = (0.0, max_scroll_y); // Update max scroll
@@ -4319,15 +4320,32 @@ impl Engine {
         };
 
         // If we have a hit and a document, dispatch the event
-        if let (Some(_hit), Some(_document)) = (hit_result, &view.document) {
-            // TODO: Map hit result to DOM node and dispatch event
-            // For now, just log
-            trace!(?view_id, event_type = dom_event_type, "Mouse event");
+        if let (Some(hit), Some(document)) = (&hit_result, &view.document) {
+            // NOTE: Full mouse event dispatch requires node_id tracking in layout tree.
+            // The layout tree (HitTestResult) currently doesn't track which DOM node
+            // each layout box corresponds to (LayoutBox.element_id is always None).
+            // To fully implement mouse event dispatch:
+            // 1. Add node_id: NodeId field to LayoutBox
+            // 2. Set it during layout tree construction
+            // 3. Include it in HitTestResult
+            // 4. Use it here to dispatch MouseEvent to the correct DOM node
+            //
+            // For now, we log the hit but cannot dispatch to the specific element.
+            trace!(
+                ?view_id,
+                event_type = dom_event_type,
+                depth = hit.depth,
+                "Mouse event (node dispatch pending layout node_id tracking)"
+            );
         }
 
         // Handle click focus change
-        if event.event_type == MouseEventType::MouseDown {
+        if event.event_type == MouseEventType::MouseDown && hit_result.is_some() {
             // TODO: Focus the clicked element if focusable
+            // This also requires node_id tracking in HitTestResult to know which
+            // element was clicked. Once that's available, check if the element is
+            // focusable (form controls, elements with tabindex) and call focus_element().
+            trace!(?view_id, "Click focus change pending layout node_id tracking");
         }
     }
 
@@ -4351,10 +4369,73 @@ impl Engine {
         // Handle Tab key for focus navigation
         if event.event_type == KeyEventType::KeyDown && event.key_code == KeyCode::Tab {
             // TODO: Implement Tab navigation between focusable elements
+            // This requires traversing the DOM to find all focusable elements
+            // (elements with tabindex, form controls, links, buttons)
+            // and moving focus to the next/previous one based on Shift key
+            trace!(?view_id, "Tab navigation not yet implemented");
         }
 
         // Dispatch to focused element via DOM events
-        // TODO: Dispatch KeyboardEvent to focused DOM node
+        if let (Some(focused_id), Some(document)) = (view.focused_node, &view.document) {
+            use rustkit_dom::events::{DomEvent, Event, EventDispatcher, KeyboardEventData};
+
+            if let Some(focused_node) = document.get_node(focused_id) {
+                let event_type_str = match event.event_type {
+                    KeyEventType::KeyDown => "keydown",
+                    KeyEventType::KeyUp => "keyup",
+                    KeyEventType::Char => "keypress",
+                };
+
+                let key_str = match event.key_code {
+                    KeyCode::Enter => "Enter".to_string(),
+                    KeyCode::Tab => "Tab".to_string(),
+                    KeyCode::Backspace => "Backspace".to_string(),
+                    KeyCode::Escape => "Escape".to_string(),
+                    KeyCode::Space => " ".to_string(),
+                    KeyCode::Left => "ArrowLeft".to_string(),
+                    KeyCode::Right => "ArrowRight".to_string(),
+                    KeyCode::Up => "ArrowUp".to_string(),
+                    KeyCode::Down => "ArrowDown".to_string(),
+                    KeyCode::Home => "Home".to_string(),
+                    KeyCode::End => "End".to_string(),
+                    KeyCode::PageUp => "PageUp".to_string(),
+                    KeyCode::PageDown => "PageDown".to_string(),
+                    KeyCode::Delete => "Delete".to_string(),
+                    KeyCode::Insert => "Insert".to_string(),
+                    KeyCode::Char(c) => c.to_string(),
+                    _ => format!("{:?}", event.key_code),
+                };
+
+                let keyboard_event = Event::new_trusted(event_type_str, true, true);
+                let keyboard_data = KeyboardEventData {
+                    key: key_str.clone(),
+                    code: format!("{:?}", event.key_code),
+                    repeat: false, // TODO: track repeat state
+                    ctrl_key: event.modifiers.ctrl,
+                    alt_key: event.modifiers.alt,
+                    shift_key: event.modifiers.shift,
+                    meta_key: event.modifiers.meta,
+                    location: 0, // TODO: detect key location
+                };
+
+                let mut dom_event = DomEvent::Keyboard(keyboard_event, keyboard_data);
+
+                // Build ancestor chain
+                let mut ancestors = Vec::new();
+                let mut current = focused_node.parent();
+                while let Some(node) = current {
+                    ancestors.push(node.clone());
+                    current = node.parent();
+                }
+                ancestors.reverse(); // Root to parent order
+
+                let prevented = !EventDispatcher::dispatch(&mut dom_event, &focused_node, &ancestors);
+
+                if prevented {
+                    trace!(?view_id, key = ?key_str, "Keyboard event default prevented");
+                }
+            }
+        }
     }
 
     /// Focus a DOM node in a view.
@@ -4363,6 +4444,8 @@ impl Engine {
         view_id: EngineViewId,
         node_id: rustkit_dom::NodeId,
     ) -> Result<(), EngineError> {
+        use rustkit_dom::events::{DomEvent, Event, EventDispatcher, FocusEventData};
+
         let view = self
             .views
             .get_mut(&view_id)
@@ -4371,8 +4454,49 @@ impl Engine {
         let old_focused = view.focused_node;
         view.focused_node = Some(node_id);
 
-        // TODO: Dispatch blur event to old focused element
-        // TODO: Dispatch focus event to new focused element
+        // Dispatch blur event to old focused element
+        if let (Some(old_id), Some(document)) = (old_focused, &view.document) {
+            if let Some(old_node) = document.get_node(old_id) {
+                let blur_event = Event::new_trusted("blur", false, false);
+                let focus_data = FocusEventData {
+                    related_target: Some(node_id),
+                };
+                let mut dom_event = DomEvent::Focus(blur_event, focus_data);
+
+                // Build ancestor chain
+                let mut ancestors = Vec::new();
+                let mut current = old_node.parent();
+                while let Some(node) = current {
+                    ancestors.push(node.clone());
+                    current = node.parent();
+                }
+                ancestors.reverse(); // Root to parent order
+
+                EventDispatcher::dispatch(&mut dom_event, &old_node, &ancestors);
+            }
+        }
+
+        // Dispatch focus event to new focused element
+        if let Some(document) = &view.document {
+            if let Some(new_node) = document.get_node(node_id) {
+                let focus_event = Event::new_trusted("focus", false, false);
+                let focus_data = FocusEventData {
+                    related_target: old_focused,
+                };
+                let mut dom_event = DomEvent::Focus(focus_event, focus_data);
+
+                // Build ancestor chain
+                let mut ancestors = Vec::new();
+                let mut current = new_node.parent();
+                while let Some(node) = current {
+                    ancestors.push(node.clone());
+                    current = node.parent();
+                }
+                ancestors.reverse(); // Root to parent order
+
+                EventDispatcher::dispatch(&mut dom_event, &new_node, &ancestors);
+            }
+        }
 
         debug!(?view_id, ?node_id, ?old_focused, "Focus changed");
         Ok(())
@@ -4380,6 +4504,8 @@ impl Engine {
 
     /// Blur the currently focused element.
     pub fn blur_element(&mut self, view_id: EngineViewId) -> Result<(), EngineError> {
+        use rustkit_dom::events::{DomEvent, Event, EventDispatcher, FocusEventData};
+
         let view = self
             .views
             .get_mut(&view_id)
@@ -4387,7 +4513,27 @@ impl Engine {
 
         let old_focused = view.focused_node.take();
 
-        // TODO: Dispatch blur event to old focused element
+        // Dispatch blur event to old focused element
+        if let (Some(old_id), Some(document)) = (old_focused, &view.document) {
+            if let Some(old_node) = document.get_node(old_id) {
+                let blur_event = Event::new_trusted("blur", false, false);
+                let focus_data = FocusEventData {
+                    related_target: None,
+                };
+                let mut dom_event = DomEvent::Focus(blur_event, focus_data);
+
+                // Build ancestor chain
+                let mut ancestors = Vec::new();
+                let mut current = old_node.parent();
+                while let Some(node) = current {
+                    ancestors.push(node.clone());
+                    current = node.parent();
+                }
+                ancestors.reverse(); // Root to parent order
+
+                EventDispatcher::dispatch(&mut dom_event, &old_node, &ancestors);
+            }
+        }
 
         debug!(?view_id, ?old_focused, "Element blurred");
         Ok(())
@@ -4738,6 +4884,7 @@ fn parse_linear_gradient(value: &str, repeating: bool) -> Option<rustkit_css::Gr
         direction = parse_gradient_direction(first)?;
         stops_start = 1;
     } else if first.ends_with("deg") {
+        // SAFETY: strip_suffix will succeed because we just checked ends_with("deg")
         if let Ok(deg) = first.strip_suffix("deg").unwrap().trim().parse::<f32>() {
             direction = rustkit_css::GradientDirection::Angle(deg);
             stops_start = 1;
@@ -5440,8 +5587,10 @@ fn parse_box_shadow(value: &str) -> Option<rustkit_css::BoxShadow> {
     
     // Check for "inset" keyword
     let (value, inset) = if value.starts_with("inset") {
+        // SAFETY: strip_prefix will succeed because we just checked starts_with("inset")
         (value.strip_prefix("inset").unwrap().trim(), true)
     } else if value.ends_with("inset") {
+        // SAFETY: strip_suffix will succeed because we just checked ends_with("inset")
         (value.strip_suffix("inset").unwrap().trim(), true)
     } else {
         (value, false)

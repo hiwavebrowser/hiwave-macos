@@ -44,6 +44,10 @@ pub struct RustKitView {
     /// Counter for blocked requests (shared with shield).
     #[allow(dead_code)]
     blocked_counter: Option<Arc<AtomicU64>>,
+    /// Navigation history stack.
+    history: RefCell<Vec<Url>>,
+    /// Current position in navigation history.
+    history_index: RefCell<usize>,
 }
 
 impl RustKitView {
@@ -103,6 +107,8 @@ impl RustKitView {
             loading: RefCell::new(false),
             event_rx,
             blocked_counter: counter_clone,
+            history: RefCell::new(Vec::new()),
+            history_index: RefCell::new(0),
         })
     }
 
@@ -155,8 +161,27 @@ impl RustKitView {
 
     /// Load URL (WRY compatibility method).
     pub fn wry_load_url(&self, url: &str) -> Result<(), String> {
+        let parsed = Url::parse(url).map_err(|e| format!("Invalid URL: {}", e))?;
+
         // Update cached URL
         *self.current_url.borrow_mut() = Some(url.to_string());
+
+        // Update navigation history
+        let mut history = self.history.borrow_mut();
+        let mut index = self.history_index.borrow_mut();
+
+        // If we're in the middle of history (user went back), truncate forward history
+        if *index < history.len() {
+            history.truncate(*index + 1);
+        }
+
+        // Add new URL to history
+        history.push(parsed);
+        *index = history.len() - 1;
+
+        drop(history);
+        drop(index);
+
         self.load_url_blocking(url);
         Ok(())
     }
@@ -253,6 +278,23 @@ impl IWebContent for RustKitView {
     fn navigate(&mut self, url: &Url) -> HiWaveResult<()> {
         // Update cached URL
         *self.current_url.borrow_mut() = Some(url.to_string());
+
+        // Update navigation history
+        let mut history = self.history.borrow_mut();
+        let mut index = self.history_index.borrow_mut();
+
+        // If we're in the middle of history (user went back), truncate forward history
+        if *index < history.len() {
+            history.truncate(*index + 1);
+        }
+
+        // Add new URL to history
+        history.push(url.clone());
+        *index = history.len() - 1;
+
+        drop(history);
+        drop(index);
+
         self.load_url_blocking(url.as_str());
         Ok(())
     }
@@ -271,27 +313,46 @@ impl IWebContent for RustKitView {
     }
 
     fn can_go_back(&self) -> bool {
-        // TODO: Implement navigation history
-        false
+        *self.history_index.borrow() > 0
     }
 
     fn can_go_forward(&self) -> bool {
-        // TODO: Implement navigation history
-        false
+        let index = *self.history_index.borrow();
+        let history_len = self.history.borrow().len();
+        index < history_len.saturating_sub(1)
     }
 
     fn go_back(&mut self) -> HiWaveResult<()> {
-        // TODO: Implement navigation history
-        Err(hiwave_core::HiWaveError::WebView("Not yet implemented".to_string()))
+        if !self.can_go_back() {
+            return Err(hiwave_core::HiWaveError::WebView("Cannot go back".to_string()));
+        }
+
+        let mut index = self.history_index.borrow_mut();
+        *index -= 1;
+        let url = self.history.borrow()[*index].clone();
+        drop(index);
+
+        self.load_url_blocking(url.as_str());
+        *self.current_url.borrow_mut() = Some(url.to_string());
+        Ok(())
     }
 
     fn go_forward(&mut self) -> HiWaveResult<()> {
-        // TODO: Implement navigation history
-        Err(hiwave_core::HiWaveError::WebView("Not yet implemented".to_string()))
+        if !self.can_go_forward() {
+            return Err(hiwave_core::HiWaveError::WebView("Cannot go forward".to_string()));
+        }
+
+        let mut index = self.history_index.borrow_mut();
+        *index += 1;
+        let url = self.history.borrow()[*index].clone();
+        drop(index);
+
+        self.load_url_blocking(url.as_str());
+        *self.current_url.borrow_mut() = Some(url.to_string());
+        Ok(())
     }
 
     fn reload(&mut self) -> HiWaveResult<()> {
-        // TODO: Implement reload
         if let Some(url) = self.current_url.borrow().clone() {
             self.load_url_blocking(&url);
             Ok(())

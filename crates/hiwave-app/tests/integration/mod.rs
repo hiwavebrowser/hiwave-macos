@@ -22,3 +22,4 @@
 
 mod engine_lifecycle;
 mod rendering_pipeline;
+mod navigation_and_events;

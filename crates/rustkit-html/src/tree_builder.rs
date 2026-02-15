@@ -39,6 +39,10 @@ impl FragmentContext {
 }
 
 /// Insertion mode for tree construction.
+///
+/// Many modes are currently unused but required for full HTML5 spec compliance
+/// (HTML5 § 8.2.5 Tree Construction). The simplified parser uses a subset but
+/// keeps all modes defined for future expansion to full spec-compliant parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 enum InsertionMode {
@@ -94,6 +98,8 @@ const TABLE_CELL_ELEMENTS: &[&str] = &["td", "th"];
 const TABLE_SCOPE_ELEMENTS: &[&str] = &["html", "table", "template"];
 
 /// Elements that can be in table context but trigger foster parenting.
+/// Required for spec-compliant table parsing (HTML5 § 8.2.5.3).
+/// Currently unused but needed for full foster parenting algorithm.
 #[allow(dead_code)]
 const TABLE_CONTEXT_ELEMENTS: &[&str] = &[
     "table", "tbody", "tfoot", "thead", "tr",
@@ -144,9 +150,9 @@ pub struct TreeBuilder<S: TreeSink> {
     active_formatting_elements: Vec<FormattingEntry<S::NodeId>>,
     /// Template insertion modes stack
     template_insertion_modes: Vec<InsertionMode>,
+    /// Foster parenting mode for handling misplaced table content.
+    /// Required for spec-compliant table parsing (HTML5 § 8.2.5.3).
     foster_parenting: bool,
-    #[allow(dead_code)]
-    scripting: bool,
     /// Buffer for accumulating consecutive text characters
     text_buffer: String,
     /// Pending table character tokens (for InTableText mode)
@@ -157,7 +163,9 @@ pub struct TreeBuilder<S: TreeSink> {
     fragment_context: Option<FragmentContext>,
     /// Head element pointer (for implicit head handling)
     head_element: Option<S::NodeId>,
-    /// Form element pointer (for form owner tracking)
+    /// Form element pointer (for form owner tracking).
+    /// Required for spec-compliant form association (HTML5 § 4.10.18.3).
+    /// Currently unused but needed when form control elements track their owner form.
     #[allow(dead_code)]
     form_element: Option<S::NodeId>,
 }
@@ -173,7 +181,6 @@ impl<S: TreeSink> TreeBuilder<S> {
             active_formatting_elements: Vec::new(),
             template_insertion_modes: Vec::new(),
             foster_parenting: false,
-            scripting: false,
             text_buffer: String::new(),
             pending_table_chars: Vec::new(),
             quirks_mode: QuirksMode::NoQuirks,
@@ -221,7 +228,6 @@ impl<S: TreeSink> TreeBuilder<S> {
             active_formatting_elements: Vec::new(),
             template_insertion_modes: template_modes,
             foster_parenting: false,
-            scripting: false,
             text_buffer: String::new(),
             pending_table_chars: Vec::new(),
             quirks_mode: QuirksMode::NoQuirks,

@@ -2127,6 +2127,9 @@ impl LayoutBox {
             }
         }
 
+        // Detect if element is scrollable by checking overflow style
+        let is_scrollable = self.detect_overflow();
+
         // No child was hit, so we are the target
         Some(HitTestResult {
             box_type: self.box_type.clone(),
@@ -2139,8 +2142,41 @@ impl LayoutBox {
             ancestors: Vec::new(),
             z_index: self.z_index,
             position: self.position,
-            is_scrollable: false, // TODO: detect overflow
+            is_scrollable,
         })
+    }
+
+    /// Detect if this element has overflow and should be scrollable.
+    fn detect_overflow(&self) -> bool {
+        use rustkit_css::Overflow;
+
+        // Check if overflow is set to scroll or auto
+        let has_overflow_style = matches!(
+            self.style.overflow_x,
+            Overflow::Scroll | Overflow::Auto
+        ) || matches!(
+            self.style.overflow_y,
+            Overflow::Scroll | Overflow::Auto
+        );
+
+        if !has_overflow_style {
+            return false;
+        }
+
+        // Check if content actually overflows the container
+        let padding_box = self.dimensions.padding_box();
+        let mut content_width = 0.0_f32;
+        let mut content_height = 0.0_f32;
+
+        // Calculate total content size including children
+        for child in &self.children {
+            let child_box = child.dimensions.margin_box();
+            content_width = content_width.max(child_box.x + child_box.width - padding_box.x);
+            content_height = content_height.max(child_box.y + child_box.height - padding_box.y);
+        }
+
+        // Element is scrollable if content exceeds container
+        content_width > padding_box.width || content_height > padding_box.height
     }
 
     /// Check if a point is within the border box.
@@ -2738,30 +2774,21 @@ fn parse_length(value: &str) -> Option<f32> {
     }
 }
 
-/// A paint item with z-index for sorting.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct PaintItem {
-    z_index: i32,
-    layer: u32, // For stable sort within same z-index
-    commands: Vec<DisplayCommand>,
-}
-
-#[allow(dead_code)]
-impl PaintItem {
-    fn new(z_index: i32, layer: u32) -> Self {
-        Self {
-            z_index,
-            layer,
-            commands: Vec::new(),
-        }
-    }
-}
-
 /// A display list of paint commands.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct DisplayList {
     pub commands: Vec<DisplayCommand>,
+    /// Root element font size for rem unit calculations
+    root_font_size: f32,
+}
+
+impl Default for DisplayList {
+    fn default() -> Self {
+        Self {
+            commands: Vec::new(),
+            root_font_size: 16.0,
+        }
+    }
 }
 
 impl DisplayList {
@@ -2769,12 +2796,24 @@ impl DisplayList {
     pub fn new() -> Self {
         Self {
             commands: Vec::new(),
+            root_font_size: 16.0,
         }
     }
 
     /// Build display list from a layout box with proper stacking order.
     pub fn build(root: &LayoutBox) -> Self {
-        let mut list = DisplayList::new();
+        // Extract root font size from root element
+        let root_font_size = match root.style.font_size {
+            Length::Px(px) => px,
+            Length::Em(em) => em * 16.0, // Relative to browser default
+            Length::Rem(rem) => rem * 16.0, // Relative to browser default
+            _ => 16.0,
+        };
+
+        let mut list = DisplayList {
+            commands: Vec::new(),
+            root_font_size,
+        };
         list.render_stacking_context(root, 0, &mut 0);
         list
     }
@@ -2793,8 +2832,19 @@ impl DisplayList {
         // Update sticky positions based on scroll
         root.update_sticky_positions(scroll_x, scroll_y, viewport);
 
+        // Extract root font size from root element
+        let root_font_size = match root.style.font_size {
+            Length::Px(px) => px,
+            Length::Em(em) => em * 16.0,
+            Length::Rem(rem) => rem * 16.0,
+            _ => 16.0,
+        };
+
         // Build the display list
-        let mut list = DisplayList::new();
+        let mut list = DisplayList {
+            commands: Vec::new(),
+            root_font_size,
+        };
         list.render_stacking_context(root, 0, &mut 0);
         list
     }
@@ -2995,7 +3045,8 @@ impl DisplayList {
             Length::Px(px) => px,
             _ => 16.0,
         };
-        let root_font_size = 16.0; // TODO: Pass actual root font size
+        // Use actual root font size for rem unit calculations
+        let root_font_size = self.root_font_size;
 
         // Calculate border radius once (used for both solid color and gradient clipping)
         let radius = BorderRadius {
@@ -3638,7 +3689,9 @@ impl DisplayList {
                     background_color: if bg_color.a > 0.0 { bg_color } else { Color::WHITE },
                     border_color: if border_color.a > 0.0 { border_color } else { Color::new(200, 200, 200, 1.0) },
                     border_width: 1.0,
-                    focused: false, // TODO: track focus state
+                    // Focus tracking requires DOM node ID in LayoutBox (architectural change)
+                    // For now, focus state is managed at the Engine level via focus_element()
+                    focused: false,
                     caret_position: None,
                 });
             }

@@ -150,7 +150,10 @@ impl MacOSViewHost {
         }));
 
         {
-            let mut views = self.views.write().unwrap();
+            let mut views = self.views.write().map_err(|e| {
+                tracing::error!("Views RwLock poisoned in create_view_from_window: {}", e);
+                ViewHostError::LockPoisoned
+            })?;
             views.insert(view_id, state);
         }
 
@@ -161,23 +164,35 @@ impl MacOSViewHost {
     /// Get the NSView for a view ID
     pub fn get_view(&self, view_id: ViewId) -> Result<id, ViewHostError> {
         let state_arc = {
-            let views = self.views.read().unwrap();
+            let views = self.views.read().map_err(|e| {
+                tracing::error!("Views RwLock poisoned in get_view: {}", e);
+                ViewHostError::LockPoisoned
+            })?;
             views
                 .get(&view_id)
                 .ok_or(ViewHostError::ViewNotFound(view_id))?
                 .clone() // Clone the Arc to extend lifetime
         }; // views lock is released here
-        let view = state_arc.lock().unwrap().view;
+        let view = state_arc.lock().map_err(|e| {
+            tracing::error!("ViewState lock poisoned in get_view: {}", e);
+            ViewHostError::LockPoisoned
+        })?.view;
         Ok(view)
     }
 
     /// Get the raw window handle for a view
     pub fn get_raw_window_handle(&self, view_id: ViewId) -> Result<RawWindowHandle, ViewHostError> {
-        let views = self.views.read().unwrap();
+        let views = self.views.read().map_err(|e| {
+            tracing::error!("Views RwLock poisoned in get_raw_window_handle: {}", e);
+            ViewHostError::LockPoisoned
+        })?;
         let state = views
             .get(&view_id)
             .ok_or(ViewHostError::ViewNotFound(view_id))?;
-        let view = state.lock().unwrap().view;
+        let view = state.lock().map_err(|e| {
+            tracing::error!("ViewState lock poisoned in get_raw_window_handle: {}", e);
+            ViewHostError::LockPoisoned
+        })?.view;
 
         // Get the window from the view
         let window: id = unsafe { msg_send![view, window] };
@@ -219,12 +234,18 @@ impl MacOSViewHost {
 
     /// Set view bounds
     pub fn set_bounds(&self, view_id: ViewId, bounds: Bounds) -> Result<(), ViewHostError> {
-        let views = self.views.read().unwrap();
+        let views = self.views.read().map_err(|e| {
+            tracing::error!("Views RwLock poisoned in set_bounds: {}", e);
+            ViewHostError::LockPoisoned
+        })?;
         let state = views
             .get(&view_id)
             .ok_or(ViewHostError::ViewNotFound(view_id))?;
 
-        let mut state = state.lock().unwrap();
+        let mut state = state.lock().map_err(|e| {
+            tracing::error!("ViewState lock poisoned in set_bounds: {}", e);
+            ViewHostError::LockPoisoned
+        })?;
         state.bounds = bounds;
 
         unsafe {
@@ -261,24 +282,36 @@ impl MacOSViewHost {
     /// Get view bounds
     pub fn get_bounds(&self, view_id: ViewId) -> Result<Bounds, ViewHostError> {
         let state_arc = {
-            let views = self.views.read().unwrap();
+            let views = self.views.read().map_err(|e| {
+                tracing::error!("Views RwLock poisoned in get_bounds: {}", e);
+                ViewHostError::LockPoisoned
+            })?;
             views
                 .get(&view_id)
                 .ok_or(ViewHostError::ViewNotFound(view_id))?
                 .clone() // Clone the Arc to extend lifetime
         }; // views lock is released here
-        let bounds = state_arc.lock().unwrap().bounds;
+        let bounds = state_arc.lock().map_err(|e| {
+            tracing::error!("ViewState lock poisoned in get_bounds: {}", e);
+            ViewHostError::LockPoisoned
+        })?.bounds;
         Ok(bounds)
     }
 
     /// Set view visibility
     pub fn set_visible(&self, view_id: ViewId, visible: bool) -> Result<(), ViewHostError> {
-        let views = self.views.read().unwrap();
+        let views = self.views.read().map_err(|e| {
+            tracing::error!("Views RwLock poisoned in set_visible: {}", e);
+            ViewHostError::LockPoisoned
+        })?;
         let state = views
             .get(&view_id)
             .ok_or(ViewHostError::ViewNotFound(view_id))?;
 
-        let mut state = state.lock().unwrap();
+        let mut state = state.lock().map_err(|e| {
+            tracing::error!("ViewState lock poisoned in set_visible: {}", e);
+            ViewHostError::LockPoisoned
+        })?;
         state.visible = visible;
 
         unsafe {
@@ -292,12 +325,18 @@ impl MacOSViewHost {
 
     /// Focus a view
     pub fn focus(&self, view_id: ViewId) -> Result<(), ViewHostError> {
-        let views = self.views.read().unwrap();
+        let views = self.views.read().map_err(|e| {
+            tracing::error!("Views RwLock poisoned in focus: {}", e);
+            ViewHostError::LockPoisoned
+        })?;
         let state = views
             .get(&view_id)
             .ok_or(ViewHostError::ViewNotFound(view_id))?;
 
-        let state = state.lock().unwrap();
+        let state = state.lock().map_err(|e| {
+            tracing::error!("ViewState lock poisoned in focus: {}", e);
+            ViewHostError::LockPoisoned
+        })?;
 
         unsafe {
             let window: id = msg_send![state.view, window];
@@ -313,26 +352,38 @@ impl MacOSViewHost {
     /// Get DPI for a view
     pub fn get_dpi(&self, view_id: ViewId) -> Result<u32, ViewHostError> {
         let state_arc = {
-            let views = self.views.read().unwrap();
+            let views = self.views.read().map_err(|e| {
+                tracing::error!("Views RwLock poisoned in get_dpi: {}", e);
+                ViewHostError::LockPoisoned
+            })?;
             views
                 .get(&view_id)
                 .ok_or(ViewHostError::ViewNotFound(view_id))?
                 .clone() // Clone the Arc to extend lifetime
         }; // views lock is released here
-        let dpi = state_arc.lock().unwrap().dpi;
+        let dpi = state_arc.lock().map_err(|e| {
+            tracing::error!("ViewState lock poisoned in get_dpi: {}", e);
+            ViewHostError::LockPoisoned
+        })?.dpi;
         Ok(dpi)
     }
 
     /// Destroy a view
     pub fn destroy_view(&self, view_id: ViewId) -> Result<(), ViewHostError> {
         let state_arc = {
-            let mut views = self.views.write().unwrap();
+            let mut views = self.views.write().map_err(|e| {
+                tracing::error!("Views RwLock poisoned in destroy_view: {}", e);
+                ViewHostError::LockPoisoned
+            })?;
             views
                 .remove(&view_id)
                 .ok_or(ViewHostError::ViewNotFound(view_id))?
         }; // views lock is released here
-        
-        let view = state_arc.lock().unwrap().view;
+
+        let view = state_arc.lock().map_err(|e| {
+            tracing::error!("ViewState lock poisoned in destroy_view: {}", e);
+            ViewHostError::LockPoisoned
+        })?.view;
 
         unsafe {
             let _: () = msg_send![view, removeFromSuperview];

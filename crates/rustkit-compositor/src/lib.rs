@@ -952,8 +952,350 @@ mod tests {
         let config = CompositorConfig::default();
         assert!(config.vsync);
         assert_eq!(config.format, wgpu::TextureFormat::Bgra8Unorm);
+        assert_eq!(config.power_preference, wgpu::PowerPreference::HighPerformance);
     }
 
-    // Note: GPU tests require a display and are typically run manually
-    // or in integration test environments with GPU access.
+    #[test]
+    fn test_compositor_config_custom() {
+        let config = CompositorConfig {
+            vsync: false,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            power_preference: wgpu::PowerPreference::LowPower,
+        };
+        assert!(!config.vsync);
+        assert_eq!(config.format, wgpu::TextureFormat::Rgba8Unorm);
+        assert_eq!(config.power_preference, wgpu::PowerPreference::LowPower);
+    }
+
+    #[test]
+    fn test_compositor_creation() {
+        // Test that compositor can be created with default config
+        let result = Compositor::new();
+        if result.is_err() {
+            // Skip test if no GPU available (CI environments)
+            println!("Skipping test: No GPU available");
+            return;
+        }
+        let compositor = result.unwrap();
+        assert_eq!(compositor.surface_format(), wgpu::TextureFormat::Bgra8Unorm);
+        assert_eq!(compositor.surface_count(), 0);
+    }
+
+    #[test]
+    fn test_compositor_with_custom_config() {
+        let config = CompositorConfig {
+            vsync: false,
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            power_preference: wgpu::PowerPreference::LowPower,
+        };
+        let result = Compositor::with_config(config.clone());
+        if result.is_err() {
+            println!("Skipping test: No GPU available");
+            return;
+        }
+        let compositor = result.unwrap();
+        assert_eq!(compositor.surface_format(), config.format);
+    }
+
+    #[test]
+    fn test_headless_texture_lifecycle() {
+        let result = Compositor::new();
+        if result.is_err() {
+            println!("Skipping test: No GPU available");
+            return;
+        }
+        let compositor = result.unwrap();
+
+        // Create headless texture
+        let view_id = ViewId::new();
+        compositor
+            .create_headless_texture(view_id, 800, 600)
+            .expect("Failed to create headless texture");
+
+        // Verify texture exists and has correct size
+        let size = compositor
+            .get_surface_size(view_id)
+            .expect("Failed to get surface size");
+        assert_eq!(size, (800, 600));
+
+        // Destroy texture
+        compositor
+            .destroy_headless_texture(view_id)
+            .expect("Failed to destroy headless texture");
+
+        // Verify texture is gone
+        assert!(compositor.get_surface_size(view_id).is_err());
+    }
+
+    #[test]
+    fn test_headless_texture_recreate_different_size() {
+        let result = Compositor::new();
+        if result.is_err() {
+            println!("Skipping test: No GPU available");
+            return;
+        }
+        let compositor = result.unwrap();
+
+        let view_id = ViewId::new();
+        compositor
+            .create_headless_texture(view_id, 800, 600)
+            .expect("Failed to create headless texture");
+
+        // To "resize" a headless texture, destroy and recreate it
+        compositor
+            .destroy_headless_texture(view_id)
+            .expect("Failed to destroy");
+
+        compositor
+            .create_headless_texture(view_id, 1024, 768)
+            .expect("Failed to recreate with new size");
+
+        let size = compositor
+            .get_surface_size(view_id)
+            .expect("Failed to get surface size");
+        assert_eq!(size, (1024, 768));
+
+        compositor
+            .destroy_headless_texture(view_id)
+            .expect("Failed to destroy");
+    }
+
+    #[test]
+    fn test_headless_texture_zero_size() {
+        let result = Compositor::new();
+        if result.is_err() {
+            println!("Skipping test: No GPU available");
+            return;
+        }
+        let compositor = result.unwrap();
+
+        let view_id = ViewId::new();
+
+        // Creating zero-size texture should fail
+        let result = compositor.create_headless_texture(view_id, 0, 0);
+
+        // Zero-size textures are invalid, should error
+        assert!(result.is_err(), "Zero-size texture should fail");
+    }
+
+    #[test]
+    fn test_multiple_headless_textures() {
+        let result = Compositor::new();
+        if result.is_err() {
+            println!("Skipping test: No GPU available");
+            return;
+        }
+        let compositor = result.unwrap();
+
+        // Create multiple headless textures
+        let view1 = ViewId::new();
+        let view2 = ViewId::new();
+        let view3 = ViewId::new();
+
+        compositor
+            .create_headless_texture(view1, 800, 600)
+            .expect("Failed to create texture 1");
+        compositor
+            .create_headless_texture(view2, 1024, 768)
+            .expect("Failed to create texture 2");
+        compositor
+            .create_headless_texture(view3, 640, 480)
+            .expect("Failed to create texture 3");
+
+        // Verify all sizes
+        assert_eq!(compositor.get_surface_size(view1).unwrap(), (800, 600));
+        assert_eq!(compositor.get_surface_size(view2).unwrap(), (1024, 768));
+        assert_eq!(compositor.get_surface_size(view3).unwrap(), (640, 480));
+
+        // Clean up
+        compositor.destroy_headless_texture(view1).expect("Failed to destroy 1");
+        compositor.destroy_headless_texture(view2).expect("Failed to destroy 2");
+        compositor.destroy_headless_texture(view3).expect("Failed to destroy 3");
+    }
+
+    #[test]
+    fn test_destroy_nonexistent_texture() {
+        let result = Compositor::new();
+        if result.is_err() {
+            println!("Skipping test: No GPU available");
+            return;
+        }
+        let compositor = result.unwrap();
+
+        let view_id = ViewId::new();
+
+        // Destroying non-existent texture should error
+        let result = compositor.destroy_headless_texture(view_id);
+        assert!(result.is_err(), "Destroying non-existent texture should fail");
+    }
+
+    #[test]
+    fn test_double_destroy() {
+        let result = Compositor::new();
+        if result.is_err() {
+            println!("Skipping test: No GPU available");
+            return;
+        }
+        let compositor = result.unwrap();
+
+        let view_id = ViewId::new();
+        compositor
+            .create_headless_texture(view_id, 800, 600)
+            .expect("Failed to create texture");
+
+        // First destroy should succeed
+        compositor
+            .destroy_headless_texture(view_id)
+            .expect("First destroy should succeed");
+
+        // Second destroy should fail
+        let result = compositor.destroy_headless_texture(view_id);
+        assert!(result.is_err(), "Second destroy should fail");
+    }
+
+    #[test]
+    fn test_get_headless_texture_view() {
+        let result = Compositor::new();
+        if result.is_err() {
+            println!("Skipping test: No GPU available");
+            return;
+        }
+        let compositor = result.unwrap();
+
+        let view_id = ViewId::new();
+        compositor
+            .create_headless_texture(view_id, 800, 600)
+            .expect("Failed to create texture");
+
+        // Get texture view - should succeed and return a TextureView
+        let _view = compositor
+            .get_headless_texture_view(view_id)
+            .expect("Failed to get texture view");
+
+        // Getting texture view for non-existent surface should fail
+        let bad_view_id = ViewId::new();
+        assert!(compositor.get_headless_texture_view(bad_view_id).is_err());
+
+        compositor.destroy_headless_texture(view_id).expect("Failed to destroy");
+    }
+
+    #[test]
+    fn test_render_solid_color_headless() {
+        let result = Compositor::new();
+        if result.is_err() {
+            println!("Skipping test: No GPU available");
+            return;
+        }
+        let compositor = result.unwrap();
+
+        let view_id = ViewId::new();
+        compositor
+            .create_headless_texture(view_id, 100, 100)
+            .expect("Failed to create texture");
+
+        // Render solid red color
+        compositor
+            .render_solid_color(view_id, [1.0, 0.0, 0.0, 1.0])
+            .expect("Failed to render solid color");
+
+        compositor.destroy_headless_texture(view_id).expect("Failed to destroy");
+    }
+
+    #[test]
+    fn test_adapter_info() {
+        let result = Compositor::new();
+        if result.is_err() {
+            println!("Skipping test: No GPU available");
+            return;
+        }
+        let compositor = result.unwrap();
+
+        let info = compositor.adapter_info();
+        // Verify we got adapter info (actual values depend on GPU)
+        assert!(!info.name.is_empty(), "Adapter name should not be empty");
+    }
+
+    #[test]
+    fn test_device_and_queue_access() {
+        let result = Compositor::new();
+        if result.is_err() {
+            println!("Skipping test: No GPU available");
+            return;
+        }
+        let compositor = result.unwrap();
+
+        // Test device access
+        let _device = compositor.device();
+        let device_arc = compositor.device_arc();
+        assert!(Arc::strong_count(&device_arc) >= 1);
+
+        // Test queue access
+        let _queue = compositor.queue();
+        let queue_arc = compositor.queue_arc();
+        assert!(Arc::strong_count(&queue_arc) >= 1);
+    }
+
+    #[test]
+    fn test_headless_texture_various_sizes() {
+        let result = Compositor::new();
+        if result.is_err() {
+            println!("Skipping test: No GPU available");
+            return;
+        }
+        let compositor = result.unwrap();
+
+        // Test creating textures at various sizes
+        let view1 = ViewId::new();
+        let view2 = ViewId::new();
+        let view3 = ViewId::new();
+
+        // Small size (1x1)
+        compositor
+            .create_headless_texture(view1, 1, 1)
+            .expect("Failed to create 1x1 texture");
+        assert_eq!(compositor.get_surface_size(view1).unwrap(), (1, 1));
+
+        // Standard size (800x600)
+        compositor
+            .create_headless_texture(view2, 800, 600)
+            .expect("Failed to create 800x600 texture");
+        assert_eq!(compositor.get_surface_size(view2).unwrap(), (800, 600));
+
+        // Large size (4K: 3840x2160)
+        compositor
+            .create_headless_texture(view3, 3840, 2160)
+            .expect("Failed to create 4K texture");
+        assert_eq!(compositor.get_surface_size(view3).unwrap(), (3840, 2160));
+
+        // Clean up
+        compositor.destroy_headless_texture(view1).expect("Failed to destroy");
+        compositor.destroy_headless_texture(view2).expect("Failed to destroy");
+        compositor.destroy_headless_texture(view3).expect("Failed to destroy");
+    }
+
+    #[test]
+    fn test_resize_surface_error_for_headless() {
+        let result = Compositor::new();
+        if result.is_err() {
+            println!("Skipping test: No GPU available");
+            return;
+        }
+        let compositor = result.unwrap();
+
+        let view_id = ViewId::new();
+        compositor
+            .create_headless_texture(view_id, 800, 600)
+            .expect("Failed to create texture");
+
+        // resize_surface_from_bounds should fail for headless textures
+        // (they don't have surfaces, only textures)
+        let result = compositor.resize_surface_from_bounds(view_id, Bounds::new(0, 0, 1024, 768));
+        assert!(result.is_err(), "Resize should fail for headless textures");
+
+        compositor.destroy_headless_texture(view_id).expect("Failed to destroy");
+    }
+
+    // Note: Full surface tests (non-headless) require a display and are typically
+    // run manually or in integration test environments with window access.
+    // The tests above cover the headless path which shares most of the compositor logic.
 }

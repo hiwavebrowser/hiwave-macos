@@ -139,6 +139,9 @@ pub enum ViewHostError {
 
     #[error("Windows API error: {0}")]
     WindowsApi(String),
+
+    #[error("Lock poisoned - thread panicked while holding lock")]
+    LockPoisoned,
 }
 
 /// Events emitted by the ViewHost.
@@ -369,7 +372,10 @@ impl ViewHost {
         }
 
         // Store the main HWND
-        *self.main_hwnd.write().unwrap() = Some(hwnd.0 as isize);
+        *self.main_hwnd.write().map_err(|e| {
+            tracing::error!("main_hwnd RwLock poisoned in create_main_window: {}", e);
+            ViewHostError::LockPoisoned
+        })? = Some(hwnd.0 as isize);
 
         // Show the window
         unsafe {
@@ -386,7 +392,11 @@ impl ViewHost {
     pub fn get_main_hwnd(&self) -> Option<HWND> {
         self.main_hwnd
             .read()
-            .unwrap()
+            .map_err(|e| {
+                tracing::error!("main_hwnd RwLock poisoned in get_main_hwnd: {}", e);
+                e
+            })
+            .ok()?
             .map(|raw| HWND(raw as *mut _))
     }
 
@@ -542,7 +552,13 @@ impl ViewHost {
     /// Set the event callback for all views.
     #[cfg(windows)]
     pub fn set_event_callback(&self, callback: EventCallback) {
-        let mut registry = VIEW_REGISTRY.write().unwrap();
+        let mut registry = match VIEW_REGISTRY.write() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("VIEW_REGISTRY lock poisoned in set_event_callback: {}", e);
+                return;
+            }
+        };
         registry.set_callback(callback);
     }
 
@@ -617,13 +633,19 @@ impl ViewHost {
 
         // Store in local views map
         {
-            let mut views = self.views.write().unwrap();
+            let mut views = self.views.write().map_err(|e| {
+                tracing::error!("Views RwLock poisoned in create_view: {}", e);
+                ViewHostError::LockPoisoned
+            })?;
             views.insert(view_id, state.clone());
         }
 
         // Register in global registry for window proc
         {
-            let mut registry = VIEW_REGISTRY.write().unwrap();
+            let mut registry = VIEW_REGISTRY.write().map_err(|e| {
+                tracing::error!("VIEW_REGISTRY lock poisoned in create_view: {}", e);
+                ViewHostError::LockPoisoned
+            })?;
             registry.register(hwnd_raw, state);
         }
 
@@ -734,7 +756,10 @@ impl ViewHost {
         }));
 
         {
-            let mut views = self.views.write().unwrap();
+            let mut views = self.views.write().map_err(|e| {
+                tracing::error!("Views RwLock poisoned in create_view (macOS): {}", e);
+                ViewHostError::LockPoisoned
+            })?;
             views.insert(view_id, state);
         }
 
@@ -758,7 +783,10 @@ impl ViewHost {
             visible: true,
             focused: false,
         }));
-        self.views.write().unwrap().insert(view_id, state);
+        self.views.write().map_err(|e| {
+            tracing::error!("Views RwLock poisoned in create_view (non-mac/win): {}", e);
+            ViewHostError::LockPoisoned
+        })?.insert(view_id, state);
         Ok(view_id)
     }
 
@@ -769,7 +797,10 @@ impl ViewHost {
             .get(&view_id)
             .ok_or(ViewHostError::ViewNotFound(view_id))?;
 
-        let mut state = state.lock().unwrap();
+        let mut state = state.lock().map_err(|e| {
+            tracing::error!("ViewState lock poisoned in set_bounds: {}", e);
+            ViewHostError::LockPoisoned
+        })?;
         state.bounds = bounds;
 
         #[cfg(windows)]
@@ -797,22 +828,34 @@ impl ViewHost {
 
     /// Get the current bounds of a view.
     pub fn get_bounds(&self, view_id: ViewId) -> Result<Bounds, ViewHostError> {
-        let views = self.views.read().unwrap();
+        let views = self.views.read().map_err(|e| {
+            tracing::error!("Views RwLock poisoned in get_bounds: {}", e);
+            ViewHostError::LockPoisoned
+        })?;
         let state = views
             .get(&view_id)
             .ok_or(ViewHostError::ViewNotFound(view_id))?;
-        let bounds = state.lock().unwrap().bounds;
+        let bounds = state.lock().map_err(|e| {
+            tracing::error!("ViewState lock poisoned in get_bounds: {}", e);
+            ViewHostError::LockPoisoned
+        })?.bounds;
         Ok(bounds)
     }
 
     /// Set view visibility.
     pub fn set_visible(&self, view_id: ViewId, visible: bool) -> Result<(), ViewHostError> {
-        let views = self.views.read().unwrap();
+        let views = self.views.read().map_err(|e| {
+            tracing::error!("Views RwLock poisoned in set_visible: {}", e);
+            ViewHostError::LockPoisoned
+        })?;
         let state = views
             .get(&view_id)
             .ok_or(ViewHostError::ViewNotFound(view_id))?;
 
-        let mut state = state.lock().unwrap();
+        let mut state = state.lock().map_err(|e| {
+            tracing::error!("ViewState lock poisoned in set_visible: {}", e);
+            ViewHostError::LockPoisoned
+        })?;
         state.visible = visible;
 
         #[cfg(windows)]
@@ -829,12 +872,18 @@ impl ViewHost {
 
     /// Focus a view.
     pub fn focus(&self, view_id: ViewId) -> Result<(), ViewHostError> {
-        let views = self.views.read().unwrap();
+        let views = self.views.read().map_err(|e| {
+            tracing::error!("Views RwLock poisoned in focus: {}", e);
+            ViewHostError::LockPoisoned
+        })?;
         let state = views
             .get(&view_id)
             .ok_or(ViewHostError::ViewNotFound(view_id))?;
 
-        let state = state.lock().unwrap();
+        let state = state.lock().map_err(|e| {
+            tracing::error!("ViewState lock poisoned in focus: {}", e);
+            ViewHostError::LockPoisoned
+        })?;
 
         #[cfg(windows)]
         {
@@ -862,33 +911,51 @@ impl ViewHost {
     /// Get the HWND for a view.
     #[cfg(windows)]
     pub fn get_hwnd(&self, view_id: ViewId) -> Result<HWND, ViewHostError> {
-        let views = self.views.read().unwrap();
+        let views = self.views.read().map_err(|e| {
+            tracing::error!("Views RwLock poisoned in get_hwnd: {}", e);
+            ViewHostError::LockPoisoned
+        })?;
         let state = views
             .get(&view_id)
             .ok_or(ViewHostError::ViewNotFound(view_id))?;
-        let hwnd_raw = state.lock().unwrap().hwnd_raw;
+        let hwnd_raw = state.lock().map_err(|e| {
+            tracing::error!("ViewState lock poisoned in get_hwnd: {}", e);
+            ViewHostError::LockPoisoned
+        })?.hwnd_raw;
         Ok(HWND(hwnd_raw as *mut _))
     }
 
     /// Get the DPI for a view.
     pub fn get_dpi(&self, view_id: ViewId) -> Result<u32, ViewHostError> {
-        let views = self.views.read().unwrap();
+        let views = self.views.read().map_err(|e| {
+            tracing::error!("Views RwLock poisoned in get_dpi: {}", e);
+            ViewHostError::LockPoisoned
+        })?;
         let state = views
             .get(&view_id)
             .ok_or(ViewHostError::ViewNotFound(view_id))?;
-        let dpi = state.lock().unwrap().dpi;
+        let dpi = state.lock().map_err(|e| {
+            tracing::error!("ViewState lock poisoned in get_dpi: {}", e);
+            ViewHostError::LockPoisoned
+        })?.dpi;
         Ok(dpi)
     }
 
     /// Destroy a view.
     pub fn destroy_view(&self, view_id: ViewId) -> Result<(), ViewHostError> {
         let state = {
-            let mut views = self.views.write().unwrap();
+            let mut views = self.views.write().map_err(|e| {
+                tracing::error!("Views RwLock poisoned in destroy_view: {}", e);
+                ViewHostError::LockPoisoned
+            })?;
             views.remove(&view_id)
         };
 
         if let Some(state) = state {
-            let state_lock = state.lock().unwrap();
+            let state_lock = state.lock().map_err(|e| {
+                tracing::error!("ViewState lock poisoned in destroy_view: {}", e);
+                ViewHostError::LockPoisoned
+            })?;
             #[cfg(windows)]
             let hwnd_raw = state_lock.hwnd_raw;
             drop(state_lock);
@@ -897,7 +964,10 @@ impl ViewHost {
             {
                 // Unregister from global registry
                 {
-                    let mut registry = VIEW_REGISTRY.write().unwrap();
+                    let mut registry = VIEW_REGISTRY.write().map_err(|e| {
+                        tracing::error!("VIEW_REGISTRY lock poisoned in destroy_view: {}", e);
+                        ViewHostError::LockPoisoned
+                    })?;
                     registry.unregister(hwnd_raw);
                 }
 
@@ -916,7 +986,7 @@ impl ViewHost {
 
     /// Get the number of active views.
     pub fn view_count(&self) -> usize {
-        self.views.read().unwrap().len()
+        self.views.read().map(|v| v.len()).unwrap_or(0)
     }
 
     /// Register the window class (Windows only).
@@ -1029,7 +1099,13 @@ impl ViewHost {
             // === Mouse Events ===
             WM_MOUSEMOVE => {
                 if let Some(state) = get_state() {
-                    let mut state = state.lock().unwrap();
+                    let mut state = match state.lock() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("ViewState lock poisoned in WM_MOUSEMOVE: {}", e);
+                            return DefWindowProcW(hwnd, msg, wparam, lparam);
+                        }
+                    };
                     let x = (lparam.0 & 0xFFFF) as i16 as f64;
                     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f64;
                     let pos = Point::new(x, y);
@@ -1066,7 +1142,13 @@ impl ViewHost {
 
             WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
                 if let Some(state) = get_state() {
-                    let mut state = state.lock().unwrap();
+                    let mut state = match state.lock() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("ViewState lock poisoned in WM_*BUTTONDOWN: {}", e);
+                            return DefWindowProcW(hwnd, msg, wparam, lparam);
+                        }
+                    };
                     let x = (lparam.0 & 0xFFFF) as i16 as f64;
                     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f64;
                     let pos = Point::new(x, y);
@@ -1110,7 +1192,13 @@ impl ViewHost {
 
             WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
                 if let Some(state) = get_state() {
-                    let mut state = state.lock().unwrap();
+                    let mut state = match state.lock() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("ViewState lock poisoned in WM_*BUTTONUP: {}", e);
+                            return DefWindowProcW(hwnd, msg, wparam, lparam);
+                        }
+                    };
                     let x = (lparam.0 & 0xFFFF) as i16 as f64;
                     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f64;
                     let pos = Point::new(x, y);
@@ -1139,7 +1227,13 @@ impl ViewHost {
 
             WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
                 if let Some(state) = get_state() {
-                    let state = state.lock().unwrap();
+                    let state = match state.lock() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("ViewState lock poisoned in WM_MOUSEWHEEL: {}", e);
+                            return DefWindowProcW(hwnd, msg, wparam, lparam);
+                        }
+                    };
                     let view_id = state.id;
                     drop(state);
 
@@ -1172,7 +1266,13 @@ impl ViewHost {
 
             m if m == WM_MOUSELEAVE_MSG => {
                 if let Some(state) = get_state() {
-                    let mut state = state.lock().unwrap();
+                    let mut state = match state.lock() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("ViewState lock poisoned in WM_MOUSELEAVE: {}", e);
+                            return DefWindowProcW(hwnd, msg, wparam, lparam);
+                        }
+                    };
                     state.tracking_mouse = false;
                     let view_id = state.id;
                     let pos = state.mouse_state.position;
@@ -1191,7 +1291,13 @@ impl ViewHost {
             // === Keyboard Events ===
             WM_KEYDOWN | WM_SYSKEYDOWN => {
                 if let Some(state) = get_state() {
-                    let mut state = state.lock().unwrap();
+                    let mut state = match state.lock() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("ViewState lock poisoned in WM_KEYDOWN: {}", e);
+                            return DefWindowProcW(hwnd, msg, wparam, lparam);
+                        }
+                    };
                     let vk = wparam.0 as u32;
                     let key_code = KeyCode::from_vk(vk);
 
@@ -1213,7 +1319,13 @@ impl ViewHost {
 
             WM_KEYUP | WM_SYSKEYUP => {
                 if let Some(state) = get_state() {
-                    let mut state = state.lock().unwrap();
+                    let mut state = match state.lock() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("ViewState lock poisoned in WM_KEYUP: {}", e);
+                            return DefWindowProcW(hwnd, msg, wparam, lparam);
+                        }
+                    };
                     let vk = wparam.0 as u32;
                     let key_code = KeyCode::from_vk(vk);
 
@@ -1234,7 +1346,13 @@ impl ViewHost {
 
             WM_CHAR => {
                 if let Some(state) = get_state() {
-                    let state = state.lock().unwrap();
+                    let state = match state.lock() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("ViewState lock poisoned in WM_CHAR: {}", e);
+                            return DefWindowProcW(hwnd, msg, wparam, lparam);
+                        }
+                    };
                     let view_id = state.id;
                     drop(state);
 
@@ -1254,7 +1372,13 @@ impl ViewHost {
             // === Focus Events ===
             WM_SETFOCUS => {
                 if let Some(state) = get_state() {
-                    let mut state = state.lock().unwrap();
+                    let mut state = match state.lock() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("ViewState lock poisoned in WM_SETFOCUS: {}", e);
+                            return DefWindowProcW(hwnd, msg, wparam, lparam);
+                        }
+                    };
                     state.focused = true;
                     let view_id = state.id;
                     drop(state);
@@ -1272,7 +1396,13 @@ impl ViewHost {
 
             WM_KILLFOCUS => {
                 if let Some(state) = get_state() {
-                    let mut state = state.lock().unwrap();
+                    let mut state = match state.lock() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("ViewState lock poisoned in WM_KILLFOCUS: {}", e);
+                            return DefWindowProcW(hwnd, msg, wparam, lparam);
+                        }
+                    };
                     state.focused = false;
                     let view_id = state.id;
                     drop(state);
@@ -1291,7 +1421,13 @@ impl ViewHost {
             // === Window Events ===
             WM_SIZE => {
                 if let Some(state) = get_state() {
-                    let state = state.lock().unwrap();
+                    let state = match state.lock() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("ViewState lock poisoned in WM_SIZE: {}", e);
+                            return DefWindowProcW(hwnd, msg, wparam, lparam);
+                        }
+                    };
                     let width = (lparam.0 & 0xFFFF) as u32;
                     let height = ((lparam.0 >> 16) & 0xFFFF) as u32;
                     let view_id = state.id;
@@ -1310,7 +1446,13 @@ impl ViewHost {
 
             WM_DPICHANGED => {
                 if let Some(state) = get_state() {
-                    let mut state = state.lock().unwrap();
+                    let mut state = match state.lock() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("ViewState lock poisoned in WM_DPICHANGED: {}", e);
+                            return DefWindowProcW(hwnd, msg, wparam, lparam);
+                        }
+                    };
                     let new_dpi = (wparam.0 & 0xFFFF) as u32;
                     state.dpi = new_dpi;
                     let view_id = state.id;
@@ -1353,7 +1495,13 @@ impl ViewHost {
 
             WM_DESTROY => {
                 if let Some(state) = get_state() {
-                    let state = state.lock().unwrap();
+                    let state = match state.lock() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("ViewState lock poisoned in WM_DESTROY: {}", e);
+                            return DefWindowProcW(hwnd, msg, wparam, lparam);
+                        }
+                    };
                     let view_id = state.id;
                     drop(state);
 
@@ -1378,7 +1526,12 @@ impl Default for ViewHost {
 impl Drop for ViewHost {
     fn drop(&mut self) {
         // Destroy all views
-        let view_ids: Vec<_> = self.views.read().unwrap().keys().copied().collect();
+        let view_ids: Vec<_> = self.views.read()
+            .map(|views| views.keys().copied().collect())
+            .unwrap_or_else(|e| {
+                tracing::error!("Views RwLock poisoned in ViewHost::drop: {}", e);
+                Vec::new()
+            });
         for view_id in view_ids {
             let _ = self.destroy_view(view_id);
         }
@@ -1454,11 +1607,17 @@ impl ViewHostTrait for ViewHost {
 
     #[cfg(target_os = "macos")]
     fn get_raw_window_handle(&self, view_id: ViewId) -> Result<raw_window_handle::RawWindowHandle, ViewHostError> {
-        let views = self.views.read().unwrap();
+        let views = self.views.read().map_err(|e| {
+            tracing::error!("Views RwLock poisoned in get_raw_window_handle: {}", e);
+            ViewHostError::LockPoisoned
+        })?;
         let state = views
             .get(&view_id)
             .ok_or(ViewHostError::ViewNotFound(view_id))?;
-        let view = state.lock().unwrap().hwnd_raw as id;
+        let view = state.lock().map_err(|e| {
+            tracing::error!("ViewState lock poisoned in get_raw_window_handle: {}", e);
+            ViewHostError::LockPoisoned
+        })?.hwnd_raw as id;
 
         // Get the window from the view
         let window: id = unsafe { msg_send![view, window] };
@@ -1535,6 +1694,187 @@ mod tests {
         assert_eq!(host.view_count(), 0);
     }
 
-    // Note: View lifecycle tests require a valid window handle and are tested
-    // in the hiwave-app integration tests instead.
+    #[test]
+    fn test_lock_poisoning_handling() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        // Create a mutex that we'll intentionally poison
+        let poisoned_lock: Arc<Mutex<i32>> = Arc::new(Mutex::new(42));
+        let poisoned_lock_clone = poisoned_lock.clone();
+
+        // Spawn a thread that panics while holding the lock
+        let _ = thread::spawn(move || {
+            let _guard = poisoned_lock_clone.lock().unwrap();
+            panic!("Intentional panic to poison the lock");
+        })
+        .join();
+
+        // Now the lock is poisoned - attempting to acquire it should fail
+        let result = poisoned_lock.lock();
+        assert!(result.is_err(), "Lock should be poisoned");
+
+        // Verify we can handle the poisoned lock gracefully
+        match result {
+            Ok(_) => panic!("Expected poisoned lock"),
+            Err(e) => {
+                // This demonstrates our error handling pattern
+                tracing::error!("Lock poisoned (expected in test): {}", e);
+                // In the real code, we would return ViewHostError::LockPoisoned
+            }
+        }
+    }
+
+    #[test]
+    fn test_bounds_zero_size() {
+        let bounds = Bounds::new(0, 0, 0, 0);
+        assert_eq!(bounds.width, 0);
+        assert_eq!(bounds.height, 0);
+    }
+
+    #[test]
+    fn test_bounds_negative_position() {
+        // Negative positions are valid (multi-monitor setups)
+        let bounds = Bounds::new(-100, -50, 800, 600);
+        assert_eq!(bounds.x, -100);
+        assert_eq!(bounds.y, -50);
+    }
+
+    #[test]
+    fn test_bounds_large_values() {
+        // Test with 4K resolution
+        let bounds = Bounds::new(0, 0, 3840, 2160);
+        assert_eq!(bounds.width, 3840);
+        assert_eq!(bounds.height, 2160);
+    }
+
+    #[test]
+    fn test_bounds_equality() {
+        let b1 = Bounds::new(10, 20, 800, 600);
+        let b2 = Bounds::new(10, 20, 800, 600);
+        let b3 = Bounds::new(10, 20, 1024, 768);
+
+        assert_eq!(b1, b2);
+        assert_ne!(b1, b3);
+    }
+
+    #[test]
+    fn test_view_id_raw_value() {
+        let id = ViewId::new();
+        let raw = id.raw();
+
+        // Raw value should be non-zero
+        assert!(raw > 0, "ViewId raw value should be non-zero");
+    }
+
+    #[test]
+    fn test_view_id_many_unique() {
+        // Generate many IDs and verify uniqueness
+        let mut ids = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            let id = ViewId::new();
+            assert!(ids.insert(id), "ViewId should be unique");
+        }
+        assert_eq!(ids.len(), 1000);
+    }
+
+    #[test]
+    fn test_viewhost_view_count_initial() {
+        let host = ViewHost::new();
+        assert_eq!(host.view_count(), 0, "New ViewHost should have 0 views");
+    }
+
+    #[test]
+    fn test_viewhost_error_display() {
+        // Test that error messages are formatted correctly
+        let err = ViewHostError::ViewNotFound(ViewId::new());
+        let msg = format!("{}", err);
+        assert!(msg.contains("View not found"), "Error message should be descriptive");
+
+        let err = ViewHostError::WindowCreation("test error".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("Failed to create window"), "Error message should be descriptive");
+        assert!(msg.contains("test error"), "Error message should include details");
+    }
+
+    #[test]
+    fn test_viewhost_error_lock_poisoned() {
+        let err = ViewHostError::LockPoisoned;
+        let msg = format!("{}", err);
+        assert!(msg.contains("poisoned"), "Error should mention lock poisoning");
+    }
+
+    #[test]
+    fn test_viewhost_multiple_instances() {
+        // Verify multiple ViewHost instances can coexist
+        let host1 = ViewHost::new();
+        let host2 = ViewHost::new();
+        let host3 = ViewHost::new();
+
+        assert_eq!(host1.view_count(), 0);
+        assert_eq!(host2.view_count(), 0);
+        assert_eq!(host3.view_count(), 0);
+    }
+
+    #[test]
+    fn test_view_id_debug_format() {
+        let id = ViewId::new();
+        let debug_str = format!("{:?}", id);
+
+        // Debug format should include "ViewId"
+        assert!(debug_str.contains("ViewId"), "Debug format should be descriptive");
+    }
+
+    #[test]
+    fn test_bounds_debug_format() {
+        let bounds = Bounds::new(10, 20, 800, 600);
+        let debug_str = format!("{:?}", bounds);
+
+        // Debug format should show all values
+        assert!(debug_str.contains("10"));
+        assert!(debug_str.contains("20"));
+        assert!(debug_str.contains("800"));
+        assert!(debug_str.contains("600"));
+    }
+
+    #[test]
+    fn test_bounds_clone() {
+        let b1 = Bounds::new(10, 20, 800, 600);
+        let b2 = b1.clone();
+
+        assert_eq!(b1, b2);
+        assert_eq!(b1.x, b2.x);
+        assert_eq!(b1.y, b2.y);
+        assert_eq!(b1.width, b2.width);
+        assert_eq!(b1.height, b2.height);
+    }
+
+    #[test]
+    fn test_view_id_clone() {
+        let id1 = ViewId::new();
+        let id2 = id1.clone();
+
+        // Cloned IDs should be equal
+        assert_eq!(id1, id2);
+        assert_eq!(id1.raw(), id2.raw());
+    }
+
+    #[test]
+    fn test_viewhost_error_invalid_parent() {
+        let err = ViewHostError::InvalidParent;
+        let msg = format!("{}", err);
+        assert!(msg.contains("Invalid parent window"), "Error message should be descriptive");
+    }
+
+    #[test]
+    fn test_viewhost_error_windows_api() {
+        let err = ViewHostError::WindowsApi("test API failure".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("Windows API error"), "Error message should be descriptive");
+        assert!(msg.contains("test API failure"), "Error message should include details");
+    }
+
+    // Note: Full view lifecycle tests (create_view, destroy_view, resize_view)
+    // require valid window handles and are tested in hiwave-app integration tests.
+    // The tests above cover all testable logic that doesn't require platform windows.
 }

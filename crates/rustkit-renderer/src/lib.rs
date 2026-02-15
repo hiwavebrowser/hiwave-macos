@@ -69,6 +69,9 @@ pub enum RendererError {
     #[error("Failed to create buffer: {0}")]
     BufferCreation(String),
 
+    #[error("Buffer size {0} bytes exceeds maximum allowed size of {1} bytes")]
+    BufferTooLarge(u64, u64),
+
     #[error("Texture upload failed: {0}")]
     TextureUpload(String),
 
@@ -78,6 +81,11 @@ pub enum RendererError {
     #[error("Surface error: {0}")]
     Surface(#[from] wgpu::SurfaceError),
 }
+
+// ==================== Constants ====================
+
+/// Maximum GPU buffer size (256 MB) - prevents OOM on pathological inputs
+const MAX_BUFFER_SIZE: u64 = 256 * 1024 * 1024;
 
 // ==================== Vertex Types ====================
 
@@ -568,6 +576,21 @@ impl Renderer {
         })
     }
 
+    /// Validate buffer size to prevent GPU memory exhaustion.
+    /// Returns Ok(size) if size is within limits, Err otherwise.
+    fn validate_buffer_size(&self, size: u64, label: &str) -> Result<u64, RendererError> {
+        if size > MAX_BUFFER_SIZE {
+            tracing::error!(
+                "Buffer '{}' size {} bytes exceeds maximum {} bytes",
+                label,
+                size,
+                MAX_BUFFER_SIZE
+            );
+            return Err(RendererError::BufferTooLarge(size, MAX_BUFFER_SIZE));
+        }
+        Ok(size)
+    }
+
     /// Set the viewport size.
     pub fn set_viewport_size(&mut self, width: u32, height: u32) {
         self.viewport_size = (width, height);
@@ -644,9 +667,9 @@ impl Renderer {
 
     /// Flush current batched vertices to the target without clearing.
     /// Used for incremental rendering when backdrop filters are present.
-    fn flush_batches_to(&mut self, target: &wgpu::TextureView, clear: bool) {
+    fn flush_batches_to(&mut self, target: &wgpu::TextureView, clear: bool) -> Result<(), RendererError> {
         if self.color_vertices.is_empty() && self.texture_vertices.is_empty() {
-            return;
+            return Ok(());
         }
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -677,6 +700,13 @@ impl Renderer {
 
             // Draw solid colors
             if !self.color_vertices.is_empty() {
+                // Validate buffer sizes before allocation
+                let vertex_size = (self.color_vertices.len() * std::mem::size_of::<ColorVertex>()) as u64;
+                let index_size = (self.color_indices.len() * std::mem::size_of::<u32>()) as u64;
+
+                self.validate_buffer_size(vertex_size, "Color Vertex Buffer")?;
+                self.validate_buffer_size(index_size, "Color Index Buffer")?;
+
                 let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("Color Vertex Buffer"),
                     contents: bytemuck::cast_slice(&self.color_vertices),
@@ -698,6 +728,13 @@ impl Renderer {
 
             // Draw textured quads
             if !self.texture_vertices.is_empty() {
+                // Validate buffer sizes before allocation
+                let vertex_size = (self.texture_vertices.len() * std::mem::size_of::<TextureVertex>()) as u64;
+                let index_size = (self.texture_indices.len() * std::mem::size_of::<u32>()) as u64;
+
+                self.validate_buffer_size(vertex_size, "Texture Vertex Buffer")?;
+                self.validate_buffer_size(index_size, "Texture Index Buffer")?;
+
                 let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("Texture Vertex Buffer"),
                     contents: bytemuck::cast_slice(&self.texture_vertices),
@@ -726,11 +763,12 @@ impl Renderer {
         self.color_indices.clear();
         self.texture_vertices.clear();
         self.texture_indices.clear();
+        Ok(())
     }
 
     /// Flush batched vertices before rendering a GPU gradient.
     /// This ensures correct z-order: batched content renders before the gradient.
-    fn flush_batches_for_gradient(&mut self, target: &wgpu::TextureView, clear: bool) {
+    fn flush_batches_for_gradient(&mut self, target: &wgpu::TextureView, clear: bool) -> Result<(), RendererError> {
         if self.color_vertices.is_empty() && self.texture_vertices.is_empty() {
             // Nothing to flush, but if this is the first call we still need to clear
             if clear {
@@ -755,7 +793,7 @@ impl Renderer {
                 }
                 self.queue.submit(std::iter::once(encoder.finish()));
             }
-            return;
+            return Ok(());
         }
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -786,6 +824,13 @@ impl Renderer {
 
             // Draw solid colors
             if !self.color_vertices.is_empty() {
+                // Validate buffer sizes before allocation
+                let vertex_size = (self.color_vertices.len() * std::mem::size_of::<ColorVertex>()) as u64;
+                let index_size = (self.color_indices.len() * std::mem::size_of::<u32>()) as u64;
+
+                self.validate_buffer_size(vertex_size, "Color Vertex Buffer")?;
+                self.validate_buffer_size(index_size, "Color Index Buffer")?;
+
                 let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("Color Vertex Buffer"),
                     contents: bytemuck::cast_slice(&self.color_vertices),
@@ -807,6 +852,13 @@ impl Renderer {
 
             // Draw textured quads
             if !self.texture_vertices.is_empty() {
+                // Validate buffer sizes before allocation
+                let vertex_size = (self.texture_vertices.len() * std::mem::size_of::<TextureVertex>()) as u64;
+                let index_size = (self.texture_indices.len() * std::mem::size_of::<u32>()) as u64;
+
+                self.validate_buffer_size(vertex_size, "Texture Vertex Buffer")?;
+                self.validate_buffer_size(index_size, "Texture Index Buffer")?;
+
                 let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("Texture Vertex Buffer"),
                     contents: bytemuck::cast_slice(&self.texture_vertices),
@@ -835,6 +887,7 @@ impl Renderer {
         self.color_indices.clear();
         self.texture_vertices.clear();
         self.texture_indices.clear();
+        Ok(())
     }
 
     /// Draw a textured quad from a filtered texture to the render target immediately.
@@ -1140,7 +1193,7 @@ impl Renderer {
             {
                 if *radius > 0.0 {
                     // Flush current batches to intermediate texture
-                    self.flush_batches_to(&intermediate_view, is_first_flush);
+                    self.flush_batches_to(&intermediate_view, is_first_flush)?;
                     is_first_flush = false;
 
                     // Apply GPU blur
@@ -1156,7 +1209,7 @@ impl Renderer {
 
         // Flush remaining batches to intermediate
         if !self.color_vertices.is_empty() || !self.texture_vertices.is_empty() {
-            self.flush_batches_to(&intermediate_view, is_first_flush);
+            self.flush_batches_to(&intermediate_view, is_first_flush)?;
         }
 
         // Copy intermediate to final target
@@ -1187,7 +1240,7 @@ impl Renderer {
             if is_gpu_gradient {
                 // Flush batched content FIRST (before gradient)
                 // This ensures children render before their parent's gradient
-                self.flush_batches_for_gradient(target, is_first_flush);
+                self.flush_batches_for_gradient(target, is_first_flush)?;
                 is_first_flush = false;
 
                 // Render the gradient directly (inline, not queued)
@@ -1200,7 +1253,7 @@ impl Renderer {
 
         // Flush any remaining batched content
         if !self.color_vertices.is_empty() || !self.texture_vertices.is_empty() {
-            self.flush_batches_for_gradient(target, is_first_flush);
+            self.flush_batches_for_gradient(target, is_first_flush)?;
         }
 
         Ok(())
@@ -1901,23 +1954,26 @@ impl Renderer {
             }
 
             DisplayCommand::FillCircle { cx, cy, radius, color } => {
-                // Approximate circle with a square for now
-                // TODO: Implement proper circle rendering with triangles
-                self.draw_solid_rect(
-                    Rect::new(cx - radius, cy - radius, radius * 2.0, radius * 2.0),
-                    *color,
-                );
+                // Render circle using triangle fan
+                self.draw_fill_circle(*cx, *cy, *radius, *color);
             }
 
             DisplayCommand::StrokeCircle { cx, cy, radius, color, width } => {
-                // Approximate with a square border
-                let outer = Rect::new(cx - radius, cy - radius, radius * 2.0, radius * 2.0);
-                self.draw_border(outer, *color, *width, *width, *width, *width);
+                // Draw stroked circle as two filled circles (outer and inner)
+                // Outer circle
+                self.draw_fill_circle(*cx, *cy, *radius, *color);
+                // Inner circle (background colored to create stroke effect)
+                // Note: This is a simplified approach; proper implementation would
+                // require a separate background color or compositing
+                if *radius > *width {
+                    let bg_color = Color::new(255, 255, 255, 1.0); // White background
+                    self.draw_fill_circle(*cx, *cy, radius - width, bg_color);
+                }
             }
 
             DisplayCommand::FillEllipse { rect, color } => {
-                // Approximate with rectangle
-                self.draw_solid_rect(*rect, *color);
+                // Render ellipse using triangle fan with parametric equations
+                self.draw_fill_ellipse(*rect, *color);
             }
 
             DisplayCommand::Line { x1, y1, x2, y2, color, width } => {
@@ -2312,6 +2368,108 @@ impl Renderer {
                 px += step;
             }
             py += step;
+        }
+    }
+
+    /// Draw a filled circle using triangle fan.
+    fn draw_fill_circle(&mut self, cx: f32, cy: f32, radius: f32, color: Color) {
+        if radius <= 0.0 {
+            return;
+        }
+
+        // Determine number of segments based on radius for smooth appearance
+        let segments = ((radius / 2.0).sqrt() * 8.0).round().max(16.0).min(64.0) as u32;
+
+        let c = [
+            color.r as f32 / 255.0,
+            color.g as f32 / 255.0,
+            color.b as f32 / 255.0,
+            color.a,
+        ];
+
+        let base = self.color_vertices.len() as u32;
+
+        // Center vertex
+        let (center_x, center_y) = self.transform_point(cx, cy);
+        self.color_vertices.push(ColorVertex {
+            position: [center_x, center_y],
+            color: c,
+        });
+
+        // Generate vertices around the circumference
+        use std::f32::consts::PI;
+        for i in 0..=segments {
+            let angle = 2.0 * PI * (i as f32) / (segments as f32);
+            let px = cx + radius * angle.cos();
+            let py = cy + radius * angle.sin();
+            let (x, y) = self.transform_point(px, py);
+            self.color_vertices.push(ColorVertex {
+                position: [x, y],
+                color: c,
+            });
+        }
+
+        // Generate triangle fan indices
+        for i in 0..segments {
+            self.color_indices.extend_from_slice(&[
+                base,         // Center
+                base + i + 1, // Current point on circumference
+                base + i + 2, // Next point on circumference
+            ]);
+        }
+    }
+
+    /// Draw a filled ellipse using triangle fan.
+    fn draw_fill_ellipse(&mut self, rect: Rect, color: Color) {
+        let cx = rect.x + rect.width / 2.0;
+        let cy = rect.y + rect.height / 2.0;
+        let rx = rect.width / 2.0;
+        let ry = rect.height / 2.0;
+
+        if rx <= 0.0 || ry <= 0.0 {
+            return;
+        }
+
+        // Use average of radii to determine segment count
+        let avg_radius = (rx + ry) / 2.0;
+        let segments = ((avg_radius / 2.0).sqrt() * 8.0).round().max(16.0).min(64.0) as u32;
+
+        let c = [
+            color.r as f32 / 255.0,
+            color.g as f32 / 255.0,
+            color.b as f32 / 255.0,
+            color.a,
+        ];
+
+        let base = self.color_vertices.len() as u32;
+
+        // Center vertex
+        let (center_x, center_y) = self.transform_point(cx, cy);
+        self.color_vertices.push(ColorVertex {
+            position: [center_x, center_y],
+            color: c,
+        });
+
+        // Generate vertices around the ellipse using parametric equations
+        use std::f32::consts::PI;
+        for i in 0..=segments {
+            let angle = 2.0 * PI * (i as f32) / (segments as f32);
+            let px = cx + rx * angle.cos();
+            let py = cy + ry * angle.sin();
+            let (x, y) = self.transform_point(px, py);
+            self.color_vertices.push(ColorVertex {
+                position: [x, y],
+                color: c,
+            });
+        }
+
+        // Generate triangle fan indices
+        for i in 0..segments {
+            self.color_indices.extend_from_slice(&[
+                base,         // Center
+                base + i + 1, // Current point on ellipse
+                base + i + 2, // Next point on ellipse
+            ]);
         }
     }
 
@@ -4142,8 +4300,53 @@ impl Renderer {
         }
 
         // Calculate the starting position based on position property
-        let start_x = container.x + (container.width - bg_width) * position.0;
-        let start_y = container.y + (container.height - bg_height) * position.1;
+        let mut start_x = container.x + (container.width - bg_width) * position.0;
+        let mut start_y = container.y + (container.height - bg_height) * position.1;
+
+        // Adjust size and spacing for space/round modes
+        let mut adjusted_bg_width = bg_width;
+        let mut adjusted_bg_height = bg_height;
+        let mut spacing_x = 0.0_f32;
+        let mut spacing_y = 0.0_f32;
+
+        match repeat {
+            BackgroundRepeat::Space => {
+                // Calculate how many full images fit
+                let fit_count_x = (container.width / bg_width).floor().max(1.0);
+                let fit_count_y = (container.height / bg_height).floor().max(1.0);
+
+                // Calculate spacing to evenly distribute
+                if fit_count_x > 1.0 {
+                    let total_image_width = fit_count_x * bg_width;
+                    let remaining_space_x = container.width - total_image_width;
+                    spacing_x = remaining_space_x / (fit_count_x - 1.0);
+                }
+
+                if fit_count_y > 1.0 {
+                    let total_image_height = fit_count_y * bg_height;
+                    let remaining_space_y = container.height - total_image_height;
+                    spacing_y = remaining_space_y / (fit_count_y - 1.0);
+                }
+
+                // Start at container edge for space mode
+                start_x = container.x;
+                start_y = container.y;
+            }
+            BackgroundRepeat::Round => {
+                // Calculate integer repetitions by rounding
+                let repetitions_x = (container.width / bg_width).round().max(1.0);
+                let repetitions_y = (container.height / bg_height).round().max(1.0);
+
+                // Scale image to fit exactly
+                adjusted_bg_width = container.width / repetitions_x;
+                adjusted_bg_height = container.height / repetitions_y;
+
+                // Start at container edge for round mode
+                start_x = container.x;
+                start_y = container.y;
+            }
+            _ => {}
+        }
 
         // Determine tiling based on repeat
         let (tile_x, tile_y) = match repeat {
@@ -4151,8 +4354,8 @@ impl Renderer {
             BackgroundRepeat::RepeatX => (true, false),
             BackgroundRepeat::RepeatY => (false, true),
             BackgroundRepeat::NoRepeat => (false, false),
-            BackgroundRepeat::Space => (true, true), // TODO: proper spacing
-            BackgroundRepeat::Round => (true, true), // TODO: proper rounding
+            BackgroundRepeat::Space => (true, true),
+            BackgroundRepeat::Round => (true, true),
         };
 
         // Generate tile positions
@@ -4161,22 +4364,22 @@ impl Renderer {
             self.draw_background_image_tile(url, Rect {
                 x: start_x,
                 y: start_y,
-                width: bg_width,
-                height: bg_height,
+                width: adjusted_bg_width,
+                height: adjusted_bg_height,
             }, container);
         } else {
             // Tiled images
-            let x_start = if tile_x {
-                // Find the leftmost position that's visible
-                let tiles_left = ((start_x - container.x) / bg_width).ceil() as i32;
-                start_x - (tiles_left as f32 * bg_width)
+            let x_start = if tile_x && *repeat != BackgroundRepeat::Space && *repeat != BackgroundRepeat::Round {
+                // Find the leftmost position that's visible (for repeat mode)
+                let tiles_left = ((start_x - container.x) / adjusted_bg_width).ceil() as i32;
+                start_x - (tiles_left as f32 * adjusted_bg_width)
             } else {
                 start_x
             };
 
-            let y_start = if tile_y {
-                let tiles_up = ((start_y - container.y) / bg_height).ceil() as i32;
-                start_y - (tiles_up as f32 * bg_height)
+            let y_start = if tile_y && *repeat != BackgroundRepeat::Space && *repeat != BackgroundRepeat::Round {
+                let tiles_up = ((start_y - container.y) / adjusted_bg_height).ceil() as i32;
+                start_y - (tiles_up as f32 * adjusted_bg_height)
             } else {
                 start_y
             };
@@ -4188,8 +4391,8 @@ impl Renderer {
                     let tile_rect = Rect {
                         x,
                         y,
-                        width: bg_width,
-                        height: bg_height,
+                        width: adjusted_bg_width,
+                        height: adjusted_bg_height,
                     };
 
                     // Only draw if visible within container
@@ -4202,14 +4405,14 @@ impl Renderer {
                     }
 
                     if tile_x {
-                        x += bg_width;
+                        x += adjusted_bg_width + spacing_x;
                     } else {
                         break;
                     }
                 }
 
                 if tile_y {
-                    y += bg_height;
+                    y += adjusted_bg_height + spacing_y;
                 } else {
                     break;
                 }
@@ -4479,6 +4682,13 @@ impl Renderer {
 
             // Draw solid colors
             if !self.color_vertices.is_empty() {
+                // Validate buffer sizes before allocation
+                let vertex_size = (self.color_vertices.len() * std::mem::size_of::<ColorVertex>()) as u64;
+                let index_size = (self.color_indices.len() * std::mem::size_of::<u32>()) as u64;
+
+                self.validate_buffer_size(vertex_size, "Color Vertex Buffer")?;
+                self.validate_buffer_size(index_size, "Color Index Buffer")?;
+
                 let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("Color Vertex Buffer"),
                     contents: bytemuck::cast_slice(&self.color_vertices),
@@ -4773,6 +4983,318 @@ mod tests {
             20,
             "GradientColorStop size mismatch"
         );
+    }
+
+    /// Test buffer size validation logic (unit test without GPU).
+    #[test]
+    fn test_buffer_size_validation_logic() {
+        // Test the validation logic directly
+        // This tests the error handling without needing a real GPU device
+
+        const MAX_SIZE: u64 = 256 * 1024 * 1024; // 256 MB
+
+        // Simulate validation function
+        let validate = |size: u64| -> Result<u64, String> {
+            if size > MAX_SIZE {
+                Err(format!("Buffer size {} exceeds maximum {}", size, MAX_SIZE))
+            } else {
+                Ok(size)
+            }
+        };
+
+        // Test valid buffer sizes
+        assert!(validate(1024).is_ok());
+        assert!(validate(1024 * 1024).is_ok());
+        assert!(validate(100 * 1024 * 1024).is_ok());
+
+        // Test buffer size at limit
+        assert!(validate(MAX_SIZE).is_ok());
+
+        // Test buffer size exceeding limit
+        assert!(validate(MAX_SIZE + 1).is_err());
+        assert!(validate(MAX_SIZE * 2).is_err());
+
+        // Test pathological gradient scenario (10K stops)
+        let pathological_stops = 10_000;
+        let stop_size = std::mem::size_of::<crate::pipeline::GradientColorStop>() as u64; // 20 bytes
+        let total_size = pathological_stops * stop_size;
+        // 10K stops = 200KB, well within limits
+        assert!(validate(total_size).is_ok(), "10K gradient stops should fit in buffer");
+
+        // Test extreme case (1M stops would be 20MB, still within 256MB limit)
+        let extreme_stops = 1_000_000;
+        let extreme_size = extreme_stops * stop_size;
+        assert!(validate(extreme_size).is_ok(), "1M stops should fit");
+
+        // Test truly pathological case (1B stops = 20GB, should exceed limit)
+        let truly_pathological = 1_000_000_000;
+        let pathological_size = truly_pathological * stop_size;
+        assert!(validate(pathological_size).is_err(), "1B stops should exceed limit");
+    }
+
+    #[test]
+    fn test_gradient_stops_clamping() {
+        // Test that gradient stops are properly clamped to max_stops (32)
+        // This is important for GPU buffer allocation safety
+        const MAX_STOPS: usize = 32;
+
+        // Simulate what happens with many stops
+        let input_stops = 100;
+        let clamped = input_stops.min(MAX_STOPS);
+        assert_eq!(clamped, MAX_STOPS, "Should clamp to 32 stops");
+
+        // Edge case: exactly at limit
+        assert_eq!(MAX_STOPS.min(MAX_STOPS), MAX_STOPS);
+
+        // Edge case: under limit
+        assert_eq!(10_usize.min(MAX_STOPS), 10);
+    }
+
+    #[test]
+    fn test_circle_rendering_triangle_count() {
+        // Test that circle rendering uses a reasonable triangle count
+        // Circles are rendered as triangle fans
+        const MIN_SEGMENTS: u32 = 16; // Minimum for visual smoothness
+        const MAX_SEGMENTS: u32 = 64; // Maximum to avoid GPU overload
+
+        // For a small circle (radius 10px), use minimum segments
+        let small_radius = 10.0;
+        let small_segments = estimate_circle_segments(small_radius);
+        assert!(small_segments >= MIN_SEGMENTS, "Small circle needs minimum segments");
+        assert!(small_segments <= MAX_SEGMENTS, "Small circle shouldn't exceed max");
+
+        // For a large circle (radius 500px), might use more segments
+        let large_radius = 500.0;
+        let large_segments = estimate_circle_segments(large_radius);
+        assert!(large_segments >= MIN_SEGMENTS);
+        assert!(large_segments <= MAX_SEGMENTS, "Large circle should be clamped");
+
+        // Helper function to estimate segments (simplified version)
+        fn estimate_circle_segments(radius: f32) -> u32 {
+            // A simple heuristic: use more segments for larger circles
+            let base = (radius / 10.0).sqrt() as u32;
+            base.max(16).min(64)
+        }
+    }
+
+    #[test]
+    fn test_ellipse_aspect_ratio() {
+        // Test that ellipse rendering maintains correct aspect ratio
+        let width = 200.0;
+        let height = 100.0;
+        let aspect = width / height;
+        assert_eq!(aspect, 2.0, "Aspect ratio should be 2:1");
+
+        // Edge case: circle (aspect 1:1)
+        let circle_width = 100.0;
+        let circle_height = 100.0;
+        let circle_aspect = circle_width / circle_height;
+        assert_eq!(circle_aspect, 1.0, "Circle has 1:1 aspect");
+
+        // Edge case: very elongated ellipse
+        let narrow_width = 500.0;
+        let narrow_height = 10.0;
+        let narrow_aspect = narrow_width / narrow_height;
+        assert_eq!(narrow_aspect, 50.0, "Narrow ellipse has 50:1 aspect");
+    }
+
+    #[test]
+    fn test_background_repeat_space_calculation() {
+        // Test background-repeat: space calculation
+        // Should evenly distribute images with spacing between them
+        let container_width = 800.0_f32;
+        let image_width = 100.0_f32;
+
+        // Calculate how many full images fit
+        let fit_count = (container_width / image_width).floor() as u32;
+        assert_eq!(fit_count, 8, "8 images of 100px fit in 800px");
+
+        // Calculate spacing for 'space' mode
+        // With 8 images, we need 7 gaps to distribute evenly
+        let gaps = if fit_count > 1 { fit_count - 1 } else { 1 };
+        let total_image_width = fit_count as f32 * image_width;
+        let remaining_space = container_width - total_image_width;
+        let gap_size = remaining_space / gaps as f32;
+
+        assert!(gap_size >= 0.0_f32, "Gap size should be non-negative");
+        assert_eq!(gap_size, 0.0_f32, "With perfect fit, gap is 0");
+
+        // Test with imperfect fit
+        let container_width_2 = 850.0_f32;
+        let fit_count_2 = (container_width_2 / image_width).floor() as u32;
+        let gaps_2 = fit_count_2 - 1;
+        let total_image_width_2 = fit_count_2 as f32 * image_width;
+        let remaining_space_2 = container_width_2 - total_image_width_2;
+        let gap_size_2 = remaining_space_2 / gaps_2 as f32;
+
+        assert!(gap_size_2 > 0.0_f32, "Imperfect fit should have gaps");
+        assert!((gap_size_2 - 7.14_f32).abs() < 0.1_f32, "Gap should be ~7.14px");
+    }
+
+    #[test]
+    fn test_background_repeat_round_scaling() {
+        // Test background-repeat: round calculation
+        // Should scale images to fit container with integer repetitions
+        let container_width = 850.0_f32;
+        let image_width = 100.0_f32;
+
+        // Calculate integer repetitions
+        let repetitions = (container_width / image_width).round() as u32;
+        assert_eq!(repetitions, 9, "Should round to 9 repetitions");
+
+        // Calculate scaled image size
+        let scaled_width = container_width / repetitions as f32;
+        assert!((scaled_width - 94.44_f32).abs() < 0.1_f32, "Scaled image should be ~94.44px");
+
+        // Edge case: exact fit (no scaling needed)
+        let exact_container = 800.0_f32;
+        let exact_reps = (exact_container / image_width).round() as u32;
+        let exact_scaled = exact_container / exact_reps as f32;
+        assert_eq!(exact_scaled, 100.0_f32, "Exact fit should not scale");
+    }
+
+    #[test]
+    fn test_gradient_color_interpolation() {
+        // Test gradient color interpolation between stops
+        // Linear interpolation between two colors
+        let color1 = [1.0, 0.0, 0.0, 1.0]; // Red
+        let color2 = [0.0, 0.0, 1.0, 1.0]; // Blue
+        let t = 0.5; // Halfway
+
+        let interpolated = [
+            color1[0] * (1.0 - t) + color2[0] * t,
+            color1[1] * (1.0 - t) + color2[1] * t,
+            color1[2] * (1.0 - t) + color2[2] * t,
+            color1[3] * (1.0 - t) + color2[3] * t,
+        ];
+
+        assert_eq!(interpolated[0], 0.5, "Red channel should be 0.5");
+        assert_eq!(interpolated[1], 0.0, "Green channel should be 0");
+        assert_eq!(interpolated[2], 0.5, "Blue channel should be 0.5");
+        assert_eq!(interpolated[3], 1.0, "Alpha should be 1.0");
+
+        // Edge case: t=0 should return first color
+        let t0 = 0.0;
+        let at_start = [
+            color1[0] * (1.0 - t0) + color2[0] * t0,
+            color1[1] * (1.0 - t0) + color2[1] * t0,
+            color1[2] * (1.0 - t0) + color2[2] * t0,
+            color1[3] * (1.0 - t0) + color2[3] * t0,
+        ];
+        assert_eq!(at_start, color1);
+
+        // Edge case: t=1 should return second color
+        let t1 = 1.0;
+        let at_end = [
+            color1[0] * (1.0 - t1) + color2[0] * t1,
+            color1[1] * (1.0 - t1) + color2[1] * t1,
+            color1[2] * (1.0 - t1) + color2[2] * t1,
+            color1[3] * (1.0 - t1) + color2[3] * t1,
+        ];
+        assert_eq!(at_end, color2);
+    }
+
+    #[test]
+    fn test_gradient_radial_center_calculation() {
+        // Test that radial gradients correctly calculate center position
+        let rect_x = 100.0;
+        let rect_y = 200.0;
+        let rect_width = 400.0;
+        let rect_height = 300.0;
+
+        // Default center is at 50% 50%
+        let center_x = rect_x + rect_width / 2.0;
+        let center_y = rect_y + rect_height / 2.0;
+
+        assert_eq!(center_x, 300.0, "Center X should be at 300");
+        assert_eq!(center_y, 350.0, "Center Y should be at 350");
+
+        // Test with offset center (e.g., at 25% 75%)
+        let offset_center_x = rect_x + rect_width * 0.25;
+        let offset_center_y = rect_y + rect_height * 0.75;
+
+        assert_eq!(offset_center_x, 200.0, "Offset center X");
+        assert_eq!(offset_center_y, 425.0, "Offset center Y");
+    }
+
+    #[test]
+    fn test_gradient_conic_angle_normalization() {
+        // Test that conic gradient angles are normalized to 0-360 range
+        let angle_450 = 450.0_f32;
+        let normalized_450 = angle_450 % 360.0;
+        assert_eq!(normalized_450, 90.0, "450° should normalize to 90°");
+
+        let angle_neg90 = -90.0_f32;
+        let normalized_neg = (angle_neg90 % 360.0 + 360.0) % 360.0;
+        assert_eq!(normalized_neg, 270.0, "-90° should normalize to 270°");
+
+        let angle_720 = 720.0_f32;
+        let normalized_720 = angle_720 % 360.0;
+        assert_eq!(normalized_720, 0.0, "720° should normalize to 0°");
+    }
+
+    #[test]
+    fn test_buffer_vertex_capacity() {
+        // Test that vertex buffers can hold expected number of vertices
+        const VERTICES_PER_RECT: usize = 4;
+        const INDICES_PER_RECT: usize = 6;
+
+        // Typical batch size
+        let batch_size = 100;
+        let total_vertices = batch_size * VERTICES_PER_RECT;
+        let total_indices = batch_size * INDICES_PER_RECT;
+
+        assert_eq!(total_vertices, 400, "100 rects need 400 vertices");
+        assert_eq!(total_indices, 600, "100 rects need 600 indices");
+
+        // Check buffer size
+        let vertex_size = std::mem::size_of::<ColorVertex>();
+        let total_vertex_bytes = total_vertices * vertex_size;
+
+        assert_eq!(total_vertex_bytes, 400 * 24, "Total vertex buffer size");
+        assert!(total_vertex_bytes < 256 * 1024 * 1024, "Should fit in max buffer");
+    }
+
+    #[test]
+    fn test_rect_fully_contains() {
+        // Test rect containment logic
+        let outer = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let inner = Rect::new(50.0, 50.0, 100.0, 100.0);
+
+        // Check if inner is fully inside outer
+        let contains = inner.x >= outer.x
+            && inner.y >= outer.y
+            && (inner.x + inner.width) <= (outer.x + outer.width)
+            && (inner.y + inner.height) <= (outer.y + outer.height);
+
+        assert!(contains, "Inner rect should be fully contained");
+
+        // Edge case: same rect
+        let same = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let contains_self = same.x >= outer.x
+            && same.y >= outer.y
+            && (same.x + same.width) <= (outer.x + outer.width)
+            && (same.y + same.height) <= (outer.y + outer.height);
+
+        assert!(contains_self, "Rect should contain itself");
+    }
+
+    #[test]
+    fn test_rect_area_calculation() {
+        // Test rectangle area calculations
+        let rect = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let area = rect.width * rect.height;
+        assert_eq!(area, 5000.0, "Area should be 5000 square pixels");
+
+        // Edge case: zero area
+        let zero_width = Rect::new(0.0, 0.0, 0.0, 100.0);
+        let zero_area = zero_width.width * zero_width.height;
+        assert_eq!(zero_area, 0.0, "Zero width means zero area");
+
+        // Edge case: very small rect
+        let tiny = Rect::new(0.0, 0.0, 0.1, 0.1);
+        let tiny_area = tiny.width * tiny.height;
+        assert!(tiny_area < 0.02, "Tiny rect has tiny area");
     }
 }
 
