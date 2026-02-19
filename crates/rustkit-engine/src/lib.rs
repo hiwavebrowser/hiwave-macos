@@ -3201,11 +3201,6 @@ impl Engine {
         tokens
     }
 
-    /// Check if a simple selector matches an element (without pseudo-class context).
-    fn simple_selector_matches(&self, selector: &str, tag_name: &str, attributes: &HashMap<String, String>) -> bool {
-        self.simple_selector_matches_with_pseudo(selector, tag_name, attributes, 0, 1)
-    }
-    
     /// Check if a simple selector matches an element with pseudo-class context.
     fn simple_selector_matches_with_pseudo(
         &self,
@@ -3968,7 +3963,7 @@ impl Engine {
             if let Some(display_list) = &view.display_list {
                 // Clone commands to break the borrow on self.views
                 let commands = display_list.commands.clone();
-                drop(view); // Explicitly drop the borrow
+                // Borrow is dropped when scope ends
                 self.upload_display_list_images(&commands);
             }
         }
@@ -6346,9 +6341,9 @@ mod tests {
             assert_eq!(linear.direction, rustkit_css::GradientDirection::ToRight);
             assert_eq!(linear.stops.len(), 2);
             assert_eq!(linear.stops[0].color, rustkit_css::Color::from_rgb(255, 0, 0));
-            assert_eq!(linear.stops[0].position, Some(0.0));
+            assert_eq!(linear.stops[0].position, Some(rustkit_css::StopPosition::Percent(0.0)));
             assert_eq!(linear.stops[1].color, rustkit_css::Color::from_rgb(0, 0, 255));
-            assert_eq!(linear.stops[1].position, Some(1.0));
+            assert_eq!(linear.stops[1].position, Some(rustkit_css::StopPosition::Percent(1.0)));
         } else {
             panic!("Expected Linear gradient");
         }
@@ -6407,15 +6402,15 @@ mod tests {
         assert!(stop.is_some());
         let stop = stop.unwrap();
         assert_eq!(stop.color, rustkit_css::Color::from_rgb(255, 0, 0));
-        assert_eq!(stop.position, Some(0.5));
-        
+        assert_eq!(stop.position, Some(rustkit_css::StopPosition::Percent(0.5)));
+
         // Test color without position
         let stop = parse_color_stop("blue");
         assert!(stop.is_some());
         let stop = stop.unwrap();
         assert_eq!(stop.color, rustkit_css::Color::from_rgb(0, 0, 255));
         assert_eq!(stop.position, None);
-        
+
         // Test rgba color with position
         let stop = parse_color_stop("rgba(255, 255, 255, 0.5) 25%");
         assert!(stop.is_some());
@@ -6424,7 +6419,7 @@ mod tests {
         assert_eq!(stop.color.g, 255);
         assert_eq!(stop.color.b, 255);
         assert!((stop.color.a - 0.5).abs() < 0.01);
-        assert_eq!(stop.position, Some(0.25));
+        assert_eq!(stop.position, Some(rustkit_css::StopPosition::Percent(0.25)));
     }
 
     #[test]
