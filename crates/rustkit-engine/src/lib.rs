@@ -1031,10 +1031,30 @@ impl Engine {
         root_style.background_color = rustkit_css::Color::WHITE;
         let mut root_box = LayoutBox::new(BoxType::Block, root_style);
 
+        // Compute the <html> element's style so its inherited properties (line-height,
+        // font-family, color, font-size, ...) propagate into <body> and below. Layout starts
+        // at <body>, but parity-reset.css — and browsers' own UA sheet — set inherited
+        // properties on <html>; building body with `parent_style = None` silently dropped them
+        // (e.g. `html { line-height: 1.5 }` never reached any heading). Chrome inherits html's
+        // computed values through body to every descendant.
+        let html_style = document.document_element().and_then(|html| {
+            if let NodeType::Element { tag_name, attributes, .. } = &html.node_type {
+                Some(self.compute_style_for_element(tag_name, attributes, &stylesheets, &css_vars, &[]))
+            } else {
+                None
+            }
+        });
+
         // Get the body element and build layout from it
         if let Some(body) = document.body() {
             debug!("Found body element, building layout with stylesheets");
-            let body_box = self.build_layout_from_node_with_styles(&body, &stylesheets, &css_vars, &[]);
+            let body_box = self.build_layout_from_node_with_parent_style(
+                &body,
+                &stylesheets,
+                &css_vars,
+                &[],
+                html_style.as_ref(),
+            );
             root_box.children.push(body_box);
         } else if let Some(html) = document.document_element() {
             // Fallback: use html element if no body
@@ -1105,6 +1125,27 @@ impl Engine {
                     rustkit_css::Length::Rem(rem) => rustkit_css::Length::Px(rem * 16.0),
                     other => other,
                 };
+
+                // `line-height` is an inherited property, but rustkit only inherited it into text
+                // nodes (see the NodeType::Text arm), never from one element to a descendant
+                // element. That dropped cross-element inheritance of the computed value: e.g.
+                // `html { line-height: 1.5 }` (as every websuite fixture sets via parity-reset.css)
+                // never reached headings/paragraphs, so they fell back to the `Normal` 1.2
+                // multiplier while Chrome inherits the 1.5 factor. The vertical drift shifted every
+                // block below the first heading.
+                //
+                // The UA defaults in `compute_style_for_element` never set `line_height`, so a value
+                // of `Normal` here reliably means "not specified by UA or author": inherit the
+                // parent's computed value. `Number` inherits as a factor (re-resolved against this
+                // element's own font-size); `Px` inherits as the absolute length — both match CSS
+                // 2.1 §10.8 computed-value inheritance.
+                if let Some(parent) = parent_style {
+                    if matches!(style.line_height, rustkit_css::LineHeight::Normal)
+                        && !matches!(parent.line_height, rustkit_css::LineHeight::Normal)
+                    {
+                        style.line_height = parent.line_height.clone();
+                    }
+                }
 
                 // Check for display: none
                 if style.display == rustkit_css::Display::None {
@@ -6182,6 +6223,75 @@ mod tests {
         assert_eq!(get("Em"), rustkit_css::Length::Px(32.0), "2em vs body 16px");
         assert_eq!(get("Percent"), rustkit_css::Length::Px(24.0), "150% vs body 16px");
         assert_eq!(get("Rem"), rustkit_css::Length::Px(24.0), "1.5rem vs root 16px");
+    }
+
+    #[test]
+    fn test_line_height_inherits_from_html_through_body() {
+        // `line-height` is inherited, but rustkit only inherited it into text nodes, never
+        // element->element, and layout began at <body> with no parent — so a value set on
+        // <html> (as every parity fixture does via parity-reset.css: `html{line-height:1.5}`)
+        // never reached headings/paragraphs, which fell back to Normal (×1.2). Chrome inherits
+        // the 1.5 factor to every descendant. Assert both the html->body hop and multi-level
+        // element inheritance now carry it, while leaving an unset subtree at Normal.
+        let html = r#"<!DOCTYPE html>
+            <html style="line-height: 1.5">
+              <body>
+                <h1>Head</h1>
+                <div><p>Para</p></div>
+              </body>
+            </html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+        };
+
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        fn collect(b: &LayoutBox, out: &mut Vec<(String, rustkit_css::LineHeight)>) {
+            if let BoxType::Text(t) = &b.box_type {
+                out.push((t.clone(), b.style.line_height.clone()));
+            }
+            for c in &b.children {
+                collect(c, out);
+            }
+        }
+        let mut lhs = Vec::new();
+        collect(&layout, &mut lhs);
+        let get = |needle: &str| {
+            lhs.iter()
+                .find(|(t, _)| t.contains(needle))
+                .map(|(_, s)| s.clone())
+                .unwrap_or_else(|| panic!("no text box containing {:?}", needle))
+        };
+        // html -> body -> h1 (unitless factor inherits as the number, re-resolved per font-size)
+        assert!(
+            matches!(get("Head"), rustkit_css::LineHeight::Number(n) if (n - 1.5).abs() < 1e-4),
+            "h1 line-height did not inherit html's 1.5: {:?}",
+            get("Head")
+        );
+        // html -> body -> div -> p (multi-level element inheritance)
+        assert!(
+            matches!(get("Para"), rustkit_css::LineHeight::Number(n) if (n - 1.5).abs() < 1e-4),
+            "p line-height did not inherit through the div: {:?}",
+            get("Para")
+        );
     }
 
     #[test]
