@@ -2402,13 +2402,17 @@ pub fn parse_color(value: &str) -> Option<Color> {
 
 /// Convert HSL to RGB
 fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
-    if s == 0.0 {
+    let s = s.clamp(0.0, 1.0);
+    let l = l.clamp(0.0, 1.0);
+
+    if s < 0.0001 {
         // Achromatic (gray)
         let v = (l * 255.0).round() as u8;
         return (v, v, v);
     }
 
-    let h = h / 360.0;
+    // Wrap hue into [0, 360) — hsl(-120, …) and hsl(480, …) are valid CSS.
+    let h = ((h % 360.0) + 360.0) % 360.0 / 360.0;
     let q = if l < 0.5 {
         l * (1.0 + s)
     } else {
@@ -2600,6 +2604,16 @@ mod tests {
         assert_eq!(parse_color("red"), Some(Color::from_rgb(255, 0, 0)));
         assert_eq!(parse_color("black"), Some(Color::BLACK));
         assert_eq!(parse_color("transparent"), Some(Color::TRANSPARENT));
+        // Extended names must resolve — rustkit-engine delegates here now
+        assert_eq!(parse_color("coral"), Some(Color::from_rgb(255, 127, 80)));
+        assert_eq!(parse_color("tomato"), Some(Color::from_rgb(255, 99, 71)));
+    }
+
+    #[test]
+    fn test_parse_color_hsl_hue_wraps() {
+        // hsl(-120) ≡ hsl(240), hsl(480) ≡ hsl(120) — hue is a circle
+        assert_eq!(parse_color("hsl(-120, 50%, 50%)"), parse_color("hsl(240, 50%, 50%)"));
+        assert_eq!(parse_color("hsl(480, 100%, 50%)"), parse_color("hsl(120, 100%, 50%)"));
     }
 
     #[test]

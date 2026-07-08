@@ -4696,132 +4696,12 @@ impl Default for EngineBuilder {
 
 /// Parse a color value from CSS.
 fn parse_color(value: &str) -> Option<rustkit_css::Color> {
-    let value = value.trim().to_lowercase();
-
-    // Named colors
-    match value.as_str() {
-        "black" => return Some(rustkit_css::Color::BLACK),
-        "white" => return Some(rustkit_css::Color::WHITE),
-        "red" => return Some(rustkit_css::Color::new(255, 0, 0, 1.0)),
-        "green" => return Some(rustkit_css::Color::new(0, 128, 0, 1.0)),
-        "blue" => return Some(rustkit_css::Color::new(0, 0, 255, 1.0)),
-        "yellow" => return Some(rustkit_css::Color::new(255, 255, 0, 1.0)),
-        "cyan" => return Some(rustkit_css::Color::new(0, 255, 255, 1.0)),
-        "magenta" => return Some(rustkit_css::Color::new(255, 0, 255, 1.0)),
-        "gray" | "grey" => return Some(rustkit_css::Color::new(128, 128, 128, 1.0)),
-        "transparent" => return Some(rustkit_css::Color::TRANSPARENT),
-        _ => {}
-    }
-
-    // Hex colors
-    if value.starts_with('#') {
-        let hex = &value[1..];
-        let (r, g, b) = match hex.len() {
-            3 => {
-                let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
-                let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
-                let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
-                (r, g, b)
-            }
-            6 => {
-                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-                (r, g, b)
-            }
-            _ => return None,
-        };
-        return Some(rustkit_css::Color::from_rgb(r, g, b));
-    }
-
-    // rgb() and rgba()
-    if value.starts_with("rgb(") || value.starts_with("rgba(") {
-        let inner = value
-            .trim_start_matches("rgba(")
-            .trim_start_matches("rgb(")
-            .trim_end_matches(')');
-        let parts: Vec<&str> = inner.split(',').collect();
-        if parts.len() >= 3 {
-            let r: u8 = parts[0].trim().parse().ok()?;
-            let g: u8 = parts[1].trim().parse().ok()?;
-            let b: u8 = parts[2].trim().parse().ok()?;
-            let a: f32 = if parts.len() >= 4 {
-                parts[3].trim().parse().ok()?
-            } else {
-                1.0
-            };
-            return Some(rustkit_css::Color::new(r, g, b, a));
-        }
-    }
-
-    // hsl() and hsla()
-    if value.starts_with("hsl(") || value.starts_with("hsla(") {
-        let inner = value
-            .trim_start_matches("hsla(")
-            .trim_start_matches("hsl(")
-            .trim_end_matches(')');
-        let parts: Vec<&str> = inner.split(',').collect();
-        if parts.len() >= 3 {
-            let h: f32 = parts[0].trim().trim_end_matches("deg").parse().ok()?;
-            let s: f32 = parts[1].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
-            let l: f32 = parts[2].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
-            let a: f32 = if parts.len() >= 4 {
-                parts[3].trim().parse().ok()?
-            } else {
-                1.0
-            };
-            let (r, g, b) = hsl_to_rgb(h, s, l);
-            return Some(rustkit_css::Color::new(r, g, b, a));
-        }
-    }
-
-    None
-}
-
-/// Convert HSL to RGB.
-fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
-    let s = s.clamp(0.0, 1.0);
-    let l = l.clamp(0.0, 1.0);
-
-    if s < 0.0001 {
-        // Achromatic (gray)
-        let v = (l * 255.0).round() as u8;
-        return (v, v, v);
-    }
-
-    let h = ((h % 360.0) + 360.0) % 360.0 / 360.0;
-    let q = if l < 0.5 {
-        l * (1.0 + s)
-    } else {
-        l + s - l * s
-    };
-    let p = 2.0 * l - q;
-
-    let r = hue_to_rgb(p, q, h + 1.0 / 3.0);
-    let g = hue_to_rgb(p, q, h);
-    let b = hue_to_rgb(p, q, h - 1.0 / 3.0);
-
-    (
-        (r * 255.0).round().clamp(0.0, 255.0) as u8,
-        (g * 255.0).round().clamp(0.0, 255.0) as u8,
-        (b * 255.0).round().clamp(0.0, 255.0) as u8,
-    )
-}
-
-fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
-    if t < 0.0 { t += 1.0; }
-    if t > 1.0 { t -= 1.0; }
-
-    if t < 1.0 / 6.0 {
-        return p + (q - p) * 6.0 * t;
-    }
-    if t < 0.5 {
-        return q;
-    }
-    if t < 2.0 / 3.0 {
-        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
-    }
-    p
+    // Delegate to rustkit-css: single source of truth for color parsing.
+    // This engine-local copy knew 11 named colors and silently dropped every
+    // declaration using any other name (`background-color: coral` painted
+    // nothing). Lowercase here because rustkit_css::parse_color matches
+    // functional prefixes case-sensitively.
+    rustkit_css::parse_color(&value.trim().to_lowercase())
 }
 
 /// Parse a CSS gradient value (linear-gradient or radial-gradient).
@@ -6214,6 +6094,18 @@ mod tests {
         
         // Test rgb colors
         assert_eq!(parse_color("rgb(255, 0, 0)"), Some(rustkit_css::Color::new(255, 0, 0, 1.0)));
+
+        // Extended named colors — the engine-local parser knew only 11 names
+        // and silently dropped the rest (bg-solid's coral swatch, 2026-07-08).
+        assert_eq!(parse_color("coral"), Some(rustkit_css::Color::from_rgb(255, 127, 80)));
+        assert_eq!(parse_color("tomato"), Some(rustkit_css::Color::from_rgb(255, 99, 71)));
+        assert_eq!(parse_color("Orange"), Some(rustkit_css::Color::from_rgb(255, 165, 0)));
+
+        // Case-insensitive functional syntax must keep working post-delegation
+        assert_eq!(parse_color("RGB(0, 128, 0)"), Some(rustkit_css::Color::new(0, 128, 0, 1.0)));
+
+        // hsl with negative hue wraps (engine semantics preserved)
+        assert_eq!(parse_color("hsl(-120, 50%, 50%)"), parse_color("hsl(240, 50%, 50%)"));
     }
 
     #[test]
