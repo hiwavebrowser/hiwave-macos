@@ -55,3 +55,6 @@ progress_report.json
 scripts/__pycache__/
 
 fastrender/
+
+# Pinned Chrome for Testing download (~150MB, machine-local; see trench/BASELINE-macos.md)
+.browsers/
