@@ -29,7 +29,9 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 REPO_ROOT = Path(__file__).parent.parent
-BASELINES_DIR = REPO_ROOT / "baselines" / "chrome-120"
+# Campaign pin (trench/BASELINE-macos.md): Chrome for Testing 148.0.7778.216.
+# Override with PARITY_BASELINE_SET only for deliberate cross-version experiments.
+BASELINES_DIR = REPO_ROOT / "baselines" / os.environ.get("PARITY_BASELINE_SET", "chrome-148")
 OUTPUT_DIR = REPO_ROOT / "parity-baseline"
 
 # Case definitions
