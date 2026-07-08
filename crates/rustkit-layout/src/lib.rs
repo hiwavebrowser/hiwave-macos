@@ -1798,6 +1798,13 @@ impl LayoutBox {
                 cb.content.height = cursor_y;
                 child.layout(&cb);
 
+                // An inline-level box (e.g. a styled <span>/<a>) laid out on
+                // its own is centered/right-aligned as a single-item line so
+                // its box decoration follows text-align.
+                if matches!(child.box_type, BoxType::Inline) {
+                    lines.push((i, i + 1, child.dimensions.margin_box().width));
+                }
+
                 if child.float == Float::None {
                     cursor_y += child.dimensions.margin_box().height;
                 }
@@ -1836,7 +1843,14 @@ impl LayoutBox {
 
         if offset > 0.0 {
             for child in children {
-                if child.style.display.is_inline_block() {
+                // inline-block items and inline boxes (a span/link's own
+                // background/border/padding) shift as a unit. Their text
+                // descendants already self-align against the block width in
+                // layout_text, so we move only the box's own origin here —
+                // both settle about the same center, no double-shift.
+                if child.style.display.is_inline_block()
+                    || matches!(child.box_type, BoxType::Inline)
+                {
                     child.dimensions.content.x += offset;
                 }
             }
@@ -1938,6 +1952,11 @@ impl LayoutBox {
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y;
                 child.layout_with_collapse(&cb, margin_context, float_context);
+
+                // See layout_block_children: keep inline box decoration aligned.
+                if matches!(child.box_type, BoxType::Inline) {
+                    lines.push((i, i + 1, child.dimensions.margin_box().width));
+                }
 
                 if child.float == Float::None {
                     cursor_y = child.dimensions.border_box().bottom() - self.dimensions.content.y;
@@ -4049,6 +4068,88 @@ mod tests {
         assert_eq!(layout_box.dimensions.content.width, 1000.0);
         assert_eq!(layout_box.dimensions.margin.left, 0.0);
         assert_eq!(layout_box.dimensions.margin.right, 0.0);
+    }
+
+    #[test]
+    fn test_text_align_center_shifts_inline_box() {
+        // Regression: text-align:center must move an inline box (a styled
+        // <span>/<a>, so its background/border/padding follow the text) — not
+        // only inline-block items. Plain text already self-centers in
+        // layout_text; this covers the box origin. (2026-07-08, macOS trench)
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 200.0, 0.0);
+
+        let mut block_style = ComputedStyle::new();
+        block_style.text_align = TextAlign::Center;
+
+        // Plain text child stays centered (baseline behavior, must not regress).
+        let mut block = LayoutBox::new(BoxType::Block, block_style.clone());
+        let mut text_style = ComputedStyle::new();
+        text_style.text_align = TextAlign::Center;
+        block
+            .children
+            .push(LayoutBox::new(BoxType::Text("Hi".to_string()), text_style));
+        block.layout(&cb);
+        let text_x = block.children[0].dimensions.content.x;
+        let text_w = block.children[0].dimensions.content.width;
+        assert!(
+            (text_x - (200.0 - text_w) / 2.0).abs() < 0.5,
+            "plain text should stay centered, got x={text_x} w={text_w}"
+        );
+
+        // Inline span with an explicit 50px width is centered: (200-50)/2 = 75.
+        let mut span_style = ComputedStyle::new();
+        span_style.text_align = TextAlign::Center;
+        span_style.width = Length::Px(50.0);
+        let mut block2 = LayoutBox::new(BoxType::Block, block_style.clone());
+        block2
+            .children
+            .push(LayoutBox::new(BoxType::Inline, span_style));
+        block2.layout(&cb);
+        assert_eq!(
+            block2.children[0].dimensions.content.x, 75.0,
+            "inline box should be centered"
+        );
+
+        // Realistic <div center><span>Hi</span></div>: the span box and its
+        // inner text end up centered about the same point (no double-shift).
+        let mut span3 = LayoutBox::new(BoxType::Inline, {
+            let mut s = ComputedStyle::new();
+            s.text_align = TextAlign::Center;
+            s
+        });
+        let mut inner_style = ComputedStyle::new();
+        inner_style.text_align = TextAlign::Center;
+        span3
+            .children
+            .push(LayoutBox::new(BoxType::Text("Hi".to_string()), inner_style));
+        let mut block3 = LayoutBox::new(BoxType::Block, block_style.clone());
+        block3.children.push(span3);
+        block3.layout(&cb);
+        let span3 = &block3.children[0];
+        let span3_center = span3.dimensions.content.x + span3.dimensions.content.width / 2.0;
+        let inner = &span3.children[0];
+        let inner_center = inner.dimensions.content.x + inner.dimensions.content.width / 2.0;
+        assert!(
+            (span3_center - inner_center).abs() < 1.0 && (span3_center - 100.0).abs() < 1.0,
+            "span box and inner text should share a center near 100, got box_center={span3_center} text_center={inner_center}"
+        );
+    }
+
+    #[test]
+    fn test_text_align_left_is_noop_for_inline_box() {
+        // Default (left) alignment must leave an inline box at the origin.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 200.0, 0.0);
+        let block_style = ComputedStyle::new(); // text_align defaults to Left
+        let mut span_style = ComputedStyle::new();
+        span_style.width = Length::Px(50.0);
+        let mut block = LayoutBox::new(BoxType::Block, block_style);
+        block
+            .children
+            .push(LayoutBox::new(BoxType::Inline, span_style));
+        block.layout(&cb);
+        assert_eq!(block.children[0].dimensions.content.x, 0.0);
     }
 
     #[test]

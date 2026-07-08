@@ -18,13 +18,13 @@
 //! - [CSS Grid Layout Module Level 2](https://www.w3.org/TR/css-grid-2/)
 
 use rustkit_css::{
-    AlignContent, AlignItems, AlignSelf, BoxSizing, Display, GridAutoFlow, GridLine,
-    GridPlacement, GridTemplate, GridTemplateAreas, JustifyContent, JustifyItems, JustifySelf,
-    Length, TrackDefinition, TrackRepeat, TrackSize,
+    AlignContent, AlignItems, AlignSelf, BoxSizing, ComputedStyle, Display, GridAutoFlow,
+    GridLine, GridPlacement, GridTemplate, GridTemplateAreas, JustifyContent, JustifyItems,
+    JustifySelf, Length, Overflow, Position, TrackDefinition, TrackRepeat, TrackSize, WhiteSpace,
 };
 use tracing::{debug, trace};
 
-use crate::{LayoutBox, Rect};
+use crate::{BoxType, LayoutBox, Rect};
 
 // ==================== Grid Container ====================
 
@@ -397,8 +397,19 @@ impl<'a> GridItem<'a> {
             Length::Percent(p) if container_width > 0.0 => container_width * p / 100.0,
             _ => 0.0,
         };
-        
-        min_width
+
+        // Automatic minimum size (CSS Grid §6.6): an auto-width item whose
+        // overflow is visible is floored by its min-content width, so
+        // unbreakable content inside the item widens intrinsic and flexible
+        // tracks. Scroll containers may shrink below their content and keep
+        // the explicit-only contribution.
+        let auto_min = if style.overflow_x == Overflow::Visible {
+            estimate_min_content_width(self.layout_box)
+        } else {
+            0.0
+        };
+
+        min_width.max(auto_min)
     }
 
     /// Set explicit placement from style.
@@ -1980,6 +1991,87 @@ pub fn layout_grid_container(
 }
 
 /// Size grid tracks using the track sizing algorithm.
+/// Conservative estimate of a box's min-content (border-box) width.
+///
+/// Track sizing runs before grid items are laid out, so full intrinsic sizing
+/// (text measurement in particular) is unavailable here. This walk accounts
+/// only for unbreakable content it can size exactly: explicit pixel widths,
+/// and nowrap runs of inline-level boxes, whose outer widths sum because no
+/// wrap opportunity exists between them. Text contributes 0 (collapsed
+/// inter-item spaces in a nowrap run are likewise dropped). Underestimating
+/// leaves a track at the size it gets today; this floor never oversizes a
+/// track beyond what Chrome would.
+fn estimate_min_content_width(layout_box: &LayoutBox) -> f32 {
+    let style = &layout_box.style;
+    if style.display == Display::None {
+        return 0.0;
+    }
+    // Out-of-flow boxes don't contribute to intrinsic sizes.
+    if matches!(
+        layout_box.position,
+        crate::Position::Absolute | crate::Position::Fixed
+    ) {
+        return 0.0;
+    }
+
+    let padding_border = horizontal_padding_border(style);
+
+    // An explicit pixel width fixes the contribution regardless of content.
+    if let Length::Px(w) = style.width {
+        return match style.box_sizing {
+            BoxSizing::BorderBox => w,
+            BoxSizing::ContentBox => w + padding_border,
+        };
+    }
+
+    // Content-derived width. Under white-space that forbids wrapping,
+    // consecutive inline-level children form one unbreakable run (sum);
+    // otherwise every child stands alone (max). A block-level child always
+    // interrupts an inline run.
+    let nowrap = matches!(style.white_space, WhiteSpace::Nowrap | WhiteSpace::Pre);
+    let mut max_contribution = 0.0f32;
+    let mut inline_run = 0.0f32;
+    for child in &layout_box.children {
+        if child.style.display == Display::None {
+            continue;
+        }
+        if matches!(
+            child.position,
+            crate::Position::Absolute | crate::Position::Fixed
+        ) {
+            continue;
+        }
+        let inline_level =
+            child.style.display.is_inline_level() || matches!(child.box_type, BoxType::Text(_));
+        let outer = estimate_min_content_width(child) + horizontal_margins(&child.style);
+        if inline_level && nowrap {
+            inline_run += outer;
+        } else {
+            max_contribution = max_contribution.max(outer);
+            if !inline_level {
+                max_contribution = max_contribution.max(inline_run);
+                inline_run = 0.0;
+            }
+        }
+    }
+    max_contribution = max_contribution.max(inline_run);
+
+    max_contribution + padding_border
+}
+
+fn horizontal_margins(style: &ComputedStyle) -> f32 {
+    let px = |l: &Length| if let Length::Px(v) = l { *v } else { 0.0 };
+    px(&style.margin_left) + px(&style.margin_right)
+}
+
+fn horizontal_padding_border(style: &ComputedStyle) -> f32 {
+    let px = |l: &Length| if let Length::Px(v) = l { *v } else { 0.0 };
+    px(&style.padding_left)
+        + px(&style.padding_right)
+        + px(&style.border_left_width)
+        + px(&style.border_right_width)
+}
+
 fn size_grid_tracks(tracks: &mut [GridTrack], container_size: f32, gap: f32) {
     if tracks.is_empty() {
         return;
@@ -2496,6 +2588,99 @@ mod tests {
 
         assert_eq!(tracks[0].size, 50.0);
         assert_eq!(tracks[1].size, 250.0);
+    }
+
+    fn nowrap_scroller_with_inline_blocks() -> LayoutBox {
+        // Six 200px inline-blocks with 15px right margins (last one 0) under
+        // white-space: nowrap — an unbreakable run of 6*200 + 5*15 = 1275.
+        let mut scroller_style = ComputedStyle::new();
+        scroller_style.white_space = WhiteSpace::Nowrap;
+        scroller_style.overflow_x = Overflow::Auto;
+        let mut scroller = LayoutBox::new(BoxType::Block, scroller_style);
+        for i in 0..6 {
+            let mut item_style = ComputedStyle::new();
+            item_style.display = Display::InlineBlock;
+            item_style.width = Length::Px(200.0);
+            item_style.margin_right = Length::Px(if i < 5 { 15.0 } else { 0.0 });
+            scroller.children.push(LayoutBox::new(BoxType::Block, item_style));
+        }
+        scroller
+    }
+
+    #[test]
+    fn test_width_contribution_nowrap_inline_block_run() {
+        let mut main_box = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        main_box.children.push(nowrap_scroller_with_inline_blocks());
+
+        let item = GridItem::new(&main_box);
+        assert_eq!(item.get_width_contribution(0.0), 1275.0);
+    }
+
+    #[test]
+    fn test_width_contribution_wrappable_inline_blocks_take_max() {
+        // Without nowrap, inline-blocks may wrap between each other: the
+        // min-content contribution is the widest single item, not the sum.
+        let mut wrapper = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        for _ in 0..3 {
+            let mut item_style = ComputedStyle::new();
+            item_style.display = Display::InlineBlock;
+            item_style.width = Length::Px(200.0);
+            wrapper.children.push(LayoutBox::new(BoxType::Block, item_style));
+        }
+        let mut main_box = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        main_box.children.push(wrapper);
+
+        let item = GridItem::new(&main_box);
+        assert_eq!(item.get_width_contribution(0.0), 200.0);
+    }
+
+    #[test]
+    fn test_width_contribution_scroll_container_item_explicit_only() {
+        // A grid item that is itself a scroll container can shrink below its
+        // content: the automatic minimum doesn't apply (CSS Grid §6.6).
+        let mut style = ComputedStyle::new();
+        style.overflow_x = Overflow::Auto;
+        let mut item_box = LayoutBox::new(BoxType::Block, style);
+        let mut child_style = ComputedStyle::new();
+        child_style.width = Length::Px(500.0);
+        item_box
+            .children
+            .push(LayoutBox::new(BoxType::Block, child_style));
+
+        let item = GridItem::new(&item_box);
+        assert_eq!(item.get_width_contribution(0.0), 0.0);
+    }
+
+    #[test]
+    fn test_fr_track_floored_by_item_min_content() {
+        // The sticky-scroll shape: 250px 1fr 250px in a 1160px container.
+        // Free space would give the fr track 660px, but the item's 1275px
+        // unbreakable row floors it there (Chrome resolves the real page to
+        // 1295.94px; the extra 20.94 is collapsed inter-item spaces, which
+        // the conservative estimate deliberately drops).
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns = GridTemplate::from_sizes(vec![
+            TrackSize::Px(250.0),
+            TrackSize::Fr(1.0),
+            TrackSize::Px(250.0),
+        ]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        let mut main_style = ComputedStyle::new();
+        main_style.grid_column_start = GridLine::Number(2);
+        main_style.grid_column_end = GridLine::Number(3);
+        let mut main_box = LayoutBox::new(BoxType::Block, main_style);
+        main_box.children.push(nowrap_scroller_with_inline_blocks());
+        container.children.push(main_box);
+
+        layout_grid_container(&mut container, 1160.0, 800.0);
+
+        let width = container.children[0].dimensions.content.width;
+        assert!(
+            (width - 1275.0).abs() < 1.0,
+            "fr track should be floored at the item's 1275px min-content, got {width}"
+        );
     }
 
     #[test]
