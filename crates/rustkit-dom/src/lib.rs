@@ -532,31 +532,39 @@ impl Document {
         self.elements_by_id.get(id).cloned()
     }
 
-    /// Get elements by tag name.
+    /// Get elements by tag name, in document order.
+    ///
+    /// Iterating `self.nodes` (a HashMap) here returned a RANDOM order per
+    /// process, and callers that cascade stylesheets (`<style>`/`<link>`
+    /// extraction) silently depend on document order — CSS rule order breaks
+    /// ties, so random sheet order made identical renders differ run-to-run.
     pub fn get_elements_by_tag_name(&self, tag_name: &str) -> Vec<Rc<Node>> {
         let tag_name_lower = tag_name.to_lowercase();
-        self.nodes
-            .values()
-            .filter(|n| {
-                n.tag_name()
-                    .map(|t| t.to_lowercase() == tag_name_lower)
-                    .unwrap_or(false)
-            })
-            .cloned()
-            .collect()
+        let mut result = Vec::new();
+        self.traverse(|n| {
+            if n.tag_name()
+                .map(|t| t.to_lowercase() == tag_name_lower)
+                .unwrap_or(false)
+            {
+                result.push(n.clone());
+            }
+        });
+        result
     }
 
-    /// Get elements by class name.
+    /// Get elements by class name, in document order (see
+    /// `get_elements_by_tag_name` for why traversal, not `nodes`, is used).
     pub fn get_elements_by_class_name(&self, class_name: &str) -> Vec<Rc<Node>> {
-        self.nodes
-            .values()
-            .filter(|n| {
-                n.get_attribute("class")
-                    .map(|c| c.split_whitespace().any(|cls| cls == class_name))
-                    .unwrap_or(false)
-            })
-            .cloned()
-            .collect()
+        let mut result = Vec::new();
+        self.traverse(|n| {
+            if n.get_attribute("class")
+                .map(|c| c.split_whitespace().any(|cls| cls == class_name))
+                .unwrap_or(false)
+            {
+                result.push(n.clone());
+            }
+        });
+        result
     }
 
     /// Get node by ID.
@@ -648,6 +656,38 @@ mod tests {
         let main = doc.get_element_by_id("main").unwrap();
         assert_eq!(main.tag_name(), Some("p"));
         assert_eq!(main.text_content(), "Hello, world!");
+    }
+
+    #[test]
+    fn test_get_elements_by_tag_name_document_order() {
+        // Regression: HashMap-backed lookup returned styles in random order
+        // per process, which randomized the CSS cascade (rule order breaks
+        // specificity ties). Order must be document order, deterministically.
+        let html = r#"<html>
+<head>
+    <style>/*first*/</style>
+    <style>/*second*/</style>
+</head>
+<body>
+    <style>/*third*/</style>
+    <p class="x">a</p>
+    <p class="x">b</p>
+</body>
+</html>"#;
+
+        for _ in 0..8 {
+            let doc = Document::parse_html(html).unwrap();
+            let styles = doc.get_elements_by_tag_name("style");
+            let contents: Vec<String> = styles
+                .iter()
+                .map(|s| s.text_content().trim().to_string())
+                .collect();
+            assert_eq!(contents, vec!["/*first*/", "/*second*/", "/*third*/"]);
+
+            let ps = doc.get_elements_by_class_name("x");
+            let texts: Vec<String> = ps.iter().map(|p| p.text_content()).collect();
+            assert_eq!(texts, vec!["a", "b"]);
+        }
     }
 
     #[test]
