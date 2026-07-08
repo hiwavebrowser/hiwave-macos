@@ -1084,8 +1084,28 @@ impl Engine {
                 }
 
                 // Create computed style based on element, attributes, and stylesheets
-                let style = self.compute_style_for_element(tag_name, attributes, stylesheets, css_vars, ancestors);
-                
+                let mut style = self.compute_style_for_element(tag_name, attributes, stylesheets, css_vars, ancestors);
+
+                // CSS computed-value resolution: font-size absolutizes at
+                // style time — em/% against the PARENT's computed font-size,
+                // rem against the root (16px). Layout falls back to 16px on
+                // any non-Px font-size, so leaving Em here made
+                // h1 { font-size: 2em } render at 16px.
+                let parent_font_px = parent_style
+                    .map(|p| match p.font_size {
+                        rustkit_css::Length::Px(px) => px,
+                        _ => 16.0,
+                    })
+                    .unwrap_or(16.0);
+                style.font_size = match style.font_size {
+                    rustkit_css::Length::Em(em) => rustkit_css::Length::Px(em * parent_font_px),
+                    rustkit_css::Length::Percent(pct) => {
+                        rustkit_css::Length::Px(pct / 100.0 * parent_font_px)
+                    }
+                    rustkit_css::Length::Rem(rem) => rustkit_css::Length::Px(rem * 16.0),
+                    other => other,
+                };
+
                 // Check for display: none
                 if style.display == rustkit_css::Display::None {
                     return LayoutBox::new(BoxType::Block, ComputedStyle::new());
@@ -6106,6 +6126,62 @@ mod tests {
 
         // hsl with negative hue wraps (engine semantics preserved)
         assert_eq!(parse_color("hsl(-120, 50%, 50%)"), parse_color("hsl(240, 50%, 50%)"));
+    }
+
+    #[test]
+    fn test_em_font_size_absolutizes_against_parent() {
+        // font-size: 2em must COMPUTE to Px(32) (2 × body's 16px) at style
+        // time — layout falls back to 16px on any non-Px font-size, so an
+        // unresolved Em(2.0) rendered h1s at body size (bg-solid, 2026-07-08).
+        let html = r#"<!DOCTYPE html>
+            <html><body>
+                <h1 style="font-size: 2em">Em</h1>
+                <div style="font-size: 150%">Percent</div>
+                <div style="font-size: 1.5rem">Rem</div>
+            </body></html>"#;
+        let document = Document::parse_html(html).expect("Failed to parse HTML");
+        let document = Rc::new(document);
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+        };
+
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        fn collect_font_sizes(b: &LayoutBox, out: &mut Vec<(String, rustkit_css::Length)>) {
+            if let BoxType::Text(t) = &b.box_type {
+                out.push((t.clone(), b.style.font_size.clone()));
+            }
+            for c in &b.children {
+                collect_font_sizes(c, out);
+            }
+        }
+        let mut sizes = Vec::new();
+        collect_font_sizes(&layout, &mut sizes);
+
+        let get = |needle: &str| {
+            sizes.iter().find(|(t, _)| t.contains(needle)).map(|(_, s)| s.clone())
+                .unwrap_or_else(|| panic!("no text box containing {:?}", needle))
+        };
+        assert_eq!(get("Em"), rustkit_css::Length::Px(32.0), "2em vs body 16px");
+        assert_eq!(get("Percent"), rustkit_css::Length::Px(24.0), "150% vs body 16px");
+        assert_eq!(get("Rem"), rustkit_css::Length::Px(24.0), "1.5rem vs root 16px");
     }
 
     #[test]
