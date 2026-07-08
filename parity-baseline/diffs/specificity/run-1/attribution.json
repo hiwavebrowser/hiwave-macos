@@ -1,11 +1,11 @@
 {
   "width": 800,
   "height": 600,
-  "diffPercent": 12.665833333333335,
+  "diffPercent": 13.457916666666666,
   "totalDiffPixels": 480000,
   "unattributedDiffPixels": 0,
   "taxonomy": {
-    "text_metrics": 96.49999999999996
+    "text_metrics": 97.16666666666663
   },
   "topContributors": [
     {
@@ -15,12 +15,12 @@
         "x": 0,
         "y": 0,
         "width": 800,
-        "height": 706
+        "height": 722
       },
-      "diff_pixels": 350640,
-      "contribution_percent": 73.05,
-      "element_diff_percent": 62.08215297450425,
-      "corner_ratio": 0.0008213552361396304,
+      "diff_pixels": 341680,
+      "contribution_percent": 71.18333333333334,
+      "element_diff_percent": 59.15512465373961,
+      "corner_ratio": 0.000842893935846406,
       "likely_cause": "text_metrics"
     },
     {
@@ -30,12 +30,12 @@
         "x": 20,
         "y": 20,
         "width": 760,
-        "height": 38
+        "height": 48
       },
-      "diff_pixels": 28880,
-      "contribution_percent": 6.016666666666667,
+      "diff_pixels": 36480,
+      "contribution_percent": 7.6,
       "element_diff_percent": 100,
-      "corner_ratio": 0.019944598337950138,
+      "corner_ratio": 0.015789473684210527,
       "likely_cause": "text_metrics"
     },
     {
@@ -43,12 +43,12 @@
       "tag": "p",
       "rect": {
         "x": 20,
-        "y": 58,
+        "y": 68,
         "width": 760,
-        "height": 18
+        "height": 24
       },
-      "diff_pixels": 13680,
-      "contribution_percent": 2.85,
+      "diff_pixels": 18240,
+      "contribution_percent": 3.8,
       "element_diff_percent": 100,
       "corner_ratio": 0.031578947368421054,
       "likely_cause": "text_metrics"
@@ -58,7 +58,7 @@
       "tag": "div",
       "rect": {
         "x": 30,
-        "y": 86,
+        "y": 102,
         "width": 200,
         "height": 50
       },
@@ -73,7 +73,7 @@
       "tag": "div",
       "rect": {
         "x": 30,
-        "y": 146,
+        "y": 162,
         "width": 200,
         "height": 50
       },
@@ -88,7 +88,7 @@
       "tag": "div",
       "rect": {
         "x": 30,
-        "y": 206,
+        "y": 222,
         "width": 200,
         "height": 50
       },
@@ -103,7 +103,7 @@
       "tag": "div",
       "rect": {
         "x": 30,
-        "y": 266,
+        "y": 282,
         "width": 200,
         "height": 50
       },
@@ -118,7 +118,7 @@
       "tag": "div",
       "rect": {
         "x": 30,
-        "y": 326,
+        "y": 342,
         "width": 200,
         "height": 50
       },
@@ -133,7 +133,7 @@
       "tag": "div",
       "rect": {
         "x": 30,
-        "y": 386,
+        "y": 402,
         "width": 200,
         "height": 50
       },
@@ -148,7 +148,7 @@
       "tag": "div",
       "rect": {
         "x": 30,
-        "y": 446,
+        "y": 462,
         "width": 200,
         "height": 50
       },

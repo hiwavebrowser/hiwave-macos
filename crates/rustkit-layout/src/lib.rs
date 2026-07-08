@@ -1623,6 +1623,42 @@ impl LayoutBox {
         };
         let content_width = content_width.min(max_width);
 
+        // CSS 2.1 §10.3.3: auto horizontal margins absorb the space left
+        // over once the used width is known. With width:auto the content
+        // has already consumed all available space (free space is zero),
+        // so this only moves boxes whose width came from a specified
+        // width or a min/max-width clamp — `margin: 0 auto` centers them.
+        // Auto margins resolved to 0.0 above, so free space is computed
+        // against the non-auto sides only.
+        // Floats are excluded: their auto margins are used as 0 (§10.3.5).
+        let margin_left_auto =
+            matches!(style.margin_left, Length::Auto) && self.float == Float::None;
+        let margin_right_auto =
+            matches!(style.margin_right, Length::Auto) && self.float == Float::None;
+        let (margin_left, margin_right) = if margin_left_auto || margin_right_auto {
+            let free_space = containing_block.content.width
+                - content_width
+                - border_left
+                - border_right
+                - padding_left
+                - padding_right
+                - margin_left
+                - margin_right;
+            if free_space > 0.0 {
+                if margin_left_auto && margin_right_auto {
+                    (margin_left + free_space / 2.0, margin_right + free_space / 2.0)
+                } else if margin_left_auto {
+                    (margin_left + free_space, margin_right)
+                } else {
+                    (margin_left, margin_right + free_space)
+                }
+            } else {
+                (margin_left, margin_right)
+            }
+        } else {
+            (margin_left, margin_right)
+        };
+
         self.dimensions.content.width = content_width;
         self.dimensions.margin.left = margin_left;
         self.dimensions.margin.right = margin_right;
@@ -3951,6 +3987,94 @@ mod tests {
         let style = ComputedStyle::new();
         let layout_box = LayoutBox::with_float(BoxType::Block, style, Float::Left);
         assert_eq!(layout_box.float, Float::Left);
+    }
+
+    fn containing_1000() -> Dimensions {
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 1000.0, 600.0);
+        cb
+    }
+
+    #[test]
+    fn test_auto_margins_center_fixed_width() {
+        // width: 600px; margin: 0 auto → 200px each side (CSS 2.1 §10.3.3)
+        let mut style = ComputedStyle::new();
+        style.width = Length::Px(600.0);
+        style.margin_left = Length::Auto;
+        style.margin_right = Length::Auto;
+        let mut layout_box = LayoutBox::new(BoxType::Block, style);
+        layout_box.calculate_block_width(&containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 600.0);
+        assert_eq!(layout_box.dimensions.margin.left, 200.0);
+        assert_eq!(layout_box.dimensions.margin.right, 200.0);
+    }
+
+    #[test]
+    fn test_auto_margins_center_max_width_clamped() {
+        // width: auto; max-width: 600px; margin: 0 auto → clamped then centered
+        let mut style = ComputedStyle::new();
+        style.width = Length::Auto;
+        style.max_width = Length::Px(600.0);
+        style.margin_left = Length::Auto;
+        style.margin_right = Length::Auto;
+        let mut layout_box = LayoutBox::new(BoxType::Block, style);
+        layout_box.calculate_block_width(&containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 600.0);
+        assert_eq!(layout_box.dimensions.margin.left, 200.0);
+        assert_eq!(layout_box.dimensions.margin.right, 200.0);
+    }
+
+    #[test]
+    fn test_auto_margin_single_side_absorbs_free_space() {
+        // width: 600px; margin-left: auto; margin-right: 100px
+        let mut style = ComputedStyle::new();
+        style.width = Length::Px(600.0);
+        style.margin_left = Length::Auto;
+        style.margin_right = Length::Px(100.0);
+        let mut layout_box = LayoutBox::new(BoxType::Block, style);
+        layout_box.calculate_block_width(&containing_1000());
+        assert_eq!(layout_box.dimensions.margin.left, 300.0);
+        assert_eq!(layout_box.dimensions.margin.right, 100.0);
+    }
+
+    #[test]
+    fn test_auto_margins_zero_when_width_auto() {
+        // width: auto fills the containing block; auto margins get nothing
+        let mut style = ComputedStyle::new();
+        style.width = Length::Auto;
+        style.margin_left = Length::Auto;
+        style.margin_right = Length::Auto;
+        let mut layout_box = LayoutBox::new(BoxType::Block, style);
+        layout_box.calculate_block_width(&containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 1000.0);
+        assert_eq!(layout_box.dimensions.margin.left, 0.0);
+        assert_eq!(layout_box.dimensions.margin.right, 0.0);
+    }
+
+    #[test]
+    fn test_auto_margins_ignored_on_floats() {
+        // Floated boxes use auto margins as 0 (CSS 2.1 §10.3.5)
+        let mut style = ComputedStyle::new();
+        style.width = Length::Px(600.0);
+        style.margin_left = Length::Auto;
+        style.margin_right = Length::Auto;
+        let mut layout_box = LayoutBox::with_float(BoxType::Block, style, Float::Left);
+        layout_box.calculate_block_width(&containing_1000());
+        assert_eq!(layout_box.dimensions.margin.left, 0.0);
+        assert_eq!(layout_box.dimensions.margin.right, 0.0);
+    }
+
+    #[test]
+    fn test_auto_margins_overconstrained_stay_zero() {
+        // Box wider than its container: no free space to distribute
+        let mut style = ComputedStyle::new();
+        style.width = Length::Px(1400.0);
+        style.margin_left = Length::Auto;
+        style.margin_right = Length::Auto;
+        let mut layout_box = LayoutBox::new(BoxType::Block, style);
+        layout_box.calculate_block_width(&containing_1000());
+        assert_eq!(layout_box.dimensions.margin.left, 0.0);
+        assert_eq!(layout_box.dimensions.margin.right, 0.0);
     }
 
     #[test]
