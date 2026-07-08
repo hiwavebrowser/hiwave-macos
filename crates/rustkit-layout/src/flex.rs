@@ -284,11 +284,13 @@ pub fn layout_flex_container(
                     let child_containing = item.layout_box.dimensions.clone();
                     layout_flex_container(item.layout_box, &child_containing);
                 } else {
-                    // Block container: lay out children normally
-                    for child in &mut item.layout_box.children {
-                        let cb = item.layout_box.dimensions.clone();
-                        child.layout(&cb);
-                    }
+                    // Block container: lay out children in normal flow.
+                    // Cloning the item's FINAL dimensions per child would make every
+                    // child position itself at content.y + content.height (block layout
+                    // treats containing_block.content.height as the flow cursor), i.e.
+                    // stacked at the item's bottom edge. layout_block_children advances
+                    // a real cursor from the item's content top instead.
+                    item.layout_box.layout_block_children();
                 }
             }
         }
