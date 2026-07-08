@@ -24,18 +24,20 @@ def extract_metrics(results: dict, commit: str = "", branch: str = "") -> dict:
         case_id = result.get("case_id", "unknown")
         threshold = result.get("threshold", 15)
 
-        # Get diff percent from pixel data
-        pixel_data = result.get("pixel", {})
-        diff_percent = pixel_data.get("diffPercent", 0.0)
+        # Get diff percent from pixel data. Errored cases carry pixel=None
+        # and diff_pct=100.0; score them as worst-case, never as a pass.
+        pixel_data = result.get("pixel") or {}
+        diff_percent = float(pixel_data.get("diffPercent", result.get("diff_pct", 100.0)))
 
-        passed = diff_percent <= threshold
+        passed = diff_percent <= threshold and not result.get("error")
 
         tests.append({
             "name": case_id,
             "diff": diff_percent,
             "threshold": threshold,
             "passed": passed,
-            "type": result.get("type", "unknown")
+            "type": result.get("type", "unknown"),
+            "error": result.get("error")
         })
 
         total_diff += diff_percent
