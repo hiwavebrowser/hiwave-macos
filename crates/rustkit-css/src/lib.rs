@@ -863,6 +863,14 @@ impl Display {
     pub fn is_inline_block(self) -> bool {
         matches!(self, Display::InlineBlock)
     }
+
+    /// Check if this is an atomic inline-level box (inline-block, inline-flex,
+    /// inline-grid): participates in inline flow as a single opaque box while
+    /// laying out its own contents with its inner display type (CSS Display 3
+    /// §2.4).
+    pub fn is_atomic_inline(self) -> bool {
+        matches!(self, Display::InlineBlock | Display::InlineFlex | Display::InlineGrid)
+    }
 }
 
 // ==================== Flexbox Types ====================

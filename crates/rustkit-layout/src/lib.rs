@@ -1770,8 +1770,8 @@ impl LayoutBox {
                 continue;
             }
 
-            // Check if child is inline-block
-            let is_inline_block = child.style.display.is_inline_block();
+            // Check if child is an atomic inline (inline-block/-flex/-grid)
+            let is_inline_block = child.style.display.is_atomic_inline();
 
             if is_inline_block {
                 // Layout inline-block child to get its dimensions first
@@ -1897,7 +1897,7 @@ impl LayoutBox {
                 // descendants already self-align against the block width in
                 // layout_text, so we move only the box's own origin here —
                 // both settle about the same center, no double-shift.
-                if child.style.display.is_inline_block()
+                if child.style.display.is_atomic_inline()
                     || matches!(child.box_type, BoxType::Inline)
                 {
                     child.dimensions.content.x += offset;
@@ -1933,8 +1933,8 @@ impl LayoutBox {
                 continue;
             }
 
-            // Check if child is inline-block
-            let is_inline_block = child.style.display.is_inline_block();
+            // Check if child is an atomic inline (inline-block/-flex/-grid)
+            let is_inline_block = child.style.display.is_atomic_inline();
 
             // Line boxes interrupt margin adjacency (CSS 2.1 §8.3.1): any
             // inline-level child (inline-block, inline, text, replaced) must
@@ -4252,6 +4252,59 @@ mod tests {
         assert!(
             (span3_center - inner_center).abs() < 1.0 && (span3_center - 100.0).abs() < 1.0,
             "span box and inner text should share a center near 100, got box_center={span3_center} text_center={inner_center}"
+        );
+    }
+
+    #[test]
+    fn test_inline_flex_children_share_a_line() {
+        // Regression: display:inline-flex is an atomic inline (CSS Display 3
+        // §2.4) — siblings flow on one line like inline-block, they don't
+        // stack as blocks. Was: flow classification used is_inline_block(),
+        // so every inline-flex child got its own line and containers grew
+        // ~2x tall, landing bottom borders far below Chrome's.
+        // (2026-07-09, macOS trench session 8)
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 500.0, 0.0);
+
+        let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        for _ in 0..3 {
+            let mut s = ComputedStyle::new();
+            s.display = rustkit_css::Display::InlineFlex;
+            s.width = Length::Px(100.0);
+            s.height = Length::Px(40.0);
+            parent.children.push(LayoutBox::new(BoxType::Block, s));
+        }
+        parent.layout(&cb);
+
+        let ys: Vec<f32> = parent.children.iter().map(|c| c.dimensions.content.y).collect();
+        let xs: Vec<f32> = parent.children.iter().map(|c| c.dimensions.content.x).collect();
+        assert!(
+            ys[0] == ys[1] && ys[1] == ys[2],
+            "inline-flex siblings must share a line, got ys={ys:?}"
+        );
+        assert_eq!(xs, vec![0.0, 100.0, 200.0], "boxes should advance horizontally");
+        assert!(
+            (parent.dimensions.content.height - 40.0).abs() < 0.5,
+            "parent should be one line tall (40px), got {}",
+            parent.dimensions.content.height
+        );
+
+        // Same contract through the margin-collapse path the engine uses.
+        let mut parent2 = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        for _ in 0..3 {
+            let mut s = ComputedStyle::new();
+            s.display = rustkit_css::Display::InlineFlex;
+            s.width = Length::Px(100.0);
+            s.height = Length::Px(40.0);
+            parent2.children.push(LayoutBox::new(BoxType::Block, s));
+        }
+        let mut mc = MarginCollapseContext::new();
+        let mut fc = FloatContext::new();
+        parent2.layout_with_collapse(&cb, &mut mc, &mut fc);
+        let ys2: Vec<f32> = parent2.children.iter().map(|c| c.dimensions.content.y).collect();
+        assert!(
+            ys2[0] == ys2[1] && ys2[1] == ys2[2],
+            "inline-flex siblings must share a line under margin collapse, got ys={ys2:?}"
         );
     }
 
