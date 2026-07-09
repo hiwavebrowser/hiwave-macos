@@ -73,9 +73,19 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          # The parity run modifies TRACKED result files (parity-baseline/*),
+          # and a dirty tree blocks `git checkout metrics-history` — which
+          # then cascades into the orphan fallback failing with "branch
+          # already exists" (the fetch created it). Save the untracked
+          # metrics file aside and discard the regenerable modifications
+          # before switching branches.
+          cp parity-metrics.json /tmp/parity-metrics.json
+          git checkout -- .
+
           # Create or checkout metrics branch
           git fetch origin metrics-history:metrics-history 2>/dev/null || true
           git checkout metrics-history 2>/dev/null || git checkout --orphan metrics-history
+          cp /tmp/parity-metrics.json parity-metrics.json
 
           # Create metrics directory if it doesn't exist
           mkdir -p metrics
