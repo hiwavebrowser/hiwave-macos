@@ -425,14 +425,14 @@ fn create_flex_item<'a>(
             // If explicit size is 0 (auto), check for intrinsic sizing
             if explicit_size == 0.0 {
                 // Get intrinsic size for replaced elements (form controls, images)
-                get_intrinsic_main_size(&layout_box.box_type, main_axis, &layout_box.style)
+                get_intrinsic_main_size(layout_box, main_axis)
             } else {
                 explicit_size
             }
         }
         FlexBasis::Content => {
             // Use content size - for replaced elements, use intrinsic size
-            get_intrinsic_main_size(&layout_box.box_type, main_axis, &layout_box.style)
+            get_intrinsic_main_size(layout_box, main_axis)
         }
         FlexBasis::Length(len) => len,
         FlexBasis::Percent(pct) => pct / 100.0 * container_main,
@@ -998,12 +998,14 @@ fn apply_positions(
 }
 
 /// Get the intrinsic main size for replaced elements (form controls, images).
-fn get_intrinsic_main_size(box_type: &crate::BoxType, main_axis: Axis, style: &rustkit_css::ComputedStyle) -> f32 {
+fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f32 {
+    let box_type = &layout_box.box_type;
+    let style = &layout_box.style;
     let font_size = match style.font_size {
         Length::Px(px) => px,
         _ => 16.0,
     };
-    
+
     match box_type {
         crate::BoxType::FormControl(control) => {
             use crate::FormControlType;
@@ -1045,9 +1047,23 @@ fn get_intrinsic_main_size(box_type: &crate::BoxType, main_axis: Axis, style: &r
             }
         }
         crate::BoxType::Inline | crate::BoxType::Block | crate::BoxType::AnonymousBlock => {
-            // For block/inline elements, use line height as intrinsic main size
-            // This ensures proper sizing in flex containers
-            style.line_height.to_px(font_size)
+            // Horizontal main axis: a block container's content contribution
+            // (children's explicit px widths + nowrap inline runs — the same
+            // conservative estimator grid track sizing uses; never oversizes
+            // past Chrome). Falls back to line height when content gives
+            // nothing to measure. Vertical main axis keeps the line-height
+            // heuristic: heights come from the flex layout pass itself.
+            match main_axis {
+                Axis::Horizontal => {
+                    let content = crate::grid::estimate_min_content_width(layout_box);
+                    if content > 0.0 {
+                        content
+                    } else {
+                        style.line_height.to_px(font_size)
+                    }
+                }
+                Axis::Vertical => style.line_height.to_px(font_size),
+            }
         }
         crate::BoxType::Text(_) => {
             // For text boxes, use line height
@@ -1166,6 +1182,48 @@ mod tests {
         let line = FlexLine::new();
         assert!(line.items.is_empty());
         assert_eq!(line.cross_size, 0.0);
+    }
+
+    #[test]
+    fn test_auto_width_item_sized_by_block_child_content() {
+        // Regression: a row-flex item with width:auto and flex-basis:auto
+        // must take its content's width (max-content contribution), not the
+        // line-height. Was: get_intrinsic_main_size returned line_height for
+        // Block boxes, so a wrapper <div> around a 150px box measured ~24px
+        // and every wrapper on the line overlapped its neighbors.
+        // (2026-07-09, macOS trench session 8, gpu-gradient-regression)
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Row;
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        // Two wrapper items, each holding an explicit 150px-wide child.
+        for _ in 0..2 {
+            let mut wrapper = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+            let mut inner_style = ComputedStyle::new();
+            inner_style.width = Length::Px(150.0);
+            inner_style.height = Length::Px(100.0);
+            wrapper.children.push(LayoutBox::new(BoxType::Block, inner_style));
+            container.children.push(wrapper);
+        }
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 760.0, 600.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        let w0 = container.children[0].dimensions.content.width;
+        let x0 = container.children[0].dimensions.content.x;
+        let x1 = container.children[1].dimensions.content.x;
+        assert!(
+            (w0 - 150.0).abs() < 0.5,
+            "wrapper item should size to its 150px child, got {w0}"
+        );
+        assert!(
+            x1 >= x0 + 150.0,
+            "second item must not overlap the first: x0={x0} x1={x1}"
+        );
     }
 
     #[test]
