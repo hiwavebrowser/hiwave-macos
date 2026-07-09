@@ -1,19 +1,19 @@
 {
-  "timestamp": "2026-07-08T07:57:29.501510",
+  "timestamp": "2026-07-09T00:24:54.076067",
   "scope": "all",
   "iterations": 1,
   "max_variance": 0.1,
-  "passed": 9,
-  "failed": 17,
+  "passed": 16,
+  "failed": 10,
   "results": [
     {
       "case_id": "new_tab",
       "type": "builtins",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 17030,
+        "diffPixels": 37441,
         "totalPixels": 1024000,
-        "diffPercent": 1.6630859375,
+        "diffPercent": 3.6563476562500004,
         "width": 1280,
         "height": 800,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/new_tab/run-1/diff.png",
@@ -1128,23 +1128,23 @@
       },
       "passed": true,
       "pixel_runs": [
-        1.6630859375
+        3.6563476562500004
       ],
-      "diff_pct_median": 1.6630859375,
-      "diff_pct_min": 1.6630859375,
-      "diff_pct_max": 1.6630859375,
+      "diff_pct_median": 3.6563476562500004,
+      "diff_pct_min": 3.6563476562500004,
+      "diff_pct_max": 3.6563476562500004,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 1.6630859375
+      "diff_pct": 3.6563476562500004
     },
     {
       "case_id": "about",
       "type": "builtins",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 26173,
+        "diffPixels": 60432,
         "totalPixels": 480000,
-        "diffPercent": 5.452708333333333,
+        "diffPercent": 12.590000000000002,
         "width": 800,
         "height": 600,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/about/run-1/diff.png",
@@ -1517,23 +1517,23 @@
       },
       "passed": true,
       "pixel_runs": [
-        5.452708333333333
+        12.590000000000002
       ],
-      "diff_pct_median": 5.452708333333333,
-      "diff_pct_min": 5.452708333333333,
-      "diff_pct_max": 5.452708333333333,
+      "diff_pct_median": 12.590000000000002,
+      "diff_pct_min": 12.590000000000002,
+      "diff_pct_max": 12.590000000000002,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 5.452708333333333
+      "diff_pct": 12.590000000000002
     },
     {
       "case_id": "settings",
       "type": "builtins",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 85938,
+        "diffPixels": 92997,
         "totalPixels": 480000,
-        "diffPercent": 17.90375,
+        "diffPercent": 19.374375,
         "width": 800,
         "height": 600,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/settings/run-1/diff.png",
@@ -2312,14 +2312,14 @@
       },
       "passed": false,
       "pixel_runs": [
-        17.90375
+        19.374375
       ],
-      "diff_pct_median": 17.90375,
-      "diff_pct_min": 17.90375,
-      "diff_pct_max": 17.90375,
+      "diff_pct_median": 19.374375,
+      "diff_pct_min": 19.374375,
+      "diff_pct_max": 19.374375,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 17.90375
+      "diff_pct": 19.374375
     },
     {
       "case_id": "chrome_rustkit",
@@ -3161,9 +3161,9 @@
       "type": "websuite",
       "threshold": 20,
       "pixel": {
-        "diffPixels": 101195,
+        "diffPixels": 110906,
         "totalPixels": 1024000,
-        "diffPercent": 9.88232421875,
+        "diffPercent": 10.8306640625,
         "width": 1280,
         "height": 800,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/article-typography/run-1/diff.png",
@@ -3619,23 +3619,23 @@
       },
       "passed": true,
       "pixel_runs": [
-        9.88232421875
+        10.8306640625
       ],
-      "diff_pct_median": 9.88232421875,
-      "diff_pct_min": 9.88232421875,
-      "diff_pct_max": 9.88232421875,
+      "diff_pct_median": 10.8306640625,
+      "diff_pct_min": 10.8306640625,
+      "diff_pct_max": 10.8306640625,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 9.88232421875
+      "diff_pct": 10.8306640625
     },
     {
       "case_id": "card-grid",
       "type": "websuite",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 380545,
+        "diffPixels": 333600,
         "totalPixels": 1024000,
-        "diffPercent": 37.16259765625,
+        "diffPercent": 32.578125,
         "width": 1280,
         "height": 800,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/card-grid/run-1/diff.png",
@@ -4498,23 +4498,23 @@
       },
       "passed": false,
       "pixel_runs": [
-        37.16259765625
+        32.578125
       ],
-      "diff_pct_median": 37.16259765625,
-      "diff_pct_min": 37.16259765625,
-      "diff_pct_max": 37.16259765625,
+      "diff_pct_median": 32.578125,
+      "diff_pct_min": 32.578125,
+      "diff_pct_max": 32.578125,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 37.16259765625
+      "diff_pct": 32.578125
     },
     {
       "case_id": "css-selectors",
       "type": "websuite",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 286382,
+        "diffPixels": 264835,
         "totalPixels": 960000,
-        "diffPercent": 29.831458333333334,
+        "diffPercent": 27.586979166666666,
         "width": 800,
         "height": 1200,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/css-selectors/run-1/diff.png",
@@ -5376,23 +5376,23 @@
       },
       "passed": false,
       "pixel_runs": [
-        29.831458333333334
+        27.586979166666666
       ],
-      "diff_pct_median": 29.831458333333334,
-      "diff_pct_min": 29.831458333333334,
-      "diff_pct_max": 29.831458333333334,
+      "diff_pct_median": 27.586979166666666,
+      "diff_pct_min": 27.586979166666666,
+      "diff_pct_max": 27.586979166666666,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 29.831458333333334
+      "diff_pct": 27.586979166666666
     },
     {
       "case_id": "flex-positioning",
       "type": "websuite",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 108789,
+        "diffPixels": 108664,
         "totalPixels": 800000,
-        "diffPercent": 13.598625,
+        "diffPercent": 13.583,
         "width": 800,
         "height": 1000,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/flex-positioning/run-1/diff.png",
@@ -6338,23 +6338,23 @@
       },
       "passed": true,
       "pixel_runs": [
-        13.598625
+        13.583
       ],
-      "diff_pct_median": 13.598625,
-      "diff_pct_min": 13.598625,
-      "diff_pct_max": 13.598625,
+      "diff_pct_median": 13.583,
+      "diff_pct_min": 13.583,
+      "diff_pct_max": 13.583,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 13.598625
+      "diff_pct": 13.583
     },
     {
       "case_id": "form-elements",
       "type": "websuite",
       "threshold": 12,
       "pixel": {
-        "diffPixels": 27943,
+        "diffPixels": 26829,
         "totalPixels": 480000,
-        "diffPercent": 5.821458333333333,
+        "diffPercent": 5.5893749999999995,
         "width": 800,
         "height": 600,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/form-elements/run-1/diff.png",
@@ -6825,23 +6825,23 @@
       },
       "passed": true,
       "pixel_runs": [
-        5.821458333333333
+        5.5893749999999995
       ],
-      "diff_pct_median": 5.821458333333333,
-      "diff_pct_min": 5.821458333333333,
-      "diff_pct_max": 5.821458333333333,
+      "diff_pct_median": 5.5893749999999995,
+      "diff_pct_min": 5.5893749999999995,
+      "diff_pct_max": 5.5893749999999995,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 5.821458333333333
+      "diff_pct": 5.5893749999999995
     },
     {
       "case_id": "gradient-backgrounds",
       "type": "websuite",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 115298,
+        "diffPixels": 64743,
         "totalPixels": 480000,
-        "diffPercent": 24.020416666666666,
+        "diffPercent": 13.488125,
         "width": 800,
         "height": 600,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/gradient-backgrounds/run-1/diff.png",
@@ -7254,25 +7254,25 @@
         "mismatched": 42,
         "differences": []
       },
-      "passed": false,
+      "passed": true,
       "pixel_runs": [
-        24.020416666666666
+        13.488125
       ],
-      "diff_pct_median": 24.020416666666666,
-      "diff_pct_min": 24.020416666666666,
-      "diff_pct_max": 24.020416666666666,
+      "diff_pct_median": 13.488125,
+      "diff_pct_min": 13.488125,
+      "diff_pct_max": 13.488125,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 24.020416666666666
+      "diff_pct": 13.488125
     },
     {
       "case_id": "image-gallery",
       "type": "websuite",
       "threshold": 10,
       "pixel": {
-        "diffPixels": 197447,
+        "diffPixels": 220927,
         "totalPixels": 1024000,
-        "diffPercent": 19.28193359375,
+        "diffPercent": 21.57490234375,
         "width": 1280,
         "height": 800,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/image-gallery/run-1/diff.png",
@@ -7924,23 +7924,23 @@
       },
       "passed": false,
       "pixel_runs": [
-        19.28193359375
+        21.57490234375
       ],
-      "diff_pct_median": 19.28193359375,
-      "diff_pct_min": 19.28193359375,
-      "diff_pct_max": 19.28193359375,
+      "diff_pct_median": 21.57490234375,
+      "diff_pct_min": 21.57490234375,
+      "diff_pct_max": 21.57490234375,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 19.28193359375
+      "diff_pct": 21.57490234375
     },
     {
       "case_id": "sticky-scroll",
       "type": "websuite",
       "threshold": 25,
       "pixel": {
-        "diffPixels": 508946,
+        "diffPixels": 493247,
         "totalPixels": 1024000,
-        "diffPercent": 49.701757812500006,
+        "diffPercent": 48.168652343750004,
         "width": 1280,
         "height": 800,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/sticky-scroll/run-1/diff.png",
@@ -8845,23 +8845,23 @@
       },
       "passed": false,
       "pixel_runs": [
-        49.701757812500006
+        48.168652343750004
       ],
-      "diff_pct_median": 49.701757812500006,
-      "diff_pct_min": 49.701757812500006,
-      "diff_pct_max": 49.701757812500006,
+      "diff_pct_median": 48.168652343750004,
+      "diff_pct_min": 48.168652343750004,
+      "diff_pct_max": 48.168652343750004,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 49.701757812500006
+      "diff_pct": 48.168652343750004
     },
     {
       "case_id": "backgrounds",
       "type": "micro",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 278029,
+        "diffPixels": 229707,
         "totalPixels": 900000,
-        "diffPercent": 30.89211111111111,
+        "diffPercent": 25.523,
         "width": 900,
         "height": 1000,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/backgrounds/run-1/diff.png",
@@ -9360,23 +9360,23 @@
       },
       "passed": false,
       "pixel_runs": [
-        30.89211111111111
+        25.523
       ],
-      "diff_pct_median": 30.89211111111111,
-      "diff_pct_min": 30.89211111111111,
-      "diff_pct_max": 30.89211111111111,
+      "diff_pct_median": 25.523,
+      "diff_pct_min": 25.523,
+      "diff_pct_max": 25.523,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 30.89211111111111
+      "diff_pct": 25.523
     },
     {
       "case_id": "bg-solid",
       "type": "micro",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 59041,
+        "diffPixels": 17465,
         "totalPixels": 300000,
-        "diffPercent": 19.680333333333333,
+        "diffPercent": 5.821666666666666,
         "width": 600,
         "height": 500,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/bg-solid/run-1/diff.png",
@@ -9704,16 +9704,16 @@
         "mismatched": 13,
         "differences": []
       },
-      "passed": false,
+      "passed": true,
       "pixel_runs": [
-        19.680333333333333
+        5.821666666666666
       ],
-      "diff_pct_median": 19.680333333333333,
-      "diff_pct_min": 19.680333333333333,
-      "diff_pct_max": 19.680333333333333,
+      "diff_pct_median": 5.821666666666666,
+      "diff_pct_min": 5.821666666666666,
+      "diff_pct_max": 5.821666666666666,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 19.680333333333333
+      "diff_pct": 5.821666666666666
     },
     {
       "case_id": "bg-pure",
@@ -10262,9 +10262,9 @@
       "type": "micro",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 98611,
+        "diffPixels": 59561,
         "totalPixels": 640000,
-        "diffPercent": 15.40796875,
+        "diffPercent": 9.30640625,
         "width": 800,
         "height": 800,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/combinators/run-1/diff.png",
@@ -10281,11 +10281,11 @@
                 "x": 0,
                 "y": 0,
                 "width": 800,
-                "height": 1514
+                "height": 1572
               },
               "diff_pixels": 138400,
               "contribution_percent": 21.625,
-              "element_diff_percent": 11.42668428005284,
+              "element_diff_percent": 11.005089058524172,
               "corner_ratio": 0.0020809248554913293,
               "likely_cause": "text_metrics"
             },
@@ -10294,7 +10294,7 @@
               "tag": "div",
               "rect": {
                 "x": 20,
-                "y": 440,
+                "y": 468,
                 "width": 760,
                 "height": 164
               },
@@ -10309,14 +10309,14 @@
               "tag": "div",
               "rect": {
                 "x": 20,
-                "y": 652,
+                "y": 686,
                 "width": 760,
                 "height": 209
               },
-              "diff_pixels": 94480,
-              "contribution_percent": 14.762500000000001,
-              "element_diff_percent": 59.48123898262403,
-              "corner_ratio": 0.003048264182895851,
+              "diff_pixels": 73590,
+              "contribution_percent": 11.4984375,
+              "element_diff_percent": 46.32963988919668,
+              "corner_ratio": 0.003913575214023644,
               "likely_cause": "text_metrics"
             },
             {
@@ -10324,7 +10324,7 @@
               "tag": "div",
               "rect": {
                 "x": 20,
-                "y": 106,
+                "y": 122,
                 "width": 760,
                 "height": 119
               },
@@ -10339,7 +10339,7 @@
               "tag": "div",
               "rect": {
                 "x": 20,
-                "y": 273,
+                "y": 295,
                 "width": 760,
                 "height": 119
               },
@@ -10356,12 +10356,12 @@
                 "x": 20,
                 "y": 20,
                 "width": 760,
-                "height": 38
+                "height": 48
               },
-              "diff_pixels": 28880,
-              "contribution_percent": 4.5125,
+              "diff_pixels": 36480,
+              "contribution_percent": 5.7,
               "element_diff_percent": 100,
-              "corner_ratio": 0.019944598337950138,
+              "corner_ratio": 0.015789473684210527,
               "likely_cause": "text_metrics"
             },
             {
@@ -10369,7 +10369,7 @@
               "tag": "div",
               "rect": {
                 "x": 32,
-                "y": 168,
+                "y": 184,
                 "width": 736,
                 "height": 40
               },
@@ -10384,7 +10384,7 @@
               "tag": "div",
               "rect": {
                 "x": 32,
-                "y": 335,
+                "y": 357,
                 "width": 736,
                 "height": 40
               },
@@ -10399,12 +10399,12 @@
               "tag": "h2",
               "rect": {
                 "x": 20,
-                "y": 78,
+                "y": 88,
                 "width": 760,
-                "height": 18
+                "height": 24
               },
-              "diff_pixels": 13680,
-              "contribution_percent": 2.1375,
+              "diff_pixels": 18240,
+              "contribution_percent": 2.85,
               "element_diff_percent": 100,
               "corner_ratio": 0.031578947368421054,
               "likely_cause": "text_metrics"
@@ -10414,12 +10414,12 @@
               "tag": "h2",
               "rect": {
                 "x": 20,
-                "y": 245,
+                "y": 261,
                 "width": 760,
-                "height": 18
+                "height": 24
               },
-              "diff_pixels": 13680,
-              "contribution_percent": 2.1375,
+              "diff_pixels": 18240,
+              "contribution_percent": 2.85,
               "element_diff_percent": 100,
               "corner_ratio": 0.031578947368421054,
               "likely_cause": "text_metrics"
@@ -10433,11 +10433,11 @@
                 "x": 0,
                 "y": 0,
                 "width": 800,
-                "height": 1514
+                "height": 1572
               },
               "diff_pixels": 138400,
               "contribution_percent": 21.625,
-              "element_diff_percent": 11.42668428005284,
+              "element_diff_percent": 11.005089058524172,
               "corner_ratio": 0.0020809248554913293,
               "likely_cause": "text_metrics"
             },
@@ -10446,7 +10446,7 @@
               "tag": "div",
               "rect": {
                 "x": 20,
-                "y": 440,
+                "y": 468,
                 "width": 760,
                 "height": 164
               },
@@ -10461,14 +10461,14 @@
               "tag": "div",
               "rect": {
                 "x": 20,
-                "y": 652,
+                "y": 686,
                 "width": 760,
                 "height": 209
               },
-              "diff_pixels": 94480,
-              "contribution_percent": 14.762500000000001,
-              "element_diff_percent": 59.48123898262403,
-              "corner_ratio": 0.003048264182895851,
+              "diff_pixels": 73590,
+              "contribution_percent": 11.4984375,
+              "element_diff_percent": 46.32963988919668,
+              "corner_ratio": 0.003913575214023644,
               "likely_cause": "text_metrics"
             },
             {
@@ -10476,7 +10476,7 @@
               "tag": "div",
               "rect": {
                 "x": 20,
-                "y": 106,
+                "y": 122,
                 "width": 760,
                 "height": 119
               },
@@ -10491,7 +10491,7 @@
               "tag": "div",
               "rect": {
                 "x": 20,
-                "y": 273,
+                "y": 295,
                 "width": 760,
                 "height": 119
               },
@@ -10508,12 +10508,12 @@
                 "x": 20,
                 "y": 20,
                 "width": 760,
-                "height": 38
+                "height": 48
               },
-              "diff_pixels": 28880,
-              "contribution_percent": 4.5125,
+              "diff_pixels": 36480,
+              "contribution_percent": 5.7,
               "element_diff_percent": 100,
-              "corner_ratio": 0.019944598337950138,
+              "corner_ratio": 0.015789473684210527,
               "likely_cause": "text_metrics"
             },
             {
@@ -10521,7 +10521,7 @@
               "tag": "div",
               "rect": {
                 "x": 32,
-                "y": 168,
+                "y": 184,
                 "width": 736,
                 "height": 40
               },
@@ -10536,7 +10536,7 @@
               "tag": "div",
               "rect": {
                 "x": 32,
-                "y": 335,
+                "y": 357,
                 "width": 736,
                 "height": 40
               },
@@ -10551,12 +10551,12 @@
               "tag": "h2",
               "rect": {
                 "x": 20,
-                "y": 78,
+                "y": 88,
                 "width": 760,
-                "height": 18
+                "height": 24
               },
-              "diff_pixels": 13680,
-              "contribution_percent": 2.1375,
+              "diff_pixels": 18240,
+              "contribution_percent": 2.85,
               "element_diff_percent": 100,
               "corner_ratio": 0.031578947368421054,
               "likely_cause": "text_metrics"
@@ -10566,12 +10566,12 @@
               "tag": "h2",
               "rect": {
                 "x": 20,
-                "y": 245,
+                "y": 261,
                 "width": 760,
-                "height": 18
+                "height": 24
               },
-              "diff_pixels": 13680,
-              "contribution_percent": 2.1375,
+              "diff_pixels": 18240,
+              "contribution_percent": 2.85,
               "element_diff_percent": 100,
               "corner_ratio": 0.031578947368421054,
               "likely_cause": "text_metrics"
@@ -10581,12 +10581,12 @@
               "tag": "h2",
               "rect": {
                 "x": 20,
-                "y": 412,
+                "y": 434,
                 "width": 760,
-                "height": 18
+                "height": 24
               },
-              "diff_pixels": 13680,
-              "contribution_percent": 2.1375,
+              "diff_pixels": 18240,
+              "contribution_percent": 2.85,
               "element_diff_percent": 100,
               "corner_ratio": 0.031578947368421054
             },
@@ -10595,12 +10595,12 @@
               "tag": "h2",
               "rect": {
                 "x": 20,
-                "y": 624,
+                "y": 652,
                 "width": 760,
-                "height": 18
+                "height": 24
               },
-              "diff_pixels": 13680,
-              "contribution_percent": 2.1375,
+              "diff_pixels": 18240,
+              "contribution_percent": 2.85,
               "element_diff_percent": 100,
               "corner_ratio": 0.031578947368421054
             },
@@ -10609,7 +10609,7 @@
               "tag": "div",
               "rect": {
                 "x": 37,
-                "y": 123,
+                "y": 139,
                 "width": 150,
                 "height": 40
               },
@@ -10623,7 +10623,7 @@
               "tag": "div",
               "rect": {
                 "x": 37,
-                "y": 168,
+                "y": 184,
                 "width": 150,
                 "height": 40
               },
@@ -10637,7 +10637,7 @@
               "tag": "div",
               "rect": {
                 "x": 37,
-                "y": 290,
+                "y": 312,
                 "width": 150,
                 "height": 40
               },
@@ -10651,7 +10651,7 @@
               "tag": "div",
               "rect": {
                 "x": 37,
-                "y": 335,
+                "y": 357,
                 "width": 150,
                 "height": 40
               },
@@ -10665,7 +10665,7 @@
               "tag": "div",
               "rect": {
                 "x": 37,
-                "y": 457,
+                "y": 485,
                 "width": 150,
                 "height": 40
               },
@@ -10679,7 +10679,7 @@
               "tag": "div",
               "rect": {
                 "x": 37,
-                "y": 502,
+                "y": 530,
                 "width": 150,
                 "height": 40
               },
@@ -10693,7 +10693,7 @@
               "tag": "div",
               "rect": {
                 "x": 37,
-                "y": 547,
+                "y": 575,
                 "width": 150,
                 "height": 40
               },
@@ -10707,7 +10707,7 @@
               "tag": "div",
               "rect": {
                 "x": 37,
-                "y": 669,
+                "y": 703,
                 "width": 150,
                 "height": 40
               },
@@ -10721,7 +10721,7 @@
               "tag": "div",
               "rect": {
                 "x": 37,
-                "y": 714,
+                "y": 748,
                 "width": 150,
                 "height": 40
               },
@@ -10735,19 +10735,19 @@
               "tag": "div",
               "rect": {
                 "x": 37,
-                "y": 759,
+                "y": 793,
                 "width": 150,
                 "height": 40
               },
-              "diff_pixels": 6000,
-              "contribution_percent": 0.9375,
-              "element_diff_percent": 100,
-              "corner_ratio": 0.096
+              "diff_pixels": 1050,
+              "contribution_percent": 0.1640625,
+              "element_diff_percent": 17.5,
+              "corner_ratio": 0.16
             }
           ]
         },
         "taxonomy": {
-          "text_metrics": 86.35
+          "text_metrics": 85.69843749999997
         }
       },
       "styles": {
@@ -10760,25 +10760,25 @@
         "mismatched": 41,
         "differences": []
       },
-      "passed": false,
+      "passed": true,
       "pixel_runs": [
-        15.40796875
+        9.30640625
       ],
-      "diff_pct_median": 15.40796875,
-      "diff_pct_min": 15.40796875,
-      "diff_pct_max": 15.40796875,
+      "diff_pct_median": 9.30640625,
+      "diff_pct_min": 9.30640625,
+      "diff_pct_max": 9.30640625,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 15.40796875
+      "diff_pct": 9.30640625
     },
     {
       "case_id": "form-controls",
       "type": "micro",
       "threshold": 12,
       "pixel": {
-        "diffPixels": 74368,
+        "diffPixels": 74813,
         "totalPixels": 960000,
-        "diffPercent": 7.746666666666667,
+        "diffPercent": 7.793020833333333,
         "width": 800,
         "height": 1200,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/form-controls/run-1/diff.png",
@@ -11822,23 +11822,23 @@
       },
       "passed": true,
       "pixel_runs": [
-        7.746666666666667
+        7.793020833333333
       ],
-      "diff_pct_median": 7.746666666666667,
-      "diff_pct_min": 7.746666666666667,
-      "diff_pct_max": 7.746666666666667,
+      "diff_pct_median": 7.793020833333333,
+      "diff_pct_min": 7.793020833333333,
+      "diff_pct_max": 7.793020833333333,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 7.746666666666667
+      "diff_pct": 7.793020833333333
     },
     {
       "case_id": "gradients",
       "type": "micro",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 204845,
+        "diffPixels": 101421,
         "totalPixels": 900000,
-        "diffPercent": 22.760555555555555,
+        "diffPercent": 11.269,
         "width": 900,
         "height": 1000,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/gradients/run-1/diff.png",
@@ -12321,25 +12321,25 @@
         "mismatched": 41,
         "differences": []
       },
-      "passed": false,
+      "passed": true,
       "pixel_runs": [
-        22.760555555555555
+        11.269
       ],
-      "diff_pct_median": 22.760555555555555,
-      "diff_pct_min": 22.760555555555555,
-      "diff_pct_max": 22.760555555555555,
+      "diff_pct_median": 11.269,
+      "diff_pct_min": 11.269,
+      "diff_pct_max": 11.269,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 22.760555555555555
+      "diff_pct": 11.269
     },
     {
       "case_id": "gradient-no-radius",
       "type": "micro",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 116582,
+        "diffPixels": 66590,
         "totalPixels": 480000,
-        "diffPercent": 24.287916666666668,
+        "diffPercent": 13.872916666666665,
         "width": 800,
         "height": 600,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/gradient-no-radius/run-1/diff.png",
@@ -12356,11 +12356,11 @@
                 "x": 0,
                 "y": 0,
                 "width": 800,
-                "height": 1546
+                "height": 1577.5625
               },
               "diff_pixels": 105600,
               "contribution_percent": 22,
-              "element_diff_percent": 8.538163001293661,
+              "element_diff_percent": 8.367338853452717,
               "corner_ratio": 0.0027272727272727275,
               "likely_cause": "text_metrics"
             },
@@ -12369,14 +12369,29 @@
               "tag": "div",
               "rect": {
                 "x": 40,
-                "y": 118,
+                "y": 128,
                 "width": 720,
-                "height": 1388
+                "height": 1409.5625
               },
-              "diff_pixels": 64800,
-              "contribution_percent": 13.5,
-              "element_diff_percent": 6.484149855907781,
+              "diff_pixels": 54000,
+              "contribution_percent": 11.25,
+              "element_diff_percent": 5.320799893584002,
               "corner_ratio": 0,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.grid > h3.section-header:nth-of-type(1)",
+              "tag": "h3",
+              "rect": {
+                "x": 40,
+                "y": 128,
+                "width": 720,
+                "height": 57.390625
+              },
+              "diff_pixels": 41040,
+              "contribution_percent": 8.55,
+              "element_diff_percent": 99.31935747345494,
+              "corner_ratio": 0.014035087719298246,
               "likely_cause": "text_metrics"
             },
             {
@@ -12384,14 +12399,14 @@
               "tag": "div",
               "rect": {
                 "x": 286.65625,
-                "y": 400,
+                "y": 415.390625,
                 "width": 226.671875,
                 "height": 180
               },
-              "diff_pixels": 37880,
-              "contribution_percent": 7.891666666666667,
-              "element_diff_percent": 92.8410039597742,
-              "corner_ratio": 0.015205913410770855,
+              "diff_pixels": 37480,
+              "contribution_percent": 7.808333333333334,
+              "element_diff_percent": 91.86063432978715,
+              "corner_ratio": 0.01536819637139808,
               "likely_cause": "gradient_interpolation"
             },
             {
@@ -12399,14 +12414,14 @@
               "tag": "div",
               "rect": {
                 "x": 40,
-                "y": 200,
+                "y": 215.390625,
                 "width": 226.65625,
                 "height": 180
               },
-              "diff_pixels": 37640,
-              "contribution_percent": 7.841666666666666,
-              "element_diff_percent": 92.25914181105136,
-              "corner_ratio": 0.015302869287991499,
+              "diff_pixels": 37180,
+              "contribution_percent": 7.745833333333334,
+              "element_diff_percent": 91.13163901527336,
+              "corner_ratio": 0.015492200107584723,
               "likely_cause": "gradient_interpolation"
             },
             {
@@ -12414,67 +12429,7 @@
               "tag": "div",
               "rect": {
                 "x": 533.328125,
-                "y": 200,
-                "width": 226.671875,
-                "height": 180
-              },
-              "diff_pixels": 37444,
-              "contribution_percent": 7.800833333333333,
-              "element_diff_percent": 91.77240106308831,
-              "corner_ratio": 0.015382971904711036,
-              "likely_cause": "gradient_interpolation"
-            },
-            {
-              "selector": "body > div.grid > h3.section-header:nth-of-type(1)",
-              "tag": "h3",
-              "rect": {
-                "x": 40,
-                "y": 118,
-                "width": 720,
-                "height": 52
-              },
-              "diff_pixels": 37440,
-              "contribution_percent": 7.8,
-              "element_diff_percent": 100,
-              "corner_ratio": 0.015384615384615385,
-              "likely_cause": "text_metrics"
-            },
-            {
-              "selector": "body > div.grid > div.gradient-box linear-4:nth-of-type(4)",
-              "tag": "div",
-              "rect": {
-                "x": 40,
-                "y": 400,
-                "width": 226.65625,
-                "height": 180
-              },
-              "diff_pixels": 37332,
-              "contribution_percent": 7.7775,
-              "element_diff_percent": 91.50420515648698,
-              "corner_ratio": 0.015429122468659595,
-              "likely_cause": "gradient_interpolation"
-            },
-            {
-              "selector": "body > div.grid > div.gradient-box linear-6:nth-of-type(6)",
-              "tag": "div",
-              "rect": {
-                "x": 533.328125,
-                "y": 400,
-                "width": 226.671875,
-                "height": 180
-              },
-              "diff_pixels": 37248,
-              "contribution_percent": 7.76,
-              "element_diff_percent": 91.29201994439467,
-              "corner_ratio": 0.015463917525773196,
-              "likely_cause": "gradient_interpolation"
-            },
-            {
-              "selector": "body > div.grid > div.gradient-box linear-2:nth-of-type(2)",
-              "tag": "div",
-              "rect": {
-                "x": 286.65625,
-                "y": 200,
+                "y": 215.390625,
                 "width": 226.671875,
                 "height": 180
               },
@@ -12485,18 +12440,63 @@
               "likely_cause": "gradient_interpolation"
             },
             {
+              "selector": "body > div.grid > div.gradient-box linear-4:nth-of-type(4)",
+              "tag": "div",
+              "rect": {
+                "x": 40,
+                "y": 415.390625,
+                "width": 226.65625,
+                "height": 180
+              },
+              "diff_pixels": 36828,
+              "contribution_percent": 7.6725,
+              "element_diff_percent": 90.26885426719979,
+              "corner_ratio": 0.015640273704789834,
+              "likely_cause": "gradient_interpolation"
+            },
+            {
+              "selector": "body > div.grid > div.gradient-box linear-6:nth-of-type(6)",
+              "tag": "div",
+              "rect": {
+                "x": 533.328125,
+                "y": 415.390625,
+                "width": 226.671875,
+                "height": 180
+              },
+              "diff_pixels": 36732,
+              "contribution_percent": 7.6525,
+              "element_diff_percent": 90.02734312171135,
+              "corner_ratio": 0.015681149950996405,
+              "likely_cause": "gradient_interpolation"
+            },
+            {
+              "selector": "body > div.grid > div.gradient-box linear-2:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 286.65625,
+                "y": 215.390625,
+                "width": 226.671875,
+                "height": 180
+              },
+              "diff_pixels": 36424,
+              "contribution_percent": 7.588333333333333,
+              "element_diff_percent": 89.27245850662132,
+              "corner_ratio": 0.015813749176367232,
+              "likely_cause": "gradient_interpolation"
+            },
+            {
               "selector": "body > h1",
               "tag": "h1",
               "rect": {
                 "x": 40,
                 "y": 40,
                 "width": 720,
-                "height": 38
+                "height": 48
               },
-              "diff_pixels": 27360,
-              "contribution_percent": 5.7,
+              "diff_pixels": 34560,
+              "contribution_percent": 7.199999999999999,
               "element_diff_percent": 100,
-              "corner_ratio": 0.021052631578947368,
+              "corner_ratio": 0.016666666666666666,
               "likely_cause": "text_metrics"
             }
           ],
@@ -12508,11 +12508,11 @@
                 "x": 0,
                 "y": 0,
                 "width": 800,
-                "height": 1546
+                "height": 1577.5625
               },
               "diff_pixels": 105600,
               "contribution_percent": 22,
-              "element_diff_percent": 8.538163001293661,
+              "element_diff_percent": 8.367338853452717,
               "corner_ratio": 0.0027272727272727275,
               "likely_cause": "text_metrics"
             },
@@ -12521,14 +12521,29 @@
               "tag": "div",
               "rect": {
                 "x": 40,
-                "y": 118,
+                "y": 128,
                 "width": 720,
-                "height": 1388
+                "height": 1409.5625
               },
-              "diff_pixels": 64800,
-              "contribution_percent": 13.5,
-              "element_diff_percent": 6.484149855907781,
+              "diff_pixels": 54000,
+              "contribution_percent": 11.25,
+              "element_diff_percent": 5.320799893584002,
               "corner_ratio": 0,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.grid > h3.section-header:nth-of-type(1)",
+              "tag": "h3",
+              "rect": {
+                "x": 40,
+                "y": 128,
+                "width": 720,
+                "height": 57.390625
+              },
+              "diff_pixels": 41040,
+              "contribution_percent": 8.55,
+              "element_diff_percent": 99.31935747345494,
+              "corner_ratio": 0.014035087719298246,
               "likely_cause": "text_metrics"
             },
             {
@@ -12536,14 +12551,14 @@
               "tag": "div",
               "rect": {
                 "x": 286.65625,
-                "y": 400,
+                "y": 415.390625,
                 "width": 226.671875,
                 "height": 180
               },
-              "diff_pixels": 37880,
-              "contribution_percent": 7.891666666666667,
-              "element_diff_percent": 92.8410039597742,
-              "corner_ratio": 0.015205913410770855,
+              "diff_pixels": 37480,
+              "contribution_percent": 7.808333333333334,
+              "element_diff_percent": 91.86063432978715,
+              "corner_ratio": 0.01536819637139808,
               "likely_cause": "gradient_interpolation"
             },
             {
@@ -12551,14 +12566,14 @@
               "tag": "div",
               "rect": {
                 "x": 40,
-                "y": 200,
+                "y": 215.390625,
                 "width": 226.65625,
                 "height": 180
               },
-              "diff_pixels": 37640,
-              "contribution_percent": 7.841666666666666,
-              "element_diff_percent": 92.25914181105136,
-              "corner_ratio": 0.015302869287991499,
+              "diff_pixels": 37180,
+              "contribution_percent": 7.745833333333334,
+              "element_diff_percent": 91.13163901527336,
+              "corner_ratio": 0.015492200107584723,
               "likely_cause": "gradient_interpolation"
             },
             {
@@ -12566,67 +12581,7 @@
               "tag": "div",
               "rect": {
                 "x": 533.328125,
-                "y": 200,
-                "width": 226.671875,
-                "height": 180
-              },
-              "diff_pixels": 37444,
-              "contribution_percent": 7.800833333333333,
-              "element_diff_percent": 91.77240106308831,
-              "corner_ratio": 0.015382971904711036,
-              "likely_cause": "gradient_interpolation"
-            },
-            {
-              "selector": "body > div.grid > h3.section-header:nth-of-type(1)",
-              "tag": "h3",
-              "rect": {
-                "x": 40,
-                "y": 118,
-                "width": 720,
-                "height": 52
-              },
-              "diff_pixels": 37440,
-              "contribution_percent": 7.8,
-              "element_diff_percent": 100,
-              "corner_ratio": 0.015384615384615385,
-              "likely_cause": "text_metrics"
-            },
-            {
-              "selector": "body > div.grid > div.gradient-box linear-4:nth-of-type(4)",
-              "tag": "div",
-              "rect": {
-                "x": 40,
-                "y": 400,
-                "width": 226.65625,
-                "height": 180
-              },
-              "diff_pixels": 37332,
-              "contribution_percent": 7.7775,
-              "element_diff_percent": 91.50420515648698,
-              "corner_ratio": 0.015429122468659595,
-              "likely_cause": "gradient_interpolation"
-            },
-            {
-              "selector": "body > div.grid > div.gradient-box linear-6:nth-of-type(6)",
-              "tag": "div",
-              "rect": {
-                "x": 533.328125,
-                "y": 400,
-                "width": 226.671875,
-                "height": 180
-              },
-              "diff_pixels": 37248,
-              "contribution_percent": 7.76,
-              "element_diff_percent": 91.29201994439467,
-              "corner_ratio": 0.015463917525773196,
-              "likely_cause": "gradient_interpolation"
-            },
-            {
-              "selector": "body > div.grid > div.gradient-box linear-2:nth-of-type(2)",
-              "tag": "div",
-              "rect": {
-                "x": 286.65625,
-                "y": 200,
+                "y": 215.390625,
                 "width": 226.671875,
                 "height": 180
               },
@@ -12637,18 +12592,63 @@
               "likely_cause": "gradient_interpolation"
             },
             {
+              "selector": "body > div.grid > div.gradient-box linear-4:nth-of-type(4)",
+              "tag": "div",
+              "rect": {
+                "x": 40,
+                "y": 415.390625,
+                "width": 226.65625,
+                "height": 180
+              },
+              "diff_pixels": 36828,
+              "contribution_percent": 7.6725,
+              "element_diff_percent": 90.26885426719979,
+              "corner_ratio": 0.015640273704789834,
+              "likely_cause": "gradient_interpolation"
+            },
+            {
+              "selector": "body > div.grid > div.gradient-box linear-6:nth-of-type(6)",
+              "tag": "div",
+              "rect": {
+                "x": 533.328125,
+                "y": 415.390625,
+                "width": 226.671875,
+                "height": 180
+              },
+              "diff_pixels": 36732,
+              "contribution_percent": 7.6525,
+              "element_diff_percent": 90.02734312171135,
+              "corner_ratio": 0.015681149950996405,
+              "likely_cause": "gradient_interpolation"
+            },
+            {
+              "selector": "body > div.grid > div.gradient-box linear-2:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 286.65625,
+                "y": 215.390625,
+                "width": 226.671875,
+                "height": 180
+              },
+              "diff_pixels": 36424,
+              "contribution_percent": 7.588333333333333,
+              "element_diff_percent": 89.27245850662132,
+              "corner_ratio": 0.015813749176367232,
+              "likely_cause": "gradient_interpolation"
+            },
+            {
               "selector": "body > h1",
               "tag": "h1",
               "rect": {
                 "x": 40,
                 "y": 40,
                 "width": 720,
-                "height": 38
+                "height": 48
               },
-              "diff_pixels": 27360,
-              "contribution_percent": 5.7,
+              "diff_pixels": 34560,
+              "contribution_percent": 7.199999999999999,
               "element_diff_percent": 100,
-              "corner_ratio": 0.021052631578947368,
+              "corner_ratio": 0.016666666666666666,
               "likely_cause": "text_metrics"
             },
             {
@@ -12656,90 +12656,90 @@
               "tag": "span",
               "rect": {
                 "x": 302.65625,
-                "y": 336,
+                "y": 347,
                 "width": 133.375,
-                "height": 28
+                "height": 32.390625
               },
-              "diff_pixels": 3724,
-              "contribution_percent": 0.7758333333333334,
-              "element_diff_percent": 99.71883786316776,
-              "corner_ratio": 0.15467239527389903
+              "diff_pixels": 4256,
+              "contribution_percent": 0.8866666666666667,
+              "element_diff_percent": 98.51624695791972,
+              "corner_ratio": 0.13533834586466165
             },
             {
               "selector": "body > div.grid > div.gradient-box linear-6:nth-of-type(6) > span",
               "tag": "span",
               "rect": {
                 "x": 549.328125,
-                "y": 536,
+                "y": 547,
                 "width": 128.484375,
-                "height": 28
+                "height": 32.390625
               },
-              "diff_pixels": 3612,
-              "contribution_percent": 0.7525,
-              "element_diff_percent": 100.40131338927398,
-              "corner_ratio": 0.15946843853820597
+              "diff_pixels": 4128,
+              "contribution_percent": 0.86,
+              "element_diff_percent": 99.19049195428515,
+              "corner_ratio": 0.13953488372093023
             },
             {
               "selector": "body > div.grid > div.gradient-box linear-4:nth-of-type(4) > span",
               "tag": "span",
               "rect": {
                 "x": 56,
-                "y": 536,
+                "y": 547,
                 "width": 125.671875,
-                "height": 28
+                "height": 32.390625
               },
-              "diff_pixels": 3528,
-              "contribution_percent": 0.735,
-              "element_diff_percent": 100.26109660574411,
-              "corner_ratio": 0.16326530612244897
+              "diff_pixels": 4032,
+              "contribution_percent": 0.84,
+              "element_diff_percent": 99.05196615946164,
+              "corner_ratio": 0.14285714285714285
             },
             {
               "selector": "body > div.grid > div.gradient-box linear-3:nth-of-type(3) > span",
               "tag": "span",
               "rect": {
                 "x": 549.328125,
-                "y": 336,
+                "y": 347,
                 "width": 121.1875,
-                "height": 28
+                "height": 32.390625
               },
-              "diff_pixels": 3416,
-              "contribution_percent": 0.7116666666666667,
-              "element_diff_percent": 100.67044868488912,
-              "corner_ratio": 0.1686182669789227
+              "diff_pixels": 3904,
+              "contribution_percent": 0.8133333333333332,
+              "element_diff_percent": 99.45638152757014,
+              "corner_ratio": 0.14754098360655737
             },
             {
               "selector": "body > div.grid > div.gradient-box linear-1:nth-of-type(1) > span",
               "tag": "span",
               "rect": {
                 "x": 56,
-                "y": 336,
+                "y": 347,
                 "width": 115.328125,
-                "height": 28
+                "height": 32.390625
               },
-              "diff_pixels": 3220,
-              "contribution_percent": 0.6708333333333334,
-              "element_diff_percent": 99.71548570654383,
-              "corner_ratio": 0.17888198757763976
+              "diff_pixels": 3680,
+              "contribution_percent": 0.7666666666666666,
+              "element_diff_percent": 98.51293522769019,
+              "corner_ratio": 0.1565217391304348
             },
             {
               "selector": "body > div.grid > div.gradient-box linear-5:nth-of-type(5) > span",
               "tag": "span",
               "rect": {
                 "x": 302.65625,
-                "y": 536,
+                "y": 547,
                 "width": 100.5,
-                "height": 28
+                "height": 32.390625
               },
-              "diff_pixels": 2800,
-              "contribution_percent": 0.5833333333333334,
-              "element_diff_percent": 99.50248756218906,
-              "corner_ratio": 0.2057142857142857
+              "diff_pixels": 3200,
+              "contribution_percent": 0.6666666666666667,
+              "element_diff_percent": 98.3025058019118,
+              "corner_ratio": 0.18
             }
           ]
         },
         "taxonomy": {
           "text_metrics": 49,
-          "gradient_interpolation": 46.77083333333333
+          "gradient_interpolation": 46.166666666666664
         }
       },
       "styles": {
@@ -12752,25 +12752,25 @@
         "mismatched": 35,
         "differences": []
       },
-      "passed": false,
+      "passed": true,
       "pixel_runs": [
-        24.287916666666668
+        13.872916666666665
       ],
-      "diff_pct_median": 24.287916666666668,
-      "diff_pct_min": 24.287916666666668,
-      "diff_pct_max": 24.287916666666668,
+      "diff_pct_median": 13.872916666666665,
+      "diff_pct_min": 13.872916666666665,
+      "diff_pct_max": 13.872916666666665,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 24.287916666666668
+      "diff_pct": 13.872916666666665
     },
     {
       "case_id": "gradient-radius-only",
       "type": "micro",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 101539,
+        "diffPixels": 51108,
         "totalPixels": 480000,
-        "diffPercent": 21.153958333333335,
+        "diffPercent": 10.6475,
         "width": 800,
         "height": 600,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/gradient-radius-only/run-1/diff.png",
@@ -12787,11 +12787,11 @@
                 "x": 0,
                 "y": 0,
                 "width": 800,
-                "height": 1464
+                "height": 1490.171875
               },
               "diff_pixels": 105600,
               "contribution_percent": 22,
-              "element_diff_percent": 9.01639344262295,
+              "element_diff_percent": 8.858038607123758,
               "corner_ratio": 0.0027272727272727275,
               "likely_cause": "text_metrics"
             },
@@ -12800,104 +12800,14 @@
               "tag": "div",
               "rect": {
                 "x": 40,
-                "y": 118,
+                "y": 128,
                 "width": 720,
-                "height": 1306
+                "height": 1322.171875
               },
-              "diff_pixels": 64800,
-              "contribution_percent": 13.5,
-              "element_diff_percent": 6.891271056661561,
+              "diff_pixels": 54000,
+              "contribution_percent": 11.25,
+              "element_diff_percent": 5.672484902917784,
               "corner_ratio": 0,
-              "likely_cause": "text_metrics"
-            },
-            {
-              "selector": "body > div.grid > div.box color-3:nth-of-type(3)",
-              "tag": "div",
-              "rect": {
-                "x": 533.328125,
-                "y": 200,
-                "width": 226.671875,
-                "height": 180
-              },
-              "diff_pixels": 39432,
-              "contribution_percent": 8.215,
-              "element_diff_percent": 96.64483812412399,
-              "corner_ratio": 0.014607425441265977,
-              "likely_cause": "text_metrics"
-            },
-            {
-              "selector": "body > div.grid > div.box color-4:nth-of-type(4)",
-              "tag": "div",
-              "rect": {
-                "x": 40,
-                "y": 400,
-                "width": 226.65625,
-                "height": 180
-              },
-              "diff_pixels": 39152,
-              "contribution_percent": 8.156666666666666,
-              "element_diff_percent": 95.96519447891293,
-              "corner_ratio": 0.014711892112791173,
-              "likely_cause": "text_metrics"
-            },
-            {
-              "selector": "body > div.grid > div.box color-5:nth-of-type(5)",
-              "tag": "div",
-              "rect": {
-                "x": 286.65625,
-                "y": 400,
-                "width": 226.671875,
-                "height": 180
-              },
-              "diff_pixels": 39140,
-              "contribution_percent": 8.154166666666667,
-              "element_diff_percent": 95.92916829423343,
-              "corner_ratio": 0.014716402657128258,
-              "likely_cause": "text_metrics"
-            },
-            {
-              "selector": "body > div.grid > div.box color-6:nth-of-type(6)",
-              "tag": "div",
-              "rect": {
-                "x": 533.328125,
-                "y": 400,
-                "width": 226.671875,
-                "height": 180
-              },
-              "diff_pixels": 39068,
-              "contribution_percent": 8.139166666666666,
-              "element_diff_percent": 95.75270176083576,
-              "corner_ratio": 0.014743524111805057,
-              "likely_cause": "text_metrics"
-            },
-            {
-              "selector": "body > div.grid > div.box color-1:nth-of-type(1)",
-              "tag": "div",
-              "rect": {
-                "x": 40,
-                "y": 200,
-                "width": 226.65625,
-                "height": 180
-              },
-              "diff_pixels": 38760,
-              "contribution_percent": 8.075000000000001,
-              "element_diff_percent": 95.00436600946735,
-              "corner_ratio": 0.014860681114551083,
-              "likely_cause": "text_metrics"
-            },
-            {
-              "selector": "body > div.grid > div.box color-2:nth-of-type(2)",
-              "tag": "div",
-              "rect": {
-                "x": 286.65625,
-                "y": 200,
-                "width": 226.671875,
-                "height": 180
-              },
-              "diff_pixels": 38552,
-              "contribution_percent": 8.031666666666666,
-              "element_diff_percent": 94.48802493815246,
-              "corner_ratio": 0.014940859099398216,
               "likely_cause": "text_metrics"
             },
             {
@@ -12905,14 +12815,104 @@
               "tag": "h3",
               "rect": {
                 "x": 40,
-                "y": 118,
+                "y": 128,
                 "width": 720,
-                "height": 52
+                "height": 57.390625
               },
-              "diff_pixels": 37440,
-              "contribution_percent": 7.8,
-              "element_diff_percent": 100,
-              "corner_ratio": 0.015384615384615385,
+              "diff_pixels": 41040,
+              "contribution_percent": 8.55,
+              "element_diff_percent": 99.31935747345494,
+              "corner_ratio": 0.014035087719298246,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.grid > div.box color-3:nth-of-type(3)",
+              "tag": "div",
+              "rect": {
+                "x": 533.328125,
+                "y": 215.390625,
+                "width": 226.671875,
+                "height": 180
+              },
+              "diff_pixels": 39228,
+              "contribution_percent": 8.172500000000001,
+              "element_diff_percent": 96.14484961283058,
+              "corner_ratio": 0.014683389415723462,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.grid > div.box color-5:nth-of-type(5)",
+              "tag": "div",
+              "rect": {
+                "x": 286.65625,
+                "y": 415.390625,
+                "width": 226.671875,
+                "height": 180
+              },
+              "diff_pixels": 38920,
+              "contribution_percent": 8.108333333333333,
+              "element_diff_percent": 95.38996499774055,
+              "corner_ratio": 0.014799588900308325,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.grid > div.box color-4:nth-of-type(4)",
+              "tag": "div",
+              "rect": {
+                "x": 40,
+                "y": 415.390625,
+                "width": 226.65625,
+                "height": 180
+              },
+              "diff_pixels": 38908,
+              "contribution_percent": 8.105833333333333,
+              "element_diff_percent": 95.36712777854375,
+              "corner_ratio": 0.014804153387478154,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.grid > div.box color-6:nth-of-type(6)",
+              "tag": "div",
+              "rect": {
+                "x": 533.328125,
+                "y": 415.390625,
+                "width": 226.671875,
+                "height": 180
+              },
+              "diff_pixels": 38812,
+              "contribution_percent": 8.085833333333333,
+              "element_diff_percent": 95.12526519764405,
+              "corner_ratio": 0.0148407708955993,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.grid > div.box color-1:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 40,
+                "y": 215.390625,
+                "width": 226.65625,
+                "height": 180
+              },
+              "diff_pixels": 38460,
+              "contribution_percent": 8.0125,
+              "element_diff_percent": 94.26903809917735,
+              "corner_ratio": 0.01497659906396256,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.grid > div.box color-2:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 286.65625,
+                "y": 215.390625,
+                "width": 226.671875,
+                "height": 180
+              },
+              "diff_pixels": 38248,
+              "contribution_percent": 7.968333333333333,
+              "element_diff_percent": 93.7429440193623,
+              "corner_ratio": 0.015059610960050198,
               "likely_cause": "text_metrics"
             },
             {
@@ -12922,12 +12922,12 @@
                 "x": 40,
                 "y": 40,
                 "width": 720,
-                "height": 38
+                "height": 48
               },
-              "diff_pixels": 27360,
-              "contribution_percent": 5.7,
+              "diff_pixels": 34560,
+              "contribution_percent": 7.199999999999999,
               "element_diff_percent": 100,
-              "corner_ratio": 0.021052631578947368,
+              "corner_ratio": 0.016666666666666666,
               "likely_cause": "text_metrics"
             }
           ],
@@ -12939,11 +12939,11 @@
                 "x": 0,
                 "y": 0,
                 "width": 800,
-                "height": 1464
+                "height": 1490.171875
               },
               "diff_pixels": 105600,
               "contribution_percent": 22,
-              "element_diff_percent": 9.01639344262295,
+              "element_diff_percent": 8.858038607123758,
               "corner_ratio": 0.0027272727272727275,
               "likely_cause": "text_metrics"
             },
@@ -12952,104 +12952,14 @@
               "tag": "div",
               "rect": {
                 "x": 40,
-                "y": 118,
+                "y": 128,
                 "width": 720,
-                "height": 1306
+                "height": 1322.171875
               },
-              "diff_pixels": 64800,
-              "contribution_percent": 13.5,
-              "element_diff_percent": 6.891271056661561,
+              "diff_pixels": 54000,
+              "contribution_percent": 11.25,
+              "element_diff_percent": 5.672484902917784,
               "corner_ratio": 0,
-              "likely_cause": "text_metrics"
-            },
-            {
-              "selector": "body > div.grid > div.box color-3:nth-of-type(3)",
-              "tag": "div",
-              "rect": {
-                "x": 533.328125,
-                "y": 200,
-                "width": 226.671875,
-                "height": 180
-              },
-              "diff_pixels": 39432,
-              "contribution_percent": 8.215,
-              "element_diff_percent": 96.64483812412399,
-              "corner_ratio": 0.014607425441265977,
-              "likely_cause": "text_metrics"
-            },
-            {
-              "selector": "body > div.grid > div.box color-4:nth-of-type(4)",
-              "tag": "div",
-              "rect": {
-                "x": 40,
-                "y": 400,
-                "width": 226.65625,
-                "height": 180
-              },
-              "diff_pixels": 39152,
-              "contribution_percent": 8.156666666666666,
-              "element_diff_percent": 95.96519447891293,
-              "corner_ratio": 0.014711892112791173,
-              "likely_cause": "text_metrics"
-            },
-            {
-              "selector": "body > div.grid > div.box color-5:nth-of-type(5)",
-              "tag": "div",
-              "rect": {
-                "x": 286.65625,
-                "y": 400,
-                "width": 226.671875,
-                "height": 180
-              },
-              "diff_pixels": 39140,
-              "contribution_percent": 8.154166666666667,
-              "element_diff_percent": 95.92916829423343,
-              "corner_ratio": 0.014716402657128258,
-              "likely_cause": "text_metrics"
-            },
-            {
-              "selector": "body > div.grid > div.box color-6:nth-of-type(6)",
-              "tag": "div",
-              "rect": {
-                "x": 533.328125,
-                "y": 400,
-                "width": 226.671875,
-                "height": 180
-              },
-              "diff_pixels": 39068,
-              "contribution_percent": 8.139166666666666,
-              "element_diff_percent": 95.75270176083576,
-              "corner_ratio": 0.014743524111805057,
-              "likely_cause": "text_metrics"
-            },
-            {
-              "selector": "body > div.grid > div.box color-1:nth-of-type(1)",
-              "tag": "div",
-              "rect": {
-                "x": 40,
-                "y": 200,
-                "width": 226.65625,
-                "height": 180
-              },
-              "diff_pixels": 38760,
-              "contribution_percent": 8.075000000000001,
-              "element_diff_percent": 95.00436600946735,
-              "corner_ratio": 0.014860681114551083,
-              "likely_cause": "text_metrics"
-            },
-            {
-              "selector": "body > div.grid > div.box color-2:nth-of-type(2)",
-              "tag": "div",
-              "rect": {
-                "x": 286.65625,
-                "y": 200,
-                "width": 226.671875,
-                "height": 180
-              },
-              "diff_pixels": 38552,
-              "contribution_percent": 8.031666666666666,
-              "element_diff_percent": 94.48802493815246,
-              "corner_ratio": 0.014940859099398216,
               "likely_cause": "text_metrics"
             },
             {
@@ -13057,14 +12967,104 @@
               "tag": "h3",
               "rect": {
                 "x": 40,
-                "y": 118,
+                "y": 128,
                 "width": 720,
-                "height": 52
+                "height": 57.390625
               },
-              "diff_pixels": 37440,
-              "contribution_percent": 7.8,
-              "element_diff_percent": 100,
-              "corner_ratio": 0.015384615384615385,
+              "diff_pixels": 41040,
+              "contribution_percent": 8.55,
+              "element_diff_percent": 99.31935747345494,
+              "corner_ratio": 0.014035087719298246,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.grid > div.box color-3:nth-of-type(3)",
+              "tag": "div",
+              "rect": {
+                "x": 533.328125,
+                "y": 215.390625,
+                "width": 226.671875,
+                "height": 180
+              },
+              "diff_pixels": 39228,
+              "contribution_percent": 8.172500000000001,
+              "element_diff_percent": 96.14484961283058,
+              "corner_ratio": 0.014683389415723462,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.grid > div.box color-5:nth-of-type(5)",
+              "tag": "div",
+              "rect": {
+                "x": 286.65625,
+                "y": 415.390625,
+                "width": 226.671875,
+                "height": 180
+              },
+              "diff_pixels": 38920,
+              "contribution_percent": 8.108333333333333,
+              "element_diff_percent": 95.38996499774055,
+              "corner_ratio": 0.014799588900308325,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.grid > div.box color-4:nth-of-type(4)",
+              "tag": "div",
+              "rect": {
+                "x": 40,
+                "y": 415.390625,
+                "width": 226.65625,
+                "height": 180
+              },
+              "diff_pixels": 38908,
+              "contribution_percent": 8.105833333333333,
+              "element_diff_percent": 95.36712777854375,
+              "corner_ratio": 0.014804153387478154,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.grid > div.box color-6:nth-of-type(6)",
+              "tag": "div",
+              "rect": {
+                "x": 533.328125,
+                "y": 415.390625,
+                "width": 226.671875,
+                "height": 180
+              },
+              "diff_pixels": 38812,
+              "contribution_percent": 8.085833333333333,
+              "element_diff_percent": 95.12526519764405,
+              "corner_ratio": 0.0148407708955993,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.grid > div.box color-1:nth-of-type(1)",
+              "tag": "div",
+              "rect": {
+                "x": 40,
+                "y": 215.390625,
+                "width": 226.65625,
+                "height": 180
+              },
+              "diff_pixels": 38460,
+              "contribution_percent": 8.0125,
+              "element_diff_percent": 94.26903809917735,
+              "corner_ratio": 0.01497659906396256,
+              "likely_cause": "text_metrics"
+            },
+            {
+              "selector": "body > div.grid > div.box color-2:nth-of-type(2)",
+              "tag": "div",
+              "rect": {
+                "x": 286.65625,
+                "y": 215.390625,
+                "width": 226.671875,
+                "height": 180
+              },
+              "diff_pixels": 38248,
+              "contribution_percent": 7.968333333333333,
+              "element_diff_percent": 93.7429440193623,
+              "corner_ratio": 0.015059610960050198,
               "likely_cause": "text_metrics"
             },
             {
@@ -13074,12 +13074,12 @@
                 "x": 40,
                 "y": 40,
                 "width": 720,
-                "height": 38
+                "height": 48
               },
-              "diff_pixels": 27360,
-              "contribution_percent": 5.7,
+              "diff_pixels": 34560,
+              "contribution_percent": 7.199999999999999,
               "element_diff_percent": 100,
-              "corner_ratio": 0.021052631578947368,
+              "corner_ratio": 0.016666666666666666,
               "likely_cause": "text_metrics"
             },
             {
@@ -13087,89 +13087,89 @@
               "tag": "span",
               "rect": {
                 "x": 302.65625,
-                "y": 336,
+                "y": 347,
                 "width": 76.484375,
-                "height": 28
+                "height": 32.390625
               },
-              "diff_pixels": 2128,
-              "contribution_percent": 0.44333333333333336,
-              "element_diff_percent": 99.36670071501533,
-              "corner_ratio": 0.2706766917293233
+              "diff_pixels": 2432,
+              "contribution_percent": 0.5066666666666666,
+              "element_diff_percent": 98.168356519224,
+              "corner_ratio": 0.23684210526315788
             },
             {
               "selector": "body > div.grid > div.box color-1:nth-of-type(1) > span",
               "tag": "span",
               "rect": {
                 "x": 56,
-                "y": 336,
+                "y": 347,
                 "width": 74.578125,
-                "height": 28
+                "height": 32.390625
               },
-              "diff_pixels": 2100,
-              "contribution_percent": 0.43750000000000006,
-              "element_diff_percent": 100.56568196103079,
-              "corner_ratio": 0.2742857142857143
+              "diff_pixels": 2400,
+              "contribution_percent": 0.5,
+              "element_diff_percent": 99.35287827119686,
+              "corner_ratio": 0.24
             },
             {
               "selector": "body > div.grid > div.box color-6:nth-of-type(6) > span",
               "tag": "span",
               "rect": {
                 "x": 549.328125,
-                "y": 536,
+                "y": 547,
                 "width": 63.40625,
-                "height": 28
+                "height": 32.390625
               },
-              "diff_pixels": 1792,
-              "contribution_percent": 0.37333333333333335,
-              "element_diff_percent": 100.93642188270084,
-              "corner_ratio": 0.32142857142857145
+              "diff_pixels": 2048,
+              "contribution_percent": 0.4266666666666667,
+              "element_diff_percent": 99.7191471373716,
+              "corner_ratio": 0.28125
             },
             {
               "selector": "body > div.grid > div.box color-4:nth-of-type(4) > span",
               "tag": "span",
               "rect": {
                 "x": 56,
-                "y": 536,
+                "y": 547,
                 "width": 61.5,
-                "height": 28
+                "height": 32.390625
               },
-              "diff_pixels": 1708,
-              "contribution_percent": 0.35583333333333333,
-              "element_diff_percent": 99.1869918699187,
-              "corner_ratio": 0.3372365339578454
+              "diff_pixels": 1952,
+              "contribution_percent": 0.4066666666666666,
+              "element_diff_percent": 97.99081492985697,
+              "corner_ratio": 0.29508196721311475
             },
             {
               "selector": "body > div.grid > div.box color-5:nth-of-type(5) > span",
               "tag": "span",
               "rect": {
                 "x": 302.65625,
-                "y": 536,
+                "y": 547,
                 "width": 55.828125,
-                "height": 28
+                "height": 32.390625
               },
-              "diff_pixels": 1540,
-              "contribution_percent": 0.32083333333333336,
-              "element_diff_percent": 98.51665267282395,
-              "corner_ratio": 0.37402597402597404
+              "diff_pixels": 1760,
+              "contribution_percent": 0.36666666666666664,
+              "element_diff_percent": 97.32855990059984,
+              "corner_ratio": 0.32727272727272727
             },
             {
               "selector": "body > div.grid > div.box color-3:nth-of-type(3) > span",
               "tag": "span",
               "rect": {
                 "x": 549.328125,
-                "y": 336,
+                "y": 347,
                 "width": 50.84375,
-                "height": 28
+                "height": 32.390625
               },
-              "diff_pixels": 1428,
-              "contribution_percent": 0.29750000000000004,
-              "element_diff_percent": 100.30731407498463,
-              "corner_ratio": 0.40336134453781514
+              "diff_pixels": 1632,
+              "contribution_percent": 0.33999999999999997,
+              "element_diff_percent": 99.09762625449518,
+              "corner_ratio": 0.35294117647058826
             }
           ]
         },
         "taxonomy": {
-          "text_metrics": 97.77166666666668
+          "text_metrics": 97.45333333333335
         }
       },
       "styles": {
@@ -13182,25 +13182,25 @@
         "mismatched": 34,
         "differences": []
       },
-      "passed": false,
+      "passed": true,
       "pixel_runs": [
-        21.153958333333335
+        10.6475
       ],
-      "diff_pct_median": 21.153958333333335,
-      "diff_pct_min": 21.153958333333335,
-      "diff_pct_max": 21.153958333333335,
+      "diff_pct_median": 10.6475,
+      "diff_pct_min": 10.6475,
+      "diff_pct_max": 10.6475,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 21.153958333333335
+      "diff_pct": 10.6475
     },
     {
       "case_id": "gpu-gradient-regression",
       "type": "micro",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 368751,
+        "diffPixels": 349504,
         "totalPixels": 960000,
-        "diffPercent": 38.4115625,
+        "diffPercent": 36.406666666666666,
         "width": 800,
         "height": 1200,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/gpu-gradient-regression/run-1/diff.png",
@@ -14441,23 +14441,23 @@
       },
       "passed": false,
       "pixel_runs": [
-        38.4115625
+        36.406666666666666
       ],
-      "diff_pct_median": 38.4115625,
-      "diff_pct_min": 38.4115625,
-      "diff_pct_max": 38.4115625,
+      "diff_pct_median": 36.406666666666666,
+      "diff_pct_min": 36.406666666666666,
+      "diff_pct_max": 36.406666666666666,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 38.4115625
+      "diff_pct": 36.406666666666666
     },
     {
       "case_id": "images-intrinsic",
       "type": "micro",
       "threshold": 10,
       "pixel": {
-        "diffPixels": 141026,
+        "diffPixels": 139209,
         "totalPixels": 1120000,
-        "diffPercent": 12.591607142857143,
+        "diffPercent": 12.429375,
         "width": 800,
         "height": 1400,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/images-intrinsic/run-1/diff.png",
@@ -14998,23 +14998,23 @@
       },
       "passed": false,
       "pixel_runs": [
-        12.591607142857143
+        12.429375
       ],
-      "diff_pct_median": 12.591607142857143,
-      "diff_pct_min": 12.591607142857143,
-      "diff_pct_max": 12.591607142857143,
+      "diff_pct_median": 12.429375,
+      "diff_pct_min": 12.429375,
+      "diff_pct_max": 12.429375,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 12.591607142857143
+      "diff_pct": 12.429375
     },
     {
       "case_id": "pseudo-classes",
       "type": "micro",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 149207,
+        "diffPixels": 140820,
         "totalPixels": 640000,
-        "diffPercent": 23.31359375,
+        "diffPercent": 22.003125,
         "width": 800,
         "height": 800,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/pseudo-classes/run-1/diff.png",
@@ -15736,23 +15736,23 @@
       },
       "passed": false,
       "pixel_runs": [
-        23.31359375
+        22.003125
       ],
-      "diff_pct_median": 23.31359375,
-      "diff_pct_min": 23.31359375,
-      "diff_pct_max": 23.31359375,
+      "diff_pct_median": 22.003125,
+      "diff_pct_min": 22.003125,
+      "diff_pct_max": 22.003125,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 23.31359375
+      "diff_pct": 22.003125
     },
     {
       "case_id": "rounded-corners",
       "type": "micro",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 237591,
+        "diffPixels": 113881,
         "totalPixels": 900000,
-        "diffPercent": 26.399,
+        "diffPercent": 12.653444444444444,
         "width": 900,
         "height": 1000,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/rounded-corners/run-1/diff.png",
@@ -16402,25 +16402,25 @@
         "mismatched": 47,
         "differences": []
       },
-      "passed": false,
+      "passed": true,
       "pixel_runs": [
-        26.399
+        12.653444444444444
       ],
-      "diff_pct_median": 26.399,
-      "diff_pct_min": 26.399,
-      "diff_pct_max": 26.399,
+      "diff_pct_median": 12.653444444444444,
+      "diff_pct_min": 12.653444444444444,
+      "diff_pct_max": 12.653444444444444,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 26.399
+      "diff_pct": 12.653444444444444
     },
     {
       "case_id": "specificity",
       "type": "micro",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 64598,
+        "diffPixels": 27791,
         "totalPixels": 480000,
-        "diffPercent": 13.457916666666666,
+        "diffPercent": 5.789791666666667,
         "width": 800,
         "height": 600,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/specificity/run-1/diff.png",
@@ -16778,14 +16778,14 @@
       },
       "passed": true,
       "pixel_runs": [
-        13.457916666666666
+        5.789791666666667
       ],
-      "diff_pct_median": 13.457916666666666,
-      "diff_pct_min": 13.457916666666666,
-      "diff_pct_max": 13.457916666666666,
+      "diff_pct_median": 5.789791666666667,
+      "diff_pct_min": 5.789791666666667,
+      "diff_pct_max": 5.789791666666667,
       "diff_pct_variance": 0.0,
       "stable": false,
-      "diff_pct": 13.457916666666666
+      "diff_pct": 5.789791666666667
     }
   ]
 }
