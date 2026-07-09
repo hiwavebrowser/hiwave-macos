@@ -1,15 +1,10 @@
 {
   "browserVersion": "148.0.7778.216",
   "executable": "Chrome for Testing (pinned via PARITY_CHROME_PATH)",
-  "capturedAt": "2026-07-08T02:20:18.190Z",
+  "capturedAt": "2026-07-09T04:22:11.192Z",
   "platform": "darwin",
   "glBackend": "angle-swiftshader",
-  "cases": 26,
+  "cases": 25,
   "failures": [],
-  "sourceMissing": [],
-  "notes": [
-    "22 cases captured by capture_all_baselines.mjs from the chrome-120 tree layout.",
-    "builtins/about, micro/bg-pure, micro/gradient-no-radius timed out on the first pass (30s screenshot timeout while a parallel cargo build saturated cores) and captured cleanly on retry at reference viewports.",
-    "micro/gpu-gradient-regression added explicitly at 800x1200 (parity_lib viewport): the case was in the test suite but never had a baseline in chrome-120 — it scored 100% diff in CI purely from the missing PNG."
-  ]
+  "sourceMissing": []
 }
