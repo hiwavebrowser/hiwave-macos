@@ -1049,6 +1049,41 @@ impl LayoutBox {
         self.dimensions.content.height = computed_height;
     }
 
+    /// Single-line measured width of a text box (no wrapping), used by the
+    /// block child loop to decide whether a text run fits on the current
+    /// line box. Uses the same measurement as layout_text's single-line path.
+    fn text_single_line_width(&self) -> f32 {
+        let BoxType::Text(ref text) = self.box_type else {
+            return 0.0;
+        };
+        let font_size = match self.style.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let letter_spacing = match self.style.letter_spacing {
+            Length::Px(px) => px,
+            Length::Em(em) => em * font_size,
+            Length::Rem(rem) => rem * 16.0,
+            _ => 0.0,
+        };
+        let word_spacing = match self.style.word_spacing {
+            Length::Px(px) => px,
+            Length::Em(em) => em * font_size,
+            Length::Rem(rem) => rem * 16.0,
+            _ => 0.0,
+        };
+        measure_text_with_spacing(
+            text,
+            &self.style.font_family,
+            font_size,
+            self.style.font_weight,
+            self.style.font_style,
+            letter_spacing,
+            word_spacing,
+        )
+        .width
+    }
+
     /// Layout a text box.
     fn layout_text(&mut self, text: String, containing_block: &Dimensions) {
         // Get font size
@@ -1261,8 +1296,16 @@ impl LayoutBox {
                 (font_size * 0.6 * cols, font_size * 1.2 * rows + 8.0)
             }
             FormControlType::Button { label, .. } => {
-                // Button: width based on label, with padding
-                let label_width = label.len() as f32 * font_size * 0.6;
+                // Button: measured label width plus padding (was a
+                // chars-times-0.6em guess that oversized real labels ~40%)
+                let label_width = measure_text_advanced(
+                    label,
+                    &self.style.font_family,
+                    font_size,
+                    self.style.font_weight,
+                    self.style.font_style,
+                )
+                .width;
                 (label_width + 24.0, font_size * 1.5 + 12.0)
             }
             FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
@@ -1904,12 +1947,30 @@ impl LayoutBox {
 
             // Check if child is an atomic inline (inline-block/-flex/-grid)
             let is_inline_block = child.style.display.is_atomic_inline();
+            // CSS2 §9.4.2: ALL inline-level boxes share line boxes, not just
+            // atomic inlines — non-atomic inline boxes (spans/links), inline
+            // form controls and inline images flow on the same line. A text
+            // run joins the current line only when it fits the remaining
+            // space as a single line; longer text keeps the block path and
+            // wraps there (full IFC text splitting is a later phase).
+            let flows_inline = is_inline_block
+                || (child.style.display == rustkit_css::Display::Inline
+                    && matches!(
+                        child.box_type,
+                        BoxType::Inline | BoxType::FormControl(_) | BoxType::Image { .. }
+                    ))
+                || (cursor_x > 0.0
+                    && matches!(child.box_type, BoxType::Text(_))
+                    && child.text_single_line_width() <= container_width - cursor_x);
 
-            if is_inline_block {
-                // Layout inline-block child to get its dimensions first
+            if flows_inline {
+                // Layout inline-level child to get its dimensions first
                 let mut cb = self.dimensions.clone();
                 cb.content.x = self.dimensions.content.x + cursor_x;
                 cb.content.y = self.dimensions.content.y + cursor_y;
+                // Children self-position at cb.y + cb.height; the cursor is
+                // already baked into cb.y, so the height term must be zero.
+                cb.content.height = 0.0;
                 child.layout(&cb);
 
                 let child_width = child.dimensions.margin_box().width;
@@ -2036,8 +2097,17 @@ impl LayoutBox {
                 // descendants already self-align against the block width in
                 // layout_text, so we move only the box's own origin here —
                 // both settle about the same center, no double-shift.
+                // Text/form-control/image children recorded on a line were
+                // positioned by the inline-flow cursor (no self-align), so
+                // they shift with the line too.
                 if child.style.display.is_atomic_inline()
-                    || matches!(child.box_type, BoxType::Inline)
+                    || matches!(
+                        child.box_type,
+                        BoxType::Inline
+                            | BoxType::Text(_)
+                            | BoxType::FormControl(_)
+                            | BoxType::Image { .. }
+                    )
                 {
                     child.dimensions.content.x += offset;
                 }
@@ -2093,16 +2163,32 @@ impl LayoutBox {
                 margin_context.reset();
             }
 
-            if is_inline_block {
-                // Inline-block establishes its own BFC: its margins never
-                // collapse with siblings, so lay it out against a throwaway
-                // context instead of leaking margins into the parent's.
+            // CSS2 §9.4.2: ALL inline-level boxes share line boxes — see
+            // layout_block_children for the full rationale.
+            let flows_inline = is_inline_block
+                || (child.style.display == rustkit_css::Display::Inline
+                    && matches!(
+                        child.box_type,
+                        BoxType::Inline | BoxType::FormControl(_) | BoxType::Image { .. }
+                    ))
+                || (cursor_x > 0.0
+                    && matches!(child.box_type, BoxType::Text(_))
+                    && child.text_single_line_width() <= container_width - cursor_x);
+
+            if flows_inline {
+                // Inline-level content never collapses margins with siblings
+                // (and an inline-block establishes its own BFC), so lay it
+                // out against a throwaway context instead of leaking margins
+                // into the parent's.
                 let mut ib_margin_context = MarginCollapseContext::new();
                 let margin_context = &mut ib_margin_context;
                 // Layout to get dimensions first
                 let mut cb = self.dimensions.clone();
                 cb.content.x = self.dimensions.content.x + cursor_x;
                 cb.content.y = self.dimensions.content.y + cursor_y;
+                // Children self-position at cb.y + cb.height; the cursor is
+                // already baked into cb.y, so the height term must be zero.
+                cb.content.height = 0.0;
                 child.layout_with_collapse(&cb, margin_context, float_context);
 
                 let child_width = child.dimensions.margin_box().width;

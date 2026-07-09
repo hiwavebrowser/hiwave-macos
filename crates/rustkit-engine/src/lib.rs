@@ -20,7 +20,7 @@ use rustkit_bindings::DomBindings;
 pub use rustkit_bindings::IpcMessage;
 use rustkit_compositor::Compositor;
 use rustkit_core::{LoadEvent, NavigationRequest, NavigationStateMachine};
-use rustkit_css::{ComputedStyle, Stylesheet, Rule, parse_display};
+use rustkit_css::{parse_display, ComputedStyle, Rule, Stylesheet};
 use rustkit_dom::{Document, Node, NodeType};
 use rustkit_image::ImageManager;
 use rustkit_js::JsRuntime;
@@ -127,10 +127,7 @@ pub enum EngineEvent {
         error: String,
     },
     /// Favicon detected.
-    FaviconDetected {
-        view_id: EngineViewId,
-        url: Url,
-    },
+    FaviconDetected { view_id: EngineViewId, url: Url },
 }
 
 /// View state.
@@ -253,7 +250,8 @@ impl Engine {
             compositor.device_arc(),
             compositor.queue_arc(),
             compositor.surface_format(),
-        ).map_err(|e| EngineError::RenderError(e.to_string()))?;
+        )
+        .map_err(|e| EngineError::RenderError(e.to_string()))?;
 
         // Event channel
         let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -293,11 +291,7 @@ impl Engine {
         debug!(?id, ?bounds, "Creating view");
 
         // Create viewhost view (using trait method)
-        let viewhost_id = <ViewHost as ViewHostTrait>::create_view(
-            &self.viewhost,
-            parent,
-            bounds,
-        )
+        let viewhost_id = <ViewHost as ViewHostTrait>::create_view(&self.viewhost, parent, bounds)
             .map_err(|e| EngineError::ViewError(e.to_string()))?;
 
         // Create compositor surface
@@ -354,12 +348,8 @@ impl Engine {
     ) -> Result<EngineViewId, EngineError> {
         // TODO: Implement macOS view creation in Phase 3
         // For now, use trait method which will call the stub implementation
-        let viewhost_id = <ViewHost as ViewHostTrait>::create_view(
-            &self.viewhost,
-            parent,
-            bounds,
-        )
-        .map_err(|e| EngineError::ViewError(e.to_string()))?;
+        let viewhost_id = <ViewHost as ViewHostTrait>::create_view(&self.viewhost, parent, bounds)
+            .map_err(|e| EngineError::ViewError(e.to_string()))?;
 
         // Create view state (without compositor surface for now)
         let (nav_tx, nav_rx) = mpsc::unbounded_channel();
@@ -388,8 +378,9 @@ impl Engine {
         self.views.insert(id, view_state);
 
         // Get raw window handle for compositor
-        let raw_handle = <ViewHost as ViewHostTrait>::get_raw_window_handle(&self.viewhost, viewhost_id)
-            .map_err(|e| EngineError::ViewError(e.to_string()))?;
+        let raw_handle =
+            <ViewHost as ViewHostTrait>::get_raw_window_handle(&self.viewhost, viewhost_id)
+                .map_err(|e| EngineError::ViewError(e.to_string()))?;
 
         // Create compositor surface
         unsafe {
@@ -412,10 +403,7 @@ impl Engine {
     /// This creates a view without requiring a window, perfect for unit tests
     /// and CI environments. Requires the "headless" feature flag.
     #[cfg(feature = "headless")]
-    pub fn create_headless_view(
-        &mut self,
-        bounds: Bounds,
-    ) -> Result<EngineViewId, EngineError> {
+    pub fn create_headless_view(&mut self, bounds: Bounds) -> Result<EngineViewId, EngineError> {
         let id = EngineViewId::new();
         let viewhost_id = ViewId::new();
 
@@ -488,9 +476,7 @@ impl Engine {
         if is_headless {
             // Headless view: recreate headless texture with new size
             // First destroy old texture
-            self.compositor
-                .destroy_headless_texture(viewhost_id)
-                .ok(); // Ignore errors if it doesn't exist
+            self.compositor.destroy_headless_texture(viewhost_id).ok(); // Ignore errors if it doesn't exist
 
             // Create new texture with new size
             self.compositor
@@ -498,7 +484,10 @@ impl Engine {
                 .map_err(|e| EngineError::RenderError(e.to_string()))?;
 
             // Update headless_bounds in view state
-            let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+            let view = self
+                .views
+                .get_mut(&id)
+                .ok_or(EngineError::ViewNotFound(id))?;
             view.headless_bounds = Some(bounds);
         } else {
             // Regular view: resize viewhost and surface
@@ -512,7 +501,13 @@ impl Engine {
         }
 
         // Re-layout if we have content
-        if self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?.document.is_some() {
+        if self
+            .views
+            .get(&id)
+            .ok_or(EngineError::ViewNotFound(id))?
+            .document
+            .is_some()
+        {
             self.relayout(id)?;
         }
 
@@ -527,13 +522,21 @@ impl Engine {
     }
 
     /// Scroll a view by the given delta.
-    /// 
+    ///
     /// Returns true if the scroll caused a change (and thus needs a re-render).
-    pub fn scroll_view(&mut self, id: EngineViewId, delta_x: f32, delta_y: f32) -> Result<bool, EngineError> {
-        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
-        
+    pub fn scroll_view(
+        &mut self,
+        id: EngineViewId,
+        delta_x: f32,
+        delta_y: f32,
+    ) -> Result<bool, EngineError> {
+        let view = self
+            .views
+            .get_mut(&id)
+            .ok_or(EngineError::ViewNotFound(id))?;
+
         let old_offset = view.scroll_offset;
-        
+
         // Apply scroll delta (negative delta_y means scroll down in most UIs)
         let new_x = (view.scroll_offset.0 + delta_x)
             .max(0.0)
@@ -541,32 +544,40 @@ impl Engine {
         let new_y = (view.scroll_offset.1 - delta_y) // Invert Y for natural scrolling
             .max(0.0)
             .min(view.max_scroll_offset.1);
-        
+
         view.scroll_offset = (new_x, new_y);
-        
+
         let changed = view.scroll_offset != old_offset;
         if changed {
             debug!(?id, ?old_offset, new_offset = ?view.scroll_offset, "View scrolled");
         }
-        
+
         Ok(changed)
     }
-    
+
     /// Get the current scroll offset of a view.
     pub fn get_scroll_offset(&self, id: EngineViewId) -> Result<(f32, f32), EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
         Ok(view.scroll_offset)
     }
-    
+
     /// Set the scroll offset directly.
-    pub fn set_scroll_offset(&mut self, id: EngineViewId, x: f32, y: f32) -> Result<(), EngineError> {
-        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
-        
+    pub fn set_scroll_offset(
+        &mut self,
+        id: EngineViewId,
+        x: f32,
+        y: f32,
+    ) -> Result<(), EngineError> {
+        let view = self
+            .views
+            .get_mut(&id)
+            .ok_or(EngineError::ViewNotFound(id))?;
+
         view.scroll_offset = (
             x.max(0.0).min(view.max_scroll_offset.0),
             y.max(0.0).min(view.max_scroll_offset.1),
         );
-        
+
         debug!(?id, offset = ?view.scroll_offset, "Scroll offset set");
         Ok(())
     }
@@ -624,7 +635,10 @@ impl Engine {
 
         if !response.ok() {
             let error = format!("HTTP {}", response.status);
-            let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+            let view = self
+                .views
+                .get_mut(&id)
+                .ok_or(EngineError::ViewNotFound(id))?;
             view.navigation
                 .fail_navigation(error.clone())
                 .map_err(|e| EngineError::NavigationError(e.to_string()))?;
@@ -639,7 +653,10 @@ impl Engine {
         }
 
         // Commit navigation
-        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        let view = self
+            .views
+            .get_mut(&id)
+            .ok_or(EngineError::ViewNotFound(id))?;
         view.navigation
             .commit_navigation()
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
@@ -659,7 +676,10 @@ impl Engine {
         let title = document.title();
 
         // Store in view
-        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        let view = self
+            .views
+            .get_mut(&id)
+            .ok_or(EngineError::ViewNotFound(id))?;
         view.url = Some(url.clone());
         view.document = Some(document.clone());
         view.title = title.clone();
@@ -679,13 +699,16 @@ impl Engine {
                 .set_location(&url)
                 .map_err(|e| EngineError::JsError(e.to_string()))?;
 
-            let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+            let view = self
+                .views
+                .get_mut(&id)
+                .ok_or(EngineError::ViewNotFound(id))?;
             view.bindings = Some(bindings);
         }
 
         // Initial layout and render
         self.relayout(id)?;
-        
+
         // Load external resources (stylesheets, images)
         // This will trigger additional relayouts as resources arrive
         if let Err(e) = self.load_subresources(id).await {
@@ -694,7 +717,10 @@ impl Engine {
         }
 
         // Finish navigation
-        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        let view = self
+            .views
+            .get_mut(&id)
+            .ok_or(EngineError::ViewNotFound(id))?;
         view.navigation
             .finish_navigation()
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
@@ -763,7 +789,10 @@ impl Engine {
         let title = document.title();
 
         // Store in view
-        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        let view = self
+            .views
+            .get_mut(&id)
+            .ok_or(EngineError::ViewNotFound(id))?;
         view.url = Some(url.clone());
         view.document = Some(document.clone());
         view.title = title.clone();
@@ -783,7 +812,10 @@ impl Engine {
                 .set_location(&url)
                 .map_err(|e| EngineError::JsError(e.to_string()))?;
 
-            let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+            let view = self
+                .views
+                .get_mut(&id)
+                .ok_or(EngineError::ViewNotFound(id))?;
             view.bindings = Some(bindings);
         }
 
@@ -791,7 +823,10 @@ impl Engine {
         self.relayout(id)?;
 
         // Finish navigation
-        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        let view = self
+            .views
+            .get_mut(&id)
+            .ok_or(EngineError::ViewNotFound(id))?;
         view.navigation
             .finish_navigation()
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
@@ -817,7 +852,7 @@ impl Engine {
     #[tracing::instrument(skip(self), fields(view_id = ?id))]
     fn relayout(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         let _span = tracing::info_span!("relayout", ?id).entered();
-        
+
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
         let document = view
@@ -849,7 +884,7 @@ impl Engine {
             content: Rect::new(0.0, 0.0, bounds.width as f32, 0.0),
             ..Default::default()
         };
-        
+
         debug!(
             containing_width = containing_block.content.width,
             containing_height = containing_block.content.height,
@@ -857,16 +892,18 @@ impl Engine {
         );
 
         // Get external stylesheets from view state
-        let external_stylesheets = self.views.get(&id)
+        let external_stylesheets = self
+            .views
+            .get(&id)
             .map(|v| v.external_stylesheets.clone())
             .unwrap_or_default();
-        
+
         // Build layout tree from DOM with tracing
         let root_box = {
             let _build_span = tracing::info_span!("build_layout_tree").entered();
             self.build_layout_from_document(&document, &external_stylesheets)
         };
-        
+
         // Layout computation
         let mut root_box = root_box;
         {
@@ -879,7 +916,11 @@ impl Engine {
             // ran every text page taller than Chrome.
             let mut margin_context = rustkit_layout::MarginCollapseContext::new();
             let mut float_context = rustkit_layout::FloatContext::new();
-            root_box.layout_with_collapse(&containing_block, &mut margin_context, &mut float_context);
+            root_box.layout_with_collapse(
+                &containing_block,
+                &mut margin_context,
+                &mut float_context,
+            );
         }
 
         // Ensure body element fills viewport (common browser behavior)
@@ -889,13 +930,18 @@ impl Engine {
             if body_box.dimensions.content.height < 1.0 {
                 // Body is empty or has no content - fill viewport
                 body_box.dimensions.content.height = bounds.height as f32;
-                debug!("Extended empty body to fill viewport height: {}px", bounds.height);
+                debug!(
+                    "Extended empty body to fill viewport height: {}px",
+                    bounds.height
+                );
             }
         }
 
         // Debug: log the layout box tree AFTER layout
         fn debug_layout_box(box_: &LayoutBox, depth: usize) {
-            if depth > 5 { return; } // Limit depth
+            if depth > 5 {
+                return;
+            } // Limit depth
             let indent = "  ".repeat(depth);
             let bg = box_.style.background_color;
             let dims = &box_.dimensions;
@@ -903,9 +949,14 @@ impl Engine {
                 "{}[{:?}] bg=rgba({},{},{},{:.1}) dims=({:.0}x{:.0} @ {:.0},{:.0}) children={}",
                 indent,
                 box_.box_type,
-                bg.r, bg.g, bg.b, bg.a,
-                dims.content.width, dims.content.height,
-                dims.content.x, dims.content.y,
+                bg.r,
+                bg.g,
+                bg.b,
+                bg.a,
+                dims.content.width,
+                dims.content.height,
+                dims.content.x,
+                dims.content.y,
                 box_.children.len()
             );
             for child in &box_.children {
@@ -925,19 +976,22 @@ impl Engine {
             num_commands = display_list.commands.len(),
             "Generated display list"
         );
-        
+
         // Debug: log first 10 display commands
         for (i, cmd) in display_list.commands.iter().take(10).enumerate() {
             trace!("DisplayCmd[{}]: {:?}", i, cmd);
         }
-        
+
         // Update max scroll offset based on content size
         let content_height = root_box.dimensions.margin_box().height;
         let viewport_height = bounds.height as f32;
         let max_scroll_y = (content_height - viewport_height).max(0.0);
 
         // Store
-        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        let view = self
+            .views
+            .get_mut(&id)
+            .ok_or(EngineError::ViewNotFound(id))?;
         view.layout = Some(root_box);
         view.display_list = Some(display_list);
         view.max_scroll_offset = (0.0, max_scroll_y); // Update max scroll
@@ -951,8 +1005,9 @@ impl Engine {
     /// Check if a style has visible styling (dimensions, background, borders, etc.)
     fn has_visible_styling(style: &ComputedStyle) -> bool {
         // Check for explicit dimensions
-        if !matches!(style.width, rustkit_css::Length::Auto) ||
-           !matches!(style.height, rustkit_css::Length::Auto) {
+        if !matches!(style.width, rustkit_css::Length::Auto)
+            || !matches!(style.height, rustkit_css::Length::Auto)
+        {
             return true;
         }
 
@@ -968,23 +1023,31 @@ impl Engine {
 
         // Check for borders (need to check both Px(0.0) and Zero)
         let has_border = |len: &rustkit_css::Length| -> bool {
-            !matches!(len, rustkit_css::Length::Px(0.0) | rustkit_css::Length::Zero)
+            !matches!(
+                len,
+                rustkit_css::Length::Px(0.0) | rustkit_css::Length::Zero
+            )
         };
-        if has_border(&style.border_top_width) ||
-           has_border(&style.border_right_width) ||
-           has_border(&style.border_bottom_width) ||
-           has_border(&style.border_left_width) {
+        if has_border(&style.border_top_width)
+            || has_border(&style.border_right_width)
+            || has_border(&style.border_bottom_width)
+            || has_border(&style.border_left_width)
+        {
             return true;
         }
 
         // Check for padding (creates visual space)
         let has_padding = |len: &rustkit_css::Length| -> bool {
-            !matches!(len, rustkit_css::Length::Px(0.0) | rustkit_css::Length::Zero)
+            !matches!(
+                len,
+                rustkit_css::Length::Px(0.0) | rustkit_css::Length::Zero
+            )
         };
-        if has_padding(&style.padding_top) ||
-           has_padding(&style.padding_right) ||
-           has_padding(&style.padding_bottom) ||
-           has_padding(&style.padding_left) {
+        if has_padding(&style.padding_top)
+            || has_padding(&style.padding_right)
+            || has_padding(&style.padding_bottom)
+            || has_padding(&style.padding_left)
+        {
             return true;
         }
 
@@ -1016,22 +1079,26 @@ impl Engine {
     }
 
     /// Build a layout tree from a DOM document.
-    fn build_layout_from_document(&self, document: &Document, external_stylesheets: &[Stylesheet]) -> LayoutBox {
+    fn build_layout_from_document(
+        &self,
+        document: &Document,
+        external_stylesheets: &[Stylesheet],
+    ) -> LayoutBox {
         // Extract stylesheets from <style> elements
         let mut stylesheets = self.extract_stylesheets(document);
-        
+
         // Add external stylesheets (loaded from <link> elements)
         stylesheets.extend(external_stylesheets.iter().cloned());
-        
+
         let css_vars = self.extract_css_variables(&stylesheets);
-        
+
         info!(
             inline_count = stylesheets.len() - external_stylesheets.len(),
             external_count = external_stylesheets.len(),
             css_var_count = css_vars.len(),
             "Extracted stylesheets and CSS variables"
         );
-        
+
         // Create root layout box for the document
         let mut root_style = ComputedStyle::new();
         root_style.background_color = rustkit_css::Color::WHITE;
@@ -1044,8 +1111,22 @@ impl Engine {
         // (e.g. `html { line-height: 1.5 }` never reached any heading). Chrome inherits html's
         // computed values through body to every descendant.
         let html_style = document.document_element().and_then(|html| {
-            if let NodeType::Element { tag_name, attributes, .. } = &html.node_type {
-                Some(self.compute_style_for_element(tag_name, attributes, &stylesheets, &css_vars, &[], &[], 0, 1))
+            if let NodeType::Element {
+                tag_name,
+                attributes,
+                ..
+            } = &html.node_type
+            {
+                Some(self.compute_style_for_element(
+                    tag_name,
+                    attributes,
+                    &stylesheets,
+                    &css_vars,
+                    &[],
+                    &[],
+                    0,
+                    1,
+                ))
             } else {
                 None
             }
@@ -1068,7 +1149,8 @@ impl Engine {
         } else if let Some(html) = document.document_element() {
             // Fallback: use html element if no body
             debug!("No body found, using html element");
-            let html_box = self.build_layout_from_node_with_styles(&html, &stylesheets, &css_vars, &[]);
+            let html_box =
+                self.build_layout_from_node_with_styles(&html, &stylesheets, &css_vars, &[]);
             root_box.children.push(html_box);
         } else {
             warn!("No body or html element found!");
@@ -1086,7 +1168,16 @@ impl Engine {
         css_vars: &HashMap<String, String>,
         ancestors: &[(String, Vec<String>, Option<String>)],
     ) -> LayoutBox {
-        self.build_layout_from_node_with_parent_style(node, stylesheets, css_vars, ancestors, None, &[], 0, 1)
+        self.build_layout_from_node_with_parent_style(
+            node,
+            stylesheets,
+            css_vars,
+            ancestors,
+            None,
+            &[],
+            0,
+            1,
+        )
     }
 
     fn build_layout_from_node_with_parent_style(
@@ -1101,9 +1192,13 @@ impl Engine {
         sibling_count: usize,
     ) -> LayoutBox {
         match &node.node_type {
-            NodeType::Element { tag_name, attributes, .. } => {
+            NodeType::Element {
+                tag_name,
+                attributes,
+                ..
+            } => {
                 let tag_lower = tag_name.to_lowercase();
-                
+
                 // Skip rendering for certain elements
                 let is_hidden = matches!(
                     tag_lower.as_str(),
@@ -1176,13 +1271,13 @@ impl Engine {
                 // Handle replaced elements (images)
                 if tag_lower == "img" {
                     let src = attributes.get("src").cloned().unwrap_or_default();
-                    
+
                     // Parse explicit dimensions from attributes
-                    let explicit_width: Option<f32> = attributes.get("width")
-                        .and_then(|w| w.parse().ok());
-                    let explicit_height: Option<f32> = attributes.get("height")
-                        .and_then(|h| h.parse().ok());
-                    
+                    let explicit_width: Option<f32> =
+                        attributes.get("width").and_then(|w| w.parse().ok());
+                    let explicit_height: Option<f32> =
+                        attributes.get("height").and_then(|h| h.parse().ok());
+
                     // width=/height= attributes are presentational hints: they set
                     // the used size like CSS width/height (lowest priority), they do
                     // NOT describe the image's natural dimensions. Author CSS wins.
@@ -1219,12 +1314,12 @@ impl Engine {
                         // width=/height= attributes, then the placeholder size.
                         None => match (explicit_width, explicit_height) {
                             (Some(w), Some(h)) => (w, h),
-                            (Some(w), None) => (w, w),  // Assume square if only width
-                            (None, Some(h)) => (h, h),  // Assume square if only height
-                            (None, None) => (150.0, 150.0),  // Default placeholder size
+                            (Some(w), None) => (w, w), // Assume square if only width
+                            (None, Some(h)) => (h, h), // Assume square if only height
+                            (None, None) => (150.0, 150.0), // Default placeholder size
                         },
                     };
-                    
+
                     return LayoutBox::new(
                         BoxType::Image {
                             url: src,
@@ -1234,13 +1329,16 @@ impl Engine {
                         style,
                     );
                 }
-                
+
                 // Handle form controls
                 if tag_lower == "input" {
-                    let input_type = attributes.get("type").cloned().unwrap_or_else(|| "text".to_string());
+                    let input_type = attributes
+                        .get("type")
+                        .cloned()
+                        .unwrap_or_else(|| "text".to_string());
                     let value = attributes.get("value").cloned().unwrap_or_default();
                     let placeholder = attributes.get("placeholder").cloned().unwrap_or_default();
-                    
+
                     let control = match input_type.as_str() {
                         "checkbox" => rustkit_layout::FormControlType::Checkbox {
                             checked: attributes.contains_key("checked"),
@@ -1255,20 +1353,26 @@ impl Engine {
                             input_type,
                         },
                     };
-                    
+
                     return LayoutBox::new(BoxType::FormControl(control), style);
                 }
-                
+
                 if tag_lower == "button" {
                     // Get button label from inner text or value
                     let text = node.text_content();
                     let label = if text.trim().is_empty() {
-                        attributes.get("value").cloned().unwrap_or_else(|| "Button".to_string())
+                        attributes
+                            .get("value")
+                            .cloned()
+                            .unwrap_or_else(|| "Button".to_string())
                     } else {
                         text
                     };
-                    let button_type = attributes.get("type").cloned().unwrap_or_else(|| "button".to_string());
-                    
+                    let button_type = attributes
+                        .get("type")
+                        .cloned()
+                        .unwrap_or_else(|| "button".to_string());
+
                     return LayoutBox::new(
                         BoxType::FormControl(rustkit_layout::FormControlType::Button {
                             label,
@@ -1277,13 +1381,19 @@ impl Engine {
                         style,
                     );
                 }
-                
+
                 if tag_lower == "textarea" {
                     let value = node.text_content();
                     let placeholder = attributes.get("placeholder").cloned().unwrap_or_default();
-                    let rows = attributes.get("rows").and_then(|r| r.parse().ok()).unwrap_or(3);
-                    let cols = attributes.get("cols").and_then(|c| c.parse().ok()).unwrap_or(20);
-                    
+                    let rows = attributes
+                        .get("rows")
+                        .and_then(|r| r.parse().ok())
+                        .unwrap_or(3);
+                    let cols = attributes
+                        .get("cols")
+                        .and_then(|c| c.parse().ok())
+                        .unwrap_or(20);
+
                     return LayoutBox::new(
                         BoxType::FormControl(rustkit_layout::FormControlType::TextArea {
                             value,
@@ -1294,13 +1404,16 @@ impl Engine {
                         style,
                     );
                 }
-                
+
                 if tag_lower == "select" {
                     // Get options from children
-                    let options: Vec<String> = node.children()
+                    let options: Vec<String> = node
+                        .children()
                         .into_iter()
                         .filter_map(|child| {
-                            if let rustkit_dom::NodeType::Element { tag_name, .. } = &child.node_type {
+                            if let rustkit_dom::NodeType::Element { tag_name, .. } =
+                                &child.node_type
+                            {
                                 if tag_name.to_lowercase() == "option" {
                                     let text = child.text_content();
                                     if !text.is_empty() {
@@ -1311,9 +1424,9 @@ impl Engine {
                             None
                         })
                         .collect();
-                    
+
                     let selected_index = if options.is_empty() { None } else { Some(0) };
-                    
+
                     return LayoutBox::new(
                         BoxType::FormControl(rustkit_layout::FormControlType::Select {
                             options,
@@ -1322,11 +1435,26 @@ impl Engine {
                         style,
                     );
                 }
-                
+
                 // Determine box type based on tag for non-replaced elements
                 let is_inline = matches!(
                     tag_lower.as_str(),
-                    "a" | "span" | "strong" | "b" | "em" | "i" | "u" | "code" | "small" | "big" | "sub" | "sup" | "abbr" | "cite" | "q" | "mark" | "label"
+                    "a" | "span"
+                        | "strong"
+                        | "b"
+                        | "em"
+                        | "i"
+                        | "u"
+                        | "code"
+                        | "small"
+                        | "big"
+                        | "sub"
+                        | "sup"
+                        | "abbr"
+                        | "cite"
+                        | "q"
+                        | "mark"
+                        | "label"
                 );
 
                 let box_type = if is_inline {
@@ -1381,7 +1509,12 @@ impl Engine {
                         preceding_siblings.len(),
                         child_element_count,
                     );
-                    if let NodeType::Element { tag_name, attributes, .. } = &child.node_type {
+                    if let NodeType::Element {
+                        tag_name,
+                        attributes,
+                        ..
+                    } = &child.node_type
+                    {
                         let child_classes: Vec<String> = attributes
                             .get("class")
                             .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
@@ -1397,14 +1530,14 @@ impl Engine {
                     let should_include = match child_box.box_type {
                         BoxType::Block | BoxType::AnonymousBlock => {
                             // Include blocks if they have children, OR have visible styling
-                            !child_box.children.is_empty() ||
-                            Self::has_visible_styling(&child_box.style)
+                            !child_box.children.is_empty()
+                                || Self::has_visible_styling(&child_box.style)
                         }
                         BoxType::Inline => {
                             // Include inline boxes if they have content children (text, images, form controls)
                             // or have visible styling (padding, border, background)
-                            Self::has_content_children(&child_box) ||
-                            Self::has_visible_styling(&child_box.style)
+                            Self::has_content_children(&child_box)
+                                || Self::has_visible_styling(&child_box.style)
                         }
                         BoxType::Text(_) | BoxType::Image { .. } | BoxType::FormControl(_) => true,
                     };
@@ -1451,6 +1584,11 @@ impl Engine {
                         s.letter_spacing = parent.letter_spacing.clone();
                         s.word_spacing = parent.word_spacing.clone();
                         s.text_transform = parent.text_transform;
+                        // Wrapping behavior is inherited; without these a
+                        // nowrap/pre parent's text still wrapped (shelf bug).
+                        s.white_space = parent.white_space;
+                        s.word_break = parent.word_break;
+                        s.font_stretch = parent.font_stretch;
                         s
                     } else {
                         let mut s = ComputedStyle::new();
@@ -1483,40 +1621,48 @@ impl Engine {
     ) -> Option<LayoutBox> {
         // Compute style for the pseudo-element by matching selectors with the pseudo suffix
         let mut pseudo_style = ComputedStyle::new();
-        
+
         // Collect matching rules for this element + pseudo
         // Use (a, b, c) specificity tuple converted to u32 for sorting
         let mut matching_rules: Vec<((usize, usize, usize), &Rule)> = Vec::new();
-        
+
         for stylesheet in stylesheets {
             for rule in &stylesheet.rules {
                 let selector = &rule.selector;
-                
+
                 // Check for explicit pseudo-element in selector
                 if selector.ends_with(pseudo) || selector.ends_with(&pseudo.replace("::", ":")) {
                     // Get the base selector (without pseudo)
                     let base_selector = selector
                         .trim_end_matches(pseudo)
                         .trim_end_matches(&pseudo.replace("::", ":"));
-                    
+
                     // Check if base selector matches this element
                     // Use 0, 1 for element_index, sibling_count since we don't need sibling selectors for pseudo-elements
-                    if self.selector_matches(base_selector.trim(), tag_name, attributes, ancestors, &[], 0, 1) {
+                    if self.selector_matches(
+                        base_selector.trim(),
+                        tag_name,
+                        attributes,
+                        ancestors,
+                        &[],
+                        0,
+                        1,
+                    ) {
                         let specificity = self.selector_specificity(selector);
                         matching_rules.push((specificity, rule));
                     }
                 }
             }
         }
-        
+
         // If no rules match, no pseudo-element
         if matching_rules.is_empty() {
             return None;
         }
-        
+
         // Sort by specificity (a, b, c)
         matching_rules.sort_by_key(|(spec, _)| *spec);
-        
+
         // Apply matching rules
         for (_, rule) in matching_rules {
             for declaration in &rule.declarations {
@@ -1528,13 +1674,13 @@ impl Engine {
                 self.apply_style_property(&mut pseudo_style, &declaration.property, value_str);
             }
         }
-        
+
         // Only create pseudo-element if content property is set
         let content = pseudo_style.content.as_ref()?;
-        
+
         // Create the pseudo-element box
         let mut pseudo_box = LayoutBox::new(BoxType::Inline, pseudo_style.clone());
-        
+
         // If content is not empty, add a text child
         if !content.is_empty() {
             let mut text_style = pseudo_style.clone();
@@ -1542,7 +1688,7 @@ impl Engine {
             let text_box = LayoutBox::new(BoxType::Text(content.clone()), text_style);
             pseudo_box.children.push(text_box);
         }
-        
+
         Some(pseudo_box)
     }
 
@@ -1665,12 +1811,12 @@ impl Engine {
             "sub" => {
                 style.display = rustkit_css::Display::Inline;
                 style.font_size = rustkit_css::Length::Px(13.0); // smaller
-                // vertical-align: sub (not implemented)
+                                                                 // vertical-align: sub (not implemented)
             }
             "sup" => {
                 style.display = rustkit_css::Display::Inline;
                 style.font_size = rustkit_css::Length::Px(13.0); // smaller
-                // vertical-align: super (not implemented)
+                                                                 // vertical-align: super (not implemented)
             }
             // Code and preformatted
             "pre" => {
@@ -1792,7 +1938,7 @@ impl Engine {
             // Table elements
             "table" => {
                 style.display = rustkit_css::Display::Block; // Should be table
-                // border-collapse: separate (not implemented)
+                                                             // border-collapse: separate (not implemented)
             }
             "caption" => {
                 style.display = rustkit_css::Display::Block; // Should be table-caption
@@ -1829,7 +1975,8 @@ impl Engine {
             }
             "mark" => {
                 style.display = rustkit_css::Display::Inline;
-                style.background_color = rustkit_css::Color::new(255, 255, 0, 1.0); // yellow
+                style.background_color = rustkit_css::Color::new(255, 255, 0, 1.0);
+                // yellow
             }
             "abbr" | "acronym" => {
                 style.display = rustkit_css::Display::Inline;
@@ -1848,7 +1995,7 @@ impl Engine {
         // Collect matching rules with specificity for ordering
         let mut matching_rules: Vec<(&Rule, (usize, usize, usize), usize)> = Vec::new();
         let mut rule_index = 0;
-        
+
         for stylesheet in stylesheets {
             for rule in &stylesheet.rules {
                 if self.selector_matches(
@@ -1872,7 +2019,7 @@ impl Engine {
             // Compare specificity: (ids, classes, tags)
             a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2))
         });
-        
+
         // Apply matching rules in order
         for (rule, _, _) in matching_rules {
             for decl in &rule.declarations {
@@ -1884,7 +2031,12 @@ impl Engine {
                 };
                 let resolved_value = self.resolve_css_variables(&value_str, css_vars);
                 if value_str != resolved_value {
-                    trace!(property = decl.property.as_str(), original = value_str.as_str(), resolved = resolved_value.as_str(), "Resolved CSS variable");
+                    trace!(
+                        property = decl.property.as_str(),
+                        original = value_str.as_str(),
+                        resolved = resolved_value.as_str(),
+                        "Resolved CSS variable"
+                    );
                 }
                 self.apply_style_property(&mut style, &decl.property, &resolved_value);
             }
@@ -1899,7 +2051,12 @@ impl Engine {
     }
 
     /// Apply inline style attribute to computed style.
-    fn apply_inline_style(&self, style: &mut ComputedStyle, style_attr: &str, css_vars: &HashMap<String, String>) {
+    fn apply_inline_style(
+        &self,
+        style: &mut ComputedStyle,
+        style_attr: &str,
+        css_vars: &HashMap<String, String>,
+    ) {
         for declaration in style_attr.split(';') {
             let declaration = declaration.trim();
             if declaration.is_empty() {
@@ -1918,7 +2075,7 @@ impl Engine {
     /// Apply a single CSS property to a computed style.
     fn apply_style_property(&self, style: &mut ComputedStyle, property: &str, value: &str) {
         let value = value.trim();
-        
+
         // Handle CSS-wide keywords
         // inherit: use the computed value from the parent (already handled by inherit_from)
         // initial: use the property's initial value
@@ -1945,7 +2102,7 @@ impl Engine {
             }
             _ => {}
         }
-        
+
         match property {
             "color" => {
                 if let Some(color) = parse_color(value) {
@@ -2043,14 +2200,14 @@ impl Engine {
                     }
                 }
             }
-                    "font-size" => {
-                        if let Some(length) = parse_length(value) {
-                            style.font_size = length;
-                        }
-                    }
-                    "font-weight" => {
-                        if value == "bold" || value == "700" || value == "800" || value == "900" {
-                            style.font_weight = rustkit_css::FontWeight::BOLD;
+            "font-size" => {
+                if let Some(length) = parse_length(value) {
+                    style.font_size = length;
+                }
+            }
+            "font-weight" => {
+                if value == "bold" || value == "700" || value == "800" || value == "900" {
+                    style.font_weight = rustkit_css::FontWeight::BOLD;
                 } else if value == "normal" || value == "400" {
                     style.font_weight = rustkit_css::FontWeight::NORMAL;
                 }
@@ -2246,8 +2403,12 @@ impl Engine {
                     style.flex_basis = rustkit_css::FlexBasis::Content;
                 } else if let Some(length) = parse_length(value) {
                     match length {
-                        rustkit_css::Length::Px(px) => style.flex_basis = rustkit_css::FlexBasis::Length(px),
-                        rustkit_css::Length::Percent(pct) => style.flex_basis = rustkit_css::FlexBasis::Percent(pct),
+                        rustkit_css::Length::Px(px) => {
+                            style.flex_basis = rustkit_css::FlexBasis::Length(px)
+                        }
+                        rustkit_css::Length::Percent(pct) => {
+                            style.flex_basis = rustkit_css::FlexBasis::Percent(pct)
+                        }
                         _ => {}
                     }
                 }
@@ -2268,8 +2429,12 @@ impl Engine {
                 if parts.len() >= 3 {
                     if let Some(length) = parse_length(parts[2]) {
                         match length {
-                            rustkit_css::Length::Px(px) => style.flex_basis = rustkit_css::FlexBasis::Length(px),
-                            rustkit_css::Length::Percent(pct) => style.flex_basis = rustkit_css::FlexBasis::Percent(pct),
+                            rustkit_css::Length::Px(px) => {
+                                style.flex_basis = rustkit_css::FlexBasis::Length(px)
+                            }
+                            rustkit_css::Length::Percent(pct) => {
+                                style.flex_basis = rustkit_css::FlexBasis::Percent(pct)
+                            }
                             _ => {}
                         }
                     }
@@ -2494,7 +2659,9 @@ impl Engine {
                         }
                     }
                     2 => {
-                        if let (Some(tb), Some(lr)) = (parse_length(parts[0]), parse_length(parts[1])) {
+                        if let (Some(tb), Some(lr)) =
+                            (parse_length(parts[0]), parse_length(parts[1]))
+                        {
                             style.top = Some(tb.clone());
                             style.bottom = Some(tb);
                             style.right = Some(lr.clone());
@@ -2535,9 +2702,15 @@ impl Engine {
             "text-decoration" | "text-decoration-line" => {
                 match value.trim().to_lowercase().as_str() {
                     "none" => style.text_decoration_line = rustkit_css::TextDecorationLine::NONE,
-                    "underline" => style.text_decoration_line = rustkit_css::TextDecorationLine::UNDERLINE,
-                    "overline" => style.text_decoration_line = rustkit_css::TextDecorationLine::OVERLINE,
-                    "line-through" => style.text_decoration_line = rustkit_css::TextDecorationLine::LINE_THROUGH,
+                    "underline" => {
+                        style.text_decoration_line = rustkit_css::TextDecorationLine::UNDERLINE
+                    }
+                    "overline" => {
+                        style.text_decoration_line = rustkit_css::TextDecorationLine::OVERLINE
+                    }
+                    "line-through" => {
+                        style.text_decoration_line = rustkit_css::TextDecorationLine::LINE_THROUGH
+                    }
                     _ => {
                         // Handle combined values like "underline line-through"
                         let mut decoration = rustkit_css::TextDecorationLine::NONE;
@@ -2764,16 +2937,41 @@ impl Engine {
                         }
                     } else {
                         match *part {
-                            "infinite" => style.animation_iteration_count = rustkit_css::AnimationIterationCount::Infinite,
-                            "normal" => style.animation_direction = rustkit_css::AnimationDirection::Normal,
-                            "reverse" => style.animation_direction = rustkit_css::AnimationDirection::Reverse,
-                            "alternate" => style.animation_direction = rustkit_css::AnimationDirection::Alternate,
-                            "alternate-reverse" => style.animation_direction = rustkit_css::AnimationDirection::AlternateReverse,
-                            "forwards" => style.animation_fill_mode = rustkit_css::AnimationFillMode::Forwards,
-                            "backwards" => style.animation_fill_mode = rustkit_css::AnimationFillMode::Backwards,
-                            "both" => style.animation_fill_mode = rustkit_css::AnimationFillMode::Both,
-                            "paused" => style.animation_play_state = rustkit_css::AnimationPlayState::Paused,
-                            "running" => style.animation_play_state = rustkit_css::AnimationPlayState::Running,
+                            "infinite" => {
+                                style.animation_iteration_count =
+                                    rustkit_css::AnimationIterationCount::Infinite
+                            }
+                            "normal" => {
+                                style.animation_direction = rustkit_css::AnimationDirection::Normal
+                            }
+                            "reverse" => {
+                                style.animation_direction = rustkit_css::AnimationDirection::Reverse
+                            }
+                            "alternate" => {
+                                style.animation_direction =
+                                    rustkit_css::AnimationDirection::Alternate
+                            }
+                            "alternate-reverse" => {
+                                style.animation_direction =
+                                    rustkit_css::AnimationDirection::AlternateReverse
+                            }
+                            "forwards" => {
+                                style.animation_fill_mode = rustkit_css::AnimationFillMode::Forwards
+                            }
+                            "backwards" => {
+                                style.animation_fill_mode =
+                                    rustkit_css::AnimationFillMode::Backwards
+                            }
+                            "both" => {
+                                style.animation_fill_mode = rustkit_css::AnimationFillMode::Both
+                            }
+                            "paused" => {
+                                style.animation_play_state = rustkit_css::AnimationPlayState::Paused
+                            }
+                            "running" => {
+                                style.animation_play_state =
+                                    rustkit_css::AnimationPlayState::Running
+                            }
                             _ => {
                                 // Could be timing function or name
                                 if i == 0 || style.animation_name.is_empty() {
@@ -2805,9 +3003,11 @@ impl Engine {
             "animation-iteration-count" => {
                 let v = value.trim();
                 if v == "infinite" {
-                    style.animation_iteration_count = rustkit_css::AnimationIterationCount::Infinite;
+                    style.animation_iteration_count =
+                        rustkit_css::AnimationIterationCount::Infinite;
                 } else if let Ok(n) = v.parse::<f32>() {
-                    style.animation_iteration_count = rustkit_css::AnimationIterationCount::Count(n);
+                    style.animation_iteration_count =
+                        rustkit_css::AnimationIterationCount::Count(n);
                 }
             }
             "animation-direction" => {
@@ -2850,10 +3050,10 @@ impl Engine {
                     style.content = None;
                 } else if v.starts_with('"') && v.ends_with('"') && v.len() >= 2 {
                     // Quoted string content
-                    style.content = Some(v[1..v.len()-1].to_string());
+                    style.content = Some(v[1..v.len() - 1].to_string());
                 } else if v.starts_with('\'') && v.ends_with('\'') && v.len() >= 2 {
                     // Single-quoted string content
-                    style.content = Some(v[1..v.len()-1].to_string());
+                    style.content = Some(v[1..v.len() - 1].to_string());
                 } else if v == "''" || v == "\"\"" {
                     // Empty string
                     style.content = Some(String::new());
@@ -2881,7 +3081,7 @@ impl Engine {
             }
         }
     }
-    
+
     /// Apply the initial (default) value for a CSS property.
     fn apply_initial_value(&self, style: &mut ComputedStyle, property: &str) {
         match property {
@@ -2900,7 +3100,9 @@ impl Engine {
             "padding-right" => style.padding_right = rustkit_css::Length::Zero,
             "padding-bottom" => style.padding_bottom = rustkit_css::Length::Zero,
             "padding-left" => style.padding_left = rustkit_css::Length::Zero,
-            "border-width" | "border-top-width" => style.border_top_width = rustkit_css::Length::Zero,
+            "border-width" | "border-top-width" => {
+                style.border_top_width = rustkit_css::Length::Zero
+            }
             "border-right-width" => style.border_right_width = rustkit_css::Length::Zero,
             "border-bottom-width" => style.border_bottom_width = rustkit_css::Length::Zero,
             "border-left-width" => style.border_left_width = rustkit_css::Length::Zero,
@@ -2917,10 +3119,10 @@ impl Engine {
     /// Extract CSS text from <style> elements in the document.
     fn extract_stylesheets(&self, document: &Document) -> Vec<Stylesheet> {
         let mut stylesheets = Vec::new();
-        
+
         // Find all <style> elements
         let style_elements = document.get_elements_by_tag_name("style");
-        
+
         for style_el in style_elements {
             // Get text content
             let mut css_text = String::new();
@@ -2929,7 +3131,7 @@ impl Engine {
                     css_text.push_str(text);
                 }
             }
-            
+
             if !css_text.is_empty() {
                 match Stylesheet::parse(&css_text) {
                     Ok(stylesheet) => {
@@ -2942,17 +3144,21 @@ impl Engine {
                 }
             }
         }
-        
+
         stylesheets
     }
-    
+
     /// Discover external stylesheets from <link> elements.
-    fn discover_external_stylesheets(&self, document: &Document, base_url: Option<&Url>) -> Vec<Url> {
+    fn discover_external_stylesheets(
+        &self,
+        document: &Document,
+        base_url: Option<&Url>,
+    ) -> Vec<Url> {
         let mut urls = Vec::new();
-        
+
         // Find all <link rel="stylesheet"> elements
         let link_elements = document.get_elements_by_tag_name("link");
-        
+
         for link_el in link_elements {
             if let NodeType::Element { attributes, .. } = &link_el.node_type {
                 // Check if this is a stylesheet link
@@ -2960,7 +3166,7 @@ impl Engine {
                 if rel.as_deref() != Some("stylesheet") {
                     continue;
                 }
-                
+
                 // Get href
                 if let Some(href) = attributes.get("href") {
                     // Resolve relative URL
@@ -2969,7 +3175,7 @@ impl Engine {
                     } else {
                         Url::parse(href).ok()
                     };
-                    
+
                     if let Some(url) = resolved {
                         debug!(%url, "Discovered external stylesheet");
                         urls.push(url);
@@ -2977,17 +3183,17 @@ impl Engine {
                 }
             }
         }
-        
+
         urls
     }
-    
+
     /// Discover images from <img> elements.
     fn discover_images(&self, document: &Document, base_url: Option<&Url>) -> Vec<(String, Url)> {
         let mut images = Vec::new();
-        
+
         // Find all <img> elements
         let img_elements = document.get_elements_by_tag_name("img");
-        
+
         for img_el in img_elements {
             if let NodeType::Element { attributes, .. } = &img_el.node_type {
                 if let Some(src) = attributes.get("src") {
@@ -2997,7 +3203,7 @@ impl Engine {
                     } else {
                         Url::parse(src).ok()
                     };
-                    
+
                     if let Some(url) = resolved {
                         debug!(%url, "Discovered image");
                         images.push((src.clone(), url));
@@ -3005,41 +3211,42 @@ impl Engine {
                 }
             }
         }
-        
+
         images
     }
-    
+
     /// Load external stylesheets asynchronously.
-    pub async fn load_external_stylesheets(&mut self, id: EngineViewId) -> Result<Vec<Stylesheet>, EngineError> {
+    pub async fn load_external_stylesheets(
+        &mut self,
+        id: EngineViewId,
+    ) -> Result<Vec<Stylesheet>, EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
-        
+
         let Some(document) = &view.document else {
             return Ok(Vec::new());
         };
-        
+
         let base_url = view.url.as_ref();
         let urls = self.discover_external_stylesheets(document.as_ref(), base_url);
-        
+
         let mut stylesheets = Vec::new();
-        
+
         for url in urls {
             info!(%url, "Loading external stylesheet");
-            
+
             match self.loader.fetch(Request::get(url.clone())).await {
                 Ok(response) => {
                     if response.ok() {
                         match response.text().await {
-                            Ok(css_text) => {
-                                match Stylesheet::parse(&css_text) {
-                                    Ok(stylesheet) => {
-                                        debug!(rules = stylesheet.rules.len(), %url, "Parsed external stylesheet");
-                                        stylesheets.push(stylesheet);
-                                    }
-                                    Err(e) => {
-                                        warn!(?e, %url, "Failed to parse external stylesheet");
-                                    }
+                            Ok(css_text) => match Stylesheet::parse(&css_text) {
+                                Ok(stylesheet) => {
+                                    debug!(rules = stylesheet.rules.len(), %url, "Parsed external stylesheet");
+                                    stylesheets.push(stylesheet);
                                 }
-                            }
+                                Err(e) => {
+                                    warn!(?e, %url, "Failed to parse external stylesheet");
+                                }
+                            },
                             Err(e) => {
                                 warn!(?e, %url, "Failed to read stylesheet body");
                             }
@@ -3053,10 +3260,10 @@ impl Engine {
                 }
             }
         }
-        
+
         Ok(stylesheets)
     }
-    
+
     /// Load images asynchronously and store in cache.
     pub async fn load_images(&mut self, id: EngineViewId) -> Result<usize, EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
@@ -3100,14 +3307,17 @@ impl Engine {
 
         Ok(loaded)
     }
-    
+
     /// Load all subresources (stylesheets, images) for a view.
     pub async fn load_subresources(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         // Load external stylesheets
         let external_stylesheets = self.load_external_stylesheets(id).await?;
-        
+
         if !external_stylesheets.is_empty() {
-            info!(count = external_stylesheets.len(), "Loaded external stylesheets");
+            info!(
+                count = external_stylesheets.len(),
+                "Loaded external stylesheets"
+            );
             // Store for use during relayout
             if let Some(view) = self.views.get_mut(&id) {
                 view.external_stylesheets = external_stylesheets;
@@ -3115,7 +3325,7 @@ impl Engine {
             // Trigger relayout with new styles
             self.relayout(id)?;
         }
-        
+
         // Load images
         let image_count = self.load_images(id).await?;
         if image_count > 0 {
@@ -3123,14 +3333,14 @@ impl Engine {
             // Trigger repaint for images
             self.relayout(id)?;
         }
-        
+
         Ok(())
     }
 
     /// Extract CSS variables from :root rules.
     fn extract_css_variables(&self, stylesheets: &[Stylesheet]) -> HashMap<String, String> {
         let mut variables = HashMap::new();
-        
+
         for stylesheet in stylesheets {
             for rule in &stylesheet.rules {
                 // Check for :root selector
@@ -3150,7 +3360,7 @@ impl Engine {
                 }
             }
         }
-        
+
         debug!(count = variables.len(), "Extracted CSS variables");
         variables
     }
@@ -3158,38 +3368,47 @@ impl Engine {
     /// Resolve CSS variable references in a value.
     fn resolve_css_variables(&self, value: &str, css_vars: &HashMap<String, String>) -> String {
         let mut result = value.to_string();
-        
+
         // Look for var(--name) or var(--name, fallback)
         while let Some(start) = result.find("var(") {
             let after_var = &result[start + 4..];
             if let Some(end) = after_var.find(')') {
                 let var_content = &after_var[..end];
-                
+
                 // Parse variable name and optional fallback
                 let (var_name, fallback) = if let Some(comma_pos) = var_content.find(',') {
-                    (var_content[..comma_pos].trim(), Some(var_content[comma_pos + 1..].trim()))
+                    (
+                        var_content[..comma_pos].trim(),
+                        Some(var_content[comma_pos + 1..].trim()),
+                    )
                 } else {
                     (var_content.trim(), None)
                 };
-                
+
                 // Look up variable value
-                let replacement = css_vars.get(var_name)
+                let replacement = css_vars
+                    .get(var_name)
                     .map(|s| s.as_str())
                     .or(fallback)
                     .unwrap_or("");
-                
+
                 // Replace var(...) with the resolved value
-                result = format!("{}{}{}", &result[..start], replacement, &after_var[end + 1..]);
+                result = format!(
+                    "{}{}{}",
+                    &result[..start],
+                    replacement,
+                    &after_var[end + 1..]
+                );
             } else {
                 break; // Malformed var(), stop processing
             }
         }
-        
+
         result
     }
 
     /// Check if a selector matches an element.
-    /// 
+    ///
     /// `ancestors` is a list of (tag_name, classes, id) tuples from parent to root.
     /// `siblings_before` is a list of (tag_name, classes, id) tuples for preceding siblings.
     /// `element_index` is the 0-based index of this element among its siblings.
@@ -3205,41 +3424,51 @@ impl Engine {
         sibling_count: usize,
     ) -> bool {
         let selector = selector.trim();
-        
+
         // Handle multiple selectors (comma-separated)
         if selector.contains(',') {
-            return selector.split(',')
-                .any(|s| self.selector_matches(
-                    s.trim(), tag_name, attributes, ancestors,
-                    siblings_before, element_index, sibling_count
-                ));
+            return selector.split(',').any(|s| {
+                self.selector_matches(
+                    s.trim(),
+                    tag_name,
+                    attributes,
+                    ancestors,
+                    siblings_before,
+                    element_index,
+                    sibling_count,
+                )
+            });
         }
-        
+
         // Tokenize selector into parts and combinators
         let tokens = self.tokenize_selector(selector);
-        
+
         if tokens.is_empty() {
             return false;
         }
-        
+
         // The last token must match the current element
         let last_token = &tokens[tokens.len() - 1];
         if !last_token.1.is_empty() {
             // There's a combinator before this - we need to handle it
             return false; // Simplified - we'll handle this below
         }
-        
+
         if !self.simple_selector_matches_with_pseudo(
-            &last_token.0, tag_name, attributes, element_index, sibling_count
+            &last_token.0,
+            tag_name,
+            attributes,
+            element_index,
+            sibling_count,
         ) {
             return false;
         }
-        
+
         // If there's only one token, we're done
         if tokens.len() == 1 {
             return true;
         }
-        
+
         // Handle combinators by walking backwards through tokens
         // Track current position in ancestor chain
         let mut ancestor_idx = 0;
@@ -3252,8 +3481,15 @@ impl Engine {
                     // Descendant combinator: some ancestor (from current position) must match
                     let mut found = false;
                     let mut found_idx = ancestor_idx;
-                    for (idx, (anc_tag, anc_classes, anc_id)) in ancestors.iter().enumerate().skip(ancestor_idx) {
-                        if self.simple_selector_matches_ancestor(sel_part, anc_tag, anc_classes, anc_id.as_ref()) {
+                    for (idx, (anc_tag, anc_classes, anc_id)) in
+                        ancestors.iter().enumerate().skip(ancestor_idx)
+                    {
+                        if self.simple_selector_matches_ancestor(
+                            sel_part,
+                            anc_tag,
+                            anc_classes,
+                            anc_id.as_ref(),
+                        ) {
                             found = true;
                             found_idx = idx + 1; // Next position after this ancestor
                             break;
@@ -3266,8 +3502,15 @@ impl Engine {
                 }
                 ">" => {
                     // Child combinator: immediate parent (at current position) must match
-                    if let Some((parent_tag, parent_classes, parent_id)) = ancestors.get(ancestor_idx) {
-                        if !self.simple_selector_matches_ancestor(sel_part, parent_tag, parent_classes, parent_id.as_ref()) {
+                    if let Some((parent_tag, parent_classes, parent_id)) =
+                        ancestors.get(ancestor_idx)
+                    {
+                        if !self.simple_selector_matches_ancestor(
+                            sel_part,
+                            parent_tag,
+                            parent_classes,
+                            parent_id.as_ref(),
+                        ) {
                             return false;
                         }
                         ancestor_idx += 1; // Move to next ancestor
@@ -3279,7 +3522,12 @@ impl Engine {
                     // Adjacent sibling combinator: immediate previous sibling must match
                     // Note: sibling combinators only apply at the element level, not up the tree
                     if let Some((prev_tag, prev_classes, prev_id)) = siblings_before.last() {
-                        if !self.simple_selector_matches_ancestor(sel_part, prev_tag, prev_classes, prev_id.as_ref()) {
+                        if !self.simple_selector_matches_ancestor(
+                            sel_part,
+                            prev_tag,
+                            prev_classes,
+                            prev_id.as_ref(),
+                        ) {
                             return false;
                         }
                     } else {
@@ -3290,7 +3538,12 @@ impl Engine {
                     // General sibling combinator: any previous sibling must match
                     let mut found = false;
                     for (sib_tag, sib_classes, sib_id) in siblings_before {
-                        if self.simple_selector_matches_ancestor(sel_part, sib_tag, sib_classes, sib_id.as_ref()) {
+                        if self.simple_selector_matches_ancestor(
+                            sel_part,
+                            sib_tag,
+                            sib_classes,
+                            sib_id.as_ref(),
+                        ) {
                             found = true;
                             break;
                         }
@@ -3307,7 +3560,7 @@ impl Engine {
 
         true
     }
-    
+
     /// Tokenize a selector into (simple_selector, combinator) pairs.
     /// The combinator is the one that follows this selector part.
     fn tokenize_selector(&self, selector: &str) -> Vec<(String, String)> {
@@ -3317,7 +3570,7 @@ impl Engine {
         let mut in_brackets = false;
         let mut in_quotes = false;
         let mut quote_char = ' ';
-        
+
         while let Some(c) = chars.next() {
             if in_quotes {
                 current.push(c);
@@ -3326,31 +3579,31 @@ impl Engine {
                 }
                 continue;
             }
-            
+
             if c == '"' || c == '\'' {
                 in_quotes = true;
                 quote_char = c;
                 current.push(c);
                 continue;
             }
-            
+
             if c == '[' {
                 in_brackets = true;
                 current.push(c);
                 continue;
             }
-            
+
             if c == ']' {
                 in_brackets = false;
                 current.push(c);
                 continue;
             }
-            
+
             if in_brackets {
                 current.push(c);
                 continue;
             }
-            
+
             // Check for combinators
             if c == '>' || c == '+' || c == '~' {
                 if !current.trim().is_empty() {
@@ -3359,7 +3612,7 @@ impl Engine {
                 }
                 continue;
             }
-            
+
             if c.is_whitespace() {
                 // Could be a descendant combinator or just whitespace around other combinators
                 if !current.trim().is_empty() {
@@ -3367,12 +3620,18 @@ impl Engine {
                     while chars.peek().map(|c| c.is_whitespace()).unwrap_or(false) {
                         chars.next();
                     }
-                    
+
                     if let Some(&next) = chars.peek() {
                         if next == '>' || next == '+' || next == '~' {
                             // Don't push yet - the actual combinator character will be handled
                             // when we process it. Keep current intact for the combinator handler.
-                        } else if next.is_alphanumeric() || next == '.' || next == '#' || next == '[' || next == ':' || next == '*' {
+                        } else if next.is_alphanumeric()
+                            || next == '.'
+                            || next == '#'
+                            || next == '['
+                            || next == ':'
+                            || next == '*'
+                        {
                             // Descendant combinator (space between selectors)
                             tokens.push((current.trim().to_string(), " ".to_string()));
                             current = String::new();
@@ -3381,15 +3640,15 @@ impl Engine {
                 }
                 continue;
             }
-            
+
             current.push(c);
         }
-        
+
         // Add the last token with empty combinator
         if !current.trim().is_empty() {
             tokens.push((current.trim().to_string(), String::new()));
         }
-        
+
         tokens
     }
 
@@ -3406,12 +3665,12 @@ impl Engine {
         if selector == "*" {
             return true;
         }
-        
+
         // :root pseudo-class matches html element
         if selector == ":root" {
             return tag_name.eq_ignore_ascii_case("html");
         }
-        
+
         // ID selector: #id
         if let Some(id) = selector.strip_prefix('#') {
             if let Some(el_id) = attributes.get("id") {
@@ -3419,7 +3678,7 @@ impl Engine {
             }
             return false;
         }
-        
+
         // Class selector: .class (can be chained: .a.b)
         if selector.starts_with('.') && !selector.contains(|c| c == '#' || c == '[' || c == ':') {
             let classes: Vec<&str> = selector[1..].split('.').filter(|s| !s.is_empty()).collect();
@@ -3429,31 +3688,33 @@ impl Engine {
             }
             return false;
         }
-        
+
         // Type selector (element name)
         // May have class, ID, attribute, or pseudo-class attached: div.class or div#id or div[attr] or div:first-child
         let mut remaining = selector;
-        
+
         // Extract tag part
-        let tag_end = remaining.find(|c| c == '.' || c == '#' || c == ':' || c == '[')
+        let tag_end = remaining
+            .find(|c| c == '.' || c == '#' || c == ':' || c == '[')
             .unwrap_or(remaining.len());
         let tag_part = &remaining[..tag_end];
         remaining = &remaining[tag_end..];
-        
+
         // Check tag name (if specified)
         if !tag_part.is_empty() && !tag_part.eq_ignore_ascii_case(tag_name) {
             return false;
         }
-        
+
         // Check remaining parts (classes, IDs, attributes, pseudo-classes)
         while !remaining.is_empty() {
             if let Some(rest) = remaining.strip_prefix('.') {
                 // Class
-                let class_end = rest.find(|c| c == '.' || c == '#' || c == ':' || c == '[')
+                let class_end = rest
+                    .find(|c| c == '.' || c == '#' || c == ':' || c == '[')
                     .unwrap_or(rest.len());
                 let class_name = &rest[..class_end];
                 remaining = &rest[class_end..];
-                
+
                 if let Some(el_class) = attributes.get("class") {
                     if !el_class.split_whitespace().any(|c| c == class_name) {
                         return false;
@@ -3463,11 +3724,12 @@ impl Engine {
                 }
             } else if let Some(rest) = remaining.strip_prefix('#') {
                 // ID
-                let id_end = rest.find(|c| c == '.' || c == '#' || c == ':' || c == '[')
+                let id_end = rest
+                    .find(|c| c == '.' || c == '#' || c == ':' || c == '[')
                     .unwrap_or(rest.len());
                 let id_name = &rest[..id_end];
                 remaining = &rest[id_end..];
-                
+
                 if attributes.get("id").map(|s| s.as_str()) != Some(id_name) {
                     return false;
                 }
@@ -3475,8 +3737,12 @@ impl Engine {
                 // Attribute selector with operators
                 let bracket_end = rest.find(']').unwrap_or(rest.len());
                 let attr_selector = &rest[..bracket_end];
-                remaining = if bracket_end < rest.len() { &rest[bracket_end + 1..] } else { "" };
-                
+                remaining = if bracket_end < rest.len() {
+                    &rest[bracket_end + 1..]
+                } else {
+                    ""
+                };
+
                 if !self.match_attribute_selector(attr_selector, attributes) {
                     return false;
                 }
@@ -3485,7 +3751,14 @@ impl Engine {
                 let (pseudo_name, pseudo_arg, consumed) = self.parse_pseudo_class(rest);
                 remaining = &rest[consumed..];
 
-                if !self.match_pseudo_class(&pseudo_name, pseudo_arg.as_deref(), tag_name, element_index, sibling_count, attributes) {
+                if !self.match_pseudo_class(
+                    &pseudo_name,
+                    pseudo_arg.as_deref(),
+                    tag_name,
+                    element_index,
+                    sibling_count,
+                    attributes,
+                ) {
                     return false;
                 }
             } else {
@@ -3493,31 +3766,39 @@ impl Engine {
                 break;
             }
         }
-        
+
         true
     }
-    
+
     /// Match an attribute selector with operators.
-    fn match_attribute_selector(&self, attr_selector: &str, attributes: &HashMap<String, String>) -> bool {
+    fn match_attribute_selector(
+        &self,
+        attr_selector: &str,
+        attributes: &HashMap<String, String>,
+    ) -> bool {
         // Determine the operator
         let operators = ["~=", "|=", "^=", "$=", "*=", "="];
-        
+
         for op in &operators {
             if let Some(pos) = attr_selector.find(op) {
                 let attr_name = attr_selector[..pos].trim();
                 let mut attr_value = attr_selector[pos + op.len()..].trim();
-                
+
                 // Remove quotes if present
-                if (attr_value.starts_with('"') && attr_value.ends_with('"')) ||
-                   (attr_value.starts_with('\'') && attr_value.ends_with('\'')) {
+                if (attr_value.starts_with('"') && attr_value.ends_with('"'))
+                    || (attr_value.starts_with('\'') && attr_value.ends_with('\''))
+                {
                     attr_value = &attr_value[1..attr_value.len() - 1];
                 }
-                
+
                 if let Some(el_attr) = attributes.get(attr_name) {
                     return match *op {
                         "=" => el_attr == attr_value,
                         "~=" => el_attr.split_whitespace().any(|w| w == attr_value),
-                        "|=" => el_attr == attr_value || el_attr.starts_with(&format!("{}-", attr_value)),
+                        "|=" => {
+                            el_attr == attr_value
+                                || el_attr.starts_with(&format!("{}-", attr_value))
+                        }
                         "^=" => el_attr.starts_with(attr_value),
                         "$=" => el_attr.ends_with(attr_value),
                         "*=" => el_attr.contains(attr_value),
@@ -3528,19 +3809,20 @@ impl Engine {
                 }
             }
         }
-        
+
         // Just [attr] - check presence
         let attr_name = attr_selector.trim();
         attributes.contains_key(attr_name)
     }
-    
+
     /// Parse a pseudo-class, returning (name, optional_arg, chars_consumed).
     fn parse_pseudo_class(&self, rest: &str) -> (String, Option<String>, usize) {
         // Handle :not(...) and :nth-child(...) with parentheses
-        let name_end = rest.find(|c: char| !c.is_alphanumeric() && c != '-')
+        let name_end = rest
+            .find(|c: char| !c.is_alphanumeric() && c != '-')
             .unwrap_or(rest.len());
         let name = rest[..name_end].to_string();
-        
+
         if rest[name_end..].starts_with('(') {
             // Find matching closing paren
             let paren_start = name_end + 1;
@@ -3565,7 +3847,7 @@ impl Engine {
             (name, None, name_end)
         }
     }
-    
+
     /// Match a pseudo-class.
     fn match_pseudo_class(
         &self,
@@ -3601,7 +3883,11 @@ impl Engine {
                     // Pass element_index and sibling_count for pseudo-class support inside :not()
                     // This enables :not(:first-child), :not(:nth-child(2)), etc.
                     !self.simple_selector_matches_with_pseudo(
-                        arg, tag_name, attributes, element_index, sibling_count
+                        arg,
+                        tag_name,
+                        attributes,
+                        element_index,
+                        sibling_count,
                     )
                 } else {
                     true
@@ -3615,32 +3901,32 @@ impl Engine {
             "enabled" => !attributes.contains_key("disabled"),
             "checked" => attributes.contains_key("checked"),
             "empty" => false, // Would need DOM context
-            "root" => false, // Handled separately
-            _ => true, // Unknown pseudo-classes pass through
+            "root" => false,  // Handled separately
+            _ => true,        // Unknown pseudo-classes pass through
         }
     }
-    
+
     /// Match an nth-child expression like "2n+1", "odd", "even", or a number.
     fn match_nth(&self, expr: &str, n: usize) -> bool {
         let expr = expr.trim().to_lowercase();
-        
+
         if expr == "odd" {
             return n % 2 == 1;
         }
         if expr == "even" {
             return n % 2 == 0;
         }
-        
+
         // Try parsing as a simple number
         if let Ok(num) = expr.parse::<usize>() {
             return n == num;
         }
-        
+
         // Parse An+B formula
         // Examples: 2n, 2n+1, -n+3, n+2
         let mut a = 0i32;
         let mut b = 0i32;
-        
+
         if let Some(n_pos) = expr.find('n') {
             let a_part = &expr[..n_pos].trim();
             a = if a_part.is_empty() || *a_part == "+" {
@@ -3650,7 +3936,7 @@ impl Engine {
             } else {
                 a_part.parse().unwrap_or(0)
             };
-            
+
             let b_part = expr[n_pos + 1..].trim();
             if !b_part.is_empty() {
                 b = b_part.replace('+', "").trim().parse().unwrap_or(0);
@@ -3659,13 +3945,13 @@ impl Engine {
             // Just a number
             b = expr.parse().unwrap_or(0);
         }
-        
+
         // Check if n matches An+B for some non-negative integer
         let n = n as i32;
         if a == 0 {
             return n == b;
         }
-        
+
         // n = a*k + b for some k >= 0
         // k = (n - b) / a
         let diff = n - b;
@@ -3700,7 +3986,8 @@ impl Engine {
 
         while i <= chars.len() {
             let at_end = i == chars.len();
-            let is_delimiter = !at_end && (chars[i] == '.' || chars[i] == '#' || chars[i] == ':' || chars[i] == '[');
+            let is_delimiter = !at_end
+                && (chars[i] == '.' || chars[i] == '#' || chars[i] == ':' || chars[i] == '[');
 
             if at_end || is_delimiter {
                 if i > current_start {
@@ -3716,7 +4003,12 @@ impl Engine {
                         // Find class name
                         let start = i + 1;
                         i += 1;
-                        while i < chars.len() && chars[i] != '.' && chars[i] != '#' && chars[i] != ':' && chars[i] != '[' {
+                        while i < chars.len()
+                            && chars[i] != '.'
+                            && chars[i] != '#'
+                            && chars[i] != ':'
+                            && chars[i] != '['
+                        {
                             i += 1;
                         }
                         if i > start {
@@ -3728,7 +4020,12 @@ impl Engine {
                         // Find ID
                         let start = i + 1;
                         i += 1;
-                        while i < chars.len() && chars[i] != '.' && chars[i] != '#' && chars[i] != ':' && chars[i] != '[' {
+                        while i < chars.len()
+                            && chars[i] != '.'
+                            && chars[i] != '#'
+                            && chars[i] != ':'
+                            && chars[i] != '['
+                        {
                             i += 1;
                         }
                         if i > start {
@@ -3776,10 +4073,10 @@ impl Engine {
     /// - b = number of class selectors, attribute selectors, and pseudo-classes
     /// - c = number of type selectors and pseudo-elements
     fn selector_specificity(&self, selector: &str) -> (usize, usize, usize) {
-        let mut ids = 0;      // (a)
-        let mut classes = 0;  // (b)
-        let mut tags = 0;     // (c)
-        
+        let mut ids = 0; // (a)
+        let mut classes = 0; // (b)
+        let mut tags = 0; // (c)
+
         // Handle comma-separated selectors - take max specificity
         if selector.contains(',') {
             let mut max_spec = (0, 0, 0);
@@ -3791,17 +4088,17 @@ impl Engine {
             }
             return max_spec;
         }
-        
+
         // Process each part of the selector (space-separated for descendants)
         for part in selector.split_whitespace() {
             // Skip combinators
             if part == ">" || part == "+" || part == "~" {
                 continue;
             }
-            
+
             let chars: Vec<char> = part.chars().collect();
             let mut i = 0;
-            
+
             while i < chars.len() {
                 match chars[i] {
                     '#' => {
@@ -3809,7 +4106,9 @@ impl Engine {
                         ids += 1;
                         i += 1;
                         // Skip the ID name
-                        while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_') {
+                        while i < chars.len()
+                            && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_')
+                        {
                             i += 1;
                         }
                     }
@@ -3818,7 +4117,9 @@ impl Engine {
                         classes += 1;
                         i += 1;
                         // Skip the class name
-                        while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_') {
+                        while i < chars.len()
+                            && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_')
+                        {
                             i += 1;
                         }
                     }
@@ -3841,18 +4142,26 @@ impl Engine {
                             tags += 1;
                             i += 1;
                             // Skip the pseudo-element name
-                            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_') {
+                            while i < chars.len()
+                                && (chars[i].is_alphanumeric()
+                                    || chars[i] == '-'
+                                    || chars[i] == '_')
+                            {
                                 i += 1;
                             }
                         } else {
                             // Pseudo-class
                             // Check for functional pseudo-classes
                             let start = i;
-                            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_') {
+                            while i < chars.len()
+                                && (chars[i].is_alphanumeric()
+                                    || chars[i] == '-'
+                                    || chars[i] == '_')
+                            {
                                 i += 1;
                             }
                             let name: String = chars[start..i].iter().collect();
-                            
+
                             if i < chars.len() && chars[i] == '(' {
                                 // Functional pseudo-class
                                 if name == "not" || name == "is" {
@@ -3868,7 +4177,8 @@ impl Engine {
                                         }
                                         i += 1;
                                     }
-                                    let arg: String = chars[arg_start..i.saturating_sub(1)].iter().collect();
+                                    let arg: String =
+                                        chars[arg_start..i.saturating_sub(1)].iter().collect();
                                     let (a, b, c) = self.selector_specificity(&arg);
                                     ids += a;
                                     classes += b;
@@ -3914,7 +4224,9 @@ impl Engine {
                         tags += 1;
                         i += 1;
                         // Skip the element name
-                        while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_') {
+                        while i < chars.len()
+                            && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_')
+                        {
                             i += 1;
                         }
                     }
@@ -3924,7 +4236,7 @@ impl Engine {
                 }
             }
         }
-        
+
         (ids, classes, tags)
     }
 
@@ -3956,12 +4268,15 @@ impl Engine {
         info!(?id, path, "Capturing frame");
 
         // Get surface size
-        let (width, height) = self.compositor
+        let (width, height) = self
+            .compositor
             .get_surface_size(viewhost_id)
             .map_err(|e| EngineError::RenderError(e.to_string()))?;
 
         if width == 0 || height == 0 {
-            return Err(EngineError::RenderError("Cannot capture zero-size frame".into()));
+            return Err(EngineError::RenderError(
+                "Cannot capture zero-size frame".into(),
+            ));
         }
 
         // If we have a display list and renderer, render to offscreen texture
@@ -3972,7 +4287,12 @@ impl Engine {
 
                 // Capture with actual display list rendering
                 self.compositor
-                    .capture_frame_with_renderer(viewhost_id, path, renderer, &display_list.commands)
+                    .capture_frame_with_renderer(
+                        viewhost_id,
+                        path,
+                        renderer,
+                        &display_list.commands,
+                    )
                     .map_err(|e| EngineError::RenderError(e.to_string()))
             }
             _ => {
@@ -3990,11 +4310,12 @@ impl Engine {
     /// which can be compared against Chromium's DOMRect data for layout parity testing.
     pub fn export_layout_json(&self, id: EngineViewId, path: &str) -> Result<(), EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
-        
-        let layout = view.layout.as_ref().ok_or_else(|| {
-            EngineError::RenderError("No layout tree available".into())
-        })?;
-        
+
+        let layout = view
+            .layout
+            .as_ref()
+            .ok_or_else(|| EngineError::RenderError("No layout tree available".into()))?;
+
         // Convert layout tree to JSON-serializable structure
         fn layout_box_to_json(layout_box: &LayoutBox) -> serde_json::Value {
             let dims = &layout_box.dimensions;
@@ -4002,49 +4323,57 @@ impl Engine {
             let margin_box = dims.margin_box();
             let padding_box = dims.padding_box();
             let border_box = dims.border_box();
-            
+
             let box_type = match &layout_box.box_type {
                 BoxType::Block => "block",
                 BoxType::Inline => "inline",
                 BoxType::AnonymousBlock => "anonymous_block",
-                BoxType::Text(t) => return serde_json::json!({
-                    "type": "text",
-                    "text": t.chars().take(50).collect::<String>(),
-                    "rect": {
-                        "x": content.x,
-                        "y": content.y,
-                        "width": content.width,
-                        "height": content.height
-                    }
-                }),
-                BoxType::Image { natural_width, natural_height, .. } => return serde_json::json!({
-                    "type": "image",
-                    "natural_width": natural_width,
-                    "natural_height": natural_height,
-                    "rect": {
-                        "x": content.x,
-                        "y": content.y,
-                        "width": content.width,
-                        "height": content.height
-                    }
-                }),
-                BoxType::FormControl(ctrl) => return serde_json::json!({
-                    "type": "form_control",
-                    "control_type": format!("{:?}", ctrl),
-                    "rect": {
-                        "x": content.x,
-                        "y": content.y,
-                        "width": content.width,
-                        "height": content.height
-                    }
-                }),
+                BoxType::Text(t) => {
+                    return serde_json::json!({
+                        "type": "text",
+                        "text": t.chars().take(50).collect::<String>(),
+                        "rect": {
+                            "x": content.x,
+                            "y": content.y,
+                            "width": content.width,
+                            "height": content.height
+                        }
+                    })
+                }
+                BoxType::Image {
+                    natural_width,
+                    natural_height,
+                    ..
+                } => {
+                    return serde_json::json!({
+                        "type": "image",
+                        "natural_width": natural_width,
+                        "natural_height": natural_height,
+                        "rect": {
+                            "x": content.x,
+                            "y": content.y,
+                            "width": content.width,
+                            "height": content.height
+                        }
+                    })
+                }
+                BoxType::FormControl(ctrl) => {
+                    return serde_json::json!({
+                        "type": "form_control",
+                        "control_type": format!("{:?}", ctrl),
+                        "rect": {
+                            "x": content.x,
+                            "y": content.y,
+                            "width": content.width,
+                            "height": content.height
+                        }
+                    })
+                }
             };
-            
-            let children: Vec<serde_json::Value> = layout_box.children
-                .iter()
-                .map(layout_box_to_json)
-                .collect();
-            
+
+            let children: Vec<serde_json::Value> =
+                layout_box.children.iter().map(layout_box_to_json).collect();
+
             serde_json::json!({
                 "type": box_type,
                 "content_rect": {
@@ -4092,14 +4421,15 @@ impl Engine {
                 "children": children
             })
         }
-        
+
         let layout_json = layout_box_to_json(layout);
-        
+
         // Get viewport size from compositor
-        let (width, height) = self.compositor
+        let (width, height) = self
+            .compositor
             .get_surface_size(view.viewhost_id)
             .unwrap_or((0, 0));
-        
+
         let wrapper = serde_json::json!({
             "version": 1,
             "viewport": {
@@ -4108,13 +4438,13 @@ impl Engine {
             },
             "root": layout_json
         });
-        
+
         let json_str = serde_json::to_string_pretty(&wrapper)
             .map_err(|e| EngineError::RenderError(format!("JSON serialization failed: {}", e)))?;
-        
+
         std::fs::write(path, json_str)
             .map_err(|e| EngineError::RenderError(format!("Failed to write layout file: {}", e)))?;
-        
+
         info!(?id, path, "Layout tree exported");
         Ok(())
     }
@@ -4130,12 +4460,21 @@ impl Engine {
             (
                 view.viewhost_id,
                 view.display_list.is_some(),
-                view.display_list.as_ref().map(|dl| dl.commands.len()).unwrap_or(0),
+                view.display_list
+                    .as_ref()
+                    .map(|dl| dl.commands.len())
+                    .unwrap_or(0),
                 view.headless_bounds.is_some(),
             )
         };
 
-        trace!(?id, has_display_list, cmd_count, is_headless, "Rendering view");
+        trace!(
+            ?id,
+            has_display_list,
+            cmd_count,
+            is_headless,
+            "Rendering view"
+        );
 
         // Get surface size and update renderer viewport before rendering
         let (surface_width, surface_height) = {
@@ -4175,11 +4514,13 @@ impl Engine {
 
             let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
             if let (Some(renderer), Some(display_list)) = (&mut self.renderer, display_list) {
-                renderer.execute(&display_list.commands, &texture_view)
+                renderer
+                    .execute(&display_list.commands, &texture_view)
                     .map_err(|e| EngineError::RenderError(e.to_string()))?;
             } else if let Some(renderer) = &mut self.renderer {
                 // No display list, render empty (will clear to white or debug color)
-                renderer.execute(&[], &texture_view)
+                renderer
+                    .execute(&[], &texture_view)
                     .map_err(|e| EngineError::RenderError(e.to_string()))?;
             } else {
                 // Fallback to compositor solid color
@@ -4202,11 +4543,13 @@ impl Engine {
             {
                 let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
                 if let (Some(renderer), Some(display_list)) = (&mut self.renderer, display_list) {
-                    renderer.execute(&display_list.commands, &texture_view)
+                    renderer
+                        .execute(&display_list.commands, &texture_view)
                         .map_err(|e| EngineError::RenderError(e.to_string()))?;
                 } else if let Some(renderer) = &mut self.renderer {
                     // No display list, render empty (will clear to white or debug color)
-                    renderer.execute(&[], &texture_view)
+                    renderer
+                        .execute(&[], &texture_view)
                         .map_err(|e| EngineError::RenderError(e.to_string()))?;
                 } else {
                     // Fallback to compositor solid color (shouldn't normally happen)
@@ -4230,10 +4573,7 @@ impl Engine {
     /// This scans the display list for BackgroundImage and Image commands and ensures
     /// any cached images are uploaded to the GPU before rendering.
     /// For data: URLs, images are loaded synchronously on-demand.
-    fn upload_display_list_images(
-        &mut self,
-        commands: &[rustkit_layout::DisplayCommand],
-    ) {
+    fn upload_display_list_images(&mut self, commands: &[rustkit_layout::DisplayCommand]) {
         use std::collections::HashSet;
         use std::time::Duration;
 
@@ -4243,7 +4583,8 @@ impl Engine {
         };
 
         // Collect unique image URLs from display list
-        let mut urls_to_upload: Vec<(String, std::sync::Arc<rustkit_image::LoadedImage>)> = Vec::new();
+        let mut urls_to_upload: Vec<(String, std::sync::Arc<rustkit_image::LoadedImage>)> =
+            Vec::new();
         let mut urls_seen = HashSet::new();
 
         for cmd in commands {
@@ -4294,12 +4635,9 @@ impl Engine {
         // Now upload all collected images
         for (url_str, image) in urls_to_upload {
             let frame = image.current_frame(Duration::ZERO);
-            if let Err(e) = renderer.upload_image(
-                &url_str,
-                frame.width(),
-                frame.height(),
-                frame.data(),
-            ) {
+            if let Err(e) =
+                renderer.upload_image(&url_str, frame.width(), frame.height(), frame.data())
+            {
                 tracing::warn!(?e, %url_str, "Failed to upload image to renderer");
             } else {
                 tracing::debug!(%url_str, "Uploaded image to renderer");
@@ -4532,7 +4870,10 @@ impl Engine {
             // This also requires node_id tracking in HitTestResult to know which
             // element was clicked. Once that's available, check if the element is
             // focusable (form controls, elements with tabindex) and call focus_element().
-            trace!(?view_id, "Click focus change pending layout node_id tracking");
+            trace!(
+                ?view_id,
+                "Click focus change pending layout node_id tracking"
+            );
         }
     }
 
@@ -4616,7 +4957,8 @@ impl Engine {
                 }
                 ancestors.reverse(); // Root to parent order
 
-                let prevented = !EventDispatcher::dispatch(&mut dom_event, &focused_node, &ancestors);
+                let prevented =
+                    !EventDispatcher::dispatch(&mut dom_event, &focused_node, &ancestors);
 
                 if prevented {
                     trace!(?view_id, key = ?key_str, "Keyboard event default prevented");
@@ -4753,7 +5095,10 @@ impl Engine {
                     url: url.clone(),
                     error: error.clone(),
                 });
-                Err(EngineError::RenderError(format!("Image load failed: {}", error)))
+                Err(EngineError::RenderError(format!(
+                    "Image load failed: {}",
+                    error
+                )))
             }
         }
     }
@@ -4930,11 +5275,12 @@ fn parse_gradient(value: &str) -> Option<rustkit_css::Gradient> {
 /// Parse a linear-gradient CSS function.
 fn parse_linear_gradient(value: &str, repeating: bool) -> Option<rustkit_css::Gradient> {
     // Strip prefix and suffix
-    let prefix = if repeating { "repeating-linear-gradient(" } else { "linear-gradient(" };
-    let inner = value
-        .strip_prefix(prefix)?
-        .strip_suffix(')')?
-        .trim();
+    let prefix = if repeating {
+        "repeating-linear-gradient("
+    } else {
+        "linear-gradient("
+    };
+    let inner = value.strip_prefix(prefix)?.strip_suffix(')')?.trim();
 
     // Split by commas, being careful about nested parentheses
     let parts = split_by_comma(inner);
@@ -4981,11 +5327,12 @@ fn parse_linear_gradient(value: &str, repeating: bool) -> Option<rustkit_css::Gr
 /// Parse a radial-gradient CSS function.
 fn parse_radial_gradient(value: &str, repeating: bool) -> Option<rustkit_css::Gradient> {
     // Strip prefix and suffix
-    let prefix = if repeating { "repeating-radial-gradient(" } else { "radial-gradient(" };
-    let inner = value
-        .strip_prefix(prefix)?
-        .strip_suffix(')')?
-        .trim();
+    let prefix = if repeating {
+        "repeating-radial-gradient("
+    } else {
+        "radial-gradient("
+    };
+    let inner = value.strip_prefix(prefix)?.strip_suffix(')')?.trim();
 
     let parts = split_by_comma(inner);
     if parts.is_empty() {
@@ -5016,11 +5363,26 @@ fn parse_radial_gradient(value: &str, repeating: bool) -> Option<rustkit_css::Gr
                 // "left"/"right" are horizontal - vertical stays centered
                 let keyword = pos_parts[0].trim().to_lowercase();
                 match keyword.as_str() {
-                    "top" => { center.0 = 0.5; center.1 = 0.0; }
-                    "bottom" => { center.0 = 0.5; center.1 = 1.0; }
-                    "left" => { center.0 = 0.0; center.1 = 0.5; }
-                    "right" => { center.0 = 1.0; center.1 = 0.5; }
-                    "center" => { center.0 = 0.5; center.1 = 0.5; }
+                    "top" => {
+                        center.0 = 0.5;
+                        center.1 = 0.0;
+                    }
+                    "bottom" => {
+                        center.0 = 0.5;
+                        center.1 = 1.0;
+                    }
+                    "left" => {
+                        center.0 = 0.0;
+                        center.1 = 0.5;
+                    }
+                    "right" => {
+                        center.0 = 1.0;
+                        center.1 = 0.5;
+                    }
+                    "center" => {
+                        center.0 = 0.5;
+                        center.1 = 0.5;
+                    }
                     _ => {
                         // Percentage or other value - apply to both
                         let val = parse_position_value(pos_parts[0]);
@@ -5056,11 +5418,12 @@ fn parse_radial_gradient(value: &str, repeating: bool) -> Option<rustkit_css::Gr
 /// Parse a conic-gradient CSS function.
 fn parse_conic_gradient(value: &str, repeating: bool) -> Option<rustkit_css::Gradient> {
     // Strip prefix and suffix
-    let prefix = if repeating { "repeating-conic-gradient(" } else { "conic-gradient(" };
-    let inner = value
-        .strip_prefix(prefix)?
-        .strip_suffix(')')?
-        .trim();
+    let prefix = if repeating {
+        "repeating-conic-gradient("
+    } else {
+        "conic-gradient("
+    };
+    let inner = value.strip_prefix(prefix)?.strip_suffix(')')?.trim();
 
     let parts = split_by_comma(inner);
     if parts.is_empty() {
@@ -5095,11 +5458,26 @@ fn parse_conic_gradient(value: &str, repeating: bool) -> Option<rustkit_css::Gra
                 // Single keyword: interpret as axis-specific position
                 let keyword = pos_parts[0].trim().to_lowercase();
                 match keyword.as_str() {
-                    "top" => { center.0 = 0.5; center.1 = 0.0; }
-                    "bottom" => { center.0 = 0.5; center.1 = 1.0; }
-                    "left" => { center.0 = 0.0; center.1 = 0.5; }
-                    "right" => { center.0 = 1.0; center.1 = 0.5; }
-                    "center" => { center.0 = 0.5; center.1 = 0.5; }
+                    "top" => {
+                        center.0 = 0.5;
+                        center.1 = 0.0;
+                    }
+                    "bottom" => {
+                        center.0 = 0.5;
+                        center.1 = 1.0;
+                    }
+                    "left" => {
+                        center.0 = 0.0;
+                        center.1 = 0.5;
+                    }
+                    "right" => {
+                        center.0 = 1.0;
+                        center.1 = 0.5;
+                    }
+                    "center" => {
+                        center.0 = 0.5;
+                        center.1 = 0.5;
+                    }
                     _ => {
                         let val = parse_position_value(pos_parts[0]);
                         center.0 = val;
@@ -5141,7 +5519,9 @@ fn parse_gradient_direction(value: &str) -> Option<rustkit_css::GradientDirectio
         "to top left" | "to left top" => Some(rustkit_css::GradientDirection::ToTopLeft),
         "to top right" | "to right top" => Some(rustkit_css::GradientDirection::ToTopRight),
         "to bottom left" | "to left bottom" => Some(rustkit_css::GradientDirection::ToBottomLeft),
-        "to bottom right" | "to right bottom" => Some(rustkit_css::GradientDirection::ToBottomRight),
+        "to bottom right" | "to right bottom" => {
+            Some(rustkit_css::GradientDirection::ToBottomRight)
+        }
         _ => None,
     }
 }
@@ -5171,11 +5551,15 @@ fn parse_color_stop(value: &str) -> Option<rustkit_css::ColorStop> {
 
         if pos_str.ends_with('%') {
             // Percentage position (normalized to 0-1)
-            let percent = pos_str.strip_suffix('%').and_then(|s| s.parse::<f32>().ok())?;
+            let percent = pos_str
+                .strip_suffix('%')
+                .and_then(|s| s.parse::<f32>().ok())?;
             Some(rustkit_css::ColorStop::with_percent(color, percent / 100.0))
         } else if pos_str.ends_with("px") {
             // Pixel position - store as pixels for conversion at render time
-            let pixels = pos_str.strip_suffix("px").and_then(|s| s.parse::<f32>().ok())?;
+            let pixels = pos_str
+                .strip_suffix("px")
+                .and_then(|s| s.parse::<f32>().ok())?;
             Some(rustkit_css::ColorStop::with_pixels(color, pixels))
         } else {
             // No recognized unit, try parsing as a number (treat as percentage)
@@ -5183,13 +5567,19 @@ fn parse_color_stop(value: &str) -> Option<rustkit_css::ColorStop> {
                 Some(rustkit_css::ColorStop::with_percent(color, val / 100.0))
             } else {
                 // No valid position, just the color
-                Some(rustkit_css::ColorStop { color, position: None })
+                Some(rustkit_css::ColorStop {
+                    color,
+                    position: None,
+                })
             }
         }
     } else {
         // No position, just the color
         let color = parse_color(value)?;
-        Some(rustkit_css::ColorStop { color, position: None })
+        Some(rustkit_css::ColorStop {
+            color,
+            position: None,
+        })
     }
 }
 
@@ -5198,7 +5588,7 @@ fn split_by_comma(value: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut paren_depth = 0;
-    
+
     for (i, ch) in value.char_indices() {
         match ch {
             '(' => paren_depth += 1,
@@ -5210,7 +5600,7 @@ fn split_by_comma(value: &str) -> Vec<&str> {
             _ => {}
         }
     }
-    
+
     if start < value.len() {
         parts.push(&value[start..]);
     }
@@ -5230,8 +5620,12 @@ fn parse_background_size(value: &str) -> rustkit_css::BackgroundSize {
         _ => {
             // Parse explicit size (e.g., "100px 50px" or "50% auto")
             let parts: Vec<&str> = value.split_whitespace().collect();
-            let width = parts.first().and_then(|s| parse_background_size_dimension(s));
-            let height = parts.get(1).and_then(|s| parse_background_size_dimension(s));
+            let width = parts
+                .first()
+                .and_then(|s| parse_background_size_dimension(s));
+            let height = parts
+                .get(1)
+                .and_then(|s| parse_background_size_dimension(s));
             rustkit_css::BackgroundSize::Explicit { width, height }
         }
     }
@@ -5249,7 +5643,10 @@ fn parse_background_size_dimension(value: &str) -> Option<f32> {
     if value.ends_with('%') {
         // Return percentage as negative value to indicate it's a percentage
         // (will be resolved during layout)
-        return value.strip_suffix('%').and_then(|s| s.parse::<f32>().ok()).map(|p| -p);
+        return value
+            .strip_suffix('%')
+            .and_then(|s| s.parse::<f32>().ok())
+            .map(|p| -p);
     }
     value.parse().ok()
 }
@@ -5272,16 +5669,22 @@ fn parse_background_position(value: &str) -> rustkit_css::BackgroundPosition {
     let value = value.trim().to_lowercase();
     let parts: Vec<&str> = value.split_whitespace().collect();
 
-    let x = parts.first().map(|s| parse_background_position_value(s))
+    let x = parts
+        .first()
+        .map(|s| parse_background_position_value(s))
         .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0));
-    let y = parts.get(1).map(|s| parse_background_position_value(s))
+    let y = parts
+        .get(1)
+        .map(|s| parse_background_position_value(s))
         .unwrap_or_else(|| {
             // If only one value, center the other axis for keywords, or use same for lengths
             match &x {
-                rustkit_css::BackgroundPositionValue::Percent(_) =>
-                    rustkit_css::BackgroundPositionValue::Percent(0.5),
-                rustkit_css::BackgroundPositionValue::Px(_) =>
-                    rustkit_css::BackgroundPositionValue::Percent(0.5),
+                rustkit_css::BackgroundPositionValue::Percent(_) => {
+                    rustkit_css::BackgroundPositionValue::Percent(0.5)
+                }
+                rustkit_css::BackgroundPositionValue::Px(_) => {
+                    rustkit_css::BackgroundPositionValue::Percent(0.5)
+                }
             }
         });
 
@@ -5295,21 +5698,21 @@ fn parse_background_position_value(value: &str) -> rustkit_css::BackgroundPositi
         "left" | "top" => rustkit_css::BackgroundPositionValue::Percent(0.0),
         "center" => rustkit_css::BackgroundPositionValue::Percent(0.5),
         "right" | "bottom" => rustkit_css::BackgroundPositionValue::Percent(1.0),
-        _ if value.ends_with('%') => {
-            value.strip_suffix('%')
-                .and_then(|s| s.parse::<f32>().ok())
-                .map(|p| rustkit_css::BackgroundPositionValue::Percent(p / 100.0))
-                .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0))
-        }
-        _ if value.ends_with("px") => {
-            value.strip_suffix("px")
-                .and_then(|s| s.parse::<f32>().ok())
-                .map(rustkit_css::BackgroundPositionValue::Px)
-                .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0))
-        }
+        _ if value.ends_with('%') => value
+            .strip_suffix('%')
+            .and_then(|s| s.parse::<f32>().ok())
+            .map(|p| rustkit_css::BackgroundPositionValue::Percent(p / 100.0))
+            .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0)),
+        _ if value.ends_with("px") => value
+            .strip_suffix("px")
+            .and_then(|s| s.parse::<f32>().ok())
+            .map(rustkit_css::BackgroundPositionValue::Px)
+            .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0)),
         _ => {
             // Try parsing as a number (assumed px)
-            value.parse::<f32>().ok()
+            value
+                .parse::<f32>()
+                .ok()
                 .map(rustkit_css::BackgroundPositionValue::Px)
                 .unwrap_or(rustkit_css::BackgroundPositionValue::Percent(0.0))
         }
@@ -5370,12 +5773,11 @@ fn parse_position_value(value: &str) -> f32 {
         "left" | "top" => 0.0,
         "center" => 0.5,
         "right" | "bottom" => 1.0,
-        _ if value.ends_with('%') => {
-            value.strip_suffix('%')
-                .and_then(|s| s.parse::<f32>().ok())
-                .map(|p| p / 100.0)
-                .unwrap_or(0.5)
-        }
+        _ if value.ends_with('%') => value
+            .strip_suffix('%')
+            .and_then(|s| s.parse::<f32>().ok())
+            .map(|p| p / 100.0)
+            .unwrap_or(0.5),
         _ => 0.5,
     }
 }
@@ -5391,22 +5793,22 @@ fn parse_length(value: &str) -> Option<rustkit_css::Length> {
             rustkit_css::Length::Zero
         });
     }
-    
+
     // Handle calc() expressions (simplified)
     if value.starts_with("calc(") && value.ends_with(')') {
         return parse_calc(value);
     }
-    
+
     // Handle min() function
     if value.starts_with("min(") && value.ends_with(')') {
         return parse_min_max_clamp(value, "min");
     }
-    
+
     // Handle max() function
     if value.starts_with("max(") && value.ends_with(')') {
         return parse_min_max_clamp(value, "max");
     }
-    
+
     // Handle clamp() function
     if value.starts_with("clamp(") && value.ends_with(')') {
         return parse_min_max_clamp(value, "clamp");
@@ -5427,23 +5829,23 @@ fn parse_length(value: &str) -> Option<rustkit_css::Length> {
         let num: f32 = value.trim_end_matches("em").trim().parse().ok()?;
         return Some(rustkit_css::Length::Em(num));
     }
-    
+
     // Viewport units (check vmin/vmax before vh/vw since they're longer)
     if value.ends_with("vmin") {
         let num: f32 = value.trim_end_matches("vmin").trim().parse().ok()?;
         return Some(rustkit_css::Length::Vmin(num));
     }
-    
+
     if value.ends_with("vmax") {
         let num: f32 = value.trim_end_matches("vmax").trim().parse().ok()?;
         return Some(rustkit_css::Length::Vmax(num));
     }
-    
+
     if value.ends_with("vh") {
         let num: f32 = value.trim_end_matches("vh").trim().parse().ok()?;
         return Some(rustkit_css::Length::Vh(num));
     }
-    
+
     if value.ends_with("vw") {
         let num: f32 = value.trim_end_matches("vw").trim().parse().ok()?;
         return Some(rustkit_css::Length::Vw(num));
@@ -5467,27 +5869,32 @@ fn parse_length(value: &str) -> Option<rustkit_css::Length> {
 fn parse_calc(value: &str) -> Option<rustkit_css::Length> {
     let inner = value.strip_prefix("calc(")?.strip_suffix(')')?;
     let inner = inner.trim();
-    
+
     // Look for + or - operator (not at the start, and not inside a number like -20px)
     let mut op_idx = None;
     let mut op_char = '+';
     let chars: Vec<char> = inner.chars().collect();
-    
+
     for (i, &c) in chars.iter().enumerate() {
         if i == 0 {
             continue;
         }
-        if (c == '+' || c == '-') && chars.get(i.saturating_sub(1)).map(|&prev| prev.is_whitespace()).unwrap_or(false) {
+        if (c == '+' || c == '-')
+            && chars
+                .get(i.saturating_sub(1))
+                .map(|&prev| prev.is_whitespace())
+                .unwrap_or(false)
+        {
             op_idx = Some(i);
             op_char = c;
             break;
         }
     }
-    
+
     if let Some(idx) = op_idx {
         let left = inner[..idx].trim();
         let right = inner[idx + 1..].trim();
-        
+
         // For now, we can only handle simple cases where one is % and one is px
         // Return the dominant type (percent if present, otherwise first)
         if let (Some(left_len), Some(right_len)) = (parse_length(left), parse_length(right)) {
@@ -5513,7 +5920,7 @@ fn parse_calc(value: &str) -> Option<rustkit_css::Length> {
             }
         }
     }
-    
+
     // Fallback: try to parse as a single length
     parse_length(inner)
 }
@@ -5523,10 +5930,10 @@ fn parse_min_max_clamp(value: &str, func: &str) -> Option<rustkit_css::Length> {
     // Strip the function name and parentheses
     let prefix_len = func.len() + 1; // "min(" or "max(" or "clamp("
     let inner = &value[prefix_len..value.len() - 1];
-    
+
     // Split by comma, but be careful of nested functions
     let args = split_css_args(inner);
-    
+
     match func {
         "min" => {
             if args.len() >= 2 {
@@ -5551,7 +5958,9 @@ fn parse_min_max_clamp(value: &str, func: &str) -> Option<rustkit_css::Length> {
                 let min_val = parse_length(args[0].trim())?;
                 let preferred = parse_length(args[1].trim())?;
                 let max_val = parse_length(args[2].trim())?;
-                Some(rustkit_css::Length::Clamp(Box::new((min_val, preferred, max_val))))
+                Some(rustkit_css::Length::Clamp(Box::new((
+                    min_val, preferred, max_val,
+                ))))
             } else {
                 None
             }
@@ -5565,7 +5974,7 @@ fn split_css_args(s: &str) -> Vec<&str> {
     let mut result = Vec::new();
     let mut depth = 0;
     let mut start = 0;
-    
+
     for (i, c) in s.char_indices() {
         match c {
             '(' => depth += 1,
@@ -5577,12 +5986,12 @@ fn split_css_args(s: &str) -> Vec<&str> {
             _ => {}
         }
     }
-    
+
     // Don't forget the last argument
     if start < s.len() {
         result.push(&s[start..]);
     }
-    
+
     result
 }
 
@@ -5593,9 +6002,12 @@ fn split_css_args(s: &str) -> Vec<&str> {
 /// for `none`/`hidden` (which force a zero width, matching how the box would
 /// paint). Color tokens may contain spaces (`rgb(1, 2, 3)`), so everything
 /// that isn't a width or style keyword is re-joined and handed to parse_color.
-fn parse_border_shorthand(value: &str) -> Option<(rustkit_css::Length, Option<rustkit_css::Color>)> {
+fn parse_border_shorthand(
+    value: &str,
+) -> Option<(rustkit_css::Length, Option<rustkit_css::Color>)> {
     const STYLE_KEYWORDS: [&str; 10] = [
-        "solid", "dashed", "dotted", "double", "groove", "ridge", "inset", "outset", "none", "hidden",
+        "solid", "dashed", "dotted", "double", "groove", "ridge", "inset", "outset", "none",
+        "hidden",
     ];
 
     let mut width: Option<rustkit_css::Length> = None;
@@ -5608,9 +6020,7 @@ fn parse_border_shorthand(value: &str) -> Option<(rustkit_css::Length, Option<ru
         if STYLE_KEYWORDS.contains(&lower.as_str()) {
             saw_style = true;
             style_none = matches!(lower.as_str(), "none" | "hidden");
-        } else if width.is_none()
-            && (lower == "thin" || lower == "medium" || lower == "thick")
-        {
+        } else if width.is_none() && (lower == "thin" || lower == "medium" || lower == "thick") {
             width = Some(rustkit_css::Length::Px(match lower.as_str() {
                 "thin" => 1.0,
                 "thick" => 5.0,
@@ -5640,9 +6050,16 @@ fn parse_border_shorthand(value: &str) -> Option<(rustkit_css::Length, Option<ru
     Some((resolved_width, color))
 }
 
-fn parse_shorthand_4(value: &str) -> Option<(rustkit_css::Length, rustkit_css::Length, rustkit_css::Length, rustkit_css::Length)> {
+fn parse_shorthand_4(
+    value: &str,
+) -> Option<(
+    rustkit_css::Length,
+    rustkit_css::Length,
+    rustkit_css::Length,
+    rustkit_css::Length,
+)> {
     let parts: Vec<&str> = value.split_whitespace().collect();
-    
+
     match parts.len() {
         1 => {
             let v = parse_length(parts[0])?;
@@ -5701,9 +6118,9 @@ fn parse_box_shadow(value: &str) -> Option<rustkit_css::BoxShadow> {
     if value.is_empty() || value == "none" {
         return None;
     }
-    
+
     let mut shadow = rustkit_css::BoxShadow::new();
-    
+
     // Check for "inset" keyword
     let (value, inset) = if value.starts_with("inset") {
         // SAFETY: strip_prefix will succeed because we just checked starts_with("inset")
@@ -5715,12 +6132,12 @@ fn parse_box_shadow(value: &str) -> Option<rustkit_css::BoxShadow> {
         (value, false)
     };
     shadow.inset = inset;
-    
+
     // Split into tokens, being careful about rgba() which contains commas
     let mut parts: Vec<&str> = Vec::new();
     let mut current_start = 0;
     let mut paren_depth = 0;
-    
+
     for (i, ch) in value.char_indices() {
         match ch {
             '(' => paren_depth += 1,
@@ -5740,12 +6157,12 @@ fn parse_box_shadow(value: &str) -> Option<rustkit_css::BoxShadow> {
     if !last_part.is_empty() {
         parts.push(last_part);
     }
-    
+
     // Parse parts: expect at least 2 lengths + 1 color
     // Format: offset-x offset-y [blur [spread]] color
     let mut lengths: Vec<f32> = Vec::new();
     let mut color_value = None;
-    
+
     for part in parts {
         // Try as length first
         if let Some(length) = parse_length(part) {
@@ -5757,7 +6174,7 @@ fn parse_box_shadow(value: &str) -> Option<rustkit_css::BoxShadow> {
             }
         }
     }
-    
+
     // Assign lengths
     if lengths.len() >= 2 {
         shadow.offset_x = lengths[0];
@@ -5765,18 +6182,18 @@ fn parse_box_shadow(value: &str) -> Option<rustkit_css::BoxShadow> {
     } else {
         return None; // Need at least offset-x and offset-y
     }
-    
+
     if lengths.len() >= 3 {
         shadow.blur_radius = lengths[2].max(0.0);
     }
-    
+
     if lengths.len() >= 4 {
         shadow.spread_radius = lengths[3];
     }
-    
+
     // Set color
     shadow.color = color_value.unwrap_or(rustkit_css::Color::new(0, 0, 0, 0.5));
-    
+
     Some(shadow)
 }
 
@@ -5796,7 +6213,10 @@ fn parse_overflow(value: &str) -> rustkit_css::Overflow {
 fn parse_time(value: &str) -> Option<f32> {
     let value = value.trim();
     if value.ends_with("ms") {
-        value[..value.len() - 2].parse::<f32>().ok().map(|v| v / 1000.0)
+        value[..value.len() - 2]
+            .parse::<f32>()
+            .ok()
+            .map(|v| v / 1000.0)
     } else if value.ends_with('s') {
         value[..value.len() - 1].parse::<f32>().ok()
     } else {
@@ -5817,8 +6237,13 @@ fn parse_timing_function(value: &str) -> rustkit_css::TimingFunction {
         "step-end" => rustkit_css::TimingFunction::StepEnd,
         _ if value.starts_with("cubic-bezier(") => {
             // Parse cubic-bezier(x1, y1, x2, y2)
-            let inner = value.trim_start_matches("cubic-bezier(").trim_end_matches(')');
-            let parts: Vec<f32> = inner.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+            let inner = value
+                .trim_start_matches("cubic-bezier(")
+                .trim_end_matches(')');
+            let parts: Vec<f32> = inner
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
             if parts.len() == 4 {
                 rustkit_css::TimingFunction::CubicBezier(parts[0], parts[1], parts[2], parts[3])
             } else {
@@ -5830,7 +6255,10 @@ fn parse_timing_function(value: &str) -> rustkit_css::TimingFunction {
             let inner = value.trim_start_matches("steps(").trim_end_matches(')');
             let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
             if let Some(count) = parts.first().and_then(|s| s.parse::<u32>().ok()) {
-                let jump_start = parts.get(1).map(|s| *s == "jump-start" || *s == "start").unwrap_or(false);
+                let jump_start = parts
+                    .get(1)
+                    .map(|s| *s == "jump-start" || *s == "start")
+                    .unwrap_or(false);
                 rustkit_css::TimingFunction::Steps(count, jump_start)
             } else {
                 rustkit_css::TimingFunction::StepEnd
@@ -5852,17 +6280,17 @@ fn parse_transform(value: &str) -> Option<rustkit_css::TransformList> {
 
     while !remaining.is_empty() {
         remaining = remaining.trim_start();
-        
+
         // Find the function name
         if let Some(paren_pos) = remaining.find('(') {
             let func_name = &remaining[..paren_pos];
             let after_paren = &remaining[paren_pos + 1..];
-            
+
             // Find matching closing paren
             if let Some(close_pos) = find_matching_paren(after_paren) {
                 let args = &after_paren[..close_pos];
                 remaining = &after_paren[close_pos + 1..];
-                
+
                 if let Some(op) = parse_transform_op(func_name, args) {
                     ops.push(op);
                 }
@@ -5885,11 +6313,14 @@ fn parse_transform(value: &str) -> Option<rustkit_css::TransformList> {
 fn parse_transform_op(func: &str, args: &str) -> Option<rustkit_css::TransformOp> {
     let args = args.trim();
     let parts: Vec<&str> = args.split(',').map(|s| s.trim()).collect();
-    
+
     match func.trim() {
         "translate" => {
             let x = parse_length(parts.first()?)?;
-            let y = parts.get(1).and_then(|s| parse_length(s)).unwrap_or(rustkit_css::Length::Zero);
+            let y = parts
+                .get(1)
+                .and_then(|s| parse_length(s))
+                .unwrap_or(rustkit_css::Length::Zero);
             Some(rustkit_css::TransformOp::Translate(x, y))
         }
         "translateX" => {
@@ -5902,7 +6333,10 @@ fn parse_transform_op(func: &str, args: &str) -> Option<rustkit_css::TransformOp
         }
         "scale" => {
             let sx = parts.first()?.parse::<f32>().ok()?;
-            let sy = parts.get(1).and_then(|s| s.parse::<f32>().ok()).unwrap_or(sx);
+            let sy = parts
+                .get(1)
+                .and_then(|s| s.parse::<f32>().ok())
+                .unwrap_or(sx);
             Some(rustkit_css::TransformOp::Scale(sx, sy))
         }
         "scaleX" => {
@@ -5953,11 +6387,20 @@ fn parse_angle(value: &str) -> Option<f32> {
     if value.ends_with("deg") {
         value[..value.len() - 3].parse().ok()
     } else if value.ends_with("rad") {
-        value[..value.len() - 3].parse::<f32>().ok().map(|r| r.to_degrees())
+        value[..value.len() - 3]
+            .parse::<f32>()
+            .ok()
+            .map(|r| r.to_degrees())
     } else if value.ends_with("turn") {
-        value[..value.len() - 4].parse::<f32>().ok().map(|t| t * 360.0)
+        value[..value.len() - 4]
+            .parse::<f32>()
+            .ok()
+            .map(|t| t * 360.0)
     } else if value.ends_with("grad") {
-        value[..value.len() - 4].parse::<f32>().ok().map(|g| g * 0.9)
+        value[..value.len() - 4]
+            .parse::<f32>()
+            .ok()
+            .map(|g| g * 0.9)
     } else {
         // Try parsing as number (defaults to degrees)
         value.parse().ok()
@@ -5967,7 +6410,7 @@ fn parse_angle(value: &str) -> Option<f32> {
 /// Parse transform-origin value.
 fn parse_transform_origin(value: &str) -> Option<rustkit_css::TransformOrigin> {
     let parts: Vec<&str> = value.split_whitespace().collect();
-    
+
     let parse_component = |s: &str| -> Option<rustkit_css::Length> {
         match s {
             "left" => Some(rustkit_css::Length::Percent(0.0)),
@@ -5978,7 +6421,7 @@ fn parse_transform_origin(value: &str) -> Option<rustkit_css::TransformOrigin> {
             _ => parse_length(s),
         }
     };
-    
+
     match parts.len() {
         1 => {
             let x = parse_component(parts[0])?;
@@ -6000,24 +6443,24 @@ fn parse_transform_origin(value: &str) -> Option<rustkit_css::TransformOrigin> {
 /// Supports: repeat(N, 1fr), explicit track sizes, and combinations.
 fn parse_grid_template(value: &str) -> Option<rustkit_css::GridTemplate> {
     let value = value.trim();
-    
+
     if value == "none" || value.is_empty() {
         return Some(rustkit_css::GridTemplate::none());
     }
-    
+
     let mut tracks = Vec::new();
-    
+
     // Check for repeat() function
     if let Some(repeat_start) = value.find("repeat(") {
         let after_repeat = &value[repeat_start + 7..];
         if let Some(close_paren) = find_matching_paren(after_repeat) {
             let repeat_content = &after_repeat[..close_paren];
-            
+
             // Parse repeat(count, track-size)
             if let Some(comma_pos) = repeat_content.find(',') {
                 let count_str = repeat_content[..comma_pos].trim();
                 let track_str = repeat_content[comma_pos + 1..].trim();
-                
+
                 // Parse count (could be number, auto-fill, auto-fit)
                 let count: Option<u32> = if count_str == "auto-fill" || count_str == "auto-fit" {
                     // For now, default to a reasonable number
@@ -6025,7 +6468,7 @@ fn parse_grid_template(value: &str) -> Option<rustkit_css::GridTemplate> {
                 } else {
                     count_str.parse().ok()
                 };
-                
+
                 if let (Some(count), Some(track_size)) = (count, parse_track_size(track_str)) {
                     for _ in 0..count {
                         tracks.push(rustkit_css::TrackDefinition::simple(track_size.clone()));
@@ -6041,11 +6484,11 @@ fn parse_grid_template(value: &str) -> Option<rustkit_css::GridTemplate> {
             }
         }
     }
-    
+
     if tracks.is_empty() {
         return None;
     }
-    
+
     Some(rustkit_css::GridTemplate {
         tracks,
         repeats: Vec::new(),
@@ -6074,40 +6517,40 @@ fn find_matching_paren(s: &str) -> Option<usize> {
 /// Parse a single track size (e.g., "1fr", "100px", "auto", "minmax(...)").
 fn parse_track_size(value: &str) -> Option<rustkit_css::TrackSize> {
     let value = value.trim();
-    
+
     if value == "auto" {
         return Some(rustkit_css::TrackSize::Auto);
     }
-    
+
     if value == "min-content" {
         return Some(rustkit_css::TrackSize::MinContent);
     }
-    
+
     if value == "max-content" {
         return Some(rustkit_css::TrackSize::MaxContent);
     }
-    
+
     // Check for fr unit
     if let Some(fr_str) = value.strip_suffix("fr") {
         if let Ok(fr) = fr_str.trim().parse::<f32>() {
             return Some(rustkit_css::TrackSize::Fr(fr));
         }
     }
-    
+
     // Check for px unit
     if let Some(px_str) = value.strip_suffix("px") {
         if let Ok(px) = px_str.trim().parse::<f32>() {
             return Some(rustkit_css::TrackSize::Px(px));
         }
     }
-    
+
     // Check for percent
     if let Some(pct_str) = value.strip_suffix('%') {
         if let Ok(pct) = pct_str.trim().parse::<f32>() {
             return Some(rustkit_css::TrackSize::Percent(pct));
         }
     }
-    
+
     // Check for minmax()
     if value.starts_with("minmax(") {
         if let Some(close) = find_matching_paren(&value[7..]) {
@@ -6115,34 +6558,38 @@ fn parse_track_size(value: &str) -> Option<rustkit_css::TrackSize> {
             if let Some(comma) = content.find(',') {
                 let min_str = content[..comma].trim();
                 let max_str = content[comma + 1..].trim();
-                if let (Some(min), Some(max)) = (parse_track_size(min_str), parse_track_size(max_str)) {
+                if let (Some(min), Some(max)) =
+                    (parse_track_size(min_str), parse_track_size(max_str))
+                {
                     return Some(rustkit_css::TrackSize::MinMax(Box::new(min), Box::new(max)));
                 }
             }
         }
     }
-    
+
     // Check for fit-content()
     if value.starts_with("fit-content(") {
         if let Some(close) = find_matching_paren(&value[12..]) {
             let content = &value[12..12 + close];
             if let Some(length) = parse_length(content) {
-                return Some(rustkit_css::TrackSize::FitContent(length.to_px(16.0, 16.0, 0.0)));
+                return Some(rustkit_css::TrackSize::FitContent(
+                    length.to_px(16.0, 16.0, 0.0),
+                ));
             }
         }
     }
-    
+
     None
 }
 
 /// Parse a grid line value (e.g., "1", "span 2", "auto").
 fn parse_grid_line(value: &str) -> Option<rustkit_css::GridLine> {
     let value = value.trim();
-    
+
     if value == "auto" {
         return Some(rustkit_css::GridLine::Auto);
     }
-    
+
     // Check for "span N"
     if let Some(span_str) = value.strip_prefix("span") {
         let span_str = span_str.trim();
@@ -6150,31 +6597,33 @@ fn parse_grid_line(value: &str) -> Option<rustkit_css::GridLine> {
             return Some(rustkit_css::GridLine::Span(span));
         }
     }
-    
+
     // Try as a number
     if let Ok(num) = value.parse::<i32>() {
         return Some(rustkit_css::GridLine::Number(num));
     }
-    
+
     // Could be a named line (just use auto for now)
     Some(rustkit_css::GridLine::Auto)
 }
 
 /// Parse a grid-column or grid-row shorthand (e.g., "1 / 3", "span 2").
-fn parse_grid_line_shorthand(value: &str) -> Option<(rustkit_css::GridLine, rustkit_css::GridLine)> {
+fn parse_grid_line_shorthand(
+    value: &str,
+) -> Option<(rustkit_css::GridLine, rustkit_css::GridLine)> {
     let value = value.trim();
-    
+
     // Check for "start / end" format
     if let Some(slash_pos) = value.find('/') {
         let start_str = value[..slash_pos].trim();
         let end_str = value[slash_pos + 1..].trim();
-        
+
         let start = parse_grid_line(start_str)?;
         let end = parse_grid_line(end_str)?;
-        
+
         return Some((start, end));
     }
-    
+
     // Single value - applies to start, end is auto
     let start = parse_grid_line(value)?;
     Some((start, rustkit_css::GridLine::Auto))
@@ -6219,13 +6668,13 @@ mod tests {
                 <p>This is a paragraph.</p>
             </body>
             </html>"#;
-        
+
         let document = Document::parse_html(html).expect("Failed to parse HTML");
         let document = Rc::new(document);
-        
+
         // Verify document structure
         assert!(document.body().is_some(), "Document should have a body");
-        
+
         // Create a dummy engine - skip test if GPU is not available
         let compositor = match Compositor::new() {
             Ok(c) => c,
@@ -6234,7 +6683,7 @@ mod tests {
                 return;
             }
         };
-        
+
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
             config: EngineConfig::default(),
@@ -6242,21 +6691,26 @@ mod tests {
             viewhost: ViewHost::new(),
             compositor,
             renderer: None,
-            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader")),
+            loader: Arc::new(
+                ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
+            ),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
         };
-        
+
         // Build layout tree from document
         let layout = engine.build_layout_from_document(&document, &[]);
-        
+
         // Verify layout tree is not empty
-        assert!(!layout.children.is_empty(), "Layout tree should have children from body");
-        
+        assert!(
+            !layout.children.is_empty(),
+            "Layout tree should have children from body"
+        );
+
         // The body should contain h1 and p elements
         let body_box = &layout.children[0];
-        
+
         // Count text boxes (h1 content "Hello World" and p content "This is a paragraph.")
         fn count_text_boxes(layout_box: &LayoutBox) -> usize {
             let mut count = if matches!(layout_box.box_type, BoxType::Text(_)) {
@@ -6269,9 +6723,13 @@ mod tests {
             }
             count
         }
-        
+
         let text_count = count_text_boxes(body_box);
-        assert!(text_count >= 2, "Should have at least 2 text boxes (h1 and p content), got {}", text_count);
+        assert!(
+            text_count >= 2,
+            "Should have at least 2 text boxes (h1 and p content), got {}",
+            text_count
+        );
     }
 
     #[test]
@@ -6323,7 +6781,9 @@ mod tests {
             viewhost: ViewHost::new(),
             compositor,
             renderer: None,
-            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader")),
+            loader: Arc::new(
+                ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
+            ),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
@@ -6334,18 +6794,52 @@ mod tests {
         let wrap = &body_box.children[0];
         let section = &body_box.children[1];
 
-        let bg = |b: &LayoutBox| (b.style.background_color.r, b.style.background_color.g, b.style.background_color.b);
+        let bg = |b: &LayoutBox| {
+            (
+                b.style.background_color.r,
+                b.style.background_color.g,
+                b.style.background_color.b,
+            )
+        };
 
         // .wrap children: a, b, x, c
-        assert_eq!(bg(&wrap.children[0]), (200, 200, 200), ".a matches no sibling rule");
-        assert_eq!(bg(&wrap.children[1]), (0, 128, 0), ".a + .b should match adjacent sibling");
-        assert_eq!(bg(&wrap.children[2]), (200, 200, 200), ".x matches no sibling rule");
-        assert_eq!(bg(&wrap.children[3]), (0, 0, 255), ".a ~ .c should match general sibling");
+        assert_eq!(
+            bg(&wrap.children[0]),
+            (200, 200, 200),
+            ".a matches no sibling rule"
+        );
+        assert_eq!(
+            bg(&wrap.children[1]),
+            (0, 128, 0),
+            ".a + .b should match adjacent sibling"
+        );
+        assert_eq!(
+            bg(&wrap.children[2]),
+            (200, 200, 200),
+            ".x matches no sibling rule"
+        );
+        assert_eq!(
+            bg(&wrap.children[3]),
+            (0, 0, 255),
+            ".a ~ .c should match general sibling"
+        );
 
         // section children: p, p, p
-        assert_eq!(bg(&section.children[0]), (255, 0, 0), "first p is :first-child");
-        assert_eq!(bg(&section.children[1]), (200, 200, 200), "middle p is neither first nor last child");
-        assert_eq!(bg(&section.children[2]), (255, 165, 0), "last p is :last-child");
+        assert_eq!(
+            bg(&section.children[0]),
+            (255, 0, 0),
+            "first p is :first-child"
+        );
+        assert_eq!(
+            bg(&section.children[1]),
+            (200, 200, 200),
+            "middle p is neither first nor last child"
+        );
+        assert_eq!(
+            bg(&section.children[2]),
+            (255, 165, 0),
+            "last p is :last-child"
+        );
     }
 
     #[test]
@@ -6357,10 +6851,10 @@ mod tests {
                 <h1>Title</h1>
             </body>
             </html>"#;
-        
+
         let document = Document::parse_html(html).expect("Failed to parse HTML");
         let document = Rc::new(document);
-        
+
         // Skip test if GPU is not available
         let compositor = match Compositor::new() {
             Ok(c) => c,
@@ -6369,7 +6863,7 @@ mod tests {
                 return;
             }
         };
-        
+
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
             config: EngineConfig::default(),
@@ -6377,26 +6871,32 @@ mod tests {
             viewhost: ViewHost::new(),
             compositor,
             renderer: None,
-            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader")),
+            loader: Arc::new(
+                ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
+            ),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
         };
-        
+
         let mut layout = engine.build_layout_from_document(&document, &[]);
-        
+
         // Perform layout with a containing block
         let containing_block = Dimensions {
             content: Rect::new(0.0, 0.0, 800.0, 600.0),
             ..Default::default()
         };
         layout.layout(&containing_block);
-        
+
         // Generate display list
         let display_list = DisplayList::build(&layout);
-        
+
         // Display list should have commands (at least background colors)
-        assert!(!display_list.commands.is_empty(), "Display list should have commands, got {:?}", display_list.commands);
+        assert!(
+            !display_list.commands.is_empty(),
+            "Display list should have commands, got {:?}",
+            display_list.commands
+        );
     }
 
     #[test]
@@ -6404,26 +6904,53 @@ mod tests {
         // Test named colors
         assert_eq!(parse_color("black"), Some(rustkit_css::Color::BLACK));
         assert_eq!(parse_color("white"), Some(rustkit_css::Color::WHITE));
-        
+
         // Test hex colors
-        assert_eq!(parse_color("#fff"), Some(rustkit_css::Color::from_rgb(255, 255, 255)));
-        assert_eq!(parse_color("#000000"), Some(rustkit_css::Color::from_rgb(0, 0, 0)));
-        assert_eq!(parse_color("#ff0000"), Some(rustkit_css::Color::from_rgb(255, 0, 0)));
-        
+        assert_eq!(
+            parse_color("#fff"),
+            Some(rustkit_css::Color::from_rgb(255, 255, 255))
+        );
+        assert_eq!(
+            parse_color("#000000"),
+            Some(rustkit_css::Color::from_rgb(0, 0, 0))
+        );
+        assert_eq!(
+            parse_color("#ff0000"),
+            Some(rustkit_css::Color::from_rgb(255, 0, 0))
+        );
+
         // Test rgb colors
-        assert_eq!(parse_color("rgb(255, 0, 0)"), Some(rustkit_css::Color::new(255, 0, 0, 1.0)));
+        assert_eq!(
+            parse_color("rgb(255, 0, 0)"),
+            Some(rustkit_css::Color::new(255, 0, 0, 1.0))
+        );
 
         // Extended named colors — the engine-local parser knew only 11 names
         // and silently dropped the rest (bg-solid's coral swatch, 2026-07-08).
-        assert_eq!(parse_color("coral"), Some(rustkit_css::Color::from_rgb(255, 127, 80)));
-        assert_eq!(parse_color("tomato"), Some(rustkit_css::Color::from_rgb(255, 99, 71)));
-        assert_eq!(parse_color("Orange"), Some(rustkit_css::Color::from_rgb(255, 165, 0)));
+        assert_eq!(
+            parse_color("coral"),
+            Some(rustkit_css::Color::from_rgb(255, 127, 80))
+        );
+        assert_eq!(
+            parse_color("tomato"),
+            Some(rustkit_css::Color::from_rgb(255, 99, 71))
+        );
+        assert_eq!(
+            parse_color("Orange"),
+            Some(rustkit_css::Color::from_rgb(255, 165, 0))
+        );
 
         // Case-insensitive functional syntax must keep working post-delegation
-        assert_eq!(parse_color("RGB(0, 128, 0)"), Some(rustkit_css::Color::new(0, 128, 0, 1.0)));
+        assert_eq!(
+            parse_color("RGB(0, 128, 0)"),
+            Some(rustkit_css::Color::new(0, 128, 0, 1.0))
+        );
 
         // hsl with negative hue wraps (engine semantics preserved)
-        assert_eq!(parse_color("hsl(-120, 50%, 50%)"), parse_color("hsl(240, 50%, 50%)"));
+        assert_eq!(
+            parse_color("hsl(-120, 50%, 50%)"),
+            parse_color("hsl(240, 50%, 50%)")
+        );
     }
 
     #[test]
@@ -6454,7 +6981,9 @@ mod tests {
             viewhost: ViewHost::new(),
             compositor,
             renderer: None,
-            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader")),
+            loader: Arc::new(
+                ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
+            ),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
@@ -6474,12 +7003,23 @@ mod tests {
         collect_font_sizes(&layout, &mut sizes);
 
         let get = |needle: &str| {
-            sizes.iter().find(|(t, _)| t.contains(needle)).map(|(_, s)| s.clone())
+            sizes
+                .iter()
+                .find(|(t, _)| t.contains(needle))
+                .map(|(_, s)| s.clone())
                 .unwrap_or_else(|| panic!("no text box containing {:?}", needle))
         };
         assert_eq!(get("Em"), rustkit_css::Length::Px(32.0), "2em vs body 16px");
-        assert_eq!(get("Percent"), rustkit_css::Length::Px(24.0), "150% vs body 16px");
-        assert_eq!(get("Rem"), rustkit_css::Length::Px(24.0), "1.5rem vs root 16px");
+        assert_eq!(
+            get("Percent"),
+            rustkit_css::Length::Px(24.0),
+            "150% vs body 16px"
+        );
+        assert_eq!(
+            get("Rem"),
+            rustkit_css::Length::Px(24.0),
+            "1.5rem vs root 16px"
+        );
     }
 
     #[test]
@@ -6558,7 +7098,10 @@ mod tests {
         assert_eq!(parse_length("10px"), Some(rustkit_css::Length::Px(10.0)));
         assert_eq!(parse_length("1.5em"), Some(rustkit_css::Length::Em(1.5)));
         assert_eq!(parse_length("2rem"), Some(rustkit_css::Length::Rem(2.0)));
-        assert_eq!(parse_length("50%"), Some(rustkit_css::Length::Percent(50.0)));
+        assert_eq!(
+            parse_length("50%"),
+            Some(rustkit_css::Length::Percent(50.0))
+        );
     }
 
     #[test]
@@ -6644,13 +7187,27 @@ mod tests {
 
     #[test]
     fn test_parse_timing_function() {
-        assert!(matches!(parse_timing_function("ease"), rustkit_css::TimingFunction::Ease));
-        assert!(matches!(parse_timing_function("linear"), rustkit_css::TimingFunction::Linear));
-        assert!(matches!(parse_timing_function("ease-in"), rustkit_css::TimingFunction::EaseIn));
-        assert!(matches!(parse_timing_function("ease-out"), rustkit_css::TimingFunction::EaseOut));
-        
+        assert!(matches!(
+            parse_timing_function("ease"),
+            rustkit_css::TimingFunction::Ease
+        ));
+        assert!(matches!(
+            parse_timing_function("linear"),
+            rustkit_css::TimingFunction::Linear
+        ));
+        assert!(matches!(
+            parse_timing_function("ease-in"),
+            rustkit_css::TimingFunction::EaseIn
+        ));
+        assert!(matches!(
+            parse_timing_function("ease-out"),
+            rustkit_css::TimingFunction::EaseOut
+        ));
+
         // Test cubic-bezier
-        if let rustkit_css::TimingFunction::CubicBezier(x1, y1, x2, y2) = parse_timing_function("cubic-bezier(0.1, 0.2, 0.3, 0.4)") {
+        if let rustkit_css::TimingFunction::CubicBezier(x1, y1, x2, y2) =
+            parse_timing_function("cubic-bezier(0.1, 0.2, 0.3, 0.4)")
+        {
             assert!((x1 - 0.1).abs() < 0.01);
             assert!((y1 - 0.2).abs() < 0.01);
             assert!((x2 - 0.3).abs() < 0.01);
@@ -6671,32 +7228,49 @@ mod tests {
         // Test simple linear gradient
         let gradient = parse_gradient("linear-gradient(to right, #ff0000 0%, #0000ff 100%)");
         assert!(gradient.is_some(), "Should parse simple linear gradient");
-        
+
         if let Some(rustkit_css::Gradient::Linear(linear)) = gradient {
             assert_eq!(linear.direction, rustkit_css::GradientDirection::ToRight);
             assert_eq!(linear.stops.len(), 2);
-            assert_eq!(linear.stops[0].color, rustkit_css::Color::from_rgb(255, 0, 0));
-            assert_eq!(linear.stops[0].position, Some(rustkit_css::StopPosition::Percent(0.0)));
-            assert_eq!(linear.stops[1].color, rustkit_css::Color::from_rgb(0, 0, 255));
-            assert_eq!(linear.stops[1].position, Some(rustkit_css::StopPosition::Percent(1.0)));
+            assert_eq!(
+                linear.stops[0].color,
+                rustkit_css::Color::from_rgb(255, 0, 0)
+            );
+            assert_eq!(
+                linear.stops[0].position,
+                Some(rustkit_css::StopPosition::Percent(0.0))
+            );
+            assert_eq!(
+                linear.stops[1].color,
+                rustkit_css::Color::from_rgb(0, 0, 255)
+            );
+            assert_eq!(
+                linear.stops[1].position,
+                Some(rustkit_css::StopPosition::Percent(1.0))
+            );
         } else {
             panic!("Expected Linear gradient");
         }
-        
+
         // Test with angle
         let gradient = parse_gradient("linear-gradient(45deg, red 0%, blue 100%)");
         assert!(gradient.is_some(), "Should parse gradient with angle");
-        
+
         if let Some(rustkit_css::Gradient::Linear(linear)) = gradient {
-            assert!(matches!(linear.direction, rustkit_css::GradientDirection::Angle(a) if (a - 45.0).abs() < 0.01));
+            assert!(
+                matches!(linear.direction, rustkit_css::GradientDirection::Angle(a) if (a - 45.0).abs() < 0.01)
+            );
         } else {
             panic!("Expected Linear gradient with angle");
         }
-        
+
         // Test default direction (to bottom)
         let gradient = parse_gradient("linear-gradient(#667eea, #764ba2)");
-        assert!(gradient.is_some(), "Should parse gradient without direction");
-        
+        assert!(
+            gradient.is_some(),
+            "Should parse gradient without direction"
+        );
+
         if let Some(rustkit_css::Gradient::Linear(linear)) = gradient {
             assert_eq!(linear.direction, rustkit_css::GradientDirection::ToBottom);
         } else {
@@ -6707,24 +7281,32 @@ mod tests {
     #[test]
     fn test_parse_radial_gradient() {
         // Test simple radial gradient
-        let gradient = parse_gradient("radial-gradient(circle at center, #667eea 0%, #764ba2 100%)");
+        let gradient =
+            parse_gradient("radial-gradient(circle at center, #667eea 0%, #764ba2 100%)");
         assert!(gradient.is_some(), "Should parse radial gradient");
-        
+
         if let Some(rustkit_css::Gradient::Radial(radial)) = gradient {
             assert_eq!(radial.shape, rustkit_css::RadialShape::Circle);
             assert_eq!(radial.stops.len(), 2);
         } else {
             panic!("Expected Radial gradient");
         }
-        
+
         // Test ellipse
-        let gradient = parse_gradient("radial-gradient(ellipse at top left, #f093fb 0%, #f5576c 100%)");
+        let gradient =
+            parse_gradient("radial-gradient(ellipse at top left, #f093fb 0%, #f5576c 100%)");
         assert!(gradient.is_some(), "Should parse ellipse radial gradient");
-        
+
         if let Some(rustkit_css::Gradient::Radial(radial)) = gradient {
             assert_eq!(radial.shape, rustkit_css::RadialShape::Ellipse);
-            assert!((radial.center.0 - 0.0).abs() < 0.01, "center.0 should be 0.0 for left");
-            assert!((radial.center.1 - 0.0).abs() < 0.01, "center.1 should be 0.0 for top");
+            assert!(
+                (radial.center.0 - 0.0).abs() < 0.01,
+                "center.0 should be 0.0 for left"
+            );
+            assert!(
+                (radial.center.1 - 0.0).abs() < 0.01,
+                "center.1 should be 0.0 for top"
+            );
         } else {
             panic!("Expected Radial gradient with ellipse");
         }
@@ -6754,7 +7336,10 @@ mod tests {
         assert_eq!(stop.color.g, 255);
         assert_eq!(stop.color.b, 255);
         assert!((stop.color.a - 0.5).abs() < 0.01);
-        assert_eq!(stop.position, Some(rustkit_css::StopPosition::Percent(0.25)));
+        assert_eq!(
+            stop.position,
+            Some(rustkit_css::StopPosition::Percent(0.25))
+        );
     }
 
     #[test]
@@ -6762,7 +7347,7 @@ mod tests {
         // Simple case
         let parts = split_by_comma("a, b, c");
         assert_eq!(parts, vec!["a", " b", " c"]);
-        
+
         // With nested parentheses
         let parts = split_by_comma("rgb(255, 0, 0), blue, rgba(0, 255, 0, 0.5)");
         assert_eq!(parts.len(), 3);
@@ -6781,7 +7366,7 @@ mod tests {
                 return;
             }
         };
-        
+
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
             config: EngineConfig::default(),
@@ -6789,60 +7374,65 @@ mod tests {
             viewhost: ViewHost::new(),
             compositor,
             renderer: None,
-            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader")),
+            loader: Arc::new(
+                ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
+            ),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
         };
-        
+
         // Test type selector: (0, 0, 1)
         assert_eq!(engine.selector_specificity("div"), (0, 0, 1));
         assert_eq!(engine.selector_specificity("p"), (0, 0, 1));
-        
+
         // Test class selector: (0, 1, 0)
         assert_eq!(engine.selector_specificity(".class"), (0, 1, 0));
         assert_eq!(engine.selector_specificity(".a.b"), (0, 2, 0));
-        
+
         // Test ID selector: (1, 0, 0)
         assert_eq!(engine.selector_specificity("#id"), (1, 0, 0));
-        
+
         // Test combined selectors
         assert_eq!(engine.selector_specificity("div.class"), (0, 1, 1));
         assert_eq!(engine.selector_specificity("div#id"), (1, 0, 1));
         assert_eq!(engine.selector_specificity("#id.class"), (1, 1, 0));
-        
+
         // Test pseudo-classes: (0, 1, 0) each
         assert_eq!(engine.selector_specificity(":hover"), (0, 1, 0));
         assert_eq!(engine.selector_specificity(":first-child"), (0, 1, 0));
         assert_eq!(engine.selector_specificity("div:first-child"), (0, 1, 1));
-        
+
         // Test pseudo-elements: (0, 0, 1) each
         assert_eq!(engine.selector_specificity("::before"), (0, 0, 1));
         assert_eq!(engine.selector_specificity("div::before"), (0, 0, 2));
-        
+
         // Test attribute selectors: (0, 1, 0) each
         assert_eq!(engine.selector_specificity("[type]"), (0, 1, 0));
         assert_eq!(engine.selector_specificity("[type=text]"), (0, 1, 0));
         assert_eq!(engine.selector_specificity("input[type=text]"), (0, 1, 1));
-        
+
         // Test descendant selectors
         assert_eq!(engine.selector_specificity("body div"), (0, 0, 2));
         assert_eq!(engine.selector_specificity("body .class"), (0, 1, 1));
         assert_eq!(engine.selector_specificity("#id .class div"), (1, 1, 1));
-        
+
         // Test :not() - adds specificity of argument
         assert_eq!(engine.selector_specificity(":not(.class)"), (0, 1, 0));
         assert_eq!(engine.selector_specificity("div:not(.class)"), (0, 1, 1));
-        
+
         // Test universal selector: (0, 0, 0)
         assert_eq!(engine.selector_specificity("*"), (0, 0, 0));
-        
+
         // Test complex selectors
         assert_eq!(engine.selector_specificity("div.a.b#id:hover"), (1, 3, 1));
-        
+
         // Test ID beats multiple classes
         let id_spec = engine.selector_specificity("#test");
         let multi_class_spec = engine.selector_specificity(".a.b.c.d.e");
-        assert!(id_spec > multi_class_spec, "ID should beat multiple classes");
+        assert!(
+            id_spec > multi_class_spec,
+            "ID should beat multiple classes"
+        );
     }
 }

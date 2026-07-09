@@ -176,7 +176,10 @@ impl<'a> FlexLine<'a> {
 
     /// Get the total hypothetical main size of items.
     pub fn hypothetical_main_size(&self) -> f32 {
-        self.items.iter().map(|item| item.outer_hypothetical_main_size()).sum()
+        self.items
+            .iter()
+            .map(|item| item.outer_hypothetical_main_size())
+            .sum()
     }
 
     /// Get the largest outer cross size among items.
@@ -195,10 +198,7 @@ impl<'a> Default for FlexLine<'a> {
 }
 
 /// Layout a flex container and its children.
-pub fn layout_flex_container(
-    container: &mut LayoutBox,
-    containing_block: &Dimensions,
-) {
+pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimensions) {
     let style = &container.style;
 
     // 1. Determine main/cross axes
@@ -270,7 +270,12 @@ pub fn layout_flex_container(
     // 5. Calculate cross sizes for each line
     // Pass has_definite_cross_size so stretch behavior is correct for auto-height containers
     for line in &mut lines {
-        calculate_cross_sizes(line, container_cross_size, style.align_items, has_definite_cross_size);
+        calculate_cross_sizes(
+            line,
+            container_cross_size,
+            style.align_items,
+            has_definite_cross_size,
+        );
     }
 
     // 6. Calculate line cross sizes and positions
@@ -284,11 +289,23 @@ pub fn layout_flex_container(
     } else {
         total_cross_size
     };
-    distribute_lines(&mut lines, effective_cross_size, total_cross_size, cross_gap, style.align_content);
+    distribute_lines(
+        &mut lines,
+        effective_cross_size,
+        total_cross_size,
+        cross_gap,
+        style.align_content,
+    );
 
     // 8. Main axis alignment (justify-content) and positioning
     for line in &mut lines {
-        distribute_main_axis(line, container_main_size, main_gap, style.justify_content, direction.is_reverse());
+        distribute_main_axis(
+            line,
+            container_main_size,
+            main_gap,
+            style.justify_content,
+            direction.is_reverse(),
+        );
     }
 
     // 9. Cross axis alignment (align-items, align-self)
@@ -299,8 +316,14 @@ pub fn layout_flex_container(
     // 10. Apply final positions to layout boxes
     // Pass the container's content origin so positions are absolute, not relative
     let container_origin = (containing_block.content.x, containing_block.content.y);
-    apply_positions(&mut lines, main_axis, direction.is_reverse(), wrap == FlexWrap::WrapReverse, container_origin);
-    
+    apply_positions(
+        &mut lines,
+        main_axis,
+        direction.is_reverse(),
+        wrap == FlexWrap::WrapReverse,
+        container_origin,
+    );
+
     // 11. Recursively layout children of flex items (important for nested flex containers)
     // After flex positioning, each item's dimensions are set, so we can use them as containing blocks
     for line in &mut lines {
@@ -332,7 +355,9 @@ pub fn layout_flex_container(
             // Only recompute if cross_size is still using fallback (line_height or similar)
             // and we have children with actual heights
             if !item.layout_box.children.is_empty() {
-                let children_height: f32 = item.layout_box.children
+                let children_height: f32 = item
+                    .layout_box
+                    .children
                     .iter()
                     .map(|c| c.dimensions.margin_box().height)
                     .sum();
@@ -363,7 +388,8 @@ pub fn layout_flex_container(
         }
 
         // Recompute line cross size based on updated item cross sizes
-        line.cross_size = line.items
+        line.cross_size = line
+            .items
             .iter()
             .map(|i| i.cross_size + i.cross_margin_start + i.cross_margin_end)
             .fold(0.0, f32::max);
@@ -381,7 +407,13 @@ pub fn layout_flex_container(
     } else {
         total_cross_size
     };
-    distribute_lines(&mut lines, effective_cross_size, total_cross_size, cross_gap, style.align_content);
+    distribute_lines(
+        &mut lines,
+        effective_cross_size,
+        total_cross_size,
+        cross_gap,
+        style.align_content,
+    );
     for line in &mut lines {
         align_cross_axis(line, style.align_items);
         for item in &mut line.items {
@@ -390,8 +422,16 @@ pub fn layout_flex_container(
             // already-laid-out subtree is sufficient.
             let d = &item.layout_box.dimensions;
             let (origin_cross, old_content_cross, pb_start) = match cross_axis {
-                Axis::Vertical => (container_origin.1, d.content.y, d.padding.top + d.border.top),
-                Axis::Horizontal => (container_origin.0, d.content.x, d.padding.left + d.border.left),
+                Axis::Vertical => (
+                    container_origin.1,
+                    d.content.y,
+                    d.padding.top + d.border.top,
+                ),
+                Axis::Horizontal => (
+                    container_origin.0,
+                    d.content.x,
+                    d.padding.left + d.border.left,
+                ),
             };
             let delta = origin_cross + line.cross_position + item.cross_position + pb_start
                 - old_content_cross;
@@ -410,7 +450,8 @@ pub fn layout_flex_container(
         let (total_main, total_cross) = match main_axis {
             Axis::Horizontal => {
                 // Main axis is horizontal (width), cross axis is vertical (height)
-                let max_main: f32 = lines.iter()
+                let max_main: f32 = lines
+                    .iter()
                     .flat_map(|l| l.items.iter())
                     .map(|item| item.main_position + item.target_main_size)
                     .fold(0.0f32, f32::max);
@@ -420,7 +461,8 @@ pub fn layout_flex_container(
             }
             Axis::Vertical => {
                 // Main axis is vertical (height), cross axis is horizontal (width)
-                let max_main: f32 = lines.iter()
+                let max_main: f32 = lines
+                    .iter()
                     .flat_map(|l| l.items.iter())
                     .map(|item| item.main_position + item.target_main_size)
                     .fold(0.0f32, f32::max);
@@ -429,20 +471,22 @@ pub fn layout_flex_container(
                 (max_main, total_cross)
             }
         };
-        
+
         // Update container height if it wasn't explicitly set
         match main_axis {
             Axis::Horizontal => {
                 // For row direction, update height from cross size
-                if container.dimensions.content.height == 0.0 || 
-                   matches!(container.style.height, rustkit_css::Length::Auto) {
+                if container.dimensions.content.height == 0.0
+                    || matches!(container.style.height, rustkit_css::Length::Auto)
+                {
                     container.dimensions.content.height = total_cross;
                 }
             }
             Axis::Vertical => {
                 // For column direction, update height from main size
-                if container.dimensions.content.height == 0.0 ||
-                   matches!(container.style.height, rustkit_css::Length::Auto) {
+                if container.dimensions.content.height == 0.0
+                    || matches!(container.style.height, rustkit_css::Length::Auto)
+                {
                     container.dimensions.content.height = total_main;
                 }
             }
@@ -465,7 +509,8 @@ fn create_flex_item<'a>(
     let align_self = layout_box.style.align_self;
 
     // Get margins
-    let (main_margin_start, main_margin_end, cross_margin_start, cross_margin_end) = match main_axis {
+    let (main_margin_start, main_margin_end, cross_margin_start, cross_margin_end) = match main_axis
+    {
         Axis::Horizontal => (
             resolve_length(&layout_box.style.margin_left, container_main),
             resolve_length(&layout_box.style.margin_right, container_main),
@@ -549,10 +594,11 @@ fn create_flex_item<'a>(
             resolve_max_length(&layout_box.style.max_width, container_cross),
         ),
     };
-    
+
     // For replaced elements (form controls, images), use intrinsic size as minimum
     // This ensures flex items have proper sizing even without explicit min-width/height
-    let intrinsic_cross = get_intrinsic_cross_size(&layout_box.box_type, main_axis, &layout_box.style);
+    let intrinsic_cross =
+        get_intrinsic_cross_size(&layout_box.box_type, main_axis, &layout_box.style);
     let min_main = if css_min_main > 0.0 {
         spec_main_to_border_box(css_min_main)
     } else {
@@ -590,8 +636,7 @@ fn create_flex_item<'a>(
         rustkit_css::Length::Percent(_) => None,
         l => Some(spec_cross_to_border_box(resolve_length(l, container_cross))),
     };
-    let has_explicit_cross_size =
-        !matches!(explicit_cross_length, rustkit_css::Length::Auto);
+    let has_explicit_cross_size = !matches!(explicit_cross_length, rustkit_css::Length::Auto);
 
     FlexItem {
         layout_box,
@@ -648,7 +693,11 @@ fn collect_flex_lines<'a>(
 
     for item in items.drain(..) {
         let item_size = item.outer_hypothetical_main_size();
-        let gap = if current_line.items.is_empty() { 0.0 } else { main_gap };
+        let gap = if current_line.items.is_empty() {
+            0.0
+        } else {
+            main_gap
+        };
 
         if !current_line.items.is_empty() && line_main_size + gap + item_size > container_main {
             // Start new line
@@ -657,7 +706,11 @@ fn collect_flex_lines<'a>(
             line_main_size = 0.0;
         }
 
-        line_main_size += if current_line.items.is_empty() { 0.0 } else { main_gap };
+        line_main_size += if current_line.items.is_empty() {
+            0.0
+        } else {
+            main_gap
+        };
         line_main_size += item_size;
         current_line.items.push(item);
     }
@@ -677,7 +730,11 @@ fn resolve_flexible_lengths(line: &mut FlexLine, container_main: f32, main_gap: 
 
     // Calculate used space
     let total_gaps = main_gap * (line.items.len().saturating_sub(1)) as f32;
-    let used_space: f32 = line.items.iter().map(|i| i.hypothetical_main_size + i.main_margin_start + i.main_margin_end).sum();
+    let used_space: f32 = line
+        .items
+        .iter()
+        .map(|i| i.hypothetical_main_size + i.main_margin_start + i.main_margin_end)
+        .sum();
     let free_space = container_main - used_space - total_gaps;
 
     if free_space.abs() < 0.01 {
@@ -702,7 +759,12 @@ fn resolve_flexible_lengths(line: &mut FlexLine, container_main: f32, main_gap: 
 
 /// Grow items to fill free space.
 fn grow_items(line: &mut FlexLine, free_space: f32) {
-    let total_grow: f32 = line.items.iter().filter(|i| !i.frozen).map(|i| i.flex_grow).sum();
+    let total_grow: f32 = line
+        .items
+        .iter()
+        .filter(|i| !i.frozen)
+        .map(|i| i.flex_grow)
+        .sum();
 
     if total_grow <= 0.0 {
         return;
@@ -729,7 +791,8 @@ fn grow_items(line: &mut FlexLine, free_space: f32) {
 
 /// Shrink items to remove overflow.
 fn shrink_items(line: &mut FlexLine, overflow: f32) {
-    let total_shrink_scaled: f32 = line.items
+    let total_shrink_scaled: f32 = line
+        .items
         .iter()
         .filter(|i| !i.frozen)
         .map(|i| i.flex_shrink * i.flex_basis)
@@ -759,16 +822,21 @@ fn shrink_items(line: &mut FlexLine, overflow: f32) {
 }
 
 /// Calculate cross sizes for items in a line.
-/// 
+///
 /// The `has_definite_cross_size` parameter indicates whether the flex container
 /// has a definite (non-auto) cross size. This affects stretch behavior:
 /// - With definite cross size: stretch items to fill the container
 /// - With auto cross size: stretch items to match the tallest item in the line
-fn calculate_cross_sizes(line: &mut FlexLine, container_cross: f32, align_items: AlignItems, has_definite_cross_size: bool) {
+fn calculate_cross_sizes(
+    line: &mut FlexLine,
+    container_cross: f32,
+    align_items: AlignItems,
+    has_definite_cross_size: bool,
+) {
     // PASS 1: Calculate content-based cross sizes for ALL items (ignore stretch for now)
     // This determines the "natural" height of each item
     let mut content_cross_sizes: Vec<f32> = Vec::with_capacity(line.items.len());
-    
+
     for item in &mut line.items {
         // Compute the hypothetical cross size (border-box): the explicit
         // cross size when specified, otherwise the content-based size plus
@@ -779,18 +847,23 @@ fn calculate_cross_sizes(line: &mut FlexLine, container_cross: f32, align_items:
         };
 
         // Apply min/max constraints to content size
-        let constrained_size = content_cross_size.max(item.min_cross_size).min(item.max_cross_size);
+        let constrained_size = content_cross_size
+            .max(item.min_cross_size)
+            .min(item.max_cross_size);
         content_cross_sizes.push(constrained_size);
 
         // Initially set cross_size to content size
         item.cross_size = constrained_size;
     }
-    
+
     // Compute the line cross size based on content sizes (largest item outer cross size)
-    let line_cross_size = line.items.iter().enumerate()
+    let line_cross_size = line
+        .items
+        .iter()
+        .enumerate()
         .map(|(i, item)| content_cross_sizes[i] + item.cross_margin_start + item.cross_margin_end)
         .fold(0.0, f32::max);
-    
+
     // PASS 2: Apply stretch behavior based on container sizing
     for (i, item) in line.items.iter_mut().enumerate() {
         let align = if item.align_self == AlignSelf::Auto {
@@ -817,17 +890,21 @@ fn calculate_cross_sizes(line: &mut FlexLine, container_cross: f32, align_items:
                 // Container has auto height - stretch to match tallest item in line
                 line_cross_size - item.cross_margin_start - item.cross_margin_end
             };
-            
+
             // Stretch, but never below content size
             item.cross_size = stretch_target.max(content_cross_sizes[i]);
         }
 
         // Clamp to min/max
-        item.cross_size = item.cross_size.max(item.min_cross_size).min(item.max_cross_size);
+        item.cross_size = item
+            .cross_size
+            .max(item.min_cross_size)
+            .min(item.max_cross_size);
     }
 
     // Set line cross size (largest item outer cross size after stretch)
-    line.cross_size = line.items
+    line.cross_size = line
+        .items
         .iter()
         .map(|i| i.cross_size + i.cross_margin_start + i.cross_margin_end)
         .fold(0.0, f32::max);
@@ -840,27 +917,27 @@ fn get_content_cross_size(layout_box: &LayoutBox) -> f32 {
     if layout_box.dimensions.content.height > 0.0 {
         return layout_box.dimensions.content.height;
     }
-    
+
     // Get font size for intrinsic calculations
     let font_size = match layout_box.style.font_size {
         Length::Px(px) => px,
         _ => 16.0,
     };
-    
+
     // Get line height (used for text and inline boxes)
     let line_height = layout_box.style.line_height.to_px(font_size);
-    
+
     // For text boxes, use line height
     if let crate::BoxType::Text(_) = &layout_box.box_type {
         return line_height;
     }
-    
+
     // For inline boxes, use line height as minimum cross size
     // This ensures proper vertical rhythm in flex containers
     if let crate::BoxType::Inline = &layout_box.box_type {
         return line_height;
     }
-    
+
     // For form controls, use intrinsic height
     if let crate::BoxType::FormControl(control) = &layout_box.box_type {
         use crate::FormControlType;
@@ -875,17 +952,18 @@ fn get_content_cross_size(layout_box: &LayoutBox) -> f32 {
             FormControlType::Select { .. } => font_size * 1.5 + 8.0,
         };
     }
-    
+
     // For images, use natural height
     if let crate::BoxType::Image { natural_height, .. } = &layout_box.box_type {
         if *natural_height > 0.0 {
             return *natural_height;
         }
     }
-    
+
     // For containers with children, sum children heights (for block) or use max (for inline)
     if !layout_box.children.is_empty() {
-        let children_height: f32 = layout_box.children
+        let children_height: f32 = layout_box
+            .children
             .iter()
             .map(|c| c.dimensions.margin_box().height)
             .sum();
@@ -893,14 +971,14 @@ fn get_content_cross_size(layout_box: &LayoutBox) -> f32 {
             return children_height;
         }
     }
-    
+
     // Check for explicit CSS height
     match layout_box.style.height {
         Length::Px(px) if px > 0.0 => return px,
         Length::Em(em) if em > 0.0 => return em * font_size,
         _ => {}
     }
-    
+
     // For inline/block boxes without content, use line height as minimum
     layout_box.style.line_height.to_px(font_size)
 }
@@ -1045,7 +1123,7 @@ fn align_cross_axis(line: &mut FlexLine, align_items: AlignItems) {
 }
 
 /// Apply computed positions to layout boxes.
-/// 
+///
 /// The `container_origin` is the (x, y) of the container's content area,
 /// which is added to the flex-computed positions to get absolute coordinates.
 fn apply_positions(
@@ -1056,14 +1134,14 @@ fn apply_positions(
     container_origin: (f32, f32),
 ) {
     let (origin_x, origin_y) = container_origin;
-    
+
     trace!(
         ?origin_x,
         ?origin_y,
         num_lines = lines.len(),
         "apply_positions: starting"
     );
-    
+
     let lines_iter: Box<dyn Iterator<Item = &mut FlexLine>> = if reverse_cross {
         Box::new(lines.iter_mut().rev())
     } else {
@@ -1169,36 +1247,42 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f3
                         Axis::Vertical => font_size * 1.5 + 8.0,
                     }
                 }
-                FormControlType::TextArea { rows, cols, .. } => {
-                    match main_axis {
-                        Axis::Horizontal => font_size * 0.6 * (*cols).max(20) as f32,
-                        Axis::Vertical => font_size * 1.2 * (*rows).max(2) as f32 + 8.0,
+                FormControlType::TextArea { rows, cols, .. } => match main_axis {
+                    Axis::Horizontal => font_size * 0.6 * (*cols).max(20) as f32,
+                    Axis::Vertical => font_size * 1.2 * (*rows).max(2) as f32 + 8.0,
+                },
+                FormControlType::Button { label, .. } => match main_axis {
+                    Axis::Horizontal => {
+                        crate::measure_text_advanced(
+                            label,
+                            &style.font_family,
+                            font_size,
+                            style.font_weight,
+                            style.font_style,
+                        )
+                        .width
+                            + 24.0
                     }
-                }
-                FormControlType::Button { label, .. } => {
-                    match main_axis {
-                        Axis::Horizontal => label.len() as f32 * font_size * 0.6 + 24.0,
-                        Axis::Vertical => font_size * 1.5 + 12.0,
-                    }
-                }
+                    Axis::Vertical => font_size * 1.5 + 12.0,
+                },
                 FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
                     // Fixed size for checkboxes and radios
                     font_size * 1.2
                 }
-                FormControlType::Select { .. } => {
-                    match main_axis {
-                        Axis::Horizontal => font_size * 10.0,
-                        Axis::Vertical => font_size * 1.5 + 8.0,
-                    }
-                }
+                FormControlType::Select { .. } => match main_axis {
+                    Axis::Horizontal => font_size * 10.0,
+                    Axis::Vertical => font_size * 1.5 + 8.0,
+                },
             }
         }
-        crate::BoxType::Image { natural_width, natural_height, .. } => {
-            match main_axis {
-                Axis::Horizontal => *natural_width,
-                Axis::Vertical => *natural_height,
-            }
-        }
+        crate::BoxType::Image {
+            natural_width,
+            natural_height,
+            ..
+        } => match main_axis {
+            Axis::Horizontal => *natural_width,
+            Axis::Vertical => *natural_height,
+        },
         crate::BoxType::Inline | crate::BoxType::Block | crate::BoxType::AnonymousBlock => {
             // Horizontal main axis: flex-basis:auto resolves to the item's
             // content size suggestion = MAX-content width (css-flexbox-1
@@ -1232,7 +1316,11 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f3
                         style.font_style,
                     )
                     .width;
-                    if w > 0.0 { w } else { style.line_height.to_px(font_size) }
+                    if w > 0.0 {
+                        w
+                    } else {
+                        style.line_height.to_px(font_size)
+                    }
                 }
                 Axis::Vertical => style.line_height.to_px(font_size),
             }
@@ -1242,54 +1330,50 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f3
 
 /// Get the intrinsic cross size for replaced elements (form controls, images).
 /// This returns the height for horizontal main axis, width for vertical main axis.
-fn get_intrinsic_cross_size(box_type: &crate::BoxType, main_axis: Axis, style: &rustkit_css::ComputedStyle) -> f32 {
+fn get_intrinsic_cross_size(
+    box_type: &crate::BoxType,
+    main_axis: Axis,
+    style: &rustkit_css::ComputedStyle,
+) -> f32 {
     let font_size = match style.font_size {
         Length::Px(px) => px,
         _ => 16.0,
     };
-    
+
     // Cross axis is the opposite of main axis
     let cross_axis = main_axis.cross();
-    
+
     match box_type {
         crate::BoxType::FormControl(control) => {
             use crate::FormControlType;
             match control {
-                FormControlType::TextInput { .. } => {
-                    match cross_axis {
-                        Axis::Horizontal => font_size * 12.0,
-                        Axis::Vertical => font_size * 1.5 + 8.0,
-                    }
-                }
-                FormControlType::TextArea { rows, cols, .. } => {
-                    match cross_axis {
-                        Axis::Horizontal => font_size * 0.6 * (*cols).max(20) as f32,
-                        Axis::Vertical => font_size * 1.2 * (*rows).max(2) as f32 + 8.0,
-                    }
-                }
-                FormControlType::Button { label, .. } => {
-                    match cross_axis {
-                        Axis::Horizontal => label.len() as f32 * font_size * 0.6 + 24.0,
-                        Axis::Vertical => font_size * 1.5 + 12.0,
-                    }
-                }
-                FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
-                    font_size * 1.2
-                }
-                FormControlType::Select { .. } => {
-                    match cross_axis {
-                        Axis::Horizontal => font_size * 10.0,
-                        Axis::Vertical => font_size * 1.5 + 8.0,
-                    }
-                }
+                FormControlType::TextInput { .. } => match cross_axis {
+                    Axis::Horizontal => font_size * 12.0,
+                    Axis::Vertical => font_size * 1.5 + 8.0,
+                },
+                FormControlType::TextArea { rows, cols, .. } => match cross_axis {
+                    Axis::Horizontal => font_size * 0.6 * (*cols).max(20) as f32,
+                    Axis::Vertical => font_size * 1.2 * (*rows).max(2) as f32 + 8.0,
+                },
+                FormControlType::Button { label, .. } => match cross_axis {
+                    Axis::Horizontal => label.len() as f32 * font_size * 0.6 + 24.0,
+                    Axis::Vertical => font_size * 1.5 + 12.0,
+                },
+                FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => font_size * 1.2,
+                FormControlType::Select { .. } => match cross_axis {
+                    Axis::Horizontal => font_size * 10.0,
+                    Axis::Vertical => font_size * 1.5 + 8.0,
+                },
             }
         }
-        crate::BoxType::Image { natural_width, natural_height, .. } => {
-            match cross_axis {
-                Axis::Horizontal => *natural_width,
-                Axis::Vertical => *natural_height,
-            }
-        }
+        crate::BoxType::Image {
+            natural_width,
+            natural_height,
+            ..
+        } => match cross_axis {
+            Axis::Horizontal => *natural_width,
+            Axis::Vertical => *natural_height,
+        },
         crate::BoxType::Text(_) => {
             // Text boxes have intrinsic height based on line height
             let line_height = style.line_height.to_px(font_size);
@@ -1327,8 +1411,8 @@ fn resolve_max_length(length: &Length, container_size: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustkit_css::{ComputedStyle, FlexDirection, JustifyContent, AlignItems, Length};
     use crate::BoxType;
+    use rustkit_css::{AlignItems, ComputedStyle, FlexDirection, JustifyContent, Length};
 
     #[test]
     fn test_axis_cross() {
@@ -1371,7 +1455,9 @@ mod tests {
             let mut inner_style = ComputedStyle::new();
             inner_style.width = Length::Px(150.0);
             inner_style.height = Length::Px(100.0);
-            wrapper.children.push(LayoutBox::new(BoxType::Block, inner_style));
+            wrapper
+                .children
+                .push(LayoutBox::new(BoxType::Block, inner_style));
             container.children.push(wrapper);
         }
 
@@ -1452,15 +1538,43 @@ mod tests {
         // Row 1: 3 cards of 300 + 2 gaps of 24 = 948, centered in 1200
         // -> border boxes start at 126, 450, 774 (Chrome's numbers).
         // content rect = border box + 24 padding inset.
-        let xs: Vec<f32> = container.children.iter().map(|c| c.dimensions.content.x).collect();
-        let ws: Vec<f32> = container.children.iter().map(|c| c.dimensions.content.width).collect();
-        assert!((xs[0] - 150.0).abs() < 0.5, "card 1 content x: got {}", xs[0]);
-        assert!((xs[1] - 474.0).abs() < 0.5, "card 2 content x: got {}", xs[1]);
-        assert!((xs[2] - 798.0).abs() < 0.5, "card 3 content x: got {}", xs[2]);
-        assert!((ws[0] - 252.0).abs() < 0.5, "border-box 300 - 48 pb = 252 content, got {}", ws[0]);
+        let xs: Vec<f32> = container
+            .children
+            .iter()
+            .map(|c| c.dimensions.content.x)
+            .collect();
+        let ws: Vec<f32> = container
+            .children
+            .iter()
+            .map(|c| c.dimensions.content.width)
+            .collect();
+        assert!(
+            (xs[0] - 150.0).abs() < 0.5,
+            "card 1 content x: got {}",
+            xs[0]
+        );
+        assert!(
+            (xs[1] - 474.0).abs() < 0.5,
+            "card 2 content x: got {}",
+            xs[1]
+        );
+        assert!(
+            (xs[2] - 798.0).abs() < 0.5,
+            "card 3 content x: got {}",
+            xs[2]
+        );
+        assert!(
+            (ws[0] - 252.0).abs() < 0.5,
+            "border-box 300 - 48 pb = 252 content, got {}",
+            ws[0]
+        );
 
         // Row 2: the 4th card wraps, centered alone: border box at 450.
-        assert!((xs[3] - 474.0).abs() < 0.5, "wrapped card content x: got {}", xs[3]);
+        assert!(
+            (xs[3] - 474.0).abs() < 0.5,
+            "wrapped card content x: got {}",
+            xs[3]
+        );
         let y3 = container.children[3].dimensions.content.y;
         let y0 = container.children[0].dimensions.content.y;
         // Row 2 starts below row 1's border-box height (60 content + 48 pb) plus the 24px row gap.
@@ -1491,7 +1605,10 @@ mod tests {
 
         let c0 = &container.children[0].dimensions;
         let c1 = &container.children[1].dimensions;
-        assert!((c0.content.width - 300.0).abs() < 0.5, "content-box keeps 300 content width");
+        assert!(
+            (c0.content.width - 300.0).abs() < 0.5,
+            "content-box keeps 300 content width"
+        );
         let border_box_end = c0.content.x - 24.0 + 348.0;
         let next_start = c1.content.x - 24.0;
         assert!(
@@ -1513,12 +1630,16 @@ mod tests {
         let mut child1_style = ComputedStyle::new();
         child1_style.width = Length::Px(100.0);
         child1_style.height = Length::Px(50.0);
-        container.children.push(LayoutBox::new(BoxType::Block, child1_style));
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, child1_style));
 
         let mut child2_style = ComputedStyle::new();
         child2_style.width = Length::Px(100.0);
         child2_style.height = Length::Px(50.0);
-        container.children.push(LayoutBox::new(BoxType::Block, child2_style));
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, child2_style));
 
         // Create containing block
         let containing = Dimensions {
@@ -1543,11 +1664,15 @@ mod tests {
         // Two children with flex-grow: 1
         let mut child1_style = ComputedStyle::new();
         child1_style.flex_grow = 1.0;
-        container.children.push(LayoutBox::new(BoxType::Block, child1_style));
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, child1_style));
 
         let mut child2_style = ComputedStyle::new();
         child2_style.flex_grow = 1.0;
-        container.children.push(LayoutBox::new(BoxType::Block, child2_style));
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, child2_style));
 
         let containing = Dimensions {
             content: Rect::new(0.0, 0.0, 400.0, 100.0),
@@ -1575,7 +1700,9 @@ mod tests {
         child_style.flex_basis = rustkit_css::FlexBasis::Length(100.0);
         child_style.min_width = Length::Px(100.0); // Prevent shrinking
         child_style.flex_shrink = 0.0; // Don't shrink
-        container.children.push(LayoutBox::new(BoxType::Block, child_style));
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, child_style));
 
         let containing = Dimensions {
             content: Rect::new(0.0, 0.0, 400.0, 100.0),
@@ -1609,7 +1736,9 @@ mod tests {
         child_style.width = Length::Px(100.0);
         child_style.height = Length::Px(50.0);
         child_style.min_height = Length::Px(50.0);
-        container.children.push(LayoutBox::new(BoxType::Block, child_style));
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, child_style));
 
         let containing = Dimensions {
             content: Rect::new(0.0, 0.0, 400.0, 200.0),
@@ -1636,13 +1765,17 @@ mod tests {
         child1_style.height = Length::Px(50.0);
         child1_style.flex_basis = rustkit_css::FlexBasis::Length(50.0);
         child1_style.min_height = Length::Px(50.0);
-        container.children.push(LayoutBox::new(BoxType::Block, child1_style));
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, child1_style));
 
         let mut child2_style = ComputedStyle::new();
         child2_style.height = Length::Px(50.0);
         child2_style.flex_basis = rustkit_css::FlexBasis::Length(50.0);
         child2_style.min_height = Length::Px(50.0);
-        container.children.push(LayoutBox::new(BoxType::Block, child2_style));
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, child2_style));
 
         let containing = Dimensions {
             content: Rect::new(0.0, 0.0, 400.0, 300.0),
@@ -1661,7 +1794,7 @@ mod tests {
             child1_y
         );
     }
-    
+
     #[test]
     fn test_auto_height_stretch() {
         // Test that flex items in an auto-height container stretch to the tallest item,
@@ -1669,7 +1802,7 @@ mod tests {
         let mut style = ComputedStyle::new();
         style.display = rustkit_css::Display::Flex;
         style.flex_direction = FlexDirection::Row;
-        style.height = Length::Auto;  // Auto height container
+        style.height = Length::Auto; // Auto height container
 
         let mut container = LayoutBox::new(BoxType::Block, style);
 
@@ -1677,13 +1810,17 @@ mod tests {
         let mut child1_style = ComputedStyle::new();
         child1_style.width = Length::Px(100.0);
         child1_style.height = Length::Px(50.0);
-        container.children.push(LayoutBox::new(BoxType::Block, child1_style));
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, child1_style));
 
         // Second child: auto height (should stretch to match first child)
         let mut child2_style = ComputedStyle::new();
         child2_style.width = Length::Px(100.0);
         child2_style.height = Length::Auto;
-        container.children.push(LayoutBox::new(BoxType::Block, child2_style));
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, child2_style));
 
         // Large parent container - items should NOT stretch to this
         let containing = Dimensions {
@@ -1697,7 +1834,7 @@ mod tests {
         // NOT 500px (the parent container height)
         let child1_height = container.children[0].dimensions.content.height;
         let child2_height = container.children[1].dimensions.content.height;
-        
+
         assert!(
             child1_height < 100.0,
             "Child1 height {} should be less than 100px",
