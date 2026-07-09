@@ -1039,7 +1039,7 @@ impl Engine {
         // computed values through body to every descendant.
         let html_style = document.document_element().and_then(|html| {
             if let NodeType::Element { tag_name, attributes, .. } = &html.node_type {
-                Some(self.compute_style_for_element(tag_name, attributes, &stylesheets, &css_vars, &[]))
+                Some(self.compute_style_for_element(tag_name, attributes, &stylesheets, &css_vars, &[], &[], 0, 1))
             } else {
                 None
             }
@@ -1054,6 +1054,9 @@ impl Engine {
                 &css_vars,
                 &[],
                 html_style.as_ref(),
+                &[],
+                0,
+                1,
             );
             root_box.children.push(body_box);
         } else if let Some(html) = document.document_element() {
@@ -1077,7 +1080,7 @@ impl Engine {
         css_vars: &HashMap<String, String>,
         ancestors: &[(String, Vec<String>, Option<String>)],
     ) -> LayoutBox {
-        self.build_layout_from_node_with_parent_style(node, stylesheets, css_vars, ancestors, None)
+        self.build_layout_from_node_with_parent_style(node, stylesheets, css_vars, ancestors, None, &[], 0, 1)
     }
 
     fn build_layout_from_node_with_parent_style(
@@ -1087,6 +1090,9 @@ impl Engine {
         css_vars: &HashMap<String, String>,
         ancestors: &[(String, Vec<String>, Option<String>)],
         parent_style: Option<&ComputedStyle>,
+        siblings_before: &[(String, Vec<String>, Option<String>)],
+        element_index: usize,
+        sibling_count: usize,
     ) -> LayoutBox {
         match &node.node_type {
             NodeType::Element { tag_name, attributes, .. } => {
@@ -1104,7 +1110,16 @@ impl Engine {
                 }
 
                 // Create computed style based on element, attributes, and stylesheets
-                let mut style = self.compute_style_for_element(tag_name, attributes, stylesheets, css_vars, ancestors);
+                let mut style = self.compute_style_for_element(
+                    tag_name,
+                    attributes,
+                    stylesheets,
+                    css_vars,
+                    ancestors,
+                    siblings_before,
+                    element_index,
+                    sibling_count,
+                );
 
                 // CSS computed-value resolution: font-size absolutizes at
                 // style time — em/% against the PARENT's computed font-size,
@@ -1305,9 +1320,39 @@ impl Engine {
                     layout_box.children.push(before_box);
                 }
 
-                // Process children
-                for child in node.children() {
-                    let child_box = self.build_layout_from_node_with_parent_style(&child, stylesheets, css_vars, &child_ancestors, Some(&style));
+                // Process children. Sibling context (preceding element siblings, element
+                // index, element count) feeds `+`/`~` combinators and positional
+                // pseudo-classes; it counts DOM element children, not layout boxes, since
+                // CSS sibling relationships are defined on the element tree.
+                let child_nodes = node.children();
+                let child_element_count = child_nodes
+                    .iter()
+                    .filter(|c| matches!(c.node_type, NodeType::Element { .. }))
+                    .count();
+                let mut preceding_siblings: Vec<(String, Vec<String>, Option<String>)> =
+                    Vec::with_capacity(child_element_count);
+                for child in child_nodes {
+                    let child_box = self.build_layout_from_node_with_parent_style(
+                        &child,
+                        stylesheets,
+                        css_vars,
+                        &child_ancestors,
+                        Some(&style),
+                        &preceding_siblings,
+                        preceding_siblings.len(),
+                        child_element_count,
+                    );
+                    if let NodeType::Element { tag_name, attributes, .. } = &child.node_type {
+                        let child_classes: Vec<String> = attributes
+                            .get("class")
+                            .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
+                            .unwrap_or_default();
+                        preceding_siblings.push((
+                            tag_name.to_lowercase(),
+                            child_classes,
+                            attributes.get("id").cloned(),
+                        ));
+                    }
 
                     // Determine if box should be included in layout tree
                     let should_include = match child_box.box_type {
@@ -1470,6 +1515,9 @@ impl Engine {
         stylesheets: &[Stylesheet],
         css_vars: &HashMap<String, String>,
         ancestors: &[(String, Vec<String>, Option<String>)],
+        siblings_before: &[(String, Vec<String>, Option<String>)],
+        element_index: usize,
+        sibling_count: usize,
     ) -> ComputedStyle {
         let mut style = ComputedStyle::new();
         style.color = rustkit_css::Color::BLACK;
@@ -1762,12 +1810,6 @@ impl Engine {
         let mut matching_rules: Vec<(&Rule, (usize, usize, usize), usize)> = Vec::new();
         let mut rule_index = 0;
         
-        // For now, we don't track siblings during style computation
-        // TODO: Pass sibling info from build_layout_from_node_with_styles
-        let empty_siblings: Vec<(String, Vec<String>, Option<String>)> = Vec::new();
-        let element_index = 0;
-        let sibling_count = 1;
-        
         for stylesheet in stylesheets {
             for rule in &stylesheet.rules {
                 if self.selector_matches(
@@ -1775,7 +1817,7 @@ impl Engine {
                     tag_name,
                     attributes,
                     ancestors,
-                    &empty_siblings,
+                    siblings_before,
                     element_index,
                     sibling_count,
                 ) {
@@ -6089,6 +6131,80 @@ mod tests {
         
         let text_count = count_text_boxes(body_box);
         assert!(text_count >= 2, "Should have at least 2 text boxes (h1 and p content), got {}", text_count);
+    }
+
+    #[test]
+    fn test_sibling_combinators_and_positional_pseudo_classes() {
+        // `+`/`~` and :first-child/:last-child depend on the sibling context that
+        // build_layout_from_node_with_parent_style threads into style computation.
+        // Before that context existed, every element saw "no previous siblings,
+        // index 0 of 1": sibling combinators never matched and :first-child/
+        // :last-child matched everything.
+        let html = r#"<!DOCTYPE html>
+            <html>
+            <head><style>
+                div, p { background: rgb(200, 200, 200); }
+                .a + .b { background: rgb(0, 128, 0); }
+                .a ~ .c { background: rgb(0, 0, 255); }
+                p:first-child { background: rgb(255, 0, 0); }
+                p:last-child { background: rgb(255, 165, 0); }
+            </style></head>
+            <body>
+                <div class="wrap">
+                    <div class="a">A</div>
+                    <div class="b">B</div>
+                    <div class="x">X</div>
+                    <div class="c">C</div>
+                </div>
+                <section>
+                    <p>first</p>
+                    <p>middle</p>
+                    <p>last</p>
+                </section>
+            </body>
+            </html>"#;
+
+        let document = Document::parse_html(html).expect("Failed to parse HTML");
+        let document = Rc::new(document);
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+        };
+
+        let layout = engine.build_layout_from_document(&document, &[]);
+        let body_box = &layout.children[0];
+        let wrap = &body_box.children[0];
+        let section = &body_box.children[1];
+
+        let bg = |b: &LayoutBox| (b.style.background_color.r, b.style.background_color.g, b.style.background_color.b);
+
+        // .wrap children: a, b, x, c
+        assert_eq!(bg(&wrap.children[0]), (200, 200, 200), ".a matches no sibling rule");
+        assert_eq!(bg(&wrap.children[1]), (0, 128, 0), ".a + .b should match adjacent sibling");
+        assert_eq!(bg(&wrap.children[2]), (200, 200, 200), ".x matches no sibling rule");
+        assert_eq!(bg(&wrap.children[3]), (0, 0, 255), ".a ~ .c should match general sibling");
+
+        // section children: p, p, p
+        assert_eq!(bg(&section.children[0]), (255, 0, 0), "first p is :first-child");
+        assert_eq!(bg(&section.children[1]), (200, 200, 200), "middle p is neither first nor last child");
+        assert_eq!(bg(&section.children[2]), (255, 165, 0), "last p is :last-child");
     }
 
     #[test]
