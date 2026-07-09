@@ -1200,15 +1200,16 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f3
             }
         }
         crate::BoxType::Inline | crate::BoxType::Block | crate::BoxType::AnonymousBlock => {
-            // Horizontal main axis: a block container's content contribution
-            // (children's explicit px widths + nowrap inline runs — the same
-            // conservative estimator grid track sizing uses; never oversizes
-            // past Chrome). Falls back to line height when content gives
-            // nothing to measure. Vertical main axis keeps the line-height
-            // heuristic: heights come from the flex layout pass itself.
+            // Horizontal main axis: flex-basis:auto resolves to the item's
+            // content size suggestion = MAX-content width (css-flexbox-1
+            // §9.2.3.C) — text measured on one line, inline runs summed.
+            // flex-shrink then pulls oversized items back to the container.
+            // Falls back to line height when content gives nothing to
+            // measure. Vertical main axis keeps the line-height heuristic:
+            // heights come from the flex layout pass itself.
             match main_axis {
                 Axis::Horizontal => {
-                    let content = crate::grid::estimate_min_content_width(layout_box);
+                    let content = crate::grid::estimate_max_content_width(layout_box);
                     if content > 0.0 {
                         content
                     } else {
@@ -1218,9 +1219,23 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f3
                 Axis::Vertical => style.line_height.to_px(font_size),
             }
         }
-        crate::BoxType::Text(_) => {
-            // For text boxes, use line height
-            style.line_height.to_px(font_size)
+        crate::BoxType::Text(text) => {
+            // Anonymous text flex item: full single-line measure on the main
+            // axis (max-content), line height on the cross/vertical axis.
+            match main_axis {
+                Axis::Horizontal => {
+                    let w = crate::measure_text_advanced(
+                        text,
+                        &style.font_family,
+                        font_size,
+                        style.font_weight,
+                        style.font_style,
+                    )
+                    .width;
+                    if w > 0.0 { w } else { style.line_height.to_px(font_size) }
+                }
+                Axis::Vertical => style.line_height.to_px(font_size),
+            }
         }
     }
 }
