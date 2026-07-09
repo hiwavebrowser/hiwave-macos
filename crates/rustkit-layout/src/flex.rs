@@ -104,6 +104,24 @@ pub struct FlexItem<'a> {
     /// Whether the item has an explicit cross size (not auto).
     /// If true, stretch should not apply per CSS spec.
     pub has_explicit_cross_size: bool,
+
+    /// Explicit cross size (border-box), when the style specifies one.
+    pub explicit_cross_size: Option<f32>,
+
+    /// Padding+border extent at the main-axis start edge (resolved px).
+    /// All FlexItem sizes (basis, hypothetical, target, cross) are
+    /// border-box; these extents convert back to the content rect at
+    /// apply_positions time.
+    pub main_pb_start: f32,
+
+    /// Padding+border extent at the main-axis end edge.
+    pub main_pb_end: f32,
+
+    /// Padding+border extent at the cross-axis start edge.
+    pub cross_pb_start: f32,
+
+    /// Padding+border extent at the cross-axis end edge.
+    pub cross_pb_end: f32,
 }
 
 impl<'a> FlexItem<'a> {
@@ -120,6 +138,16 @@ impl<'a> FlexItem<'a> {
     /// Get outer cross size.
     pub fn outer_cross_size(&self) -> f32 {
         self.cross_size + self.cross_margin_start + self.cross_margin_end
+    }
+
+    /// Total padding+border on the main axis.
+    pub fn main_pb(&self) -> f32 {
+        self.main_pb_start + self.main_pb_end
+    }
+
+    /// Total padding+border on the cross axis.
+    pub fn cross_pb(&self) -> f32 {
+        self.cross_pb_start + self.cross_pb_end
     }
 }
 
@@ -309,9 +337,13 @@ pub fn layout_flex_container(
                     .map(|c| c.dimensions.margin_box().height)
                     .sum();
 
-                if children_height > 0.0 && children_height > item.cross_size {
+                // children_height is a content measure; item.cross_size is
+                // border-box, so compare and store with padding+border added.
+                if children_height > 0.0 && children_height + item.cross_pb() > item.cross_size {
                     // Update cross size based on actual children heights
-                    item.cross_size = children_height.max(item.min_cross_size).min(item.max_cross_size);
+                    item.cross_size = (children_height + item.cross_pb())
+                        .max(item.min_cross_size)
+                        .min(item.max_cross_size);
 
                     // Also update the layout box content height
                     match cross_axis {
@@ -335,6 +367,41 @@ pub fn layout_flex_container(
             .iter()
             .map(|i| i.cross_size + i.cross_margin_start + i.cross_margin_end)
             .fold(0.0, f32::max);
+    }
+
+    // 11c. Re-position lines with the true cross sizes. Steps 6-10 placed
+    // lines using the hypothetical (line-height fallback) cross sizes;
+    // step 11's child layout revealed the real ones. Without this pass,
+    // wrapped rows stack at the estimated heights and overlap whenever an
+    // item is taller than one text line.
+    let total_cross_size: f32 = lines.iter().map(|l| l.cross_size).sum::<f32>()
+        + cross_gap * (lines.len().saturating_sub(1)) as f32;
+    let effective_cross_size = if has_definite_cross_size {
+        container_cross_size
+    } else {
+        total_cross_size
+    };
+    distribute_lines(&mut lines, effective_cross_size, total_cross_size, cross_gap, style.align_content);
+    for line in &mut lines {
+        align_cross_axis(line, style.align_items);
+        for item in &mut line.items {
+            // New absolute border-box cross position, converted to a content
+            // rect delta; main-axis positions are unchanged, so shifting the
+            // already-laid-out subtree is sufficient.
+            let d = &item.layout_box.dimensions;
+            let (origin_cross, old_content_cross, pb_start) = match cross_axis {
+                Axis::Vertical => (container_origin.1, d.content.y, d.padding.top + d.border.top),
+                Axis::Horizontal => (container_origin.0, d.content.x, d.padding.left + d.border.left),
+            };
+            let delta = origin_cross + line.cross_position + item.cross_position + pb_start
+                - old_content_cross;
+            if delta != 0.0 {
+                match cross_axis {
+                    Axis::Vertical => translate_subtree(item.layout_box, 0.0, delta),
+                    Axis::Horizontal => translate_subtree(item.layout_box, delta, 0.0),
+                }
+            }
+        }
     }
 
     // 12. Update container dimensions based on flex items
@@ -413,7 +480,36 @@ fn create_flex_item<'a>(
         ),
     };
 
-    // Calculate flex basis
+    // Padding and border were resolved onto dimensions by the block
+    // pre-pass that runs before flex (layout_block_with_definite_height),
+    // so read them from there. All flex sizes below are border-box: a
+    // specified size under box-sizing:content-box gains padding+border,
+    // under border-box it is used as-is. Intrinsic estimates measure
+    // content and always gain padding+border.
+    let (main_pb_start, main_pb_end, cross_pb_start, cross_pb_end) = {
+        let d = &layout_box.dimensions;
+        match main_axis {
+            Axis::Horizontal => (
+                d.padding.left + d.border.left,
+                d.padding.right + d.border.right,
+                d.padding.top + d.border.top,
+                d.padding.bottom + d.border.bottom,
+            ),
+            Axis::Vertical => (
+                d.padding.top + d.border.top,
+                d.padding.bottom + d.border.bottom,
+                d.padding.left + d.border.left,
+                d.padding.right + d.border.right,
+            ),
+        }
+    };
+    let main_pb = main_pb_start + main_pb_end;
+    let cross_pb = cross_pb_start + cross_pb_end;
+    let is_border_box = layout_box.style.box_sizing == rustkit_css::BoxSizing::BorderBox;
+    let spec_main_to_border_box = |v: f32| if is_border_box { v } else { v + main_pb };
+    let spec_cross_to_border_box = |v: f32| if is_border_box { v } else { v + cross_pb };
+
+    // Calculate flex basis (border-box)
     let flex_basis = match flex_basis_value {
         FlexBasis::Auto => {
             // Use main size property, or intrinsic size for replaced elements
@@ -421,21 +517,21 @@ fn create_flex_item<'a>(
                 Axis::Horizontal => resolve_length(&layout_box.style.width, container_main),
                 Axis::Vertical => resolve_length(&layout_box.style.height, container_main),
             };
-            
+
             // If explicit size is 0 (auto), check for intrinsic sizing
             if explicit_size == 0.0 {
                 // Get intrinsic size for replaced elements (form controls, images)
-                get_intrinsic_main_size(layout_box, main_axis)
+                get_intrinsic_main_size(layout_box, main_axis) + main_pb
             } else {
-                explicit_size
+                spec_main_to_border_box(explicit_size)
             }
         }
         FlexBasis::Content => {
             // Use content size - for replaced elements, use intrinsic size
-            get_intrinsic_main_size(layout_box, main_axis)
+            get_intrinsic_main_size(layout_box, main_axis) + main_pb
         }
-        FlexBasis::Length(len) => len,
-        FlexBasis::Percent(pct) => pct / 100.0 * container_main,
+        FlexBasis::Length(len) => spec_main_to_border_box(len),
+        FlexBasis::Percent(pct) => spec_main_to_border_box(pct / 100.0 * container_main),
     };
 
     // Get min/max constraints from CSS
@@ -457,18 +553,45 @@ fn create_flex_item<'a>(
     // For replaced elements (form controls, images), use intrinsic size as minimum
     // This ensures flex items have proper sizing even without explicit min-width/height
     let intrinsic_cross = get_intrinsic_cross_size(&layout_box.box_type, main_axis, &layout_box.style);
-    let min_main = css_min_main;
-    let min_cross = if css_min_cross > 0.0 { css_min_cross } else { intrinsic_cross };
+    let min_main = if css_min_main > 0.0 {
+        spec_main_to_border_box(css_min_main)
+    } else {
+        0.0
+    };
+    let max_main = if max_main.is_finite() {
+        spec_main_to_border_box(max_main)
+    } else {
+        max_main
+    };
+    let min_cross = if css_min_cross > 0.0 {
+        spec_cross_to_border_box(css_min_cross)
+    } else {
+        intrinsic_cross + cross_pb
+    };
+    let max_cross = if max_cross.is_finite() {
+        spec_cross_to_border_box(max_cross)
+    } else {
+        max_cross
+    };
 
     // Hypothetical main size (clamped)
     let hypothetical_main_size = flex_basis.max(min_main).min(max_main);
 
     // Check if the cross size is explicitly set (not auto)
     // Per CSS spec, items with explicit cross size should NOT be stretched
-    let has_explicit_cross_size = match main_axis {
-        Axis::Horizontal => !matches!(layout_box.style.height, rustkit_css::Length::Auto),
-        Axis::Vertical => !matches!(layout_box.style.width, rustkit_css::Length::Auto),
+    let explicit_cross_length = match main_axis {
+        Axis::Horizontal => &layout_box.style.height,
+        Axis::Vertical => &layout_box.style.width,
     };
+    let explicit_cross_size = match explicit_cross_length {
+        rustkit_css::Length::Auto => None,
+        // A percentage cross size may not be resolvable against an
+        // indefinite container; keep it on the content-measure path.
+        rustkit_css::Length::Percent(_) => None,
+        l => Some(spec_cross_to_border_box(resolve_length(l, container_cross))),
+    };
+    let has_explicit_cross_size =
+        !matches!(explicit_cross_length, rustkit_css::Length::Auto);
 
     FlexItem {
         layout_box,
@@ -492,6 +615,11 @@ fn create_flex_item<'a>(
         cross_margin_start,
         cross_margin_end,
         has_explicit_cross_size,
+        explicit_cross_size,
+        main_pb_start,
+        main_pb_end,
+        cross_pb_start,
+        cross_pb_end,
     }
 }
 
@@ -642,13 +770,18 @@ fn calculate_cross_sizes(line: &mut FlexLine, container_cross: f32, align_items:
     let mut content_cross_sizes: Vec<f32> = Vec::with_capacity(line.items.len());
     
     for item in &mut line.items {
-        // Compute the content-based cross size (hypothetical cross size)
-        let content_cross_size = get_content_cross_size(item.layout_box);
-        
+        // Compute the hypothetical cross size (border-box): the explicit
+        // cross size when specified, otherwise the content-based size plus
+        // the item's own padding+border.
+        let content_cross_size = match item.explicit_cross_size {
+            Some(explicit) => explicit,
+            None => get_content_cross_size(item.layout_box) + item.cross_pb(),
+        };
+
         // Apply min/max constraints to content size
         let constrained_size = content_cross_size.max(item.min_cross_size).min(item.max_cross_size);
         content_cross_sizes.push(constrained_size);
-        
+
         // Initially set cross_size to content size
         item.cross_size = constrained_size;
     }
@@ -956,7 +1089,7 @@ fn apply_positions(
 
             let abs_x = origin_x + rel_x;
             let abs_y = origin_y + rel_y;
-            
+
             trace!(
                 ?rel_x,
                 ?rel_y,
@@ -970,12 +1103,21 @@ fn apply_positions(
                 "apply_positions: positioning flex item"
             );
 
+            // Flex math above is border-box; dimensions.content is the
+            // content rect, so inset by the item's own padding+border
+            // (resolved onto dimensions by the block pre-pass).
+            let d = &item.layout_box.dimensions;
+            let pb_left = d.padding.left + d.border.left;
+            let pb_right = d.padding.right + d.border.right;
+            let pb_top = d.padding.top + d.border.top;
+            let pb_bottom = d.padding.bottom + d.border.bottom;
+
             // Update layout box dimensions with absolute positions
             item.layout_box.dimensions.content = Rect {
-                x: abs_x,
-                y: abs_y,
-                width,
-                height,
+                x: abs_x + pb_left,
+                y: abs_y + pb_top,
+                width: (width - pb_left - pb_right).max(0.0),
+                height: (height - pb_top - pb_bottom).max(0.0),
             };
 
             // Set margins
@@ -994,6 +1136,17 @@ fn apply_positions(
                 },
             };
         }
+    }
+}
+
+/// Shift a laid-out box and its entire subtree by (dx, dy).
+/// Content rects hold absolute coordinates once layout has run, so every
+/// descendant moves by the same delta.
+fn translate_subtree(b: &mut crate::LayoutBox, dx: f32, dy: f32) {
+    b.dimensions.content.x += dx;
+    b.dimensions.content.y += dy;
+    for child in &mut b.children {
+        translate_subtree(child, dx, dy);
     }
 }
 
@@ -1223,6 +1376,112 @@ mod tests {
         assert!(
             x1 >= x0 + 150.0,
             "second item must not overlap the first: x0={x0} x1={x1}"
+        );
+    }
+
+    /// Build a flex item box with the given width/padding/box-sizing, with
+    /// padding pre-resolved onto dimensions the way the block pre-pass does.
+    fn padded_item(width: f32, padding: f32, border_box: bool) -> LayoutBox {
+        let mut style = ComputedStyle::new();
+        style.width = Length::Px(width);
+        style.padding_left = Length::Px(padding);
+        style.padding_right = Length::Px(padding);
+        style.padding_top = Length::Px(padding);
+        style.padding_bottom = Length::Px(padding);
+        style.box_sizing = if border_box {
+            rustkit_css::BoxSizing::BorderBox
+        } else {
+            rustkit_css::BoxSizing::ContentBox
+        };
+        let mut b = LayoutBox::new(BoxType::Block, style);
+        b.dimensions.padding = EdgeSizes {
+            left: padding,
+            right: padding,
+            top: padding,
+            bottom: padding,
+        };
+        // Give the item some content height, as the block pre-pass would.
+        let mut inner = ComputedStyle::new();
+        inner.width = Length::Px(60.0);
+        inner.height = Length::Px(60.0);
+        b.children.push(LayoutBox::new(BoxType::Block, inner));
+        b
+    }
+
+    #[test]
+    fn test_border_box_items_wrap_and_center_like_chrome() {
+        // Regression (card-grid, macOS trench session 9): flex math treated
+        // item sizes as content-box and never added padding/border, so a
+        // border-box 300px card with 24px padding painted 348px wide while
+        // neighbors were placed 300px apart — 48px of overlap per item on
+        // both axes. Border-box items must occupy exactly their specified
+        // width, and gaps must separate them.
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Row;
+        style.flex_wrap = rustkit_css::FlexWrap::Wrap;
+        style.justify_content = JustifyContent::Center;
+        style.row_gap = Length::Px(24.0);
+        style.column_gap = Length::Px(24.0);
+        let mut container = LayoutBox::new(BoxType::Block, style);
+        for _ in 0..4 {
+            container.children.push(padded_item(300.0, 24.0, true));
+        }
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 1200.0, 800.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        // Row 1: 3 cards of 300 + 2 gaps of 24 = 948, centered in 1200
+        // -> border boxes start at 126, 450, 774 (Chrome's numbers).
+        // content rect = border box + 24 padding inset.
+        let xs: Vec<f32> = container.children.iter().map(|c| c.dimensions.content.x).collect();
+        let ws: Vec<f32> = container.children.iter().map(|c| c.dimensions.content.width).collect();
+        assert!((xs[0] - 150.0).abs() < 0.5, "card 1 content x: got {}", xs[0]);
+        assert!((xs[1] - 474.0).abs() < 0.5, "card 2 content x: got {}", xs[1]);
+        assert!((xs[2] - 798.0).abs() < 0.5, "card 3 content x: got {}", xs[2]);
+        assert!((ws[0] - 252.0).abs() < 0.5, "border-box 300 - 48 pb = 252 content, got {}", ws[0]);
+
+        // Row 2: the 4th card wraps, centered alone: border box at 450.
+        assert!((xs[3] - 474.0).abs() < 0.5, "wrapped card content x: got {}", xs[3]);
+        let y3 = container.children[3].dimensions.content.y;
+        let y0 = container.children[0].dimensions.content.y;
+        // Row 2 starts below row 1's border-box height (60 content + 48 pb) plus the 24px row gap.
+        assert!(
+            (y3 - (y0 + 108.0 + 24.0)).abs() < 1.0,
+            "row 2 must sit one border-box row + gap below row 1: y0={y0} y3={y3}"
+        );
+    }
+
+    #[test]
+    fn test_content_box_padded_items_do_not_overlap() {
+        // Without border-box, a 300px-wide item with 24px padding occupies
+        // 348px; the next item must start at least 348 + gap further over.
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Row;
+        style.column_gap = Length::Px(24.0);
+        let mut container = LayoutBox::new(BoxType::Block, style);
+        for _ in 0..2 {
+            container.children.push(padded_item(300.0, 24.0, false));
+        }
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 1200.0, 800.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        let c0 = &container.children[0].dimensions;
+        let c1 = &container.children[1].dimensions;
+        assert!((c0.content.width - 300.0).abs() < 0.5, "content-box keeps 300 content width");
+        let border_box_end = c0.content.x - 24.0 + 348.0;
+        let next_start = c1.content.x - 24.0;
+        assert!(
+            (next_start - (border_box_end + 24.0)).abs() < 0.5,
+            "second item must start one gap after the first border box: end={border_box_end} next={next_start}"
         );
     }
 
