@@ -23,30 +23,30 @@ pub mod margin_collapse;
 pub mod scroll;
 pub mod text;
 
-pub use grid::{layout_grid_container, GridItem, GridLayout, GridTrack};
+pub use flex::{layout_flex_container, Axis, FlexItem, FlexLine};
 pub use forms::{
     calculate_caret_position, calculate_selection_rects, render_button, render_checkbox,
     render_input, render_radio, CaretInfo, InputLayout, InputState, SelectionInfo,
 };
-pub use flex::{layout_flex_container, Axis, FlexItem, FlexLine};
-pub use scroll::{
-    calculate_scroll_into_view, handle_wheel_event, is_scroll_container, render_scrollbars,
-    ScrollAlignment, Scrollbar, ScrollbarOrientation, ScrollMomentum, ScrollState, StickyOffsets,
-    StickyState, WheelDeltaMode,
-};
+pub use grid::{layout_grid_container, GridItem, GridLayout, GridTrack};
 pub use images::{
     calculate_intrinsic_size, calculate_placeholder_size, render_background_image,
     render_broken_image, render_image, ImageLayoutInfo,
-};
-pub use text::{
-    apply_text_transform, collapse_whitespace, FontCache, FontDisplay, FontFaceRule,
-    FontFamilyChain, FontLoader, LineHeight, PositionedGlyph, ShapedRun, TextDecoration, TextError,
-    TextMetrics, TextShaper,
 };
 pub use intrinsic_cache::IntrinsicSizingMode;
 pub use margin_collapse::{
     collapse_margins, establishes_bfc, is_margin_collapsible_through,
     should_collapse_with_first_child, should_collapse_with_last_child, CollapsibleMargin,
+};
+pub use scroll::{
+    calculate_scroll_into_view, handle_wheel_event, is_scroll_container, render_scrollbars,
+    ScrollAlignment, ScrollMomentum, ScrollState, Scrollbar, ScrollbarOrientation, StickyOffsets,
+    StickyState, WheelDeltaMode,
+};
+pub use text::{
+    apply_text_transform, collapse_whitespace, FontCache, FontDisplay, FontFaceRule,
+    FontFamilyChain, FontLoader, LineHeight, PositionedGlyph, ShapedRun, TextDecoration, TextError,
+    TextMetrics, TextShaper,
 };
 
 use rustkit_css::{BoxSizing, Color, ComputedStyle, Length, TextAlign};
@@ -383,7 +383,14 @@ impl FloatContext {
     }
 
     /// Check if a float of the given size fits at the specified position.
-    pub fn float_fits(&self, x: f32, y: f32, width: f32, height: f32, container_width: f32) -> bool {
+    pub fn float_fits(
+        &self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        container_width: f32,
+    ) -> bool {
         // Check bounds
         if x < 0.0 || x + width > container_width {
             return false;
@@ -636,14 +643,9 @@ pub enum FormControlType {
         button_type: String, // "submit", "button", "reset"
     },
     /// Checkbox input.
-    Checkbox {
-        checked: bool,
-    },
+    Checkbox { checked: bool },
     /// Radio button input.
-    Radio {
-        checked: bool,
-        name: String,
-    },
+    Radio { checked: bool, name: String },
     /// Select dropdown (placeholder for future).
     Select {
         options: Vec<String>,
@@ -660,6 +662,21 @@ pub struct StackingContext {
     pub creates_context: bool,
     /// Positioned children in this stacking context.
     pub positioned_children: Vec<usize>,
+}
+
+/// One line of a wrapped text box.
+///
+/// Populated by `layout_text` when a `BoxType::Text` box wraps onto multiple
+/// lines; `None`/absent means the box is a single run (the pre-wrap layout
+/// model) and renders exactly as before.
+#[derive(Debug, Clone)]
+pub struct TextLine {
+    /// The line's text content (whitespace at the break point removed).
+    pub text: String,
+    /// Measured width of this line in px.
+    pub width: f32,
+    /// X offset from the box's content origin (per-line text-align).
+    pub x_offset: f32,
 }
 
 /// A layout box in the layout tree.
@@ -695,6 +712,8 @@ pub struct LayoutBox {
     /// Optional element ID for intrinsic sizing cache.
     /// When set, enables caching of min-content/max-content calculations.
     pub element_id: Option<usize>,
+    /// Wrapped lines for text boxes (`None` = single-run text, no wrap).
+    pub text_lines: Option<Vec<TextLine>>,
 }
 
 impl LayoutBox {
@@ -715,6 +734,7 @@ impl LayoutBox {
             viewport: (0.0, 0.0),
             sticky_state: None,
             element_id: None,
+            text_lines: None,
         }
     }
 
@@ -808,10 +828,7 @@ impl LayoutBox {
 
         // Determine the container rect for children
         // For scroll containers, use the content rect; otherwise pass through
-        let child_container = if is_scroll_container(
-            self.style.overflow_x,
-            self.style.overflow_y,
-        ) {
+        let child_container = if is_scroll_container(self.style.overflow_x, self.style.overflow_y) {
             self.dimensions.content
         } else {
             container_rect
@@ -860,17 +877,18 @@ impl LayoutBox {
     /// Perform layout with an explicit definite height for percentage resolution.
     /// This is used by grid layout when re-laying out children - the containing_block
     /// is used for positioning, while definite_height is used for percentage height resolution.
-    pub fn layout_with_definite_height(&mut self, containing_block: &Dimensions, definite_height: f32) {
+    pub fn layout_with_definite_height(
+        &mut self,
+        containing_block: &Dimensions,
+        definite_height: f32,
+    ) {
         match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
                 // Check for flex or grid container
                 if self.style.display.is_flex() {
                     self.layout_block_with_definite_height(containing_block, definite_height);
                     // Flex layout is applied to children
-                    flex::layout_flex_container(
-                        self,
-                        &self.dimensions.clone(),
-                    );
+                    flex::layout_flex_container(self, &self.dimensions.clone());
                 } else if self.style.display.is_grid() {
                     self.layout_block_with_definite_height(containing_block, definite_height);
                     // Grid layout is applied to children
@@ -891,7 +909,11 @@ impl LayoutBox {
                 // Text boxes: calculate dimensions based on text content
                 self.layout_text(text.clone(), containing_block);
             }
-            BoxType::Image { natural_width, natural_height, .. } => {
+            BoxType::Image {
+                natural_width,
+                natural_height,
+                ..
+            } => {
                 // Replaced element: use intrinsic dimensions or explicit sizing
                 self.layout_image(*natural_width, *natural_height, containing_block);
             }
@@ -910,27 +932,39 @@ impl LayoutBox {
         // Calculate margins, padding, and borders for the inline box
         let d = &mut self.dimensions;
         let container_width = containing_block.content.width;
-        
+
         d.margin.left = self.style.margin_left.to_px(16.0, 16.0, container_width);
         d.margin.right = self.style.margin_right.to_px(16.0, 16.0, container_width);
         // Vertical margins don't apply to inline elements
         d.margin.top = 0.0;
         d.margin.bottom = 0.0;
-        
+
         d.padding.left = self.style.padding_left.to_px(16.0, 16.0, container_width);
         d.padding.right = self.style.padding_right.to_px(16.0, 16.0, container_width);
         d.padding.top = self.style.padding_top.to_px(16.0, 16.0, container_width);
         d.padding.bottom = self.style.padding_bottom.to_px(16.0, 16.0, container_width);
-        
-        d.border.left = self.style.border_left_width.to_px(16.0, 16.0, container_width);
-        d.border.right = self.style.border_right_width.to_px(16.0, 16.0, container_width);
-        d.border.top = self.style.border_top_width.to_px(16.0, 16.0, container_width);
-        d.border.bottom = self.style.border_bottom_width.to_px(16.0, 16.0, container_width);
-        
+
+        d.border.left = self
+            .style
+            .border_left_width
+            .to_px(16.0, 16.0, container_width);
+        d.border.right = self
+            .style
+            .border_right_width
+            .to_px(16.0, 16.0, container_width);
+        d.border.top = self
+            .style
+            .border_top_width
+            .to_px(16.0, 16.0, container_width);
+        d.border.bottom = self
+            .style
+            .border_bottom_width
+            .to_px(16.0, 16.0, container_width);
+
         // Position at containing block's content area
         d.content.x = containing_block.content.x + d.margin.left + d.border.left + d.padding.left;
         d.content.y = containing_block.content.y + containing_block.content.height;
-        
+
         // Check for explicit CSS width first
         let explicit_width = match self.style.width {
             Length::Px(px) if px > 0.0 => Some(px),
@@ -944,7 +978,7 @@ impl LayoutBox {
             }
             _ => None,
         };
-        
+
         // Check for explicit CSS height
         let explicit_height = match self.style.height {
             Length::Px(px) if px > 0.0 => Some(px),
@@ -960,25 +994,25 @@ impl LayoutBox {
             }
             _ => None,
         };
-        
+
         // Layout inline children sequentially
         // Use the containing block's width for child layout, not our own (which might be 0)
         let available_width = containing_block.content.width;
         let mut cursor_x = 0.0;
         let mut max_height = 0.0f32;
-        
+
         for child in &mut self.children {
             let mut cb = self.dimensions.clone();
             cb.content.x = self.dimensions.content.x + cursor_x;
             cb.content.width = available_width; // Pass parent's available width
             cb.content.height = 0.0;
-            
+
             child.layout(&cb);
-            
+
             cursor_x += child.dimensions.margin_box().width;
             max_height = max_height.max(child.dimensions.margin_box().height);
         }
-        
+
         // Set content dimensions:
         // 1. Use explicit CSS width if specified
         // 2. Otherwise use computed width from children
@@ -990,15 +1024,16 @@ impl LayoutBox {
         } else {
             // Inline box with no children and no explicit width:
             // Use horizontal padding + border as minimum (inline-block behavior)
-            let horizontal_box = self.dimensions.padding.horizontal() + self.dimensions.border.horizontal();
+            let horizontal_box =
+                self.dimensions.padding.horizontal() + self.dimensions.border.horizontal();
             horizontal_box
         };
         self.dimensions.content.width = computed_width;
-        
+
         // Height: use explicit height, or line-height as minimum for inline boxes
         let min_height = self.dimensions.padding.vertical() + self.dimensions.border.vertical();
         let line_height = self.get_line_height();
-        
+
         // Height calculation for inline boxes:
         // Inline boxes should always have at least line-height to maintain proper vertical rhythm.
         // This is critical for flex containers where inline items need proper sizing.
@@ -1049,8 +1084,61 @@ impl LayoutBox {
         );
         let text_width = metrics.width;
 
-        // Calculate text-align offset
         let container_width = containing_block.content.width;
+        self.text_lines = None;
+
+        // Wrap overflowing text into line boxes (CSS2 §9.4.2, css-text-3 §5).
+        // container_width == 0 means the containing block has no resolved width
+        // yet (intrinsic sizing pass) — never wrap against an unresolved width.
+        let can_wrap = !matches!(
+            self.style.white_space,
+            rustkit_css::WhiteSpace::Nowrap | rustkit_css::WhiteSpace::Pre
+        );
+        if can_wrap && container_width > 0.0 && text_width > container_width {
+            let shaper = TextShaper::new();
+            let chain = FontFamilyChain::from_css_value(&self.style.font_family);
+            if let Ok(lines) = shaper.wrap_text(
+                &text,
+                &chain,
+                self.style.font_weight,
+                self.style.font_style,
+                self.style.font_stretch,
+                font_size,
+                container_width,
+                self.style.word_break,
+            ) {
+                if lines.len() > 1 {
+                    // Known phase-1 gap: wrap_text shapes without letter/word-
+                    // spacing, so spaced text may break slightly late. Ledgered.
+                    let text_lines: Vec<TextLine> = lines
+                        .iter()
+                        .map(|l| {
+                            let x_offset = match self.style.text_align {
+                                TextAlign::Left | TextAlign::Justify => 0.0,
+                                TextAlign::Right => (container_width - l.width).max(0.0),
+                                TextAlign::Center => ((container_width - l.width) / 2.0).max(0.0),
+                            };
+                            TextLine {
+                                text: l.text(),
+                                width: l.width,
+                                x_offset,
+                            }
+                        })
+                        .collect();
+                    let max_line_width = text_lines.iter().map(|l| l.width).fold(0.0f32, f32::max);
+                    let line_count = text_lines.len();
+                    self.text_lines = Some(text_lines);
+                    self.dimensions.content.x = containing_block.content.x;
+                    self.dimensions.content.y =
+                        containing_block.content.y + containing_block.content.height;
+                    self.dimensions.content.width = max_line_width.min(container_width);
+                    self.dimensions.content.height = line_count as f32 * self.get_line_height();
+                    return;
+                }
+            }
+        }
+
+        // Single-line path (fits, nowrap/pre, or wrapping unavailable).
         let text_align_offset = if container_width > text_width {
             match self.style.text_align {
                 TextAlign::Left => 0.0,
@@ -1076,24 +1164,37 @@ impl LayoutBox {
     }
 
     /// Layout a replaced element (image).
-    fn layout_image(&mut self, natural_width: f32, natural_height: f32, containing_block: &Dimensions) {
+    fn layout_image(
+        &mut self,
+        natural_width: f32,
+        natural_height: f32,
+        containing_block: &Dimensions,
+    ) {
         // Calculate explicit dimensions from style
         let explicit_width = match self.style.width {
             Length::Px(px) => Some(px),
             Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.width),
             _ => None,
         };
-        
+
         let explicit_height = match self.style.height {
             Length::Px(px) => Some(px),
             Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.height),
             _ => None,
         };
-        
+
         // Determine final dimensions using intrinsic size calculation
         let (mut width, mut height) = crate::images::calculate_intrinsic_size(
-            if natural_width > 0.0 { Some(natural_width) } else { None },
-            if natural_height > 0.0 { Some(natural_height) } else { None },
+            if natural_width > 0.0 {
+                Some(natural_width)
+            } else {
+                None
+            },
+            if natural_height > 0.0 {
+                Some(natural_height)
+            } else {
+                None
+            },
             explicit_width,
             explicit_height,
             containing_block.content.width,
@@ -1114,13 +1215,21 @@ impl LayoutBox {
         };
         if let Some(mw) = max_width {
             if width > mw && width > 0.0 {
-                height = if height > 0.0 { mw * height / width } else { height };
+                height = if height > 0.0 {
+                    mw * height / width
+                } else {
+                    height
+                };
                 width = mw;
             }
         }
         if let Some(mh) = max_height {
             if height > mh && height > 0.0 {
-                width = if width > 0.0 { mh * width / height } else { width };
+                width = if width > 0.0 {
+                    mh * width / height
+                } else {
+                    width
+                };
                 height = mh;
             }
         }
@@ -1138,7 +1247,7 @@ impl LayoutBox {
             Length::Px(px) => px,
             _ => 16.0,
         };
-        
+
         // Calculate intrinsic dimensions based on control type
         let (intrinsic_width, intrinsic_height) = match &control {
             FormControlType::TextInput { .. } => {
@@ -1165,31 +1274,39 @@ impl LayoutBox {
                 (font_size * 10.0, font_size * 1.5 + 8.0)
             }
         };
-        
+
         // Override with explicit CSS dimensions if specified, but always fall back to intrinsic
         // if the explicit value resolves to zero (e.g., percent of zero-height container)
         let width = match self.style.width {
             Length::Px(px) if px > 0.0 => px,
             Length::Percent(pct) => {
                 let resolved = pct / 100.0 * containing_block.content.width;
-                if resolved > 0.0 { resolved } else { intrinsic_width }
+                if resolved > 0.0 {
+                    resolved
+                } else {
+                    intrinsic_width
+                }
             }
             Length::Em(em) if em > 0.0 => em * font_size,
             _ => intrinsic_width,
         };
-        
+
         let height = match self.style.height {
             Length::Px(px) if px > 0.0 => px,
             Length::Percent(pct) => {
                 let resolved = pct / 100.0 * containing_block.content.height;
                 // CRITICAL: Fall back to intrinsic height if percent resolves to 0
                 // This fixes form controls in flex containers before flex layout runs
-                if resolved > 0.0 { resolved } else { intrinsic_height }
+                if resolved > 0.0 {
+                    resolved
+                } else {
+                    intrinsic_height
+                }
             }
             Length::Em(em) if em > 0.0 => em * font_size,
             _ => intrinsic_height,
         };
-        
+
         // Position within containing block
         self.dimensions.content.x = containing_block.content.x;
         self.dimensions.content.y = containing_block.content.y + containing_block.content.height;
@@ -1261,7 +1378,11 @@ impl LayoutBox {
             BoxType::Text(text) => {
                 self.layout_text(text.clone(), containing_block);
             }
-            BoxType::Image { natural_width, natural_height, .. } => {
+            BoxType::Image {
+                natural_width,
+                natural_height,
+                ..
+            } => {
                 self.layout_image(*natural_width, *natural_height, containing_block);
             }
             BoxType::FormControl(ref control) => {
@@ -1284,7 +1405,11 @@ impl LayoutBox {
     }
 
     /// Layout a block-level box with an explicit definite height for percentage resolution.
-    fn layout_block_with_definite_height(&mut self, containing_block: &Dimensions, definite_height: f32) {
+    fn layout_block_with_definite_height(
+        &mut self,
+        containing_block: &Dimensions,
+        definite_height: f32,
+    ) {
         tracing::trace!(
             containing_width = containing_block.content.width,
             definite_height = definite_height,
@@ -1631,10 +1756,12 @@ impl LayoutBox {
                 (containing_block.content.width - total_margin_border_padding).max(0.0)
             }
             _ => {
-                let specified_width = self.length_to_px(&style.width, containing_block.content.width);
+                let specified_width =
+                    self.length_to_px(&style.width, containing_block.content.width);
                 // With box-sizing: border-box, the specified width includes padding and border
                 if style.box_sizing == BoxSizing::BorderBox {
-                    (specified_width - padding_left - padding_right - border_left - border_right).max(0.0)
+                    (specified_width - padding_left - padding_right - border_left - border_right)
+                        .max(0.0)
                 } else {
                     specified_width
                 }
@@ -1654,9 +1781,11 @@ impl LayoutBox {
         let max_width = match style.max_width {
             Length::Auto | Length::Zero => f32::INFINITY,
             _ => {
-                let max_width_raw = self.length_to_px(&style.max_width, containing_block.content.width);
+                let max_width_raw =
+                    self.length_to_px(&style.max_width, containing_block.content.width);
                 if style.box_sizing == BoxSizing::BorderBox {
-                    (max_width_raw - padding_left - padding_right - border_left - border_right).max(0.0)
+                    (max_width_raw - padding_left - padding_right - border_left - border_right)
+                        .max(0.0)
                 } else {
                     max_width_raw
                 }
@@ -1687,7 +1816,10 @@ impl LayoutBox {
                 - margin_right;
             if free_space > 0.0 {
                 if margin_left_auto && margin_right_auto {
-                    (margin_left + free_space / 2.0, margin_right + free_space / 2.0)
+                    (
+                        margin_left + free_space / 2.0,
+                        margin_right + free_space / 2.0,
+                    )
                 } else if margin_left_auto {
                     (margin_left + free_space, margin_right)
                 } else {
@@ -1809,8 +1941,10 @@ impl LayoutBox {
                 }
 
                 // Position the child
-                child.dimensions.content.x = self.dimensions.content.x + cursor_x + child.dimensions.margin.left;
-                child.dimensions.content.y = self.dimensions.content.y + cursor_y + child.dimensions.margin.top;
+                child.dimensions.content.x =
+                    self.dimensions.content.x + cursor_x + child.dimensions.margin.left;
+                child.dimensions.content.y =
+                    self.dimensions.content.y + cursor_y + child.dimensions.margin.top;
 
                 // Advance cursor
                 cursor_x += child_width;
@@ -1870,7 +2004,12 @@ impl LayoutBox {
 
         // Apply text-align to all recorded lines
         for (start, end, width) in lines {
-            Self::apply_text_align_offset(&mut self.children[start..end], width, container_width, text_align);
+            Self::apply_text_align_offset(
+                &mut self.children[start..end],
+                width,
+                container_width,
+                text_align,
+            );
         }
 
         self.dimensions.content.height = cursor_y;
@@ -1944,7 +2083,10 @@ impl LayoutBox {
             let is_inline_level = is_inline_block
                 || matches!(
                     child.box_type,
-                    BoxType::Inline | BoxType::Text(_) | BoxType::Image { .. } | BoxType::FormControl(_)
+                    BoxType::Inline
+                        | BoxType::Text(_)
+                        | BoxType::Image { .. }
+                        | BoxType::FormControl(_)
                 );
             if is_inline_level {
                 cursor_y += margin_context.resolve();
@@ -1992,8 +2134,10 @@ impl LayoutBox {
                 }
 
                 // Position the child
-                child.dimensions.content.x = self.dimensions.content.x + cursor_x + child.dimensions.margin.left;
-                child.dimensions.content.y = self.dimensions.content.y + cursor_y + child.dimensions.margin.top;
+                child.dimensions.content.x =
+                    self.dimensions.content.x + cursor_x + child.dimensions.margin.left;
+                child.dimensions.content.y =
+                    self.dimensions.content.y + cursor_y + child.dimensions.margin.top;
 
                 // Advance cursor
                 cursor_x += child_width;
@@ -2050,7 +2194,12 @@ impl LayoutBox {
 
         // Apply text-align to all recorded lines
         for (start, end, width) in lines {
-            Self::apply_text_align_offset(&mut self.children[start..end], width, container_width, text_align);
+            Self::apply_text_align_offset(
+                &mut self.children[start..end],
+                width,
+                container_width,
+                text_align,
+            );
         }
 
         self.dimensions.content.height = cursor_y;
@@ -2176,9 +2325,15 @@ impl LayoutBox {
             Length::Px(px) => *px,
             _ => 16.0,
         };
-        length.to_px_with_viewport(font_size, 16.0, container_size, self.viewport.0, self.viewport.1)
+        length.to_px_with_viewport(
+            font_size,
+            16.0,
+            container_size,
+            self.viewport.0,
+            self.viewport.1,
+        )
     }
-    
+
     /// Set viewport dimensions for this box and all children.
     pub fn set_viewport(&mut self, width: f32, height: f32) {
         self.viewport = (width, height);
@@ -2282,13 +2437,8 @@ impl LayoutBox {
         use rustkit_css::Overflow;
 
         // Check if overflow is set to scroll or auto
-        let has_overflow_style = matches!(
-            self.style.overflow_x,
-            Overflow::Scroll | Overflow::Auto
-        ) || matches!(
-            self.style.overflow_y,
-            Overflow::Scroll | Overflow::Auto
-        );
+        let has_overflow_style = matches!(self.style.overflow_x, Overflow::Scroll | Overflow::Auto)
+            || matches!(self.style.overflow_y, Overflow::Scroll | Overflow::Auto);
 
         if !has_overflow_style {
             return false;
@@ -2437,11 +2587,13 @@ impl BorderRadius {
             bottom_left: radius,
         }
     }
-    
+
     /// Check if all radii are zero (no rounding).
     pub fn is_zero(&self) -> bool {
-        self.top_left == 0.0 && self.top_right == 0.0 
-            && self.bottom_right == 0.0 && self.bottom_left == 0.0
+        self.top_left == 0.0
+            && self.top_right == 0.0
+            && self.bottom_right == 0.0
+            && self.bottom_left == 0.0
     }
 }
 
@@ -2643,21 +2795,54 @@ pub enum DisplayCommand {
     /// Fill a rectangle with solid color.
     FillRect { rect: Rect, color: Color },
     /// Stroke a rectangle.
-    StrokeRect { rect: Rect, color: Color, width: f32 },
+    StrokeRect {
+        rect: Rect,
+        color: Color,
+        width: f32,
+    },
     /// Fill a circle.
-    FillCircle { cx: f32, cy: f32, radius: f32, color: Color },
+    FillCircle {
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        color: Color,
+    },
     /// Stroke a circle.
-    StrokeCircle { cx: f32, cy: f32, radius: f32, color: Color, width: f32 },
+    StrokeCircle {
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        color: Color,
+        width: f32,
+    },
     /// Fill an ellipse.
     FillEllipse { rect: Rect, color: Color },
     /// Draw a line.
-    Line { x1: f32, y1: f32, x2: f32, y2: f32, color: Color, width: f32 },
+    Line {
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        color: Color,
+        width: f32,
+    },
     /// Draw a polyline (connected line segments).
-    Polyline { points: Vec<(f32, f32)>, color: Color, width: f32 },
+    Polyline {
+        points: Vec<(f32, f32)>,
+        color: Color,
+        width: f32,
+    },
     /// Fill a polygon.
-    FillPolygon { points: Vec<(f32, f32)>, color: Color },
+    FillPolygon {
+        points: Vec<(f32, f32)>,
+        color: Color,
+    },
     /// Stroke a polygon.
-    StrokePolygon { points: Vec<(f32, f32)>, color: Color, width: f32 },
+    StrokePolygon {
+        points: Vec<(f32, f32)>,
+        color: Color,
+        width: f32,
+    },
 }
 
 /// Text decoration style for display commands.
@@ -2781,7 +2966,10 @@ pub enum BackgroundSize {
     /// Scale to fit
     Contain,
     /// Explicit size
-    Explicit { width: Option<f32>, height: Option<f32> },
+    Explicit {
+        width: Option<f32>,
+        height: Option<f32>,
+    },
     /// Auto sizing
     #[default]
     Auto,
@@ -2805,12 +2993,7 @@ impl BackgroundSize {
     }
 
     /// Calculate the background image size
-    pub fn compute_size(
-        &self,
-        container: Rect,
-        image_width: f32,
-        image_height: f32,
-    ) -> (f32, f32) {
+    pub fn compute_size(&self, container: Rect, image_width: f32, image_height: f32) -> (f32, f32) {
         if image_width == 0.0 || image_height == 0.0 {
             return (0.0, 0.0);
         }
@@ -2837,14 +3020,12 @@ impl BackgroundSize {
 
             BackgroundSize::Auto => (image_width, image_height),
 
-            BackgroundSize::Explicit { width, height } => {
-                match (width, height) {
-                    (Some(w), Some(h)) => (*w, *h),
-                    (Some(w), None) => (*w, *w / image_aspect),
-                    (None, Some(h)) => (*h * image_aspect, *h),
-                    (None, None) => (image_width, image_height),
-                }
-            }
+            BackgroundSize::Explicit { width, height } => match (width, height) {
+                (Some(w), Some(h)) => (*w, *h),
+                (Some(w), None) => (*w, *w / image_aspect),
+                (None, Some(h)) => (*h * image_aspect, *h),
+                (None, None) => (image_width, image_height),
+            },
         }
     }
 }
@@ -2883,12 +3064,24 @@ impl BackgroundRepeat {
 
     /// Check if repeating on x-axis
     pub fn repeats_x(&self) -> bool {
-        matches!(self, BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::Space | BackgroundRepeat::Round)
+        matches!(
+            self,
+            BackgroundRepeat::Repeat
+                | BackgroundRepeat::RepeatX
+                | BackgroundRepeat::Space
+                | BackgroundRepeat::Round
+        )
     }
 
     /// Check if repeating on y-axis
     pub fn repeats_y(&self) -> bool {
-        matches!(self, BackgroundRepeat::Repeat | BackgroundRepeat::RepeatY | BackgroundRepeat::Space | BackgroundRepeat::Round)
+        matches!(
+            self,
+            BackgroundRepeat::Repeat
+                | BackgroundRepeat::RepeatY
+                | BackgroundRepeat::Space
+                | BackgroundRepeat::Round
+        )
     }
 }
 
@@ -3007,10 +3200,23 @@ impl DisplayList {
         if has_transform {
             let border_box = layout_box.dimensions.border_box();
             // Compute transform matrix
-            let matrix = layout_box.style.transform.to_matrix(border_box.width, border_box.height);
+            let matrix = layout_box
+                .style
+                .transform
+                .to_matrix(border_box.width, border_box.height);
             // Compute origin in absolute coordinates
-            let origin_x = border_box.x + layout_box.style.transform_origin.x.to_px(16.0, 16.0, border_box.width);
-            let origin_y = border_box.y + layout_box.style.transform_origin.y.to_px(16.0, 16.0, border_box.height);
+            let origin_x = border_box.x
+                + layout_box
+                    .style
+                    .transform_origin
+                    .x
+                    .to_px(16.0, 16.0, border_box.width);
+            let origin_y = border_box.y
+                + layout_box
+                    .style
+                    .transform_origin
+                    .y
+                    .to_px(16.0, 16.0, border_box.height);
             self.commands.push(DisplayCommand::PushTransform {
                 matrix,
                 origin: (origin_x, origin_y),
@@ -3127,7 +3333,7 @@ impl DisplayList {
     /// Render box shadows (must be called before background).
     fn render_box_shadows(&mut self, layout_box: &LayoutBox) {
         let box_rect = layout_box.dimensions.border_box();
-        
+
         // Render outer shadows first (in order, first shadow is top-most)
         for shadow in &layout_box.style.box_shadows {
             if shadow.is_visible() && !shadow.inset {
@@ -3143,11 +3349,11 @@ impl DisplayList {
             }
         }
     }
-    
+
     /// Render inset box shadows (called after background).
     fn render_inset_shadows(&mut self, layout_box: &LayoutBox) {
         let box_rect = layout_box.dimensions.border_box();
-        
+
         for shadow in &layout_box.style.box_shadows {
             if shadow.is_visible() && shadow.inset {
                 self.commands.push(DisplayCommand::BoxShadow {
@@ -3162,7 +3368,7 @@ impl DisplayList {
             }
         }
     }
-    
+
     /// Render background.
     /// Supports multiple background layers painted bottom-to-top.
     /// Respects background-clip property (border-box, padding-box, content-box).
@@ -3181,10 +3387,24 @@ impl DisplayList {
 
         // Calculate border radius once (used for both solid color and gradient clipping)
         let radius = BorderRadius {
-            top_left: s.border_top_left_radius.to_px(font_size, root_font_size, border_rect.width),
-            top_right: s.border_top_right_radius.to_px(font_size, root_font_size, border_rect.width),
-            bottom_right: s.border_bottom_right_radius.to_px(font_size, root_font_size, border_rect.width),
-            bottom_left: s.border_bottom_left_radius.to_px(font_size, root_font_size, border_rect.width),
+            top_left: s
+                .border_top_left_radius
+                .to_px(font_size, root_font_size, border_rect.width),
+            top_right: s.border_top_right_radius.to_px(
+                font_size,
+                root_font_size,
+                border_rect.width,
+            ),
+            bottom_right: s.border_bottom_right_radius.to_px(
+                font_size,
+                root_font_size,
+                border_rect.width,
+            ),
+            bottom_left: s.border_bottom_left_radius.to_px(
+                font_size,
+                root_font_size,
+                border_rect.width,
+            ),
         };
 
         // Calculate the clipped rect based on background-clip property
@@ -3204,8 +3424,16 @@ impl DisplayList {
                 Rect::new(
                     border_rect.x + d.border.left + d.padding.left,
                     border_rect.y + d.border.top + d.padding.top,
-                    border_rect.width - d.border.left - d.border.right - d.padding.left - d.padding.right,
-                    border_rect.height - d.border.top - d.border.bottom - d.padding.top - d.padding.bottom,
+                    border_rect.width
+                        - d.border.left
+                        - d.border.right
+                        - d.padding.left
+                        - d.padding.right,
+                    border_rect.height
+                        - d.border.top
+                        - d.border.bottom
+                        - d.padding.top
+                        - d.padding.bottom,
                 )
             }
             rustkit_css::BackgroundClip::Text => {
@@ -3244,9 +3472,14 @@ impl DisplayList {
         if color.a > 0.0 {
             if radius.is_zero() || needs_clip {
                 // When clipping, use solid rect within the clipped area
-                self.commands.push(DisplayCommand::SolidColor(color, paint_rect));
+                self.commands
+                    .push(DisplayCommand::SolidColor(color, paint_rect));
             } else {
-                self.commands.push(DisplayCommand::RoundedRect { color, rect: paint_rect, radius });
+                self.commands.push(DisplayCommand::RoundedRect {
+                    color,
+                    rect: paint_rect,
+                    radius,
+                });
             }
         }
 
@@ -3299,9 +3532,9 @@ impl DisplayList {
                         // relative to the positioned_rect which preserves correct color mapping.
                         self.render_gradient(gradient, positioned_rect, border_radius);
                     }
-                    rustkit_css::BackgroundRepeat::Repeat |
-                    rustkit_css::BackgroundRepeat::RepeatX |
-                    rustkit_css::BackgroundRepeat::RepeatY => {
+                    rustkit_css::BackgroundRepeat::Repeat
+                    | rustkit_css::BackgroundRepeat::RepeatX
+                    | rustkit_css::BackgroundRepeat::RepeatY => {
                         // Tile the gradient
                         let tile_width = positioned_rect.width.max(1.0);
                         let tile_height = positioned_rect.height.max(1.0);
@@ -3310,22 +3543,26 @@ impl DisplayList {
                         if tile_width >= container.width && tile_height >= container.height {
                             self.render_gradient(gradient, positioned_rect, border_radius);
                         } else {
-                            let repeat_x = !matches!(layer.repeat, rustkit_css::BackgroundRepeat::RepeatY);
-                            let repeat_y = !matches!(layer.repeat, rustkit_css::BackgroundRepeat::RepeatX);
+                            let repeat_x =
+                                !matches!(layer.repeat, rustkit_css::BackgroundRepeat::RepeatY);
+                            let repeat_y =
+                                !matches!(layer.repeat, rustkit_css::BackgroundRepeat::RepeatX);
 
                             // Calculate starting tile position
                             // The first tile's origin aligns with positioned_rect's origin
                             // We need to find which tiles intersect the container
                             let start_x = if repeat_x && tile_width < container.width {
                                 // Find the leftmost tile that intersects the container
-                                let offset = (positioned_rect.x - container.x).rem_euclid(tile_width);
+                                let offset =
+                                    (positioned_rect.x - container.x).rem_euclid(tile_width);
                                 container.x - offset
                             } else {
                                 positioned_rect.x
                             };
 
                             let start_y = if repeat_y && tile_height < container.height {
-                                let offset = (positioned_rect.y - container.y).rem_euclid(tile_height);
+                                let offset =
+                                    (positioned_rect.y - container.y).rem_euclid(tile_height);
                                 container.y - offset
                             } else {
                                 positioned_rect.y
@@ -3360,9 +3597,13 @@ impl DisplayList {
                                     let tile_end_x = tile_x + tile_width;
                                     let tile_end_y = tile_y + tile_height;
 
-                                    if tile_end_x > container.x && tile_x < end_x &&
-                                       tile_end_y > container.y && tile_y < end_y {
-                                        let tile_rect = Rect::new(tile_x, tile_y, tile_width, tile_height);
+                                    if tile_end_x > container.x
+                                        && tile_x < end_x
+                                        && tile_end_y > container.y
+                                        && tile_y < end_y
+                                    {
+                                        let tile_rect =
+                                            Rect::new(tile_x, tile_y, tile_width, tile_height);
                                         self.render_gradient(gradient, tile_rect, border_radius);
                                     }
                                 }
@@ -3420,9 +3661,23 @@ impl DisplayList {
                 (intrinsic_width * scale, intrinsic_height * scale)
             }
             rustkit_css::BackgroundSize::Explicit { width, height } => {
-                let w = width.map(|v| if v < 0.0 { container.width * (-v / 100.0) } else { v })
+                let w = width
+                    .map(|v| {
+                        if v < 0.0 {
+                            container.width * (-v / 100.0)
+                        } else {
+                            v
+                        }
+                    })
                     .unwrap_or(intrinsic_width);
-                let h = height.map(|v| if v < 0.0 { container.height * (-v / 100.0) } else { v })
+                let h = height
+                    .map(|v| {
+                        if v < 0.0 {
+                            container.height * (-v / 100.0)
+                        } else {
+                            v
+                        }
+                    })
                     .unwrap_or(intrinsic_height);
                 (w, h)
             }
@@ -3436,7 +3691,12 @@ impl DisplayList {
     }
 
     /// Render a gradient to a rect with optional border-radius clipping.
-    fn render_gradient(&mut self, gradient: &rustkit_css::Gradient, rect: Rect, border_radius: BorderRadius) {
+    fn render_gradient(
+        &mut self,
+        gradient: &rustkit_css::Gradient,
+        rect: Rect,
+        border_radius: BorderRadius,
+    ) {
         match gradient {
             rustkit_css::Gradient::Linear(linear) => {
                 self.commands.push(DisplayCommand::LinearGradient {
@@ -3477,9 +3737,10 @@ impl DisplayList {
             rustkit_css::BackgroundSize::Auto => BackgroundSize::Auto,
             rustkit_css::BackgroundSize::Cover => BackgroundSize::Cover,
             rustkit_css::BackgroundSize::Contain => BackgroundSize::Contain,
-            rustkit_css::BackgroundSize::Explicit { width, height } => {
-                BackgroundSize::Explicit { width: *width, height: *height }
-            }
+            rustkit_css::BackgroundSize::Explicit { width, height } => BackgroundSize::Explicit {
+                width: *width,
+                height: *height,
+            },
         }
     }
 
@@ -3600,155 +3861,192 @@ impl DisplayList {
             // Half-leading is the space above (and below) the text content
             let half_leading = ((line_height - content_height) / 2.0).max(0.0);
 
-            // Adjust y to account for half-leading - this places the text baseline correctly
-            let y = content_y + half_leading;
+            // Build the list of lines to emit: wrapped text boxes carry
+            // per-line fragments (see LayoutBox::text_lines); single-run
+            // boxes emit exactly one line, positioned as before.
+            // Tuple: (text, x, y, width) — shadowing the outer names inside
+            // the loop keeps the emission code identical for both cases.
+            let render_lines: Vec<(String, f32, f32, f32)> = match &layout_box.text_lines {
+                Some(lines) => lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| !l.text.is_empty())
+                    .map(|(i, l)| {
+                        (
+                            apply_text_transform(&l.text, style.text_transform),
+                            x + l.x_offset,
+                            content_y + i as f32 * line_height + half_leading,
+                            l.width,
+                        )
+                    })
+                    .collect(),
+                None => vec![(text.clone(), x, content_y + half_leading, text_width)],
+            };
 
-            // Check if this is gradient text (background-clip: text with gradient and transparent fill)
-            let is_gradient_text = style.background_clip == rustkit_css::BackgroundClip::Text
-                && style.webkit_text_fill_color == Some(rustkit_css::Color::TRANSPARENT)
-                && style.background_gradient.is_some();
+            for (text, x, y, text_width) in render_lines {
+                // Check if this is gradient text (background-clip: text with gradient and transparent fill)
+                let is_gradient_text = style.background_clip == rustkit_css::BackgroundClip::Text
+                    && style.webkit_text_fill_color == Some(rustkit_css::Color::TRANSPARENT)
+                    && style.background_gradient.is_some();
 
-            if is_gradient_text {
-                // Emit gradient text command
-                if let Some(gradient) = &style.background_gradient {
-                    self.commands.push(DisplayCommand::GradientText {
-                        text: text.clone(),
-                        x,
-                        y,
-                        font_size,
-                        font_family: style.font_family.clone(),
-                        font_weight: style.font_weight.0,
-                        font_style: match style.font_style {
-                            rustkit_css::FontStyle::Normal => 0,
-                            rustkit_css::FontStyle::Italic => 1,
-                            rustkit_css::FontStyle::Oblique => 2,
-                        },
-                        gradient: gradient.clone(),
-                        rect: Rect::new(x, y, text_width, layout_box.dimensions.content.height),
-                    });
-                    return; // Skip regular text rendering
-                }
-            }
-
-            // Draw regular text
-            self.commands.push(DisplayCommand::Text {
-                text: text.clone(),
-                x,
-                y,
-                color: style.color,
-                font_size,
-                font_family: style.font_family.clone(),
-                font_weight: style.font_weight.0,
-                font_style: match style.font_style {
-                    rustkit_css::FontStyle::Normal => 0,
-                    rustkit_css::FontStyle::Italic => 1,
-                    rustkit_css::FontStyle::Oblique => 2,
-                },
-            });
-
-            // Draw text decorations
-            let decoration_line = style.text_decoration_line;
-            if decoration_line.underline || decoration_line.overline || decoration_line.line_through
-            {
-                let decoration_color = style.text_decoration_color.unwrap_or(style.color);
-                let decoration_style = match style.text_decoration_style {
-                    rustkit_css::TextDecorationStyle::Solid => TextDecorationStyleValue::Solid,
-                    rustkit_css::TextDecorationStyle::Double => TextDecorationStyleValue::Double,
-                    rustkit_css::TextDecorationStyle::Dotted => TextDecorationStyleValue::Dotted,
-                    rustkit_css::TextDecorationStyle::Dashed => TextDecorationStyleValue::Dashed,
-                    rustkit_css::TextDecorationStyle::Wavy => TextDecorationStyleValue::Wavy,
-                };
-
-                // Get actual font metrics for accurate decoration positioning
-                let metrics = measure_text_advanced(
-                    &text,
-                    &style.font_family,
-                    font_size,
-                    style.font_weight,
-                    style.font_style,
-                );
-                
-                // Calculate thickness from style or font metrics
-                let thickness = match style.text_decoration_thickness {
-                    Length::Px(px) => px,
-                    Length::Em(em) => em * font_size,
-                    _ => {
-                        // Use font metrics if available, otherwise fallback
-                        if metrics.underline_thickness > 0.0 {
-                            metrics.underline_thickness
-                        } else {
-                            font_size / 14.0
-                        }
+                if is_gradient_text {
+                    // Emit gradient text command
+                    if let Some(gradient) = &style.background_gradient {
+                        self.commands.push(DisplayCommand::GradientText {
+                            text: text.clone(),
+                            x,
+                            y,
+                            font_size,
+                            font_family: style.font_family.clone(),
+                            font_weight: style.font_weight.0,
+                            font_style: match style.font_style {
+                                rustkit_css::FontStyle::Normal => 0,
+                                rustkit_css::FontStyle::Italic => 1,
+                                rustkit_css::FontStyle::Oblique => 2,
+                            },
+                            gradient: gradient.clone(),
+                            rect: Rect::new(x, y, text_width, line_height),
+                        });
+                        continue; // Skip regular text rendering for this line
                     }
-                };
-
-                // Use actual metrics for positioning
-                let ascent = if metrics.ascent > 0.0 { metrics.ascent } else { font_size * 0.8 };
-
-                // Underline: position below baseline using font metrics
-                if decoration_line.underline {
-                    let underline_y = if metrics.underline_offset != 0.0 {
-                        // Font provides underline position (negative = below baseline)
-                        y + ascent - metrics.underline_offset
-                    } else {
-                        // Fallback: position slightly below baseline
-                        y + ascent + font_size * 0.1
-                    };
-                    
-                    self.commands.push(DisplayCommand::TextDecoration {
-                        x,
-                        y: underline_y,
-                        width: text_width,
-                        thickness,
-                        color: decoration_color,
-                        style: decoration_style,
-                    });
                 }
 
-                // Overline: position at top of text
-                if decoration_line.overline {
-                    let overline_y = if metrics.overline_offset != 0.0 {
-                        y + ascent - metrics.overline_offset
-                    } else {
-                        y // At top of text box
-                    };
-                    
-                    self.commands.push(DisplayCommand::TextDecoration {
-                        x,
-                        y: overline_y,
-                        width: text_width,
-                        thickness,
-                        color: decoration_color,
-                        style: decoration_style,
-                    });
-                }
+                // Draw regular text
+                self.commands.push(DisplayCommand::Text {
+                    text: text.clone(),
+                    x,
+                    y,
+                    color: style.color,
+                    font_size,
+                    font_family: style.font_family.clone(),
+                    font_weight: style.font_weight.0,
+                    font_style: match style.font_style {
+                        rustkit_css::FontStyle::Normal => 0,
+                        rustkit_css::FontStyle::Italic => 1,
+                        rustkit_css::FontStyle::Oblique => 2,
+                    },
+                });
 
-                // Line-through (strikethrough): position at middle of x-height
-                if decoration_line.line_through {
-                    let strikethrough_y = if metrics.strikethrough_offset != 0.0 {
-                        y + ascent - metrics.strikethrough_offset
-                    } else {
-                        // Fallback: approximately middle of x-height
-                        y + ascent * 0.35
+                // Draw text decorations
+                let decoration_line = style.text_decoration_line;
+                if decoration_line.underline
+                    || decoration_line.overline
+                    || decoration_line.line_through
+                {
+                    let decoration_color = style.text_decoration_color.unwrap_or(style.color);
+                    let decoration_style = match style.text_decoration_style {
+                        rustkit_css::TextDecorationStyle::Solid => TextDecorationStyleValue::Solid,
+                        rustkit_css::TextDecorationStyle::Double => {
+                            TextDecorationStyleValue::Double
+                        }
+                        rustkit_css::TextDecorationStyle::Dotted => {
+                            TextDecorationStyleValue::Dotted
+                        }
+                        rustkit_css::TextDecorationStyle::Dashed => {
+                            TextDecorationStyleValue::Dashed
+                        }
+                        rustkit_css::TextDecorationStyle::Wavy => TextDecorationStyleValue::Wavy,
                     };
-                    
-                    self.commands.push(DisplayCommand::TextDecoration {
-                        x,
-                        y: strikethrough_y,
-                        width: text_width,
-                        thickness,
-                        color: decoration_color,
-                        style: decoration_style,
-                    });
+
+                    // Get actual font metrics for accurate decoration positioning
+                    let metrics = measure_text_advanced(
+                        &text,
+                        &style.font_family,
+                        font_size,
+                        style.font_weight,
+                        style.font_style,
+                    );
+
+                    // Calculate thickness from style or font metrics
+                    let thickness = match style.text_decoration_thickness {
+                        Length::Px(px) => px,
+                        Length::Em(em) => em * font_size,
+                        _ => {
+                            // Use font metrics if available, otherwise fallback
+                            if metrics.underline_thickness > 0.0 {
+                                metrics.underline_thickness
+                            } else {
+                                font_size / 14.0
+                            }
+                        }
+                    };
+
+                    // Use actual metrics for positioning
+                    let ascent = if metrics.ascent > 0.0 {
+                        metrics.ascent
+                    } else {
+                        font_size * 0.8
+                    };
+
+                    // Underline: position below baseline using font metrics
+                    if decoration_line.underline {
+                        let underline_y = if metrics.underline_offset != 0.0 {
+                            // Font provides underline position (negative = below baseline)
+                            y + ascent - metrics.underline_offset
+                        } else {
+                            // Fallback: position slightly below baseline
+                            y + ascent + font_size * 0.1
+                        };
+
+                        self.commands.push(DisplayCommand::TextDecoration {
+                            x,
+                            y: underline_y,
+                            width: text_width,
+                            thickness,
+                            color: decoration_color,
+                            style: decoration_style,
+                        });
+                    }
+
+                    // Overline: position at top of text
+                    if decoration_line.overline {
+                        let overline_y = if metrics.overline_offset != 0.0 {
+                            y + ascent - metrics.overline_offset
+                        } else {
+                            y // At top of text box
+                        };
+
+                        self.commands.push(DisplayCommand::TextDecoration {
+                            x,
+                            y: overline_y,
+                            width: text_width,
+                            thickness,
+                            color: decoration_color,
+                            style: decoration_style,
+                        });
+                    }
+
+                    // Line-through (strikethrough): position at middle of x-height
+                    if decoration_line.line_through {
+                        let strikethrough_y = if metrics.strikethrough_offset != 0.0 {
+                            y + ascent - metrics.strikethrough_offset
+                        } else {
+                            // Fallback: approximately middle of x-height
+                            y + ascent * 0.35
+                        };
+
+                        self.commands.push(DisplayCommand::TextDecoration {
+                            x,
+                            y: strikethrough_y,
+                            width: text_width,
+                            thickness,
+                            color: decoration_color,
+                            style: decoration_style,
+                        });
+                    }
                 }
-            }
+            } // end per-line loop
         }
     }
-    
+
     /// Render replaced content (images).
     fn render_replaced_content(&mut self, layout_box: &LayoutBox) {
         match &layout_box.box_type {
-            BoxType::Image { url, natural_width, natural_height } => {
+            BoxType::Image {
+                url,
+                natural_width,
+                natural_height,
+            } => {
                 let dims = &layout_box.dimensions;
                 let container = Rect {
                     x: dims.content.x,
@@ -3756,7 +4054,7 @@ impl DisplayList {
                     width: dims.content.width,
                     height: dims.content.height,
                 };
-                
+
                 // Parse object-fit from style
                 let object_fit = match layout_box.style.object_fit.as_str() {
                     "fill" => ObjectFit::Fill,
@@ -3766,9 +4064,9 @@ impl DisplayList {
                     "scale-down" => ObjectFit::ScaleDown,
                     _ => ObjectFit::Contain,
                 };
-                
+
                 let (pos_x, pos_y) = layout_box.style.object_position;
-                
+
                 // Generate image display command
                 let cmd = crate::images::render_image(
                     url,
@@ -3779,7 +4077,7 @@ impl DisplayList {
                     (pos_x, pos_y),
                     layout_box.style.opacity,
                 );
-                
+
                 self.commands.push(cmd);
             }
             BoxType::FormControl(control) => {
@@ -3788,7 +4086,7 @@ impl DisplayList {
             _ => {}
         }
     }
-    
+
     /// Render a form control.
     fn render_form_control(&mut self, layout_box: &LayoutBox, control: &FormControlType) {
         let dims = &layout_box.dimensions;
@@ -3798,18 +4096,20 @@ impl DisplayList {
             width: dims.content.width,
             height: dims.content.height,
         };
-        
+
         let font_size = match layout_box.style.font_size {
             Length::Px(px) => px,
             _ => 16.0,
         };
-        
+
         let text_color = layout_box.style.color;
         let bg_color = layout_box.style.background_color;
         let border_color = layout_box.style.border_top_color;
-        
+
         match control {
-            FormControlType::TextInput { value, placeholder, .. } => {
+            FormControlType::TextInput {
+                value, placeholder, ..
+            } => {
                 self.commands.push(DisplayCommand::TextInput {
                     rect,
                     value: value.clone(),
@@ -3817,8 +4117,16 @@ impl DisplayList {
                     font_size,
                     text_color,
                     placeholder_color: Color::new(160, 160, 160, 1.0),
-                    background_color: if bg_color.a > 0.0 { bg_color } else { Color::WHITE },
-                    border_color: if border_color.a > 0.0 { border_color } else { Color::new(200, 200, 200, 1.0) },
+                    background_color: if bg_color.a > 0.0 {
+                        bg_color
+                    } else {
+                        Color::WHITE
+                    },
+                    border_color: if border_color.a > 0.0 {
+                        border_color
+                    } else {
+                        Color::new(200, 200, 200, 1.0)
+                    },
                     border_width: 1.0,
                     // Focus tracking requires DOM node ID in LayoutBox (architectural change)
                     // For now, focus state is managed at the Engine level via focus_element()
@@ -3826,7 +4134,9 @@ impl DisplayList {
                     caret_position: None,
                 });
             }
-            FormControlType::TextArea { value, placeholder, .. } => {
+            FormControlType::TextArea {
+                value, placeholder, ..
+            } => {
                 self.commands.push(DisplayCommand::TextInput {
                     rect,
                     value: value.clone(),
@@ -3834,8 +4144,16 @@ impl DisplayList {
                     font_size,
                     text_color,
                     placeholder_color: Color::new(160, 160, 160, 1.0),
-                    background_color: if bg_color.a > 0.0 { bg_color } else { Color::WHITE },
-                    border_color: if border_color.a > 0.0 { border_color } else { Color::new(200, 200, 200, 1.0) },
+                    background_color: if bg_color.a > 0.0 {
+                        bg_color
+                    } else {
+                        Color::WHITE
+                    },
+                    border_color: if border_color.a > 0.0 {
+                        border_color
+                    } else {
+                        Color::new(200, 200, 200, 1.0)
+                    },
                     border_width: 1.0,
                     focused: false,
                     caret_position: None,
@@ -3846,9 +4164,21 @@ impl DisplayList {
                     rect,
                     label: label.clone(),
                     font_size,
-                    text_color: if text_color.a > 0.0 { text_color } else { Color::BLACK },
-                    background_color: if bg_color.a > 0.0 { bg_color } else { Color::new(239, 239, 239, 1.0) },
-                    border_color: if border_color.a > 0.0 { border_color } else { Color::new(180, 180, 180, 1.0) },
+                    text_color: if text_color.a > 0.0 {
+                        text_color
+                    } else {
+                        Color::BLACK
+                    },
+                    background_color: if bg_color.a > 0.0 {
+                        bg_color
+                    } else {
+                        Color::new(239, 239, 239, 1.0)
+                    },
+                    border_color: if border_color.a > 0.0 {
+                        border_color
+                    } else {
+                        Color::new(180, 180, 180, 1.0)
+                    },
                     border_width: 1.0,
                     border_radius: 4.0,
                     pressed: false,
@@ -3857,9 +4187,17 @@ impl DisplayList {
             }
             FormControlType::Checkbox { checked } => {
                 // Draw checkbox as a small rect with optional checkmark
-                let check_color = if *checked { text_color } else { Color::TRANSPARENT };
+                let check_color = if *checked {
+                    text_color
+                } else {
+                    Color::TRANSPARENT
+                };
                 self.commands.push(DisplayCommand::SolidColor(
-                    if bg_color.a > 0.0 { bg_color } else { Color::WHITE },
+                    if bg_color.a > 0.0 {
+                        bg_color
+                    } else {
+                        Color::WHITE
+                    },
                     rect,
                 ));
                 self.commands.push(DisplayCommand::Border {
@@ -3878,14 +4216,19 @@ impl DisplayList {
                         width: rect.width - 6.0,
                         height: rect.height - 6.0,
                     };
-                    self.commands.push(DisplayCommand::SolidColor(check_color, inner));
+                    self.commands
+                        .push(DisplayCommand::SolidColor(check_color, inner));
                 }
             }
             FormControlType::Radio { checked, .. } => {
                 // Draw radio as a circle (using ellipse)
                 self.commands.push(DisplayCommand::FillEllipse {
                     rect,
-                    color: if bg_color.a > 0.0 { bg_color } else { Color::WHITE },
+                    color: if bg_color.a > 0.0 {
+                        bg_color
+                    } else {
+                        Color::WHITE
+                    },
                 });
                 // Outer ring
                 self.commands.push(DisplayCommand::StrokeCircle {
@@ -3905,13 +4248,16 @@ impl DisplayList {
                     });
                 }
             }
-            FormControlType::Select { options, selected_index } => {
+            FormControlType::Select {
+                options,
+                selected_index,
+            } => {
                 // Draw as a text input with dropdown arrow
                 let display_text = selected_index
                     .and_then(|i| options.get(i))
                     .cloned()
                     .unwrap_or_default();
-                
+
                 self.commands.push(DisplayCommand::TextInput {
                     rect,
                     value: display_text,
@@ -3919,8 +4265,16 @@ impl DisplayList {
                     font_size,
                     text_color,
                     placeholder_color: Color::new(160, 160, 160, 1.0),
-                    background_color: if bg_color.a > 0.0 { bg_color } else { Color::WHITE },
-                    border_color: if border_color.a > 0.0 { border_color } else { Color::new(200, 200, 200, 1.0) },
+                    background_color: if bg_color.a > 0.0 {
+                        bg_color
+                    } else {
+                        Color::WHITE
+                    },
+                    border_color: if border_color.a > 0.0 {
+                        border_color
+                    } else {
+                        Color::new(200, 200, 200, 1.0)
+                    },
                     border_width: 1.0,
                     focused: false,
                     caret_position: None,
@@ -3940,7 +4294,15 @@ pub fn measure_text_advanced(
     font_weight: rustkit_css::FontWeight,
     font_style: rustkit_css::FontStyle,
 ) -> TextMetrics {
-    measure_text_with_spacing(text, font_family, font_size, font_weight, font_style, 0.0, 0.0)
+    measure_text_with_spacing(
+        text,
+        font_family,
+        font_size,
+        font_weight,
+        font_style,
+        0.0,
+        0.0,
+    )
 }
 
 /// Measure text using the text shaper with letter-spacing and word-spacing.
@@ -4104,13 +4466,105 @@ mod tests {
         assert_eq!(layout_box.dimensions.margin.right, 200.0);
     }
 
+    fn containing_200() -> Dimensions {
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 200.0, 600.0);
+        cb
+    }
+
+    const LONG_TEXT: &str = "The quick brown fox jumps over the lazy dog again \
+                             and again until the line has no choice but to wrap";
+
+    #[test]
+    fn test_text_wraps_into_line_boxes() {
+        // Overflowing text in a 200px block wraps: multiple lines, each within
+        // the container, box height = line_count * line-height (CSS2 §9.4.2).
+        let style = ComputedStyle::new();
+        let mut layout_box = LayoutBox::new(BoxType::Text(LONG_TEXT.to_string()), style);
+        layout_box.layout_text(LONG_TEXT.to_string(), &containing_200());
+
+        let lines = layout_box.text_lines.as_ref().expect("text should wrap");
+        assert!(
+            lines.len() > 1,
+            "expected multiple lines, got {}",
+            lines.len()
+        );
+        for line in lines {
+            assert!(
+                line.width <= 200.0 + 0.5,
+                "line '{}' overflows container: {}px",
+                line.text,
+                line.width
+            );
+        }
+        let line_height = layout_box.get_line_height();
+        assert_eq!(
+            layout_box.dimensions.content.height,
+            lines.len() as f32 * line_height
+        );
+        // Wrapped fragment spans from the container origin (per-line offsets
+        // handle text-align), never a single shifted run.
+        assert_eq!(layout_box.dimensions.content.x, 0.0);
+    }
+
+    #[test]
+    fn test_text_nowrap_stays_single_line() {
+        let mut style = ComputedStyle::new();
+        style.white_space = rustkit_css::WhiteSpace::Nowrap;
+        let mut layout_box = LayoutBox::new(BoxType::Text(LONG_TEXT.to_string()), style);
+        layout_box.layout_text(LONG_TEXT.to_string(), &containing_200());
+
+        assert!(layout_box.text_lines.is_none(), "nowrap must not wrap");
+        assert_eq!(
+            layout_box.dimensions.content.height,
+            layout_box.get_line_height()
+        );
+    }
+
+    #[test]
+    fn test_short_text_does_not_wrap() {
+        let style = ComputedStyle::new();
+        let mut layout_box = LayoutBox::new(BoxType::Text("short".to_string()), style);
+        layout_box.layout_text("short".to_string(), &containing_200());
+
+        assert!(layout_box.text_lines.is_none());
+        assert_eq!(
+            layout_box.dimensions.content.height,
+            layout_box.get_line_height()
+        );
+    }
+
+    #[test]
+    fn test_wrapped_lines_center_align() {
+        let mut style = ComputedStyle::new();
+        style.text_align = TextAlign::Center;
+        let mut layout_box = LayoutBox::new(BoxType::Text(LONG_TEXT.to_string()), style);
+        layout_box.layout_text(LONG_TEXT.to_string(), &containing_200());
+
+        let lines = layout_box.text_lines.as_ref().expect("text should wrap");
+        for line in lines {
+            let expected = ((200.0 - line.width) / 2.0).max(0.0);
+            assert!(
+                (line.x_offset - expected).abs() < 0.01,
+                "line '{}': x_offset {} != centered {}",
+                line.text,
+                line.x_offset,
+                expected
+            );
+        }
+    }
+
     #[test]
     fn test_image_max_width_preserves_aspect() {
         // 100x100 natural; max-width: 80px → 80x80 (CSS 2.1 §10.4)
         let mut style = ComputedStyle::new();
         style.max_width = Length::Px(80.0);
         let mut layout_box = LayoutBox::new(
-            BoxType::Image { url: String::new(), natural_width: 100.0, natural_height: 100.0 },
+            BoxType::Image {
+                url: String::new(),
+                natural_width: 100.0,
+                natural_height: 100.0,
+            },
             style,
         );
         layout_box.layout_image(100.0, 100.0, &containing_1000());
@@ -4124,7 +4578,11 @@ mod tests {
         let mut style = ComputedStyle::new();
         style.max_height = Length::Px(60.0);
         let mut layout_box = LayoutBox::new(
-            BoxType::Image { url: String::new(), natural_width: 200.0, natural_height: 100.0 },
+            BoxType::Image {
+                url: String::new(),
+                natural_width: 200.0,
+                natural_height: 100.0,
+            },
             style,
         );
         layout_box.layout_image(200.0, 100.0, &containing_1000());
@@ -4139,7 +4597,11 @@ mod tests {
         style.max_width = Length::Px(500.0);
         style.max_height = Length::Px(500.0);
         let mut layout_box = LayoutBox::new(
-            BoxType::Image { url: String::new(), natural_width: 100.0, natural_height: 100.0 },
+            BoxType::Image {
+                url: String::new(),
+                natural_width: 100.0,
+                natural_height: 100.0,
+            },
             style,
         );
         layout_box.layout_image(100.0, 100.0, &containing_1000());
@@ -4276,13 +4738,25 @@ mod tests {
         }
         parent.layout(&cb);
 
-        let ys: Vec<f32> = parent.children.iter().map(|c| c.dimensions.content.y).collect();
-        let xs: Vec<f32> = parent.children.iter().map(|c| c.dimensions.content.x).collect();
+        let ys: Vec<f32> = parent
+            .children
+            .iter()
+            .map(|c| c.dimensions.content.y)
+            .collect();
+        let xs: Vec<f32> = parent
+            .children
+            .iter()
+            .map(|c| c.dimensions.content.x)
+            .collect();
         assert!(
             ys[0] == ys[1] && ys[1] == ys[2],
             "inline-flex siblings must share a line, got ys={ys:?}"
         );
-        assert_eq!(xs, vec![0.0, 100.0, 200.0], "boxes should advance horizontally");
+        assert_eq!(
+            xs,
+            vec![0.0, 100.0, 200.0],
+            "boxes should advance horizontally"
+        );
         assert!(
             (parent.dimensions.content.height - 40.0).abs() < 0.5,
             "parent should be one line tall (40px), got {}",
@@ -4301,7 +4775,11 @@ mod tests {
         let mut mc = MarginCollapseContext::new();
         let mut fc = FloatContext::new();
         parent2.layout_with_collapse(&cb, &mut mc, &mut fc);
-        let ys2: Vec<f32> = parent2.children.iter().map(|c| c.dimensions.content.y).collect();
+        let ys2: Vec<f32> = parent2
+            .children
+            .iter()
+            .map(|c| c.dimensions.content.y)
+            .collect();
         assert!(
             ys2[0] == ys2[1] && ys2[1] == ys2[2],
             "inline-flex siblings must share a line under margin collapse, got ys={ys2:?}"
@@ -4778,8 +5256,7 @@ mod tests {
         layout_box.dimensions.content = Rect::new(0.0, 0.0, 800.0, 600.0);
 
         // Add a sticky child
-        let mut sticky_child =
-            LayoutBox::with_position(BoxType::Block, style, Position::Sticky);
+        let mut sticky_child = LayoutBox::with_position(BoxType::Block, style, Position::Sticky);
         sticky_child.set_offsets(Some(10.0), None, None, None);
         sticky_child.dimensions.content = Rect::new(0.0, 100.0, 200.0, 50.0);
 
