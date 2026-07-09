@@ -1991,20 +1991,21 @@ pub fn layout_grid_container(
 }
 
 /// Size grid tracks using the track sizing algorithm.
-/// Conservative estimate of a box's min-content (border-box) width.
+/// Estimate of a box's min-content (border-box) width.
 ///
-/// Track sizing runs before grid items are laid out, so full intrinsic sizing
-/// (text measurement in particular) is unavailable here. This walk accounts
-/// only for unbreakable content it can size exactly: explicit pixel widths,
-/// and nowrap runs of inline-level boxes, whose outer widths sum because no
-/// wrap opportunity exists between them. Text contributes 0 (collapsed
-/// inter-item spaces in a nowrap run are likewise dropped). Underestimating
-/// leaves a track at the size it gets today; this floor never oversizes a
-/// track beyond what Chrome would.
+/// Explicit pixel widths are exact. Text contributes its longest unbreakable
+/// unit (longest word) — under nowrap/pre, the whole run — measured with the
+/// same shaper layout uses, so min-content matches what line-box wrapping
+/// will actually produce. Consecutive inline-level boxes under nowrap sum
+/// into one unbreakable run; otherwise children contribute independently
+/// (max), per css-sizing-3 §4.
 pub(crate) fn estimate_min_content_width(layout_box: &LayoutBox) -> f32 {
     let style = &layout_box.style;
     if style.display == Display::None {
         return 0.0;
+    }
+    if let BoxType::Text(text) = &layout_box.box_type {
+        return text_min_content_width(text, style);
     }
     // Out-of-flow boxes don't contribute to intrinsic sizes.
     if matches!(
@@ -2052,6 +2053,95 @@ pub(crate) fn estimate_min_content_width(layout_box: &LayoutBox) -> f32 {
                 max_contribution = max_contribution.max(inline_run);
                 inline_run = 0.0;
             }
+        }
+    }
+    max_contribution = max_contribution.max(inline_run);
+
+    max_contribution + padding_border
+}
+
+/// Min-content width of a text run: the widest unbreakable unit (word).
+/// Under white-space that forbids wrapping, the whole run is unbreakable.
+fn text_min_content_width(text: &str, style: &ComputedStyle) -> f32 {
+    if text.trim().is_empty() {
+        return 0.0;
+    }
+    let font_size = match style.font_size {
+        Length::Px(px) => px,
+        _ => 16.0,
+    };
+    let measure = |s: &str| {
+        crate::measure_text_advanced(s, &style.font_family, font_size, style.font_weight, style.font_style).width
+    };
+    if matches!(style.white_space, WhiteSpace::Nowrap | WhiteSpace::Pre) {
+        return measure(text);
+    }
+    text.split_whitespace().map(measure).fold(0.0f32, f32::max)
+}
+
+/// Max-content width of a text run: the full single-line measure.
+fn text_max_content_width(text: &str, style: &ComputedStyle) -> f32 {
+    if text.trim().is_empty() {
+        return 0.0;
+    }
+    let font_size = match style.font_size {
+        Length::Px(px) => px,
+        _ => 16.0,
+    };
+    crate::measure_text_advanced(text, &style.font_family, font_size, style.font_weight, style.font_style).width
+}
+
+/// Estimate of a box's max-content (border-box) width: the width the box
+/// takes laying its inline content on one line with no wrap opportunities
+/// taken (css-sizing-3 §4). Consecutive inline-level children always sum
+/// (max-content never takes an optional break); block-level children
+/// interrupt the run and contribute independently. Used by flex-basis:auto
+/// content sizing (css-flexbox-1 §9.2.3.C).
+pub(crate) fn estimate_max_content_width(layout_box: &LayoutBox) -> f32 {
+    let style = &layout_box.style;
+    if style.display == Display::None {
+        return 0.0;
+    }
+    if matches!(
+        layout_box.position,
+        crate::Position::Absolute | crate::Position::Fixed
+    ) {
+        return 0.0;
+    }
+    if let BoxType::Text(text) = &layout_box.box_type {
+        return text_max_content_width(text, style);
+    }
+
+    let padding_border = horizontal_padding_border(style);
+
+    if let Length::Px(w) = style.width {
+        return match style.box_sizing {
+            BoxSizing::BorderBox => w,
+            BoxSizing::ContentBox => w + padding_border,
+        };
+    }
+
+    let mut max_contribution = 0.0f32;
+    let mut inline_run = 0.0f32;
+    for child in &layout_box.children {
+        if child.style.display == Display::None {
+            continue;
+        }
+        if matches!(
+            child.position,
+            crate::Position::Absolute | crate::Position::Fixed
+        ) {
+            continue;
+        }
+        let inline_level =
+            child.style.display.is_inline_level() || matches!(child.box_type, BoxType::Text(_));
+        let outer = estimate_max_content_width(child) + horizontal_margins(&child.style);
+        if inline_level {
+            inline_run += outer;
+        } else {
+            max_contribution = max_contribution.max(inline_run);
+            inline_run = 0.0;
+            max_contribution = max_contribution.max(outer);
         }
     }
     max_contribution = max_contribution.max(inline_run);
