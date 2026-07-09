@@ -1091,14 +1091,40 @@ impl LayoutBox {
         };
         
         // Determine final dimensions using intrinsic size calculation
-        let (width, height) = crate::images::calculate_intrinsic_size(
+        let (mut width, mut height) = crate::images::calculate_intrinsic_size(
             if natural_width > 0.0 { Some(natural_width) } else { None },
             if natural_height > 0.0 { Some(natural_height) } else { None },
             explicit_width,
             explicit_height,
             containing_block.content.width,
         );
-        
+
+        // CSS 2.1 §10.4: max-width/max-height constrain replaced elements while
+        // preserving the aspect ratio (max-width applied first, then max-height,
+        // matching the constraint-violation table for the common cases).
+        let max_width = match self.style.max_width {
+            Length::Px(px) => Some(px),
+            Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.width),
+            _ => None,
+        };
+        let max_height = match self.style.max_height {
+            Length::Px(px) => Some(px),
+            Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.height),
+            _ => None,
+        };
+        if let Some(mw) = max_width {
+            if width > mw && width > 0.0 {
+                height = if height > 0.0 { mw * height / width } else { height };
+                width = mw;
+            }
+        }
+        if let Some(mh) = max_height {
+            if height > mh && height > 0.0 {
+                width = if width > 0.0 { mh * width / height } else { width };
+                height = mh;
+            }
+        }
+
         // Position within containing block
         self.dimensions.content.x = containing_block.content.x;
         self.dimensions.content.y = containing_block.content.y + containing_block.content.height;
@@ -1169,6 +1195,35 @@ impl LayoutBox {
         self.dimensions.content.y = containing_block.content.y + containing_block.content.height;
         self.dimensions.content.width = width;
         self.dimensions.content.height = height;
+    }
+
+    /// Space the line-box strut leaves under an inline-level replaced element
+    /// sitting on the baseline: font descent plus half-leading (CSS 2.1 §10.8).
+    /// Approximation until a real line-box model exists — without it, a block
+    /// containing a lone inline <img> is measurably shorter than Chrome's
+    /// (the fixture-visible symptom: every .container ~6px short, compounding
+    /// down the page). Computed from the CONTAINER's font/line-height, since
+    /// the strut belongs to the line box, not the image.
+    fn inline_strut_descent(&self) -> f32 {
+        let font_size = match self.style.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let line_height = self.style.line_height.to_px(font_size);
+        let metrics = measure_text_advanced(
+            "x",
+            &self.style.font_family,
+            font_size,
+            self.style.font_weight,
+            self.style.font_style,
+        );
+        let (ascent, descent) = if metrics.ascent > 0.0 {
+            (metrics.ascent, metrics.descent)
+        } else {
+            (font_size * 0.8, font_size * 0.2)
+        };
+        let half_leading = ((line_height - (ascent + descent)) / 2.0).max(0.0);
+        descent + half_leading
     }
 
     /// Get line height for text layout.
@@ -1699,6 +1754,7 @@ impl LayoutBox {
         let mut line_height = 0.0_f32;
         let container_width = self.dimensions.content.width;
         let text_align = self.style.text_align;
+        let strut_descent = self.inline_strut_descent();
 
         // Track lines for text-align adjustment after layout: (start_index, end_index, line_width)
         let mut lines: Vec<(usize, usize, f32)> = Vec::new();
@@ -1793,6 +1849,13 @@ impl LayoutBox {
 
                 if child.float == Float::None {
                     cursor_y += child.dimensions.margin_box().height;
+                    // An inline image on the baseline leaves the strut's
+                    // descent + half-leading below it (see inline_strut_descent).
+                    if matches!(child.box_type, BoxType::Image { .. })
+                        && child.style.display == rustkit_css::Display::Inline
+                    {
+                        cursor_y += strut_descent;
+                    }
                 }
             }
         }
@@ -1854,6 +1917,7 @@ impl LayoutBox {
         let mut line_height = 0.0_f32;
         let container_width = self.dimensions.content.width;
         let text_align = self.style.text_align;
+        let strut_descent = self.inline_strut_descent();
 
         // Track lines for text-align adjustment after layout: (start_index, end_index, line_width)
         let mut lines: Vec<(usize, usize, f32)> = Vec::new();
@@ -1965,6 +2029,13 @@ impl LayoutBox {
 
                 if child.float == Float::None {
                     cursor_y = child.dimensions.border_box().bottom() - self.dimensions.content.y;
+                    // An inline image on the baseline leaves the strut's
+                    // descent + half-leading below it (see inline_strut_descent).
+                    if matches!(child.box_type, BoxType::Image { .. })
+                        && child.style.display == rustkit_css::Display::Inline
+                    {
+                        cursor_y += strut_descent;
+                    }
                 }
             }
         }
@@ -4031,6 +4102,49 @@ mod tests {
         assert_eq!(layout_box.dimensions.content.width, 600.0);
         assert_eq!(layout_box.dimensions.margin.left, 200.0);
         assert_eq!(layout_box.dimensions.margin.right, 200.0);
+    }
+
+    #[test]
+    fn test_image_max_width_preserves_aspect() {
+        // 100x100 natural; max-width: 80px → 80x80 (CSS 2.1 §10.4)
+        let mut style = ComputedStyle::new();
+        style.max_width = Length::Px(80.0);
+        let mut layout_box = LayoutBox::new(
+            BoxType::Image { url: String::new(), natural_width: 100.0, natural_height: 100.0 },
+            style,
+        );
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 80.0);
+        assert_eq!(layout_box.dimensions.content.height, 80.0);
+    }
+
+    #[test]
+    fn test_image_max_height_preserves_aspect() {
+        // 200x100 natural; max-height: 60px → 120x60
+        let mut style = ComputedStyle::new();
+        style.max_height = Length::Px(60.0);
+        let mut layout_box = LayoutBox::new(
+            BoxType::Image { url: String::new(), natural_width: 200.0, natural_height: 100.0 },
+            style,
+        );
+        layout_box.layout_image(200.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 120.0);
+        assert_eq!(layout_box.dimensions.content.height, 60.0);
+    }
+
+    #[test]
+    fn test_image_max_constraints_ignore_unconstrained() {
+        // Natural size within both maxima → untouched
+        let mut style = ComputedStyle::new();
+        style.max_width = Length::Px(500.0);
+        style.max_height = Length::Px(500.0);
+        let mut layout_box = LayoutBox::new(
+            BoxType::Image { url: String::new(), natural_width: 100.0, natural_height: 100.0 },
+            style,
+        );
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 100.0);
+        assert_eq!(layout_box.dimensions.content.height, 100.0);
     }
 
     #[test]

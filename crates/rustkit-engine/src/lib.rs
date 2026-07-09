@@ -1183,13 +1183,46 @@ impl Engine {
                     let explicit_height: Option<f32> = attributes.get("height")
                         .and_then(|h| h.parse().ok());
                     
-                    // For now, use explicit dimensions or defaults
-                    // Real implementation would load image to get natural size
-                    let (natural_width, natural_height) = match (explicit_width, explicit_height) {
-                        (Some(w), Some(h)) => (w, h),
-                        (Some(w), None) => (w, w),  // Assume square if only width
-                        (None, Some(h)) => (h, h),  // Assume square if only height
-                        (None, None) => (150.0, 150.0),  // Default placeholder size
+                    // width=/height= attributes are presentational hints: they set
+                    // the used size like CSS width/height (lowest priority), they do
+                    // NOT describe the image's natural dimensions. Author CSS wins.
+                    if let Some(w) = explicit_width {
+                        if matches!(style.width, rustkit_css::Length::Auto) {
+                            style.width = rustkit_css::Length::Px(w);
+                        }
+                    }
+                    if let Some(h) = explicit_height {
+                        if matches!(style.height, rustkit_css::Length::Auto) {
+                            style.height = rustkit_css::Length::Px(h);
+                        }
+                    }
+
+                    // Resolve the image's real natural size: cache hit, or a
+                    // synchronous decode for data: URLs (no network involved) —
+                    // the same idiom the paint path uses when uploading images.
+                    // Layout previously never consulted ImageManager and gave every
+                    // CSS-sized <img> a 150x150 placeholder, so pages sized by
+                    // stylesheet rules (not width=/height= attributes) drifted.
+                    let loaded = Url::parse(&src).ok().and_then(|parsed_url| {
+                        if let Some(cached) = self.image_manager.get_cached(&parsed_url) {
+                            Some(cached)
+                        } else if parsed_url.scheme() == "data" {
+                            self.image_manager.load_blocking(parsed_url).ok()
+                        } else {
+                            None
+                        }
+                    });
+
+                    let (natural_width, natural_height) = match &loaded {
+                        Some(image) => (image.natural_width as f32, image.natural_height as f32),
+                        // Image unavailable at layout time: fall back to the
+                        // width=/height= attributes, then the placeholder size.
+                        None => match (explicit_width, explicit_height) {
+                            (Some(w), Some(h)) => (w, h),
+                            (Some(w), None) => (w, w),  // Assume square if only width
+                            (None, Some(h)) => (h, h),  // Assume square if only height
+                            (None, None) => (150.0, 150.0),  // Default placeholder size
+                        },
                     };
                     
                     return LayoutBox::new(
@@ -2124,12 +2157,62 @@ impl Engine {
                     style.padding_left = length;
                 }
             }
-            "border" | "border-width" => {
-                if let Some(length) = parse_length(value) {
-                    style.border_top_width = length.clone();
-                    style.border_right_width = length.clone();
-                    style.border_bottom_width = length.clone();
-                    style.border_left_width = length;
+            "border" => {
+                // Shorthand: <width> || <style> || <color> — the old code fed the
+                // whole value to parse_length, so `border: 2px solid #333` was
+                // silently dropped and only a bare `border: 2px` ever applied.
+                if let Some((width, color)) = parse_border_shorthand(value) {
+                    style.border_top_width = width.clone();
+                    style.border_right_width = width.clone();
+                    style.border_bottom_width = width.clone();
+                    style.border_left_width = width;
+                    if let Some(color) = color {
+                        style.border_top_color = color;
+                        style.border_right_color = color;
+                        style.border_bottom_color = color;
+                        style.border_left_color = color;
+                    }
+                }
+            }
+            "border-width" => {
+                // 1–4 length values, standard sides expansion
+                if let Some((t, r, b, l)) = parse_shorthand_4(value) {
+                    style.border_top_width = t;
+                    style.border_right_width = r;
+                    style.border_bottom_width = b;
+                    style.border_left_width = l;
+                }
+            }
+            "border-top" => {
+                if let Some((width, color)) = parse_border_shorthand(value) {
+                    style.border_top_width = width;
+                    if let Some(color) = color {
+                        style.border_top_color = color;
+                    }
+                }
+            }
+            "border-right" => {
+                if let Some((width, color)) = parse_border_shorthand(value) {
+                    style.border_right_width = width;
+                    if let Some(color) = color {
+                        style.border_right_color = color;
+                    }
+                }
+            }
+            "border-bottom" => {
+                if let Some((width, color)) = parse_border_shorthand(value) {
+                    style.border_bottom_width = width;
+                    if let Some(color) = color {
+                        style.border_bottom_color = color;
+                    }
+                }
+            }
+            "border-left" => {
+                if let Some((width, color)) = parse_border_shorthand(value) {
+                    style.border_left_width = width;
+                    if let Some(color) = color {
+                        style.border_left_color = color;
+                    }
                 }
             }
             "border-color" => {
@@ -5505,6 +5588,58 @@ fn split_css_args(s: &str) -> Vec<&str> {
 
 /// Parse a shorthand value with 1-4 parts (like margin, padding).
 /// Returns (top, right, bottom, left).
+/// Parse a `border` / `border-<side>` shorthand: `<width> || <style> || <color>`.
+/// ComputedStyle has no border-style field, so the style keyword only matters
+/// for `none`/`hidden` (which force a zero width, matching how the box would
+/// paint). Color tokens may contain spaces (`rgb(1, 2, 3)`), so everything
+/// that isn't a width or style keyword is re-joined and handed to parse_color.
+fn parse_border_shorthand(value: &str) -> Option<(rustkit_css::Length, Option<rustkit_css::Color>)> {
+    const STYLE_KEYWORDS: [&str; 10] = [
+        "solid", "dashed", "dotted", "double", "groove", "ridge", "inset", "outset", "none", "hidden",
+    ];
+
+    let mut width: Option<rustkit_css::Length> = None;
+    let mut style_none = false;
+    let mut saw_style = false;
+    let mut color_parts: Vec<&str> = Vec::new();
+
+    for token in value.split_whitespace() {
+        let lower = token.to_ascii_lowercase();
+        if STYLE_KEYWORDS.contains(&lower.as_str()) {
+            saw_style = true;
+            style_none = matches!(lower.as_str(), "none" | "hidden");
+        } else if width.is_none()
+            && (lower == "thin" || lower == "medium" || lower == "thick")
+        {
+            width = Some(rustkit_css::Length::Px(match lower.as_str() {
+                "thin" => 1.0,
+                "thick" => 5.0,
+                _ => 3.0,
+            }));
+        } else if width.is_none() && parse_length(token).is_some() {
+            width = parse_length(token);
+        } else {
+            color_parts.push(token);
+        }
+    }
+
+    if width.is_none() && !saw_style && color_parts.is_empty() {
+        return None; // Nothing recognizable — drop, don't guess.
+    }
+
+    // `border: solid` etc. → medium width per spec.
+    let mut resolved_width = width.unwrap_or(rustkit_css::Length::Px(3.0));
+    if style_none {
+        resolved_width = rustkit_css::Length::Zero;
+    }
+    let color = if color_parts.is_empty() {
+        None
+    } else {
+        parse_color(&color_parts.join(" "))
+    };
+    Some((resolved_width, color))
+}
+
 fn parse_shorthand_4(value: &str) -> Option<(rustkit_css::Length, rustkit_css::Length, rustkit_css::Length, rustkit_css::Length)> {
     let parts: Vec<&str> = value.split_whitespace().collect();
     

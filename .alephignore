@@ -3,6 +3,10 @@
 # (aleph 0.5.0). vendor/ and target/ are already default-masked; the macOS
 # equivalent of her deps/ finding is the capture/baseline churn below —
 # binary trees that pollute temporal git-log scans and symbol discovery.
+# Session-7: fastrender is NOT the metric engine (parity renders with
+# crates/rustkit-*) — keep it masked so Aleph steers to rustkit.
+fastrender
+
 .browsers
 parity-baseline
 parity-history

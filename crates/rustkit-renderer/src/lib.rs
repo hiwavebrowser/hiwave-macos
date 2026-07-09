@@ -216,7 +216,11 @@ impl TextureCache {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                // Rgba8Unorm, NOT Rgba8UnormSrgb: the render targets are linear
+                // formats and every other pipeline writes sRGB bytes through
+                // unconverted. An Srgb view would linearize on sample and paint
+                // images darker than the rest of the page.
+                format: wgpu::TextureFormat::Rgba8Unorm,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
@@ -329,6 +333,12 @@ pub struct Renderer {
     color_indices: Vec<u32>,
     texture_vertices: Vec<TextureVertex>,
     texture_indices: Vec<u32>,
+    // Image quads batch separately from glyphs: the glyph batch binds the
+    // glyph atlas for the whole draw, while each image quad must bind its
+    // own texture (per-URL runs, drawn between colors and text).
+    image_vertices: Vec<TextureVertex>,
+    image_indices: Vec<u32>,
+    image_runs: Vec<(String, u32)>,
 
     // GPU gradient queues for batched rendering
     gradient_queue: Vec<QueuedLinearGradient>,
@@ -559,6 +569,9 @@ impl Renderer {
             color_indices: Vec::with_capacity(8192),
             texture_vertices: Vec::with_capacity(4096),
             texture_indices: Vec::with_capacity(8192),
+            image_vertices: Vec::with_capacity(256),
+            image_indices: Vec::with_capacity(512),
+            image_runs: Vec::with_capacity(64),
             gradient_queue: Vec::with_capacity(64),
             radial_gradient_queue: Vec::with_capacity(16),
             conic_gradient_queue: Vec::with_capacity(16),
@@ -668,7 +681,10 @@ impl Renderer {
     /// Flush current batched vertices to the target without clearing.
     /// Used for incremental rendering when backdrop filters are present.
     fn flush_batches_to(&mut self, target: &wgpu::TextureView, clear: bool) -> Result<(), RendererError> {
-        if self.color_vertices.is_empty() && self.texture_vertices.is_empty() {
+        if self.color_vertices.is_empty()
+            && self.texture_vertices.is_empty()
+            && self.image_vertices.is_empty()
+        {
             return Ok(());
         }
 
@@ -726,6 +742,9 @@ impl Renderer {
                 render_pass.draw_indexed(0..self.color_indices.len() as u32, 0, 0..1);
             }
 
+            // Draw images (own textures) between backgrounds and text
+            self.draw_image_batch(&mut render_pass);
+
             // Draw textured quads
             if !self.texture_vertices.is_empty() {
                 // Validate buffer sizes before allocation
@@ -763,13 +782,19 @@ impl Renderer {
         self.color_indices.clear();
         self.texture_vertices.clear();
         self.texture_indices.clear();
+        self.image_vertices.clear();
+        self.image_indices.clear();
+        self.image_runs.clear();
         Ok(())
     }
 
     /// Flush batched vertices before rendering a GPU gradient.
     /// This ensures correct z-order: batched content renders before the gradient.
     fn flush_batches_for_gradient(&mut self, target: &wgpu::TextureView, clear: bool) -> Result<(), RendererError> {
-        if self.color_vertices.is_empty() && self.texture_vertices.is_empty() {
+        if self.color_vertices.is_empty()
+            && self.texture_vertices.is_empty()
+            && self.image_vertices.is_empty()
+        {
             // Nothing to flush, but if this is the first call we still need to clear
             if clear {
                 let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -850,6 +875,9 @@ impl Renderer {
                 render_pass.draw_indexed(0..self.color_indices.len() as u32, 0, 0..1);
             }
 
+            // Draw images (own textures) between backgrounds and text
+            self.draw_image_batch(&mut render_pass);
+
             // Draw textured quads
             if !self.texture_vertices.is_empty() {
                 // Validate buffer sizes before allocation
@@ -887,6 +915,9 @@ impl Renderer {
         self.color_indices.clear();
         self.texture_vertices.clear();
         self.texture_indices.clear();
+        self.image_vertices.clear();
+        self.image_indices.clear();
+        self.image_runs.clear();
         Ok(())
     }
 
@@ -1131,6 +1162,9 @@ impl Renderer {
         self.color_indices.clear();
         self.texture_vertices.clear();
         self.texture_indices.clear();
+        self.image_vertices.clear();
+        self.image_indices.clear();
+        self.image_runs.clear();
         self.gradient_queue.clear();
         self.radial_gradient_queue.clear();
         self.conic_gradient_queue.clear();
@@ -1208,7 +1242,10 @@ impl Renderer {
         }
 
         // Flush remaining batches to intermediate
-        if !self.color_vertices.is_empty() || !self.texture_vertices.is_empty() {
+        if !self.color_vertices.is_empty()
+            || !self.texture_vertices.is_empty()
+            || !self.image_vertices.is_empty()
+        {
             self.flush_batches_to(&intermediate_view, is_first_flush)?;
         }
 
@@ -1252,7 +1289,10 @@ impl Renderer {
         }
 
         // Flush any remaining batched content
-        if !self.color_vertices.is_empty() || !self.texture_vertices.is_empty() {
+        if !self.color_vertices.is_empty()
+            || !self.texture_vertices.is_empty()
+            || !self.image_vertices.is_empty()
+        {
             self.flush_batches_for_gradient(target, is_first_flush)?;
         }
 
@@ -4238,37 +4278,49 @@ impl Renderer {
             let (x2, y2) = self.transform_point(rect.x + rect.width, rect.y + rect.height);
             let (x3, y3) = self.transform_point(rect.x, rect.y + rect.height);
 
-            let base = self.texture_vertices.len() as u32;
-
-            self.texture_vertices.extend_from_slice(&[
-                TextureVertex {
-                    position: [x0, y0],
-                    tex_coords: [0.0, 0.0],
-                    color: [1.0, 1.0, 1.0, 1.0],
-                },
-                TextureVertex {
-                    position: [x1, y1],
-                    tex_coords: [1.0, 0.0],
-                    color: [1.0, 1.0, 1.0, 1.0],
-                },
-                TextureVertex {
-                    position: [x2, y2],
-                    tex_coords: [1.0, 1.0],
-                    color: [1.0, 1.0, 1.0, 1.0],
-                },
-                TextureVertex {
-                    position: [x3, y3],
-                    tex_coords: [0.0, 1.0],
-                    color: [1.0, 1.0, 1.0, 1.0],
-                },
-            ]);
-
-            self.texture_indices.extend_from_slice(&[
-                base, base + 1, base + 2,
-                base, base + 2, base + 3,
-            ]);
+            self.push_image_quad(
+                url,
+                [
+                    TextureVertex {
+                        position: [x0, y0],
+                        tex_coords: [0.0, 0.0],
+                        color: [1.0, 1.0, 1.0, 1.0],
+                    },
+                    TextureVertex {
+                        position: [x1, y1],
+                        tex_coords: [1.0, 0.0],
+                        color: [1.0, 1.0, 1.0, 1.0],
+                    },
+                    TextureVertex {
+                        position: [x2, y2],
+                        tex_coords: [1.0, 1.0],
+                        color: [1.0, 1.0, 1.0, 1.0],
+                    },
+                    TextureVertex {
+                        position: [x3, y3],
+                        tex_coords: [0.0, 1.0],
+                        color: [1.0, 1.0, 1.0, 1.0],
+                    },
+                ],
+            );
         }
         // If image not loaded, skip (async loading handled elsewhere)
+    }
+
+    /// Append a quad to the image batch, extending the current run when the
+    /// previous quad used the same texture so consecutive tiles stay one draw.
+    fn push_image_quad(&mut self, url: &str, corners: [TextureVertex; 4]) {
+        let base = self.image_vertices.len() as u32;
+        self.image_vertices.extend_from_slice(&corners);
+        self.image_indices.extend_from_slice(&[
+            base, base + 1, base + 2,
+            base, base + 2, base + 3,
+        ]);
+
+        match self.image_runs.last_mut() {
+            Some((last_url, count)) if last_url == url => *count += 6,
+            _ => self.image_runs.push((url.to_string(), 6)),
+        }
     }
 
     /// Draw a background image with proper size, position, and repeat handling.
@@ -4455,35 +4507,31 @@ impl Renderer {
         let (x2, y2) = self.transform_point(draw_rect.x + draw_rect.width, draw_rect.y + draw_rect.height);
         let (x3, y3) = self.transform_point(draw_rect.x, draw_rect.y + draw_rect.height);
 
-        let base = self.texture_vertices.len() as u32;
-
-        self.texture_vertices.extend_from_slice(&[
-            TextureVertex {
-                position: [x0, y0],
-                tex_coords: [tex_left, tex_top],
-                color: [1.0, 1.0, 1.0, 1.0],
-            },
-            TextureVertex {
-                position: [x1, y1],
-                tex_coords: [tex_right, tex_top],
-                color: [1.0, 1.0, 1.0, 1.0],
-            },
-            TextureVertex {
-                position: [x2, y2],
-                tex_coords: [tex_right, tex_bottom],
-                color: [1.0, 1.0, 1.0, 1.0],
-            },
-            TextureVertex {
-                position: [x3, y3],
-                tex_coords: [tex_left, tex_bottom],
-                color: [1.0, 1.0, 1.0, 1.0],
-            },
-        ]);
-
-        self.texture_indices.extend_from_slice(&[
-            base, base + 1, base + 2,
-            base, base + 2, base + 3,
-        ]);
+        self.push_image_quad(
+            url,
+            [
+                TextureVertex {
+                    position: [x0, y0],
+                    tex_coords: [tex_left, tex_top],
+                    color: [1.0, 1.0, 1.0, 1.0],
+                },
+                TextureVertex {
+                    position: [x1, y1],
+                    tex_coords: [tex_right, tex_top],
+                    color: [1.0, 1.0, 1.0, 1.0],
+                },
+                TextureVertex {
+                    position: [x2, y2],
+                    tex_coords: [tex_right, tex_bottom],
+                    color: [1.0, 1.0, 1.0, 1.0],
+                },
+                TextureVertex {
+                    position: [x3, y3],
+                    tex_coords: [tex_left, tex_bottom],
+                    color: [1.0, 1.0, 1.0, 1.0],
+                },
+            ],
+        );
     }
 
     /// Upload an image to the texture cache.
@@ -4600,6 +4648,42 @@ impl Renderer {
     }
 
     /// Flush all batched vertices to the target.
+    /// Draw the batched image quads into an open render pass: one draw call
+    /// per (texture, run) pair so every image samples its own texture rather
+    /// than the glyph atlas the shared texture batch binds.
+    fn draw_image_batch(&self, render_pass: &mut wgpu::RenderPass<'_>) {
+        if self.image_vertices.is_empty() {
+            return;
+        }
+
+        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Image Vertex Buffer"),
+            contents: bytemuck::cast_slice(&self.image_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Image Index Buffer"),
+            contents: bytemuck::cast_slice(&self.image_indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        // blit_pipeline, not texture_pipeline: the texture shader treats the
+        // sampled R channel as glyph-atlas alpha; blit samples real RGBA.
+        render_pass.set_pipeline(&self.blit_pipeline);
+        render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+
+        let mut start = 0u32;
+        for (url, count) in &self.image_runs {
+            if let Some(cached) = self.texture_cache.get(url) {
+                render_pass.set_bind_group(1, &cached.bind_group, &[]);
+                render_pass.draw_indexed(start..start + count, 0, 0..1);
+            }
+            start += count;
+        }
+    }
+
     fn flush_to(&mut self, target: &wgpu::TextureView) -> Result<(), RendererError> {
         // Check for debug visual mode (RUSTKIT_DEBUG_VISUAL=1)
         // When enabled, clear to magenta to prove pixels are hitting the screen
@@ -4708,7 +4792,10 @@ impl Renderer {
                 render_pass.draw_indexed(0..self.color_indices.len() as u32, 0, 0..1);
             }
 
-            // Draw textured quads (images and glyphs)
+            // Draw images (own textures) between backgrounds and text
+            self.draw_image_batch(&mut render_pass);
+
+            // Draw textured quads (glyphs)
             if !self.texture_vertices.is_empty() {
                 let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("Texture Vertex Buffer"),

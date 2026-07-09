@@ -84,14 +84,38 @@ export async function createDeterministicContext(browser, width, height, options
   }
 
   // For micro-tests only: normalize default styles.
+  //
+  // Init scripts run before the document has a root element on file://
+  // navigations, so the old `document.documentElement.appendChild(...)`
+  // threw and was silently swallowed by the page — NO Chrome capture ever
+  // had the reset applied (found session 7 via pageerror probe: micro
+  // baselines rendered with UA Times/normal/8px-margin while rustkit's
+  // parity-capture injects the reset). Wait for the root element, then
+  // insert the reset FIRST in document order so fixture rules override it
+  // on cascade ties — matching parity-capture's inject-first-in-head.
   if (applyParityReset && RESET_CSS) {
     await context.addInitScript({
       content: `(() => {
         const css = ${JSON.stringify(RESET_CSS)};
-        const style = document.createElement('style');
-        style.setAttribute('data-parity-reset', '1');
-        style.textContent = css;
-        document.documentElement.appendChild(style);
+        const inject = () => {
+          if (!document.documentElement || document.querySelector('style[data-parity-reset]')) return;
+          const style = document.createElement('style');
+          style.setAttribute('data-parity-reset', '1');
+          style.textContent = css;
+          document.documentElement.insertBefore(style, document.documentElement.firstChild);
+        };
+        if (document.documentElement) {
+          inject();
+        } else {
+          const obs = new MutationObserver(() => {
+            if (document.documentElement) {
+              inject();
+              obs.disconnect();
+            }
+          });
+          obs.observe(document, { childList: true });
+          document.addEventListener('DOMContentLoaded', inject);
+        }
       })();`,
     });
   }
