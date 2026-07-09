@@ -873,7 +873,13 @@ impl Engine {
             let _layout_span = tracing::info_span!("layout_compute").entered();
             // Set viewport dimensions for vh/vw unit resolution
             root_box.set_viewport(bounds.width as f32, bounds.height as f32);
-            root_box.layout(&containing_block);
+            // Root establishes the initial BFC: lay out through the margin-collapse
+            // path so sibling margins collapse per CSS 2.1 §8.3.1. The plain
+            // layout() path stacks margins additively (gap = bottom + top), which
+            // ran every text page taller than Chrome.
+            let mut margin_context = rustkit_layout::MarginCollapseContext::new();
+            let mut float_context = rustkit_layout::FloatContext::new();
+            root_box.layout_with_collapse(&containing_block, &mut margin_context, &mut float_context);
         }
 
         // Ensure body element fills viewport (common browser behavior)
