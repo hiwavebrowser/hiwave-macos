@@ -16,19 +16,21 @@
 
 use rustkit_css::{
     Color, Direction as CssDirection, FontStretch, FontStyle, FontWeight, Length,
-    TextDecorationLine, TextDecorationStyle, TextTransform, WhiteSpace,
-    WordBreak as CssWordBreak,
+    TextDecorationLine, TextDecorationStyle, TextTransform, WhiteSpace, WordBreak as CssWordBreak,
 };
 use rustkit_text::bidi::{BidiInfo, Direction as BidiDirection};
-use rustkit_text::line_break::{LineBreaker, WordBreak as LineBreakWordBreak, OverflowWrap};
+use rustkit_text::line_break::{LineBreaker, OverflowWrap, WordBreak as LineBreakWordBreak};
 use std::collections::HashMap;
 use std::sync::RwLock;
 use thiserror::Error;
 
 #[cfg(windows)]
-use std::sync::Arc;
+use rustkit_text::{
+    FontCollection as RkFontCollection, FontStretch as RkFontStretch, FontStyle as RkFontStyle,
+    FontWeight as RkFontWeight,
+};
 #[cfg(windows)]
-use rustkit_text::{FontCollection as RkFontCollection, FontStretch as RkFontStretch, FontStyle as RkFontStyle, FontWeight as RkFontWeight};
+use std::sync::Arc;
 
 #[cfg(target_os = "macos")]
 use core_foundation::base::TCFType;
@@ -94,7 +96,7 @@ impl FontFamilyChain {
             .with_fallback("Hiragino Sans")
             .with_fallback("sans-serif")
     }
-    
+
     /// Create default font chain for sans-serif.
     #[cfg(not(target_os = "macos"))]
     pub fn sans_serif() -> Self {
@@ -116,7 +118,7 @@ impl FontFamilyChain {
             .with_fallback("Songti SC")
             .with_fallback("serif")
     }
-    
+
     /// Create default font chain for serif.
     #[cfg(not(target_os = "macos"))]
     pub fn serif() -> Self {
@@ -137,7 +139,7 @@ impl FontFamilyChain {
             .with_fallback("Courier New")
             .with_fallback("monospace")
     }
-    
+
     /// Create default font chain for monospace.
     #[cfg(not(target_os = "macos"))]
     pub fn monospace() -> Self {
@@ -197,7 +199,10 @@ impl FontFamilyChain {
                 for fallback in families.iter().skip(1) {
                     // Recursively handle generic families in fallback chain
                     let lower = fallback.to_lowercase();
-                    if lower == "system-ui" || lower == "-apple-system" || lower == "blinkmacsystemfont" {
+                    if lower == "system-ui"
+                        || lower == "-apple-system"
+                        || lower == "blinkmacsystemfont"
+                    {
                         let sys_chain = Self::system_ui();
                         chain.fallbacks.push(sys_chain.primary);
                         chain.fallbacks.extend(sys_chain.fallbacks);
@@ -691,18 +696,14 @@ impl FontCache {
         stretch: FontStretch,
         size: f32,
     ) -> Result<TextMetrics, TextError> {
-        let collection = RkFontCollection::system().map_err(|e| TextError::DirectWriteError(e.to_string()))?;
+        let collection =
+            RkFontCollection::system().map_err(|e| TextError::DirectWriteError(e.to_string()))?;
 
         // Try to find the font family
         let dw_family = collection
             .font_family_by_name(family)
             .map_err(|e| TextError::DirectWriteError(e.to_string()))?
-            .or_else(|| {
-                collection
-                    .font_family_by_name("Segoe UI")
-                    .ok()
-                    .flatten()
-            });
+            .or_else(|| collection.font_family_by_name("Segoe UI").ok().flatten());
 
         if let Some(family) = dw_family {
             let dw_weight = RkFontWeight::from_u32(weight.0 as u32);
@@ -758,7 +759,12 @@ impl FontCache {
         size: f32,
     ) -> Result<TextMetrics, TextError> {
         // Try to get real Core Text metrics for the requested font
-        if let Ok(font) = TextShaper::create_ct_font_with_traits(family, size, weight.0, style == FontStyle::Italic) {
+        if let Ok(font) = TextShaper::create_ct_font_with_traits(
+            family,
+            size,
+            weight.0,
+            style == FontStyle::Italic,
+        ) {
             return Ok(TextMetrics::from_core_text_font(&font, 0.0));
         }
 
@@ -824,7 +830,8 @@ impl TextShaper {
             });
         }
 
-        let collection = RkFontCollection::system().map_err(|e| TextError::DirectWriteError(e.to_string()))?;
+        let collection =
+            RkFontCollection::system().map_err(|e| TextError::DirectWriteError(e.to_string()))?;
 
         // Find first available font in chain
         let mut font_family_name = font_chain.primary.clone();
@@ -1009,29 +1016,32 @@ impl TextShaper {
         // Try to find a font from the chain
         let mut ct_font_opt: Option<core_text::font::CTFont> = None;
         let mut used_family = font_chain.primary.clone();
-        
+
         for family in font_chain.all_families() {
             // Try to create font with traits
-            if let Ok(font) = Self::create_ct_font_with_traits(family, size, weight.0, style == FontStyle::Italic) {
+            if let Ok(font) =
+                Self::create_ct_font_with_traits(family, size, weight.0, style == FontStyle::Italic)
+            {
                 ct_font_opt = Some(font);
                 used_family = family.to_string();
                 break;
             }
         }
-        
+
         // Fallback to system font if nothing found
         let ct_font = ct_font_opt.unwrap_or_else(|| {
-            ct_font::new_from_name("Helvetica", size as f64)
-                .unwrap_or_else(|_| ct_font::new_from_name(".AppleSystemUIFont", size as f64).unwrap())
+            ct_font::new_from_name("Helvetica", size as f64).unwrap_or_else(|_| {
+                ct_font::new_from_name(".AppleSystemUIFont", size as f64).unwrap()
+            })
         });
-        
+
         // Convert text to UTF-16 for Core Text
         let utf16_chars: Vec<u16> = text.encode_utf16().collect();
         let char_count = utf16_chars.len();
-        
+
         // Get glyph IDs
         let mut glyph_ids: Vec<u16> = vec![0; char_count];
-        
+
         unsafe {
             extern "C" {
                 fn CTFontGetGlyphsForCharacters(
@@ -1040,7 +1050,7 @@ impl TextShaper {
                     glyphs: *mut u16,
                     count: isize,
                 ) -> bool;
-                
+
                 fn CTFontGetAdvancesForGlyphs(
                     font: core_text::font::CTFontRef,
                     orientation: u32,
@@ -1049,14 +1059,14 @@ impl TextShaper {
                     count: isize,
                 ) -> f64;
             }
-            
+
             let _success = CTFontGetGlyphsForCharacters(
                 ct_font.as_concrete_TypeRef(),
                 utf16_chars.as_ptr(),
                 glyph_ids.as_mut_ptr(),
                 char_count as isize,
             );
-            
+
             // Get advances for each glyph
             let mut glyph_advances: Vec<CGSize> = vec![CGSize::new(0.0, 0.0); char_count];
             let _total_advance = CTFontGetAdvancesForGlyphs(
@@ -1066,27 +1076,27 @@ impl TextShaper {
                 glyph_advances.as_mut_ptr(),
                 char_count as isize,
             );
-            
+
             // Build positioned glyphs
             let text_chars: Vec<char> = text.chars().collect();
             let mut glyphs = Vec::with_capacity(text_chars.len());
             let mut x_offset: f32 = 0.0;
-            
+
             // Handle surrogate pairs - UTF-16 index to char index mapping
             let mut char_idx = 0;
             let mut utf16_idx = 0;
-            
+
             while utf16_idx < char_count && char_idx < text_chars.len() {
                 let c = text_chars[char_idx];
                 let advance = glyph_advances[utf16_idx].width as f32;
-                
+
                 // Handle missing glyphs (glyph ID 0)
                 let final_advance = if glyph_ids[utf16_idx] == 0 && advance == 0.0 {
                     size * 0.5 // Fallback advance
                 } else {
                     advance
                 };
-                
+
                 glyphs.push(PositionedGlyph {
                     glyph_id: glyph_ids[utf16_idx],
                     x: x_offset,
@@ -1095,25 +1105,25 @@ impl TextShaper {
                     character: c,
                     cluster: char_idx as u32,
                 });
-                
+
                 x_offset += final_advance;
-                
+
                 // Advance UTF-16 index (handle surrogate pairs)
                 utf16_idx += c.len_utf16();
                 char_idx += 1;
             }
-            
+
             // Get font metrics from Core Text
             let ascent = ct_font.ascent() as f32;
             let descent = ct_font.descent() as f32;
             let leading = ct_font.leading() as f32;
             let underline_position = ct_font.underline_position() as f32;
             let underline_thickness = ct_font.underline_thickness() as f32;
-            
+
             // Calculate strikethrough position (approximately middle of x-height)
             let x_height = ct_font.x_height() as f32;
             let strikethrough_offset = x_height * 0.5;
-            
+
             let metrics = TextMetrics {
                 width: x_offset,
                 height: ascent + descent + leading,
@@ -1126,7 +1136,7 @@ impl TextShaper {
                 strikethrough_thickness: underline_thickness,
                 overline_offset: -ascent,
             };
-            
+
             Ok(ShapedRun {
                 text: text.to_string(),
                 glyphs,
@@ -1152,7 +1162,7 @@ impl TextShaper {
         // Try to find a font variant with the specified traits
         // First try appending -Bold, -Italic, etc. to the family name
         let mut variants_to_try = vec![family.to_string()];
-        
+
         if weight >= 700 {
             variants_to_try.push(format!("{}-Bold", family));
             variants_to_try.push(format!("{}Bold", family));
@@ -1161,22 +1171,22 @@ impl TextShaper {
                 variants_to_try.push(format!("{}-BoldOblique", family));
             }
         }
-        
+
         if italic {
             variants_to_try.push(format!("{}-Italic", family));
             variants_to_try.push(format!("{}-Oblique", family));
             variants_to_try.push(format!("{}Italic", family));
         }
-        
+
         for variant in &variants_to_try {
             if let Ok(font) = ct_font::new_from_name(variant, size as f64) {
                 return Ok(font);
             }
         }
-        
+
         Err(TextError::FontNotFound(family.to_string()))
     }
-    
+
     /// Simplified shaping fallback for non-Windows, non-macOS platforms.
     #[cfg(all(not(windows), not(target_os = "macos")))]
     pub fn shape(
@@ -1418,15 +1428,7 @@ impl TextShaper {
         // Handle case where text has no mandatory breaks
         if lines.is_empty() && !text.is_empty() {
             lines = self.wrap_segment(
-                text,
-                font_chain,
-                weight,
-                style,
-                stretch,
-                size,
-                max_width,
-                &breaker,
-                0,
+                text, font_chain, weight, style, stretch, size, max_width, &breaker, 0,
             )?;
         }
 
@@ -1473,37 +1475,61 @@ impl TextShaper {
             // Need to find a break point
             // Binary search for the right break point
             let break_offset = self.find_line_break(
-                remaining,
-                font_chain,
-                weight,
-                style,
-                stretch,
-                size,
-                max_width,
-                breaker,
+                remaining, font_chain, weight, style, stretch, size, max_width, breaker,
             )?;
 
             if break_offset == 0 {
-                // Can't fit even one character - force break at first grapheme
-                let first_grapheme_end = rustkit_text::segmentation::grapheme_boundaries(remaining)
-                    .get(1)
-                    .copied()
-                    .unwrap_or(remaining.len());
+                // No break opportunity fits within max_width.
+                let may_break_mid_word = breaker.allows_emergency_breaks()
+                    || matches!(
+                        breaker.word_break,
+                        LineBreakWordBreak::BreakAll | LineBreakWordBreak::BreakWord
+                    );
+                let line_end = if may_break_mid_word {
+                    // overflow-wrap: anywhere/break-word or word-break:
+                    // break-all — force break at the first grapheme boundary.
+                    rustkit_text::segmentation::grapheme_boundaries(remaining)
+                        .get(1)
+                        .copied()
+                        .unwrap_or(remaining.len())
+                } else {
+                    // css-text-3 §5.2: when no break opportunity exists on the
+                    // line, the unbreakable unit stays on it and OVERFLOWS —
+                    // it is never broken mid-word. (Chrome behavior for
+                    // word-break: normal/keep-all.) Take everything up to the
+                    // next break opportunity as this line.
+                    breaker
+                        .find_break_after(remaining, 1)
+                        .filter(|&o| o > 0)
+                        .unwrap_or(remaining.len())
+                        .min(remaining.len())
+                };
 
-                let line_text = &remaining[..first_grapheme_end];
-                let shaped_line = self.shape(line_text, font_chain, weight, style, stretch, size)?;
+                let line_text = &remaining[..line_end];
+                let shaped_line =
+                    self.shape(line_text, font_chain, weight, style, stretch, size)?;
 
                 lines.push(WrappedLine {
                     runs: vec![shaped_line.clone()],
                     width: shaped_line.metrics.width,
                     start_offset: base_offset + line_start,
-                    end_offset: base_offset + line_start + first_grapheme_end,
+                    end_offset: base_offset + line_start + line_end,
                 });
 
-                line_start += first_grapheme_end;
+                // Skip whitespace at the break point
+                line_start += line_end;
+                while line_start < text.len() && text[line_start..].starts_with(char::is_whitespace)
+                {
+                    line_start += text[line_start..]
+                        .chars()
+                        .next()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
+                }
             } else {
                 let line_text = &remaining[..break_offset];
-                let shaped_line = self.shape(line_text, font_chain, weight, style, stretch, size)?;
+                let shaped_line =
+                    self.shape(line_text, font_chain, weight, style, stretch, size)?;
 
                 lines.push(WrappedLine {
                     runs: vec![shaped_line.clone()],
@@ -1514,8 +1540,13 @@ impl TextShaper {
 
                 // Skip whitespace at the break point
                 line_start += break_offset;
-                while line_start < text.len() && text[line_start..].starts_with(char::is_whitespace) {
-                    line_start += text[line_start..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                while line_start < text.len() && text[line_start..].starts_with(char::is_whitespace)
+                {
+                    line_start += text[line_start..]
+                        .chars()
+                        .next()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
                 }
             }
         }
@@ -1910,12 +1941,24 @@ mod tests {
         use rustkit_text::bidi::Direction as BidiDirection;
 
         // From CSS
-        assert_eq!(TextDirection::from_css(CssDirection::Ltr), TextDirection::Ltr);
-        assert_eq!(TextDirection::from_css(CssDirection::Rtl), TextDirection::Rtl);
+        assert_eq!(
+            TextDirection::from_css(CssDirection::Ltr),
+            TextDirection::Ltr
+        );
+        assert_eq!(
+            TextDirection::from_css(CssDirection::Rtl),
+            TextDirection::Rtl
+        );
 
         // From bidi
-        assert_eq!(TextDirection::from_bidi(BidiDirection::Ltr), TextDirection::Ltr);
-        assert_eq!(TextDirection::from_bidi(BidiDirection::Rtl), TextDirection::Rtl);
+        assert_eq!(
+            TextDirection::from_bidi(BidiDirection::Ltr),
+            TextDirection::Ltr
+        );
+        assert_eq!(
+            TextDirection::from_bidi(BidiDirection::Rtl),
+            TextDirection::Rtl
+        );
 
         // To bidi
         assert_eq!(TextDirection::Ltr.to_bidi(), BidiDirection::Ltr);
@@ -2005,7 +2048,11 @@ mod tests {
         assert!(result.is_ok());
         let runs = result.unwrap();
         // Mixed text should produce multiple runs
-        assert!(runs.len() >= 2, "Expected multiple runs for mixed text, got {}", runs.len());
+        assert!(
+            runs.len() >= 2,
+            "Expected multiple runs for mixed text, got {}",
+            runs.len()
+        );
     }
 
     #[test]
@@ -2102,7 +2149,11 @@ mod tests {
         assert!(result.is_ok());
         let lines = result.unwrap();
         // Should have multiple lines due to narrow width
-        assert!(lines.len() > 1, "Expected multiple lines, got {}", lines.len());
+        assert!(
+            lines.len() > 1,
+            "Expected multiple lines, got {}",
+            lines.len()
+        );
     }
 
     #[test]
@@ -2122,7 +2173,10 @@ mod tests {
         assert!(result.is_ok());
         let lines = result.unwrap();
         // Should have at least 2 lines due to newline
-        assert!(lines.len() >= 2, "Expected at least 2 lines for text with newline");
+        assert!(
+            lines.len() >= 2,
+            "Expected at least 2 lines for text with newline"
+        );
     }
 
     #[test]
