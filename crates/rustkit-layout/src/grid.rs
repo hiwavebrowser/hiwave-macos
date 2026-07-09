@@ -2001,7 +2001,7 @@ pub fn layout_grid_container(
 /// inter-item spaces in a nowrap run are likewise dropped). Underestimating
 /// leaves a track at the size it gets today; this floor never oversizes a
 /// track beyond what Chrome would.
-fn estimate_min_content_width(layout_box: &LayoutBox) -> f32 {
+pub(crate) fn estimate_min_content_width(layout_box: &LayoutBox) -> f32 {
     let style = &layout_box.style;
     if style.display == Display::None {
         return 0.0;
