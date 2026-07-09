@@ -1,8 +1,8 @@
 {
-  "timestamp": "2026-07-09T04:21:24.348Z",
+  "timestamp": "2026-07-09T22:59:59.923Z",
   "viewport": {
-    "width": 800,
-    "height": 600
+    "width": 1024,
+    "height": 768
   },
   "elementCount": 189,
   "elements": [
@@ -14,10 +14,10 @@
       "styles": {
         "display": "flex",
         "box-sizing": "border-box",
-        "width": "800px",
+        "width": "1024px",
         "height": "3087.58px",
         "min-width": "0px",
-        "min-height": "600px",
+        "min-height": "768px",
         "max-width": "none",
         "max-height": "none",
         "padding-top": "32px",
@@ -7052,7 +7052,7 @@
       "styles": {
         "display": "block",
         "box-sizing": "border-box",
-        "width": "281.719px",
+        "width": "281.734px",
         "height": "36.1875px",
         "min-width": "auto",
         "min-height": "auto",

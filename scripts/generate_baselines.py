@@ -60,7 +60,10 @@ MICRO = [
 ]
 
 REPO_ROOT = Path(__file__).parent.parent
-BASELINES_DIR = REPO_ROOT / "baselines" / "chrome-120"
+# Campaign pin (trench/BASELINE-macos.md): Chrome for Testing 148. Keep in
+# lockstep with parity_test.py — these two diverging is how three cases
+# spent the campaign measured against wrong-dimension baselines.
+BASELINES_DIR = REPO_ROOT / "baselines" / os.environ.get("PARITY_BASELINE_SET", "chrome-148")
 ORACLE_SCRIPT = REPO_ROOT / "tools" / "parity_oracle" / "capture_baseline.mjs"
 
 
