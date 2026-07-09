@@ -1568,9 +1568,15 @@ impl Renderer {
                 match shape {
                     rustkit_css::RadialShape::Circle => (min_corner, min_corner),
                     rustkit_css::RadialShape::Ellipse => {
-                        // Match CPU implementation: rx = dist, ry = dist / aspect
-                        let aspect = rect.width / rect.height.max(0.001);
-                        (min_corner, min_corner / aspect)
+                        // css-images-3 §3.3.3: the corner ellipse has the
+                        // SAME ASPECT as the closest-side ellipse and passes
+                        // through the closest corner — exactly the per-axis
+                        // side distances scaled by sqrt(2). (Was: Euclidean
+                        // corner distance as rx with ry from the box aspect,
+                        // which made every corner-sized ellipse too small.)
+                        let dx = dist_left.min(dist_right);
+                        let dy = dist_top.min(dist_bottom);
+                        (dx * std::f32::consts::SQRT_2, dy * std::f32::consts::SQRT_2)
                     }
                 }
             }
@@ -1579,10 +1585,12 @@ impl Renderer {
                 match shape {
                     rustkit_css::RadialShape::Circle => (max_corner, max_corner),
                     rustkit_css::RadialShape::Ellipse => {
-                        // Match CPU implementation: rx = dist, ry = dist / aspect
-                        // This ensures ellipse has correct aspect ratio (width:height)
-                        let aspect = rect.width / rect.height.max(0.001);
-                        (max_corner, max_corner / aspect)
+                        // css-images-3 §3.3.3 — see ClosestCorner. Verified
+                        // against Chrome 148: 150x100 box, center position,
+                        // Chrome's ramp gives rx = 106.1 = 75·sqrt(2).
+                        let dx = dist_left.max(dist_right);
+                        let dy = dist_top.max(dist_bottom);
+                        (dx * std::f32::consts::SQRT_2, dy * std::f32::consts::SQRT_2)
                     }
                 }
             }
@@ -3590,8 +3598,11 @@ impl Renderer {
                 match shape {
                     rustkit_css::RadialShape::Circle => (min_dist, min_dist),
                     rustkit_css::RadialShape::Ellipse => {
-                        let aspect = rect.width / rect.height.max(1.0);
-                        (min_dist, min_dist / aspect)
+                        // css-images-3 §3.3.3: side distances scaled by
+                        // sqrt(2) — see the GPU path for the derivation.
+                        let dx = center.0.min(1.0 - center.0) * rect.width;
+                        let dy = center.1.min(1.0 - center.1) * rect.height;
+                        (dx * std::f32::consts::SQRT_2, dy * std::f32::consts::SQRT_2)
                     }
                 }
             }
@@ -3610,8 +3621,11 @@ impl Renderer {
                 match shape {
                     rustkit_css::RadialShape::Circle => (max_dist, max_dist),
                     rustkit_css::RadialShape::Ellipse => {
-                        let aspect = rect.width / rect.height.max(1.0);
-                        (max_dist, max_dist / aspect)
+                        // css-images-3 §3.3.3: side distances scaled by
+                        // sqrt(2) — see the GPU path for the derivation.
+                        let dx = center.0.max(1.0 - center.0) * rect.width;
+                        let dy = center.1.max(1.0 - center.1) * rect.height;
+                        (dx * std::f32::consts::SQRT_2, dy * std::f32::consts::SQRT_2)
                     }
                 }
             }
