@@ -1283,31 +1283,23 @@ impl LayoutBox {
             + self.dimensions.border.top
             + self.dimensions.padding.top;
 
-        // If this box has border or padding, margins don't collapse through it
-        let blocks_collapse = self.dimensions.border.top > 0.0
-            || self.dimensions.padding.top > 0.0
-            || self.dimensions.border.bottom > 0.0
-            || self.dimensions.padding.bottom > 0.0;
+        // Children always start with a fresh margin context: this box consumed
+        // the pending margin when it positioned itself above, so passing the
+        // parent context down would re-apply an already-materialized margin to
+        // the first child (double count). The cost is that parent/first-child
+        // edge collapse (CSS 2.1 §8.3.1 through-collapse) is not performed —
+        // sibling collapse within each child list is what this path provides.
+        let mut child_margin_context = MarginCollapseContext::new();
 
         // Check for flex or grid container - these have special child layout
         if self.style.display.is_flex() {
             // For flex containers, layout children normally first to get their intrinsic sizes
-            if blocks_collapse {
-                let mut child_margin_context = MarginCollapseContext::new();
-                self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
-            } else {
-                self.layout_block_children_with_collapse(margin_context, float_context);
-            }
+            self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
             // Then apply flex layout algorithm
             flex::layout_flex_container(self, &self.dimensions.clone());
         } else if self.style.display.is_grid() {
             // For grid containers, layout children normally first
-            if blocks_collapse {
-                let mut child_margin_context = MarginCollapseContext::new();
-                self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
-            } else {
-                self.layout_block_children_with_collapse(margin_context, float_context);
-            }
+            self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
             // Then apply grid layout algorithm
             grid::layout_grid_container(
                 self,
@@ -1316,13 +1308,7 @@ impl LayoutBox {
             );
         } else {
             // Normal block layout
-            if blocks_collapse {
-                let mut child_margin_context = MarginCollapseContext::new();
-                self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
-            } else {
-                // Margins can collapse through this box
-                self.layout_block_children_with_collapse(margin_context, float_context);
-            }
+            self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
         }
 
         // Height depends on children
@@ -1886,8 +1872,27 @@ impl LayoutBox {
             // Check if child is inline-block
             let is_inline_block = child.style.display.is_inline_block();
 
+            // Line boxes interrupt margin adjacency (CSS 2.1 §8.3.1): any
+            // inline-level child (inline-block, inline, text, replaced) must
+            // first materialize the pending block margin into the cursor —
+            // otherwise the preceding block's bottom margin is silently
+            // dropped — and must not collapse margins across the line box.
+            let is_inline_level = is_inline_block
+                || matches!(
+                    child.box_type,
+                    BoxType::Inline | BoxType::Text(_) | BoxType::Image { .. } | BoxType::FormControl(_)
+                );
+            if is_inline_level {
+                cursor_y += margin_context.resolve();
+                margin_context.reset();
+            }
+
             if is_inline_block {
-                // Inline-block elements don't participate in margin collapse
+                // Inline-block establishes its own BFC: its margins never
+                // collapse with siblings, so lay it out against a throwaway
+                // context instead of leaking margins into the parent's.
+                let mut ib_margin_context = MarginCollapseContext::new();
+                let margin_context = &mut ib_margin_context;
                 // Layout to get dimensions first
                 let mut cb = self.dimensions.clone();
                 cb.content.x = self.dimensions.content.x + cursor_x;
