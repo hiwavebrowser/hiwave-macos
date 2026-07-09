@@ -1198,6 +1198,87 @@ impl LayoutBox {
         self.dimensions.content.height = self.get_line_height();
     }
 
+    /// Whether a text child that does NOT fit the remaining line space
+    /// should split across line boxes (phase-5 IFC flow) rather than drop
+    /// to its own block row.
+    fn text_splits_inline(child: &LayoutBox, cursor_x: f32, text_align: TextAlign) -> bool {
+        cursor_x > 0.0
+            && matches!(child.box_type, BoxType::Text(_))
+            && matches!(text_align, TextAlign::Left | TextAlign::Justify)
+            && !matches!(
+                child.style.white_space,
+                rustkit_css::WhiteSpace::Nowrap | rustkit_css::WhiteSpace::Pre
+            )
+    }
+
+    /// Lay out a text box that STARTS MID-LINE in an inline formatting
+    /// context: the first line fills the remaining width of the current
+    /// line box (container width minus `first_line_offset`), subsequent
+    /// lines wrap at the container's full width (CSS2 §9.4.2).
+    ///
+    /// Positions the box at the top of the current line box (`line_top_y`);
+    /// line 0 carries `x_offset = first_line_offset`. Returns
+    /// `(line_count, last_line_width)` so the block child loop can continue
+    /// the last line after this run. Only called for `BoxType::Text`
+    /// children whose single-line width exceeds the remaining line space.
+    fn layout_text_in_flow(
+        &mut self,
+        containing_block: &Dimensions,
+        line_top_y: f32,
+        first_line_offset: f32,
+    ) -> (usize, f32) {
+        let BoxType::Text(ref text) = self.box_type else {
+            return (0, 0.0);
+        };
+        let text = text.clone();
+        let container_width = containing_block.content.width;
+        let first_line_width = (container_width - first_line_offset).max(0.0);
+        let font_size = match self.style.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let line_height = self.get_line_height();
+
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::from_css_value(&self.style.font_family);
+        let lines = match shaper.wrap_text_with_first_line(
+            &text,
+            &chain,
+            self.style.font_weight,
+            self.style.font_style,
+            self.style.font_stretch,
+            font_size,
+            first_line_width,
+            container_width,
+            self.style.word_break,
+        ) {
+            Ok(lines) if !lines.is_empty() => lines,
+            _ => {
+                // Shaping failed — fall back to the block path's layout.
+                self.layout_text(text, containing_block);
+                return (1, self.dimensions.content.width);
+            }
+        };
+
+        let text_lines: Vec<TextLine> = lines
+            .iter()
+            .enumerate()
+            .map(|(i, l)| TextLine {
+                text: l.text(),
+                width: l.width,
+                x_offset: if i == 0 { first_line_offset } else { 0.0 },
+            })
+            .collect();
+        let line_count = text_lines.len();
+        let last_width = text_lines.last().map(|l| l.width).unwrap_or(0.0);
+        self.text_lines = Some(text_lines);
+        self.dimensions.content.x = containing_block.content.x;
+        self.dimensions.content.y = line_top_y;
+        self.dimensions.content.width = container_width;
+        self.dimensions.content.height = line_count as f32 * line_height;
+        (line_count, last_width)
+    }
+
     /// Layout a replaced element (image).
     fn layout_image(
         &mut self,
@@ -2017,6 +2098,30 @@ impl LayoutBox {
                     cursor_x -= child_width;
                     line_width -= child_width;
                 }
+            } else if Self::text_splits_inline(child, cursor_x, text_align) {
+                // Phase 5 (IFC text splitting): a text run that does NOT fit
+                // the remaining space fills it and wraps onward at full
+                // width instead of dropping to its own block row. Left/
+                // justify only: a run spanning several line boxes cannot be
+                // shifted per-line as a single child.
+                let cb = self.dimensions.clone();
+                let line_top = self.dimensions.content.y + cursor_y;
+                let (n_lines, last_w) = child.layout_text_in_flow(&cb, line_top, cursor_x);
+                let lh = child.get_line_height();
+                if n_lines <= 1 {
+                    // Degenerate (shaping fallback): continue the line.
+                    cursor_x += last_w;
+                    line_width += last_w;
+                    line_height = line_height.max(lh);
+                } else {
+                    // Line 0 closes the current line box; middle lines are
+                    // full; the LAST line stays open for following content.
+                    cursor_y += line_height.max(lh) + (n_lines as f32 - 2.0).max(0.0) * lh;
+                    cursor_x = last_w;
+                    line_width = last_w;
+                    line_height = lh;
+                    line_start_index = Some(i);
+                }
             } else {
                 // Regular block layout
                 // First, finish any inline-block line
@@ -2233,6 +2338,23 @@ impl LayoutBox {
                 if child.float != Float::None {
                     cursor_x -= child_width;
                     line_width -= child_width;
+                }
+            } else if Self::text_splits_inline(child, cursor_x, text_align) {
+                // Phase 5 (IFC text splitting) — see layout_block_children.
+                let cb = self.dimensions.clone();
+                let line_top = self.dimensions.content.y + cursor_y;
+                let (n_lines, last_w) = child.layout_text_in_flow(&cb, line_top, cursor_x);
+                let lh = child.get_line_height();
+                if n_lines <= 1 {
+                    cursor_x += last_w;
+                    line_width += last_w;
+                    line_height = line_height.max(lh);
+                } else {
+                    cursor_y += line_height.max(lh) + (n_lines as f32 - 2.0).max(0.0) * lh;
+                    cursor_x = last_w;
+                    line_width = last_w;
+                    line_height = lh;
+                    line_start_index = Some(i);
                 }
             } else {
                 // Regular block layout with margin collapse
