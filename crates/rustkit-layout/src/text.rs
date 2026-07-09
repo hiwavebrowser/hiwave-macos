@@ -1380,6 +1380,33 @@ impl TextShaper {
         max_width: f32,
         word_break: CssWordBreak,
     ) -> Result<Vec<WrappedLine>, TextError> {
+        self.wrap_text_with_first_line(
+            text, font_chain, weight, style, stretch, size, max_width, max_width, word_break,
+        )
+    }
+
+    /// Wrap text where the FIRST line has a different available width than
+    /// the rest — the inline-formatting-context case: a run starting
+    /// mid-line fills the remaining space of the current line box, then
+    /// continues at the containing block's full width.
+    ///
+    /// If nothing fits on a narrower first line, the first line comes back
+    /// EMPTY (the run starts on the next line box) instead of overflowing at
+    /// the tail of a partially-filled line — css-text-3 §5.2 overflow only
+    /// applies when a whole line box cannot take the word.
+    #[allow(clippy::too_many_arguments)]
+    pub fn wrap_text_with_first_line(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        first_line_max_width: f32,
+        max_width: f32,
+        word_break: CssWordBreak,
+    ) -> Result<Vec<WrappedLine>, TextError> {
         if text.is_empty() {
             return Ok(vec![]);
         }
@@ -1409,6 +1436,14 @@ impl TextShaper {
                 continue;
             }
 
+            // The narrower first-line width applies only to the very first
+            // rendered line of the whole run.
+            let seg_first_max = if lines.is_empty() {
+                first_line_max_width
+            } else {
+                max_width
+            };
+
             // Now wrap this segment within max_width
             let segment_lines = self.wrap_segment(
                 segment_text,
@@ -1417,6 +1452,7 @@ impl TextShaper {
                 style,
                 stretch,
                 size,
+                seg_first_max,
                 max_width,
                 &breaker,
                 segment.start,
@@ -1428,7 +1464,16 @@ impl TextShaper {
         // Handle case where text has no mandatory breaks
         if lines.is_empty() && !text.is_empty() {
             lines = self.wrap_segment(
-                text, font_chain, weight, style, stretch, size, max_width, &breaker, 0,
+                text,
+                font_chain,
+                weight,
+                style,
+                stretch,
+                size,
+                first_line_max_width,
+                max_width,
+                &breaker,
+                0,
             )?;
         }
 
@@ -1444,6 +1489,7 @@ impl TextShaper {
         style: FontStyle,
         stretch: FontStretch,
         size: f32,
+        first_line_max_width: f32,
         max_width: f32,
         breaker: &LineBreaker,
         base_offset: usize,
@@ -1456,11 +1502,19 @@ impl TextShaper {
         let mut line_start = 0;
 
         while line_start < text.len() {
+            // The first rendered line may have a narrower budget (a run
+            // starting mid-line fills the current line box's remainder).
+            let cur_max = if lines.is_empty() {
+                first_line_max_width
+            } else {
+                max_width
+            };
+
             // Shape the remaining text to find where we need to break
             let remaining = &text[line_start..];
             let shaped = self.shape(remaining, font_chain, weight, style, stretch, size)?;
 
-            if shaped.metrics.width <= max_width {
+            if shaped.metrics.width <= cur_max {
                 // Entire remaining text fits on one line
                 let width = shaped.metrics.width;
                 lines.push(WrappedLine {
@@ -1475,10 +1529,22 @@ impl TextShaper {
             // Need to find a break point
             // Binary search for the right break point
             let break_offset = self.find_line_break(
-                remaining, font_chain, weight, style, stretch, size, max_width, breaker,
+                remaining, font_chain, weight, style, stretch, size, cur_max, breaker,
             )?;
 
             if break_offset == 0 {
+                // Nothing fits on a NARROWED first line: start the run on
+                // the next (full-width) line box instead of overflowing a
+                // partially-filled line.
+                if lines.is_empty() && first_line_max_width < max_width {
+                    lines.push(WrappedLine {
+                        runs: vec![],
+                        width: 0.0,
+                        start_offset: base_offset + line_start,
+                        end_offset: base_offset + line_start,
+                    });
+                    continue;
+                }
                 // No break opportunity fits within max_width.
                 let may_break_mid_word = breaker.allows_emergency_breaks()
                     || matches!(
