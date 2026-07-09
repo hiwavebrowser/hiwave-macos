@@ -1054,6 +1054,18 @@ impl Engine {
         false
     }
 
+    /// Whether a box participates in inline flow (shares line boxes with
+    /// adjacent inline-level siblings). Mirrors the layout-side flows_inline
+    /// gate in rustkit-layout's block child loop.
+    fn is_inline_level_box(b: &LayoutBox) -> bool {
+        matches!(
+            b.box_type,
+            BoxType::Text(_) | BoxType::Image { .. } | BoxType::FormControl(_)
+        ) || (matches!(b.box_type, BoxType::Inline)
+            && b.style.display == rustkit_css::Display::Inline)
+            || b.style.display.is_atomic_inline()
+    }
+
     /// Check if a layout box has content children (text, images, form controls).
     /// This is used to determine if an inline wrapper should be included.
     fn has_content_children(layout_box: &LayoutBox) -> bool {
@@ -1559,13 +1571,72 @@ impl Engine {
                     layout_box.children.push(after_box);
                 }
 
+                // css-text §4.2 phase 2: collapsed spaces at segment
+                // boundaries do not render. A text child's leading space is
+                // stripped unless the previous sibling is inline-level; its
+                // trailing space unless the next sibling is inline-level.
+                // Text boxes reduced to nothing (inter-block whitespace)
+                // are removed entirely.
+                let n = layout_box.children.len();
+                for i in 0..n {
+                    let prev_inline =
+                        i > 0 && Self::is_inline_level_box(&layout_box.children[i - 1]);
+                    let next_inline =
+                        i + 1 < n && Self::is_inline_level_box(&layout_box.children[i + 1]);
+                    if let BoxType::Text(ref mut t) = layout_box.children[i].box_type {
+                        if !prev_inline && t.starts_with(' ') {
+                            *t = t.trim_start().to_string();
+                        }
+                        if !next_inline && t.ends_with(' ') {
+                            *t = t.trim_end().to_string();
+                        }
+                    }
+                }
+                layout_box
+                    .children
+                    .retain(|c| !matches!(&c.box_type, BoxType::Text(t) if t.is_empty()));
+
                 layout_box
             }
             NodeType::Text(text) => {
-                // Create text box for non-empty text
-                let trimmed = text.trim();
-                if trimmed.is_empty() {
-                    // Skip whitespace-only text - return an inline box that won't be included
+                // css-text §4.1: under collapsible white-space, runs of
+                // whitespace collapse to one space and EDGE spaces are kept
+                // (they separate this run from inline siblings); a
+                // whitespace-only node becomes a single collapsed space.
+                // The child-assembly post-pass strips spaces that land at
+                // segment boundaries (line starts/ends, block siblings) —
+                // it has the sibling context this node-level code lacks.
+                // Pre-family white-space keeps the raw text.
+                let ws = parent_style.map(|p| p.white_space).unwrap_or_default();
+                let collapsible = !matches!(
+                    ws,
+                    rustkit_css::WhiteSpace::Pre
+                        | rustkit_css::WhiteSpace::PreWrap
+                        | rustkit_css::WhiteSpace::PreLine
+                        | rustkit_css::WhiteSpace::BreakSpaces
+                );
+                let content = if collapsible {
+                    let mut s = String::new();
+                    if text.starts_with(char::is_whitespace) {
+                        s.push(' ');
+                    }
+                    let mut first = true;
+                    for w in text.split_whitespace() {
+                        if !first {
+                            s.push(' ');
+                        }
+                        s.push_str(w);
+                        first = false;
+                    }
+                    if !first && text.ends_with(char::is_whitespace) {
+                        s.push(' ');
+                    }
+                    s // whitespace-only input -> " " (leading-ws branch only)
+                } else {
+                    text.clone()
+                };
+                if content.is_empty() {
+                    // Nothing at all (empty text node)
                     LayoutBox::new(BoxType::Inline, ComputedStyle::new())
                 } else {
                     // Inherit font properties from parent style
@@ -1595,7 +1666,7 @@ impl Engine {
                         s.color = rustkit_css::Color::BLACK;
                         s
                     };
-                    LayoutBox::new(BoxType::Text(trimmed.to_string()), style)
+                    LayoutBox::new(BoxType::Text(content), style)
                 }
             }
             NodeType::Comment(_) => {
