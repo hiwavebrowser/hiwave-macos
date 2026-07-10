@@ -1159,6 +1159,26 @@ impl TextShaper {
         weight: u16,
         italic: bool,
     ) -> Result<core_text::font::CTFont, TextError> {
+        // The macOS system font has no by-name trait variants
+        // (".AppleSystemUIFont-Bold" does not exist), so bold system-ui text
+        // silently shaped with the REGULAR face — every bold heading
+        // measured ~6% narrower than Chrome and re-centered off Chrome's x
+        // (gradient-no-radius h1: ours 493.5px vs Chrome 529). The UI-font
+        // API returns the real SF face with optical sizing, matching
+        // Chrome's system-ui resolution.
+        if family == ".AppleSystemUIFont" && !italic {
+            let ui_type = if weight >= 600 {
+                ct_font::kCTFontEmphasizedSystemFontType
+            } else {
+                ct_font::kCTFontSystemFontType
+            };
+            return Ok(ct_font::new_ui_font_for_language(
+                ui_type,
+                size as f64,
+                None,
+            ));
+        }
+
         // Try to find a font variant with the specified traits
         // First try appending -Bold, -Italic, etc. to the family name
         let mut variants_to_try = vec![family.to_string()];

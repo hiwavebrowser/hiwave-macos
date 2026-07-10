@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * { margin: 0; padding: 0; }
+  body { background: #ffffff; }
+  .row { height: 40px; width: 800px; background: #ff0000; }
+  /* Each rule paints its target green. Red = did not match. */
+  .trigger + .adjacent { background: #00ff00; }
+  .trigger-general ~ .following { background: #00ff00; }
+  .list :first-child { background: #00ff00; }
+  .list2 :last-child { background: #00ff00; }
+  .list3 :nth-child(2) { background: #00ff00; }
+  input[type="text"] { background: #00ff00; }
+  [data-x^="pre"] { background: #00ff00; }
+  [data-x$="fix"] { background: #00ff00; }
+  [data-x*="mid"] { background: #00ff00; }
+  .btn:not(.disabled) { background: #00ff00; }
+  div.box.primary { background: #00ff00; }
+  .parent > .direct { background: #00ff00; }
+  /* Negative controls: these must stay red. */
+  .list4 :nth-child(3) { background: #0000ff; }
+  .neg-trigger + .never { background: #0000ff; }
+</style>
+</head>
+<body>
+  <!-- y=0: adjacent sibling -->
+  <div class="trigger row"></div>
+  <div class="adjacent row"></div>
+  <!-- y=80: general sibling -->
+  <div class="trigger-general row"></div>
+  <div class="spacer row"></div>
+  <div class="following row"></div>
+  <!-- y=200 first-child -->
+  <div class="list"><div class="row"></div><div class="row"></div></div>
+  <!-- y=280 last-child -->
+  <div class="list2"><div class="row"></div><div class="row"></div></div>
+  <!-- y=360 nth-child(2) -->
+  <div class="list3"><div class="row"></div><div class="row"></div></div>
+  <!-- y=440 attribute selectors -->
+  <div data-x="prefixed" class="row"></div>
+  <div data-x="suffix" class="row"></div>
+  <div data-x="a-mid-b" class="row"></div>
+  <!-- y=560 :not -->
+  <div class="btn row"></div>
+  <div class="btn disabled row"></div>
+  <!-- y=640 chained + child -->
+  <div class="box primary row"></div>
+  <div class="parent"><div class="direct row"></div></div>
+  <!-- y=720 negative: nth-child(3) of 2, + with no prev -->
+  <div class="list4"><div class="row"></div><div class="never row"></div></div>
+</body>
+</html>
