@@ -1748,9 +1748,22 @@ impl LayoutBox {
                 self.apply_position_offsets_absolute(containing_block);
             }
             Position::Fixed => {
-                // Position relative to viewport (root containing block)
-                // In a full implementation, this would use the viewport dimensions
-                self.apply_position_offsets_absolute(containing_block);
+                // CSS2 §10.1: a fixed element's containing block is the
+                // VIEWPORT, not the block that laid it out. Resolving
+                // bottom:0 against the root's flow height painted
+                // bottom-anchored elements mid-page (viewport-probe: y=280
+                // in a 600px viewport whose content ended at 320). Falls
+                // back to the passed block only when no viewport has been
+                // set (bare unit trees).
+                if self.viewport.0 > 0.0 && self.viewport.1 > 0.0 {
+                    let viewport_cb = Dimensions {
+                        content: Rect::new(0.0, 0.0, self.viewport.0, self.viewport.1),
+                        ..Default::default()
+                    };
+                    self.apply_position_offsets_absolute(&viewport_cb);
+                } else {
+                    self.apply_position_offsets_absolute(containing_block);
+                }
             }
             Position::Sticky => {
                 // Sticky positioning: element stays in normal flow but can "stick"
@@ -4642,6 +4655,41 @@ mod tests {
         assert_eq!(r.bottom(), 70.0);
         assert!(r.contains(50.0, 30.0));
         assert!(!r.contains(0.0, 0.0));
+    }
+
+    #[test]
+    fn test_fixed_positions_against_viewport_not_flow() {
+        // CSS2 §10.1 regression (R1 / viewport-probe, 2026-07-10): a fixed
+        // element with right:0; bottom:0 must anchor to the VIEWPORT, not
+        // the block that laid it out — bottom used to resolve against the
+        // root's flow height, painting a 600px-viewport footer at y=280.
+        let mut style = ComputedStyle::new();
+        style.width = Length::Px(40.0);
+        style.height = Length::Px(40.0);
+        let mut fixed = LayoutBox::new(BoxType::Block, style);
+        fixed.position = Position::Fixed;
+        fixed.offsets.right = Some(0.0);
+        fixed.offsets.bottom = Some(0.0);
+
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.children.push(fixed);
+        root.set_viewport(800.0, 600.0);
+
+        // Lay out against a "flow" containing block much shorter than the
+        // viewport — the old bug anchored bottom against this.
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 320.0),
+            ..Default::default()
+        };
+        root.layout(&containing);
+
+        let f = &root.children[0].dimensions.content;
+        assert!(
+            (f.x - 760.0).abs() < 0.5 && (f.y - 560.0).abs() < 0.5,
+            "fixed right:0;bottom:0 must land at (760,560) in an 800x600 viewport, got ({}, {})",
+            f.x,
+            f.y
+        );
     }
 
     #[test]
