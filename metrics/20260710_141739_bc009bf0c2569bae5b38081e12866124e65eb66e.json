@@ -1,0 +1,223 @@
+{
+  "timestamp": "2026-07-10T14:17:35.911903",
+  "commit": "bc009bf0c2569bae5b38081e12866124e65eb66e",
+  "branch": "master",
+  "total": 26,
+  "passed": 21,
+  "failed": 5,
+  "average_diff": 11.376145525474687,
+  "worst_case": {
+    "name": "sticky-scroll",
+    "diff": 48.09560546875
+  },
+  "tests": [
+    {
+      "name": "sticky-scroll",
+      "diff": 48.09560546875,
+      "threshold": 25,
+      "passed": false,
+      "type": "websuite",
+      "error": null
+    },
+    {
+      "name": "css-selectors",
+      "diff": 26.674479166666664,
+      "threshold": 15,
+      "passed": false,
+      "type": "websuite",
+      "error": null
+    },
+    {
+      "name": "about",
+      "diff": 24.81875,
+      "threshold": 15,
+      "passed": false,
+      "type": "builtins",
+      "error": null
+    },
+    {
+      "name": "image-gallery",
+      "diff": 21.54482421875,
+      "threshold": 10,
+      "passed": false,
+      "type": "websuite",
+      "error": null
+    },
+    {
+      "name": "settings",
+      "diff": 20.138168334960938,
+      "threshold": 15,
+      "passed": false,
+      "type": "builtins",
+      "error": null
+    },
+    {
+      "name": "gradient-no-radius",
+      "diff": 14.577083333333333,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null
+    },
+    {
+      "name": "gradient-backgrounds",
+      "diff": 14.451458333333333,
+      "threshold": 15,
+      "passed": true,
+      "type": "websuite",
+      "error": null
+    },
+    {
+      "name": "backgrounds",
+      "diff": 12.979666666666667,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null
+    },
+    {
+      "name": "gradient-radius-only",
+      "diff": 11.40375,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null
+    },
+    {
+      "name": "article-typography",
+      "diff": 11.27822265625,
+      "threshold": 20,
+      "passed": true,
+      "type": "websuite",
+      "error": null
+    },
+    {
+      "name": "flex-positioning",
+      "diff": 10.483875,
+      "threshold": 15,
+      "passed": true,
+      "type": "websuite",
+      "error": null
+    },
+    {
+      "name": "form-controls",
+      "diff": 10.242708333333333,
+      "threshold": 12,
+      "passed": true,
+      "type": "micro",
+      "error": null
+    },
+    {
+      "name": "images-intrinsic",
+      "diff": 9.548839285714287,
+      "threshold": 10,
+      "passed": true,
+      "type": "micro",
+      "error": null
+    },
+    {
+      "name": "card-grid",
+      "diff": 8.89228515625,
+      "threshold": 15,
+      "passed": true,
+      "type": "websuite",
+      "error": null
+    },
+    {
+      "name": "gpu-gradient-regression",
+      "diff": 8.25875,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null
+    },
+    {
+      "name": "specificity",
+      "diff": 6.160416666666666,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null
+    },
+    {
+      "name": "combinators",
+      "diff": 5.972343749999999,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null
+    },
+    {
+      "name": "rounded-corners",
+      "diff": 5.723444444444445,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null
+    },
+    {
+      "name": "form-elements",
+      "diff": 5.573333333333333,
+      "threshold": 12,
+      "passed": true,
+      "type": "websuite",
+      "error": null
+    },
+    {
+      "name": "new_tab",
+      "diff": 5.1015625,
+      "threshold": 15,
+      "passed": true,
+      "type": "builtins",
+      "error": null
+    },
+    {
+      "name": "gradients",
+      "diff": 3.5755555555555554,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null
+    },
+    {
+      "name": "pseudo-classes",
+      "diff": 3.4128125000000002,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null
+    },
+    {
+      "name": "shelf",
+      "diff": 2.930338541666667,
+      "threshold": 15,
+      "passed": true,
+      "type": "builtins",
+      "error": null
+    },
+    {
+      "name": "chrome_rustkit",
+      "diff": 2.51796875,
+      "threshold": 15,
+      "passed": true,
+      "type": "builtins",
+      "error": null
+    },
+    {
+      "name": "bg-solid",
+      "diff": 1.4235416666666667,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null
+    },
+    {
+      "name": "bg-pure",
+      "diff": 0.0,
+      "threshold": 15,
+      "passed": true,
+      "type": "micro",
+      "error": null
+    }
+  ]
+}
