@@ -34,42 +34,13 @@ REPO_ROOT = Path(__file__).parent.parent
 BASELINES_DIR = REPO_ROOT / "baselines" / os.environ.get("PARITY_BASELINE_SET", "chrome-148")
 OUTPUT_DIR = REPO_ROOT / "parity-baseline"
 
-# Case definitions
-BUILTINS = [
-    ("new_tab", "crates/hiwave-app/src/ui/new_tab.html", 1280, 800),
-    ("about", "crates/hiwave-app/src/ui/about.html", 800, 600),
-    ("settings", "crates/hiwave-app/src/ui/settings.html", 1024, 768),
-    ("chrome_rustkit", "crates/hiwave-app/src/ui/chrome_rustkit.html", 1280, 100),
-    ("shelf", "crates/hiwave-app/src/ui/shelf.html", 1280, 120),
-]
-
-WEBSUITE = [
-    ("article-typography", "websuite/cases/article-typography/index.html", 1280, 800),
-    ("card-grid", "websuite/cases/card-grid/index.html", 1280, 800),
-    ("css-selectors", "websuite/cases/css-selectors/index.html", 800, 1200),
-    ("flex-positioning", "websuite/cases/flex-positioning/index.html", 800, 1000),
-    ("form-elements", "websuite/cases/form-elements/index.html", 800, 600),
-    ("gradient-backgrounds", "websuite/cases/gradient-backgrounds/index.html", 800, 600),
-    ("image-gallery", "websuite/cases/image-gallery/index.html", 1280, 800),
-    ("sticky-scroll", "websuite/cases/sticky-scroll/index.html", 1280, 800),
-]
-
-# Micro-tests for specific CSS features
-MICRO_TESTS = [
-    ("backgrounds", "websuite/micro/backgrounds/index.html", 900, 1000),
-    ("bg-solid", "websuite/micro/bg-solid/index.html", 800, 600),
-    ("bg-pure", "websuite/micro/bg-pure/index.html", 800, 600),
-    ("combinators", "websuite/micro/combinators/index.html", 800, 800),
-    ("form-controls", "websuite/micro/form-controls/index.html", 800, 1200),
-    ("gradients", "websuite/micro/gradients/index.html", 900, 1000),
-    ("gradient-no-radius", "websuite/micro/gradient-no-radius/index.html", 800, 600),
-    ("gradient-radius-only", "websuite/micro/gradient-radius-only/index.html", 800, 600),
-    ("gpu-gradient-regression", "websuite/micro/gpu-gradient-regression/index.html", 800, 1200),
-    ("images-intrinsic", "websuite/micro/images-intrinsic/index.html", 800, 1400),
-    ("pseudo-classes", "websuite/micro/pseudo-classes/index.html", 800, 800),
-    ("rounded-corners", "websuite/micro/rounded-corners/index.html", 900, 1000),
-    ("specificity", "websuite/micro/specificity/index.html", 800, 600),
-]
+# Case definitions — SINGLE SOURCE OF TRUTH: cases/registry.json, loaded via
+# parity_lib. This file used to carry its own copy of the table; by the time
+# the registry was cut the two copies had diverged by two cases
+# (gradient-no-radius / gradient-radius-only existed only here). Edit the
+# registry, not a table.
+sys.path.insert(0, str(Path(__file__).parent))
+from parity_lib import BUILTINS, WEBSUITE, MICRO_TESTS  # noqa: E402
 
 # Thresholds by component type
 THRESHOLDS = {

@@ -30,39 +30,27 @@ REPO_ROOT = Path(__file__).parent.parent
 BASELINES_DIR = REPO_ROOT / "baselines" / os.environ.get("PARITY_BASELINE_SET", "chrome-148")
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "parity-results"
 
-# Case definitions
-BUILTINS = [
-    ("new_tab", "crates/hiwave-app/src/ui/new_tab.html", 1280, 800),
-    ("about", "crates/hiwave-app/src/ui/about.html", 800, 600),
-    ("settings", "crates/hiwave-app/src/ui/settings.html", 1024, 768),
-    ("chrome_rustkit", "crates/hiwave-app/src/ui/chrome_rustkit.html", 1280, 100),
-    ("shelf", "crates/hiwave-app/src/ui/shelf.html", 1280, 120),
-]
+# Case definitions — SINGLE SOURCE OF TRUTH: cases/registry.json.
+# (R0, VIEWPORT_RESOLUTION_PLAN P0.2: parity_lib and parity_test carried
+# separately-maintained copies of this table; they had already diverged by
+# two cases when the registry was cut. Do not add cases here — edit the
+# registry.)
+CASE_REGISTRY_PATH = REPO_ROOT / "cases" / "registry.json"
+with open(CASE_REGISTRY_PATH) as _f:
+    CASE_REGISTRY = json.load(_f)
 
-WEBSUITE = [
-    ("article-typography", "websuite/cases/article-typography/index.html", 1280, 800),
-    ("card-grid", "websuite/cases/card-grid/index.html", 1280, 800),
-    ("css-selectors", "websuite/cases/css-selectors/index.html", 800, 1200),
-    ("flex-positioning", "websuite/cases/flex-positioning/index.html", 800, 1000),
-    ("form-elements", "websuite/cases/form-elements/index.html", 800, 600),
-    ("gradient-backgrounds", "websuite/cases/gradient-backgrounds/index.html", 800, 600),
-    ("image-gallery", "websuite/cases/image-gallery/index.html", 1280, 800),
-    ("sticky-scroll", "websuite/cases/sticky-scroll/index.html", 1280, 800),
-]
 
-MICRO_TESTS = [
-    ("backgrounds", "websuite/micro/backgrounds/index.html", 900, 1000),
-    ("bg-solid", "websuite/micro/bg-solid/index.html", 800, 600),
-    ("bg-pure", "websuite/micro/bg-pure/index.html", 800, 600),
-    ("combinators", "websuite/micro/combinators/index.html", 800, 800),
-    ("form-controls", "websuite/micro/form-controls/index.html", 800, 1200),
-    ("gradients", "websuite/micro/gradients/index.html", 900, 1000),
-    ("gpu-gradient-regression", "websuite/micro/gpu-gradient-regression/index.html", 800, 1200),
-    ("images-intrinsic", "websuite/micro/images-intrinsic/index.html", 800, 1400),
-    ("pseudo-classes", "websuite/micro/pseudo-classes/index.html", 800, 800),
-    ("rounded-corners", "websuite/micro/rounded-corners/index.html", 900, 1000),
-    ("specificity", "websuite/micro/specificity/index.html", 800, 600),
-]
+def _cases_for_scope(scope: str) -> List[Tuple[str, str, int, int]]:
+    return [
+        (cid, c["html"], c["width"], c["height"])
+        for cid, c in CASE_REGISTRY["cases"].items()
+        if c["scope"] == scope
+    ]
+
+
+BUILTINS = _cases_for_scope("builtins")
+WEBSUITE = _cases_for_scope("websuite")
+MICRO_TESTS = _cases_for_scope("micro")
 
 # Standard viewports for multi-viewport testing
 VIEWPORTS = [

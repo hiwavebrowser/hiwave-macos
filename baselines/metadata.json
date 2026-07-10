@@ -1,45 +1,8 @@
 {
-  "chrome_version": "120.0.0.0",
-  "playwright_version": "1.40.0",
-  "os": "macOS",
-  "os_version": "14.x",
-  "dpi": 1,
-  "created_at": null,
-  "last_updated": "2026-07-09T19:00:02.217417",
-  "git_commit": "647c991a5490",
-  "environment": {
-    "font_rendering": "default",
-    "color_profile": "sRGB",
-    "viewport_scale": 1.0
-  },
-  "cases": {
-    "builtins": [
-      "new_tab",
-      "about",
-      "settings",
-      "chrome_rustkit",
-      "shelf"
-    ],
-    "websuite_top5": [
-      "article-typography",
-      "card-grid",
-      "form-elements",
-      "gradient-backgrounds",
-      "image-gallery"
-    ],
-    "websuite_other": [
-      "css-selectors",
-      "flex-positioning",
-      "sticky-scroll"
-    ]
-  },
-  "thresholds": {
-    "layout_structure": 5,
-    "solid_backgrounds": 8,
-    "images_replaced": 10,
-    "gradients_effects": 15,
-    "form_controls": 12,
-    "text_rendering": 20,
-    "sticky_scroll": 25
-  }
+  "note": "Pointer only. The ACTIVE pin lives in cases/registry.json (pin section) and each baseline set carries its own metadata.json (e.g. baselines/chrome-148/metadata.json). This file previously carried stale chrome-120/dpi values that predated the campaign re-pin and could misdirect tooling (measurement lie #8 class).",
+  "active_set": "chrome-148",
+  "see": [
+    "cases/registry.json",
+    "baselines/chrome-148/metadata.json"
+  ]
 }

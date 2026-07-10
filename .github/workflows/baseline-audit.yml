@@ -1,0 +1,26 @@
+name: Baseline Audit
+
+# Instrument integrity (R0): every baseline PNG must match the case
+# registry's declared size exactly, and the baseline set's metadata must
+# match the registry pin. Catches wrong-dimension baselines at PR time —
+# the compare hard-fails them at runtime, this fails them before merge.
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Audit baselines against case registry
+        run: python3 scripts/audit_baselines.py

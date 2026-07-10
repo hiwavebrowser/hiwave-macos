@@ -139,19 +139,33 @@ export async function comparePixels(chromePath, rustkitPath, diffPath, options =
     rustkit = await loadPng(rustkitPath);
   }
   
-  // Ensure dimensions match (resize if needed)
+  // Dimension mismatch is an INSTRUMENT FAILURE, never a soft crop
+  // (measurement lie #8 class). Score 100 unless RK_ALLOW_CROP=1.
   if (chrome.width !== rustkit.width || chrome.height !== rustkit.height) {
-    // For now, just error - could implement resize later
-    console.warn(`Dimension mismatch: Chrome ${chrome.width}x${chrome.height}, RustKit ${rustkit.width}x${rustkit.height}`);
-    
+    const msg = `Chrome ${chrome.width}x${chrome.height} vs RustKit ${rustkit.width}x${rustkit.height}`;
+    if (process.env.RK_ALLOW_CROP !== '1') {
+      console.error(
+        `INSTRUMENT FAILURE — dimension mismatch: ${msg} (score 100, not cropped; RK_ALLOW_CROP=1 to debug)`
+      );
+      return {
+        diffPixels: chrome.width * chrome.height,
+        totalPixels: chrome.width * chrome.height,
+        diffPercent: 100,
+        width: chrome.width,
+        height: chrome.height,
+        instrumentFailure: `dimension_mismatch: ${msg}`,
+      };
+    }
+    console.warn(`Dimension mismatch (RK_ALLOW_CROP=1): ${msg}`);
+
     // Use smaller dimensions
     const width = Math.min(chrome.width, rustkit.width);
     const height = Math.min(chrome.height, rustkit.height);
-    
+
     // Crop both to same size (top-left corner)
     const cropChrome = cropImage(chrome.data, chrome.width, chrome.height, width, height);
     const cropRustkit = cropImage(rustkit.data, rustkit.width, rustkit.height, width, height);
-    
+
     chrome.data = cropChrome;
     chrome.width = width;
     chrome.height = height;
