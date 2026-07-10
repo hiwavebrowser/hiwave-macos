@@ -1448,31 +1448,21 @@ impl Engine {
                     );
                 }
 
-                // Determine box type based on tag for non-replaced elements
-                let is_inline = matches!(
-                    tag_lower.as_str(),
-                    "a" | "span"
-                        | "strong"
-                        | "b"
-                        | "em"
-                        | "i"
-                        | "u"
-                        | "code"
-                        | "small"
-                        | "big"
-                        | "sub"
-                        | "sup"
-                        | "abbr"
-                        | "cite"
-                        | "q"
-                        | "mark"
-                        | "label"
-                );
-
-                let box_type = if is_inline {
-                    BoxType::Inline
-                } else {
-                    BoxType::Block
+                // Box type follows the COMPUTED display, not the tag:
+                // `strong { display:block }` makes a block box (full width,
+                // vertical margins honored) and a styled-inline div flows on
+                // line boxes. The old tag-list approach ignored authored
+                // display entirely — settings' block-styled <strong> labels
+                // rendered as shrink-wrapped inlines, dropping their margins
+                // (one term of the page-wide vertical drift). UA defaults
+                // have already stamped display for every known tag by this
+                // point, so style is authoritative here.
+                let box_type = match style.display {
+                    rustkit_css::Display::Inline => BoxType::Inline,
+                    // Atomic inlines (inline-block/-flex/-grid) lay out their
+                    // CONTENTS as blocks; inline-level placement is handled by
+                    // the block child loop via display, not box type.
+                    _ => BoxType::Block,
                 };
 
                 let mut layout_box = LayoutBox::new(box_type, style.clone());
