@@ -3346,14 +3346,14 @@ impl BackgroundRepeat {
 
 /// Parse a CSS length value to pixels
 fn parse_length(value: &str) -> Option<f32> {
-    let value = value.trim();
-    if value.ends_with("px") {
-        value.trim_end_matches("px").parse().ok()
-    } else if value.ends_with('%') {
-        // Percentages would need container size - return None for now
-        None
-    } else {
-        value.parse().ok()
+    // Delegates to rustkit-css (duplication audit P0: this was a third,
+    // px-only parse_length). Only px-resolvable values map to f32 here —
+    // percent/em stay None exactly as before, but units and unitless zero
+    // now parse consistently with the rest of the engine.
+    match rustkit_css::parse_length(value)? {
+        rustkit_css::Length::Px(v) => Some(v),
+        rustkit_css::Length::Zero => Some(0.0),
+        _ => None,
     }
 }
 
