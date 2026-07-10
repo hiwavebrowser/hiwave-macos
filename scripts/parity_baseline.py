@@ -50,25 +50,9 @@ WEBSUITE_WEIGHT = 0.40
 TIER_A_THRESHOLD = 25  # Start with 25% diff threshold
 
 # Built-in pages (60% weight)
-BUILTINS = [
-    ("new_tab", "crates/hiwave-app/src/ui/new_tab.html", 1280, 800),
-    ("about", "crates/hiwave-app/src/ui/about.html", 800, 600),
-    ("settings", "crates/hiwave-app/src/ui/settings.html", 1024, 768),
-    ("chrome_rustkit", "crates/hiwave-app/src/ui/chrome_rustkit.html", 1280, 100),
-    ("shelf", "crates/hiwave-app/src/ui/shelf.html", 1280, 120),
-]
-
-# Websuite cases (40% weight)
-WEBSUITE = [
-    ("article-typography", "websuite/cases/article-typography/index.html", 1280, 800),
-    ("card-grid", "websuite/cases/card-grid/index.html", 1280, 800),
-    ("css-selectors", "websuite/cases/css-selectors/index.html", 800, 1200),
-    ("flex-positioning", "websuite/cases/flex-positioning/index.html", 800, 1000),
-    ("form-elements", "websuite/cases/form-elements/index.html", 800, 600),
-    ("gradient-backgrounds", "websuite/cases/gradient-backgrounds/index.html", 800, 600),
-    ("image-gallery", "websuite/cases/image-gallery/index.html", 1280, 800),
-    ("sticky-scroll", "websuite/cases/sticky-scroll/index.html", 1280, 800),
-]
+# Case tables come from the single source of truth: cases/registry.json
+# (via parity_lib). This file used to carry its own diverging copy.
+from parity_lib import BUILTINS, WEBSUITE, MICRO_TESTS  # noqa: F401,E402
 
 
 def run_rustkit_capture(

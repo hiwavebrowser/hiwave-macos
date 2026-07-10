@@ -1,0 +1,167 @@
+{
+  "pin": {
+    "baseline_set": "chrome-148",
+    "chrome_version": "148.0.7778.216",
+    "dpr": 1
+  },
+  "cases": {
+    "new_tab": {
+      "html": "crates/hiwave-app/src/ui/new_tab.html",
+      "width": 1280,
+      "height": 800,
+      "scope": "builtins"
+    },
+    "about": {
+      "html": "crates/hiwave-app/src/ui/about.html",
+      "width": 800,
+      "height": 600,
+      "scope": "builtins"
+    },
+    "settings": {
+      "html": "crates/hiwave-app/src/ui/settings.html",
+      "width": 1024,
+      "height": 768,
+      "scope": "builtins"
+    },
+    "chrome_rustkit": {
+      "html": "crates/hiwave-app/src/ui/chrome_rustkit.html",
+      "width": 1280,
+      "height": 100,
+      "scope": "builtins",
+      "role": "chrome_strip"
+    },
+    "shelf": {
+      "html": "crates/hiwave-app/src/ui/shelf.html",
+      "width": 1280,
+      "height": 120,
+      "scope": "builtins",
+      "role": "chrome_strip"
+    },
+    "article-typography": {
+      "html": "websuite/cases/article-typography/index.html",
+      "width": 1280,
+      "height": 800,
+      "scope": "websuite"
+    },
+    "card-grid": {
+      "html": "websuite/cases/card-grid/index.html",
+      "width": 1280,
+      "height": 800,
+      "scope": "websuite"
+    },
+    "css-selectors": {
+      "html": "websuite/cases/css-selectors/index.html",
+      "width": 800,
+      "height": 1200,
+      "scope": "websuite"
+    },
+    "flex-positioning": {
+      "html": "websuite/cases/flex-positioning/index.html",
+      "width": 800,
+      "height": 1000,
+      "scope": "websuite"
+    },
+    "form-elements": {
+      "html": "websuite/cases/form-elements/index.html",
+      "width": 800,
+      "height": 600,
+      "scope": "websuite"
+    },
+    "gradient-backgrounds": {
+      "html": "websuite/cases/gradient-backgrounds/index.html",
+      "width": 800,
+      "height": 600,
+      "scope": "websuite"
+    },
+    "image-gallery": {
+      "html": "websuite/cases/image-gallery/index.html",
+      "width": 1280,
+      "height": 800,
+      "scope": "websuite"
+    },
+    "sticky-scroll": {
+      "html": "websuite/cases/sticky-scroll/index.html",
+      "width": 1280,
+      "height": 800,
+      "scope": "websuite"
+    },
+    "backgrounds": {
+      "html": "websuite/micro/backgrounds/index.html",
+      "width": 900,
+      "height": 1000,
+      "scope": "micro"
+    },
+    "bg-solid": {
+      "html": "websuite/micro/bg-solid/index.html",
+      "width": 800,
+      "height": 600,
+      "scope": "micro"
+    },
+    "bg-pure": {
+      "html": "websuite/micro/bg-pure/index.html",
+      "width": 800,
+      "height": 600,
+      "scope": "micro"
+    },
+    "combinators": {
+      "html": "websuite/micro/combinators/index.html",
+      "width": 800,
+      "height": 800,
+      "scope": "micro"
+    },
+    "form-controls": {
+      "html": "websuite/micro/form-controls/index.html",
+      "width": 800,
+      "height": 1200,
+      "scope": "micro"
+    },
+    "gradients": {
+      "html": "websuite/micro/gradients/index.html",
+      "width": 900,
+      "height": 1000,
+      "scope": "micro"
+    },
+    "gradient-no-radius": {
+      "html": "websuite/micro/gradient-no-radius/index.html",
+      "width": 800,
+      "height": 600,
+      "scope": "micro"
+    },
+    "gradient-radius-only": {
+      "html": "websuite/micro/gradient-radius-only/index.html",
+      "width": 800,
+      "height": 600,
+      "scope": "micro"
+    },
+    "gpu-gradient-regression": {
+      "html": "websuite/micro/gpu-gradient-regression/index.html",
+      "width": 800,
+      "height": 1200,
+      "scope": "micro"
+    },
+    "images-intrinsic": {
+      "html": "websuite/micro/images-intrinsic/index.html",
+      "width": 800,
+      "height": 1400,
+      "scope": "micro"
+    },
+    "pseudo-classes": {
+      "html": "websuite/micro/pseudo-classes/index.html",
+      "width": 800,
+      "height": 800,
+      "scope": "micro"
+    },
+    "rounded-corners": {
+      "html": "websuite/micro/rounded-corners/index.html",
+      "width": 900,
+      "height": 1000,
+      "scope": "micro"
+    },
+    "specificity": {
+      "html": "websuite/micro/specificity/index.html",
+      "width": 800,
+      "height": 600,
+      "scope": "micro"
+    }
+  }
+}
