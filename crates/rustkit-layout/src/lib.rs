@@ -1445,6 +1445,18 @@ impl LayoutBox {
     /// (the fixture-visible symptom: every .container ~6px short, compounding
     /// down the page). Computed from the CONTAINER's font/line-height, since
     /// the strut belongs to the line box, not the image.
+    /// True when this inline-level box's baseline is its bottom margin edge
+    /// (CSS2 §10.8.1): replaced elements (images), and atomic inlines with no
+    /// in-flow line boxes. The line box then extends below the box by the
+    /// strut's descent + half-leading; boxes with in-flow content carry their
+    /// own below-baseline part inside their margin height instead.
+    fn baseline_is_bottom_edge(&self) -> bool {
+        if matches!(self.box_type, BoxType::Image { .. }) {
+            return true;
+        }
+        self.style.display.is_atomic_inline() && self.children.is_empty()
+    }
+
     fn inline_strut_descent(&self) -> f32 {
         let font_size = match self.style.font_size {
             Length::Px(px) => px,
@@ -2008,6 +2020,10 @@ impl LayoutBox {
         let mut cursor_y = 0.0;
         let mut cursor_x = 0.0;
         let mut line_height = 0.0_f32;
+        // Extent of the current line BELOW the baseline contributed by boxes
+        // whose bottom edge IS their baseline (empty atomic inlines, images):
+        // the strut's descent extends the line box under them.
+        let mut line_below_baseline = 0.0_f32;
         let container_width = self.dimensions.content.width;
         let text_align = self.style.text_align;
         let strut_descent = self.inline_strut_descent();
@@ -2065,9 +2081,10 @@ impl LayoutBox {
                     }
 
                     // Wrap to next line
-                    cursor_y += line_height;
+                    cursor_y += line_height.max(line_below_baseline);
                     cursor_x = 0.0;
                     line_height = 0.0;
+                    line_below_baseline = 0.0;
                     line_start_index = Some(i);
                     line_width = 0.0;
 
@@ -2082,16 +2099,30 @@ impl LayoutBox {
                     line_start_index = Some(i);
                 }
 
-                // Position the child
-                child.dimensions.content.x =
-                    self.dimensions.content.x + cursor_x + child.dimensions.margin.left;
-                child.dimensions.content.y =
-                    self.dimensions.content.y + cursor_y + child.dimensions.margin.top;
+                // Position the child. The cursor addresses the MARGIN box;
+                // the content rect sits margin+border+padding inside it
+                // (dropping border/padding here shifted every decorated
+                // inline-block up-left by border+padding).
+                child.dimensions.content.x = self.dimensions.content.x
+                    + cursor_x
+                    + child.dimensions.margin.left
+                    + child.dimensions.border.left
+                    + child.dimensions.padding.left;
+                child.dimensions.content.y = self.dimensions.content.y
+                    + cursor_y
+                    + child.dimensions.margin.top
+                    + child.dimensions.border.top
+                    + child.dimensions.padding.top;
 
                 // Advance cursor
                 cursor_x += child_width;
                 line_width += child_width;
                 line_height = line_height.max(child_height);
+                if child.baseline_is_bottom_edge() {
+                    // Box bottom sits ON the baseline; the strut extends the
+                    // line box below it (CSS2 §10.8.1).
+                    line_below_baseline = line_below_baseline.max(child_height + strut_descent);
+                }
 
                 if child.float != Float::None {
                     // Floated elements don't affect cursor
@@ -2116,10 +2147,12 @@ impl LayoutBox {
                 } else {
                     // Line 0 closes the current line box; middle lines are
                     // full; the LAST line stays open for following content.
-                    cursor_y += line_height.max(lh) + (n_lines as f32 - 2.0).max(0.0) * lh;
+                    cursor_y += line_height.max(line_below_baseline).max(lh)
+                        + (n_lines as f32 - 2.0).max(0.0) * lh;
                     cursor_x = last_w;
                     line_width = last_w;
                     line_height = lh;
+                    line_below_baseline = 0.0;
                     line_start_index = Some(i);
                 }
             } else {
@@ -2129,9 +2162,10 @@ impl LayoutBox {
                     if let Some(start) = line_start_index {
                         lines.push((start, i, line_width));
                     }
-                    cursor_y += line_height;
+                    cursor_y += line_height.max(line_below_baseline);
                     cursor_x = 0.0;
                     line_height = 0.0;
+                    line_below_baseline = 0.0;
                     line_start_index = None;
                     line_width = 0.0;
                 }
@@ -2165,7 +2199,7 @@ impl LayoutBox {
             if let Some(start) = line_start_index {
                 lines.push((start, self.children.len(), line_width));
             }
-            cursor_y += line_height;
+            cursor_y += line_height.max(line_below_baseline);
         }
 
         // Apply text-align to all recorded lines
@@ -2229,6 +2263,8 @@ impl LayoutBox {
         let mut cursor_y = 0.0;
         let mut cursor_x = 0.0;
         let mut line_height = 0.0_f32;
+        // See layout_block_children: below-baseline extent of the current line.
+        let mut line_below_baseline = 0.0_f32;
         let container_width = self.dimensions.content.width;
         let text_align = self.style.text_align;
         let strut_descent = self.inline_strut_descent();
@@ -2307,9 +2343,10 @@ impl LayoutBox {
                     }
 
                     // Wrap to next line
-                    cursor_y += line_height;
+                    cursor_y += line_height.max(line_below_baseline);
                     cursor_x = 0.0;
                     line_height = 0.0;
+                    line_below_baseline = 0.0;
                     line_start_index = Some(i);
                     line_width = 0.0;
 
@@ -2324,16 +2361,30 @@ impl LayoutBox {
                     line_start_index = Some(i);
                 }
 
-                // Position the child
-                child.dimensions.content.x =
-                    self.dimensions.content.x + cursor_x + child.dimensions.margin.left;
-                child.dimensions.content.y =
-                    self.dimensions.content.y + cursor_y + child.dimensions.margin.top;
+                // Position the child. The cursor addresses the MARGIN box;
+                // the content rect sits margin+border+padding inside it
+                // (dropping border/padding here shifted every decorated
+                // inline-block up-left by border+padding).
+                child.dimensions.content.x = self.dimensions.content.x
+                    + cursor_x
+                    + child.dimensions.margin.left
+                    + child.dimensions.border.left
+                    + child.dimensions.padding.left;
+                child.dimensions.content.y = self.dimensions.content.y
+                    + cursor_y
+                    + child.dimensions.margin.top
+                    + child.dimensions.border.top
+                    + child.dimensions.padding.top;
 
                 // Advance cursor
                 cursor_x += child_width;
                 line_width += child_width;
                 line_height = line_height.max(child_height);
+                if child.baseline_is_bottom_edge() {
+                    // Box bottom sits ON the baseline; the strut extends the
+                    // line box below it (CSS2 §10.8.1).
+                    line_below_baseline = line_below_baseline.max(child_height + strut_descent);
+                }
 
                 if child.float != Float::None {
                     cursor_x -= child_width;
@@ -2350,10 +2401,12 @@ impl LayoutBox {
                     line_width += last_w;
                     line_height = line_height.max(lh);
                 } else {
-                    cursor_y += line_height.max(lh) + (n_lines as f32 - 2.0).max(0.0) * lh;
+                    cursor_y += line_height.max(line_below_baseline).max(lh)
+                        + (n_lines as f32 - 2.0).max(0.0) * lh;
                     cursor_x = last_w;
                     line_width = last_w;
                     line_height = lh;
+                    line_below_baseline = 0.0;
                     line_start_index = Some(i);
                 }
             } else {
@@ -2363,9 +2416,10 @@ impl LayoutBox {
                     if let Some(start) = line_start_index {
                         lines.push((start, i, line_width));
                     }
-                    cursor_y += line_height;
+                    cursor_y += line_height.max(line_below_baseline);
                     cursor_x = 0.0;
                     line_height = 0.0;
+                    line_below_baseline = 0.0;
                     line_start_index = None;
                     line_width = 0.0;
                 }
@@ -2397,7 +2451,7 @@ impl LayoutBox {
             if let Some(start) = line_start_index {
                 lines.push((start, self.children.len(), line_width));
             }
-            cursor_y += line_height;
+            cursor_y += line_height.max(line_below_baseline);
         }
 
         // Apply text-align to all recorded lines
@@ -4965,9 +5019,14 @@ mod tests {
             vec![0.0, 100.0, 200.0],
             "boxes should advance horizontally"
         );
+        // One line tall = box height + strut descent below the baseline:
+        // empty atomic inlines sit ON the baseline (CSS2 §10.8.1), so the
+        // strut's descent extends the line box under them — Chrome does the
+        // same (a lone 40px inline-block makes its container ~45px tall).
+        let expected = 40.0 + parent.inline_strut_descent();
         assert!(
-            (parent.dimensions.content.height - 40.0).abs() < 0.5,
-            "parent should be one line tall (40px), got {}",
+            (parent.dimensions.content.height - expected).abs() < 0.5,
+            "parent should be one line tall ({expected}px incl. strut descent), got {}",
             parent.dimensions.content.height
         );
 
@@ -4991,6 +5050,67 @@ mod tests {
         assert!(
             ys2[0] == ys2[1] && ys2[1] == ys2[2],
             "inline-flex siblings must share a line under margin collapse, got ys={ys2:?}"
+        );
+    }
+
+    #[test]
+    fn test_inline_block_border_box_position_and_line_strut() {
+        // Two bugs found via the backgrounds y-table (macOS trench, 2026-07-10):
+        // 1) a decorated inline-block's content rect was placed where its
+        //    BORDER box belongs — border+padding painted up-left of Chrome.
+        // 2) a wrapped line of empty inline-blocks advanced by margin-box
+        //    height only; Chrome adds the strut's descent below the baseline
+        //    (126px rows vs RustKit's 120px on the backgrounds page).
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 460.0, 0.0);
+
+        let mk = || {
+            let mut s = ComputedStyle::new();
+            s.display = rustkit_css::Display::InlineBlock;
+            s.width = Length::Px(200.0);
+            s.height = Length::Px(100.0);
+            s.margin_top = Length::Px(10.0);
+            s.margin_bottom = Length::Px(10.0);
+            s.margin_left = Length::Px(10.0);
+            s.margin_right = Length::Px(10.0);
+            s.border_top_width = Length::Px(2.0);
+            s.border_bottom_width = Length::Px(2.0);
+            s.border_left_width = Length::Px(2.0);
+            s.border_right_width = Length::Px(2.0);
+            LayoutBox::new(BoxType::Block, s)
+        };
+        // 460px container: two 224px margin boxes fit, the third wraps.
+        let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        for _ in 0..3 {
+            parent.children.push(mk());
+        }
+        parent.layout(&cb);
+
+        // Border box = content minus border: starts at margin offset (10,10),
+        // so content sits at margin + border = (12,12).
+        let first = &parent.children[0].dimensions;
+        assert_eq!(
+            (first.content.x, first.content.y),
+            (12.0, 12.0),
+            "content rect must sit border-width inside the margin-box cursor"
+        );
+        assert!(
+            (first.border_box().x - 10.0).abs() < 0.01 && (first.border_box().y - 10.0).abs() < 0.01,
+            "border box must start at the margin offset, got ({}, {})",
+            first.border_box().x,
+            first.border_box().y
+        );
+
+        // Row 2 starts one full line box down: margin-box height (124) plus
+        // the strut descent below the empty inline-blocks' baseline.
+        let sd = parent.inline_strut_descent();
+        assert!(sd > 0.0, "strut descent must be positive");
+        let second_row = &parent.children[2].dimensions;
+        let expected_y = 124.0 + sd + 10.0 + 2.0;
+        assert!(
+            (second_row.content.y - expected_y).abs() < 0.5,
+            "wrapped row must advance by line height incl. strut descent; expected content.y {expected_y}, got {}",
+            second_row.content.y
         );
     }
 
