@@ -2517,13 +2517,17 @@ pub fn parse_length(value: &str) -> Option<Length> {
         let num = value.trim_end_matches("px").parse::<f32>().ok()?;
         return Some(Length::Px(num));
     }
-    if value.ends_with("em") {
-        let num = value.trim_end_matches("em").parse::<f32>().ok()?;
-        return Some(Length::Em(num));
-    }
+    // rem MUST be checked before em: "2rem".ends_with("em") is true, and
+    // the em arm's "2r".parse() then fails -> None. The engine's deleted
+    // duplicate carried this exact warning; the canonical copy had the rem
+    // arm dead below the em arm. (Duplication audit P0, proven by test.)
     if value.ends_with("rem") {
         let num = value.trim_end_matches("rem").parse::<f32>().ok()?;
         return Some(Length::Rem(num));
+    }
+    if value.ends_with("em") {
+        let num = value.trim_end_matches("em").parse::<f32>().ok()?;
+        return Some(Length::Em(num));
     }
     if value.ends_with("vh") {
         let num = value.trim_end_matches("vh").parse::<f32>().ok()?;
