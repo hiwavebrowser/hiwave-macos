@@ -24,7 +24,7 @@ use rustkit_css::{parse_display, ComputedStyle, Rule, Stylesheet};
 use rustkit_dom::{Document, Node, NodeType};
 use rustkit_image::ImageManager;
 use rustkit_js::JsRuntime;
-use rustkit_layout::{BoxType, Dimensions, DisplayList, LayoutBox, Rect};
+use rustkit_layout::{BoxType, Dimensions, DisplayList, LayoutBox, Position, Rect};
 use rustkit_net::{LoaderConfig, NetError, Request, ResourceLoader};
 use rustkit_renderer::Renderer;
 use rustkit_viewhost::{Bounds, ViewHost, ViewHostTrait, ViewId, WindowHandle};
@@ -1091,6 +1091,45 @@ impl Engine {
     }
 
     /// Build a layout tree from a DOM document.
+
+    /// Transfer position + offsets from a computed style onto a layout box.
+    /// Percent offsets resolve later (apply time) from the style itself.
+    fn transfer_positioning(layout_box: &mut LayoutBox, style: &ComputedStyle) {
+        layout_box.position = if std::env::var("RK_NO_POS").is_ok() {
+            Position::Static
+        } else {
+            match style.position {
+                rustkit_css::Position::Static => Position::Static,
+                // Relative: geometry-only for now. Entering the positioned
+                // paint path (z-reorder, stacking hoist) wrecks pages whose
+                // relative boxes are mere z-index anchors (about's cards)
+                // until the stacking pipeline matures. Offsets still apply
+                // via the Relative arm when we re-enable; today Relative
+                // boxes with no offsets are visually identical to Static.
+                rustkit_css::Position::Relative => Position::Static,
+                rustkit_css::Position::Absolute => Position::Absolute,
+                rustkit_css::Position::Fixed => Position::Fixed,
+                rustkit_css::Position::Sticky => Position::Static, // sticky pipeline unproven; ledgered
+            }
+        };
+        if layout_box.position != Position::Static {
+            let px = |l: &Option<rustkit_css::Length>| match l {
+                Some(rustkit_css::Length::Px(v)) => Some(*v),
+                Some(rustkit_css::Length::Zero) => Some(0.0),
+                Some(rustkit_css::Length::Rem(rem)) => Some(rem * 16.0),
+                Some(rustkit_css::Length::Em(em)) => {
+                    let fs = match style.font_size {
+                        rustkit_css::Length::Px(p) => p,
+                        _ => 16.0,
+                    };
+                    Some(em * fs)
+                }
+                _ => None,
+            };
+            layout_box.set_offsets(px(&style.top), px(&style.right), px(&style.bottom), px(&style.left));
+        }
+    }
+
     fn build_layout_from_document(
         &self,
         document: &Document,
@@ -1467,6 +1506,8 @@ impl Engine {
 
                 let mut layout_box = LayoutBox::new(box_type, style.clone());
 
+                Self::transfer_positioning(&mut layout_box, &style);
+
                 // Build ancestors list for child elements with class and ID info
                 // Insert at beginning so ancestors[0] is always the immediate parent
                 let classes: Vec<String> = attributes
@@ -1741,6 +1782,9 @@ impl Engine {
 
         // Create the pseudo-element box
         let mut pseudo_box = LayoutBox::new(BoxType::Inline, pseudo_style.clone());
+        if std::env::var("RK_NO_PSEUDO_POS").is_err() {
+            Self::transfer_positioning(&mut pseudo_box, &pseudo_style);
+        }
 
         // If content is not empty, add a text child
         if !content.is_empty() {
@@ -3499,6 +3543,23 @@ impl Engine {
                     sibling_count,
                 )
             });
+        }
+
+        // A pseudo-ELEMENT selector styles a generated box, never its host:
+        // `.card::before { position:absolute }` must not absolutize `.card`.
+        // Before this guard, pseudo rules bled onto host elements — harmless
+        // while box.position was never honored, catastrophic the day it was
+        // (about.html: every card/feature/quote left normal flow at once).
+        // Pseudo boxes get these rules through create_pseudo_element's own
+        // suffix-matching path; the normal cascade must skip them entirely.
+        let sel_lower = selector;
+        if sel_lower.contains("::")
+            || sel_lower.ends_with(":before")
+            || sel_lower.ends_with(":after")
+            || sel_lower.contains(":before ")
+            || sel_lower.contains(":after ")
+        {
+            return false;
         }
 
         // Tokenize selector into parts and combinators

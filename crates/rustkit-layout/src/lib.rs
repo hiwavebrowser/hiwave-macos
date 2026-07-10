@@ -1699,6 +1699,25 @@ impl LayoutBox {
         self.calculate_block_height(containing_block.content.height);
     }
 
+    /// Offsets with percent values resolved against the containing block.
+    /// Build-time transfer can only pre-resolve absolute lengths; percents
+    /// (e.g. `left: -100%` off-canvas shimmer overlays) need the containing
+    /// block, so they resolve here at apply time from the computed style.
+    fn resolved_offsets(&self, containing_block: &Dimensions) -> PositionOffsets {
+        let resolve = |pre: Option<f32>, st: &Option<Length>, basis: f32| {
+            pre.or(match st {
+                Some(Length::Percent(p)) => Some(p / 100.0 * basis),
+                _ => None,
+            })
+        };
+        PositionOffsets {
+            top: resolve(self.offsets.top, &self.style.top, containing_block.content.height),
+            bottom: resolve(self.offsets.bottom, &self.style.bottom, containing_block.content.height),
+            left: resolve(self.offsets.left, &self.style.left, containing_block.content.width),
+            right: resolve(self.offsets.right, &self.style.right, containing_block.content.width),
+        }
+    }
+
     /// Apply position offsets for positioned elements.
     fn apply_position_offsets(&mut self, containing_block: &Dimensions) {
         match self.position {
@@ -1720,36 +1739,13 @@ impl LayoutBox {
                 }
             }
             Position::Absolute => {
-                // Position relative to containing block
-                if let Some(left) = self.offsets.left {
-                    self.dimensions.content.x = containing_block.content.x
-                        + left
-                        + self.dimensions.margin.left
-                        + self.dimensions.border.left
-                        + self.dimensions.padding.left;
-                } else if let Some(right) = self.offsets.right {
-                    self.dimensions.content.x = containing_block.content.right()
-                        - right
-                        - self.dimensions.margin.right
-                        - self.dimensions.border.right
-                        - self.dimensions.padding.right
-                        - self.dimensions.content.width;
-                }
-
-                if let Some(top) = self.offsets.top {
-                    self.dimensions.content.y = containing_block.content.y
-                        + top
-                        + self.dimensions.margin.top
-                        + self.dimensions.border.top
-                        + self.dimensions.padding.top;
-                } else if let Some(bottom) = self.offsets.bottom {
-                    self.dimensions.content.y = containing_block.content.bottom()
-                        - bottom
-                        - self.dimensions.margin.bottom
-                        - self.dimensions.border.bottom
-                        - self.dimensions.padding.bottom
-                        - self.dimensions.content.height;
-                }
+                // Shares the full CSS2 §10.3.7/§10.6.4 implementation with
+                // Fixed — including the both-offsets-set + auto-size stretch
+                // (`inset: 0` filling the containing block). The old inline
+                // arm here handled single offsets only, so every
+                // `position:absolute; inset:0` overlay (settings' toggle
+                // sliders) kept its intrinsic size instead of filling.
+                self.apply_position_offsets_absolute(containing_block);
             }
             Position::Fixed => {
                 // Position relative to viewport (root containing block)
@@ -1780,16 +1776,17 @@ impl LayoutBox {
 
     /// Apply absolute positioning offsets.
     fn apply_position_offsets_absolute(&mut self, containing_block: &Dimensions) {
-        let has_left = self.offsets.left.is_some();
-        let has_right = self.offsets.right.is_some();
-        let has_top = self.offsets.top.is_some();
-        let has_bottom = self.offsets.bottom.is_some();
+        let offsets = self.resolved_offsets(containing_block);
+        let has_left = offsets.left.is_some();
+        let has_right = offsets.right.is_some();
+        let has_top = offsets.top.is_some();
+        let has_bottom = offsets.bottom.is_some();
 
         // Handle horizontal positioning
         if has_left && has_right {
             // When both left and right are set with width: auto, stretch to fill
-            let left = self.offsets.left.unwrap();
-            let right = self.offsets.right.unwrap();
+            let left = offsets.left.unwrap();
+            let right = offsets.right.unwrap();
 
             // Calculate stretched width if width is auto
             if matches!(self.style.width, Length::Auto) {
@@ -1811,13 +1808,13 @@ impl LayoutBox {
                 + self.dimensions.margin.left
                 + self.dimensions.border.left
                 + self.dimensions.padding.left;
-        } else if let Some(left) = self.offsets.left {
+        } else if let Some(left) = offsets.left {
             self.dimensions.content.x = containing_block.content.x
                 + left
                 + self.dimensions.margin.left
                 + self.dimensions.border.left
                 + self.dimensions.padding.left;
-        } else if let Some(right) = self.offsets.right {
+        } else if let Some(right) = offsets.right {
             self.dimensions.content.x = containing_block.content.right()
                 - right
                 - self.dimensions.margin.right
@@ -1829,8 +1826,8 @@ impl LayoutBox {
         // Handle vertical positioning
         if has_top && has_bottom {
             // When both top and bottom are set with height: auto, stretch to fill
-            let top = self.offsets.top.unwrap();
-            let bottom = self.offsets.bottom.unwrap();
+            let top = offsets.top.unwrap();
+            let bottom = offsets.bottom.unwrap();
 
             // Calculate stretched height if height is auto
             if matches!(self.style.height, Length::Auto) {
@@ -1852,13 +1849,13 @@ impl LayoutBox {
                 + self.dimensions.margin.top
                 + self.dimensions.border.top
                 + self.dimensions.padding.top;
-        } else if let Some(top) = self.offsets.top {
+        } else if let Some(top) = offsets.top {
             self.dimensions.content.y = containing_block.content.y
                 + top
                 + self.dimensions.margin.top
                 + self.dimensions.border.top
                 + self.dimensions.padding.top;
-        } else if let Some(bottom) = self.offsets.bottom {
+        } else if let Some(bottom) = offsets.bottom {
             self.dimensions.content.y = containing_block.content.bottom()
                 - bottom
                 - self.dimensions.margin.bottom
