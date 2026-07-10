@@ -334,6 +334,19 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
                     // Nested flex container: recursively apply flex layout
                     let child_containing = item.layout_box.dimensions.clone();
                     layout_flex_container(item.layout_box, &child_containing);
+                    // Absolutely positioned children are skipped by the flex
+                    // item collection; lay them out against the item's FINAL
+                    // dimensions so `inset: 0` overlays position AND stretch
+                    // (the pre-pass ran them against pre-flex dims).
+                    let cb = item.layout_box.dimensions.clone();
+                    for child in &mut item.layout_box.children {
+                        if matches!(
+                            child.style.position,
+                            rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
+                        ) {
+                            child.layout(&cb);
+                        }
+                    }
                 } else {
                     // Block container: lay out children in normal flow.
                     // Cloning the item's FINAL dimensions per child would make every
@@ -352,6 +365,13 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
     // before we can determine item cross sizes
     for line in &mut lines {
         for item in &mut line.items {
+            // A DEFINITE cross size never grows to fit content — content
+            // overflows instead (css-flexbox-1 §9.4). Without this guard the
+            // settings toggles (inline-flex, height:26px) ballooned to their
+            // stacked children's 40.4px whenever they sat in a flex row.
+            if item.has_explicit_cross_size {
+                continue;
+            }
             // Only recompute if cross_size is still using fallback (line_height or similar)
             // and we have children with actual heights
             if !item.layout_box.children.is_empty() {
@@ -472,23 +492,40 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
             }
         };
 
-        // Update container height if it wasn't explicitly set
-        match main_axis {
-            Axis::Horizontal => {
-                // For row direction, update height from cross size
-                if container.dimensions.content.height == 0.0
-                    || matches!(container.style.height, rustkit_css::Length::Auto)
+        // Update container height. Auto heights take the content size; an
+        // EXPLICIT height that reaches here unresolved (content.height still
+        // 0.0 — e.g. a nested inline-flex laid out mid-pass, like the
+        // settings toggles) gets RESOLVED from style, never clobbered with
+        // the children's sum. The old `== 0.0 ||` arm did exactly that
+        // clobbering: height:26px toggles grew to their content (40.4px)
+        // whenever they sat inside another flex row.
+        let content_size = match main_axis {
+            Axis::Horizontal => total_cross,
+            Axis::Vertical => total_main,
+        };
+        if matches!(container.style.height, rustkit_css::Length::Auto) {
+            container.dimensions.content.height = content_size;
+        } else if container.dimensions.content.height == 0.0 {
+            let explicit = match container.style.height {
+                rustkit_css::Length::Px(px) => Some(px),
+                rustkit_css::Length::Percent(pct)
+                    if containing_block.content.height > 0.0 =>
                 {
-                    container.dimensions.content.height = total_cross;
+                    Some(pct / 100.0 * containing_block.content.height)
                 }
-            }
-            Axis::Vertical => {
-                // For column direction, update height from main size
-                if container.dimensions.content.height == 0.0
-                    || matches!(container.style.height, rustkit_css::Length::Auto)
-                {
-                    container.dimensions.content.height = total_main;
+                _ => None,
+            };
+            match explicit {
+                Some(h) => {
+                    // Specified heights are border-box under border-box sizing.
+                    let pb = container.dimensions.padding.vertical()
+                        + container.dimensions.border.vertical();
+                    let is_bb = container.style.box_sizing
+                        == rustkit_css::BoxSizing::BorderBox;
+                    container.dimensions.content.height =
+                        if is_bb { (h - pb).max(0.0) } else { h };
                 }
+                None => container.dimensions.content.height = content_size,
             }
         }
     }
