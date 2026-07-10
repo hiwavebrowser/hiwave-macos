@@ -1177,6 +1177,7 @@ impl Engine {
                     &[],
                     0,
                     1,
+                    None,
                 ))
             } else {
                 None
@@ -1271,6 +1272,7 @@ impl Engine {
                     siblings_before,
                     element_index,
                     sibling_count,
+                    parent_style,
                 );
 
                 // CSS computed-value resolution: font-size absolutizes at
@@ -1808,9 +1810,34 @@ impl Engine {
         siblings_before: &[(String, Vec<String>, Option<String>)],
         element_index: usize,
         sibling_count: usize,
+        parent_style: Option<&ComputedStyle>,
     ) -> ComputedStyle {
         let mut style = ComputedStyle::new();
         style.color = rustkit_css::Color::BLACK;
+
+        // CSS inheritance (CSS 2.1 §6.2): inherited properties default to the
+        // PARENT's computed value; UA defaults and author rules below
+        // override. Until now only TEXT nodes inherited — an element with no
+        // matching font-size rule silently reset to 16px, so
+        // `body { font-size: 14px }` never reached any descendant div/span
+        // (css-selectors: every unruled row +2px tall, sections drifting
+        // +29px by the page bottom). font-size seeds the parent's already-
+        // absolutized px; a relative author value (em/%) still resolves
+        // against the parent right after cascade in the build walk.
+        // text-align / white-space / line-height are NOT seeded here:
+        // line-height has its own inheritance pass, and text-align feeds the
+        // known dual-alignment smell (IFC quality Slice A) — seeding it
+        // would double-shift centered runs.
+        if let Some(parent) = parent_style {
+            style.font_size = parent.font_size.clone();
+            style.font_family = parent.font_family.clone();
+            style.font_weight = parent.font_weight;
+            style.font_style = parent.font_style;
+            style.font_stretch = parent.font_stretch;
+            style.color = parent.color;
+            style.letter_spacing = parent.letter_spacing.clone();
+            style.word_spacing = parent.word_spacing.clone();
+        }
 
         // Apply tag-specific default styles (user-agent stylesheet)
         // Apply tag-specific default styles (Chrome UA stylesheet alignment)
@@ -2647,8 +2674,17 @@ impl Engine {
                 }
             }
             "text-align" => {
-                // Store text-align if ComputedStyle supports it
-                // For now, just ignore
+                // Never applied until 2026-07-10: this arm silently dropped
+                // the declaration, so every `text-align: center/right` on
+                // every fixture was a no-op — centered headlines painted
+                // left-aligned and the alignment machinery in rustkit-layout
+                // only ever saw the Left default.
+                style.text_align = match value.trim() {
+                    "center" => rustkit_css::TextAlign::Center,
+                    "right" | "end" => rustkit_css::TextAlign::Right,
+                    "justify" => rustkit_css::TextAlign::Justify,
+                    _ => rustkit_css::TextAlign::Left,
+                };
             }
             "border-radius" => {
                 // Parse border-radius (shorthand: all corners same)

@@ -181,10 +181,57 @@ pub struct FontMetrics {
     pub x_height: f32,
 }
 
-/// Create a CTFont with the specified family and size
+/// True for CSS keywords naming the macOS system font. It has no
+/// instantiable PostScript name — it resolves ONLY through the UI-font API.
+fn is_system_family(lower: &str) -> bool {
+    matches!(
+        lower,
+        "system-ui" | "-apple-system" | "blinkmacsystemfont" | ".applesystemuifont"
+    )
+}
+
+/// Map CSS generic families to concrete macOS fonts.
+fn map_generic(lower: &str, fam: &str) -> &'static str {
+    match lower {
+        "sans-serif" => "Helvetica",
+        "serif" => "Times New Roman",
+        "monospace" => "Menlo",
+        _ => {
+            // Not generic: caller uses the original string.
+            let _ = fam;
+            ""
+        }
+    }
+}
+
+/// Create a CTFont with the specified family and size.
+///
+/// `family` may be a raw CSS font-family LIST ("system-ui, -apple-system,
+/// sans-serif"): entries are tried in order with generic keywords mapped to
+/// real fonts. Before 2026-07-10 the whole list was passed verbatim to
+/// new_from_name, which failed on any multi-family value — the renderer
+/// painted Helvetica for every styled page regardless of the author's fonts.
 pub fn create_font(family: &str, size: f64) -> Result<CTFont, TextError> {
-    font::new_from_name(family, size)
-        .map_err(|_| TextError::FontNotFound(family.to_string()))
+    for fam in family.split(',') {
+        let fam = fam.trim().trim_matches('"').trim_matches('\'');
+        if fam.is_empty() {
+            continue;
+        }
+        let lower = fam.to_ascii_lowercase();
+        if is_system_family(&lower) {
+            return Ok(font::new_ui_font_for_language(
+                font::kCTFontSystemFontType,
+                size,
+                None,
+            ));
+        }
+        let mapped = map_generic(&lower, fam);
+        let name = if mapped.is_empty() { fam } else { mapped };
+        if let Ok(f) = font::new_from_name(name, size) {
+            return Ok(f);
+        }
+    }
+    font::new_from_name(family, size).map_err(|_| TextError::FontNotFound(family.to_string()))
 }
 
 /// Create a font with specific weight and style traits
@@ -194,51 +241,50 @@ fn create_font_with_traits(
     weight: u16,
     italic: bool,
 ) -> Result<CTFont, TextError> {
-    // Map CSS font-weight to Core Text weight trait
-    // CSS: 100-900, Core Text: -1.0 to 1.0
-    // 400 = normal (0.0), 700 = bold (~0.4)
-    let _weight_trait = match weight {
-        0..=199 => -0.8,      // Thin
-        200..=299 => -0.6,    // ExtraLight
-        300..=399 => -0.4,    // Light
-        400..=499 => 0.0,     // Normal
-        500..=599 => 0.23,    // Medium
-        600..=699 => 0.3,     // SemiBold
-        700..=799 => 0.4,     // Bold
-        800..=899 => 0.56,    // ExtraBold
-        _ => 0.62,            // Black
-    };
-    
-    // First try to find a font with the exact traits
-    // For bold, try appending "-Bold" or "Bold" to the family name
-    let bold_family = if weight >= 700 {
-        format!("{}-Bold", family)
-    } else {
-        family.to_string()
-    };
-    
-    let italic_family = if italic {
-        format!("{}-Italic", bold_family)
-    } else {
-        bold_family
-    };
-    
-    // Try the specific variant first
-    if let Ok(f) = font::new_from_name(&italic_family, size) {
-        return Ok(f);
-    }
-    
-    // Try bold variant
-    if weight >= 700 {
-        if let Ok(f) = font::new_from_name(&format!("{}-Bold", family), size) {
-            return Ok(f);
+    for fam in family.split(',') {
+        let fam = fam.trim().trim_matches('"').trim_matches('\'');
+        if fam.is_empty() {
+            continue;
         }
-        if let Ok(f) = font::new_from_name(&format!("{}Bold", family), size) {
-            return Ok(f);
+        let lower = fam.to_ascii_lowercase();
+
+        // System font: weight >= 600 selects the emphasized (bold) face via
+        // the UI-font API. "-Bold" name variants never exist for it, so the
+        // old path silently rasterized the REGULAR face for bold headings.
+        if is_system_family(&lower) && !italic {
+            let ui_type = if weight >= 600 {
+                font::kCTFontEmphasizedSystemFontType
+            } else {
+                font::kCTFontSystemFontType
+            };
+            return Ok(font::new_ui_font_for_language(ui_type, size, None));
+        }
+
+        let mapped = map_generic(&lower, fam);
+        let base = if mapped.is_empty() { fam } else { mapped };
+
+        let mut variants: Vec<String> = Vec::new();
+        if weight >= 700 && italic {
+            variants.push(format!("{}-BoldItalic", base));
+        }
+        if weight >= 700 {
+            variants.push(format!("{}-Bold", base));
+            variants.push(format!("{}Bold", base));
+        }
+        if italic {
+            variants.push(format!("{}-Italic", base));
+            variants.push(format!("{}-Oblique", base));
+        }
+        variants.push(base.to_string());
+
+        for v in &variants {
+            if let Ok(f) = font::new_from_name(v, size) {
+                return Ok(f);
+            }
         }
     }
-    
-    // Fall back to base font
+
+    // Fall back to base font resolution over the same list
     create_font(family, size)
 }
 
@@ -679,6 +725,33 @@ mod tests {
     fn test_create_font() {
         let font = create_font("Helvetica", 16.0);
         assert!(font.is_ok(), "Should create Helvetica font");
+    }
+
+    #[test]
+    fn test_create_font_css_family_list() {
+        // Regression (2026-07-10): a raw CSS family list was passed verbatim
+        // to new_from_name, failing on any multi-family value — the renderer
+        // painted Helvetica for every styled page.
+        let font = create_font("system-ui, -apple-system, sans-serif", 16.0);
+        assert!(font.is_ok(), "CSS family list should resolve");
+        let font = create_font("\"NoSuchFont-XYZ\", Arial", 16.0);
+        assert!(font.is_ok(), "fallback within the list should resolve");
+    }
+
+    #[test]
+    fn test_system_font_bold_face() {
+        // The system font has no "-Bold" PostScript variant; weight >= 600
+        // must route through the UI-font API and return the emphasized face
+        // (the old path silently rasterized bold headings with the regular
+        // face, ~6% narrower than Chrome).
+        let regular = create_font_with_traits("system-ui", 32.0, 400, false).unwrap();
+        let bold = create_font_with_traits("system-ui", 32.0, 700, false).unwrap();
+        let (rn, bn) = (regular.postscript_name(), bold.postscript_name());
+        assert_ne!(rn, bn, "bold system face must differ from regular");
+        assert!(
+            bn.to_lowercase().contains("bold"),
+            "emphasized face expected, got {bn}"
+        );
     }
     
     #[test]
