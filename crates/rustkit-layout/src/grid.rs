@@ -2136,6 +2136,49 @@ pub(crate) fn estimate_max_content_width(layout_box: &LayoutBox) -> f32 {
         };
     }
 
+    // A flex container's max-content main size sums its ITEMS plus
+    // main-axis gaps (row), or takes the widest item (column). Whitespace-
+    // only text never becomes a flex item (css-flexbox-1 §4), so it
+    // contributes neither width nor a gap slot. The generic inline-run
+    // walk below misses the gaps — a nav with 30px gaps measured 120px
+    // narrow, then flex-shrink smashed every link to ~2px on re-layout.
+    if style.display.is_flex() {
+        let is_row = style.flex_direction.is_row();
+        let main_gap = match style.column_gap {
+            Length::Px(g) => g,
+            _ => 0.0,
+        };
+        let mut sum = 0.0f32;
+        let mut widest = 0.0f32;
+        let mut item_count = 0usize;
+        for child in &layout_box.children {
+            if child.style.display == Display::None {
+                continue;
+            }
+            if matches!(
+                child.position,
+                crate::Position::Absolute | crate::Position::Fixed
+            ) {
+                continue;
+            }
+            if let BoxType::Text(t) = &child.box_type {
+                if t.trim().is_empty() {
+                    continue;
+                }
+            }
+            let outer = estimate_max_content_width(child) + horizontal_margins(&child.style);
+            sum += outer;
+            widest = widest.max(outer);
+            item_count += 1;
+        }
+        let content = if is_row {
+            sum + main_gap * item_count.saturating_sub(1) as f32
+        } else {
+            widest
+        };
+        return content + padding_border;
+    }
+
     let mut max_contribution = 0.0f32;
     let mut inline_run = 0.0f32;
     for child in &layout_box.children {

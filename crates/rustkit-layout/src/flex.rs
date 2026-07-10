@@ -228,6 +228,38 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
         Axis::Horizontal => !matches!(container.style.width, Length::Auto),
     };
 
+    // The definite inner cross size, resolved from STYLE rather than from
+    // containing_block: the block pre-pass can leave a stale
+    // children-stacked height in content.height (logo 38.4 + nav 25.6 = 64
+    // inside a height:60px header), which would center every item 2px low.
+    // Px lengths resolve here; anything else falls back to the passed size.
+    let definite_inner_cross = if has_definite_cross_size {
+        let (spec, pb) = match cross_axis {
+            Axis::Vertical => (
+                &container.style.height,
+                container.dimensions.padding.vertical() + container.dimensions.border.vertical(),
+            ),
+            Axis::Horizontal => (
+                &container.style.width,
+                container.dimensions.padding.horizontal()
+                    + container.dimensions.border.horizontal(),
+            ),
+        };
+        match spec {
+            Length::Px(v) => {
+                if container.style.box_sizing == rustkit_css::BoxSizing::BorderBox {
+                    Some((v - pb).max(0.0))
+                } else {
+                    Some(*v)
+                }
+            }
+            _ if container_cross_size > 0.0 => Some(container_cross_size),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     // Get gap values
     let main_gap = match main_axis {
         Axis::Horizontal => resolve_length(&style.column_gap, container_main_size),
@@ -245,6 +277,17 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
             || child.style.position == rustkit_css::Position::Fixed
         {
             continue;
+        }
+
+        // css-flexbox-1 §4: an anonymous item containing only white space
+        // is not rendered — it never becomes a flex item. Zero its rect so
+        // stale pre-pass dimensions neither paint nor consume a gap slot.
+        if let crate::BoxType::Text(t) = &child.box_type {
+            if t.trim().is_empty() {
+                child.dimensions.content.width = 0.0;
+                child.dimensions.content.height = 0.0;
+                continue;
+            }
         }
 
         let item = create_flex_item(child, main_axis, container_main_size, container_cross_size);
@@ -278,16 +321,25 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
         );
     }
 
+    // css-flexbox-1 §9.4.8 rule 1: in a single-line container with a
+    // definite cross size, the line's cross size IS the container's inner
+    // cross size. Items align within that, never within a taller
+    // content-derived line (oversized content overflows instead).
+    if wrap == FlexWrap::NoWrap {
+        if let (Some(cross), Some(line)) = (definite_inner_cross, lines.first_mut()) {
+            line.cross_size = cross;
+        }
+    }
+
     // 6. Calculate line cross sizes and positions
     let total_cross_size: f32 = lines.iter().map(|l| l.cross_size).sum::<f32>()
         + cross_gap * (lines.len().saturating_sub(1)) as f32;
 
     // 7. Apply align-content for multi-line containers
     // Only distribute lines if we have a definite cross size
-    let effective_cross_size = if has_definite_cross_size {
-        container_cross_size
-    } else {
-        total_cross_size
+    let effective_cross_size = match definite_inner_cross {
+        Some(c) => c,
+        None => total_cross_size,
     };
     distribute_lines(
         &mut lines,
@@ -375,12 +427,21 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
             // Only recompute if cross_size is still using fallback (line_height or similar)
             // and we have children with actual heights
             if !item.layout_box.children.is_empty() {
-                let children_height: f32 = item
-                    .layout_box
-                    .children
-                    .iter()
-                    .map(|c| c.dimensions.margin_box().height)
-                    .sum();
+                // A nested flex container was fully laid out in step 11 and
+                // its content height is already final (its own step 12).
+                // Summing a ROW container's children stacks side-by-side
+                // items vertically: a 5-link nav measured 9 line-heights
+                // tall, and align-items:center then pushed the sibling logo
+                // 96px below a 60px header.
+                let children_height: f32 = if item.layout_box.style.display.is_flex() {
+                    item.layout_box.dimensions.content.height
+                } else {
+                    item.layout_box
+                        .children
+                        .iter()
+                        .map(|c| c.dimensions.margin_box().height)
+                        .sum()
+                };
 
                 // children_height is a content measure; item.cross_size is
                 // border-box, so compare and store with padding+border added.
@@ -413,6 +474,13 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
             .iter()
             .map(|i| i.cross_size + i.cross_margin_start + i.cross_margin_end)
             .fold(0.0, f32::max);
+        // §9.4.8 rule 1 again: a definite single-line cross size is never
+        // re-derived from content (see step 5).
+        if wrap == FlexWrap::NoWrap {
+            if let Some(cross) = definite_inner_cross {
+                line.cross_size = cross;
+            }
+        }
     }
 
     // 11c. Re-position lines with the true cross sizes. Steps 6-10 placed
@@ -422,10 +490,9 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
     // item is taller than one text line.
     let total_cross_size: f32 = lines.iter().map(|l| l.cross_size).sum::<f32>()
         + cross_gap * (lines.len().saturating_sub(1)) as f32;
-    let effective_cross_size = if has_definite_cross_size {
-        container_cross_size
-    } else {
-        total_cross_size
+    let effective_cross_size = match definite_inner_cross {
+        Some(c) => c,
+        None => total_cross_size,
     };
     distribute_lines(
         &mut lines,
@@ -508,9 +575,7 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
         } else if container.dimensions.content.height == 0.0 {
             let explicit = match container.style.height {
                 rustkit_css::Length::Px(px) => Some(px),
-                rustkit_css::Length::Percent(pct)
-                    if containing_block.content.height > 0.0 =>
-                {
+                rustkit_css::Length::Percent(pct) if containing_block.content.height > 0.0 => {
                     Some(pct / 100.0 * containing_block.content.height)
                 }
                 _ => None,
@@ -520,10 +585,8 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
                     // Specified heights are border-box under border-box sizing.
                     let pb = container.dimensions.padding.vertical()
                         + container.dimensions.border.vertical();
-                    let is_bb = container.style.box_sizing
-                        == rustkit_css::BoxSizing::BorderBox;
-                    container.dimensions.content.height =
-                        if is_bb { (h - pb).max(0.0) } else { h };
+                    let is_bb = container.style.box_sizing == rustkit_css::BoxSizing::BorderBox;
+                    container.dimensions.content.height = if is_bb { (h - pb).max(0.0) } else { h };
                 }
                 None => container.dimensions.content.height = content_size,
             }
@@ -1450,6 +1513,129 @@ mod tests {
     use super::*;
     use crate::BoxType;
     use rustkit_css::{AlignItems, ComputedStyle, FlexDirection, JustifyContent, Length};
+
+    #[test]
+    fn test_header_nav_row_like_chrome() {
+        // Regression (sticky-scroll header, 2026-07-10): four coupled bugs
+        // scattered a sticky header's flex row:
+        //   1. estimate_max_content_width ignored flex gaps, so a 30px-gap
+        //      nav's basis came out 120px narrow and flex-shrink smashed
+        //      every link to ~2px on the re-layout pass;
+        //   2. whitespace-only text runs became flex items (css-flexbox-1
+        //      §4 forbids this), adding four phantom gap slots;
+        //   3. step 11b summed a nested ROW container's children heights —
+        //      a 5-link nav measured 9 line-heights tall;
+        //   4. line cross size ignored §9.4.8 rule 1, so align-items:center
+        //      centered the logo within that phantom line instead of the
+        //      definite 60px header (logo painted at y=96; Chrome: y=10.8).
+        fn text_box(text: &str, font_px: f32, weight: u16) -> LayoutBox {
+            let mut s = ComputedStyle::new();
+            s.font_size = Length::Px(font_px);
+            s.font_weight = rustkit_css::FontWeight(weight);
+            LayoutBox::new(BoxType::Text(text.to_string()), s)
+        }
+
+        let mut nav_style = ComputedStyle::new();
+        nav_style.display = rustkit_css::Display::Flex;
+        nav_style.flex_direction = FlexDirection::Row;
+        nav_style.column_gap = Length::Px(30.0);
+        let mut nav = LayoutBox::new(BoxType::Block, nav_style);
+        for (i, label) in ["Home", "Features", "Pricing", "About", "Contact"]
+            .iter()
+            .enumerate()
+        {
+            if i > 0 {
+                // Inter-element whitespace from the HTML source.
+                nav.children.push(text_box(" ", 16.0, 400));
+            }
+            let mut a_style = ComputedStyle::new();
+            a_style.font_size = Length::Px(16.0);
+            let mut a = LayoutBox::new(BoxType::Inline, a_style);
+            a.children.push(text_box(label, 16.0, 500));
+            nav.children.push(a);
+        }
+
+        let mut logo_style = ComputedStyle::new();
+        logo_style.font_size = Length::Px(24.0);
+        let mut logo = LayoutBox::new(BoxType::Block, logo_style);
+        logo.children.push(text_box("HiWave", 24.0, 700));
+
+        let mut header_style = ComputedStyle::new();
+        header_style.display = rustkit_css::Display::Flex;
+        header_style.flex_direction = FlexDirection::Row;
+        header_style.justify_content = JustifyContent::SpaceBetween;
+        header_style.align_items = AlignItems::Center;
+        header_style.height = Length::Px(60.0);
+        let mut header = LayoutBox::new(BoxType::Block, header_style);
+        header.children.push(logo);
+        header.children.push(nav);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 1160.0, 60.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut header, &containing);
+
+        let logo = &header.children[0];
+        let nav = &header.children[1];
+
+        // Bugs 1+2: nav takes its max-content width — 5 measured link
+        // widths (~250px with this font stack) plus exactly 4×30px gaps.
+        let nav_w = nav.dimensions.content.width;
+        assert!(
+            (330.0..440.0).contains(&nav_w),
+            "nav should be ~5 links + 4 gaps wide, got {nav_w}"
+        );
+        // space-between: nav flush to the container's right edge.
+        let nav_right = nav.dimensions.content.x + nav_w;
+        assert!(
+            (nav_right - 1160.0).abs() < 1.0,
+            "nav right edge should hit the container edge, got {nav_right}"
+        );
+        // Links keep their measured text widths (were ~2px when smashed),
+        // and consecutive links sit exactly one 30px gap apart (whitespace
+        // runs must not consume extra gap slots).
+        let links: Vec<&LayoutBox> = nav
+            .children
+            .iter()
+            .filter(|c| matches!(c.box_type, BoxType::Inline))
+            .collect();
+        assert_eq!(links.len(), 5);
+        for a in &links {
+            let w = a.dimensions.content.width;
+            assert!(w > 30.0, "nav link should keep its text width, got {w}");
+        }
+        for pair in links.windows(2) {
+            let gap = pair[1].dimensions.content.x
+                - (pair[0].dimensions.content.x + pair[0].dimensions.content.width);
+            assert!(
+                (gap - 30.0).abs() < 1.0,
+                "links should sit one 30px gap apart, got {gap}"
+            );
+        }
+
+        // Bug 3: nav is one text line tall, not nine.
+        let nav_h = nav.dimensions.content.height;
+        assert!(
+            nav_h < 35.0,
+            "nav should be a single line tall, got {nav_h}"
+        );
+
+        // Bug 4: both items center within the DEFINITE 60px header.
+        let logo_h = logo.dimensions.margin_box().height;
+        let logo_y = logo.dimensions.content.y;
+        let expected_logo_y = (60.0 - logo_h) / 2.0;
+        assert!(
+            (logo_y - expected_logo_y).abs() < 1.0,
+            "logo should center in the 60px header (expected y≈{expected_logo_y}), got {logo_y}"
+        );
+        let nav_y = nav.dimensions.content.y;
+        let expected_nav_y = (60.0 - nav_h) / 2.0;
+        assert!(
+            (nav_y - expected_nav_y).abs() < 1.0,
+            "nav should center in the 60px header (expected y≈{expected_nav_y}), got {nav_y}"
+        );
+    }
 
     #[test]
     fn test_axis_cross() {
