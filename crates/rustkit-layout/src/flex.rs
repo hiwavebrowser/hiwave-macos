@@ -1257,7 +1257,7 @@ fn apply_positions(
 /// Shift a laid-out box and its entire subtree by (dx, dy).
 /// Content rects hold absolute coordinates once layout has run, so every
 /// descendant moves by the same delta.
-fn translate_subtree(b: &mut crate::LayoutBox, dx: f32, dy: f32) {
+pub(crate) fn translate_subtree(b: &mut crate::LayoutBox, dx: f32, dy: f32) {
     b.dimensions.content.x += dx;
     b.dimensions.content.y += dy;
     for child in &mut b.children {

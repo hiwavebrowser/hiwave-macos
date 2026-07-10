@@ -1930,9 +1930,24 @@ pub fn layout_grid_container(
                     let border_left = grandchild.dimensions.border.left;
                     let padding_left = grandchild.dimensions.padding.left;
 
-                    // Set the grandchild's position directly
+                    // Set the grandchild's position directly — and carry the
+                    // WHOLE SUBTREE with it. This loop used to move only the
+                    // grandchild box while its descendants kept pre-grid
+                    // geometry (sticky-scroll: article-card correctly at
+                    // (340,90), its gradient hero still at (60,647) from the
+                    // block pre-pass — painted below the fold). Same disease
+                    // flex had; same cure (translate_subtree).
+                    let old_x = grandchild.dimensions.content.x;
+                    let old_y = grandchild.dimensions.content.y;
                     grandchild.dimensions.content.x = grid_item_x + margin_left + border_left + padding_left;
                     grandchild.dimensions.content.y = current_y + margin_top + border_top + padding_top;
+                    let dx = grandchild.dimensions.content.x - old_x;
+                    let dy = grandchild.dimensions.content.y - old_y;
+                    if dx != 0.0 || dy != 0.0 {
+                        for gc_child in &mut grandchild.children {
+                            crate::flex::translate_subtree(gc_child, dx, dy);
+                        }
+                    }
                     grandchild.dimensions.content.width = grid_item_width - margin_left - border_left - padding_left
                         - grandchild.dimensions.margin.right - grandchild.dimensions.border.right - grandchild.dimensions.padding.right;
 
