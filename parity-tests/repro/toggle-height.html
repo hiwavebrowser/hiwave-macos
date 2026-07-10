@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui; font-size: 16px; padding: 10px; }
+  .toggle {
+    position: relative;
+    display: inline-flex;
+    width: 48px;
+    height: 26px;
+    flex-shrink: 0;
+  }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: #888;
+    border: 1px solid #555;
+    border-radius: 26px;
+  }
+  .row { display: flex; align-items: center; background: #eee; }
+</style>
+</head>
+<body>
+  <!-- Case A: toggle alone in a block -->
+  <div><label class="toggle"><input type="checkbox" checked><span class="toggle-slider"></span></label></div>
+  <!-- Case B: toggle inside a flex row (settings structure) -->
+  <div class="row"><span>Label text</span><label class="toggle"><input type="checkbox"><span class="toggle-slider"></span></label></div>
+</body>
+</html>
