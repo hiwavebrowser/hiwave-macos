@@ -1372,11 +1372,39 @@ impl LayoutBox {
             _ => 16.0,
         };
 
+        // Author padding + border COMPOSE with the control's content height
+        // (DIG-1, css-selectors heatmap 2026-07-11): the old blob formula
+        // font_size*1.5+8 pretended to be the whole border-box, so
+        // input{padding:8px; border:2px} measured 29px where Chrome builds
+        // 35 (content ~= font_size+1, plus 16 padding, plus 4 border) — and
+        // every section below slid up by the deficit. When the author sets
+        // vertical padding/border, the content line composes with them; the
+        // blob stays for bare controls (UA-default look, form-controls case
+        // depends on it).
+        let author_pb_v = {
+            let px = |l: &Length| match l {
+                Length::Px(v) => *v,
+                Length::Em(em) => em * font_size,
+                _ => 0.0,
+            };
+            px(&self.style.padding_top)
+                + px(&self.style.padding_bottom)
+                + px(&self.style.border_top_width)
+                + px(&self.style.border_bottom_width)
+        };
+        let single_line_box = |blob: f32| {
+            if author_pb_v > 0.0 {
+                (font_size + 1.0) + author_pb_v
+            } else {
+                blob
+            }
+        };
+
         // Calculate intrinsic dimensions based on control type
         let (intrinsic_width, intrinsic_height) = match &control {
             FormControlType::TextInput { .. } => {
                 // Default text input: ~20 characters wide, single line height
-                (font_size * 12.0, font_size * 1.5 + 8.0)
+                (font_size * 12.0, single_line_box(font_size * 1.5 + 8.0))
             }
             FormControlType::TextArea { rows, cols, .. } => {
                 // Textarea: based on rows/cols
@@ -1403,7 +1431,7 @@ impl LayoutBox {
             }
             FormControlType::Select { .. } => {
                 // Dropdown: similar to text input but with arrow space
-                (font_size * 10.0, font_size * 1.5 + 8.0)
+                (font_size * 10.0, single_line_box(font_size * 1.5 + 8.0))
             }
         };
 
