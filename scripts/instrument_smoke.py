@@ -30,6 +30,14 @@ GAMMA_HTML = """<!DOCTYPE html><html><head><style>
 body{background:#1a1a2e;margin:0}
 </style></head><body></body></html>"""
 
+# Port-back of Athena's gamma-MID fixture (Windows #17): midtones catch
+# encode errors that the dark probe misses (the sRGB curve is shallow
+# near black on the decode side — a partial double-encode can pass the
+# dark probe and still wash mids).
+GAMMA_MID_HTML = """<!DOCTYPE html><html><head><style>
+body{background:#6a7a8a;margin:0}
+</style></head><body></body></html>"""
+
 GRADIENT_HTML = """<!DOCTYPE html><html><head><style>
 *{margin:0;padding:0}
 body{background:#ffffff}
@@ -81,6 +89,18 @@ def main() -> int:
             failures.append(
                 f"gamma: #1a1a2e rendered as {got}, expected (26,26,46) exact "
                 f"(~(90,90,118) = sRGB double-encode)"
+            )
+
+    # Probe 1b: gamma midtone (port-back of Athena's Windows fixture)
+    ppm = tmp / "gamma-mid.ppm"
+    if not capture(GAMMA_MID_HTML, 200, 100, ppm):
+        failures.append("gamma-mid: capture failed")
+    else:
+        w, h, raw = read_ppm(ppm)
+        got = px(raw, w, 100, 50)
+        if got != (106, 122, 138):
+            failures.append(
+                f"gamma-mid: #6a7a8a rendered as {got}, expected (106,122,138) exact"
             )
 
     # Probe 2: gradient stop fidelity (gamma-space interp per Chrome default)
