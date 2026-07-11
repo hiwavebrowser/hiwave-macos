@@ -2292,6 +2292,7 @@ impl LayoutBox {
         }
 
         // Apply text-align to all recorded lines
+        let valign_font = self.style.clone();
         for (start, end, width) in lines {
             Self::apply_text_align_offset(
                 &mut self.children[start..end],
@@ -2299,9 +2300,114 @@ impl LayoutBox {
                 container_width,
                 text_align,
             );
+            // Slice C: vertical alignment about the line baseline.
+            Self::apply_vertical_align(&mut self.children[start..end], &valign_font);
         }
 
         self.dimensions.content.height = cursor_y;
+    }
+
+
+    /// IFC Slice C (CSS2 §10.8 subset): align line members VERTICALLY about
+    /// the line's alphabetic baseline. Layout owns Y (same contract as
+    /// Slice A owns X): text boxes place so their baseline (content top +
+    /// half-leading + ascent, matching the paint emission math exactly)
+    /// sits on the line baseline; bottom-edge boxes (images, empty atomic
+    /// inlines) put their margin-bottom edge on it (`vertical-align:
+    /// baseline`) or center on baseline − x-height/2 (`middle`). Other
+    /// vertical-align values intentionally fall through to baseline
+    /// (Slice C subset). Text-only lines of one font shift by ZERO by
+    /// construction — the pass only moves members when a taller neighbor
+    /// raises the line's ascent (a 32px img next to 16px text: Chrome puts
+    /// the text baseline at the img bottom; we top-aligned both and the
+    /// text floated 17px high).
+    fn apply_vertical_align(children: &mut [LayoutBox], container_font: &ComputedStyle) {
+        let members: Vec<usize> = (0..children.len())
+            .filter(|&i| {
+                let c = &children[i];
+                !matches!(
+                    c.position,
+                    Position::Absolute | Position::Fixed
+                ) && c.style.display != rustkit_css::Display::None
+            })
+            .collect();
+        if members.is_empty() {
+            return;
+        }
+
+        let font_px = |s: &ComputedStyle| match s.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        // Above/below-baseline extents for a text-carrying style, matching
+        // the paint emission: glyph top = content_y + half_leading,
+        // baseline = glyph top + ascent.
+        let text_extents = |s: &ComputedStyle| -> (f32, f32) {
+            let fs = font_px(s);
+            let m = measure_text_advanced("x", &s.font_family, fs, s.font_weight, s.font_style);
+            let line_h = s.line_height.to_px(fs);
+            let half_leading = ((line_h - (m.ascent + m.descent)) / 2.0).max(0.0);
+            (half_leading + m.ascent, half_leading + m.descent)
+        };
+
+        // Line top from current geometry: every member is top-placed today.
+        let line_top = members
+            .iter()
+            .map(|&i| {
+                let d = &children[i].dimensions;
+                d.content.y - d.margin.top - d.border.top - d.padding.top
+            })
+            .fold(f32::INFINITY, f32::min);
+
+        // Pass 1: the line's ascent = max above-baseline extent, floored by
+        // the container strut.
+        let (strut_above, _strut_below) = text_extents(container_font);
+        let mut ascent = strut_above;
+        let fs = font_px(container_font);
+        // x-height ~= 0.5em (Slice C v1; the metrics type doesn't expose
+        // x-height — refine when middle-alignment precision matters).
+        let x_height = fs * 0.5;
+        for &i in &members {
+            let c = &children[i];
+            let above = if matches!(c.box_type, BoxType::Text(_)) {
+                text_extents(&c.style).0
+            } else if c.baseline_is_bottom_edge() {
+                let h = c.dimensions.margin_box().height;
+                match c.style.vertical_align {
+                    rustkit_css::VerticalAlign::Middle => h / 2.0 + x_height / 2.0,
+                    _ => h, // baseline (Slice C subset: others fall through)
+                }
+            } else {
+                continue; // non-atomic inline boxes stay top-aligned (later slice)
+            };
+            ascent = ascent.max(above);
+        }
+        let baseline_y = line_top + ascent;
+
+        // Pass 2: shift members to the baseline. Zero-shift when a member's
+        // own extent already defines the ascent.
+        for &i in &members {
+            let c = &mut children[i];
+            let target_top = if matches!(c.box_type, BoxType::Text(_)) {
+                baseline_y - text_extents(&c.style).0
+            } else if c.baseline_is_bottom_edge() {
+                let mb = c.dimensions.margin_box();
+                match c.style.vertical_align {
+                    rustkit_css::VerticalAlign::Middle => {
+                        baseline_y - x_height / 2.0 - mb.height / 2.0
+                    }
+                    _ => baseline_y - mb.height,
+                }
+            } else {
+                continue;
+            };
+            let d = &c.dimensions;
+            let current_top = d.content.y - d.margin.top - d.border.top - d.padding.top;
+            let dy = target_top - current_top;
+            if dy.abs() > 0.01 {
+                crate::flex::translate_subtree(c, 0.0, dy);
+            }
+        }
     }
 
     /// Apply text-align offset to inline children on a line.
@@ -2669,6 +2775,7 @@ impl LayoutBox {
         }
 
         // Apply text-align to all recorded lines
+        let valign_font = self.style.clone();
         for (start, end, width) in lines {
             Self::apply_text_align_offset(
                 &mut self.children[start..end],
@@ -2676,6 +2783,8 @@ impl LayoutBox {
                 container_width,
                 text_align,
             );
+            // Slice C: vertical alignment about the line baseline.
+            Self::apply_vertical_align(&mut self.children[start..end], &valign_font);
         }
 
         self.dimensions.content.height = cursor_y;
