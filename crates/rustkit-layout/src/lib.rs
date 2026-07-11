@@ -1145,19 +1145,19 @@ impl LayoutBox {
                 if lines.len() > 1 {
                     // Known phase-1 gap: wrap_text shapes without letter/word-
                     // spacing, so spaced text may break slightly late. Ledgered.
+                    //
+                    // IFC Slice A: alignment is a property of the LINE, owned
+                    // by the parent's apply_text_align_offset — leaves never
+                    // self-align (x_offset stays 0 here; the parent pass sets
+                    // per-line offsets). Two alignment sources meant mixed
+                    // runs double-shifted or half-shifted depending on which
+                    // path a child happened to take.
                     let text_lines: Vec<TextLine> = lines
                         .iter()
-                        .map(|l| {
-                            let x_offset = match self.style.text_align {
-                                TextAlign::Left | TextAlign::Justify => 0.0,
-                                TextAlign::Right => (container_width - l.width).max(0.0),
-                                TextAlign::Center => ((container_width - l.width) / 2.0).max(0.0),
-                            };
-                            TextLine {
-                                text: l.text(),
-                                width: l.width,
-                                x_offset,
-                            }
+                        .map(|l| TextLine {
+                            text: l.text(),
+                            width: l.width,
+                            x_offset: 0.0,
                         })
                         .collect();
                     let max_line_width = text_lines.iter().map(|l| l.width).fold(0.0f32, f32::max);
@@ -1174,19 +1174,11 @@ impl LayoutBox {
         }
 
         // Single-line path (fits, nowrap/pre, or wrapping unavailable).
-        let text_align_offset = if container_width > text_width {
-            match self.style.text_align {
-                TextAlign::Left => 0.0,
-                TextAlign::Right => container_width - text_width,
-                TextAlign::Center => (container_width - text_width) / 2.0,
-                TextAlign::Justify => 0.0, // Single text run doesn't justify
-            }
-        } else {
-            0.0
-        };
-
-        // Position at containing block's content area with text-align offset
-        self.dimensions.content.x = containing_block.content.x + text_align_offset;
+        // IFC Slice A: no leaf self-align — the flow cursor owns x here and
+        // the PARENT's apply_text_align_offset shifts recorded lines as a
+        // unit. (The old per-leaf offset centered each run against the full
+        // block width independently, which is why mixed runs mis-centered.)
+        self.dimensions.content.x = containing_block.content.x;
         self.dimensions.content.y = containing_block.content.y + containing_block.content.height;
         // Use text width, clamping to containing block only if it has a meaningful width
         // This prevents text from collapsing to 0 width in intrinsic sizing scenarios
@@ -2066,8 +2058,14 @@ impl LayoutBox {
                         child.box_type,
                         BoxType::Inline | BoxType::FormControl(_) | BoxType::Image { .. }
                     ))
-                || (cursor_x > 0.0
-                    && matches!(child.box_type, BoxType::Text(_))
+                // IFC Slice B (symmetric join): a fitting text run joins the
+                // line from ANY cursor position, including 0. The old
+                // cursor_x > 0 gate sent the FIRST text sibling down the
+                // block path, so `Some <b>bold</b> text` stacked as
+                // "Some" / "bold text" — half line-model, half leaf-model
+                // (session-3 falsification). Non-fitting text keeps the
+                // block path (wrap or phase-5 split as before).
+                || (matches!(child.box_type, BoxType::Text(_))
                     && child.text_single_line_width() <= container_width - cursor_x);
 
             if flows_inline {
@@ -2190,6 +2188,13 @@ impl LayoutBox {
                 if matches!(child.box_type, BoxType::Inline) {
                     lines.push((i, i + 1, child.dimensions.margin_box().width));
                 }
+                // IFC Slice A: a text run laid on the block path (a lone or
+                // first text child — the inline gate requires cursor_x > 0)
+                // is a single-item line. Leaves no longer self-align, so
+                // without this record centered headings would go left.
+                if matches!(child.box_type, BoxType::Text(_)) {
+                    lines.push((i, i + 1, child.dimensions.content.width));
+                }
 
                 if child.float == Float::None {
                     cursor_y += child.dimensions.margin_box().height;
@@ -2226,6 +2231,11 @@ impl LayoutBox {
     }
 
     /// Apply text-align offset to inline children on a line.
+    ///
+    /// IFC Slice A: this is the SOLE owner of horizontal alignment. Leaves
+    /// never self-align (layout_text places at the flow origin with zero
+    /// per-line offsets), so every recorded line shifts as a unit here —
+    /// mixed runs keep their relative positions.
     fn apply_text_align_offset(
         children: &mut [LayoutBox],
         line_width: f32,
@@ -2239,27 +2249,44 @@ impl LayoutBox {
             TextAlign::Justify => 0.0, // Justify would need gap distribution (complex)
         };
 
-        if offset > 0.0 {
-            for child in children {
-                // inline-block items and inline boxes (a span/link's own
-                // background/border/padding) shift as a unit. Their text
-                // descendants already self-align against the block width in
-                // layout_text, so we move only the box's own origin here —
-                // both settle about the same center, no double-shift.
-                // Text/form-control/image children recorded on a line were
-                // positioned by the inline-flow cursor (no self-align), so
-                // they shift with the line too.
-                if child.style.display.is_atomic_inline()
+        for child in children {
+            // A wrapped text run aligns each VISUAL line independently
+            // against the container. Only Right/Center write offsets: under
+            // Left/Justify any existing x_offset is a FLOW offset from the
+            // phase-5 mid-line split (first line starts at the old cursor),
+            // which alignment must not clobber — and the split path is
+            // gated to Left/Justify, so the two never meet.
+            if matches!(text_align, TextAlign::Right | TextAlign::Center) {
+                if let Some(text_lines) = child.text_lines.as_mut() {
+                    for tl in text_lines.iter_mut() {
+                        tl.x_offset = match text_align {
+                            TextAlign::Right => (container_width - tl.width).max(0.0),
+                            TextAlign::Center => {
+                                ((container_width - tl.width) / 2.0).max(0.0)
+                            }
+                            _ => 0.0,
+                        };
+                    }
+                    continue;
+                }
+            }
+
+            if offset > 0.0
+                && (child.style.display.is_atomic_inline()
                     || matches!(
                         child.box_type,
                         BoxType::Inline
                             | BoxType::Text(_)
                             | BoxType::FormControl(_)
                             | BoxType::Image { .. }
-                    )
-                {
-                    child.dimensions.content.x += offset;
-                }
+                    ))
+            {
+                // Shift the SUBTREE, not just the box origin: with leaf
+                // self-align gone, a span's inner text only moves if the
+                // line shift carries it (the old box-only shift depended on
+                // the text re-centering itself — the dual-source hack Slice
+                // A removes).
+                crate::flex::translate_subtree(child, offset, 0.0);
             }
         }
     }
@@ -2322,8 +2349,14 @@ impl LayoutBox {
                         child.box_type,
                         BoxType::Inline | BoxType::FormControl(_) | BoxType::Image { .. }
                     ))
-                || (cursor_x > 0.0
-                    && matches!(child.box_type, BoxType::Text(_))
+                // IFC Slice B (symmetric join): a fitting text run joins the
+                // line from ANY cursor position, including 0. The old
+                // cursor_x > 0 gate sent the FIRST text sibling down the
+                // block path, so `Some <b>bold</b> text` stacked as
+                // "Some" / "bold text" — half line-model, half leaf-model
+                // (session-3 falsification). Non-fitting text keeps the
+                // block path (wrap or phase-5 split as before).
+                || (matches!(child.box_type, BoxType::Text(_))
                     && child.text_single_line_width() <= container_width - cursor_x);
 
             if flows_inline {
@@ -2441,6 +2474,13 @@ impl LayoutBox {
                 // See layout_block_children: keep inline box decoration aligned.
                 if matches!(child.box_type, BoxType::Inline) {
                     lines.push((i, i + 1, child.dimensions.margin_box().width));
+                }
+                // IFC Slice A: a text run laid on the block path (a lone or
+                // first text child — the inline gate requires cursor_x > 0)
+                // is a single-item line. Leaves no longer self-align, so
+                // without this record centered headings would go left.
+                if matches!(child.box_type, BoxType::Text(_)) {
+                    lines.push((i, i + 1, child.dimensions.content.width));
                 }
 
                 if child.float == Float::None {
@@ -4847,13 +4887,25 @@ mod tests {
 
     #[test]
     fn test_wrapped_lines_center_align() {
+        // IFC Slice A contract: layout_text NEVER self-aligns (x_offset
+        // stays 0); the parent's apply_text_align_offset is the sole owner
+        // and sets each visual line's offset against the container.
         let mut style = ComputedStyle::new();
         style.text_align = TextAlign::Center;
         let mut layout_box = LayoutBox::new(BoxType::Text(LONG_TEXT.to_string()), style);
         layout_box.layout_text(LONG_TEXT.to_string(), &containing_200());
 
-        let lines = layout_box.text_lines.as_ref().expect("text should wrap");
-        for line in lines {
+        for line in layout_box.text_lines.as_ref().expect("text should wrap") {
+            assert_eq!(
+                line.x_offset, 0.0,
+                "leaf must not self-align (line '{}')",
+                line.text
+            );
+        }
+
+        let mut children = vec![layout_box];
+        LayoutBox::apply_text_align_offset(&mut children, 200.0, 200.0, TextAlign::Center);
+        for line in children[0].text_lines.as_ref().unwrap() {
             let expected = ((200.0 - line.width) / 2.0).max(0.0);
             assert!(
                 (line.x_offset - expected).abs() < 0.01,
@@ -4863,6 +4915,85 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn test_lone_text_centers_via_parent_line_record() {
+        // A block with ONE text child and text-align:center — the leaf takes
+        // the block path (inline gate needs cursor_x > 0), so centering must
+        // arrive via the parent's single-item line record. This is the h1
+        // headline case on every gradient page.
+        let mut parent_style = ComputedStyle::new();
+        parent_style.text_align = TextAlign::Center;
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+        parent.dimensions.content = Rect::new(0.0, 0.0, 700.0, 0.0);
+
+        let mut text_style = ComputedStyle::new();
+        text_style.text_align = TextAlign::Center; // inherited, but leaf must ignore it
+        text_style.font_size = Length::Px(32.0);
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Text("Hello".to_string()), text_style));
+
+        parent.layout_block_children();
+
+        let t = &parent.children[0];
+        let w = t.dimensions.content.width;
+        let expected = (700.0 - w) / 2.0;
+        assert!(
+            (t.dimensions.content.x - expected).abs() < 1.0,
+            "lone centered text should sit at ({expected}), got {} (w={w})",
+            t.dimensions.content.x
+        );
+    }
+
+    #[test]
+    fn test_inline_line_shifts_as_unit() {
+        // [Inline(bold), Text(" world")] under center: the recorded line
+        // shifts as ONE unit — relative spacing preserved, and the inline
+        // box's inner text moves WITH the box (subtree shift; the old
+        // box-only shift left descendants behind once leaves stopped
+        // self-aligning).
+        let mut parent_style = ComputedStyle::new();
+        parent_style.text_align = TextAlign::Center;
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+        parent.dimensions.content = Rect::new(0.0, 0.0, 600.0, 0.0);
+
+        let mut b_style = ComputedStyle::new();
+        b_style.display = rustkit_css::Display::Inline;
+        b_style.font_weight = rustkit_css::FontWeight(700);
+        let mut b = LayoutBox::new(BoxType::Inline, b_style);
+        b.children
+            .push(LayoutBox::new(BoxType::Text("bold".to_string()), ComputedStyle::new()));
+        parent.children.push(b);
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Text(" world".to_string()), ComputedStyle::new()));
+
+        parent.layout_block_children();
+
+        let b = &parent.children[0];
+        let t = &parent.children[1];
+        let line_w = b.dimensions.margin_box().width + t.dimensions.content.width;
+        let expected_start = (600.0 - line_w) / 2.0;
+        assert!(
+            (b.dimensions.content.x - expected_start).abs() < 1.5,
+            "line should start near {expected_start}, got {}",
+            b.dimensions.content.x
+        );
+        // Inner text of the inline box moved with it (subtree shift).
+        let inner = &b.children[0];
+        assert!(
+            (inner.dimensions.content.x - b.dimensions.content.x).abs() < 0.5,
+            "inline box inner text must move with the box: box.x={} inner.x={}",
+            b.dimensions.content.x,
+            inner.dimensions.content.x
+        );
+        // And the following text sits right after the inline box.
+        assert!(
+            t.dimensions.content.x > b.dimensions.content.x,
+            "second run must stay to the right of the first"
+        );
     }
 
     #[test]
