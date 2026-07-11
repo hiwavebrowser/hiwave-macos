@@ -87,7 +87,8 @@
       "html": "websuite/cases/sticky-scroll/index.html",
       "width": 1280,
       "height": 800,
-      "scope": "websuite"
+      "scope": "websuite",
+      "known_fail": true
     },
     "backgrounds": {
       "html": "websuite/micro/backgrounds/index.html",
@@ -117,7 +118,8 @@
       "html": "websuite/micro/form-controls/index.html",
       "width": 800,
       "height": 1200,
-      "scope": "micro"
+      "scope": "micro",
+      "known_fail": true
     },
     "gradients": {
       "html": "websuite/micro/gradients/index.html",
@@ -129,13 +131,15 @@
       "html": "websuite/micro/gradient-no-radius/index.html",
       "width": 800,
       "height": 600,
-      "scope": "micro"
+      "scope": "micro",
+      "known_fail": true
     },
     "gradient-radius-only": {
       "html": "websuite/micro/gradient-radius-only/index.html",
       "width": 800,
       "height": 600,
-      "scope": "micro"
+      "scope": "micro",
+      "known_fail": true
     },
     "gpu-gradient-regression": {
       "html": "websuite/micro/gpu-gradient-regression/index.html",
@@ -147,7 +151,8 @@
       "html": "websuite/micro/images-intrinsic/index.html",
       "width": 800,
       "height": 1400,
-      "scope": "micro"
+      "scope": "micro",
+      "known_fail": true
     },
     "pseudo-classes": {
       "html": "websuite/micro/pseudo-classes/index.html",

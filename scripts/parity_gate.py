@@ -108,12 +108,15 @@ def load_case_gates() -> Dict[str, Dict[str, Any]]:
     import sys as _sys
 
     _sys.path.insert(0, str(Path(__file__).parent))
-    from parity_lib import CASE_REGISTRY, get_threshold  # noqa: E402
+    from parity_lib import CASE_REGISTRY, GATE_SCOPE_CAPS, get_threshold  # noqa: E402
 
     gates: Dict[str, Dict[str, Any]] = {}
     for case_id, case in CASE_REGISTRY["cases"].items():
+        scope_cap = GATE_SCOPE_CAPS.get(case.get("scope", ""), 15.0)
         gates[case_id] = {
-            "threshold": get_threshold(case_id),
+            # T6 tier table: a case gates at the TIGHTER of its category
+            # threshold and its scope cap (builtins/micro: t8 in CI).
+            "threshold": min(get_threshold(case_id), scope_cap),
             "known_fail": bool(case.get("known_fail", False)),
         }
     return gates
