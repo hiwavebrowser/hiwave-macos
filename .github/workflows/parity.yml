@@ -81,8 +81,35 @@ jobs:
 
       - name: Aggregate shards
         run: |
-          # Find all shard run IDs
-          RUNS=$(ls -d parity-results/parity-shard-*/pr-* 2>/dev/null | xargs -n1 basename | sort -u | tr '\n' ',' | sed 's/,$//')
+          # CI-1 (2026-07-11): upload-artifact@v4 strips the run-id dir, so
+          # artifacts land as parity-results/parity-shard-N/swarm_report.json
+          # and the old `ls .../pr-*` discovery NEVER matched — every
+          # aggregate ran empty (deterministic, not flake). Re-home each
+          # shard to the layout parity_aggregate.py expects.
+          set -euo pipefail
+          RUN_IDS=()
+          for art in parity-results/parity-shard-*; do
+            [ -d "$art" ] || continue
+            shard="${art##*-}"
+            run_id="pr-${{ github.run_number }}-shard-${shard}"
+            dest="parity-results/${run_id}"
+            if [ ! -f "${dest}/swarm_report.json" ]; then
+              mkdir -p "$dest"
+              mv "$art"/* "$dest/" 2>/dev/null || true
+              rmdir "$art" 2>/dev/null || rm -rf "$art"
+            fi
+            if [ ! -f "${dest}/swarm_report.json" ]; then
+              echo "ERROR: missing swarm_report.json under ${dest}" >&2
+              find parity-results -maxdepth 3 -type f | head -50
+              exit 1
+            fi
+            RUN_IDS+=("$run_id")
+          done
+          if [ ${#RUN_IDS[@]} -eq 0 ]; then
+            echo "ERROR: no shard artifacts re-homed" >&2
+            exit 1
+          fi
+          RUNS=$(IFS=,; echo "${RUN_IDS[*]}")
           echo "Merging runs: $RUNS"
           python3 scripts/parity_aggregate.py \
             --runs "$RUNS" \
@@ -96,11 +123,15 @@ jobs:
           # cases; registry known_fail cases gate only at the 25% ceiling
           # (they may not get worse). Clearing a known_fail flag after a
           # fix ratchets that case permanently.
+          # CI-1: --primary-viewport-only gates each case at its registry
+          # viewport; exploit-phase rows at other sizes (which read 100%
+          # where no baseline exists) inform digs but never block merges.
           python3 scripts/parity_gate.py \
             --mode test_results \
             --level pr_merge \
             --report parity-results/aggregate_report.json \
             --per-case-thresholds \
+            --primary-viewport-only \
             --max-diff 25
 
       - name: Upload aggregate report
@@ -248,7 +279,32 @@ jobs:
 
       - name: Aggregate shards
         run: |
-          RUNS=$(ls -d parity-results/nightly-shard-*/nightly-* 2>/dev/null | xargs -n1 basename | sort -u | tr '\n' ',' | sed 's/,$//')
+          # CI-1: same re-home as pr-aggregate (artifacts strip the run-id
+          # dir; discovery never matched).
+          set -euo pipefail
+          RUN_IDS=()
+          for art in parity-results/nightly-shard-*; do
+            [ -d "$art" ] || continue
+            shard="${art##*-}"
+            run_id="nightly-${{ github.run_number }}-shard-${shard}"
+            dest="parity-results/${run_id}"
+            if [ ! -f "${dest}/swarm_report.json" ]; then
+              mkdir -p "$dest"
+              mv "$art"/* "$dest/" 2>/dev/null || true
+              rmdir "$art" 2>/dev/null || rm -rf "$art"
+            fi
+            if [ ! -f "${dest}/swarm_report.json" ]; then
+              echo "ERROR: missing swarm_report.json under ${dest}" >&2
+              find parity-results -maxdepth 3 -type f | head -50
+              exit 1
+            fi
+            RUN_IDS+=("$run_id")
+          done
+          if [ ${#RUN_IDS[@]} -eq 0 ]; then
+            echo "ERROR: no shard artifacts re-homed" >&2
+            exit 1
+          fi
+          RUNS=$(IFS=,; echo "${RUN_IDS[*]}")
           echo "Merging runs: $RUNS"
           python3 scripts/parity_aggregate.py \
             --runs "$RUNS" \

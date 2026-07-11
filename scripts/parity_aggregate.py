@@ -74,6 +74,7 @@ class CaseSummary:
     passed: bool
     stable: bool
     threshold: float
+    pixel_runs: int = 1
     overlay_path: Optional[str] = None
     attribution_path: Optional[str] = None
     top_contributors: List[Dict] = field(default_factory=list)
@@ -177,6 +178,7 @@ def aggregate_from_results(results: List[Dict]) -> Dict[str, Any]:
             passed=r.get("passed", False),
             stable=r.get("stable", False),
             threshold=r.get("threshold", 15),
+            pixel_runs=int(r.get("iterations") or r.get("pixel_runs") or 1),
             overlay_path=r.get("best_overlay_path"),
             attribution_path=r.get("best_attribution_path"),
         )
@@ -311,6 +313,24 @@ def aggregate_from_results(results: List[Dict]) -> Dict[str, Any]:
                 "attribution_path": c.attribution_path,
                 "top_contributors": c.top_contributors[:3],
                 "taxonomy": c.taxonomy,
+            }
+            for c in sorted(case_summaries, key=lambda x: -x.diff_pct)
+        ],
+        # CI-1 schema alias (2026-07-11): parity_gate reads `results[]` with
+        # `diff_pct_median`. Without this alias, a re-homed aggregate passed
+        # the gate on "All 0 case(s)" — decorative red would have become
+        # decorative GREEN. `cases[]` above stays for humans/scoreboards.
+        "results": [
+            {
+                "case_id": c.case_id,
+                "viewport": c.viewport,
+                "diff_pct_median": c.diff_pct,
+                "diff_pct": c.diff_pct,
+                "passed": c.passed,
+                "stable": c.stable,
+                "threshold": c.threshold,
+                "pixel_runs": c.pixel_runs,
+                "error": None,
             }
             for c in sorted(case_summaries, key=lambda x: -x.diff_pct)
         ],
