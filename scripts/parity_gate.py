@@ -122,15 +122,67 @@ def load_case_gates() -> Dict[str, Dict[str, Any]]:
     return gates
 
 
+def primary_viewport_filter(results: list) -> list:
+    """Keep only each case's REGISTRY viewport row (CI-1 §C2, 2026-07-11).
+
+    The PR swarm's exploit phase re-runs worst cases at fixed viewports
+    with no baselines — those rows read 100% (instrument/no-baseline, not
+    paint) and must inform digs, never block merges. A case not in the
+    registry is kept as-is (fail-visible, not fail-silent).
+    """
+    import sys as _sys
+
+    _sys.path.insert(0, str(Path(__file__).parent))
+    from parity_lib import CASE_REGISTRY  # noqa: E402
+
+    native = {
+        cid: f"{c['width']}x{c['height']}"
+        for cid, c in CASE_REGISTRY["cases"].items()
+    }
+    kept = []
+    for r in results:
+        cid = r.get("case_id")
+        vp = str(r.get("viewport", ""))
+        if cid in native and vp and vp != native[cid]:
+            continue
+        kept.append(r)
+    return kept
+
+
 def gate_test_results(
     report: Dict[str, Any],
     max_diff: float,
     require_stable: bool,
     max_variance: float,
     per_case_thresholds: bool = False,
+    primary_viewport_only: bool = False,
 ) -> Dict[str, Any]:
     failures = []
     results = report.get("results", [])
+    # B2 fallback: an aggregate that only carries `cases[]` still gates.
+    if not results and report.get("cases"):
+        results = [
+            {
+                "case_id": c.get("case_id"),
+                "viewport": c.get("viewport"),
+                "diff_pct_median": c.get("diff_pct"),
+                "diff_pct": c.get("diff_pct"),
+                "passed": c.get("passed"),
+                "stable": c.get("stable"),
+                "error": None,
+            }
+            for c in report["cases"]
+        ]
+    # B3 tripwire: an empty report is a schema/path bug, NEVER a pass.
+    # ("PASS: All 0 case(s)" is how a broken pipeline turns green.)
+    if not results:
+        return {
+            "failures": [{"case_id": "<pipeline>", "reason": "empty_report"}],
+            "total": 0,
+        }
+    if primary_viewport_only:
+        results = primary_viewport_filter(results)
+
     case_gates = load_case_gates() if per_case_thresholds else {}
 
     for r in results:
@@ -167,11 +219,20 @@ def gate_test_results(
             continue
 
         if require_stable:
-            if stable is not True:
-                failures.append({"case_id": case_id, "reason": "unstable", "variance": variance, "max_variance": max_variance})
-                continue
-            if variance is not None and float(variance) > max_variance:
-                failures.append({"case_id": case_id, "reason": "variance", "variance": float(variance), "max_variance": max_variance})
+            # Stability is only ENFORCEABLE where evidence exists: the PR
+            # scout phase runs each native case ONCE (iterations 1), which
+            # the swarm reports as stable=False — failing on that would
+            # permanently red-lock every PR the moment data flows (a trap
+            # nobody hit while the aggregate ran empty). Rows with >= 2 runs
+            # are held to the stability bar; single-run rows are gated on
+            # diff only.
+            runs = int(r.get("pixel_runs") or r.get("iterations") or 1)
+            if runs >= 2:
+                if stable is not True:
+                    failures.append({"case_id": case_id, "reason": "unstable", "variance": variance, "max_variance": max_variance})
+                    continue
+                if variance is not None and float(variance) > max_variance:
+                    failures.append({"case_id": case_id, "reason": "variance", "variance": float(variance), "max_variance": max_variance})
 
     return {"failures": failures, "total": len(results)}
 
@@ -202,6 +263,7 @@ def main():
     level = None
     max_diff = None
     per_case_thresholds = False
+    primary_viewport_only = False
     require_stable = None
     max_variance = None
     verbose = False
@@ -227,6 +289,9 @@ def main():
             i += 2
         elif args[i] == "--per-case-thresholds":
             per_case_thresholds = True
+            i += 1
+        elif args[i] == "--primary-viewport-only":
+            primary_viewport_only = True
             i += 1
         elif args[i] == "--require-stable":
             require_stable = True
@@ -292,6 +357,7 @@ def main():
             require_stable=bool(require_stable),
             max_variance=max_variance,
             per_case_thresholds=per_case_thresholds,
+            primary_viewport_only=primary_viewport_only,
         )
         failures = gate["failures"]
 
