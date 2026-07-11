@@ -1826,8 +1826,10 @@ impl Renderer {
                 font_family,
                 font_weight,
                 font_style,
+                advances,
+                ascent,
             } => {
-                self.draw_text(
+                self.draw_text_with_metrics(
                     text,
                     *x,
                     *y,
@@ -1836,6 +1838,8 @@ impl Renderer {
                     font_family,
                     *font_weight,
                     *font_style,
+                    advances.as_deref(),
+                    *ascent,
                 );
             }
 
@@ -4291,6 +4295,8 @@ impl Renderer {
 
         let mut cursor_x = x;
         let atlas_size = self.glyph_cache.atlas_size() as f32;
+        // Glyph entries are baseline-relative (ADVANCE CONTRACT).
+        let baseline = y + Self::fallback_run_ascent(font_family, font_size);
 
         for ch in text.chars() {
             let key = GlyphKey {
@@ -4303,7 +4309,7 @@ impl Renderer {
 
             if let Some(entry) = self.glyph_cache.get_or_rasterize(&self.device, &self.queue, &key) {
                 let glyph_x = cursor_x + entry.offset[0];
-                let glyph_y = y + entry.offset[1];
+                let glyph_y = baseline + entry.offset[1];
                 let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
                 let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
 
@@ -4352,6 +4358,22 @@ impl Renderer {
         }
     }
 
+    /// One-per-run ascent fallback for legacy callers that ship no layout
+    /// ascent — same metric source the deleted per-glyph lookup used.
+    #[cfg(target_os = "macos")]
+    fn fallback_run_ascent(font_family: &str, font_size: f32) -> f32 {
+        let family = if font_family.is_empty() { "Helvetica" } else { font_family };
+        rustkit_text::macos::TextShaper::new(family, font_size as f64)
+            .unwrap_or_else(|_| rustkit_text::macos::TextShaper::with_system_font(font_size as f64))
+            .get_metrics()
+            .ascent
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn fallback_run_ascent(_font_family: &str, font_size: f32) -> f32 {
+        font_size * 0.8
+    }
+
     fn draw_text(
         &mut self,
         text: &str,
@@ -4363,6 +4385,30 @@ impl Renderer {
         font_weight: u16,
         font_style: u8,
     ) {
+        self.draw_text_with_metrics(
+            text, x, y, color, font_size, font_family, font_weight, font_style, None, None,
+        );
+    }
+
+    /// Draw text honoring the ADVANCE CONTRACT: when layout ships per-char
+    /// advances and an ascent, glyphs are placed at layout's advances and
+    /// the baseline sits at y + layout_ascent — the renderer's own advance
+    /// derivation and per-glyph ascent shaper (two extra text stacks) are
+    /// bypassed. Legacy callers pass None and keep the old behavior.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_text_with_metrics(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        color: Color,
+        font_size: f32,
+        font_family: &str,
+        font_weight: u16,
+        font_style: u8,
+        layout_advances: Option<&[f32]>,
+        layout_ascent: Option<f32>,
+    ) {
         let mut cursor_x = x;
         let c = [
             color.r as f32 / 255.0,
@@ -4371,10 +4417,16 @@ impl Renderer {
             color.a,
         ];
 
+        // Baseline: layout's ascent when the command carries one (ADVANCE
+        // CONTRACT), else ONE per-run fallback from the same source the old
+        // per-glyph lookup used. Glyph entries are baseline-relative.
+        let baseline =
+            y + layout_ascent.unwrap_or_else(|| Self::fallback_run_ascent(font_family, font_size));
+
         // Get atlas size before the loop to avoid borrow issues
         let atlas_size = self.glyph_cache.atlas_size() as f32;
 
-        for ch in text.chars() {
+        for (char_idx, ch) in text.chars().enumerate() {
             let key = GlyphKey {
                 codepoint: ch,
                 font_family: font_family.to_string(),
@@ -4386,7 +4438,7 @@ impl Renderer {
             // Clone the entry to avoid borrow issues
             if let Some(entry) = self.glyph_cache.get_or_rasterize(&self.device, &self.queue, &key) {
                 let glyph_x = cursor_x + entry.offset[0];
-                let glyph_y = y + entry.offset[1];
+                let glyph_y = baseline + entry.offset[1];
                 let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
                 let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
 
@@ -4426,10 +4478,17 @@ impl Renderer {
                     base, base + 2, base + 3,
                 ]);
 
-                cursor_x += entry.advance;
+                // ADVANCE CONTRACT: layout's advance wins when present so
+                // painted ink tracks measured width 1:1; the atlas advance
+                // is the fallback for legacy callers.
+                cursor_x += layout_advances
+                    .and_then(|a| a.get(char_idx).copied())
+                    .unwrap_or(entry.advance);
             } else {
-                // Fallback: advance by estimated width
-                cursor_x += font_size * 0.6;
+                // Fallback: advance by estimated width (or layout's, if given)
+                cursor_x += layout_advances
+                    .and_then(|a| a.get(char_idx).copied())
+                    .unwrap_or(font_size * 0.6);
             }
         }
     }

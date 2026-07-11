@@ -2939,6 +2939,17 @@ pub enum DisplayCommand {
         font_family: String,
         font_weight: u16,
         font_style: u8,
+        /// ADVANCE CONTRACT (text-stack unification, 2026-07-11): per-char
+        /// horizontal advances from the LAYOUT shaper. When present, paint
+        /// places glyphs at these advances instead of re-deriving its own —
+        /// layout width and painted ink stay in lockstep (the ~3-4% drift
+        /// class). None = legacy paths (forms/svg placeholders); the
+        /// renderer falls back to its own advances.
+        advances: Option<Vec<f32>>,
+        /// Baseline ascent from the layout shaper (same contract): paint
+        /// positions the baseline at y + ascent instead of consulting a
+        /// third per-glyph shaper.
+        ascent: Option<f32>,
     },
     /// Draw text decoration line (underline, strikethrough, overline).
     TextDecoration {
@@ -4227,7 +4238,12 @@ impl DisplayList {
                     }
                 }
 
-                // Draw regular text
+                // Draw regular text. The ADVANCE CONTRACT ships layout's
+                // per-char advances and ascent with the command so paint
+                // places glyphs exactly where layout measured them — the
+                // ~3-4% painted-ink drift (and the 2-3px baseline offset
+                // from the renderer's third per-glyph shaper) both die here.
+                let advances = shape_line_advances(&text, style, font_size);
                 self.commands.push(DisplayCommand::Text {
                     text: text.clone(),
                     x,
@@ -4241,6 +4257,8 @@ impl DisplayList {
                         rustkit_css::FontStyle::Italic => 1,
                         rustkit_css::FontStyle::Oblique => 2,
                     },
+                    advances,
+                    ascent: Some(metrics.ascent),
                 });
 
                 // Draw text decorations
@@ -4664,6 +4682,46 @@ pub fn measure_text_with_spacing(
     }
 }
 
+/// Per-CHAR advances from the layout shaper, letter/word-spacing applied
+/// (ADVANCE CONTRACT, text-stack unification 2026-07-11). Returns None when
+/// shaping fails or when glyph count != char count (ligature clusters) — the
+/// renderer then falls back to its own advances instead of misaligning.
+pub fn shape_line_advances(
+    text: &str,
+    style: &rustkit_css::ComputedStyle,
+    font_size: f32,
+) -> Option<Vec<f32>> {
+    let letter_spacing = match style.letter_spacing {
+        Length::Px(px) => px,
+        Length::Em(em) => em * font_size,
+        Length::Rem(rem) => rem * 16.0,
+        _ => 0.0,
+    };
+    let word_spacing = match style.word_spacing {
+        Length::Px(px) => px,
+        Length::Em(em) => em * font_size,
+        Length::Rem(rem) => rem * 16.0,
+        _ => 0.0,
+    };
+    let shaper = TextShaper::new();
+    let chain = FontFamilyChain::from_css_value(&style.font_family);
+    let mut run = shaper
+        .shape(
+            text,
+            &chain,
+            style.font_weight,
+            style.font_style,
+            style.font_stretch,
+            font_size,
+        )
+        .ok()?;
+    run.apply_spacing(letter_spacing, word_spacing);
+    if run.glyphs.len() != text.chars().count() {
+        return None;
+    }
+    Some(run.glyphs.iter().map(|g| g.advance).collect())
+}
+
 /// Simple text measurement (fallback when shaping is unavailable).
 pub fn measure_text_simple(text: &str, font_size: f32) -> TextMetrics {
     // Approximate metrics based on font size
@@ -4699,6 +4757,32 @@ mod tests {
         assert_eq!(r.bottom(), 70.0);
         assert!(r.contains(50.0, 30.0));
         assert!(!r.contains(0.0, 0.0));
+    }
+
+    #[test]
+    fn test_advance_contract_sum_matches_measure() {
+        // ADVANCE CONTRACT (text-stack unification): the per-char advances
+        // shipped to paint must sum to the same width layout measured —
+        // within 0.5px — or centering math and painted ink diverge again.
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(16.0);
+        let text = "The quick brown fox jumps over 42 lazy dogs.";
+        let advances = shape_line_advances(text, &style, 16.0)
+            .expect("plain Latin text must shape to per-char advances");
+        assert_eq!(advances.len(), text.chars().count());
+        let measured = measure_text_advanced(
+            text,
+            &style.font_family,
+            16.0,
+            style.font_weight,
+            style.font_style,
+        )
+        .width;
+        let sum: f32 = advances.iter().sum();
+        assert!(
+            (sum - measured).abs() < 0.5,
+            "advance sum {sum} != measured width {measured}"
+        );
     }
 
     #[test]

@@ -238,6 +238,8 @@ pub fn render_broken_image(
                 font_family: "sans-serif".to_string(),
                 font_weight: 400,
                 font_style: 0,
+                advances: None,
+                ascent: None,
             });
         }
     }
