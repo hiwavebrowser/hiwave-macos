@@ -1220,11 +1220,24 @@ impl Engine {
                 .as_ref()
                 .map(|s| s.background_color)
                 .unwrap_or(rustkit_css::Color::TRANSPARENT);
-            root_box.style.background_color = if html_bg.a > 0.0 {
-                html_bg
+            let mut body_box = body_box;
+            if html_bg.a > 0.0 {
+                root_box.style.background_color = html_bg;
             } else {
-                body_box.style.background_color
-            };
+                // Port-back of Athena's #18 refinement: TRANSFER the
+                // background (color + gradient) to the canvas and clear it
+                // from body, so it paints once with true propagation
+                // semantics — the paint-twice-same-color shortcut broke on
+                // gradients and translucent colors.
+                root_box.style.background_color = body_box.style.background_color;
+                root_box.style.background_gradient = body_box.style.background_gradient.clone();
+                if root_box.style.background_color.a > 0.0
+                    || root_box.style.background_gradient.is_some()
+                {
+                    body_box.style.background_color = rustkit_css::Color::TRANSPARENT;
+                    body_box.style.background_gradient = None;
+                }
+            }
             root_box.children.push(body_box);
         } else if let Some(html) = document.document_element() {
             // Fallback: use html element if no body
