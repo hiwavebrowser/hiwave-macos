@@ -1970,6 +1970,15 @@ impl Engine {
                 style.display = rustkit_css::Display::Inline;
                 style.text_decoration_line = rustkit_css::TextDecorationLine::LINE_THROUGH;
             }
+            // Form controls do NOT inherit the document font in Chrome's UA
+            // sheet — they get the system control font at 13.333px unless
+            // the author sets one (css-selectors buttons: Chrome labels
+            // measured ~11% narrower than our inherited 14px serif-stack
+            // labels; every composed control width ran wide).
+            "button" | "input" | "select" | "textarea" => {
+                style.font_size = rustkit_css::Length::Px(13.333);
+                style.font_family = "system-ui".to_string();
+            }
             "small" => {
                 style.display = rustkit_css::Display::Inline;
                 style.font_size = rustkit_css::Length::Px(13.0); // smaller
