@@ -1,28 +1,17 @@
 <!DOCTYPE html>
-<html><head><meta charset="utf-8"><style>
-/* IFC Slice C prep (+ A/B smoke) — text + replaced + text on one line.
-   Expect: one baseline band when width allows; center shifts as a unit.
-   16×16 PNG is 1×1 red pixel scaled via width/height attrs (no external asset).
-   See trench/forensics/2026-07-11-ifc-b2-midline-split-BRIEF.md §8 */
-* { margin: 0; padding: 0; }
-body { background: #fff; font-family: Arial, sans-serif; font-size: 16px; }
-.row { width: 220px; margin: 12px 0; border: 1px solid #ddd; line-height: 24px; }
+<html><head><style>
+* { margin:0; padding:0; }
+body { background:#fff; font-family: Arial; font-size: 16px; padding: 10px; }
+.row { width: 400px; margin-bottom: 14px; background: #f3f3f3; }
 .c { text-align: center; }
 .r { text-align: right; }
-.l { text-align: left; }
-img { width: 16px; height: 16px; vertical-align: baseline; }
+img { width: 16px; height: 16px; }
 .mid img { vertical-align: middle; }
-.lab { font-size: 10px; color: #888; margin-top: 8px; }
 </style></head>
 <body>
-<p class="lab">left — text + img + text (must share one line)</p>
-<div class="row l">before <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" alt=""> after</div>
-
-<p class="lab">center — same group as one unit</p>
-<div class="row c">before <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" alt=""> after</div>
-
-<div class="row r">before <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" alt=""> after</div>
-
-<p class="lab">middle valign (Slice C) — img vertically centered on line</p>
-<div class="row l mid">aa <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" alt=""> bb</div>
+<div class="row">before <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="> after</div>
+<div class="row c">before <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="> after</div>
+<div class="row r">before <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="> after</div>
+<div class="row mid">aa <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="> bb</div>
+<div class="row big">tall <img style="width:32px;height:32px" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" alt=""> text</div>
 </body></html>

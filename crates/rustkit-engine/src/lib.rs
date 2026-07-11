@@ -2733,6 +2733,23 @@ impl Engine {
                     style.aspect_ratio = Some(ratio);
                 }
             }
+            "vertical-align" => {
+                // Sixth parsed-but-never-applied property found this week
+                // (text-align, background-clip, inheritance, bold system
+                // font, control font — now this). Slice C reads Baseline
+                // and Middle; other values parse and fall through to
+                // baseline behavior at layout (documented subset).
+                style.vertical_align = match value.trim() {
+                    "middle" => rustkit_css::VerticalAlign::Middle,
+                    "top" => rustkit_css::VerticalAlign::Top,
+                    "bottom" => rustkit_css::VerticalAlign::Bottom,
+                    "text-top" => rustkit_css::VerticalAlign::TextTop,
+                    "text-bottom" => rustkit_css::VerticalAlign::TextBottom,
+                    "sub" => rustkit_css::VerticalAlign::Sub,
+                    "super" => rustkit_css::VerticalAlign::Super,
+                    _ => rustkit_css::VerticalAlign::Baseline,
+                };
+            }
             "text-align" => {
                 // Never applied until 2026-07-10: this arm silently dropped
                 // the declaration, so every `text-align: center/right` on
