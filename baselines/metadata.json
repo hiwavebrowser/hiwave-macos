@@ -4,5 +4,7 @@
   "see": [
     "cases/registry.json",
     "baselines/chrome-148/metadata.json"
-  ]
+  ],
+  "last_updated": "2026-07-10T22:12:51.553832",
+  "git_commit": "98fd319209ac"
 }
