@@ -405,29 +405,38 @@ def main():
         print(build.stderr[:400])
         sys.exit(1)
     
-    # Determine cases to run
+    # Determine cases to run. Scope groups come from the registry; the
+    # HOLDOUT scope (test-fidelity T1) is reported as its own number and is
+    # NOT part of the 26-case campaign meter — "all" deliberately excludes
+    # it so the campaign scoreboard stays comparable across history. Run
+    # with --scope holdout (or --scope everything) to include it.
+    from parity_lib import _cases_for_scope
+
+    HOLDOUT = _cases_for_scope("holdout")
+    scope_groups = [
+        ("builtins", BUILTINS),
+        ("websuite", WEBSUITE),
+        ("micro", MICRO_TESTS),
+        ("holdout", HOLDOUT),
+    ]
     cases = []
     if single_case:
-        all_cases = {c[0]: c for c in BUILTINS + WEBSUITE + MICRO_TESTS}
-        if single_case in all_cases:
-            c = all_cases[single_case]
-            if any(b[0] == single_case for b in BUILTINS):
-                case_type = "builtins"
-            elif any(m[0] == single_case for m in MICRO_TESTS):
-                case_type = "micro"
-            else:
-                case_type = "websuite"
-            cases = [(c[0], c[1], c[2], c[3], case_type)]
-        else:
+        for case_type, group in scope_groups:
+            for c in group:
+                if c[0] == single_case:
+                    cases = [(c[0], c[1], c[2], c[3], case_type)]
+        if not cases:
             print(f"Error: Unknown case '{single_case}'")
             sys.exit(1)
     else:
-        if scope in ["all", "builtins"]:
-            cases.extend([(c[0], c[1], c[2], c[3], "builtins") for c in BUILTINS])
-        if scope in ["all", "websuite"]:
-            cases.extend([(c[0], c[1], c[2], c[3], "websuite") for c in WEBSUITE])
-        if scope in ["all", "micro"]:
-            cases.extend([(c[0], c[1], c[2], c[3], "micro") for c in MICRO_TESTS])
+        for case_type, group in scope_groups:
+            wanted = (
+                scope == case_type
+                or scope == "everything"
+                or (scope == "all" and case_type != "holdout")
+            )
+            if wanted:
+                cases.extend([(c[0], c[1], c[2], c[3], case_type) for c in group])
     
     # Run tests
     results = []

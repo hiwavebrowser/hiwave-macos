@@ -91,10 +91,16 @@ jobs:
 
       - name: Gate check
         run: |
+          # Test-fidelity T0 (2026-07-11): the flat --max-diff 25 never
+          # blocked anything. Per-case campaign thresholds now gate fixed
+          # cases; registry known_fail cases gate only at the 25% ceiling
+          # (they may not get worse). Clearing a known_fail flag after a
+          # fix ratchets that case permanently.
           python3 scripts/parity_gate.py \
             --mode test_results \
             --level pr_merge \
             --report parity-results/aggregate_report.json \
+            --per-case-thresholds \
             --max-diff 25
 
       - name: Upload aggregate report

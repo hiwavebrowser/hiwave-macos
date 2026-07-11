@@ -95,14 +95,40 @@ def level_defaults(level: str) -> Dict[str, Any]:
     return {"max_diff": 1.0, "require_stable": False, "max_variance": 0.10, "regression_budget": 0.0}
 
 
+def load_case_gates() -> Dict[str, Dict[str, Any]]:
+    """Per-case gate config from cases/registry.json + campaign thresholds.
+
+    Test-fidelity hardening T0 (2026-07-11): a flat --max-diff 25 meant the
+    PR gate almost never blocked — a case could be visibly wrong and land.
+    Each case now gates at its OWN campaign threshold; cases the campaign
+    has not fixed yet carry "known_fail": true in the registry and only the
+    hard ceiling applies to them (they may not get WORSE than the ceiling).
+    Fixing a case and clearing its known_fail flag ratchets it permanently.
+    """
+    import sys as _sys
+
+    _sys.path.insert(0, str(Path(__file__).parent))
+    from parity_lib import CASE_REGISTRY, get_threshold  # noqa: E402
+
+    gates: Dict[str, Dict[str, Any]] = {}
+    for case_id, case in CASE_REGISTRY["cases"].items():
+        gates[case_id] = {
+            "threshold": get_threshold(case_id),
+            "known_fail": bool(case.get("known_fail", False)),
+        }
+    return gates
+
+
 def gate_test_results(
     report: Dict[str, Any],
     max_diff: float,
     require_stable: bool,
     max_variance: float,
+    per_case_thresholds: bool = False,
 ) -> Dict[str, Any]:
     failures = []
     results = report.get("results", [])
+    case_gates = load_case_gates() if per_case_thresholds else {}
 
     for r in results:
         case_id = r.get("case_id", "<unknown>")
@@ -119,7 +145,21 @@ def gate_test_results(
             failures.append({"case_id": case_id, "reason": "missing_diff"})
             continue
 
-        if float(diff) > max_diff:
+        # Per-case gate: campaign threshold for fixed cases, ceiling-only
+        # for registry-declared known_fail cases.
+        if per_case_thresholds and case_id in case_gates:
+            g = case_gates[case_id]
+            limit = max_diff if g["known_fail"] else min(g["threshold"], max_diff)
+            if float(diff) > limit:
+                failures.append({
+                    "case_id": case_id,
+                    "reason": "diff",
+                    "diff": float(diff),
+                    "max_diff": limit,
+                    "known_fail": g["known_fail"],
+                })
+                continue
+        elif float(diff) > max_diff:
             failures.append({"case_id": case_id, "reason": "diff", "diff": float(diff), "max_diff": max_diff})
             continue
 
@@ -158,6 +198,7 @@ def main():
     mode = None
     level = None
     max_diff = None
+    per_case_thresholds = False
     require_stable = None
     max_variance = None
     verbose = False
@@ -181,6 +222,9 @@ def main():
         elif args[i] == "--max-diff" and i + 1 < len(args):
             max_diff = float(args[i + 1])
             i += 2
+        elif args[i] == "--per-case-thresholds":
+            per_case_thresholds = True
+            i += 1
         elif args[i] == "--require-stable":
             require_stable = True
             i += 1
@@ -230,6 +274,8 @@ def main():
         print(f"Mode: test_results")
         if level:
             print(f"Level: {level}")
+        if per_case_thresholds:
+            print(f"Per-case thresholds: ON (registry known_fail cases gate at ceiling {max_diff}%)")
         print(f"Max diff: {max_diff}%")
         print(f"Require stable: {bool(require_stable)}")
         if require_stable:
@@ -237,7 +283,13 @@ def main():
         if regression_threshold is not None and previous_path:
             print(f"Regression budget: {regression_threshold}%")
 
-        gate = gate_test_results(report, max_diff=max_diff, require_stable=bool(require_stable), max_variance=max_variance)
+        gate = gate_test_results(
+            report,
+            max_diff=max_diff,
+            require_stable=bool(require_stable),
+            max_variance=max_variance,
+            per_case_thresholds=per_case_thresholds,
+        )
         failures = gate["failures"]
 
         regressions = []
