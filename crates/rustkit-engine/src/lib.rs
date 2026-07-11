@@ -937,6 +937,18 @@ impl Engine {
             }
         }
 
+        // The root (canvas) box always covers the FULL viewport: its
+        // background is the CSS canvas background (§14.2, set at build from
+        // html/body), which must paint to the viewport edges even when the
+        // page content is shorter.
+        root_box.dimensions.content.width =
+            root_box.dimensions.content.width.max(bounds.width as f32);
+        root_box.dimensions.content.height = root_box
+            .dimensions
+            .content
+            .height
+            .max(bounds.height as f32);
+
         // Debug: log the layout box tree AFTER layout
         fn debug_layout_box(box_: &LayoutBox, depth: usize) {
             if depth > 5 {
@@ -1197,6 +1209,22 @@ impl Engine {
                 0,
                 1,
             );
+            // CSS 2.1 §14.2: the CANVAS background comes from the html
+            // element, or from body when html's is transparent. The root box
+            // paints it across the whole viewport (see the post-layout
+            // viewport fill). Without this, a short page painted the body's
+            // background only over its content height and left the rest of
+            // the viewport white — invisible on the 26 campaign pages (all
+            // viewport-filling), 52% of the frame on holdout-flex-toolbar.
+            let html_bg = html_style
+                .as_ref()
+                .map(|s| s.background_color)
+                .unwrap_or(rustkit_css::Color::TRANSPARENT);
+            root_box.style.background_color = if html_bg.a > 0.0 {
+                html_bg
+            } else {
+                body_box.style.background_color
+            };
             root_box.children.push(body_box);
         } else if let Some(html) = document.document_element() {
             // Fallback: use html element if no body
