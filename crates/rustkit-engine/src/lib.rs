@@ -1693,6 +1693,16 @@ impl Engine {
                         s.white_space = parent.white_space;
                         s.word_break = parent.word_break;
                         s.font_stretch = parent.font_stretch;
+                        // NOT CSS inheritance — feature plumbing: gradient
+                        // text (background-clip:text + transparent fill) is
+                        // detected on the TEXT box at paint time
+                        // (render_text's is_gradient_text), but the
+                        // properties live on the ELEMENT. Without this copy
+                        // the whole path was dead: about's hero painted the
+                        // gradient as a full-width slab with white glyphs.
+                        s.background_clip = parent.background_clip;
+                        s.webkit_text_fill_color = parent.webkit_text_fill_color;
+                        s.background_gradient = parent.background_gradient.clone();
                         s
                     } else {
                         let mut s = ComputedStyle::new();
