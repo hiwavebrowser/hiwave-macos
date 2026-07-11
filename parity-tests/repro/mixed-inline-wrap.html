@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+/* IFC Slice B2 fixture — mid-line wrap under L/C/R.
+   Expect: ≥2 visual lines; each line's ink group aligns as a unit
+   (center midpoint ≈ block mid; right ends at container edge).
+   See trench/forensics/2026-07-11-ifc-b2-midline-split-BRIEF.md */
+* { margin: 0; padding: 0; }
+body { background: #fff; font-family: Arial, sans-serif; font-size: 16px; }
+.row { width: 180px; margin: 12px 0; border: 1px solid #ddd; }
+.c { text-align: center; }
+.r { text-align: right; }
+.l { text-align: left; }
+b { font-weight: 700; }
+.lab { font-size: 10px; color: #888; margin-top: 8px; }
+</style></head>
+<body>
+<p class="lab">center — prefix + long bold that must fill remaining then wrap</p>
+<div class="row c">Hi <b>continues across the width boundary with more words here</b> end</div>
+
+<p class="lab">right — same tree</p>
+<div class="row r">Hi <b>continues across the width boundary with more words here</b> end</div>
+
+<p class="lab">left — phase-5 regression guard (must stay bit-stable vs pre-B2)</p>
+<div class="row l">Hi <b>continues across the width boundary with more words here</b> end</div>
+
+<p class="lab">center — long plain after short bold (split after non-text sibling)</p>
+<div class="row c"><b>Go</b> then a much longer plain run that cannot fit the remainder of the first line at all</div>
+
+<p class="lab">right — same B2 tree (mid-line split under right)</p>
+<div class="row r"><b>Go</b> then a much longer plain run that cannot fit the remainder of the first line at all</div>
+
+<p class="lab">left — same B2 tree (phase-5 guard for the split shape)</p>
+<div class="row l"><b>Go</b> then a much longer plain run that cannot fit the remainder of the first line at all</div>
+</body></html>
