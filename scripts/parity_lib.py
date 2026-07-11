@@ -59,16 +59,35 @@ VIEWPORTS = [
     (1920, 1080, "1920x1080"),
 ]
 
-# Thresholds by component type
+# Thresholds by component type.
+#
+# T6 THRESHOLD COLLAPSE (Pete-locked, 2026-07-11, per the test-fidelity
+# hardening plan): the sticky (25) and text (20) specials are GONE — both
+# were free-pass zones that absorbed real wrongness ("a page can be
+# visibly wrong and still pass"). Everything now caps at t15; categories
+# already tighter than 15 stay tight. Cases this flips to failing carry
+# known_fail in cases/registry.json (gate ceiling only) until actually
+# fixed. Per the hardening banlist: no threshold moves without Pete.
 THRESHOLDS = {
     "layout_structure": 5,
     "solid_backgrounds": 8,
     "images_replaced": 10,
     "gradients_effects": 15,
     "form_controls": 12,
-    "text_rendering": 20,
-    "sticky_scroll": 25,
+    "text_rendering": 15,  # was 20
+    "sticky_scroll": 15,  # was 25
     "default": 15,
+}
+
+# CI PR-gate scope caps (test-fidelity A5 tier table): builtins and micro
+# gate at t8 in CI — product chrome and micro contracts are held tighter
+# than full websuite pages. Reporting (pass@t15 scoreboard) is unchanged;
+# this only tightens what a PR may regress.
+GATE_SCOPE_CAPS = {
+    "builtins": 8.0,
+    "micro": 8.0,
+    "websuite": 15.0,
+    "holdout": 15.0,
 }
 
 # Blank frame detection threshold (>99.9% background = blank)

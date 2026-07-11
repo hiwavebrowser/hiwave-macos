@@ -42,32 +42,9 @@ OUTPUT_DIR = REPO_ROOT / "parity-baseline"
 sys.path.insert(0, str(Path(__file__).parent))
 from parity_lib import BUILTINS, WEBSUITE, MICRO_TESTS  # noqa: E402
 
-# Thresholds by component type
-THRESHOLDS = {
-    "layout_structure": 5,
-    "solid_backgrounds": 8,
-    "images_replaced": 10,
-    "gradients_effects": 15,
-    "form_controls": 12,
-    "text_rendering": 20,
-    "sticky_scroll": 25,
-    "default": 15,
-}
-
-
-def get_threshold(case_id: str) -> float:
-    """Get appropriate threshold for a case."""
-    if "form" in case_id:
-        return THRESHOLDS["form_controls"]
-    if "image" in case_id or "gallery" in case_id:
-        return THRESHOLDS["images_replaced"]
-    if "gradient" in case_id:
-        return THRESHOLDS["gradients_effects"]
-    if "sticky" in case_id or "scroll" in case_id:
-        return THRESHOLDS["sticky_scroll"]
-    if "typography" in case_id or "text" in case_id:
-        return THRESHOLDS["text_rendering"]
-    return THRESHOLDS["default"]
+# Thresholds live in parity_lib (single source, next to the registry) —
+# this file carried a divergence-prone copy until the T6 collapse.
+from parity_lib import THRESHOLDS, get_threshold  # noqa: E402, F401
 
 
 def run_rustkit_capture(case_id: str, html_path: str, width: int, height: int) -> dict:
