@@ -264,30 +264,15 @@ impl GlyphCache {
         let u1 = (atlas_x + 1 + glyph_width) as f32 / self.atlas_size as f32;
         let v1 = (atlas_y + 1 + glyph_height) as f32 / self.atlas_size as f32;
 
-        // The y passed to draw_text is the top of the content box.
-        // We need to position glyphs so they align on a common baseline.
-        // 
-        // Text layout convention:
-        // - The baseline is at y + ascent from the top of the text box
-        // - Each glyph's bearing_y is the distance from baseline to glyph top
-        // - So glyph top should be at: (y + ascent) - bearing_y
-        //
-        // Get actual font metrics for proper baseline alignment
-        #[cfg(target_os = "macos")]
-        let ascent = {
-            let family = if key.font_family.is_empty() { "Helvetica" } else { &key.font_family };
-            let shaper = rustkit_text::macos::TextShaper::new(family, font_size as f64)
-                .unwrap_or_else(|_| rustkit_text::macos::TextShaper::with_system_font(font_size as f64));
-            shaper.get_metrics().ascent
-        };
-        
-        #[cfg(not(target_os = "macos"))]
-        let ascent = font_size * 0.8; // Fallback approximation
-        
-        // y_offset: how far below the text box top to place the glyph
-        // baseline is at ascent from top, glyph top is bearing_y above baseline
-        let y_offset = ascent - bearing_y;
-        
+        // ADVANCE CONTRACT (2026-07-11): entries are BASELINE-relative.
+        // offset[1] = -bearing_y (glyph top relative to the baseline); the
+        // draw path decides where the baseline is — from layout's ascent
+        // when the display command carries one, else one per-run fallback.
+        // The old code built a THIRD TextShaper here PER GLYPH just to get
+        // an ascent, and its metrics disagreed with layout's by 2-3px —
+        // every glyph on every page painted low.
+        let y_offset = -bearing_y;
+
         // x_offset: horizontal bearing adjustment
         let x_offset = bearing_x;
         
