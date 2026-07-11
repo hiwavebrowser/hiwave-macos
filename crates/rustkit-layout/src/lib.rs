@@ -714,6 +714,14 @@ pub struct LayoutBox {
     pub element_id: Option<usize>,
     /// Wrapped lines for text boxes (`None` = single-run text, no wrap).
     pub text_lines: Option<Vec<TextLine>>,
+    /// FLOW offset of visual line 0 when this text box was laid out
+    /// MID-LINE by `layout_text_in_flow` (phase-5 split): line 0 starts at
+    /// the inline cursor, not the container origin. `None` = block-path
+    /// text (lone run or pure wrap). IFC Slice B2 uses this to tell "align
+    /// every visual line" apart from "this line record owns only the LAST
+    /// visual line" — a mid-line first fragment must never be re-aligned
+    /// as if it owned its whole line.
+    pub text_flow_first_offset: Option<f32>,
 }
 
 impl LayoutBox {
@@ -735,6 +743,7 @@ impl LayoutBox {
             sticky_state: None,
             element_id: None,
             text_lines: None,
+            text_flow_first_offset: None,
         }
     }
 
@@ -1121,6 +1130,10 @@ impl LayoutBox {
 
         let container_width = containing_block.content.width;
         self.text_lines = None;
+        // Block-path text never starts mid-line; a box re-laid out here
+        // (e.g. after a line wrap re-layout) must shed any stale phase-5
+        // flow state from an earlier pass.
+        self.text_flow_first_offset = None;
 
         // Wrap overflowing text into line boxes (CSS2 §9.4.2, css-text-3 §5).
         // container_width == 0 means the containing block has no resolved width
@@ -1192,11 +1205,13 @@ impl LayoutBox {
 
     /// Whether a text child that does NOT fit the remaining line space
     /// should split across line boxes (phase-5 IFC flow) rather than drop
-    /// to its own block row.
-    fn text_splits_inline(child: &LayoutBox, cursor_x: f32, text_align: TextAlign) -> bool {
+    /// to its own block row. IFC Slice B2 opened the split to Center/Right:
+    /// closed lines get per-visual-line alignment (`align_split_close`),
+    /// so "a run spanning several line boxes cannot be shifted as one
+    /// child" no longer forces the block path.
+    fn text_splits_inline(child: &LayoutBox, cursor_x: f32) -> bool {
         cursor_x > 0.0
             && matches!(child.box_type, BoxType::Text(_))
-            && matches!(text_align, TextAlign::Left | TextAlign::Justify)
             && !matches!(
                 child.style.white_space,
                 rustkit_css::WhiteSpace::Nowrap | rustkit_css::WhiteSpace::Pre
@@ -1264,6 +1279,7 @@ impl LayoutBox {
         let line_count = text_lines.len();
         let last_width = text_lines.last().map(|l| l.width).unwrap_or(0.0);
         self.text_lines = Some(text_lines);
+        self.text_flow_first_offset = Some(first_line_offset);
         self.dimensions.content.x = containing_block.content.x;
         self.dimensions.content.y = line_top_y;
         self.dimensions.content.width = container_width;
@@ -2034,6 +2050,9 @@ impl LayoutBox {
         let mut lines: Vec<(usize, usize, f32)> = Vec::new();
         let mut line_start_index: Option<usize> = None;
         let mut line_width = 0.0_f32;
+        // IFC Slice B2: phase-5 mid-line splits whose CLOSED lines (line 0
+        // + middles) need alignment after the loop: (line_start, text_index).
+        let mut split_records: Vec<(usize, usize)> = Vec::new();
 
         for (i, child) in self.children.iter_mut().enumerate() {
             // Skip absolutely/fixed positioned children for flow layout
@@ -2137,12 +2156,10 @@ impl LayoutBox {
                     cursor_x -= child_width;
                     line_width -= child_width;
                 }
-            } else if Self::text_splits_inline(child, cursor_x, text_align) {
+            } else if Self::text_splits_inline(child, cursor_x) {
                 // Phase 5 (IFC text splitting): a text run that does NOT fit
                 // the remaining space fills it and wraps onward at full
-                // width instead of dropping to its own block row. Left/
-                // justify only: a run spanning several line boxes cannot be
-                // shifted per-line as a single child.
+                // width instead of dropping to its own block row.
                 let cb = self.dimensions.clone();
                 let line_top = self.dimensions.content.y + cursor_y;
                 let (n_lines, last_w) = child.layout_text_in_flow(&cb, line_top, cursor_x);
@@ -2155,6 +2172,10 @@ impl LayoutBox {
                 } else {
                     // Line 0 closes the current line box; middle lines are
                     // full; the LAST line stays open for following content.
+                    // B2: the closed lines are aligned by align_split_close
+                    // after the loop (the open last line is aligned by the
+                    // recorded-lines pass when it eventually closes).
+                    split_records.push((line_start_index.unwrap_or(i), i));
                     cursor_y += line_height.max(line_below_baseline).max(lh)
                         + (n_lines as f32 - 2.0).max(0.0) * lh;
                     cursor_x = last_w;
@@ -2217,6 +2238,13 @@ impl LayoutBox {
             cursor_y += line_height.max(line_below_baseline);
         }
 
+        // IFC Slice B2: align the CLOSED lines of each mid-line split
+        // (line 0 = prior siblings + first fragment as one unit; middles
+        // per-line) before the recorded-lines pass touches last fragments.
+        for (start, ti) in split_records {
+            Self::align_split_close(&mut self.children, start, ti, container_width, text_align);
+        }
+
         // Apply text-align to all recorded lines
         for (start, end, width) in lines {
             Self::apply_text_align_offset(
@@ -2254,10 +2282,22 @@ impl LayoutBox {
             // against the container. Only Right/Center write offsets: under
             // Left/Justify any existing x_offset is a FLOW offset from the
             // phase-5 mid-line split (first line starts at the old cursor),
-            // which alignment must not clobber — and the split path is
-            // gated to Left/Justify, so the two never meet.
+            // which alignment must not clobber.
             if matches!(text_align, TextAlign::Right | TextAlign::Center) {
                 if let Some(text_lines) = child.text_lines.as_mut() {
+                    if child.text_flow_first_offset.is_some() {
+                        // IFC Slice B2: a mid-line split box reaches a
+                        // recorded line only via its LAST visual line (the
+                        // open line the split left behind; followers in
+                        // this record shift by the same line offset).
+                        // Earlier lines were closed by align_split_close —
+                        // never re-stomp them. `+=` keeps the FLOW offset
+                        // when the first and last line coincide.
+                        if let Some(last) = text_lines.last_mut() {
+                            last.x_offset += offset;
+                        }
+                        continue;
+                    }
                     for tl in text_lines.iter_mut() {
                         tl.x_offset = match text_align {
                             TextAlign::Right => (container_width - tl.width).max(0.0),
@@ -2291,6 +2331,73 @@ impl LayoutBox {
         }
     }
 
+    /// IFC Slice B2: align the CLOSED visual lines of a phase-5 mid-line
+    /// text split under Center/Right.
+    ///
+    /// Line 0 mixes prior inline siblings with the text's FIRST visual
+    /// line, so everything on it shifts by ONE offset computed from the
+    /// assembled line's width — the first fragment ends up FLOW ⊕ ALIGN
+    /// (`x_offset = first_line_offset + O₀`), never re-aligned as if it
+    /// owned the whole line. Middle lines belong wholly to the run and
+    /// align independently. The LAST line is left untouched: it stays open
+    /// for following siblings and is aligned by the recorded-lines pass
+    /// (`apply_text_align_offset`) when it closes.
+    ///
+    /// Under Left/Justify this is a no-op — FLOW offsets are already final.
+    fn align_split_close(
+        children: &mut [LayoutBox],
+        line_start: usize,
+        text_index: usize,
+        container_width: f32,
+        text_align: TextAlign,
+    ) {
+        if !matches!(text_align, TextAlign::Right | TextAlign::Center) {
+            return;
+        }
+        let Some(text_lines) = children[text_index].text_lines.as_ref() else {
+            return;
+        };
+        let n = text_lines.len();
+        if n < 2 {
+            return;
+        }
+        let flow0 = text_lines[0].x_offset;
+        let line0_width = flow0 + text_lines[0].width;
+        let align = |w: f32| match text_align {
+            TextAlign::Right => (container_width - w).max(0.0),
+            TextAlign::Center => ((container_width - w) / 2.0).max(0.0),
+            _ => 0.0,
+        };
+        let o0 = align(line0_width);
+        if o0 > 0.0 {
+            let (prior, rest) = children.split_at_mut(text_index);
+            for sib in &mut prior[line_start..] {
+                // A prior sibling that is itself a mid-line split shares
+                // this line box only through ITS last visual line —
+                // shifting the whole box would drag its earlier lines
+                // along.
+                if sib.text_flow_first_offset.is_some() {
+                    if let Some(tls) = sib.text_lines.as_mut() {
+                        if let Some(last) = tls.last_mut() {
+                            last.x_offset += o0;
+                        }
+                        continue;
+                    }
+                }
+                crate::flex::translate_subtree(sib, o0, 0.0);
+            }
+            if let Some(tls) = rest[0].text_lines.as_mut() {
+                tls[0].x_offset = flow0 + o0;
+            }
+        }
+        // Middle lines (0 and last excluded): pure per-line alignment.
+        if let Some(tls) = children[text_index].text_lines.as_mut() {
+            for tl in &mut tls[1..n - 1] {
+                tl.x_offset = align(tl.width);
+            }
+        }
+    }
+
     /// Layout block children with margin collapse.
     fn layout_block_children_with_collapse(
         &mut self,
@@ -2310,6 +2417,9 @@ impl LayoutBox {
         let mut lines: Vec<(usize, usize, f32)> = Vec::new();
         let mut line_start_index: Option<usize> = None;
         let mut line_width = 0.0_f32;
+        // IFC Slice B2: phase-5 mid-line splits whose CLOSED lines (line 0
+        // + middles) need alignment after the loop: (line_start, text_index).
+        let mut split_records: Vec<(usize, usize)> = Vec::new();
 
         for (i, child) in self.children.iter_mut().enumerate() {
             // Skip absolutely/fixed positioned children for flow layout
@@ -2433,7 +2543,7 @@ impl LayoutBox {
                     cursor_x -= child_width;
                     line_width -= child_width;
                 }
-            } else if Self::text_splits_inline(child, cursor_x, text_align) {
+            } else if Self::text_splits_inline(child, cursor_x) {
                 // Phase 5 (IFC text splitting) — see layout_block_children.
                 let cb = self.dimensions.clone();
                 let line_top = self.dimensions.content.y + cursor_y;
@@ -2444,6 +2554,8 @@ impl LayoutBox {
                     line_width += last_w;
                     line_height = line_height.max(lh);
                 } else {
+                    // B2: closed lines aligned by align_split_close below.
+                    split_records.push((line_start_index.unwrap_or(i), i));
                     cursor_y += line_height.max(line_below_baseline).max(lh)
                         + (n_lines as f32 - 2.0).max(0.0) * lh;
                     cursor_x = last_w;
@@ -2502,6 +2614,12 @@ impl LayoutBox {
                 lines.push((start, self.children.len(), line_width));
             }
             cursor_y += line_height.max(line_below_baseline);
+        }
+
+        // IFC Slice B2: align the CLOSED lines of each mid-line split —
+        // see layout_block_children.
+        for (start, ti) in split_records {
+            Self::align_split_close(&mut self.children, start, ti, container_width, text_align);
         }
 
         // Apply text-align to all recorded lines
@@ -5114,6 +5232,140 @@ mod tests {
         assert!(
             t.dimensions.content.x > b.dimensions.content.x,
             "second run must stay to the right of the first"
+        );
+    }
+
+    /// IFC Slice B2 test rig: `[Text("Hi"), Text(LONG)]` in a 200px block.
+    /// "Hi" joins the line at cursor 0; the long run does not fit the
+    /// remainder and takes the phase-5 mid-line split.
+    fn midline_split_parent(text_align: TextAlign) -> LayoutBox {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.text_align = text_align;
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+        parent.dimensions.content = Rect::new(0.0, 0.0, 200.0, 0.0);
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Text("Hi".to_string()), ComputedStyle::new()));
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Text(LONG_TEXT.to_string()), ComputedStyle::new()));
+        parent.layout_block_children();
+        parent
+    }
+
+    #[test]
+    fn center_midline_split_line0_uses_flow_plus_align() {
+        // Line 0 = "Hi" + the run's first visual line, centered as ONE
+        // unit: the prior sibling shifts by O₀ and the first fragment gets
+        // FLOW ⊕ ALIGN — never pure-centered as if it owned the line.
+        let parent = midline_split_parent(TextAlign::Center);
+        let hi_w = parent.children[0].dimensions.content.width;
+        let t = &parent.children[1];
+        let flow0 = t
+            .text_flow_first_offset
+            .expect("long run must be laid out mid-line (phase-5 split)");
+        assert!((flow0 - hi_w).abs() < 0.5, "FLOW offset must be the cursor at entry");
+        let tls = t.text_lines.as_ref().expect("split run must have visual lines");
+        assert!(tls.len() >= 2, "run must span multiple lines, got {}", tls.len());
+        let line0_w = flow0 + tls[0].width;
+        let o0 = ((200.0 - line0_w) / 2.0).max(0.0);
+        assert!(o0 > 1.0, "fixture must leave real centering slack (o0={o0})");
+        assert!(
+            (parent.children[0].dimensions.content.x - o0).abs() < 0.5,
+            "prior sibling must shift by O0={o0}, got x={}",
+            parent.children[0].dimensions.content.x
+        );
+        assert!(
+            (tls[0].x_offset - (flow0 + o0)).abs() < 0.5,
+            "line-0 fragment must be FLOW+ALIGN ({}), got {}",
+            flow0 + o0,
+            tls[0].x_offset
+        );
+    }
+
+    #[test]
+    fn center_midline_split_does_not_stomp_earlier_text_lines() {
+        // The close of the OPEN last line must touch only the last visual
+        // line; line 0 keeps FLOW⊕ALIGN and middles keep pure per-line
+        // centering.
+        let parent = midline_split_parent(TextAlign::Center);
+        let t = &parent.children[1];
+        let flow0 = t.text_flow_first_offset.unwrap();
+        let tls = t.text_lines.as_ref().unwrap();
+        let n = tls.len();
+        assert!(n >= 3, "need line0 + middle + last, got {n}");
+        let o0 = ((200.0 - (flow0 + tls[0].width)) / 2.0).max(0.0);
+        assert!(
+            (tls[0].x_offset - (flow0 + o0)).abs() < 0.5,
+            "line 0 stomped: expected {}, got {}",
+            flow0 + o0,
+            tls[0].x_offset
+        );
+        for (k, tl) in tls.iter().enumerate().take(n - 1).skip(1) {
+            let pure = ((200.0 - tl.width) / 2.0).max(0.0);
+            assert!(
+                (tl.x_offset - pure).abs() < 0.5,
+                "middle line {k} must center independently: expected {pure}, got {}",
+                tl.x_offset
+            );
+        }
+        let pure_last = ((200.0 - tls[n - 1].width) / 2.0).max(0.0);
+        assert!(
+            (tls[n - 1].x_offset - pure_last).abs() < 0.5,
+            "last line (no followers) must center on its own width: expected {pure_last}, got {}",
+            tls[n - 1].x_offset
+        );
+    }
+
+    #[test]
+    fn left_midline_split_offsets_unchanged() {
+        // Phase-5 regression guard: under Left the FLOW offsets are final —
+        // line 0 starts at the cursor, every other line at the origin, and
+        // the prior sibling never moves.
+        let parent = midline_split_parent(TextAlign::Left);
+        assert_eq!(parent.children[0].dimensions.content.x, 0.0);
+        let t = &parent.children[1];
+        let flow0 = t.text_flow_first_offset.unwrap();
+        let tls = t.text_lines.as_ref().unwrap();
+        assert!(tls.len() >= 2);
+        assert!(
+            (tls[0].x_offset - flow0).abs() < 0.01,
+            "line 0 must keep its FLOW offset {flow0}, got {}",
+            tls[0].x_offset
+        );
+        for (k, tl) in tls.iter().enumerate().skip(1) {
+            assert_eq!(tl.x_offset, 0.0, "line {k} must sit at the flow origin");
+        }
+    }
+
+    #[test]
+    fn right_midline_split_line_ends_at_container() {
+        // Every closed visual line's ink must end at the container's right
+        // edge; the open last line right-aligns on its own width.
+        let parent = midline_split_parent(TextAlign::Right);
+        let t = &parent.children[1];
+        let tls = t.text_lines.as_ref().unwrap();
+        let n = tls.len();
+        assert!(n >= 2);
+        // Line 0 ends at the container edge (prior sibling + fragment
+        // shifted together, so the fragment's own right edge is the line's).
+        assert!(
+            (tls[0].x_offset + tls[0].width - 200.0).abs() < 0.5,
+            "line 0 must end at 200, ends at {}",
+            tls[0].x_offset + tls[0].width
+        );
+        for (k, tl) in tls.iter().enumerate().skip(1) {
+            assert!(
+                (tl.x_offset + tl.width - 200.0).abs() < 0.5,
+                "line {k} must end at 200, ends at {}",
+                tl.x_offset + tl.width
+            );
+        }
+        // The prior sibling sits immediately left of line-0's fragment.
+        let hi = &parent.children[0];
+        assert!(
+            (hi.dimensions.content.x + hi.dimensions.content.width - tls[0].x_offset).abs() < 1.0,
+            "prior sibling must abut the first fragment"
         );
     }
 
