@@ -2128,6 +2128,8 @@ impl Renderer {
                 font_style,
                 gradient,
                 rect,
+                advances,
+                ascent,
             } => {
                 // Glyph quads are alpha-textured and tinted per VERTEX, so
                 // gradient text needs no offscreen mask: each glyph's left
@@ -2149,6 +2151,8 @@ impl Renderer {
                     font_family,
                     *font_weight,
                     *font_style,
+                    advances.as_deref(),
+                    *ascent,
                 );
             }
         }
@@ -4223,6 +4227,8 @@ impl Renderer {
         font_family: &str,
         font_weight: u16,
         font_style: u8,
+        layout_advances: Option<&[f32]>,
+        layout_ascent: Option<f32>,
     ) {
         let stops = match gradient {
             rustkit_css::Gradient::Linear(g) => &g.stops,
@@ -4295,10 +4301,12 @@ impl Renderer {
 
         let mut cursor_x = x;
         let atlas_size = self.glyph_cache.atlas_size() as f32;
-        // Glyph entries are baseline-relative (ADVANCE CONTRACT).
-        let baseline = y + Self::fallback_run_ascent(font_family, font_size);
+        // Glyph entries are baseline-relative (ADVANCE CONTRACT): layout's
+        // ascent when shipped, one per-run fallback otherwise.
+        let baseline = y
+            + layout_ascent.unwrap_or_else(|| Self::fallback_run_ascent(font_family, font_size));
 
-        for ch in text.chars() {
+        for (char_idx, ch) in text.chars().enumerate() {
             let key = GlyphKey {
                 codepoint: ch,
                 font_family: font_family.to_string(),
@@ -4353,7 +4361,9 @@ impl Renderer {
                     base + 3,
                 ]);
 
-                cursor_x += entry.advance;
+                cursor_x += layout_advances
+                    .and_then(|a| a.get(char_idx).copied())
+                    .unwrap_or(entry.advance);
             }
         }
     }

@@ -3112,6 +3112,10 @@ pub enum DisplayCommand {
         font_style: u8,
         gradient: rustkit_css::Gradient,
         rect: Rect,
+        /// ADVANCE CONTRACT — same semantics as Text: layout's per-char
+        /// advances and ascent; paint places, never re-measures.
+        advances: Option<Vec<f32>>,
+        ascent: Option<f32>,
     },
 
     // SVG-specific commands
@@ -4211,6 +4215,14 @@ impl DisplayList {
             };
 
             for (text, x, y, text_width) in render_lines {
+                // ADVANCE CONTRACT: ONE shape call feeds BOTH command types —
+                // layout's per-char advances and ascent ride the command so
+                // paint places glyphs exactly where layout measured them.
+                // (GradientText was skipped by the old continue-before-shape
+                // and re-owned pitch + baseline in paint — the last dual
+                // text path.)
+                let advances = shape_line_advances(&text, style, font_size);
+
                 // Check if this is gradient text (background-clip: text with gradient and transparent fill)
                 let is_gradient_text = style.background_clip == rustkit_css::BackgroundClip::Text
                     && style.webkit_text_fill_color == Some(rustkit_css::Color::TRANSPARENT)
@@ -4233,17 +4245,13 @@ impl DisplayList {
                             },
                             gradient: gradient.clone(),
                             rect: Rect::new(x, y, text_width, line_height),
+                            advances,
+                            ascent: Some(metrics.ascent),
                         });
                         continue; // Skip regular text rendering for this line
                     }
                 }
 
-                // Draw regular text. The ADVANCE CONTRACT ships layout's
-                // per-char advances and ascent with the command so paint
-                // places glyphs exactly where layout measured them — the
-                // ~3-4% painted-ink drift (and the 2-3px baseline offset
-                // from the renderer's third per-glyph shaper) both die here.
-                let advances = shape_line_advances(&text, style, font_size);
                 self.commands.push(DisplayCommand::Text {
                     text: text.clone(),
                     x,
@@ -4757,6 +4765,35 @@ mod tests {
         assert_eq!(r.bottom(), 70.0);
         assert!(r.contains(50.0, 30.0));
         assert!(!r.contains(0.0, 0.0));
+    }
+
+    #[test]
+    fn test_advance_contract_letter_spacing_sum() {
+        // GradientText advance-carry merge gate: with non-zero
+        // letter-spacing, the shared helper's advances must sum to the
+        // spaced measure within 0.5px (one test covers BOTH command types
+        // at the contract root — GradientText uses the same helper).
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(16.0);
+        style.letter_spacing = Length::Px(2.0);
+        let text = "Spaced advance parity";
+        let advances = shape_line_advances(text, &style, 16.0)
+            .expect("plain Latin text must shape");
+        let measured = measure_text_with_spacing(
+            text,
+            &style.font_family,
+            16.0,
+            style.font_weight,
+            style.font_style,
+            2.0,
+            0.0,
+        )
+        .width;
+        let sum: f32 = advances.iter().sum();
+        assert!(
+            (sum - measured).abs() < 0.5,
+            "spaced advance sum {sum} != spaced measure {measured}"
+        );
     }
 
     #[test]
