@@ -3709,8 +3709,12 @@ impl DisplayList {
                 )
             }
             rustkit_css::BackgroundClip::Text => {
-                // Text clipping is handled separately in gradient text rendering
-                border_rect
+                // background-clip:text — the background shows ONLY through
+                // glyph shapes (render_text emits GradientText for that).
+                // Falling through here painted the full-box background as a
+                // slab behind the text (about's hero: a giant cyan bar where
+                // Chrome shows thin gradient letterforms).
+                return;
             }
         };
 

@@ -2122,23 +2122,25 @@ impl Renderer {
                 font_family,
                 font_weight,
                 font_style,
-                gradient: _,
-                rect: _,
+                gradient,
+                rect,
             } => {
-                // For now, render gradient text as regular text with a fallback color
-                // Full gradient text implementation would require:
-                // 1. Render text to an offscreen alpha mask
-                // 2. Use the mask to clip a gradient fill
-                // TODO: Implement proper gradient text masking
-                
-                // Use a visible fallback color (gradient's first color stop or magenta for debugging)
-                let fallback_color = Color::new(128, 0, 255, 1.0); // Purple as fallback
-                
-                self.draw_text(
+                // Glyph quads are alpha-textured and tinted per VERTEX, so
+                // gradient text needs no offscreen mask: each glyph's left
+                // and right vertex pairs take the gradient color sampled at
+                // those x positions and the GPU interpolates between them.
+                // The sweep is sampled horizontally across `rect` — the
+                // vertical component of an angled gradient is ignored, an
+                // approximation that is exact for to-right/to-left and close
+                // for the diagonal hero-text cases this feature serves.
+                // (This replaces a hardcoded PURPLE debug fallback that
+                // painted every background-clip:text run violet.)
+                self.draw_text_gradient(
                     text,
                     *x,
                     *y,
-                    fallback_color,
+                    gradient,
+                    rect,
                     *font_size,
                     font_family,
                     *font_weight,
@@ -4201,6 +4203,155 @@ impl Renderer {
     }
 
     /// Draw text.
+    /// Draw text filled with a gradient (background-clip: text). The
+    /// gradient is sampled horizontally across `rect`; each glyph quad gets
+    /// the sampled color on its left and right vertex pairs and the GPU
+    /// interpolates across the glyph.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_text_gradient(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        gradient: &rustkit_css::Gradient,
+        rect: &Rect,
+        font_size: f32,
+        font_family: &str,
+        font_weight: u16,
+        font_style: u8,
+    ) {
+        let stops = match gradient {
+            rustkit_css::Gradient::Linear(g) => &g.stops,
+            rustkit_css::Gradient::Radial(g) => &g.stops,
+            rustkit_css::Gradient::Conic(g) => &g.stops,
+        };
+        if stops.is_empty() {
+            return;
+        }
+
+        // Resolve stop positions to 0..1: explicit values kept (pixels
+        // normalized by the sweep width), first/last default to 0/1, and
+        // runs of None distribute evenly between resolved neighbors.
+        let span = rect.width.max(1.0);
+        let n = stops.len();
+        let mut pos: Vec<Option<f32>> = stops
+            .iter()
+            .map(|s| {
+                s.position.as_ref().map(|p| match p {
+                    rustkit_css::StopPosition::Percent(v) => *v,
+                    rustkit_css::StopPosition::Pixels(px) => px / span,
+                })
+            })
+            .collect();
+        if pos[0].is_none() {
+            pos[0] = Some(0.0);
+        }
+        if pos[n - 1].is_none() {
+            pos[n - 1] = Some(1.0);
+        }
+        let mut i = 0;
+        while i < n {
+            if pos[i].is_none() {
+                let start = i - 1; // pos[0] is Some, so start >= 0 is resolved
+                let mut end = i;
+                while pos[end].is_none() {
+                    end += 1;
+                }
+                let a = pos[start].unwrap();
+                let b = pos[end].unwrap();
+                let gap = (end - start) as f32;
+                for (k, p) in pos.iter_mut().enumerate().take(end).skip(start + 1) {
+                    *p = Some(a + (b - a) * (k - start) as f32 / gap);
+                }
+            }
+            i += 1;
+        }
+
+        let sample = |t: f32| -> [f32; 4] {
+            let t = t.clamp(0.0, 1.0);
+            let mut prev = 0usize;
+            for (k, p) in pos.iter().enumerate() {
+                if p.unwrap() <= t {
+                    prev = k;
+                } else {
+                    break;
+                }
+            }
+            let next = (prev + 1).min(n - 1);
+            let (p0, p1) = (pos[prev].unwrap(), pos[next].unwrap());
+            let f = if p1 > p0 { (t - p0) / (p1 - p0) } else { 0.0 };
+            let (c0, c1) = (&stops[prev].color, &stops[next].color);
+            [
+                (c0.r as f32 + (c1.r as f32 - c0.r as f32) * f) / 255.0,
+                (c0.g as f32 + (c1.g as f32 - c0.g as f32) * f) / 255.0,
+                (c0.b as f32 + (c1.b as f32 - c0.b as f32) * f) / 255.0,
+                c0.a + (c1.a - c0.a) * f,
+            ]
+        };
+
+        let mut cursor_x = x;
+        let atlas_size = self.glyph_cache.atlas_size() as f32;
+
+        for ch in text.chars() {
+            let key = GlyphKey {
+                codepoint: ch,
+                font_family: font_family.to_string(),
+                font_size: (font_size * 10.0) as u32,
+                font_weight,
+                font_style,
+            };
+
+            if let Some(entry) = self.glyph_cache.get_or_rasterize(&self.device, &self.queue, &key) {
+                let glyph_x = cursor_x + entry.offset[0];
+                let glyph_y = y + entry.offset[1];
+                let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
+                let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
+
+                let c_left = sample((glyph_x - rect.x) / span);
+                let c_right = sample((glyph_x + glyph_w - rect.x) / span);
+
+                let (x0, y0) = self.transform_point(glyph_x, glyph_y);
+                let (x1, y1) = self.transform_point(glyph_x + glyph_w, glyph_y);
+                let (x2, y2) = self.transform_point(glyph_x + glyph_w, glyph_y + glyph_h);
+                let (x3, y3) = self.transform_point(glyph_x, glyph_y + glyph_h);
+
+                let base = self.texture_vertices.len() as u32;
+                self.texture_vertices.extend_from_slice(&[
+                    TextureVertex {
+                        position: [x0, y0],
+                        tex_coords: [entry.tex_coords[0], entry.tex_coords[1]],
+                        color: c_left,
+                    },
+                    TextureVertex {
+                        position: [x1, y1],
+                        tex_coords: [entry.tex_coords[2], entry.tex_coords[1]],
+                        color: c_right,
+                    },
+                    TextureVertex {
+                        position: [x2, y2],
+                        tex_coords: [entry.tex_coords[2], entry.tex_coords[3]],
+                        color: c_right,
+                    },
+                    TextureVertex {
+                        position: [x3, y3],
+                        tex_coords: [entry.tex_coords[0], entry.tex_coords[3]],
+                        color: c_left,
+                    },
+                ]);
+                self.texture_indices.extend_from_slice(&[
+                    base,
+                    base + 1,
+                    base + 2,
+                    base,
+                    base + 2,
+                    base + 3,
+                ]);
+
+                cursor_x += entry.advance;
+            }
+        }
+    }
+
     fn draw_text(
         &mut self,
         text: &str,
