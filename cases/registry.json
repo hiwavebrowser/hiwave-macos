@@ -198,24 +198,21 @@
       "width": 1280,
       "height": 200,
       "scope": "holdout",
-      "policy": "holdout: dig sessions must not edit this HTML (test-fidelity T1)",
-      "known_fail": true
+      "policy": "holdout: dig sessions must not edit this HTML (test-fidelity T1)"
     },
     "holdout-grid-mosaic": {
       "html": "websuite/holdout/holdout-grid-mosaic/index.html",
       "width": 1000,
       "height": 700,
       "scope": "holdout",
-      "policy": "holdout: dig sessions must not edit this HTML (test-fidelity T1)",
-      "known_fail": true
+      "policy": "holdout: dig sessions must not edit this HTML (test-fidelity T1)"
     },
     "holdout-gradient-text": {
       "html": "websuite/holdout/holdout-gradient-text/index.html",
       "width": 800,
       "height": 400,
       "scope": "holdout",
-      "policy": "holdout: dig sessions must not edit this HTML (test-fidelity T1)",
-      "known_fail": true
+      "policy": "holdout: dig sessions must not edit this HTML (test-fidelity T1)"
     }
   }
 }

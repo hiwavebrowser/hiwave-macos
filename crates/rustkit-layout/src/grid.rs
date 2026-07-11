@@ -1804,6 +1804,17 @@ pub fn layout_grid_container(
     // Phase 7: Collect final positions (drops immutable borrow of children)
     let item_count = items.len();
     let positions: Vec<Rect> = items.iter().map(|item| item.rect.clone()).collect();
+    // Row spans for Phase 9.5 (real-height row growth): (row_start, row_end)
+    // as 0-based track indices, in the same order as `positions`.
+    let row_spans: Vec<(usize, usize)> = items
+        .iter()
+        .map(|it| {
+            (
+                (it.row_start - 1).max(0) as usize,
+                (it.row_end - 1).max(0) as usize,
+            )
+        })
+        .collect();
     drop(items); // Explicitly drop to release borrow
 
     // Phase 8: Apply positions to children
@@ -1876,17 +1887,27 @@ pub fn layout_grid_container(
         position_idx += 1;
     }
 
-    // Phase 9: Recursively layout children of grid items
+    // Phase 9: Recursively layout children of grid items.
+    // Each item's REAL flowed content height is recorded for Phase 9.5 —
+    // the track-sizing pass only had estimate_content_height (blind to
+    // wrapped text), so auto rows can be far too short.
+    let mut real_heights: Vec<Option<f32>> = vec![None; positions.len()];
+    let mut phase9_idx: usize = 0;
     for child in container.children.iter_mut() {
         if child.style.display == Display::None {
             continue;
         }
-        
+        let item_idx = phase9_idx;
+        phase9_idx += 1;
+
         if !child.children.is_empty() {
             if child.style.display.is_flex() {
                 // Nested flex container
                 let child_containing = child.dimensions.clone();
                 crate::flex::layout_flex_container(child, &child_containing);
+                if let Some(slot) = real_heights.get_mut(item_idx) {
+                    *slot = Some(child.dimensions.content.height);
+                }
             } else if child.style.display.is_grid() {
                 // Nested grid container
                 layout_grid_container(
@@ -1894,6 +1915,9 @@ pub fn layout_grid_container(
                     child.dimensions.content.width,
                     child.dimensions.content.height,
                 );
+                if let Some(slot) = real_heights.get_mut(item_idx) {
+                    *slot = Some(child.dimensions.content.height);
+                }
             } else {
                 // Block container: re-layout children with correct positioning and height resolution.
                 // The grid item's dimensions.content.height is the grid-assigned height.
@@ -1993,7 +2017,99 @@ pub fn layout_grid_container(
                         + grandchild.dimensions.padding.bottom + grandchild.dimensions.border.bottom
                         + grandchild.dimensions.margin.bottom;
                 }
+
+                // Record the item's real flowed content height for Phase 9.5.
+                if let Some(slot) = real_heights.get_mut(item_idx) {
+                    *slot = Some((current_y - grid_item_y).max(0.0));
+                }
             }
+        }
+    }
+
+    // Phase 9.5: grow AUTO rows to the items' REAL content heights.
+    // Track sizing ran on estimate_content_height, which cannot see wrapped
+    // text (holdout-grid-mosaic: tiles measured 110px — the banner only —
+    // while their text put real height at 205px; row 2 was then placed at
+    // the stale 110px pitch, overlapping row 1's content). Single-row items
+    // grow their row to the real border-box height; later rows shift down
+    // with their subtrees; the container's auto height is recomputed.
+    if !has_definite_height && !grid.rows.is_empty() {
+        let mut row_growth: Vec<f32> = vec![0.0; grid.rows.len()];
+        {
+            let mut idx = 0usize;
+            for child in container.children.iter() {
+                if child.style.display == Display::None {
+                    continue;
+                }
+                if let (Some(Some(real_h)), Some(&(r0, r1))) =
+                    (real_heights.get(idx), row_spans.get(idx))
+                {
+                    // Single-row items only; multi-span distribution is a
+                    // separate (rarer) problem.
+                    if r1 <= r0 + 1 && r0 < grid.rows.len() {
+                        let pb = child.dimensions.padding.top
+                            + child.dimensions.padding.bottom
+                            + child.dimensions.border.top
+                            + child.dimensions.border.bottom;
+                        let grow = (real_h + pb) - grid.rows[r0].size;
+                        if grow > 0.5 {
+                            row_growth[r0] = row_growth[r0].max(grow);
+                        }
+                    }
+                }
+                idx += 1;
+            }
+        }
+
+        if row_growth.iter().any(|g| *g > 0.0) {
+            let old_positions: Vec<f32> = grid.rows.iter().map(|t| t.position).collect();
+            for (i, g) in row_growth.iter().enumerate() {
+                grid.rows[i].size += g;
+            }
+            // Recompute row positions from the first row's origin; a gap
+            // follows every non-collapsed row (mirrors the auto-height
+            // container formula above).
+            let mut cursor = old_positions.first().copied().unwrap_or(0.0);
+            for row in grid.rows.iter_mut() {
+                row.position = cursor;
+                if row.size > 0.0 {
+                    cursor += row.size + row_gap;
+                }
+            }
+
+            let mut idx = 0usize;
+            for child in container.children.iter_mut() {
+                if child.style.display == Display::None {
+                    continue;
+                }
+                if let Some(&(r0, _)) = row_spans.get(idx) {
+                    if r0 < grid.rows.len() {
+                        let dy = grid.rows[r0].position - old_positions[r0];
+                        if dy.abs() > 0.01 {
+                            crate::flex::translate_subtree(child, 0.0, dy);
+                        }
+                        // Default align stretch: the item's border box fills
+                        // the (grown) row. Grow-only; explicit heights and
+                        // taller-than-row content are left alone.
+                        if matches!(child.style.height, Length::Auto) {
+                            let pb = child.dimensions.padding.top
+                                + child.dimensions.padding.bottom
+                                + child.dimensions.border.top
+                                + child.dimensions.border.bottom;
+                            let target = grid.rows[r0].size - pb;
+                            if child.dimensions.content.height < target {
+                                child.dimensions.content.height = target;
+                            }
+                        }
+                    }
+                }
+                idx += 1;
+            }
+
+            let non_collapsed = grid.rows.iter().filter(|t| t.size > 0.0).count();
+            let total_gaps = non_collapsed.saturating_sub(1) as f32 * row_gap;
+            container.dimensions.content.height =
+                grid.rows.iter().map(|t| t.size).sum::<f32>() + total_gaps;
         }
     }
 
