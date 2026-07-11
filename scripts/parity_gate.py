@@ -118,6 +118,12 @@ def load_case_gates() -> Dict[str, Dict[str, Any]]:
             # threshold and its scope cap (builtins/micro: t8 in CI).
             "threshold": min(get_threshold(case_id), scope_cap),
             "known_fail": bool(case.get("known_fail", False)),
+            # CI-2: a known_fail's ceiling is FROZEN at its value when the
+            # flag was set (+1 margin), not a flat band — image-gallery may
+            # not drift 16 -> 24 under a 25% blanket, and a flat 15 would
+            # red-lock cases currently above it. Fix -> clear flag ->
+            # permanent ratchet at the campaign threshold.
+            "kf_ceiling": float(case.get("kf_ceiling", 25.0)),
         }
     return gates
 
@@ -204,7 +210,11 @@ def gate_test_results(
         # for registry-declared known_fail cases.
         if per_case_thresholds and case_id in case_gates:
             g = case_gates[case_id]
-            limit = max_diff if g["known_fail"] else min(g["threshold"], max_diff)
+            limit = (
+                min(g["kf_ceiling"], max_diff)
+                if g["known_fail"]
+                else min(g["threshold"], max_diff)
+            )
             if float(diff) > limit:
                 failures.append({
                     "case_id": case_id,

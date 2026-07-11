@@ -16,14 +16,16 @@
       "width": 800,
       "height": 600,
       "scope": "builtins",
-      "known_fail": true
+      "known_fail": true,
+      "kf_ceiling": 17.7
     },
     "settings": {
       "html": "crates/hiwave-app/src/ui/settings.html",
       "width": 1024,
       "height": 768,
       "scope": "builtins",
-      "known_fail": true
+      "known_fail": true,
+      "kf_ceiling": 19.4
     },
     "chrome_rustkit": {
       "html": "crates/hiwave-app/src/ui/chrome_rustkit.html",
@@ -56,7 +58,8 @@
       "width": 800,
       "height": 1200,
       "scope": "websuite",
-      "known_fail": true
+      "known_fail": true,
+      "kf_ceiling": 20.0
     },
     "flex-positioning": {
       "html": "websuite/cases/flex-positioning/index.html",
@@ -81,14 +84,16 @@
       "width": 1280,
       "height": 800,
       "scope": "websuite",
-      "known_fail": true
+      "known_fail": true,
+      "kf_ceiling": 22.4
     },
     "sticky-scroll": {
       "html": "websuite/cases/sticky-scroll/index.html",
       "width": 1280,
       "height": 800,
       "scope": "websuite",
-      "known_fail": true
+      "known_fail": true,
+      "kf_ceiling": 19.3
     },
     "backgrounds": {
       "html": "websuite/micro/backgrounds/index.html",
@@ -119,7 +124,8 @@
       "width": 800,
       "height": 1200,
       "scope": "micro",
-      "known_fail": true
+      "known_fail": true,
+      "kf_ceiling": 10.9
     },
     "gradients": {
       "html": "websuite/micro/gradients/index.html",
@@ -132,14 +138,16 @@
       "width": 800,
       "height": 600,
       "scope": "micro",
-      "known_fail": true
+      "known_fail": true,
+      "kf_ceiling": 15.8
     },
     "gradient-radius-only": {
       "html": "websuite/micro/gradient-radius-only/index.html",
       "width": 800,
       "height": 600,
       "scope": "micro",
-      "known_fail": true
+      "known_fail": true,
+      "kf_ceiling": 12.5
     },
     "gpu-gradient-regression": {
       "html": "websuite/micro/gpu-gradient-regression/index.html",
@@ -152,7 +160,8 @@
       "width": 800,
       "height": 1400,
       "scope": "micro",
-      "known_fail": true
+      "known_fail": true,
+      "kf_ceiling": 10.3
     },
     "pseudo-classes": {
       "html": "websuite/micro/pseudo-classes/index.html",
