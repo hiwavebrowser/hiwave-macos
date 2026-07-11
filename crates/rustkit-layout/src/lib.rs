@@ -1414,7 +1414,11 @@ impl LayoutBox {
             }
             FormControlType::Button { label, .. } => {
                 // Button: measured label width plus padding (was a
-                // chars-times-0.6em guess that oversized real labels ~40%)
+                // chars-times-0.6em guess that oversized real labels ~40%).
+                // Height composes author padding/border like TextInput/Select
+                // (DIG-2): the css-selectors buttons (padding 8px 16px) build
+                // (fs+1)+16 = 31 in Chrome; the blob said 33. Width also
+                // composes when the author sets horizontal padding.
                 let label_width = measure_text_advanced(
                     label,
                     &self.style.font_family,
@@ -1423,7 +1427,21 @@ impl LayoutBox {
                     self.style.font_style,
                 )
                 .width;
-                (label_width + 24.0, font_size * 1.5 + 12.0)
+                let px = |l: &Length| match l {
+                    Length::Px(v) => *v,
+                    Length::Em(em) => em * font_size,
+                    _ => 0.0,
+                };
+                let author_pb_h = px(&self.style.padding_left)
+                    + px(&self.style.padding_right)
+                    + px(&self.style.border_left_width)
+                    + px(&self.style.border_right_width);
+                let width = if author_pb_h > 0.0 {
+                    label_width + author_pb_h
+                } else {
+                    label_width + 24.0
+                };
+                (width, single_line_box(font_size * 1.5 + 12.0))
             }
             FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
                 // Fixed size for checkboxes and radios
