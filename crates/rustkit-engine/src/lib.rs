@@ -1875,10 +1875,19 @@ impl Engine {
         // +29px by the page bottom). font-size seeds the parent's already-
         // absolutized px; a relative author value (em/%) still resolves
         // against the parent right after cascade in the build walk.
-        // text-align / white-space / line-height are NOT seeded here:
-        // line-height has its own inheritance pass, and text-align feeds the
-        // known dual-alignment smell (IFC quality Slice A) — seeding it
-        // would double-shift centered runs.
+        // white-space / line-height are NOT seeded here: line-height has its
+        // own inheritance pass, and white-space is handled separately.
+        //
+        // text-align IS seeded (it is a genuinely inherited CSS property).
+        // The old "double-shift" fear was a PRE-Slice-A artifact: back then
+        // both the leaf AND the parent shifted a centered run. IFC Slice A
+        // made the line-owning block the SOLE owner of horizontal alignment
+        // (apply_text_align_offset reads the block's own text_align; leaves
+        // never self-align). So `<div style="text-align:center"><h1>…</h1>`
+        // only centers if the h1 itself carries Center — a block child is
+        // never shifted by its parent's line alignment, so there is no
+        // double-shift. Without this, about's hero (logo/tagline/version) and
+        // any centered-container heading left-aligned.
         if let Some(parent) = parent_style {
             style.font_size = parent.font_size.clone();
             style.font_family = parent.font_family.clone();
@@ -1888,6 +1897,7 @@ impl Engine {
             style.color = parent.color;
             style.letter_spacing = parent.letter_spacing.clone();
             style.word_spacing = parent.word_spacing.clone();
+            style.text_align = parent.text_align;
         }
 
         // Apply tag-specific default styles (user-agent stylesheet)
