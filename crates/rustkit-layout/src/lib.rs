@@ -1774,6 +1774,17 @@ impl LayoutBox {
 
     /// Apply position offsets for positioned elements.
     fn apply_position_offsets(&mut self, containing_block: &Dimensions) {
+        // Children are laid out at the pre-offset (flow) origin, then this
+        // runs. A positioned box that MOVES must carry its already-placed
+        // subtree with it: content coordinates are absolute, so shifting only
+        // the box origin strands every descendant (text, nested boxes) at the
+        // flow position. That is why `position:absolute; bottom:0` overlay
+        // captions (image-gallery cards) laid out below the card and were
+        // clipped by overflow:hidden, and why a relative offset moved a box
+        // but left its text behind. Capture the origin, apply offsets, then
+        // translate the subtree by the delta. Static/sticky produce no origin
+        // change (sticky only records a threshold), so this is a no-op there.
+        let (origin_x, origin_y) = (self.dimensions.content.x, self.dimensions.content.y);
         match self.position {
             Position::Static => {
                 // No offsets applied
@@ -1837,6 +1848,19 @@ impl LayoutBox {
                 };
                 self.sticky_state = Some(StickyState::new(original_rect, sticky_offsets));
                 // Position stays at normal flow - no offset applied during layout
+            }
+        }
+
+        // Carry the already-laid-out subtree with a moved box origin (see the
+        // note at the top of this fn). Only fires when the origin actually
+        // changed, so static/sticky and unmoved relatives cost nothing.
+        let (dx, dy) = (
+            self.dimensions.content.x - origin_x,
+            self.dimensions.content.y - origin_y,
+        );
+        if dx != 0.0 || dy != 0.0 {
+            for child in &mut self.children {
+                crate::flex::translate_subtree(child, dx, dy);
             }
         }
     }
