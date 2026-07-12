@@ -89,9 +89,7 @@
       "html": "websuite/cases/sticky-scroll/index.html",
       "width": 1280,
       "height": 800,
-      "scope": "websuite",
-      "known_fail": true,
-      "kf_ceiling": 19.3
+      "scope": "websuite"
     },
     "backgrounds": {
       "html": "websuite/micro/backgrounds/index.html",

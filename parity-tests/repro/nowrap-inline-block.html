@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  /* Mirrors sticky-scroll .horizontal-scroll: nowrap + overflow-x scroll,
+     inline-block children wider than the container in total.
+     Chrome: ONE row, container height = item(120)+pad(30) = 150, scrolls x.
+     Bug: items wrap to multiple rows -> container much taller. */
+  .scroll { overflow-x: auto; white-space: nowrap; padding: 15px 0; width: 600px; background:#eee; }
+  .item { display: inline-block; width: 200px; height: 120px; background:#4facfe; border-radius:12px; margin-right:15px; vertical-align: top; }
+</style>
+</head>
+<body>
+  <div class="scroll" id="s">
+    <div class="item"></div>
+    <div class="item"></div>
+    <div class="item"></div>
+    <div class="item"></div>
+    <div class="item"></div>
+  </div>
+</body>
+</html>
