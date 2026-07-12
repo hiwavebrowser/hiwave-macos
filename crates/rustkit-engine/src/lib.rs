@@ -5590,8 +5590,14 @@ fn parse_radial_gradient(value: &str, repeating: bool) -> Option<rustkit_css::Gr
             let pos_str = &first[at_idx + 4..];
             let pos_parts: Vec<&str> = pos_str.split_whitespace().collect();
             if pos_parts.len() >= 2 {
-                center.0 = parse_position_value(pos_parts[0]);
-                center.1 = parse_position_value(pos_parts[1]);
+                // CSS <position> keywords are order-INDEPENDENT: `top right`
+                // == `right top` (left/right -> horizontal, top/bottom ->
+                // vertical). Only length/percentage values are positional
+                // (first = horizontal, second = vertical). Routing purely by
+                // token order sent `at top right` to (0.0,1.0)=bottom-left.
+                let (cx, cy) = resolve_position_pair(pos_parts[0], pos_parts[1]);
+                center.0 = cx;
+                center.1 = cy;
             } else if pos_parts.len() == 1 {
                 // Single keyword: interpret as axis-specific position
                 // "top"/"bottom" are vertical - horizontal stays centered
@@ -5687,8 +5693,11 @@ fn parse_conic_gradient(value: &str, repeating: bool) -> Option<rustkit_css::Gra
             let pos_str = &first[at_idx + 4..];
             let pos_parts: Vec<&str> = pos_str.split_whitespace().collect();
             if pos_parts.len() >= 2 {
-                center.0 = parse_position_value(pos_parts[0]);
-                center.1 = parse_position_value(pos_parts[1]);
+                // Order-independent keyword <position> (see resolve_position_pair);
+                // conic shared the same order-only bug as radial.
+                let (cx, cy) = resolve_position_pair(pos_parts[0], pos_parts[1]);
+                center.0 = cx;
+                center.1 = cy;
             } else if pos_parts.len() == 1 {
                 // Single keyword: interpret as axis-specific position
                 let keyword = pos_parts[0].trim().to_lowercase();
@@ -6014,6 +6023,35 @@ fn parse_position_value(value: &str) -> f32 {
             .map(|p| p / 100.0)
             .unwrap_or(0.5),
         _ => 0.5,
+    }
+}
+
+/// Resolve a two-value CSS `<position>` (as used in `gradient(... at A B ...)`)
+/// into `(x, y)` fractions of the box.
+///
+/// Per CSS Values §<position>, when both values are KEYWORDS the order does
+/// not matter: `top right` and `right top` both mean x=right, y=top, because
+/// left/right always name the horizontal axis and top/bottom the vertical.
+/// Only length/percentage values are positional (first = horizontal, second =
+/// vertical). `center` is axis-neutral and takes whichever axis is left.
+///
+/// The previous code assigned `a -> x, b -> y` unconditionally, so `at top
+/// right` resolved to (0.0, 1.0) = bottom-left. Symmetric positions
+/// (`top left`, `bottom right`, `center`) are swap-invariant, which is why the
+/// bug only surfaced on asymmetric keyword pairs like `top right`.
+fn resolve_position_pair(a: &str, b: &str) -> (f32, f32) {
+    let ka = a.trim().to_lowercase();
+    let kb = b.trim().to_lowercase();
+    let is_horiz = |k: &str| matches!(k, "left" | "right");
+    let is_vert = |k: &str| matches!(k, "top" | "bottom");
+
+    if is_vert(&ka) || is_horiz(&kb) {
+        // First value names the vertical axis (or second names horizontal),
+        // e.g. `top right` / `center left` -> swap so x gets the horizontal.
+        (parse_position_value(&kb), parse_position_value(&ka))
+    } else {
+        // Natural order: `left top`, `right center`, or numeric `50% 25%`.
+        (parse_position_value(&ka), parse_position_value(&kb))
     }
 }
 
@@ -7371,6 +7409,64 @@ mod tests {
         } else {
             panic!("Expected Radial gradient with ellipse");
         }
+
+        // Regression: `at top right` is an ASYMMETRIC keyword position, so it
+        // exposes the axis-routing bug that `top left` (swap-invariant) hides.
+        // `top right` must be x=right=1.0, y=top=0.0 — NOT (0.0,1.0)=bottom-left.
+        // This is the settings-page body glow (radial ... at top right, #0f172a).
+        let center_of = |css: &str| -> (f32, f32) {
+            match parse_gradient(css) {
+                Some(rustkit_css::Gradient::Radial(r)) => r.center,
+                other => panic!("expected radial gradient, got {:?}", other.is_some()),
+            }
+        };
+        let approx =
+            |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() < 0.01 && (a.1 - b.1).abs() < 0.01;
+
+        let tr = center_of("radial-gradient(circle at top right, #06b6d4, transparent 40%)");
+        assert!(
+            approx(tr, (1.0, 0.0)),
+            "at top right => (1.0,0.0), got {:?}",
+            tr
+        );
+
+        // Keyword order must not matter: `right top` == `top right`.
+        let rt = center_of("radial-gradient(circle at right top, #06b6d4, transparent 40%)");
+        assert!(
+            approx(rt, (1.0, 0.0)),
+            "at right top => (1.0,0.0), got {:?}",
+            rt
+        );
+
+        // `bottom left` — the other asymmetric pair.
+        let bl = center_of("radial-gradient(circle at bottom left, #06b6d4, transparent)");
+        assert!(
+            approx(bl, (0.0, 1.0)),
+            "at bottom left => (0.0,1.0), got {:?}",
+            bl
+        );
+
+        // `center right` => right-center; `top center` => top-center.
+        let cr = center_of("radial-gradient(circle at center right, #06b6d4, transparent)");
+        assert!(
+            approx(cr, (1.0, 0.5)),
+            "at center right => (1.0,0.5), got {:?}",
+            cr
+        );
+        let tc = center_of("radial-gradient(circle at top center, #06b6d4, transparent)");
+        assert!(
+            approx(tc, (0.5, 0.0)),
+            "at top center => (0.5,0.0), got {:?}",
+            tc
+        );
+
+        // Numeric values stay positional (first = x, second = y).
+        let pct = center_of("radial-gradient(circle at 25% 75%, #06b6d4, transparent)");
+        assert!(
+            approx(pct, (0.25, 0.75)),
+            "at 25% 75% => (0.25,0.75), got {:?}",
+            pct
+        );
     }
 
     #[test]
