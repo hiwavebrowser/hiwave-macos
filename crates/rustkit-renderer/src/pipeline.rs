@@ -415,6 +415,67 @@ pub fn create_blit_pipeline(
     })
 }
 
+/// Create the color-glyph (emoji) pipeline: the blit shader (samples real
+/// RGBA), but with PREMULTIPLIED-alpha blending so translucent emoji composite
+/// over existing content instead of REPLACE-ing it (which paints transparent
+/// pixels as opaque black). CoreGraphics gives us premultiplied RGBA, so
+/// premultiplied-over (`One, OneMinusSrcAlpha`) is the matching blend.
+pub fn create_color_glyph_pipeline(
+    device: &wgpu::Device,
+    surface_format: wgpu::TextureFormat,
+    uniform_bind_group_layout: &wgpu::BindGroupLayout,
+    texture_bind_group_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Color Glyph Shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blit.wgsl").into()),
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Color Glyph Pipeline Layout"),
+        bind_group_layouts: &[uniform_bind_group_layout, texture_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Color Glyph Pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[TextureVertex::LAYOUT],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: surface_format,
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview: None,
+        cache: None,
+    })
+}
+
 /// Create the gradient rendering pipeline with uniform and storage buffers.
 pub fn create_gradient_pipeline(
     device: &wgpu::Device,
