@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<!--
+  Falsification fixture: an absolutely-positioned overlay inside a RELATIVE
+  grid item must be positioned against that grid item (its containing block).
+
+  Two bugs stacked here:
+  1. The grid item's `position:relative` is mapped to Static in the layout
+     position field (engine transfer_positioning, to stay out of the z-reorder
+     paint path) — which also dropped relative's containing-block role. So the
+     grid Phase-9 child re-layout must check `style.position`, not the mapped
+     field, to know the item is a containing block.
+  2. Grid Phase-9 re-layout SKIPPED abs grandchildren entirely, leaving the
+     overlay at its block-flow geometry: full container width, stacked BELOW
+     the grid (measured: overlay at y=879 w=1200 for a 288-wide item at y=147).
+     overflow:hidden then clipped it off-card — image-gallery captions vanished.
+
+  Expected: the caption "Title / Subtitle" paints at the card's bottom-left,
+  width == card width (not container width).
+-->
+<html><head><meta charset="UTF-8"><style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #111; color: #fff; font-family: -apple-system, sans-serif; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; padding: 16px; }
+  .card {
+    position: relative; height: 180px; border-radius: 12px; overflow: hidden;
+    background: linear-gradient(135deg, #6a5acd, #48d1cc);
+  }
+  .overlay {
+    position: absolute; bottom: 0; left: 0; right: 0; padding: 12px;
+    background: linear-gradient(transparent, rgba(0,0,0,0.7));
+  }
+  .overlay h3 { font-size: 1rem; }
+  .overlay p { font-size: 0.8rem; color: #ccc; }
+</style></head><body>
+  <div class="grid">
+    <div class="card"><div class="overlay"><h3>Alpha</h3><p>one</p></div></div>
+    <div class="card"><div class="overlay"><h3>Beta</h3><p>two</p></div></div>
+    <div class="card"><div class="overlay"><h3>Gamma</h3><p>three</p></div></div>
+  </div>
+</body></html>
