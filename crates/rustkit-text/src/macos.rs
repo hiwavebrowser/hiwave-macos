@@ -664,6 +664,133 @@ impl GlyphRasterizer {
         }
     }
     
+    /// Rasterize a color glyph (emoji) to a premultiplied **RGBA** bitmap.
+    ///
+    /// The grayscale path (`rasterize_char`) draws into a device-gray context
+    /// and the renderer tints the coverage mask with the text color — correct
+    /// for outline fonts, but for a color-bitmap font (Apple Color Emoji, sbix)
+    /// it collapses the artwork into a flat tinted blob (image-gallery's emoji
+    /// rendered as solid squares). CoreText's `CTFontDrawGlyphs` renders the
+    /// real color artwork when the destination is a device-RGB context, so we
+    /// draw into an RGBA context and hand the renderer straight color pixels.
+    ///
+    /// Returns `(rgba, width, height, advance, bearing_x, bearing_y)` where
+    /// `rgba` is `width*height*4` premultiplied bytes, or `None` if the char
+    /// has no glyph in any color-capable fallback font.
+    pub fn rasterize_char_color(&self, ch: char) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
+        // Resolve a font that actually has a glyph for `ch`. Prefer the
+        // instance font, then the color-emoji fallback chain.
+        let font = self.resolve_color_font(ch)?;
+        self.rasterize_char_color_with_font(&font, ch)
+    }
+
+    /// Find a font containing a glyph for `ch`, preferring color-emoji fonts.
+    fn resolve_color_font(&self, ch: char) -> Option<CTFont> {
+        let has_glyph = |font: &CTFont| -> bool { color_glyph_id(font, ch).is_some() };
+        // Emoji chars won't resolve in the instance (text) font, so go straight
+        // to the color fonts; keep the instance font first for symbol glyphs
+        // that a text font may cover.
+        for name in ["Apple Color Emoji", "Apple Symbols"] {
+            if let Ok(f) = font::new_from_name(name, self.font_size as f64) {
+                if has_glyph(&f) {
+                    return Some(f);
+                }
+            }
+        }
+        if has_glyph(&self.font) {
+            return Some(self.font.clone());
+        }
+        None
+    }
+
+    fn rasterize_char_color_with_font(
+        &self,
+        font: &CTFont,
+        ch: char,
+    ) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
+        // Astral chars (all pictographic emoji live above U+FFFF) need a UTF-16
+        // surrogate pair — `ch as u16` truncates them, which is why emoji glyph
+        // lookup silently failed. color_glyph_id encodes UTF-16 correctly.
+        let glyph = color_glyph_id(font, ch)?;
+        let glyphs: [u16; 1] = [glyph];
+
+        unsafe {
+            use core_text::font::CTFontRef;
+            use std::os::raw::c_void;
+
+            extern "C" {
+                fn CTFontGetAdvancesForGlyphs(
+                    font: CTFontRef,
+                    orientation: u32,
+                    glyphs: *const u16,
+                    advances: *mut CGSize,
+                    count: isize,
+                ) -> f64;
+                fn CTFontGetBoundingRectsForGlyphs(
+                    font: CTFontRef,
+                    orientation: u32,
+                    glyphs: *const u16,
+                    bounding_rects: *mut CGRect,
+                    count: isize,
+                ) -> CGRect;
+                fn CTFontDrawGlyphs(
+                    font: CTFontRef,
+                    glyphs: *const u16,
+                    positions: *const CGPoint,
+                    count: usize,
+                    context: *mut c_void,
+                );
+            }
+
+            let font_ref = font.as_concrete_TypeRef();
+
+            let mut advance_size = CGSize::new(0.0, 0.0);
+            CTFontGetAdvancesForGlyphs(font_ref, 0, glyphs.as_ptr(), &mut advance_size, 1);
+
+            let mut bounds = CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(0.0, 0.0));
+            CTFontGetBoundingRectsForGlyphs(font_ref, 0, glyphs.as_ptr(), &mut bounds, 1);
+
+            let padding = 2.0;
+            let width = (bounds.size.width.ceil() + padding * 2.0).max(4.0) as u32;
+            let height = (bounds.size.height.ceil() + padding * 2.0).max(4.0) as u32;
+
+            // Device-RGB, premultiplied-last (RGBA). CTFontDrawGlyphs renders
+            // the color-bitmap artwork here instead of a coverage mask.
+            let color_space = CGColorSpace::create_device_rgb();
+            const KCG_IMAGE_ALPHA_PREMULTIPLIED_LAST: u32 = 1;
+            let mut context = CGContext::create_bitmap_context(
+                None,
+                width as usize,
+                height as usize,
+                8,
+                width as usize * 4,
+                &color_space,
+                KCG_IMAGE_ALPHA_PREMULTIPLIED_LAST,
+            );
+
+            context.set_allows_antialiasing(true);
+            context.set_should_antialias(true);
+
+            let draw_x = padding - bounds.origin.x;
+            let draw_y = padding - bounds.origin.y;
+            let position = CGPoint::new(draw_x, draw_y);
+            CTFontDrawGlyphs(font_ref, glyphs.as_ptr(), &position, 1, context.as_ptr() as *mut c_void);
+
+            let data = context.data();
+            let rgba: Vec<u8> = std::slice::from_raw_parts(
+                data.as_ptr() as *const u8,
+                (width * height * 4) as usize,
+            )
+            .to_vec();
+
+            let advance = advance_size.width as f32;
+            let bearing_x = bounds.origin.x as f32;
+            let bearing_y = (bounds.origin.y + bounds.size.height) as f32;
+
+            Some((rgba, width, height, advance, bearing_x, bearing_y))
+        }
+    }
+
     /// Get glyph ID for a character
     pub fn get_glyph(&self, ch: char) -> u16 {
         ch as u16
@@ -699,6 +826,59 @@ fn width_factor(ch: char) -> f32 {
     }
 }
 
+/// Resolve the glyph id for `ch` in `font`, encoding it as UTF-16 so astral
+/// codepoints (emoji, all above U+FFFF) work. `CTFontGetGlyphsForCharacters`
+/// maps a surrogate pair to the real glyph in the high-surrogate slot and 0 in
+/// the low slot, so we read `glyphs[0]`. Returns `None` if the font has no
+/// glyph for the char.
+fn color_glyph_id(font: &CTFont, ch: char) -> Option<u16> {
+    let mut buf = [0u16; 2];
+    let units = ch.encode_utf16(&mut buf).len();
+    let mut glyphs = [0u16; 2];
+    unsafe {
+        use core_text::font::CTFontRef;
+        extern "C" {
+            fn CTFontGetGlyphsForCharacters(
+                font: CTFontRef,
+                characters: *const u16,
+                glyphs: *mut u16,
+                count: isize,
+            ) -> bool;
+        }
+        let ok = CTFontGetGlyphsForCharacters(
+            font.as_concrete_TypeRef(),
+            buf.as_ptr(),
+            glyphs.as_mut_ptr(),
+            units as isize,
+        );
+        if ok && glyphs[0] != 0 {
+            Some(glyphs[0])
+        } else {
+            None
+        }
+    }
+}
+
+/// Whether a character should be rendered via the color-glyph (emoji) path
+/// rather than the grayscale coverage-mask path.
+///
+/// Covers the common emoji/pictograph blocks. Deliberately conservative: text
+/// symbols that a normal font renders as monochrome outlines (e.g. ™, ©, →)
+/// are left to the grayscale path; only ranges that are color-bitmap in Apple
+/// Color Emoji are routed here. Variation-selector-16 (U+FE0F, emoji
+/// presentation) is handled by the caller on the base char.
+pub fn is_emoji(ch: char) -> bool {
+    let c = ch as u32;
+    matches!(c,
+        0x1F300..=0x1FAFF   // misc symbols & pictographs, emoticons, transport,
+                            // supplemental & extended-A (covers 🏔 🌅 🌲 🌸 🌊 🗼 ☕→no)
+        | 0x1F000..=0x1F0FF // mahjong/dominoes/playing cards
+        | 0x2600..=0x27BF   // misc symbols (☕ ✨ ⚡) + dingbats (✅ ✂)
+        | 0x2B00..=0x2BFF   // misc symbols & arrows (⭐ ⬆ used as emoji)
+        | 0x1F1E6..=0x1F1FF // regional indicators (flags)
+    )
+}
+
 /// Get available system fonts
 pub fn get_available_fonts() -> Vec<String> {
     // Return a common list of fonts available on macOS
@@ -725,6 +905,42 @@ mod tests {
     fn test_create_font() {
         let font = create_font("Helvetica", 16.0);
         assert!(font.is_ok(), "Should create Helvetica font");
+    }
+
+    #[test]
+    fn test_is_emoji_classification() {
+        assert!(is_emoji('🏔'), "mountain is emoji");
+        assert!(is_emoji('☕'), "coffee is emoji");
+        assert!(is_emoji('✨'), "sparkles is emoji");
+        assert!(is_emoji('🎯'), "target is emoji");
+        assert!(!is_emoji('A'), "letter is not emoji");
+        assert!(!is_emoji('7'), "digit is not emoji");
+        assert!(!is_emoji(' '), "space is not emoji");
+    }
+
+    #[test]
+    fn test_rasterize_color_emoji_is_actually_colored() {
+        // The grayscale path collapses a color-bitmap emoji into a flat tinted
+        // mask; the color path must yield real RGBA artwork. Assert the emoji
+        // rasterizes to a premultiplied RGBA buffer with MORE THAN ONE distinct
+        // opaque color (a flat mask would have a single hue).
+        let r = GlyphRasterizer::with_style("Helvetica", 48.0, 400, false);
+        let out = r.rasterize_char_color('🏔');
+        assert!(out.is_some(), "emoji should rasterize via color path");
+        let (rgba, w, h, _adv, _bx, _by) = out.unwrap();
+        assert_eq!(rgba.len(), (w * h * 4) as usize, "RGBA buffer sized w*h*4");
+        let mut hues = std::collections::HashSet::new();
+        for px in rgba.chunks_exact(4) {
+            if px[3] > 32 {
+                // Quantize to shrug off AA noise; count distinct opaque colors.
+                hues.insert((px[0] / 32, px[1] / 32, px[2] / 32));
+            }
+        }
+        assert!(
+            hues.len() > 1,
+            "color emoji must have multiple distinct colors, got {} (flat mask?)",
+            hues.len()
+        );
     }
 
     #[test]
