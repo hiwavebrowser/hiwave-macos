@@ -1229,13 +1229,27 @@ impl Engine {
                 // from body, so it paints once with true propagation
                 // semantics — the paint-twice-same-color shortcut broke on
                 // gradients and translucent colors.
+                //
+                // background_layers MUST move too. The shorthand parser
+                // dual-stores a gradient in BOTH background_gradient (legacy)
+                // and background_layers (multi-layer) — see the `background`
+                // handler. Clearing only the legacy field left body's
+                // background_layers intact, so the canvas painted the legacy
+                // copy AND body re-painted the layer copy: a translucent
+                // gradient layer (about's `…, transparent 50%` hero glow)
+                // composited TWICE, over-saturating to effective alpha
+                // 1-(1-a)² (0.15 → 0.277). Opaque backgrounds hid it
+                // (double-compositing an opaque color is idempotent).
                 root_box.style.background_color = body_box.style.background_color;
                 root_box.style.background_gradient = body_box.style.background_gradient.clone();
+                root_box.style.background_layers = body_box.style.background_layers.clone();
                 if root_box.style.background_color.a > 0.0
                     || root_box.style.background_gradient.is_some()
+                    || !root_box.style.background_layers.is_empty()
                 {
                     body_box.style.background_color = rustkit_css::Color::TRANSPARENT;
                     body_box.style.background_gradient = None;
+                    body_box.style.background_layers.clear();
                 }
             }
             root_box.children.push(body_box);

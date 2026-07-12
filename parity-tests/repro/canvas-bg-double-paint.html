@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<!--
+  Falsification fixture for the canvas-background double-paint bug.
+
+  The <body> background here is a translucent radial-gradient layer over a
+  solid color. Before the fix, the shorthand parser dual-stored the gradient
+  in BOTH background_gradient (legacy) and background_layers; the canvas
+  propagation (§14.2) cleared only the legacy field, so the canvas painted the
+  legacy copy AND the body re-painted the layer copy — compositing the
+  translucent layer twice (effective alpha 0.15 -> 1-(1-0.15)^2 = 0.277).
+
+  Ground truth: the SAME gradient on a plain <div> (right box) paints once.
+  The body background (canvas-propagated) must match the div, pixel for pixel.
+  Opaque backgrounds hid this because double-compositing an opaque color is a
+  no-op — only a translucent LAYER exposes it.
+-->
+<html><head><meta charset="UTF-8"><style>
+  html, body { height: 100%; margin: 0; }
+  body { background: radial-gradient(ellipse at top, rgba(6,182,212,0.15), transparent 50%), #0f172a; }
+  .probe {
+    position: absolute; top: 0; right: 0; width: 300px; height: 100%;
+    background: radial-gradient(ellipse at top, rgba(6,182,212,0.15), transparent 50%), #0f172a;
+    /* This div paints the gradient ONCE. The body (left of it) must match. */
+  }
+</style></head><body><div class="probe"></div></body></html>
