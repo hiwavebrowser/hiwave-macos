@@ -23,9 +23,7 @@
       "html": "crates/hiwave-app/src/ui/settings.html",
       "width": 1024,
       "height": 768,
-      "scope": "builtins",
-      "known_fail": true,
-      "kf_ceiling": 19.4
+      "scope": "builtins"
     },
     "chrome_rustkit": {
       "html": "crates/hiwave-app/src/ui/chrome_rustkit.html",
