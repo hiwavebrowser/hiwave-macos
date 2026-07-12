@@ -1929,6 +1929,19 @@ pub fn layout_grid_container(
                 let grid_item_x = child.dimensions.content.x;
                 let grid_item_width = child.dimensions.content.width;
                 let mut current_y = grid_item_y;
+                // A positioned grid item is the containing block for its abs
+                // descendants; a static one is not.
+                // A grid item that is a positioned CONTAINING BLOCK anchors its
+                // abs descendants. Check the STYLE position, not the layout
+                // position field: the engine maps relative->Static in that field
+                // (to stay out of the z-reorder paint path that regresses about's
+                // cards), which also dropped relative's containing-block role.
+                // The style still says relative, so use it — this establishes the
+                // CB without entering the positioned paint path.
+                let grid_item_positioned = !matches!(
+                    child.style.position,
+                    rustkit_css::Position::Static
+                );
 
                 trace!(
                     "Phase 9: Re-laying out children of grid item. grid_item_height={}, grid_item_y={}",
@@ -1939,10 +1952,32 @@ pub fn layout_grid_container(
                     // DEBUG: Mark that we've been here by setting a specific height
                     trace!("Phase 9: Processing grandchild with position={:?}", grandchild.position);
 
-                    // Skip absolutely positioned children - they don't participate in flow
+                    // Out-of-flow children take no flow space, but they DO need
+                    // positioning against the grid item when it is their
+                    // containing block (position:relative). Skipping them left
+                    // abs overlays (image-gallery captions) at their block-flow
+                    // geometry — full container width, stacked BELOW the grid
+                    // (measured: overlay at y=879 w=1200 for an item at y=147
+                    // w=288) — so overflow:hidden clipped them off-card. Lay the
+                    // out-of-flow child out against the item's box; its own
+                    // apply_position_offsets (subtree-aware since #50) then
+                    // resolves inset/bottom and carries its text.
                     if grandchild.position == crate::Position::Absolute
                         || grandchild.position == crate::Position::Fixed {
-                        trace!("Phase 9: Skipping absolute/fixed grandchild");
+                        if grid_item_positioned {
+                            let item_cb = crate::Dimensions {
+                                content: crate::Rect::new(
+                                    grid_item_x,
+                                    grid_item_y,
+                                    grid_item_width,
+                                    grid_item_height,
+                                ),
+                                ..Default::default()
+                            };
+                            grandchild.layout(&item_cb);
+                        } else {
+                            trace!("Phase 9: abs/fixed grandchild, static grid item — skip");
+                        }
                         continue;
                     }
 
