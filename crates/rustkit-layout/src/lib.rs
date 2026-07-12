@@ -2091,6 +2091,13 @@ impl LayoutBox {
         let container_width = self.dimensions.content.width;
         let text_align = self.style.text_align;
         let strut_descent = self.inline_strut_descent();
+        // white-space: nowrap|pre suppress soft-wrapping of inline-level
+        // children — the line box grows past container_width and overflow
+        // handles any scroll. Captured before the &mut children borrow.
+        let container_allows_wrap = !matches!(
+            self.style.white_space,
+            rustkit_css::WhiteSpace::Nowrap | rustkit_css::WhiteSpace::Pre
+        );
 
         // Track lines for text-align adjustment after layout: (start_index, end_index, line_width)
         let mut lines: Vec<(usize, usize, f32)> = Vec::new();
@@ -2130,8 +2137,13 @@ impl LayoutBox {
                 // "Some" / "bold text" — half line-model, half leaf-model
                 // (session-3 falsification). Non-fitting text keeps the
                 // block path (wrap or phase-5 split as before).
+                // Under nowrap/pre, text never soft-wraps, so it joins the
+                // line from any cursor position — even past container_width
+                // (e.g. whitespace between inline-blocks in an overflow-x
+                // scroller). Otherwise it flows inline only when it fits.
                 || (matches!(child.box_type, BoxType::Text(_))
-                    && child.text_single_line_width() <= container_width - cursor_x);
+                    && (!container_allows_wrap
+                        || child.text_single_line_width() <= container_width - cursor_x));
 
             if flows_inline {
                 // Layout inline-level child to get its dimensions first
@@ -2146,8 +2158,8 @@ impl LayoutBox {
                 let child_width = child.dimensions.margin_box().width;
                 let child_height = child.dimensions.margin_box().height;
 
-                // Check if child fits on current line
-                if cursor_x > 0.0 && cursor_x + child_width > container_width {
+                // Check if child fits on current line (nowrap/pre never soft-wrap)
+                if container_allows_wrap && cursor_x > 0.0 && cursor_x + child_width > container_width {
                     // Record completed line for text-align
                     if let Some(start) = line_start_index {
                         lines.push((start, i, line_width));
@@ -2564,6 +2576,11 @@ impl LayoutBox {
         let container_width = self.dimensions.content.width;
         let text_align = self.style.text_align;
         let strut_descent = self.inline_strut_descent();
+        // white-space: nowrap|pre suppress soft-wrapping (see layout_block_children).
+        let container_allows_wrap = !matches!(
+            self.style.white_space,
+            rustkit_css::WhiteSpace::Nowrap | rustkit_css::WhiteSpace::Pre
+        );
 
         // Track lines for text-align adjustment after layout: (start_index, end_index, line_width)
         let mut lines: Vec<(usize, usize, f32)> = Vec::new();
@@ -2618,8 +2635,13 @@ impl LayoutBox {
                 // "Some" / "bold text" — half line-model, half leaf-model
                 // (session-3 falsification). Non-fitting text keeps the
                 // block path (wrap or phase-5 split as before).
+                // Under nowrap/pre, text never soft-wraps, so it joins the
+                // line from any cursor position — even past container_width
+                // (e.g. whitespace between inline-blocks in an overflow-x
+                // scroller). Otherwise it flows inline only when it fits.
                 || (matches!(child.box_type, BoxType::Text(_))
-                    && child.text_single_line_width() <= container_width - cursor_x);
+                    && (!container_allows_wrap
+                        || child.text_single_line_width() <= container_width - cursor_x));
 
             if flows_inline {
                 // Inline-level content never collapses margins with siblings
@@ -2640,8 +2662,8 @@ impl LayoutBox {
                 let child_width = child.dimensions.margin_box().width;
                 let child_height = child.dimensions.margin_box().height;
 
-                // Check if child fits on current line
-                if cursor_x > 0.0 && cursor_x + child_width > container_width {
+                // Check if child fits on current line (nowrap/pre never soft-wrap)
+                if container_allows_wrap && cursor_x > 0.0 && cursor_x + child_width > container_width {
                     // Record completed line for text-align
                     if let Some(start) = line_start_index {
                         lines.push((start, i, line_width));
