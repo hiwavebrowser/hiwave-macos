@@ -1628,10 +1628,18 @@ pub fn layout_grid_container(
                 let start = sizing.row_start;
                 let end = (start + span).min(grid.rows.len());
 
-                // Calculate current space provided by spanned tracks
-                let current_space: f32 = (start..end)
-                    .map(|i| grid.rows[i].base_size)
-                    .sum();
+                // Calculate current space provided by spanned tracks.
+                // css-grid-1 §12.5: an item spanning N tracks also spans the
+                // N-1 gutters BETWEEN them, and that space is already available
+                // to it. Omitting the gutters made every spanning item demand
+                // its full size from the tracks alone, inflating each track by
+                // gap*(N-1)/N -- image-gallery's `grid-row: span 2` item
+                // (min-height 416, gap 16) sized its two rows to 416/2 = 208
+                // instead of (416-16)/2 = 200, and the error compounded down
+                // every subsequent row.
+                let spanned_gaps = row_gap * (end.saturating_sub(start).saturating_sub(1)) as f32;
+                let current_space: f32 =
+                    (start..end).map(|i| grid.rows[i].base_size).sum::<f32>() + spanned_gaps;
 
                 // Calculate extra space needed
                 let extra_needed = sizing.height_contribution - current_space;
@@ -1672,9 +1680,11 @@ pub fn layout_grid_container(
                 let end = (start + span).min(grid.columns.len());
 
                 // Calculate current space provided by spanned tracks
-                let current_space: f32 = (start..end)
-                    .map(|i| grid.columns[i].base_size)
-                    .sum();
+                // (same gutter credit as rows, above).
+                let spanned_gaps =
+                    column_gap * (end.saturating_sub(start).saturating_sub(1)) as f32;
+                let current_space: f32 =
+                    (start..end).map(|i| grid.columns[i].base_size).sum::<f32>() + spanned_gaps;
 
                 // Calculate extra space needed
                 let extra_needed = sizing.width_contribution - current_space;
@@ -2980,6 +2990,56 @@ mod tests {
             (width - 1275.0).abs() < 1.0,
             "fr track should be floored at the item's 1275px min-content, got {width}"
         );
+    }
+
+    #[test]
+    fn test_row_span_credits_the_spanned_gutters() {
+        // css-grid-1 §12.5. The image-gallery shape: 2 auto rows, 16px gap,
+        // one item spanning both rows with a 416px min-height.
+        //
+        // The spanned item already owns the 16px gutter BETWEEN the two rows,
+        // so it only demands 400px from the tracks: 200px each. Charging the
+        // full 416px to the tracks alone gives 208px rows -- an 8px error that
+        // compounds into every row below (Chrome: rows 200, item 416).
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Fr(1.0), TrackSize::Fr(1.0)]);
+        container_style.grid_template_rows =
+            GridTemplate::from_sizes(vec![TrackSize::Auto, TrackSize::Auto]);
+        container_style.row_gap = Length::Px(16.0);
+        container_style.column_gap = Length::Px(16.0);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        let mut tall_style = ComputedStyle::new();
+        tall_style.grid_row_start = GridLine::Number(1);
+        tall_style.grid_row_end = GridLine::Number(3); // span 2
+        tall_style.min_height = Length::Px(416.0);
+        container.children.push(LayoutBox::new(BoxType::Block, tall_style));
+
+        for _ in 0..2 {
+            let mut short_style = ComputedStyle::new();
+            short_style.min_height = Length::Px(200.0);
+            container
+                .children
+                .push(LayoutBox::new(BoxType::Block, short_style));
+        }
+
+        layout_grid_container(&mut container, 800.0, 600.0);
+
+        let tall = container.children[0].dimensions.border_box().height;
+        assert!(
+            (tall - 416.0).abs() < 0.5,
+            "row-spanning item should be 416 (200 + 16 gap + 200), got {tall}"
+        );
+        for (i, child) in container.children.iter().enumerate().skip(1) {
+            let h = child.dimensions.border_box().height;
+            assert!(
+                (h - 200.0).abs() < 0.5,
+                "single-row item {i} should be 200 (the spanning item must not \
+                 inflate the tracks by the gutters it already spans), got {h}"
+            );
+        }
     }
 
     #[test]

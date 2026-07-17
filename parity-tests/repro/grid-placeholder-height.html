@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; }
+  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-bottom: 20px; }
+  .item { position: relative; background: #2d2d44; }
+  /* A: the image-gallery shape, verbatim */
+  .a .ph { width: 100%; height: 100%; min-height: 200px; display: flex;
+           align-items: center; justify-content: center; font-size: 3em; }
+  /* B: same, but no height:100% */
+  .b .ph { width: 100%; min-height: 200px; display: flex;
+           align-items: center; justify-content: center; font-size: 3em; }
+  /* C: height:100% + min-height, but NOT a flex container */
+  .c .ph { width: 100%; height: 100%; min-height: 200px; font-size: 3em; }
+  /* D: the gallery shape with NO text content in the flex box */
+  .d .ph { width: 100%; height: 100%; min-height: 200px; display: flex;
+           align-items: center; justify-content: center; font-size: 3em; }
+  /* E: gallery shape, flex, text, but font-size 1em */
+  .e .ph { width: 100%; height: 100%; min-height: 200px; display: flex;
+           align-items: center; justify-content: center; font-size: 1em; }
+  .overlay { position: absolute; bottom: 0; left: 0; right: 0; padding: 15px; }
+</style>
+</head>
+<body>
+  <!-- Chrome: every .item and every .ph below is exactly 200px tall. -->
+  <div class="grid a"><div class="item"><div class="ph">X</div>
+    <div class="overlay"><h3>t</h3></div></div><div class="item"><div class="ph">X</div></div></div>
+
+  <div class="grid b"><div class="item"><div class="ph">X</div>
+    <div class="overlay"><h3>t</h3></div></div><div class="item"><div class="ph">X</div></div></div>
+
+  <div class="grid c"><div class="item"><div class="ph">X</div>
+    <div class="overlay"><h3>t</h3></div></div><div class="item"><div class="ph">X</div></div></div>
+
+  <div class="grid d"><div class="item"><div class="ph"></div>
+    <div class="overlay"><h3>t</h3></div></div><div class="item"><div class="ph"></div></div></div>
+
+  <div class="grid e"><div class="item"><div class="ph">X</div>
+    <div class="overlay"><h3>t</h3></div></div><div class="item"><div class="ph">X</div></div></div>
+
+  <!-- F: a row-SPANNING item. Chrome: rows are 200/200, the spanning item is
+       416 = 200 + 16 gap + 200. An item spanning N tracks contributes
+       (size - (N-1)*gap) / N to each track, not size/N. -->
+  <div class="grid f" style="grid-template-columns: repeat(2, 1fr); gap: 16px;">
+    <div class="item" style="grid-row: span 2;">
+      <div class="ph" style="width:100%; height:100%; min-height:416px; display:flex;
+           align-items:center; justify-content:center; font-size:3em;">T</div>
+    </div>
+    <div class="item">
+      <div class="ph" style="width:100%; height:100%; min-height:200px; display:flex;
+           align-items:center; justify-content:center; font-size:3em;">X</div>
+    </div>
+    <div class="item">
+      <div class="ph" style="width:100%; height:100%; min-height:200px; display:flex;
+           align-items:center; justify-content:center; font-size:3em;">Y</div>
+    </div>
+  </div>
+</body>
+</html>
