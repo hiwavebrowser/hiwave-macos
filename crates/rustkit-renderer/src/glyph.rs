@@ -227,9 +227,24 @@ impl GlyphCache {
         };
         
         let (bitmap, glyph_width, glyph_height, advance, bearing_x, bearing_y) = raster_result?;
-        
+
         let glyph_width = glyph_width.max(1).min(256);
         let glyph_height = glyph_height.max(1).min(256);
+
+        // PAINT-0 (P0c atlas A/B): FNV-1a over the rasterized bitmap. If the
+        // metrics-normal build produces identical hashes to flat-1.2, the
+        // bitmaps are byte-identical and any pixel delta is pure seating.
+        if crate::paint0_probe() {
+            let mut hash: u64 = 0xcbf29ce484222325;
+            for &b in &bitmap {
+                hash ^= b as u64;
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+            eprintln!(
+                "PAINT0 atlas cp={:?} fs={} w={} h={} bearing_x={} bearing_y={} advance={} hash={:016x}",
+                key.codepoint, key.font_size, glyph_width, glyph_height, bearing_x, bearing_y, advance, hash
+            );
+        }
 
         // Allocate space in the atlas
         let (atlas_x, atlas_y) = self.allocate_space(glyph_width + 2, glyph_height + 2)?;

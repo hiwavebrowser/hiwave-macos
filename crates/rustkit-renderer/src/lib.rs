@@ -4433,6 +4433,21 @@ impl Renderer {
         let baseline =
             y + layout_ascent.unwrap_or_else(|| Self::fallback_run_ascent(font_family, font_size));
 
+        // PAINT-0 seating probe (RUSTKIT_PAINT_PROBE=1): paint half of the
+        // seating chain — pairs with the layout-side y_cmd log so a flat vs
+        // metrics A/B can attribute score deltas to seating float shifts
+        // (forensics 2026-07-16-paint0-glyph-seat §4.2 P0a).
+        if crate::paint0_probe() {
+            eprintln!(
+                "PAINT0 paint text={:?} fs={} y_cmd={} layout_ascent={:?} baseline={}",
+                text.chars().take(16).collect::<String>(),
+                font_size,
+                y,
+                layout_ascent,
+                baseline
+            );
+        }
+
         // Get atlas size before the loop to avoid borrow issues
         let atlas_size = self.glyph_cache.atlas_size() as f32;
 
@@ -4449,6 +4464,19 @@ impl Renderer {
             if let Some(entry) = self.glyph_cache.get_or_rasterize(&self.device, &self.queue, &key) {
                 let glyph_x = cursor_x + entry.offset[0];
                 let glyph_y = baseline + entry.offset[1];
+
+                // PAINT-0: sample chars only — x (ex-height), H (cap), g
+                // (descender) cover the three seating regimes.
+                if matches!(ch, 'x' | 'H' | 'g') && crate::paint0_probe() {
+                    eprintln!(
+                        "PAINT0 glyph ch={:?} fs={} baseline={} bearing_y={} glyph_y={}",
+                        ch,
+                        font_size,
+                        baseline,
+                        -entry.offset[1],
+                        glyph_y
+                    );
+                }
                 let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
                 let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
 
@@ -5617,5 +5645,15 @@ mod tests {
         let tiny_area = tiny.width * tiny.height;
         assert!(tiny_area < 0.02, "Tiny rect has tiny area");
     }
+}
+
+/// PAINT-0 seating probe gate (forensics 2026-07-16-paint0-glyph-seat).
+/// RUSTKIT_PAINT_PROBE=1 logs the paint half of the glyph seating chain
+/// (baseline, bearing_y, glyph_y) plus per-glyph atlas bitmap hashes, so a
+/// flat-1.2 vs metrics-normal A/B can attribute score deltas to seating
+/// float shifts vs raster differences. Zero cost when off.
+pub(crate) fn paint0_probe() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RUSTKIT_PAINT_PROBE").as_deref() == Ok("1"))
 }
 

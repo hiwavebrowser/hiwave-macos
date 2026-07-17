@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<!-- PAINT-0 P0b fixture (forensics 2026-07-16-paint0-glyph-seat §4.2).
+     Dense wrapped body text ONLY: no forms, no buttons, no images — isolates
+     the glyph seating chain from DIG-buttons-stack and form-control digs.
+     Two font sizes cover the css-selectors regimes (14px body, 12px small). -->
+<style>
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  body {
+    font-family: -apple-system, system-ui, sans-serif;
+    color: #1a1a1a;
+    width: 760px;
+    padding: 20px;
+  }
+  p { margin: 0 0 8px 0; font-size: 14px; }
+  p.small { font-size: 12px; }
+</style>
+</head>
+<body>
+<p>The quick brown fox jumps over the lazy dog while eight big Hungry goats graze next to a huge hexagonal grid of hedges. Every glyph seating regime shows up here: x sits at ex-height, H rises to cap-height, and g hangs its descender below the baseline. Mixing them densely means any sub-pixel shift in half-leading exaggerates the anti-aliased edge delta on every single line of this paragraph.</p>
+<p>Height, weight, and gauge are geometry words that keep the letters H, x, and g in heavy rotation. When layout computes line-height as a flat multiple the half-leading lands on fractional pixels; when it computes it from rounded font metrics the same text seats on whole pixels. This fixture exists so the two builds can be compared line by line against exactly the same glyph bitmaps.</p>
+<p>Grazing goats hug the hedge exactly where the huge grid begins. Sixty height signs hang high, exchanging bright light for a hazy glow. Each generated sentence here is designed to wrap across the seven hundred sixty pixel measure into several physical lines, giving the probe roughly eight seated baselines per paragraph and enough samples to average away noise.</p>
+<p>The exchange highway gets bigger nightly: huge freight rigs haul heavy goods right through the highlands, exhaling smog against gray skies. Anti-aliasing gradients change with every fractional y offset, so if the bitmaps hash identically between builds, any remaining pixel difference is attributable to seating alone and never to the rasterizer.</p>
+<p>Bright huge signs hang above the highway exit, guiding night freight toward the neighboring exchange. High-gain amplifiers hum in the background while engineers weigh eight gigahertz signals against tight noise budgets. The paragraph repeats familiar shapes on purpose; a stable vocabulary keeps the atlas small and the hash comparison exact.</p>
+<p>Geography homework highlights how huge highland ridges guard the eight big lakes. Light hits the high garage roof at a grazing angle, exaggerating every edge. Whenever the glyph cache seats a bitmap one fifth of a pixel lower than Chrome does, these tightly packed lines multiply that error into a diffuse field of gray disagreement.</p>
+<p class="small">Small text regime: the twelve pixel paragraphs stress the seating math where Chrome rounds to fifteen pixels for normal line height. Eight huge highland goats graze happily right next to the hexagonal hedge grid, exchanging heavy sighs. Dense small glyphs are where sub-pixel misseating hurts the score most, because edge pixels dominate ink pixels.</p>
+<p class="small">Higher weight gauges hang beneath the eight big highway signs. The next sentence exists to lengthen this paragraph enough to guarantee wrapping at twelve pixels across the full measure, giving the probe extra baselines in the small regime where the flat model lands on fourteen point four and metrics rounding lands on fifteen exactly.</p>
+<p class="small">Neighboring lighthouses exchange bright signals through the night haze. Highly geared engines growl uphill, dragging weighty freight higher. If seating explains the whole delta, snapping the baseline to integer pixels should recover the regression here first, since the fractional gap between the two models is largest at this size.</p>
+<p>Back to fourteen pixels: the eighth huge garage holds eight bright green gliders. Hexagonal highlights gleam against the higher hangar. The mixture of ascenders, descenders, and x-height glyphs in tight succession is deliberate; every physical line contributes an x, an H, and a g sample to the per-character probe log.</p>
+<p>Weighty hedgehogs graze the high garden edge, exchanging night sighs with big gray geese. Every eighth glyph hangs a descender, and every line begins with a capital, so the sampled characters cover the top and bottom ink extremes of each seated baseline throughout this whole page of text.</p>
+<p>The final paragraph rounds the count past eighty physical lines. High tight hedges edge the huge grassy green, and eight geese exchange haughty glances by the gate. When this page and its log are diffed between the flat build and the metrics build, the attribution must land in exactly one bucket: seating, raster, or mixed.</p>
+
+<p>The quick brown fox jumps over the lazy dog while eight big Hungry goats graze next to a huge hexagonal grid of hedges. Every glyph seating regime shows up here: x sits at ex-height, H rises to cap-height, and g hangs its descender below the baseline. Mixing them densely means any sub-pixel shift in half-leading exaggerates the anti-aliased edge delta on every single line of this paragraph.</p>
+<p>Height, weight, and gauge are geometry words that keep the letters H, x, and g in heavy rotation. When layout computes line-height as a flat multiple the half-leading lands on fractional pixels; when it computes it from rounded font metrics the same text seats on whole pixels. This fixture exists so the two builds can be compared line by line against exactly the same glyph bitmaps.</p>
+<p>Grazing goats hug the hedge exactly where the huge grid begins. Sixty height signs hang high, exchanging bright light for a hazy glow. Each generated sentence here is designed to wrap across the seven hundred sixty pixel measure into several physical lines, giving the probe roughly eight seated baselines per paragraph and enough samples to average away noise.</p>
+<p>The exchange highway gets bigger nightly: huge freight rigs haul heavy goods right through the highlands, exhaling smog against gray skies. Anti-aliasing gradients change with every fractional y offset, so if the bitmaps hash identically between builds, any remaining pixel difference is attributable to seating alone and never to the rasterizer.</p>
+<p>Bright huge signs hang above the highway exit, guiding night freight toward the neighboring exchange. High-gain amplifiers hum in the background while engineers weigh eight gigahertz signals against tight noise budgets. The paragraph repeats familiar shapes on purpose; a stable vocabulary keeps the atlas small and the hash comparison exact.</p>
+<p>Geography homework highlights how huge highland ridges guard the eight big lakes. Light hits the high garage roof at a grazing angle, exaggerating every edge. Whenever the glyph cache seats a bitmap one fifth of a pixel lower than Chrome does, these tightly packed lines multiply that error into a diffuse field of gray disagreement.</p>
+<p class="small">Small text regime: the twelve pixel paragraphs stress the seating math where Chrome rounds to fifteen pixels for normal line height. Eight huge highland goats graze happily right next to the hexagonal hedge grid, exchanging heavy sighs. Dense small glyphs are where sub-pixel misseating hurts the score most, because edge pixels dominate ink pixels.</p>
+<p class="small">Higher weight gauges hang beneath the eight big highway signs. The next sentence exists to lengthen this paragraph enough to guarantee wrapping at twelve pixels across the full measure, giving the probe extra baselines in the small regime where the flat model lands on fourteen point four and metrics rounding lands on fifteen exactly.</p>
+<p class="small">Neighboring lighthouses exchange bright signals through the night haze. Highly geared engines growl uphill, dragging weighty freight higher. If seating explains the whole delta, snapping the baseline to integer pixels should recover the regression here first, since the fractional gap between the two models is largest at this size.</p>
+<p>Back to fourteen pixels: the eighth huge garage holds eight bright green gliders. Hexagonal highlights gleam against the higher hangar. The mixture of ascenders, descenders, and x-height glyphs in tight succession is deliberate; every physical line contributes an x, an H, and a g sample to the per-character probe log.</p>
+<p>Weighty hedgehogs graze the high garden edge, exchanging night sighs with big gray geese. Every eighth glyph hangs a descender, and every line begins with a capital, so the sampled characters cover the top and bottom ink extremes of each seated baseline throughout this whole page of text.</p>
+<p>The final paragraph rounds the count past eighty physical lines. High tight hedges edge the huge grassy green, and eight geese exchange haughty glances by the gate. When this page and its log are diffed between the flat build and the metrics build, the attribution must land in exactly one bucket: seating, raster, or mixed.</p>
+</body>
+</html>
