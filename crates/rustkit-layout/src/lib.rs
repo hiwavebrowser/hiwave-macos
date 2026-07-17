@@ -63,6 +63,73 @@ pub enum LayoutError {
     TextShapingError(String),
 }
 
+thread_local! {
+    /// Memo for [`normal_line_height`]: shaping a probe glyph per box per layout
+    /// pass showed up as real time, and the answer only depends on the font.
+    static NORMAL_LINE_HEIGHT_CACHE: std::cell::RefCell<
+        std::collections::HashMap<(String, u32, u16, u8), f32>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// The font's own `line-height: normal`, in px, matching Blink's model:
+/// `round(ascent) + round(descent) + line_gap`.
+///
+/// Two things matter here, and only the pair of them gets Chrome's answer:
+///
+/// 1. `normal` is derived from the FONT (ascent + descent + line-gap), not from
+///    a flat ratio. RustKit hardcoded `font_size * 1.2`, drifting up to ~1.2px
+///    per line at 16px system-ui and compounding down the page.
+/// 2. Blink rounds ascent and descent to whole pixels INDEPENDENTLY before
+///    summing (SimpleFontData). So `normal` is always an integer, and line
+///    boxes land on whole pixels. Summing the raw floats instead is *closer on
+///    average* yet scores WORSE on the pixel meter: fractional line boxes push
+///    every baseline onto a sub-pixel offset and antialiasing diverges
+///    everywhere. Measured: 24/26 -> 23/26 with raw floats. Rounding is not a
+///    cosmetic detail, it is the mechanism.
+///
+/// Verified against Chrome 148 on 20 font/size pairs drawn from the committed
+/// baselines (`crates/rustkit-layout/tests/normal_line_height_probe.rs` and
+/// `scripts/probe_normal_lineheight.py`): exact on 19/20.
+///
+/// Falls back to the flat ratio only when shaping yields no usable metrics
+/// (missing font) -- same behaviour as before this existed.
+pub fn normal_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
+    let key = (
+        style.font_family.clone(),
+        font_size.to_bits(),
+        style.font_weight.0 as u16,
+        style.font_style as u8,
+    );
+    if let Some(px) = NORMAL_LINE_HEIGHT_CACHE.with(|c| c.borrow().get(&key).copied()) {
+        return px;
+    }
+
+    let m = measure_text_advanced(
+        "x",
+        &style.font_family,
+        font_size,
+        style.font_weight,
+        style.font_style,
+    );
+    let px = if m.ascent > 0.0 {
+        m.ascent.round() + m.descent.round() + m.leading
+    } else {
+        font_size * rustkit_css::NORMAL_LINE_HEIGHT_FALLBACK_RATIO
+    };
+
+    NORMAL_LINE_HEIGHT_CACHE.with(|c| c.borrow_mut().insert(key, px));
+    px
+}
+
+/// Resolve a box's `line-height` to px, consulting font metrics for `normal`.
+pub fn resolve_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
+    match style.line_height {
+        // Only `normal` needs the font; skip shaping entirely otherwise.
+        rustkit_css::LineHeight::Normal => normal_line_height(style, font_size),
+        other => other.to_px(font_size),
+    }
+}
+
 /// CSS position property values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Position {
@@ -1516,7 +1583,7 @@ impl LayoutBox {
             Length::Px(px) => px,
             _ => 16.0,
         };
-        let line_height = self.style.line_height.to_px(font_size);
+        let line_height = resolve_line_height(&self.style, font_size);
         let metrics = measure_text_advanced(
             "x",
             &self.style.font_family,
@@ -1539,8 +1606,7 @@ impl LayoutBox {
             Length::Px(px) => px,
             _ => 16.0,
         };
-        // Use the LineHeight enum's to_px method for proper calculation
-        self.style.line_height.to_px(font_size)
+        resolve_line_height(&self.style, font_size)
     }
 
     /// Perform layout with margin collapse context.
@@ -2381,7 +2447,7 @@ impl LayoutBox {
         let text_extents = |s: &ComputedStyle| -> (f32, f32) {
             let fs = font_px(s);
             let m = measure_text_advanced("x", &s.font_family, fs, s.font_weight, s.font_style);
-            let line_h = s.line_height.to_px(fs);
+            let line_h = resolve_line_height(s, fs);
             let half_leading = ((line_h - (m.ascent + m.descent)) / 2.0).max(0.0);
             (half_leading + m.ascent, half_leading + m.descent)
         };
@@ -4494,7 +4560,8 @@ impl DisplayList {
             // Calculate half-leading for proper baseline alignment
             // CSS line-height creates extra space above and below the text content
             // The half-leading is split evenly above and below the text
-            let line_height = style.line_height.to_px(font_size);
+            // (must resolve `normal` exactly as layout did, or the baseline moves)
+            let line_height = resolve_line_height(style, font_size);
 
             // Get font metrics for accurate baseline calculation
             let metrics = measure_text_advanced(

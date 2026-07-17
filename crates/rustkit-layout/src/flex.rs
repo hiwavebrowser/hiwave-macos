@@ -1025,7 +1025,7 @@ fn get_content_cross_size(layout_box: &LayoutBox) -> f32 {
     };
 
     // Get line height (used for text and inline boxes)
-    let line_height = layout_box.style.line_height.to_px(font_size);
+    let line_height = crate::resolve_line_height(&layout_box.style, font_size);
 
     // For text boxes, use line height
     if let crate::BoxType::Text(_) = &layout_box.box_type {
@@ -1080,7 +1080,7 @@ fn get_content_cross_size(layout_box: &LayoutBox) -> f32 {
     }
 
     // For inline/block boxes without content, use line height as minimum
-    layout_box.style.line_height.to_px(font_size)
+    crate::resolve_line_height(&layout_box.style, font_size)
 }
 
 /// Distribute lines according to align-content.
@@ -1397,10 +1397,10 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f3
                     if content > 0.0 {
                         content
                     } else {
-                        style.line_height.to_px(font_size)
+                        crate::resolve_line_height(style, font_size)
                     }
                 }
-                Axis::Vertical => style.line_height.to_px(font_size),
+                Axis::Vertical => crate::resolve_line_height(style, font_size),
             }
         }
         crate::BoxType::Text(text) => {
@@ -1419,10 +1419,10 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f3
                     if w > 0.0 {
                         w
                     } else {
-                        style.line_height.to_px(font_size)
+                        crate::resolve_line_height(style, font_size)
                     }
                 }
-                Axis::Vertical => style.line_height.to_px(font_size),
+                Axis::Vertical => crate::resolve_line_height(style, font_size),
             }
         }
     }
@@ -1476,7 +1476,7 @@ fn get_intrinsic_cross_size(
         },
         crate::BoxType::Text(_) => {
             // Text boxes have intrinsic height based on line height
-            let line_height = style.line_height.to_px(font_size);
+            let line_height = crate::resolve_line_height(style, font_size);
             match cross_axis {
                 Axis::Vertical => line_height,
                 Axis::Horizontal => 0.0, // Text width depends on content
@@ -1485,7 +1485,7 @@ fn get_intrinsic_cross_size(
         _ => {
             // For block/inline boxes, provide a minimum based on line height
             // This ensures flex items have non-zero cross size
-            let line_height = style.line_height.to_px(font_size);
+            let line_height = crate::resolve_line_height(style, font_size);
             match cross_axis {
                 Axis::Vertical => line_height,
                 Axis::Horizontal => 0.0,
