@@ -2013,6 +2013,12 @@ impl Engine {
             // measured ~11% narrower than our inherited 14px serif-stack
             // labels; every composed control width ran wide).
             "button" | "input" | "select" | "textarea" => {
+                // Chrome's UA sheet computes inline-block for form controls.
+                // Without this the Display default (Block) sends every
+                // control down the block path: css-selectors §6 stacked its
+                // three buttons vertically (h=124.6 vs Chrome 39) with the
+                // interstitial whitespace text runs each taking a line.
+                style.display = rustkit_css::Display::InlineBlock;
                 style.font_size = rustkit_css::Length::Px(13.333);
                 style.font_family = "system-ui".to_string();
             }
@@ -7142,6 +7148,91 @@ mod tests {
             get("Rem"),
             rustkit_css::Length::Px(24.0),
             "1.5rem vs root 16px"
+        );
+    }
+
+    #[test]
+    fn test_button_ua_display_inline_block_one_line() {
+        // Chrome's UA sheet computes inline-block for form controls; RustKit's
+        // Display default is Block, which sent every control down the block
+        // path — css-selectors §6 stacked its three buttons vertically
+        // (h=124.6 vs Chrome 39), the whitespace runs between them each
+        // taking their own line. Drive the real engine: three sibling
+        // buttons must share one line box.
+        let html = r#"<!DOCTYPE html>
+            <html><body>
+              <div>
+                <button>One</button>
+                <button>Two</button>
+                <button>Three</button>
+              </div>
+            </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+        };
+
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        let containing_block = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        layout.layout(&containing_block);
+
+        fn collect_controls(b: &LayoutBox, out: &mut Vec<(f32, f32, rustkit_css::Display)>) {
+            if matches!(b.box_type, BoxType::FormControl(_)) {
+                out.push((
+                    b.dimensions.content.x,
+                    b.dimensions.content.y,
+                    b.style.display,
+                ));
+            }
+            for c in &b.children {
+                collect_controls(c, out);
+            }
+        }
+        let mut controls = Vec::new();
+        collect_controls(&layout, &mut controls);
+
+        assert_eq!(controls.len(), 3, "three button boxes expected");
+        for (_, _, display) in &controls {
+            assert_eq!(
+                *display,
+                rustkit_css::Display::InlineBlock,
+                "button UA display must compute to inline-block"
+            );
+        }
+        let y0 = controls[0].1;
+        for (i, (_, y, _)) in controls.iter().enumerate() {
+            assert!(
+                (y - y0).abs() <= 1.0,
+                "button {} not on the shared line: y={} vs {}",
+                i,
+                y,
+                y0
+            );
+        }
+        assert!(
+            controls[0].0 < controls[1].0 && controls[1].0 < controls[2].0,
+            "buttons must advance horizontally: xs {:?}",
+            controls.iter().map(|c| c.0).collect::<Vec<_>>()
         );
     }
 
