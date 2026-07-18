@@ -650,6 +650,10 @@ pub enum FormControlType {
     Select {
         options: Vec<String>,
         selected_index: Option<usize>,
+        /// The `size` attribute (visible rows); 0 when unspecified.
+        /// size > 1 (or `multiple`) renders as an inline listbox, not a
+        /// dropdown — Chrome CfT-148 builds 16px per visible row + 2px.
+        size: u32,
     },
 }
 
@@ -1400,17 +1404,30 @@ impl LayoutBox {
             }
         };
 
+        // Bare-control border-box sizes are calibrated to Chrome CfT-148 at
+        // the UA control font (13.333px system-ui, PR #42): single-line
+        // input/button/select build a 19px border-box (UA border included),
+        // checkbox/radio 13x13, textarea 15px per row + 2px border, range
+        // 16x129, color 27x50 (form-controls t8 dig, 2026-07-17: the old
+        // blobs fs*1.5+8 / fs*1.5+12 / fs*1.2 measured 28/32/16 — +9/+13/+3
+        // on every bare control, cascading +63px of drift down the page).
+        // Scaled by font_size so author-sized controls keep proportion; at
+        // the UA font the scale is 1.0 and the match to Chrome is exact.
+        let ua_scale = font_size / (40.0 / 3.0);
+
         // Calculate intrinsic dimensions based on control type
         let (intrinsic_width, intrinsic_height) = match &control {
-            FormControlType::TextInput { .. } => {
+            FormControlType::TextInput { input_type, .. } => match input_type.as_str() {
+                "range" => (129.0 * ua_scale, 16.0 * ua_scale),
+                "color" => (50.0 * ua_scale, 27.0 * ua_scale),
                 // Default text input: ~20 characters wide, single line height
-                (font_size * 12.0, single_line_box(font_size * 1.5 + 8.0))
-            }
+                _ => (font_size * 12.0, single_line_box(19.0 * ua_scale)),
+            },
             FormControlType::TextArea { rows, cols, .. } => {
                 // Textarea: based on rows/cols
                 let rows = (*rows).max(2) as f32;
                 let cols = (*cols).max(20) as f32;
-                (font_size * 0.6 * cols, font_size * 1.2 * rows + 8.0)
+                (font_size * 0.6 * cols, (15.0 * rows + 2.0) * ua_scale)
             }
             FormControlType::Button { label, .. } => {
                 // Button: measured label width plus padding (was a
@@ -1441,15 +1458,20 @@ impl LayoutBox {
                 } else {
                     label_width + 24.0
                 };
-                (width, single_line_box(font_size * 1.5 + 12.0))
+                (width, single_line_box(19.0 * ua_scale))
             }
             FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
                 // Fixed size for checkboxes and radios
-                (font_size * 1.2, font_size * 1.2)
+                (13.0 * ua_scale, 13.0 * ua_scale)
             }
-            FormControlType::Select { .. } => {
-                // Dropdown: similar to text input but with arrow space
-                (font_size * 10.0, single_line_box(font_size * 1.5 + 8.0))
+            FormControlType::Select { size, .. } => {
+                if *size > 1 {
+                    // Inline listbox: 16px per visible row + 2px border.
+                    (font_size * 10.0, (16.0 * *size as f32 + 2.0) * ua_scale)
+                } else {
+                    // Dropdown: similar to text input but with arrow space
+                    (font_size * 10.0, single_line_box(19.0 * ua_scale))
+                }
             }
         };
 
@@ -1508,7 +1530,56 @@ impl LayoutBox {
         if matches!(self.box_type, BoxType::Image { .. }) {
             return true;
         }
+        // BARE form controls carry a SYNTHETIC baseline — the inner text
+        // line's baseline (HTML UA behavior; Chrome CfT-148) — not their
+        // bottom margin edge. Their below-baseline part lives INSIDE the
+        // border box (form_control_baseline_hang), so the line must not
+        // extend the strut descent under them: bottom-edge treatment made
+        // every control line strut_descent too tall (input rows 25 vs Chrome
+        // 24, a fixed 50px button line 56 vs Chrome 50), compounding per row.
+        // AUTHOR-PADDED controls keep the bottom-edge model: it measures
+        // closer to Chrome there (css-selectors §6 pad-8 buttons: line 39;
+        // hang model under-built it 30.3, bottom-edge builds ~35) — same
+        // bare-vs-compose split as the DIG-1/DIG-2 height contract.
+        if matches!(self.box_type, BoxType::FormControl(_)) {
+            let px = |l: &Length| match l {
+                Length::Px(v) => *v,
+                _ => 0.0,
+            };
+            let author_pb_v = px(&self.style.padding_top)
+                + px(&self.style.padding_bottom)
+                + px(&self.style.border_top_width)
+                + px(&self.style.border_bottom_width);
+            return author_pb_v > 0.0;
+        }
         self.style.display.is_atomic_inline() && self.children.is_empty()
+    }
+
+    /// Distance from a form control's synthetic baseline (its inner text
+    /// line's baseline) to its bottom margin edge: font descent +
+    /// half-leading + author bottom padding/border. Chrome hangs exactly
+    /// this much of a control below the line baseline (bare 19px input:
+    /// ~4-5px), where the bottom-edge model hung the whole box + strut.
+    fn form_control_baseline_hang(&self) -> f32 {
+        let font_size = match self.style.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let line_height = self.style.line_height.to_px(font_size);
+        let metrics = measure_text_advanced(
+            "x",
+            &self.style.font_family,
+            font_size,
+            self.style.font_weight,
+            self.style.font_style,
+        );
+        let (ascent, descent) = if metrics.ascent > 0.0 {
+            (metrics.ascent, metrics.descent)
+        } else {
+            (font_size * 0.8, font_size * 0.2)
+        };
+        let half_leading = ((line_height - (ascent + descent)) / 2.0).max(0.0);
+        descent + half_leading + self.dimensions.padding.bottom + self.dimensions.border.bottom
     }
 
     fn inline_strut_descent(&self) -> f32 {
@@ -2407,6 +2478,11 @@ impl LayoutBox {
             let c = &children[i];
             let above = if matches!(c.box_type, BoxType::Text(_)) {
                 text_extents(&c.style).0
+            } else if matches!(c.box_type, BoxType::FormControl(_)) && !c.baseline_is_bottom_edge()
+            {
+                // Bare control, synthetic baseline: the part above it is the
+                // box minus the inner-text hang (form_control_baseline_hang).
+                (c.dimensions.margin_box().height - c.form_control_baseline_hang()).max(0.0)
             } else if c.baseline_is_bottom_edge() {
                 let h = c.dimensions.margin_box().height;
                 match c.style.vertical_align {
@@ -2426,6 +2502,10 @@ impl LayoutBox {
             let c = &mut children[i];
             let target_top = if matches!(c.box_type, BoxType::Text(_)) {
                 baseline_y - text_extents(&c.style).0
+            } else if matches!(c.box_type, BoxType::FormControl(_)) && !c.baseline_is_bottom_edge()
+            {
+                baseline_y
+                    - (c.dimensions.margin_box().height - c.form_control_baseline_hang()).max(0.0)
             } else if c.baseline_is_bottom_edge() {
                 let mb = c.dimensions.margin_box();
                 match c.style.vertical_align {
@@ -2831,6 +2911,26 @@ impl LayoutBox {
             );
             // Slice C: vertical alignment about the line baseline.
             Self::apply_vertical_align(&mut self.children[start..end], &valign_font);
+        }
+
+        // CSS 2.1 §8.3.1: the last in-flow block child's bottom margin is
+        // still pending in the context. When this box's own padding-bottom /
+        // border-bottom / definite height blocks parent-child collapse, that
+        // margin belongs INSIDE this box — materialize it into the content
+        // height. (Every padded container was measuring 10px short: the
+        // pending margin was silently dropped on return, and the form-control
+        // bare-height blobs had calibrated themselves against the deficit.)
+        // When collapse-through is allowed, keep today's behavior (pending
+        // margin dropped rather than adjoined to the parent's own bottom
+        // margin) — ledgered as a smaller residual, not chased here.
+        if !should_collapse_with_last_child(
+            &self.style,
+            self.float,
+            self.dimensions.border.bottom,
+            self.dimensions.padding.bottom,
+        ) {
+            cursor_y += margin_context.resolve();
+            margin_context.reset();
         }
 
         self.dimensions.content.height = cursor_y;
@@ -4912,6 +5012,7 @@ impl DisplayList {
             FormControlType::Select {
                 options,
                 selected_index,
+                ..
             } => {
                 // Draw as a text input with dropdown arrow
                 let display_text = selected_index
