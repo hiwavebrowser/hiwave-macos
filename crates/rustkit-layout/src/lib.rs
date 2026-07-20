@@ -4533,6 +4533,25 @@ impl DisplayList {
                 None => vec![(text.clone(), x, content_y + half_leading, text_width)],
             };
 
+            // PAINT-0 seating probe (RUSTKIT_PAINT_PROBE=1): log the layout
+            // half of the glyph seating chain so flat-1.2 vs metrics-normal
+            // builds can be diffed line-by-line (forensics 2026-07-16 §4.2).
+            if paint0_probe() {
+                for (t, _lx, ly, _lw) in &render_lines {
+                    eprintln!(
+                        "PAINT0 layout text={:?} fs={} lh={} asc={} desc={} half={} content_y={} y_cmd={}",
+                        t.chars().take(16).collect::<String>(),
+                        font_size,
+                        line_height,
+                        metrics.ascent,
+                        metrics.descent,
+                        half_leading,
+                        content_y,
+                        ly
+                    );
+                }
+            }
+
             for (text, x, y, text_width) in render_lines {
                 // ADVANCE CONTRACT: ONE shape call feeds BOTH command types —
                 // layout's per-char advances and ascent ride the command so
@@ -6363,4 +6382,13 @@ mod tests {
         let sticky = layout_box.children[0].sticky_state.as_ref().unwrap();
         assert!(sticky.is_stuck);
     }
+}
+
+/// PAINT-0 seating probe gate (forensics 2026-07-16-paint0-glyph-seat).
+/// RUSTKIT_PAINT_PROBE=1 logs the layout half of the glyph seating chain
+/// (line_height -> half_leading -> y_cmd) so flat-1.2 and metrics-normal
+/// builds can be diffed line-by-line. Zero cost when off.
+fn paint0_probe() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RUSTKIT_PAINT_PROBE").as_deref() == Ok("1"))
 }
