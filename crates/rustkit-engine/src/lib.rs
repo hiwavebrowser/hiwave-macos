@@ -1496,7 +1496,7 @@ impl Engine {
                     let rows = attributes
                         .get("rows")
                         .and_then(|r| r.parse().ok())
-                        .unwrap_or(3);
+                        .unwrap_or(2);
                     let cols = attributes
                         .get("cols")
                         .and_then(|c| c.parse().ok())
@@ -1535,10 +1535,18 @@ impl Engine {
 
                     let selected_index = if options.is_empty() { None } else { Some(0) };
 
+                    // size > 1 (or `multiple` without size, which Chrome
+                    // shows as a 4-row listbox) renders inline rows.
+                    let size = attributes
+                        .get("size")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(if attributes.contains_key("multiple") { 4 } else { 0 });
+
                     return LayoutBox::new(
                         BoxType::FormControl(rustkit_layout::FormControlType::Select {
                             options,
                             selected_index,
+                            size,
                         }),
                         style,
                     );
@@ -2013,6 +2021,12 @@ impl Engine {
             // measured ~11% narrower than our inherited 14px serif-stack
             // labels; every composed control width ran wide).
             "button" | "input" | "select" | "textarea" => {
+                // Chrome's UA sheet computes inline-block for form controls.
+                // Without this the Display default (Block) sends every
+                // control down the block path: css-selectors §6 stacked its
+                // three buttons vertically (h=124.6 vs Chrome 39) with the
+                // interstitial whitespace text runs each taking a line.
+                style.display = rustkit_css::Display::InlineBlock;
                 style.font_size = rustkit_css::Length::Px(13.333);
                 style.font_family = "system-ui".to_string();
             }
@@ -7143,6 +7157,163 @@ mod tests {
             rustkit_css::Length::Px(24.0),
             "1.5rem vs root 16px"
         );
+    }
+
+    #[test]
+    fn test_button_ua_display_inline_block_one_line() {
+        // Chrome's UA sheet computes inline-block for form controls; RustKit's
+        // Display default is Block, which sent every control down the block
+        // path — css-selectors §6 stacked its three buttons vertically
+        // (h=124.6 vs Chrome 39), the whitespace runs between them each
+        // taking their own line. Drive the real engine: three sibling
+        // buttons must share one line box.
+        let html = r#"<!DOCTYPE html>
+            <html><body>
+              <div>
+                <button>One</button>
+                <button>Two</button>
+                <button>Three</button>
+              </div>
+            </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+        };
+
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        let containing_block = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        layout.layout(&containing_block);
+
+        fn collect_controls(b: &LayoutBox, out: &mut Vec<(f32, f32, rustkit_css::Display)>) {
+            if matches!(b.box_type, BoxType::FormControl(_)) {
+                out.push((
+                    b.dimensions.content.x,
+                    b.dimensions.content.y,
+                    b.style.display,
+                ));
+            }
+            for c in &b.children {
+                collect_controls(c, out);
+            }
+        }
+        let mut controls = Vec::new();
+        collect_controls(&layout, &mut controls);
+
+        assert_eq!(controls.len(), 3, "three button boxes expected");
+        for (_, _, display) in &controls {
+            assert_eq!(
+                *display,
+                rustkit_css::Display::InlineBlock,
+                "button UA display must compute to inline-block"
+            );
+        }
+        let y0 = controls[0].1;
+        for (i, (_, y, _)) in controls.iter().enumerate() {
+            assert!(
+                (y - y0).abs() <= 1.0,
+                "button {} not on the shared line: y={} vs {}",
+                i,
+                y,
+                y0
+            );
+        }
+        assert!(
+            controls[0].0 < controls[1].0 && controls[1].0 < controls[2].0,
+            "buttons must advance horizontally: xs {:?}",
+            controls.iter().map(|c| c.0).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_bare_form_control_heights_match_chrome() {
+        // form-controls t8 dig (2026-07-17): Chrome CfT-148 builds bare
+        // single-line controls as a ~19px border-box (input/button/select at
+        // the UA 13.333px font), checkbox 13x13, textarea 15px/row + 2 —
+        // RustKit's old blobs measured 28/32/16 and every section below slid
+        // by the deficit. Author padding must still compose (DIG-1/DIG-2):
+        // a pad-8 button stays ~31.
+        let html = r#"<!DOCTYPE html>
+            <html><body>
+              <div><input type="text" placeholder="bare"></div>
+              <div><button>Bare</button></div>
+              <div><input type="checkbox"></div>
+              <div><textarea placeholder="two rows"></textarea></div>
+              <div><button style="padding: 8px 16px;">Padded</button></div>
+            </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+        };
+
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        let containing_block = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        layout.layout(&containing_block);
+
+        fn collect_control_heights(b: &LayoutBox, out: &mut Vec<f32>) {
+            if matches!(b.box_type, BoxType::FormControl(_)) {
+                out.push(b.dimensions.content.height);
+            }
+            for c in &b.children {
+                collect_control_heights(c, out);
+            }
+        }
+        let mut heights = Vec::new();
+        collect_control_heights(&layout, &mut heights);
+        assert_eq!(heights.len(), 5, "five control boxes expected: {:?}", heights);
+
+        let expect = [
+            ("bare text input", 19.0, 1.0),
+            ("bare button", 19.0, 1.0),
+            ("checkbox", 13.0, 1.0),
+            ("default textarea (2 rows)", 32.0, 1.0),
+            ("author-padded button", 31.0, 1.0),
+        ];
+        for ((name, want, tol), got) in expect.iter().zip(&heights) {
+            assert!(
+                (got - want).abs() <= *tol,
+                "{name}: height {got} not within {tol} of Chrome's {want} (all: {heights:?})"
+            );
+        }
     }
 
     #[test]
