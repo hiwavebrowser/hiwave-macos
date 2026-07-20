@@ -1435,15 +1435,34 @@ impl Default for LineHeight {
     }
 }
 
+/// Fallback ratio for `line-height: normal` when no font metrics are available.
+///
+/// CSS says `normal` is derived from the font (ascent + descent + line-gap);
+/// this constant is only a stand-in for callers that cannot shape text. Layout
+/// must use [`LineHeight::to_px_with_normal`] instead — see its docs.
+pub const NORMAL_LINE_HEIGHT_FALLBACK_RATIO: f32 = 1.2;
+
 impl LineHeight {
-    /// Compute the line height in pixels.
+    /// Compute the line height in pixels, with no font metrics available.
     ///
-    /// - `Normal` uses the default multiplier (1.2)
-    /// - `Number(n)` multiplies font_size by n
-    /// - `Px(px)` returns the absolute pixel value
+    /// `Normal` falls back to a flat 1.2 x font-size, which is NOT what the
+    /// spec (or Chrome) does. Any caller that can shape text should call
+    /// [`LineHeight::to_px_with_normal`] and pass the font's own metrics.
     pub fn to_px(&self, font_size: f32) -> f32 {
+        self.to_px_with_normal(font_size, font_size * NORMAL_LINE_HEIGHT_FALLBACK_RATIO)
+    }
+
+    /// Compute the line height in pixels, given the font's own `normal` height.
+    ///
+    /// `normal_px` is the font's ascent + descent + line-gap at this font-size
+    /// (rustkit-layout's `TextMetrics::height`). Only `Normal` consults it;
+    /// `Number`/`Px` are font-independent by definition.
+    ///
+    /// The flat-1.2 model this replaces was wrong by up to ~1.2px per line on
+    /// the common 16px system-ui case, and the error compounds down the page.
+    pub fn to_px_with_normal(&self, font_size: f32, normal_px: f32) -> f32 {
         match self {
-            LineHeight::Normal => font_size * 1.2,
+            LineHeight::Normal => normal_px,
             LineHeight::Number(n) => font_size * n,
             LineHeight::Px(px) => *px,
         }

@@ -270,7 +270,7 @@ impl<'a> GridItem<'a> {
         };
 
         // Get line height in pixels
-        let line_height_px = self.layout_box.style.line_height.to_px(font_size);
+        let line_height_px = crate::resolve_line_height(&self.layout_box.style, font_size);
 
         // Count text children (simplified)
         let text_lines = self.count_text_lines();
@@ -321,7 +321,7 @@ impl<'a> GridItem<'a> {
                 Length::Px(px) => px,
                 _ => font_size,
             };
-            let child_line_height_px = child_style.line_height.to_px(child_font_size);
+            let child_line_height_px = crate::resolve_line_height(child_style, child_font_size);
 
             // Estimate child's content height
             let child_content_height = if let crate::BoxType::Text(_) = &child.box_type {
