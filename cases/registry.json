@@ -17,7 +17,7 @@
       "height": 600,
       "scope": "builtins",
       "known_fail": true,
-      "kf_ceiling": 17.7
+      "kf_ceiling": 14.5
     },
     "settings": {
       "html": "crates/hiwave-app/src/ui/settings.html",
