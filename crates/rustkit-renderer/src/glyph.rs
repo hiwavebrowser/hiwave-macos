@@ -38,6 +38,17 @@ pub struct GlyphCache {
     next_x: u32,
     next_y: u32,
     row_height: u32,
+    // Parallel RGBA atlas for COLOR glyphs (emoji). The grayscale atlas above
+    // is R8 and the renderer tints it; color-bitmap emoji need real RGBA, drawn
+    // with the passthrough (blit) pipeline. Kept separate so the grayscale text
+    // hot path is untouched — this atlas stays empty on pages without emoji.
+    color_atlas: wgpu::Texture,
+    _color_atlas_view: wgpu::TextureView,
+    color_bind_group: wgpu::BindGroup,
+    color_entries: HashMap<GlyphKey, GlyphEntry>,
+    color_next_x: u32,
+    color_next_y: u32,
+    color_row_height: u32,
 }
 
 impl GlyphCache {
@@ -117,6 +128,58 @@ impl GlyphCache {
             label: Some("glyph_atlas_bind_group"),
         });
 
+        // Parallel RGBA color-glyph atlas (emoji). Same bind-group layout —
+        // Rgba8Unorm is float-sampleable like R8Unorm.
+        let color_atlas = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Color Glyph Atlas"),
+            size: wgpu::Extent3d {
+                width: atlas_size,
+                height: atlas_size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let color_empty = vec![0u8; (atlas_size * atlas_size * 4) as usize];
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &color_atlas,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &color_empty,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(atlas_size * 4),
+                rows_per_image: Some(atlas_size),
+            },
+            wgpu::Extent3d {
+                width: atlas_size,
+                height: atlas_size,
+                depth_or_array_layers: 1,
+            },
+        );
+        let color_atlas_view = color_atlas.create_view(&wgpu::TextureViewDescriptor::default());
+        let color_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&color_atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+            label: Some("color_glyph_atlas_bind_group"),
+        });
+
         Ok(Self {
             atlas,
             _atlas_view: atlas_view,
@@ -126,6 +189,13 @@ impl GlyphCache {
             next_x: 1, // Start at 1 to avoid edge artifacts
             next_y: 1,
             row_height: 0,
+            color_atlas,
+            _color_atlas_view: color_atlas_view,
+            color_bind_group,
+            color_entries: HashMap::new(),
+            color_next_x: 1,
+            color_next_y: 1,
+            color_row_height: 0,
         })
     }
 
@@ -137,6 +207,101 @@ impl GlyphCache {
     /// Get the bind group for the atlas texture.
     pub fn bind_group(&self) -> &wgpu::BindGroup {
         &self.bind_group
+    }
+
+    /// Get the bind group for the RGBA color-glyph atlas.
+    pub fn color_bind_group(&self) -> &wgpu::BindGroup {
+        &self.color_bind_group
+    }
+
+    /// Get or rasterize a COLOR glyph (emoji) into the RGBA atlas. Returns the
+    /// atlas entry (tex_coords into the color atlas), or None if the platform
+    /// or font can't produce a color glyph for this codepoint.
+    #[allow(unused_variables)]
+    pub fn get_or_rasterize_color(
+        &mut self,
+        _device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        key: &GlyphKey,
+    ) -> Option<GlyphEntry> {
+        if let Some(entry) = self.color_entries.get(key) {
+            return Some(entry.clone());
+        }
+
+        #[cfg(target_os = "macos")]
+        let raster = {
+            let italic = key.font_style == 1;
+            let family = if key.font_family.is_empty() {
+                "Helvetica"
+            } else {
+                key.font_family.as_str()
+            };
+            let rasterizer = rustkit_text::macos::GlyphRasterizer::with_style(
+                family,
+                key.font_size as f32 / 10.0,
+                key.font_weight,
+                italic,
+            );
+            rasterizer.rasterize_char_color(key.codepoint)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let raster: Option<(Vec<u8>, u32, u32, f32, f32, f32)> = None;
+
+        let (rgba, gw, gh, advance, bearing_x, bearing_y) = raster?;
+        let gw = gw.max(1).min(256);
+        let gh = gh.max(1).min(256);
+
+        let (ax, ay) = self.allocate_color_space(gw + 2, gh + 2)?;
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.color_atlas,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: ax + 1, y: ay + 1, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(gw * 4),
+                rows_per_image: Some(gh),
+            },
+            wgpu::Extent3d { width: gw, height: gh, depth_or_array_layers: 1 },
+        );
+
+        let u0 = (ax + 1) as f32 / self.atlas_size as f32;
+        let v0 = (ay + 1) as f32 / self.atlas_size as f32;
+        let u1 = (ax + 1 + gw) as f32 / self.atlas_size as f32;
+        let v1 = (ay + 1 + gh) as f32 / self.atlas_size as f32;
+
+        let entry = GlyphEntry {
+            tex_coords: [u0, v0, u1, v1],
+            offset: [bearing_x, -bearing_y],
+            advance,
+        };
+        self.color_entries.insert(key.clone(), entry.clone());
+        Some(entry)
+    }
+
+    /// Allocate space in the COLOR atlas (separate cursor from the grayscale one).
+    fn allocate_color_space(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
+        if self.color_next_x + width > self.atlas_size {
+            self.color_next_x = 1;
+            self.color_next_y += self.color_row_height + 1;
+            self.color_row_height = 0;
+        }
+        if self.color_next_y + height > self.atlas_size {
+            tracing::warn!("Color glyph atlas full, clearing cache");
+            self.color_entries.clear();
+            self.color_next_x = 1;
+            self.color_next_y = 1;
+            self.color_row_height = 0;
+        }
+        let x = self.color_next_x;
+        let y = self.color_next_y;
+        self.color_next_x += width + 1;
+        self.color_row_height = self.color_row_height.max(height);
+        Some((x, y))
     }
 
     /// Get or rasterize a glyph.
@@ -334,6 +499,10 @@ impl GlyphCache {
         self.next_x = 1;
         self.next_y = 1;
         self.row_height = 0;
+        self.color_entries.clear();
+        self.color_next_x = 1;
+        self.color_next_y = 1;
+        self.color_row_height = 0;
     }
 }
 
