@@ -180,7 +180,9 @@ Ships value on day one because the layout tree is already emitted.
 naming the first divergent stage.
 
 **Phase 3 — cross-platform**
-Port to `hiwave-windows` once that repo is awake. Not before.
+Port to `hiwave-windows` (live, `parity-capture` already present) and
+`hiwave-linux`. Can follow Phase 1 directly — see the correction in §4; this
+is not gated on reviving anything.
 
 ---
 
@@ -208,8 +210,11 @@ ruling.**
    either way.
 2. **`hiwave_eval(js)`** — yes or no? It is the sharpest tool and the easiest
    way to put the engine in a state no page could reach.
-3. **Windows.** Confirm it is out of scope for the first cut, or fund the
-   repo revival as part of it.
+3. **Windows / Linux.** Now that §4 is corrected — Windows is live with
+   `parity-capture` present, and Talos is walking Linux — is the port part of
+   this item, or a follow-on that Athena/Pollux pick up once the macOS export
+   paths land? My read: follow-on, because Phase 1's engine export paths are
+   the shared prerequisite and they only need writing once.
 4. **Who builds it.** This is a well-specified, mostly-mechanical crate over
    an existing engine — a good `/trench` candidate rather than hand-driven
    work, once Phase 1's export paths are designed.
