@@ -1420,6 +1420,11 @@ impl SvgText {
                 color: text_color,
                 font_weight: 400, // Normal
                 font_style: 0, // Normal
+                // ADVANCE CONTRACT: svg <text> is a legacy path — it has no
+                // layout shaper of its own, so paint falls back to its own
+                // advances (the None arm the contract documents).
+                advances: None,
+                ascent: None,
             });
         }
     }
