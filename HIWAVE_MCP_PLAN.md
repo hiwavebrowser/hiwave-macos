@@ -210,11 +210,68 @@ ruling.**
    either way.
 2. **`hiwave_eval(js)`** — yes or no? It is the sharpest tool and the easiest
    way to put the engine in a state no page could reach.
-3. **Windows / Linux.** Now that §4 is corrected — Windows is live with
-   `parity-capture` present, and Talos is walking Linux — is the port part of
-   this item, or a follow-on that Athena/Pollux pick up once the macOS export
-   paths land? My read: follow-on, because Phase 1's engine export paths are
-   the shared prerequisite and they only need writing once.
+3. ~~**Windows / Linux** — in scope or follow-on?~~ **ANSWERED by Pete,
+   2026-07-28:** the platform topology in §8 is deliberate — a worker and a
+   reviewer per architecture, macOS as pathfinder, ports downstream. So the
+   MCP follows the same route every other feature does: build on macOS, port
+   after. No separate decision needed.
 4. **Who builds it.** This is a well-specified, mostly-mechanical crate over
    an existing engine — a good `/trench` candidate rather than hand-driven
    work, once Phase 1's export paths are designed.
+
+---
+
+## 8. Platform topology — and what it does to this design
+
+Pete, 2026-07-28: *"this was my plan all along — have a worker on each arch
+with a reviewer. Their repos were behind macOS but that's ok, because
+progress on one may pave the way for the others."*
+
+The lag is **designed**, not drift. Reading the roster against it:
+
+| Arch | Worker | Reviewer | Repo |
+|---|---|---|---|
+| macOS | Atlas | Prometheus | `hiwave-macos` — pathfinder |
+| Windows | Athena | Pollux | `hiwave-windows` |
+| Linux | Talos | Argos | `hiwave-linux` |
+
+macOS solves a chapter, the ports follow with the algorithm already proven.
+That is exactly what W53 / W55 / W56, CSS Grid and radial gradients did.
+
+Worth stating plainly because its absence caused a bad claim: this topology
+is implied by the FLEET roster but written down nowhere. With no structural
+prior saying "that repo has an owner and is active," a stale local clone was
+enough to make me call a live tree dead (§4). Pinning it is the durable fix,
+not resolving to read more carefully.
+
+### The part that changes the tool surface
+
+If macOS paves and the others port, then **the highest-value diff is not
+always against Chrome — it is against macOS.**
+
+The porting seats' hardest problem right now is receipt quality, and it is
+their own reviewers saying so:
+
+- *"Windows `rustkit-text` today can 'have tests' that never execute — reject
+  that receipt shape."*
+- *"Headless GPU capture is untrusted on BusyBee."*
+
+So a porting seat currently proves a port with unit-test counts (which can be
+silently cfg-gated out) or with pixel captures (which that machine cannot
+trust). Neither answers the question the port actually asks: **did my port
+compute the same thing macOS computes?**
+
+A stage-wise introspection diff answers it directly, and it does so with
+artefacts that are text, deterministic, and GPU-independent — layout trees
+and display lists, not framebuffers.
+
+**Design consequence:** `hiwave_diff(case, stage, reference)` where
+`reference` is `chrome` **or** a committed macOS capture. Same machinery, one
+extra argument, and it turns the MCP into the port-verification tool for two
+of the three architectures rather than a debugging aid for one.
+
+That also reorders the payoff: Phase 1's exports (display list, computed
+style) stop being a macOS-only convenience and become the shared receipt
+format the whole topology runs on. It is a stronger argument for
+introspection-first than the one in §1, and it came from Pete's structure
+rather than from the code.
