@@ -143,11 +143,24 @@ This falls out of the existing structure rather than needing new machinery:
 - The fleet already has a seat per platform. Each seat runs its own
   `hiwave-mcp` against its own build, and results ride the exchange the way
   parity numbers already do.
-- **Caveat worth stating up front:** `hiwave-windows` last moved 2026-01-04
-  and its screenshot harness predates every parity fix since. Treating it as
-  a live target is a separate revival project, and the estimate for this one
-  should not quietly absorb it. macOS first; Windows when someone signs up to
-  wake that repo.
+- **CORRECTION (Atlas, same day).** An earlier draft of this section said
+  `hiwave-windows` last moved 2026-01-04 and would need reviving. That was
+  read off a **stale local clone**; the remote is at `63091a0` (2026-07-22),
+  **67 commits** ahead of it, with Athena actively landing ported parity work
+  (W53 text-align, radial gradients, CSS Grid, W55 form controls, W56
+  line-height). It carries the full crate tree **including
+  `crates/parity-capture`**. There is also a `hiwavebrowser/hiwave-linux`
+  repo, and Talos is walking the Linux platform-glue path now.
+
+  This changes the recommendation rather than a detail of it. Windows is not
+  a revival project — it is a live parallel tree with the same capture crate
+  the macOS MCP would wrap, so the port is genuinely near-free rather than
+  gated on waking a dead repo. Phase 3 can start as soon as Phase 1's export
+  paths are designed, and Athena/Pollux are already in that tree.
+
+  Recorded because this is the second time in one day I read repo state from
+  a stale local checkout instead of the remote. The rule is now: **`git fetch`
+  and quote `origin/`, or do not make the claim.**
 
 ---
 
