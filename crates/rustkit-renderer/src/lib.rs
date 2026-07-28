@@ -310,6 +310,7 @@ pub struct Renderer {
     _texture_pipeline_rgba: wgpu::RenderPipeline,
     // Blit pipeline for copying RGBA textures (unlike texture_pipeline which treats R as alpha)
     blit_pipeline: wgpu::RenderPipeline,
+    color_glyph_pipeline: wgpu::RenderPipeline,
     // Blit pipeline for Rgba8Unorm targets (for blitting to filter textures)
     blit_pipeline_rgba: wgpu::RenderPipeline,
 
@@ -333,6 +334,11 @@ pub struct Renderer {
     color_indices: Vec<u32>,
     texture_vertices: Vec<TextureVertex>,
     texture_indices: Vec<u32>,
+    // Color-glyph (emoji) batch — RGBA quads sampling the color atlas, drawn
+    // with the passthrough blit pipeline after the grayscale glyph batch. Empty
+    // on pages without emoji, so the normal text path pays nothing.
+    color_glyph_vertices: Vec<TextureVertex>,
+    color_glyph_indices: Vec<u32>,
     // Image quads batch separately from glyphs: the glyph batch binds the
     // glyph atlas for the whole draw, while each image quad must bind its
     // own texture (per-URL runs, drawn between colors and text).
@@ -515,6 +521,14 @@ impl Renderer {
             &texture_bind_group_layout,
         );
 
+        // Color-glyph (emoji) pipeline: blit shader + premultiplied-alpha blend.
+        let color_glyph_pipeline = pipeline::create_color_glyph_pipeline(
+            &device,
+            surface_format,
+            &uniform_bind_group_layout,
+            &texture_bind_group_layout,
+        );
+
         // Create blit pipeline for Rgba8Unorm targets (blitting to filter textures)
         let blit_pipeline_rgba = pipeline::create_blit_pipeline(
             &device,
@@ -558,6 +572,7 @@ impl Renderer {
             texture_pipeline,
             _texture_pipeline_rgba: texture_pipeline_rgba,
             blit_pipeline,
+            color_glyph_pipeline,
             blit_pipeline_rgba,
             backdrop_filter_pipelines,
             gradient_pipeline,
@@ -569,6 +584,8 @@ impl Renderer {
             color_indices: Vec::with_capacity(8192),
             texture_vertices: Vec::with_capacity(4096),
             texture_indices: Vec::with_capacity(8192),
+            color_glyph_vertices: Vec::new(),
+            color_glyph_indices: Vec::new(),
             image_vertices: Vec::with_capacity(256),
             image_indices: Vec::with_capacity(512),
             image_runs: Vec::with_capacity(64),
@@ -773,6 +790,9 @@ impl Renderer {
                 render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..self.texture_indices.len() as u32, 0, 0..1);
             }
+
+            // Color glyphs (emoji) drawn on top via the RGBA atlas + blit pipeline.
+            self.draw_color_glyph_batch(&mut render_pass);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -782,6 +802,8 @@ impl Renderer {
         self.color_indices.clear();
         self.texture_vertices.clear();
         self.texture_indices.clear();
+        self.color_glyph_vertices.clear();
+        self.color_glyph_indices.clear();
         self.image_vertices.clear();
         self.image_indices.clear();
         self.image_runs.clear();
@@ -906,6 +928,9 @@ impl Renderer {
                 render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..self.texture_indices.len() as u32, 0, 0..1);
             }
+
+            // Color glyphs (emoji) drawn on top via the RGBA atlas + blit pipeline.
+            self.draw_color_glyph_batch(&mut render_pass);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -915,6 +940,8 @@ impl Renderer {
         self.color_indices.clear();
         self.texture_vertices.clear();
         self.texture_indices.clear();
+        self.color_glyph_vertices.clear();
+        self.color_glyph_indices.clear();
         self.image_vertices.clear();
         self.image_indices.clear();
         self.image_runs.clear();
@@ -1162,6 +1189,8 @@ impl Renderer {
         self.color_indices.clear();
         self.texture_vertices.clear();
         self.texture_indices.clear();
+        self.color_glyph_vertices.clear();
+        self.color_glyph_indices.clear();
         self.image_vertices.clear();
         self.image_indices.clear();
         self.image_runs.clear();
@@ -4460,6 +4489,52 @@ impl Renderer {
                 font_style,
             };
 
+            // Color-glyph (emoji) path: paint the real color-bitmap artwork via
+            // the RGBA atlas + blit pipeline, not the grayscale coverage mask
+            // the normal path would tint into a flat blob. Falls through to the
+            // grayscale path if the char isn't a color glyph or has no color
+            // artwork (e.g. non-macOS).
+            #[cfg(target_os = "macos")]
+            let is_color = rustkit_text::macos::is_emoji(ch);
+            #[cfg(not(target_os = "macos"))]
+            let is_color = false;
+            if is_color {
+                if let Some(entry) =
+                    self.glyph_cache.get_or_rasterize_color(&self.device, &self.queue, &key)
+                {
+                    let glyph_x = cursor_x + entry.offset[0];
+                    let glyph_y = baseline + entry.offset[1];
+                    let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
+                    let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
+
+                    let (x0, y0) = self.transform_point(glyph_x, glyph_y);
+                    let (x1, y1) = self.transform_point(glyph_x + glyph_w, glyph_y);
+                    let (x2, y2) = self.transform_point(glyph_x + glyph_w, glyph_y + glyph_h);
+                    let (x3, y3) = self.transform_point(glyph_x, glyph_y + glyph_h);
+
+                    // White vertex color: the blit pipeline multiplies, so this
+                    // passes the emoji's own colors through untinted. Preserve
+                    // the run's alpha for opacity/fade.
+                    let cw = [1.0, 1.0, 1.0, color.a];
+                    let base = self.color_glyph_vertices.len() as u32;
+                    self.color_glyph_vertices.extend_from_slice(&[
+                        TextureVertex { position: [x0, y0], tex_coords: [entry.tex_coords[0], entry.tex_coords[1]], color: cw },
+                        TextureVertex { position: [x1, y1], tex_coords: [entry.tex_coords[2], entry.tex_coords[1]], color: cw },
+                        TextureVertex { position: [x2, y2], tex_coords: [entry.tex_coords[2], entry.tex_coords[3]], color: cw },
+                        TextureVertex { position: [x3, y3], tex_coords: [entry.tex_coords[0], entry.tex_coords[3]], color: cw },
+                    ]);
+                    self.color_glyph_indices.extend_from_slice(&[
+                        base, base + 1, base + 2,
+                        base, base + 2, base + 3,
+                    ]);
+
+                    cursor_x += layout_advances
+                        .and_then(|a| a.get(char_idx).copied())
+                        .unwrap_or(entry.advance);
+                    continue;
+                }
+            }
+
             // Clone the entry to avoid borrow issues
             if let Some(entry) = self.glyph_cache.get_or_rasterize(&self.device, &self.queue, &key) {
                 let glyph_x = cursor_x + entry.offset[0];
@@ -4946,6 +5021,32 @@ impl Renderer {
         }
     }
 
+    /// Draw the color-glyph (emoji) batch: RGBA quads sampling the color atlas
+    /// via the passthrough blit pipeline (blit samples real RGBA; the grayscale
+    /// texture pipeline would treat R as alpha and mangle the artwork). Empty on
+    /// pages without emoji, so this is a no-op for normal text.
+    fn draw_color_glyph_batch(&self, render_pass: &mut wgpu::RenderPass<'_>) {
+        if self.color_glyph_vertices.is_empty() {
+            return;
+        }
+        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Color Glyph Vertex Buffer"),
+            contents: bytemuck::cast_slice(&self.color_glyph_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Color Glyph Index Buffer"),
+            contents: bytemuck::cast_slice(&self.color_glyph_indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        render_pass.set_pipeline(&self.color_glyph_pipeline);
+        render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+        render_pass.set_bind_group(1, self.glyph_cache.color_bind_group(), &[]);
+        render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        render_pass.draw_indexed(0..self.color_glyph_indices.len() as u32, 0, 0..1);
+    }
+
     fn flush_to(&mut self, target: &wgpu::TextureView) -> Result<(), RendererError> {
         // Check for debug visual mode (RUSTKIT_DEBUG_VISUAL=1)
         // When enabled, clear to magenta to prove pixels are hitting the screen
@@ -5078,6 +5179,9 @@ impl Renderer {
                 render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..self.texture_indices.len() as u32, 0, 0..1);
             }
+
+            // Color glyphs (emoji) drawn on top via the RGBA atlas + blit pipeline.
+            self.draw_color_glyph_batch(&mut render_pass);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
