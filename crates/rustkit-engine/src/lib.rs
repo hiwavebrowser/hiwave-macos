@@ -2436,10 +2436,34 @@ impl Engine {
                 }
             }
             "font-weight" => {
-                if value == "bold" || value == "700" || value == "800" || value == "900" {
-                    style.font_weight = rustkit_css::FontWeight::BOLD;
-                } else if value == "normal" || value == "400" {
-                    style.font_weight = rustkit_css::FontWeight::NORMAL;
+                // css-fonts-4 §2.2: keywords, any <number> in [1,1000], and the
+                // lighter/bolder relative table. `style.font_weight` holds the
+                // inherited weight at apply time, so relative keywords resolve
+                // against it. The old arm accepted only bold/700/800/900 and
+                // normal/400 — 100..300, 500, 600 and lighter/bolder were
+                // silently dropped, so `font-weight: 300` text shaped Regular.
+                let inherited = style.font_weight.0;
+                let resolved = match value {
+                    "normal" => Some(400),
+                    "bold" => Some(700),
+                    "bolder" => Some(match inherited {
+                        0..=349 => 400,
+                        350..=549 => 700,
+                        550..=899 => 900,
+                        _ => inherited, // ≥900: already at the top of the table
+                    }),
+                    "lighter" => Some(match inherited {
+                        0..=99 => inherited, // <100: already at the bottom
+                        100..=549 => 100,
+                        550..=749 => 400,
+                        _ => 700,
+                    }),
+                    _ => value.parse::<f32>().ok().and_then(|n| {
+                        (1.0..=1000.0).contains(&n).then_some(n.round() as u16)
+                    }),
+                };
+                if let Some(w) = resolved {
+                    style.font_weight = rustkit_css::FontWeight(w);
                 }
             }
             "font-family" => {
@@ -7157,6 +7181,75 @@ mod tests {
             rustkit_css::Length::Px(24.0),
             "1.5rem vs root 16px"
         );
+    }
+
+    #[test]
+    fn test_font_weight_numeric_and_relative_values_compute() {
+        // css-fonts-4 §2.2: any <number> in [1,1000] plus lighter/bolder
+        // against the inherited weight. The old arm accepted only
+        // bold/700/800/900 and normal/400 — `font-weight: 300` was silently
+        // dropped, so about's .tagline shaped with the Regular face and
+        // wrapped where Chrome (Light, 659px < 672px) keeps one line.
+        let html = r#"<!DOCTYPE html>
+            <html><body>
+                <div style="font-weight: 300">W300</div>
+                <div style="font-weight: 500">W500</div>
+                <div style="font-weight: 600">W600</div>
+                <div style="font-weight: bold"><span style="font-weight: lighter">Lighter</span></div>
+                <div><span style="font-weight: bolder">Bolder</span></div>
+                <div style="font-weight: 1001">Clamp</div>
+            </body></html>"#;
+        let document = Document::parse_html(html).expect("Failed to parse HTML");
+        let document = Rc::new(document);
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(
+                ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
+            ),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+        };
+
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        fn collect_weights(b: &LayoutBox, out: &mut Vec<(String, u16)>) {
+            if let BoxType::Text(t) = &b.box_type {
+                out.push((t.clone(), b.style.font_weight.0));
+            }
+            for c in &b.children {
+                collect_weights(c, out);
+            }
+        }
+        let mut weights = Vec::new();
+        collect_weights(&layout, &mut weights);
+
+        let get = |needle: &str| {
+            weights
+                .iter()
+                .find(|(t, _)| t.contains(needle))
+                .map(|(_, w)| *w)
+                .unwrap_or_else(|| panic!("no text box containing {:?}", needle))
+        };
+        assert_eq!(get("W300"), 300, "numeric 300 must compute, not drop");
+        assert_eq!(get("W500"), 500, "numeric 500 must compute, not drop");
+        assert_eq!(get("W600"), 600, "numeric 600 must compute, not drop");
+        assert_eq!(get("Lighter"), 400, "lighter against inherited 700");
+        assert_eq!(get("Bolder"), 700, "bolder against inherited 400");
+        assert_eq!(get("Clamp"), 400, "out-of-range weight is invalid, keeps inherited");
     }
 
     #[test]

@@ -204,6 +204,96 @@ fn map_generic(lower: &str, fam: &str) -> &'static str {
     }
 }
 
+/// Map a CSS font-weight (100..900) to `kCTFontWeightTrait` (-1.0 ..= 1.0).
+///
+/// This is Skia's table (`SkTypeface_mac` / `SkFontHost_mac`), which is what
+/// Chrome uses to resolve `system-ui` weights on macOS. The anchors are
+/// Apple's own constants: Ultralight -0.80, Thin -0.60, Light -0.40,
+/// Regular 0.0, Medium 0.23, Semibold 0.30, Bold 0.40, Heavy 0.56, Black 0.62.
+/// Intermediate CSS weights interpolate linearly between neighbours.
+pub fn ct_weight_trait(css_weight: u16) -> f64 {
+    const TABLE: [(u16, f64); 9] = [
+        (100, -0.80),
+        (200, -0.60),
+        (300, -0.40),
+        (400, 0.00),
+        (500, 0.23),
+        (600, 0.30),
+        (700, 0.40),
+        (800, 0.56),
+        (900, 0.62),
+    ];
+    let w = css_weight.clamp(1, 1000);
+    if w <= TABLE[0].0 {
+        return TABLE[0].1;
+    }
+    for pair in TABLE.windows(2) {
+        let (w0, t0) = pair[0];
+        let (w1, t1) = pair[1];
+        if w <= w1 {
+            let f = (w - w0) as f64 / (w1 - w0) as f64;
+            return t0 + (t1 - t0) * f;
+        }
+    }
+    TABLE[8].1
+}
+
+/// The macOS system font at `size`, in the face matching `css_weight`.
+///
+/// The system font has no instantiable PostScript name and no by-name trait
+/// variants, so it resolves only through the UI-font API. That API exposes
+/// exactly TWO faces (`kCTFontSystemFontType` = Regular,
+/// `kCTFontEmphasizedSystemFontType` = Bold) — which is why the old
+/// `weight >= 600 ? bold : regular` gate collapsed all of 100..500 onto
+/// `.SFNS-Regular` and 600..900 onto `.SFNS-Bold`. Chrome does not: it applies
+/// `kCTFontWeightTrait` to the descriptor and gets the real face.
+///
+/// Receipts (20px, `about`'s `.tagline`, `parity-tests/probe/ct_weight_advance.py`):
+/// Light 659.1px vs Regular 670.0px — an 11px error on one line of `font-weight:300`
+/// text, enough to wrap a string Chrome fits.
+pub fn create_system_font_with_weight(size: f64, css_weight: u16) -> CTFont {
+    let base = font::new_ui_font_for_language(font::kCTFontSystemFontType, size, None);
+    if css_weight == 400 {
+        return base;
+    }
+    apply_weight_trait(&base, size, css_weight).unwrap_or_else(|| {
+        // Descriptor matching failed (unusual): keep the old two-face split
+        // rather than silently returning Regular for bold text.
+        let ui_type = if css_weight >= 600 {
+            font::kCTFontEmphasizedSystemFontType
+        } else {
+            font::kCTFontSystemFontType
+        };
+        font::new_ui_font_for_language(ui_type, size, None)
+    })
+}
+
+/// Copy `base`'s descriptor with `kCTFontWeightTrait` overridden, and
+/// re-instantiate at `size`. Returns `None` if Core Text can't match.
+fn apply_weight_trait(base: &CTFont, size: f64, css_weight: u16) -> Option<CTFont> {
+    use core_foundation::base::CFType;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::CFString;
+    use core_text::font_descriptor;
+
+    let trait_key = unsafe { CFString::wrap_under_get_rule(font_descriptor::kCTFontWeightTrait) };
+    let traits_key =
+        unsafe { CFString::wrap_under_get_rule(font_descriptor::kCTFontTraitsAttribute) };
+
+    let weight_num = CFNumber::from(ct_weight_trait(css_weight));
+    let traits: CFDictionary<CFString, CFType> =
+        CFDictionary::from_CFType_pairs(&[(trait_key, weight_num.as_CFType())]);
+    let attrs: CFDictionary<CFString, CFType> =
+        CFDictionary::from_CFType_pairs(&[(traits_key, traits.as_CFType())]);
+
+    let desc = base
+        .copy_descriptor()
+        .create_copy_with_attributes(attrs.into_untyped())
+        .ok()?;
+    Some(font::new_from_descriptor(&desc, size))
+}
+
 /// Create a CTFont with the specified family and size.
 ///
 /// `family` may be a raw CSS font-family LIST ("system-ui, -apple-system,
@@ -248,16 +338,12 @@ fn create_font_with_traits(
         }
         let lower = fam.to_ascii_lowercase();
 
-        // System font: weight >= 600 selects the emphasized (bold) face via
-        // the UI-font API. "-Bold" name variants never exist for it, so the
-        // old path silently rasterized the REGULAR face for bold headings.
+        // System font: resolve the real weighted face via kCTFontWeightTrait,
+        // as Chrome/Skia do. "-Bold" name variants never exist for it, and the
+        // UI-font API alone offers only Regular/Bold — so the previous
+        // `weight >= 600` gate shaped 300 as Regular and 600 as Bold.
         if is_system_family(&lower) && !italic {
-            let ui_type = if weight >= 600 {
-                font::kCTFontEmphasizedSystemFontType
-            } else {
-                font::kCTFontSystemFontType
-            };
-            return Ok(font::new_ui_font_for_language(ui_type, size, None));
+            return Ok(create_system_font_with_weight(size, weight));
         }
 
         let mapped = map_generic(&lower, fam);
@@ -754,6 +840,59 @@ mod tests {
         );
     }
     
+    #[test]
+    fn test_system_font_resolves_every_css_weight_to_its_own_face() {
+        // The UI-font API exposes only Regular and Bold, so the old
+        // `weight >= 600` gate collapsed 100..500 onto .SFNS-Regular and
+        // 600..900 onto .SFNS-Bold. Chrome/Skia apply kCTFontWeightTrait.
+        // Drives the real resolution path (create_font_with_traits), not a
+        // hand-simulated table.
+        let faces: Vec<(u16, String)> = [100u16, 200, 300, 400, 500, 600, 700, 800, 900]
+            .iter()
+            .map(|&w| {
+                let f = create_font_with_traits("system-ui", 32.0, w, false).unwrap();
+                (w, f.postscript_name())
+            })
+            .collect();
+
+        // Every step must land on a distinct face — no two CSS weights share one.
+        for pair in faces.windows(2) {
+            assert_ne!(
+                pair[0].1, pair[1].1,
+                "weights {} and {} collapsed onto the same face {}",
+                pair[0].0, pair[1].0, pair[0].1
+            );
+        }
+
+        // The specific regression: 300 must be lighter than 400, and 600 must
+        // NOT be the same face as 700 (the two ends of the old binary gate).
+        let name = |w: u16| faces.iter().find(|(x, _)| *x == w).unwrap().1.clone();
+        assert!(
+            name(300).to_lowercase().contains("light"),
+            "font-weight:300 must resolve to the Light face, got {}",
+            name(300)
+        );
+        assert_ne!(
+            name(600),
+            name(700),
+            "semibold and bold must not share a face"
+        );
+    }
+
+    #[test]
+    fn test_ct_weight_trait_table_matches_skia_anchors() {
+        // Apple's kCTFontWeight* constants, which is what Skia's table encodes.
+        assert_eq!(ct_weight_trait(100), -0.80);
+        assert_eq!(ct_weight_trait(300), -0.40);
+        assert_eq!(ct_weight_trait(400), 0.00);
+        assert_eq!(ct_weight_trait(700), 0.40);
+        assert_eq!(ct_weight_trait(900), 0.62);
+        // Off-table CSS weights interpolate and stay monotonic.
+        let t350 = ct_weight_trait(350);
+        assert!(t350 > -0.40 && t350 < 0.0, "350 between Light and Regular");
+        assert_eq!(ct_weight_trait(1000), 0.62, "clamped at the top");
+    }
+
     #[test]
     fn test_text_shaper() {
         let shaper = TextShaper::with_system_font(16.0);
