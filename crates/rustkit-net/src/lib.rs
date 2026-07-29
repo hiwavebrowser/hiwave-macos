@@ -583,9 +583,22 @@ impl ResourceLoader {
             if http_response.status.is_success() {
                 use std::time::Instant;
                 
-                // Determine TTL from Cache-Control or use default
-                let ttl = parse_cache_control(&http_response.headers)
-                    .unwrap_or(self.config.default_timeout);
+                // Determine TTL from Cache-Control, falling back to the
+                // CACHE's default TTL.
+                //
+                // This used to fall back to `self.config.default_timeout` —
+                // the loader's NETWORK REQUEST TIMEOUT (30s). Two separate
+                // bugs in one expression: header-less responses were cached
+                // for the wrong duration, and `CacheConfig::default_ttl`
+                // (300s) became dead config that the cache still announces in
+                // its startup log. A number printed at boot and applied
+                // nowhere is worse than no number.
+                let ttl = if self.cache.respects_cache_control() {
+                    parse_cache_control(&http_response.headers)
+                        .unwrap_or_else(|| self.cache.default_ttl())
+                } else {
+                    self.cache.default_ttl()
+                };
                 
                 if ttl > Duration::ZERO {
                     let cached = CachedResponse {

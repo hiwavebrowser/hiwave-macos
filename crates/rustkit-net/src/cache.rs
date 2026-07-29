@@ -135,6 +135,25 @@ impl MemoryCache {
         }
     }
     
+    /// The TTL to apply when a response carries no usable `Cache-Control`.
+    ///
+    /// Exposed because the cache owns this policy and the loader has to ask
+    /// for it. Before 2026-07-29 the loader instead reached for
+    /// `LoaderConfig::default_timeout` — a NETWORK REQUEST TIMEOUT — so every
+    /// header-less response was cached for 30s while `CacheConfig::default_ttl`
+    /// (300s) was logged at startup and read by nothing.
+    pub fn default_ttl(&self) -> Duration {
+        self.config.default_ttl
+    }
+
+    /// Whether `Cache-Control` should be honoured.
+    ///
+    /// Also previously unread: the flag existed, defaulted to true, and no
+    /// code path consulted it, so setting it false changed nothing.
+    pub fn respects_cache_control(&self) -> bool {
+        self.config.respect_cache_control
+    }
+
     /// Get a cached response.
     pub fn get(&self, key: &CacheKey) -> Option<CachedResponse> {
         let mut entries = self.entries.write().ok()?;
@@ -447,6 +466,48 @@ mod tests {
         assert_eq!(ttl, Some(Duration::ZERO));
     }
     
+    #[test]
+    fn test_default_ttl_is_the_caches_own_policy() {
+        // REGRESSION: default_ttl had three references — declaration, default
+        // value, and a startup log line — and was read by no code path. The
+        // loader fell back to LoaderConfig::default_timeout (30s, a network
+        // timeout) instead. The accessor is what makes the field real.
+        let cache = MemoryCache::new();
+        assert_eq!(cache.default_ttl(), Duration::from_secs(300));
+
+        let custom = MemoryCache::with_config(CacheConfig {
+            default_ttl: Duration::from_secs(42),
+            ..CacheConfig::default()
+        });
+        assert_eq!(custom.default_ttl(), Duration::from_secs(42));
+    }
+
+    #[test]
+    fn test_respect_cache_control_is_readable() {
+        // REGRESSION: this flag had exactly two references, both in its own
+        // declaration. Setting it false changed nothing anywhere.
+        assert!(MemoryCache::new().respects_cache_control());
+
+        let off = MemoryCache::with_config(CacheConfig {
+            respect_cache_control: false,
+            ..CacheConfig::default()
+        });
+        assert!(!off.respects_cache_control());
+    }
+
+    #[test]
+    fn test_no_store_is_not_cacheable() {
+        // Guards the behaviour that IS correct today, so a refactor of the
+        // TTL path cannot quietly lose it: no-store/no-cache map to ZERO,
+        // and the loader stores only when ttl > ZERO.
+        let mut headers = HeaderMap::new();
+        headers.insert("cache-control", HeaderValue::from_static("no-store"));
+        assert_eq!(parse_cache_control(&headers), Some(Duration::ZERO));
+
+        headers.insert("cache-control", HeaderValue::from_static("no-cache"));
+        assert_eq!(parse_cache_control(&headers), Some(Duration::ZERO));
+    }
+
     #[test]
     fn test_cache_stats() {
         let cache = MemoryCache::new();
