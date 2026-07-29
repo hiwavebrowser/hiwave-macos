@@ -248,11 +248,20 @@ def gate_test_results(
 
 
 def regressions_test_results(current: Dict[str, Any], previous: Dict[str, Any], budget: float) -> list:
-    current_map = {r.get("case_id"): r.get("diff_pct_median", r.get("diff_pct", 100.0)) for r in current.get("results", [])}
-    prev_map = {r.get("case_id"): r.get("diff_pct_median", r.get("diff_pct", 100.0)) for r in previous.get("results", [])}
+    # A case the instrument refused to measure has diff None. Defaulting it to
+    # 100.0 here would manufacture a regression when a run merely failed to
+    # capture, and — worse — manufacture an IMPROVEMENT on the next run when
+    # the instrument recovered. Comparing a measurement against a
+    # non-measurement is meaningless in both directions, so unmeasured cases
+    # are skipped rather than defaulted.
+    def _diff(r):
+        return r.get("diff_pct_median", r.get("diff_pct"))
+
+    current_map = {r.get("case_id"): _diff(r) for r in current.get("results", [])}
+    prev_map = {r.get("case_id"): _diff(r) for r in previous.get("results", [])}
     regressions = []
     for case_id, cur in current_map.items():
-        if case_id is None:
+        if case_id is None or cur is None:
             continue
         prev = prev_map.get(case_id, None)
         if prev is None:

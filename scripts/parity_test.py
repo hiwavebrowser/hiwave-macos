@@ -291,6 +291,15 @@ def run_test(
         pixel_result = compare_pixels(chrome_png, rustkit_ppm, run_diff_dir, chrome_rects, chrome_styles)
         last_pixel_result = pixel_result
 
+        # Instrument failure != measurement. See parity_lib.py for the full
+        # note; the short version is that the oracle refuses to score a
+        # dimension mismatch and every consumer used to ignore the refusal.
+        if pixel_result.get("instrumentFailure"):
+            result["error"] = f"INSTRUMENT: {pixel_result['instrumentFailure']}"
+            result["instrument_failure"] = pixel_result["instrumentFailure"]
+            result["diff_pct"] = None
+            return result
+
         if pixel_result.get("error"):
             result["error"] = f"Pixel compare error: {pixel_result.get('error')}"
             result["diff_pct"] = 100.0

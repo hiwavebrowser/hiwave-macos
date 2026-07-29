@@ -128,7 +128,10 @@ class CaseResult:
     diff_dir: str = ""
     
     # Results
-    diff_pct: float = 100.0
+    # None means NOT MEASURED (instrument failure). 100.0 means measured
+    # as a total mismatch. Collapsing the two is the bug this file had.
+    diff_pct: Optional[float] = 100.0
+    instrument_failure: Optional[str] = None
     diff_pixels: int = 0
     total_pixels: int = 0
     threshold: float = 15.0
@@ -584,6 +587,21 @@ def execute_work_unit(
     )
     result.compare_ms = pixel_result.get("elapsed_ms", 0)
     
+    # An INSTRUMENT FAILURE is not a measurement. The oracle already reports
+    # dimension mismatch as instrumentFailure with diffPercent=100 — but until
+    # 2026-07-29 nothing downstream read that field, so a capture the
+    # instrument itself refused to score was recorded as a 100.0 render diff
+    # with error=null. That is what made the nightly gate decorative: 65 of 91
+    # matrix cells were instrument failures wearing measurement clothes, and a
+    # gate that cannot go green stops being read.
+    instrument_failure = pixel_result.get("instrumentFailure")
+    if instrument_failure:
+        result.error = f"INSTRUMENT: {instrument_failure}"
+        result.instrument_failure = str(instrument_failure)
+        result.diff_pct = None  # refuse to publish a score we did not measure
+        result.passed = False
+        return result
+
     if pixel_result.get("error"):
         result.error = f"Compare failed: {pixel_result.get('error')}"
         return result
