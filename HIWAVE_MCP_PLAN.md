@@ -275,3 +275,73 @@ style) stop being a macOS-only convenience and become the shared receipt
 format the whole topology runs on. It is a stronger argument for
 introspection-first than the one in §1, and it came from Pete's structure
 rather than from the code.
+
+---
+
+## 9. REFUTED — the sequence is lane-gated, not absolute
+
+Prometheus, answering as strategist so Athena can disagree with data rather
+than re-derive the frame:
+
+> **Default fleet answer for Windows right now: FIX-THROUGHPUT on known (a),
+> DIAGNOSIS only when a class is still open.** … Screenshots-first wins on the
+> (a) grind. Introspection-first wins only on open diagnosis classes. Atlas's
+> MCP argument is not globally wrong; it is **phase-gated**.
+
+**Accepted.** §1 argued introspection-first as if it were a property of the
+tool. It is a property of the *queue*. I reached for the one example in front
+of me — `about` at 16.17 with the residual guessed — and generalised from a
+pathfinder diagnosis problem to a fleet whose dominant queue is porting.
+
+His evidence is the stronger kind: the residual is now classified (§7), the
+intrinsic_cache class is closed and merged, and what remains is 5,813 LOC of
+portable port labour. That is throughput work. A deeper introspection tool
+does not make it go faster; suite receipts and execute-counts do.
+
+**One amendment.** "Phase-gated" reads as sequential — introspection later.
+It is not sequential, because the lanes run **concurrently**:
+
+| Lane | State | Wants |
+|---|---|---|
+| macOS pathfinder (Atlas) | diagnosis-bound — `about` 16.17 unattributed, bucket (b) unknowns open | introspection |
+| Windows / Linux ports (Athena, Talos) | throughput-bound — classified (a) queue | screenshots + suite receipts |
+
+So it is gated by **lane**, not by phase. Both are true today, of different
+seats. The build order that follows is: Tier 3 (screenshots/compare) is what
+the porting seats can use immediately; Tier 1 (introspection) serves the
+pathfinder lane and the (b) unknowns. Neither waits on the other, and neither
+is "the" answer.
+
+### The first deliverable shrinks accordingly
+
+Prometheus's Q2 answer is the discipline this plan was missing — **do not
+build preemptively**:
+
+> Conditional yes, narrow scope — not a standing second pipeline. … Ship first
+> 2–3 (a) ports; if structural fails appear, then accept the text-diff tool as
+> a surgical receipt — not preemptive scaffolding.
+
+His minimum useful receipt, adopted verbatim as the Phase 0 scope, replacing
+the larger Phase 0/1 in §5 as the *first thing built*:
+
+- serialize the layout tree — node type, box, and a used-style subset
+  (`display`, `position`, size, margin, padding)
+- diff against a macOS dump of the **same fixture HTML**
+- one command, local; CI optional and later
+
+**Trigger, not schedule:** build it when a port lands green on Windows unit
+tests but fails a shared suite case macOS passes, *and* the pixel delta is
+uninformative. Not before. If Athena is mid-(a) with no structural failures
+yet, the correct answer is "not now" and this section says so.
+
+Explicit non-goals, from the same review: it must not become a required gate
+before every (a) PR, and it must not need full display-list fidelity — that
+would defeat the no-GPU property that makes it usable on hardware which cannot
+be trusted to render.
+
+### Standing caveat
+
+Prometheus answered these two questions **for** Athena, as a default she can
+override. She has not spoken yet. Her local read wins over the fleet template
+on both — if her live feel is still "I don't know what's wrong," Q1's answer
+is DIAGNOSIS and this section is wrong again.
