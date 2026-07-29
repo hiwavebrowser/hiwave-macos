@@ -59,6 +59,19 @@ from parity_lib import (
 # Work unit generation
 # ============================================================================
 
+
+def fmt_diff(diff_pct) -> str:
+    """Render a score, or say plainly that there is not one.
+
+    diff_pct is Optional since 2026-07-29: None means the instrument refused
+    to measure (dimension mismatch, blank frame, missing baseline) rather than
+    measuring a 100% difference. Every display path has to say which, because
+    printing "100.00%" for a capture that never happened is the exact lie the
+    three-state model exists to stop.
+    """
+    return "NOT-MEASURED" if diff_pct is None else f"{diff_pct:.2f}%"
+
+
 def generate_work_units(
     scope: str = "all",
     cases: Optional[List[str]] = None,
@@ -206,24 +219,30 @@ def run_scout_phase(
             result = worker_execute(arg)
             results.append(result)
             status = "✓" if result.passed else "✗" if not result.error else "E"
-            print(f"  [{i+1}/{len(args)}] {result.case_id}: {status} {result.diff_pct:.2f}%")
+            print(f"  [{i+1}/{len(args)}] {result.case_id}: {status} {fmt_diff(result.diff_pct)}")
     else:
         # Parallel execution
         with mp.Pool(processes=config.jobs) as pool:
             for i, result in enumerate(pool.imap_unordered(worker_execute, args)):
                 results.append(result)
                 status = "✓" if result.passed else "✗" if not result.error else "E"
-                print(f"  [{i+1}/{len(args)}] {result.case_id}: {status} {result.diff_pct:.2f}%")
+                print(f"  [{i+1}/{len(args)}] {result.case_id}: {status} {fmt_diff(result.diff_pct)}")
     
     elapsed = time.time() - start
     
     # Summary
     passed = sum(1 for r in results if r.passed)
     errors = sum(1 for r in results if r.error)
-    avg_diff = sum(r.diff_pct for r in results if not r.error) / max(1, len(results) - errors)
+    # Average over MEASURED results only. `not r.error` already excludes
+    # refusals (they always carry an error), but the None-guard is explicit so
+    # a future path that sets diff_pct=None without an error cannot poison it.
+    # 65-G: max(1, 0) would make "nothing measured" read as 0.0 — perfect
+    # parity from zero evidence, the same lie as 65-B in a second place.
+    measured = [r.diff_pct for r in results if not r.error and r.diff_pct is not None]
+    avg_diff = (sum(measured) / len(measured)) if measured else None
     
     print(f"\nScout complete: {passed}/{len(results)} passed, {errors} errors")
-    print(f"Average diff: {avg_diff:.2f}%")
+    print(f"Average diff: {fmt_diff(avg_diff)} ({len(measured)}/{len(results)} measured)")
     print(f"Elapsed: {elapsed:.1f}s")
     
     return results, elapsed
@@ -243,7 +262,7 @@ def run_exploit_phase(
     case_info: Dict[str, Tuple[str, str]] = {}  # case_id -> (html_path, case_type)
     
     for r in scout_results:
-        if not r.error:
+        if not r.error and r.diff_pct is not None:
             existing = case_diffs.get(r.case_id, float('inf'))
             if r.diff_pct > existing or r.case_id not in case_diffs:
                 case_diffs[r.case_id] = r.diff_pct
@@ -316,13 +335,13 @@ def run_exploit_phase(
             result = worker_execute(arg)
             results.append(result)
             status = "✓" if result.passed else "✗" if not result.error else "E"
-            print(f"  [{i+1}/{len(args)}] {result.case_id}@{result.viewport}: {status} {result.diff_pct:.2f}%")
+            print(f"  [{i+1}/{len(args)}] {result.case_id}@{result.viewport}: {status} {fmt_diff(result.diff_pct)}")
     else:
         with mp.Pool(processes=config.jobs) as pool:
             for i, result in enumerate(pool.imap_unordered(worker_execute, args)):
                 results.append(result)
                 status = "✓" if result.passed else "✗" if not result.error else "E"
-                print(f"  [{i+1}/{len(args)}] {result.case_id}@{result.viewport}: {status} {result.diff_pct:.2f}%")
+                print(f"  [{i+1}/{len(args)}] {result.case_id}@{result.viewport}: {status} {fmt_diff(result.diff_pct)}")
     
     elapsed = time.time() - start
     print(f"\nExploit complete. Elapsed: {elapsed:.1f}s")
@@ -358,11 +377,15 @@ def aggregate_swarm_results(
         agg = aggregate_iterations(results, config.max_variance)
         aggregated.append(aggregated_to_dict(agg))
     
-    # Sort by diff descending
-    aggregated.sort(key=lambda x: -x["diff_pct_median"])
-    
-    # Global stats
-    all_diffs = [a["diff_pct_median"] for a in aggregated]
+    # Sort worst-first, unmeasured leading. Unary minus on an Optional raises,
+    # and a cell nobody measured needs attention before any number does — the
+    # same ordering parity_aggregate._worst_first uses.
+    aggregated.sort(key=lambda x: (x["diff_pct_median"] is not None,
+                                   -(x["diff_pct_median"] or 0.0)))
+
+    # Global stats over MEASURED cells only.
+    all_diffs = [a["diff_pct_median"] for a in aggregated
+                 if a["diff_pct_median"] is not None]
     passed = sum(1 for a in aggregated if a["passed"])
     stable = sum(1 for a in aggregated if a.get("stable", False))
     
@@ -395,9 +418,15 @@ def aggregate_swarm_results(
             "passed": passed,
             "failed": len(aggregated) - passed,
             "stable": stable,
-            "avg_diff_pct": sum(all_diffs) / len(all_diffs) if all_diffs else 100,
-            "min_diff_pct": min(all_diffs) if all_diffs else 100,
-            "max_diff_pct": max(all_diffs) if all_diffs else 100,
+            # `else 100` published a total mismatch for a run that measured
+            # NOTHING — the decorative lie this whole change set removes,
+            # surviving one function past where it was fixed. No measurements
+            # means no statistics.
+            "measured_cases": len(all_diffs),
+            "not_measured_cases": len(aggregated) - len(all_diffs),
+            "avg_diff_pct": (sum(all_diffs) / len(all_diffs)) if all_diffs else None,
+            "min_diff_pct": min(all_diffs) if all_diffs else None,
+            "max_diff_pct": max(all_diffs) if all_diffs else None,
         },
         "global_taxonomy": dict(sorted(global_taxonomy.items(), key=lambda x: -x[1])),
         "results": aggregated,
@@ -424,14 +453,14 @@ def save_results(report: Dict[str, Any], config: SwarmConfig) -> Path:
         f.write(f"Parity Swarm Report: {config.run_id}\n")
         f.write(f"{'='*50}\n\n")
         f.write(f"Passed: {s['passed']}/{s['total_cases']}\n")
-        f.write(f"Average Diff: {s['avg_diff_pct']:.2f}%\n")
+        f.write(f"Average Diff: {fmt_diff(s['avg_diff_pct'])}\n")
         f.write(f"Stable: {s['stable']}\n\n")
         f.write("Top Taxonomy Buckets:\n")
         for bucket, pct in list(report["global_taxonomy"].items())[:5]:
             f.write(f"  {bucket}: {pct:.1f}%\n")
         f.write("\nWorst Cases:\n")
         for r in report["results"][:10]:
-            f.write(f"  {r['case_id']}@{r['viewport']}: {r['diff_pct_median']:.2f}%\n")
+            f.write(f"  {r['case_id']}@{r['viewport']}: {fmt_diff(r['diff_pct_median'])}\n")
     
     return report_path
 
@@ -590,7 +619,7 @@ def main():
         s = report["summary"]
         print(f"Total cases: {s['total_cases']}")
         print(f"Passed: {s['passed']}/{s['total_cases']} ({100*s['passed']/max(1,s['total_cases']):.1f}%)")
-        print(f"Average diff: {s['avg_diff_pct']:.2f}%")
+        print(f"Average diff: {fmt_diff(s['avg_diff_pct'])}")
         print(f"Stable: {s['stable']}")
         print(f"\nTotal elapsed: {total_elapsed:.1f}s ({total_elapsed/60:.1f}m)")
         print(f"\nReport saved to: {report_path}")
@@ -599,7 +628,7 @@ def main():
         print("\nWorst 5 cases:")
         for r in report["results"][:5]:
             stable_str = " (stable)" if r.get("stable") else ""
-            print(f"  {r['case_id']}@{r['viewport']}: {r['diff_pct_median']:.2f}%{stable_str}")
+            print(f"  {r['case_id']}@{r['viewport']}: {fmt_diff(r['diff_pct_median'])}{stable_str}")
         
         # Show taxonomy
         if report["global_taxonomy"]:

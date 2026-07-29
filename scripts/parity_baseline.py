@@ -707,7 +707,9 @@ def main():
     
     print(f"\nWorst 3 Cases:")
     for w in metrics["worst_3_cases"]:
-        print(f"  {w['case_id']} ({w['type']}): {w['diff_pct']:.1f}%")
+        _d = w['diff_pct']
+        print(f"  {w['case_id']} ({w['type']}): "
+              f"{'NOT-MEASURED' if _d is None else f'{_d:.1f}%'}")
     
     print(f"\nIssue Clusters:")
     for k, v in sorted(total_clusters.items(), key=lambda x: -x[1]):

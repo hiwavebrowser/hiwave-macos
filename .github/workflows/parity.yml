@@ -313,10 +313,21 @@ jobs:
 
       - name: Gate check (nightly)
         run: |
+          # --primary-viewport-only: the PR gate got this flag; the nightly
+          # lane predates it and kept running the full 3-viewport exploit
+          # matrix against baselines that only exist at each case's REGISTERED
+          # viewport. Every off-registry cell came back as a dimension
+          # mismatch scored 100.0, so nightly reported 25/91 pass and avg
+          # 73.36 for a tree the campaign instrument measured at 25/26 and
+          # 6.75. Red every scheduled run since >=07-12, and a gate that
+          # cannot go green stops being read — which is the real cost.
+          # Exploit-phase rows at other sizes still get captured and inform
+          # digs; they no longer gate.
           python3 scripts/parity_gate.py \
             --mode test_results \
             --level nightly \
             --report parity-results/nightly_aggregate.json \
+            --primary-viewport-only \
             --require-stable \
             --max-variance 0.10 \
             --max-diff 25
