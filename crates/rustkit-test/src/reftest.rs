@@ -2,6 +2,19 @@
 //!
 //! Reference tests compare rendered output against reference images
 //! or reference HTML that should produce identical output.
+//!
+//! # This path does not render. Do not report it as conformance.
+//!
+//! [`RefTestRunner::run_comparison`] normalises two HTML strings and compares them. It does not parse,
+//! style, lay out, or paint — so it cannot detect a rendering difference, and two documents that render
+//! identically from different markup are reported as a FAIL. [`crate::layout`] has the mirror problem:
+//! with no `.expected` file it passes unconditionally.
+//!
+//! `.ai/work_orders/wpt-harness.json` is labelled `status: completed` (2026-01-02). Its gates only checked
+//! that this crate builds. **No WPT pass-rate may be quoted from this module.**
+//!
+//! The real conformance lane renders through the same headless `parity-capture` path the campaign uses:
+//! see `trench/wpt/README.md` and `trench/forensics/2026-07-15-wpt-phase05-GATE-OPEN.md` (path P0).
 
 use crate::{TestError, TestResult, TestSummary};
 use std::fs;

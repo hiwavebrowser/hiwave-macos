@@ -63,3 +63,12 @@ fastrender/
 
 # Pinned Chrome for Testing download (~150MB, machine-local; see trench/BASELINE-macos.md)
 .browsers/
+
+# WPT working copy — a projection of trench/wpt/MANIFEST.json, never the source of truth.
+# Rebuild with scripts/wpt_sync.sh; do not vendor the WPT tree into this repo.
+third_party/wpt/
+
+# Python test caches. NOTE: four .pyc files were committed by accident in #65 and are still TRACKED —
+# this rule stops new ones, it does not untrack those. They need `git rm --cached`, which is not on the
+# trench seat's allowlist.
+scripts/tests/__pycache__/
