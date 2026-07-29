@@ -8,6 +8,7 @@ members = [
     "crates/hiwave-analytics",
     "crates/hiwave-app",
     "crates/parity-capture",
+    "crates/hiwave-mcp",
     "crates/rustkit-common",
     "crates/rustkit-core",
     "crates/rustkit-viewhost",
@@ -102,6 +103,7 @@ rustkit-http = { path = "crates/rustkit-http" }
 rustkit-codecs = { path = "crates/rustkit-codecs" }
 rustkit-animation = { path = "crates/rustkit-animation" }
 rustkit-svg = { path = "crates/rustkit-svg" }
+hiwave-mcp = { path = "crates/hiwave-mcp" }
 rustkit-canvas = { path = "crates/rustkit-canvas" }
 rustkit-webgl = { path = "crates/rustkit-webgl" }
 rustkit-idb = { path = "crates/rustkit-idb" }
