@@ -16,10 +16,23 @@
 //!
 //! Protocol: newline-delimited JSON-RPC 2.0 on stdin/stdout. Every diagnostic
 //! goes to stderr, because a stray stdout write corrupts the stream.
+//!
+//! Two things a caller should know, both deliberate:
+//!
+//! - **Screenshots are PPM, not PNG.** `capture_frame` is the engine's own
+//!   capture path and the parity harness already speaks PPM, so converting
+//!   here would add a dependency and a second encoder to disagree with. The
+//!   tool result names the format; convert downstream if you need to.
+//! - **Trust boundary: `hiwave_open { path }` reads any file the process can
+//!   read.** This server is a LOCAL developer tool driven by an agent already
+//!   running as the developer, so that is the same authority the agent has
+//!   anyway — it is not a sandbox and must not be exposed over a socket or
+//!   run as a service. If that ever changes, the path arm needs a root jail
+//!   before anything else does.
 
 use std::fs;
 use std::io::{self, BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use rustkit_engine::{Engine, EngineBuilder, EngineConfig};
 use rustkit_viewhost::Bounds;
@@ -265,6 +278,3 @@ fn main() {
         }
     }
 }
-
-#[allow(dead_code)]
-fn _unused(_: &Path) {}

@@ -2500,7 +2500,6 @@ name = "hiwave-mcp"
 version = "0.1.0"
 dependencies = [
  "rustkit-engine",
- "rustkit-layout",
  "rustkit-viewhost",
  "serde",
  "serde_json",

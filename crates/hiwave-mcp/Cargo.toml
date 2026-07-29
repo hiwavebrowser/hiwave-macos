@@ -11,7 +11,6 @@ path = "src/main.rs"
 [dependencies]
 rustkit-engine = { path = "../rustkit-engine", features = ["headless"] }
 rustkit-viewhost = { path = "../rustkit-viewhost" }
-rustkit-layout = { path = "../rustkit-layout" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
