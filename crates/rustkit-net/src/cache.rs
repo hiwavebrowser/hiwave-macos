@@ -525,6 +525,23 @@ mod tests {
     }
     
     #[test]
+    fn test_vary_makes_most_real_responses_ineligible() {
+        // This is why the early-return bug mattered so much. Almost every real
+        // server sends `Vary: Accept-Encoding`, so the ineligible branch is the
+        // COMMON path, not an edge case. A field mismatch there hits nearly
+        // every page load rather than a rare one.
+        let mut resp = HeaderMap::new();
+        resp.insert("vary", HeaderValue::from_static("Accept-Encoding"));
+        assert!(
+            matches!(
+                cache_eligibility(true, &HeaderMap::new(), &resp),
+                Some(Ineligible::VariesOnRequestHeaders(_))
+            ),
+            "Vary: Accept-Encoding must be ineligible — and it is the common case"
+        );
+    }
+
+    #[test]
     fn test_credentialed_requests_are_not_cached() {
         let mut req = HeaderMap::new();
         req.insert("authorization", HeaderValue::from_static("Bearer secret"));

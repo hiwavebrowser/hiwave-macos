@@ -598,40 +598,47 @@ impl ResourceLoader {
                 // requests, Cache-Control: private, and anything carrying Vary
                 // (which this cache does not key on, so serving it would return
                 // the wrong body for a differing request).
-                if let Some(reason) = cache_eligibility(
+                // Eligibility BEFORE freshness: a response can carry a
+                // perfectly good max-age and still be ineligible.
+                //
+                // Deliberately NOT an early return. The first version of this
+                // returned a second Response here, which duplicated the exit at
+                // the bottom of the function and got one field wrong: it sent
+                // `request.url` (pre-redirect) where the real exit sends `url`
+                // (post-redirect, from http_response). Every relative CSS,
+                // image and script path then resolved against the wrong base on
+                // any site that redirects — which is nearly all of them — and
+                // because Vary makes most real responses ineligible, that rare
+                // path became the common one. One exit means the mismatch cannot
+                // recur.
+                match cache_eligibility(
                     self.cache.enabled(),
                     &request.headers,
                     &http_response.headers,
                 ) {
-                    debug!(url = %request.url, ?reason, "Response not cacheable");
-                    return Ok(Response {
-                        request_id: request.id,
-                        url: request.url.clone(),
-                        status: http_response.status,
-                        headers: http_response.headers,
-                        content_type,
-                        content_length,
-                        body: ResponseBody::Full(http_response.body),
-                    });
-                }
+                    Some(reason) => {
+                        debug!(url = %url, ?reason, "Response not cacheable");
+                    }
+                    None => {
+                        let ttl = if self.cache.respects_cache_control() {
+                            parse_cache_control(&http_response.headers)
+                                .unwrap_or_else(|| self.cache.default_ttl())
+                        } else {
+                            self.cache.default_ttl()
+                        };
 
-                let ttl = if self.cache.respects_cache_control() {
-                    parse_cache_control(&http_response.headers)
-                        .unwrap_or_else(|| self.cache.default_ttl())
-                } else {
-                    self.cache.default_ttl()
-                };
-                
-                if ttl > Duration::ZERO {
-                    let cached = CachedResponse {
-                        status: http_response.status,
-                        headers: http_response.headers.clone(),
-                        body: http_response.body.clone(),
-                        cached_at: Instant::now(),
-                        expires_at: Instant::now() + ttl,
-                        size: http_response.body.len(),
-                    };
-                    self.cache.put(key, cached);
+                        if ttl > Duration::ZERO {
+                            let cached = CachedResponse {
+                                status: http_response.status,
+                                headers: http_response.headers.clone(),
+                                body: http_response.body.clone(),
+                                cached_at: Instant::now(),
+                                expires_at: Instant::now() + ttl,
+                                size: http_response.body.len(),
+                            };
+                            self.cache.put(key, cached);
+                        }
+                    }
                 }
             }
         }
