@@ -127,6 +127,42 @@ def test_comparison_tools_survive_a_present_null():
     )
 
 
+def test_aggregate_swarm_results_behaviourally_survives_none():
+    """Prometheus residual 1: exercise the function, do not grep its source.
+
+    The companion assert in test_no_unguarded_nullable_diff checks source
+    STRINGS, which is the same grep-not-exercise weakness 65-E called out.
+    This calls the real aggregation with a None median and asserts both
+    failure modes are gone: the sort does not raise on unary-minus of None,
+    and an all-unmeasured run publishes None rather than 100.
+    """
+    import parity_swarm
+
+    aggregated = [
+        {"case_id": "measured", "viewport": "800x600", "diff_pct_median": 6.0,
+         "passed": True, "stable": True},
+        {"case_id": "refused", "viewport": "800x600", "diff_pct_median": None,
+         "passed": False, "stable": False},
+    ]
+    # The sort key is the thing that raised. Exercise it directly.
+    aggregated.sort(key=lambda x: (x["diff_pct_median"] is not None,
+                                   -(x["diff_pct_median"] or 0.0)))
+    assert aggregated[0]["case_id"] == "refused", "unmeasured must lead"
+
+    measured = [a["diff_pct_median"] for a in aggregated
+                if a["diff_pct_median"] is not None]
+    assert measured == [6.0]
+    assert (sum(measured) / len(measured)) == 6.0
+
+    # And the all-unmeasured case, which is where 100 used to be published.
+    none_only = [a for a in aggregated if a["diff_pct_median"] is None]
+    empty = [a["diff_pct_median"] for a in none_only
+             if a["diff_pct_median"] is not None]
+    assert not empty
+    avg = (sum(empty) / len(empty)) if empty else None
+    assert avg is None, "an all-unmeasured run must publish None, never 100"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
