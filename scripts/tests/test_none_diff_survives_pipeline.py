@@ -67,6 +67,31 @@ def test_aggregate_does_not_erase_shard_errors():
     assert cell.error, "CaseSummary must carry the shard's error through"
 
 
+def test_comparison_tools_survive_a_present_null():
+    """`.get(key, default)` does NOT fire on a present null — only a missing key.
+
+    That distinction is why the NOT-MEASURED state broke the comparison tools
+    silently: every one of them wrote `.get("diff_pct", 100)` and looked
+    defended. None of them ran in PR CI, so nothing would have caught it until
+    someone compared two runs by hand.
+    """
+    present_null = {"diff_pct": None}
+    assert present_null.get("diff_pct", 100) is None, (
+        "if this ever returns 100, Python changed and these guards can go"
+    )
+
+    import parity_compare
+    import parity_summary
+    src_compare = open(parity_compare.__file__).read()
+    src_summary = open(parity_summary.__file__).read()
+    assert '.get("diff_pct", 100)' not in src_compare, (
+        "parity_compare still defaults a present null to 100"
+    )
+    assert '.get("diff_pct", 100)' not in src_summary, (
+        "parity_summary still defaults a present null to 100"
+    )
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
