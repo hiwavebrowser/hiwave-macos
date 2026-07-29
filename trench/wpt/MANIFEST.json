@@ -1,0 +1,44 @@
+{
+  "_comment": [
+    "WPT Tier-1 seed manifest — Phase 0.5 W0a (trench/forensics/2026-07-15-wpt-phase05-GATE-OPEN.md §4).",
+    "This file is the SOURCE OF TRUTH for which WPT tests HiWave imports. third_party/wpt/ is a",
+    "gitignored working copy produced by scripts/wpt_sync.sh from this list — never the other way round.",
+    "No pass-rate is published from this file alone. W0a ships the list; W0b ships the runner and the",
+    "first honest K/N. Anyone quoting a 'WPT %' before trench/wpt/last-run.json exists is quoting nothing."
+  ],
+  "wpt_pin": "a6f29b0bedaf3f1edba7b6739127fe8e713bfcb3",
+  "wpt_pin_date": "2026-07-29T04:47:05Z",
+  "wpt_repo": "https://github.com/web-platform-tests/wpt",
+  "pin_policy": "Frozen for the campaign. Re-pin only at a campaign boundary, deliberately, both seats in lockstep — same discipline as the CfT-148 pin (PLAN.md).",
+  "seed_n": 14,
+  "seed_cap": 30,
+  "default_viewport": { "width": 800, "height": 600 },
+  "path_verification": {
+    "method": "Every path below was read verbatim out of a directory listing of the WPT tree AT THE PINNED SHA (GitHub contents API, ref=<wpt_pin>). Nothing here is recalled or guessed.",
+    "not_verified": "The test->ref BINDING is not verified. WPT's authority for a reference is the test file's own <link rel=match href=...>, which requires reading each test. The `ref` field below is the same-directory candidate seen in the listing; W0b's runner MUST read rel=match from the test and treat a disagreement with this field as an instrument error, not a render diff.",
+    "seat_limitation": "This seat cannot clone or curl (git ls-remote / curl / git clone are all off the Bash allowlist), so scripts/wpt_sync.sh below has NEVER BEEN RUN. It ships un-dry-run. See README.md §Known gaps."
+  },
+  "buckets": {
+    "1A": "css-text soft wrap / overflow-wrap — funds line-box slices 0-1 (wrap production callers)",
+    "1B": "css-inline line-box metrics + baseline — funds IFC slices A/B/B2/C (#31/#37/#44)",
+    "1C": "css-flexbox item sizing/baseline — settings-class residual; deliberately small"
+  },
+  "entries": [
+    { "id": "css-text/overflow-wrap/overflow-wrap-001", "path": "css/css-text/overflow-wrap/overflow-wrap-001.html", "ref": "css/css-text/overflow-wrap/overflow-wrap-001-ref.html", "kind": "reftest", "tier": "1A", "maps_to": "slice-0" },
+    { "id": "css-text/overflow-wrap/overflow-wrap-002", "path": "css/css-text/overflow-wrap/overflow-wrap-002.html", "ref": "css/css-text/overflow-wrap/overflow-wrap-002-ref.html", "kind": "reftest", "tier": "1A", "maps_to": "slice-0" },
+    { "id": "css-text/overflow-wrap/overflow-wrap-004", "path": "css/css-text/overflow-wrap/overflow-wrap-004.html", "ref": "css/css-text/overflow-wrap/overflow-wrap-004-ref.html", "kind": "reftest", "tier": "1A", "maps_to": "slice-0" },
+    { "id": "css-text/overflow-wrap/overflow-wrap-anywhere-011", "path": "css/css-text/overflow-wrap/overflow-wrap-anywhere-011.html", "ref": "css/css-text/overflow-wrap/overflow-wrap-anywhere-011-ref.html", "kind": "reftest", "tier": "1A", "maps_to": "slice-0" },
+    { "id": "css-text/word-break/break-word-overflow-wrap-interactions", "path": "css/css-text/word-break/word-break-break-word-overflow-wrap-interactions.html", "ref": "css/css-text/word-break/word-break-break-word-overflow-wrap-interactions-ref.html", "kind": "reftest", "tier": "1A", "maps_to": "slice-0" },
+
+    { "id": "css-inline/br-font-size", "path": "css/css-inline/br-font-size.html", "ref": "css/css-inline/br-font-size-ref.html", "kind": "reftest", "tier": "1B", "maps_to": "A" },
+    { "id": "css-inline/br-line-height", "path": "css/css-inline/br-line-height.html", "ref": "css/css-inline/br-line-height-ref.html", "kind": "reftest", "tier": "1B", "maps_to": "A" },
+    { "id": "css-inline/empty-span-height", "path": "css/css-inline/empty-span-height.html", "ref": "css/css-inline/empty-span-height-ref.html", "kind": "reftest", "tier": "1B", "maps_to": "B" },
+    { "id": "css-inline/empty-span-scroll", "path": "css/css-inline/empty-span-scroll.html", "ref": "css/css-inline/empty-span-scroll-ref.html", "kind": "reftest", "tier": "1B", "maps_to": "B" },
+    { "id": "css-inline/empty-span-size-001", "path": "css/css-inline/empty-span-size-001.html", "ref": "css/css-inline/empty-span-size-001-ref.html", "kind": "reftest", "tier": "1B", "maps_to": "B" },
+    { "id": "css-inline/empty-span-size-002", "path": "css/css-inline/empty-span-size-002.html", "ref": "css/css-inline/empty-span-size-002-ref.html", "kind": "reftest", "tier": "1B", "maps_to": "B" },
+    { "id": "css-inline/empty-text-node-001", "path": "css/css-inline/empty-text-node-001.html", "ref": "css/css-inline/empty-text-node-001-ref.html", "kind": "reftest", "tier": "1B", "maps_to": "B2" },
+
+    { "id": "css-flexbox/align-self-015", "path": "css/css-flexbox/align-self-015.html", "ref": "css/css-flexbox/reference/align-self-015-ref.html", "kind": "reftest", "tier": "1C", "maps_to": "flex" },
+    { "id": "css-flexbox/align-items-baseline-overflow-non-visible", "path": "css/css-flexbox/align-items-baseline-overflow-non-visible.html", "ref": "css/css-flexbox/reference/align-items-baseline-overflow-non-visible-ref.html", "kind": "reftest", "tier": "1C", "maps_to": "flex" }
+  ]
+}

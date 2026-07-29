@@ -53,6 +53,23 @@ def _fmt(diff_pct) -> str:
     return "NOT-MEASURED" if diff_pct is None else f"{diff_pct:.2f}%"
 
 
+def worst_first(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Order results the way the 'Worst N' banner claims to: attention-first.
+
+    Unmeasured cases lead — the instrument refusing to measure outranks any diff it did produce
+    (#65). Measured cases follow by DESCENDING diff.
+
+    This sorted ASCENDING until 2026-07-29, so the banner printed the three *best* cases under the
+    heading "Worst 3 Cases" — on tonight's board, `bg-pure 0.00% / gradients 1.06% / bg-solid 1.61%`
+    while the real worst were `gradient-backgrounds 14.44 / gradient-no-radius 13.96 / about 13.14`.
+    Harmless on a green board; on a red one it aimed the night's dig at the healthiest pages.
+    """
+    return sorted(
+        results,
+        key=lambda r: (r.get("diff_pct") is not None, -(r.get("diff_pct") or 0.0)),
+    )
+
+
 def run_rustkit_capture(case_id: str, html_path: str, width: int, height: int) -> dict:
     """Capture RustKit rendering for a case."""
     output_dir = OUTPUT_DIR / "captures" / case_id
@@ -499,14 +516,8 @@ def main():
     
     print(f"\nResults saved to: {output_path}")
     
-    # Show worst cases
-    # Unmeasured sort first — they need attention before any diff does.
-    sorted_results = sorted(
-        results,
-        key=lambda r: (r.get("diff_pct") is not None, r.get("diff_pct") or 0.0),
-    )
     print("\nWorst 3 Cases:")
-    for r in sorted_results[:3]:
+    for r in worst_first(results)[:3]:
         print(f"  {r['case_id']}: {_fmt(r.get('diff_pct'))}")
     
     sys.exit(0 if failed == 0 else 1)
