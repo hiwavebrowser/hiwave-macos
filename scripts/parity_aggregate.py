@@ -84,6 +84,11 @@ class CaseSummary:
     error: Optional[str] = None
 
 
+def _fmt_pct(value) -> str:
+    """None means nothing was measured — never print it as a number."""
+    return "NOT-MEASURED" if value is None else f"{value:.2f}%"
+
+
 def _mean_or_none(values):
     """Average, or None when there is nothing to average.
 
@@ -683,7 +688,7 @@ def main():
     print("=" * 60)
     print(f"Total cases: {s['total_cases']}")
     print(f"Passed: {s['passed']}/{s['total_cases']}")
-    print(f"Average diff: {s['avg_diff_pct']:.2f}%")
+    print(f"Average diff: {_fmt_pct(s['avg_diff_pct'])}")
     
     print("\nFix Scoreboard (top 5):")
     for c in report["fix_scoreboard"]["top_contributors"][:5]:

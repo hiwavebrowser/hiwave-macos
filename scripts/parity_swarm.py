@@ -219,14 +219,14 @@ def run_scout_phase(
             result = worker_execute(arg)
             results.append(result)
             status = "✓" if result.passed else "✗" if not result.error else "E"
-            print(f"  [{i+1}/{len(args)}] {result.case_id}: {status} {result.diff_pct:.2f}%")
+            print(f"  [{i+1}/{len(args)}] {result.case_id}: {status} {fmt_diff(result.diff_pct)}")
     else:
         # Parallel execution
         with mp.Pool(processes=config.jobs) as pool:
             for i, result in enumerate(pool.imap_unordered(worker_execute, args)):
                 results.append(result)
                 status = "✓" if result.passed else "✗" if not result.error else "E"
-                print(f"  [{i+1}/{len(args)}] {result.case_id}: {status} {result.diff_pct:.2f}%")
+                print(f"  [{i+1}/{len(args)}] {result.case_id}: {status} {fmt_diff(result.diff_pct)}")
     
     elapsed = time.time() - start
     
@@ -236,11 +236,13 @@ def run_scout_phase(
     # Average over MEASURED results only. `not r.error` already excludes
     # refusals (they always carry an error), but the None-guard is explicit so
     # a future path that sets diff_pct=None without an error cannot poison it.
+    # 65-G: max(1, 0) would make "nothing measured" read as 0.0 — perfect
+    # parity from zero evidence, the same lie as 65-B in a second place.
     measured = [r.diff_pct for r in results if not r.error and r.diff_pct is not None]
-    avg_diff = sum(measured) / max(1, len(measured))
+    avg_diff = (sum(measured) / len(measured)) if measured else None
     
     print(f"\nScout complete: {passed}/{len(results)} passed, {errors} errors")
-    print(f"Average diff: {avg_diff:.2f}%")
+    print(f"Average diff: {fmt_diff(avg_diff)} ({len(measured)}/{len(results)} measured)")
     print(f"Elapsed: {elapsed:.1f}s")
     
     return results, elapsed
@@ -441,14 +443,14 @@ def save_results(report: Dict[str, Any], config: SwarmConfig) -> Path:
         f.write(f"Parity Swarm Report: {config.run_id}\n")
         f.write(f"{'='*50}\n\n")
         f.write(f"Passed: {s['passed']}/{s['total_cases']}\n")
-        f.write(f"Average Diff: {s['avg_diff_pct']:.2f}%\n")
+        f.write(f"Average Diff: {fmt_diff(s['avg_diff_pct'])}\n")
         f.write(f"Stable: {s['stable']}\n\n")
         f.write("Top Taxonomy Buckets:\n")
         for bucket, pct in list(report["global_taxonomy"].items())[:5]:
             f.write(f"  {bucket}: {pct:.1f}%\n")
         f.write("\nWorst Cases:\n")
         for r in report["results"][:10]:
-            f.write(f"  {r['case_id']}@{r['viewport']}: {r['diff_pct_median']:.2f}%\n")
+            f.write(f"  {r['case_id']}@{r['viewport']}: {fmt_diff(r['diff_pct_median'])}\n")
     
     return report_path
 
@@ -607,7 +609,7 @@ def main():
         s = report["summary"]
         print(f"Total cases: {s['total_cases']}")
         print(f"Passed: {s['passed']}/{s['total_cases']} ({100*s['passed']/max(1,s['total_cases']):.1f}%)")
-        print(f"Average diff: {s['avg_diff_pct']:.2f}%")
+        print(f"Average diff: {fmt_diff(s['avg_diff_pct'])}")
         print(f"Stable: {s['stable']}")
         print(f"\nTotal elapsed: {total_elapsed:.1f}s ({total_elapsed/60:.1f}m)")
         print(f"\nReport saved to: {report_path}")
@@ -616,7 +618,7 @@ def main():
         print("\nWorst 5 cases:")
         for r in report["results"][:5]:
             stable_str = " (stable)" if r.get("stable") else ""
-            print(f"  {r['case_id']}@{r['viewport']}: {r['diff_pct_median']:.2f}%{stable_str}")
+            print(f"  {r['case_id']}@{r['viewport']}: {fmt_diff(r['diff_pct_median'])}{stable_str}")
         
         # Show taxonomy
         if report["global_taxonomy"]:

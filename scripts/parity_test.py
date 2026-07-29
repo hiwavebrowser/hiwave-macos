@@ -337,7 +337,7 @@ def run_test(
     # Determine pass/fail
     diff_pct = result.get("diff_pct_median", last_pixel_result.get("diffPercent", 100) if last_pixel_result else 100)
     result["diff_pct"] = diff_pct
-    result["passed"] = diff_pct <= result["threshold"]
+    result["passed"] = diff_pct is not None and diff_pct <= result["threshold"]
     
     return result
 

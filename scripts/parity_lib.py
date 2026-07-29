@@ -165,9 +165,12 @@ class AggregatedResult:
     threshold: float
     
     # Stats across iterations
-    diff_pct_median: float = 100.0
-    diff_pct_min: float = 100.0
-    diff_pct_max: float = 100.0
+    # 65-D: these defaulted to 100.0, so a case whose every iteration errored
+    # kept publishing a scored total-mismatch for something nobody measured.
+    # None means NOT MEASURED; 100.0 has to be earned by an actual comparison.
+    diff_pct_median: Optional[float] = None
+    diff_pct_min: Optional[float] = None
+    diff_pct_max: Optional[float] = None
     diff_pct_variance: float = 0.0
     iterations: int = 0
     stable: bool = False
@@ -547,6 +550,7 @@ def execute_work_unit(
     if not baseline["baseline_png"].exists():
         result.error = f"No Chrome baseline at {baseline['baseline_png']}"
         result.is_blank_frame = True  # Treat as blank for safety
+        result.diff_pct = None  # 65-D: a refusal, not a measured 100% diff
         return result
     
     # 1. Capture RustKit
@@ -562,6 +566,7 @@ def execute_work_unit(
     if not capture_result.get("success"):
         result.error = f"Capture failed: {capture_result.get('error', 'Unknown')}"
         result.is_blank_frame = True  # Treat as blank for safety
+        result.diff_pct = None  # 65-D: a refusal, not a measured 100% diff
         return result
     
     # 2. CRITICAL: Check for blank frame BEFORE pixel comparison
@@ -609,13 +614,14 @@ def execute_work_unit(
 
     if pixel_result.get("error"):
         result.error = f"Compare failed: {pixel_result.get('error')}"
+        result.diff_pct = None  # 65-D: a refusal, not a measured 100% diff
         return result
     
     # 4. Extract results
     result.diff_pct = float(pixel_result.get("diffPercent", 100.0))
     result.diff_pixels = int(pixel_result.get("diffPixels", 0))
     result.total_pixels = int(pixel_result.get("totalPixels", 0))
-    result.passed = result.diff_pct <= result.threshold
+    result.passed = result.diff_pct is not None and result.diff_pct <= result.threshold
     
     # Attribution artifacts
     if paths["attribution_json"].exists():
@@ -663,8 +669,13 @@ def aggregate_iterations(results: List[CaseResult], max_variance: float = 0.10) 
     best_diff = float('inf')
     
     for r in results:
-        if r.error:
-            errors.append(r.error)
+        if r.error or r.diff_pct is None:
+            # `or diff_pct is None` is belt-and-braces: every refusal path sets
+            # an error today, so the second clause should be unreachable. Four
+            # misses of this exact class in one change set is enough evidence
+            # that "should be unreachable" is not a guarantee worth relying on.
+            if r.error:
+                errors.append(r.error)
         else:
             diffs.append(r.diff_pct)
             if r.diff_pct < best_diff:
@@ -689,6 +700,15 @@ def aggregate_iterations(results: List[CaseResult], max_variance: float = 0.10) 
             agg.best_overlay_path = best_result.overlay_path
             agg.best_taxonomy = best_result.taxonomy
             agg.best_top_contributors = best_result.top_contributors
+    else:
+        # Every iteration was refused. Say so explicitly rather than letting
+        # the dataclass defaults publish a score nobody measured.
+        agg.diff_pct_median = None
+        agg.diff_pct_min = None
+        agg.diff_pct_max = None
+        agg.diff_pct_variance = None
+        agg.stable = False
+        agg.passed = False
     
     return agg
 
