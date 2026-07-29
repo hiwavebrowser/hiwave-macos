@@ -204,20 +204,28 @@ ruling.**
 
 ## 7. Open for Pete
 
-1. **Sequence.** I want introspection first and screenshots second, for the
-   reasons in §1. That inverts the natural reading of "test and display." Say
-   if you want it the other way — it is your call and the work splits cleanly
-   either way.
-2. **`hiwave_eval(js)`** — yes or no? It is the sharpest tool and the easiest
-   way to put the engine in a state no page could reach.
+1. ~~**Sequence.**~~ **ANSWERED by Pete, 2026-07-29: "do both."** Which is
+   also where §9's lane analysis lands — Tier 3 (screenshots/compare) serves
+   the porting seats now, Tier 1 (introspection) serves the pathfinder lane
+   and the bucket-(b) unknowns. Neither waits on the other.
+2. ~~**`hiwave_eval(js)`**~~ — **Atlas's call, taken: YES, behind
+   `RUSTKIT_MCP_EVAL=1`.** It is the sharpest tool available and the fastest
+   way to put the engine in a state no page can reach, which is exactly what
+   a diagnosis lane needs. Off by default because an always-on script-eval
+   surface in a browser engine is a foothold, not a feature — and a tool the
+   fleet runs headlessly should not carry one silently.
 3. ~~**Windows / Linux** — in scope or follow-on?~~ **ANSWERED by Pete,
    2026-07-28:** the platform topology in §8 is deliberate — a worker and a
    reviewer per architecture, macOS as pathfinder, ports downstream. So the
    MCP follows the same route every other feature does: build on macOS, port
    after. No separate decision needed.
-4. **Who builds it.** This is a well-specified, mostly-mechanical crate over
-   an existing engine — a good `/trench` candidate rather than hand-driven
-   work, once Phase 1's export paths are designed.
+4. ~~**Who builds it.**~~ **Atlas's call, taken: `/trench`, but not yet.**
+   The Phase-0 scope in §9 is now demand-triggered and small enough that
+   standing up a trench loop for it would cost more than the work. The trench
+   earns its keep at Phase 1 — the engine export paths are repetitive,
+   well-specified, and verifiable per-symbol, which is exactly the shape
+   `/trench` is for. Until a porting seat reports the structural-mismatch
+   trigger, this stays hand-sized.
 
 ---
 
