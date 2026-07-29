@@ -241,10 +241,19 @@ pub fn split_at_mandatory_breaks(text: &str) -> impl Iterator<Item = &str> {
     let mut last_end = 0;
     let mut segments = Vec::new();
 
-    for (i, c) in text.char_indices() {
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
         if is_mandatory_break(c) {
-            // Include the break character in the segment
-            let end = i + c.len_utf8();
+            // Include the break character in the segment. CRLF is a single
+            // break, so consume the LF with the CR rather than emitting a
+            // phantom empty line between them.
+            let mut end = i + c.len_utf8();
+            if c == '\r' {
+                if let Some(&(_, '\n')) = chars.peek() {
+                    let (j, lf) = chars.next().unwrap();
+                    end = j + lf.len_utf8();
+                }
+            }
             segments.push(&text[last_end..end]);
             last_end = end;
         }
@@ -303,9 +312,17 @@ pub fn break_into_lines(text: &str) -> Vec<LineSegment<'_>> {
     let mut segments = Vec::new();
     let mut start = 0;
 
-    for (i, c) in text.char_indices() {
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
         if is_mandatory_break(c) {
-            let end = i + c.len_utf8();
+            // CRLF is a single break — see split_at_mandatory_breaks above.
+            let mut end = i + c.len_utf8();
+            if c == '\r' {
+                if let Some(&(_, '\n')) = chars.peek() {
+                    let (j, lf) = chars.next().unwrap();
+                    end = j + lf.len_utf8();
+                }
+            }
             segments.push(LineSegment {
                 text: &text[start..end],
                 start,
@@ -531,5 +548,92 @@ mod tests {
     #[test]
     fn test_overflow_wrap_enum() {
         assert_eq!(OverflowWrap::default(), OverflowWrap::Normal);
+    }
+}
+
+#[cfg(test)]
+mod crlf_tests {
+    use super::*;
+
+    // A CRLF is ONE mandatory break, not two. Both mandatory-break splitters
+    // here walk chars individually, so they see CR and LF as separate breaks
+    // and emit a phantom empty line between them. Found by Athena on Windows
+    // (#43), reproduced on Linux by Talos, and it hits every CRLF document —
+    // which on the web is most documents served from Windows toolchains.
+
+    #[test]
+    fn break_into_lines_pairs_crlf_as_one_break() {
+        let segs = break_into_lines("a\r\nb");
+        assert_eq!(segs.len(), 2, "CRLF must yield 2 lines, not 3: {segs:?}");
+        assert_eq!(segs[0].text, "a\r\n");
+        assert_eq!(segs[0].text_without_break(), "a");
+        assert!(segs[0].ends_with_break);
+        assert_eq!(segs[1].text, "b");
+        assert!(!segs[1].ends_with_break);
+    }
+
+    #[test]
+    fn split_at_mandatory_breaks_pairs_crlf_as_one_break() {
+        let segs: Vec<&str> = split_at_mandatory_breaks("a\r\nb").collect();
+        assert_eq!(segs, vec!["a\r\n", "b"]);
+    }
+
+    // The two guards below exist because the obvious fix over-reaches. Pairing
+    // must be CR-then-LF specifically, and must consume the LF exactly once.
+
+    #[test]
+    fn lf_then_cr_is_still_two_breaks() {
+        // Reversed order is NOT a line ending pair — it is a blank line.
+        let segs = break_into_lines("a\n\rb");
+        assert_eq!(segs.len(), 3, "\\n\\r is two breaks, not one: {segs:?}");
+        assert_eq!(segs[0].text, "a\n");
+        assert_eq!(segs[1].text, "\r");
+        assert_eq!(segs[2].text, "b");
+
+        let split: Vec<&str> = split_at_mandatory_breaks("a\n\rb").collect();
+        assert_eq!(split, vec!["a\n", "\r", "b"]);
+    }
+
+    #[test]
+    fn consecutive_crlf_pairs_are_one_break_each() {
+        // A blank line between two lines of text: 3 segments, not 5.
+        let segs = break_into_lines("a\r\n\r\nb");
+        assert_eq!(segs.len(), 3, "{segs:?}");
+        assert_eq!(segs[0].text, "a\r\n");
+        assert_eq!(segs[1].text, "\r\n");
+        assert_eq!(segs[2].text, "b");
+
+        let split: Vec<&str> = split_at_mandatory_breaks("a\r\n\r\nb").collect();
+        assert_eq!(split, vec!["a\r\n", "\r\n", "b"]);
+    }
+
+    #[test]
+    fn lone_cr_is_still_a_break() {
+        // Classic Mac line ending. Pairing must not swallow it.
+        let segs = break_into_lines("a\rb");
+        assert_eq!(segs.len(), 2, "{segs:?}");
+        assert_eq!(segs[0].text, "a\r");
+        assert!(segs[0].ends_with_break);
+    }
+
+    #[test]
+    fn trailing_crlf_yields_no_phantom_segment() {
+        let segs = break_into_lines("a\r\n");
+        assert_eq!(segs.len(), 1, "{segs:?}");
+        assert_eq!(segs[0].text, "a\r\n");
+        assert!(segs[0].ends_with_break);
+    }
+
+    #[test]
+    fn segment_offsets_stay_consistent_across_a_paired_break() {
+        let text = "ab\r\ncd";
+        let segs = break_into_lines(text);
+        assert_eq!(segs[0].start, 0);
+        assert_eq!(segs[0].end, 4);
+        assert_eq!(segs[1].start, 4);
+        assert_eq!(segs[1].end, 6);
+        // Offsets must still index the original string exactly.
+        assert_eq!(&text[segs[0].start..segs[0].end], segs[0].text);
+        assert_eq!(&text[segs[1].start..segs[1].end], segs[1].text);
     }
 }
