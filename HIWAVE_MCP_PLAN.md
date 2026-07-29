@@ -353,3 +353,112 @@ Prometheus answered these two questions **for** Athena, as a default she can
 override. She has not spoken yet. Her local read wins over the fleet template
 on both — if her live feel is still "I don't know what's wrong," Q1's answer
 is DIAGNOSIS and this section is wrong again.
+
+---
+
+## 10. Pete's rulings — all four answered (2026-07-29)
+
+Recorded verbatim-in-substance, with what each one settles.
+
+### 1. Introspection before screenshots — CONFIRMED
+
+> *"Intro before screenshot."*
+
+Settles the §1 reframe as written, and overrides the lane-gating hedge in §9
+only in ORDER, not in substance: Tier 1 leads, Tier 3 still ships for the
+porting seats. Prometheus's fix-throughput argument stands as the reason
+screenshots are not dropped — it was never an argument for doing them first.
+
+### 2. `hiwave_eval(js)` — BOTH DIRECTIONS
+
+> *"both directions?"*
+
+Read as: the eval surface should work in and out, not just push script in.
+So the tool is **bidirectional** — evaluate an expression AND read what the
+engine gives back, including thrown errors and console output, rather than a
+fire-and-forget `eval` whose only signal is "did it crash."
+
+That makes `hiwave_console()` part of the same tool surface rather than a
+separate Tier 2 item: an eval whose result you cannot read is a write-only
+debugger. Still behind `RUSTKIT_MCP_EVAL=1` — bidirectional does not mean
+always-on, and an always-live script-eval surface in a browser engine is a
+foothold.
+
+### 3. Windows MCP — Athena's, only if it must differ
+
+> *"let athena work on a windows mcp if it needs to be different, it shouldnt
+> need to be once all baselines are functionally similar."*
+
+This is the sharper version of what §8 said. The pin now reads: **there is one
+MCP design, and a second implementation is a signal of a baseline gap, not a
+platform requirement.** If Athena finds she needs a different tool surface,
+that difference is a bug in baseline parity and gets reported as one — the
+divergence is the finding, not the fix.
+
+Practical consequence: Windows is not "port the MCP", it is "port the engine
+exports the MCP needs." Same tool schema, same protocol, same smoke assertions.
+A Windows-only tool name would mean the trees diverged where the topology says
+they should not.
+
+### 4. `/trench` — GO
+
+> *"good trench candidate. Do it."*
+
+Phase 1 goes to a trench loop. Scope, metric and stop condition are in §11.
+
+---
+
+## 11. Phase 1 trench — scope, metric, stop condition
+
+A trench loop with no stop condition grinds forever and reports motion as
+progress. Per the working rules, this one gets all three up front.
+
+### The metric
+
+**Engine export coverage: how many of the four Tier-1 reads the engine can
+answer.** Today it is 1 of 4.
+
+| Tier-1 tool | Engine support today | Needed |
+|---|---|---|
+| `hiwave_layout` | **YES** — `export_layout_json` (lib.rs:4608) | — |
+| `hiwave_display_list` | no | new export on `rustkit-renderer` |
+| `hiwave_style` | no | computed value **+ winning rule + origin** |
+| `hiwave_diff(case, stage, reference)` | no | joins the two above against the oracle |
+
+Metric is deliberately NOT lines of code or number of commits. It is
+"can an agent ask this question and get an answer", which is checkable per
+tool by a smoke assertion in `crates/hiwave-mcp/smoke.py`.
+
+### Stop condition
+
+**Stop at 4 of 4 with a smoke assertion per tool**, or on two consecutive
+nights with no new tool answerable — whichever comes first. The second clause
+matters more: an export that needs engine surgery will stall, and a loop that
+cannot tell stalling from working is the decorative-gate failure in a different
+costume.
+
+### Per-night receipt
+
+Not "worked on display list." Each night reports:
+
+1. Which tool moved from no → yes, or explicitly **none**.
+2. The smoke assertion that proves it, run and pasted.
+3. What it cannot yet answer — the honest gap, named.
+
+### Hard scope limits
+
+- **No Windows/Linux work.** Per §10.3 the port is engine exports, not a second
+  MCP, and that is not this loop's job.
+- **`hiwave_diff` last.** It consumes the other three; building it first would
+  mean stubbing what it consumes, which is the invent-a-baseline mistake.
+- **No CI gate from this loop.** Prometheus's R1 stands: the MCP must not become
+  the reason the workspace build/test gate keeps slipping.
+- **Do not touch the parity harness.** It has had two honesty fixes in two days
+  (#65, #69) and does not need a third hand in it this week.
+
+### First night's target
+
+`hiwave_display_list` — because paint is where every HiWave bug this year
+actually lived (the ADVANCE CONTRACT, gradient axis routing, colour emoji, the
+`rustkit-svg` break), and because §1's whole argument is that an agent should
+be able to see the layout/paint boundary rather than infer it from pixels.
