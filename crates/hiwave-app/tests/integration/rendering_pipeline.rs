@@ -57,8 +57,16 @@ fn test_simple_html_renders() {
         .render_and_capture()
         .expect("Should render and capture");
 
-    // Verify frame rendered (not blank)
-    assert_not_blank(&frame);
+    // NOT assert_not_blank here: `is_blank()` means "every pixel is the same
+    // colour", and this fixture is an empty body over `background: #ffffff` —
+    // a correctly rendered frame IS uniform. The old assertion demanded the
+    // frame be non-uniform on the line above the assertion demanding it be
+    // white everywhere it samples, so a correct render could never satisfy
+    // both. `assert_not_blank` stays valid for fixtures that draw content.
+    assert!(
+        frame.width > 0 && frame.height > 0,
+        "renderer returned an empty frame"
+    );
 
     // Verify background is white
     let bg_color = frame.sample_pixel(100, 100);
@@ -213,9 +221,14 @@ fn test_css_cascade() {
         .render_and_capture()
         .expect("Should render and capture");
 
-    // ID selector (#unique) should win - green background
+    // ID selector (#unique) should win — green background.
+    //
+    // CSS `green` is #008000 = RGB(0, 128, 0). RGB(0, 255, 0) is `lime`.
+    // This assertion used to expect lime, so it failed against a correct
+    // cascade: red and blue both lost to #unique exactly as intended, and
+    // the test still reported a failure because of the keyword value.
     let color = frame.sample_pixel(400, 300);
-    assert_color_near(color, RGB::new(0, 255, 0), 5);
+    assert_color_near(color, RGB::new(0, 128, 0), 5);
 }
 
 #[test]

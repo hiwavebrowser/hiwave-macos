@@ -47,6 +47,29 @@ from parity_lib import BUILTINS, WEBSUITE, MICRO_TESTS  # noqa: E402
 from parity_lib import THRESHOLDS, get_threshold  # noqa: E402, F401
 
 
+
+def _fmt(diff_pct) -> str:
+    """None means the instrument refused to measure, not a 100% difference."""
+    return "NOT-MEASURED" if diff_pct is None else f"{diff_pct:.2f}%"
+
+
+def worst_first(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Order results the way the 'Worst N' banner claims to: attention-first.
+
+    Unmeasured cases lead — the instrument refusing to measure outranks any diff it did produce
+    (#65). Measured cases follow by DESCENDING diff.
+
+    This sorted ASCENDING until 2026-07-29, so the banner printed the three *best* cases under the
+    heading "Worst 3 Cases" — on tonight's board, `bg-pure 0.00% / gradients 1.06% / bg-solid 1.61%`
+    while the real worst were `gradient-backgrounds 14.44 / gradient-no-radius 13.96 / about 13.14`.
+    Harmless on a green board; on a red one it aimed the night's dig at the healthiest pages.
+    """
+    return sorted(
+        results,
+        key=lambda r: (r.get("diff_pct") is not None, -(r.get("diff_pct") or 0.0)),
+    )
+
+
 def run_rustkit_capture(case_id: str, html_path: str, width: int, height: int) -> dict:
     """Capture RustKit rendering for a case."""
     output_dir = OUTPUT_DIR / "captures" / case_id
@@ -262,7 +285,7 @@ def run_test(
     chrome_png = baseline_dir / "baseline.png"
     if not chrome_png.exists():
         result["error"] = "No Chrome baseline"
-        result["diff_pct"] = 100.0
+        result["diff_pct"] = None  # refusal, not a measured 100% diff
         return result
 
     chrome_rects = baseline_dir / "layout-rects.json"
@@ -276,14 +299,14 @@ def run_test(
         capture_result = run_rustkit_capture(case_id, html_path, width, height)
         if not capture_result.get("success"):
             result["error"] = f"Capture failed: {capture_result.get('error', 'Unknown')}"
-            result["diff_pct"] = 100.0
+            result["diff_pct"] = None  # refusal, not a measured 100% diff
             return result
 
         # Find RustKit output
         rustkit_ppm = capture_dir / "frame.ppm"
         if not rustkit_ppm.exists():
             result["error"] = "No RustKit capture output"
-            result["diff_pct"] = 100.0
+            result["diff_pct"] = None  # refusal, not a measured 100% diff
             return result
 
         # 1. Pixel comparison (per-run output)
@@ -291,9 +314,18 @@ def run_test(
         pixel_result = compare_pixels(chrome_png, rustkit_ppm, run_diff_dir, chrome_rects, chrome_styles)
         last_pixel_result = pixel_result
 
+        # Instrument failure != measurement. See parity_lib.py for the full
+        # note; the short version is that the oracle refuses to score a
+        # dimension mismatch and every consumer used to ignore the refusal.
+        if pixel_result.get("instrumentFailure"):
+            result["error"] = f"INSTRUMENT: {pixel_result['instrumentFailure']}"
+            result["instrument_failure"] = pixel_result["instrumentFailure"]
+            result["diff_pct"] = None
+            return result
+
         if pixel_result.get("error"):
             result["error"] = f"Pixel compare error: {pixel_result.get('error')}"
-            result["diff_pct"] = 100.0
+            result["diff_pct"] = None  # refusal, not a measured 100% diff
             return result
 
         run_diffs.append(float(pixel_result.get("diffPercent", 100.0)))
@@ -322,7 +354,7 @@ def run_test(
     # Determine pass/fail
     diff_pct = result.get("diff_pct_median", last_pixel_result.get("diffPercent", 100) if last_pixel_result else 100)
     result["diff_pct"] = diff_pct
-    result["passed"] = diff_pct <= result["threshold"]
+    result["passed"] = diff_pct is not None and diff_pct <= result["threshold"]
     
     return result
 
@@ -442,14 +474,14 @@ def main():
             stable_str = ""
             if iterations >= 3:
                 stable_str = " stable" if stable else " UNSTABLE"
-            print(f"✓ {result['diff_pct']:.2f}% (threshold: {result['threshold']}%){stable_str}")
+            print(f"✓ {_fmt(result.get('diff_pct'))} (threshold: {result['threshold']}%){stable_str}")
             passed += 1
         else:
             stable = result.get("stable")
             stable_str = ""
             if iterations >= 3:
                 stable_str = " stable" if stable else " UNSTABLE"
-            print(f"✗ {result['diff_pct']:.2f}% (threshold: {result['threshold']}%){stable_str}")
+            print(f"✗ {_fmt(result.get('diff_pct'))} (threshold: {result['threshold']}%){stable_str}")
             failed += 1
     
     # Save results
@@ -475,16 +507,18 @@ def main():
     print(f"Failed: {failed}/{len(results)}")
     
     if results:
-        avg_diff = sum(r.get("diff_pct", 100) for r in results) / len(results)
-        print(f"Average Diff: {avg_diff:.1f}%")
+        measured = [r["diff_pct"] for r in results if r.get("diff_pct") is not None]
+        if measured:
+            print(f"Average Diff: {sum(measured) / len(measured):.1f}% "
+                  f"({len(measured)}/{len(results)} measured)")
+        else:
+            print(f"Average Diff: NOT-MEASURED (0/{len(results)} measured)")
     
     print(f"\nResults saved to: {output_path}")
     
-    # Show worst cases
-    sorted_results = sorted(results, key=lambda r: r.get("diff_pct", 100), reverse=True)
     print("\nWorst 3 Cases:")
-    for r in sorted_results[:3]:
-        print(f"  {r['case_id']}: {r.get('diff_pct', 'N/A')}%")
+    for r in worst_first(results)[:3]:
+        print(f"  {r['case_id']}: {_fmt(r.get('diff_pct'))}")
     
     sys.exit(0 if failed == 0 else 1)
 

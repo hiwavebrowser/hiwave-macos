@@ -19,17 +19,46 @@ def extract_metrics(results: dict, commit: str = "", branch: str = "") -> dict:
 
     tests = []
     total_diff = 0.0
+    measured_count = 0
 
     for result in results.get("results", []):
         case_id = result.get("case_id", "unknown")
         threshold = result.get("threshold", 15)
 
-        # Get diff percent from pixel data. Errored cases carry pixel=None
-        # and diff_pct=100.0; score them as worst-case, never as a pass.
+        # Three states, not two. A case is MEASURED (a real diff), FAILED
+        # (measured as a total mismatch), or NOT MEASURED (the instrument
+        # refused — dimension mismatch, blank frame, missing baseline).
+        #
+        # The third used to be folded into the second: an instrument failure
+        # was recorded as diff 100.0 and then averaged into the campaign
+        # number as though it were a render result. That is how the nightly
+        # gate reported "avg diff 73.36%" for a tree measuring 6.75 on the
+        # same cases — the average was mostly instrument, not renderer.
         pixel_data = result.get("pixel") or {}
-        diff_percent = float(pixel_data.get("diffPercent", result.get("diff_pct", 100.0)))
+        instrument_failure = (
+            result.get("instrument_failure")
+            or pixel_data.get("instrumentFailure")
+        )
 
-        passed = diff_percent <= threshold and not result.get("error")
+        raw_diff = pixel_data.get("diffPercent", result.get("diff_pct"))
+
+        # An error IS a refusal, whatever number came with it. parity_test.py
+        # historically stamped diff_pct=100.0 alongside "Capture failed" — a
+        # timeout is not a 100% render diff, it is an absence of measurement,
+        # and treating it as a score is the same lie in a different costume.
+        not_measured = (
+            instrument_failure is not None
+            or raw_diff is None
+            or result.get("error") is not None
+        )
+        diff_percent = None if not_measured else float(raw_diff)
+
+        # Not-measured never passes, and never contributes to the average.
+        passed = (
+            not not_measured
+            and diff_percent <= threshold
+            and not result.get("error")
+        )
 
         tests.append({
             "name": case_id,
@@ -37,22 +66,31 @@ def extract_metrics(results: dict, commit: str = "", branch: str = "") -> dict:
             "threshold": threshold,
             "passed": passed,
             "type": result.get("type", "unknown"),
-            "error": result.get("error")
+            "error": result.get("error"),
+            "not_measured": not_measured,
+            "instrument_failure": instrument_failure,
         })
 
-        total_diff += diff_percent
+        if not not_measured:
+            total_diff += diff_percent
+            measured_count += 1
 
     # Calculate summary metrics
     total = len(tests)
     passed_count = sum(1 for t in tests if t["passed"])
     failed_count = total - passed_count
-    avg_diff = total_diff / total if total > 0 else 0.0
+    not_measured_count = sum(1 for t in tests if t["not_measured"])
 
-    # Find worst case
-    worst = max(tests, key=lambda t: t["diff"]) if tests else {"name": "none", "diff": 0}
+    # Average over MEASURED cases only. Averaging instrument failures in as
+    # 100.0 was what turned a 6.75 tree into a reported 73.36.
+    avg_diff = total_diff / measured_count if measured_count > 0 else None
 
-    # Sort tests by diff (worst first)
-    tests.sort(key=lambda t: -t["diff"])
+    # Worst case among measured cases; None sorts nowhere.
+    measured = [t for t in tests if not t["not_measured"]]
+    worst = max(measured, key=lambda t: t["diff"]) if measured else {"name": "none", "diff": None}
+
+    # Sort: unmeasured first (they need attention most), then worst diff.
+    tests.sort(key=lambda t: (not t["not_measured"], -(t["diff"] or 0.0)))
 
     return {
         "timestamp": results.get("timestamp", datetime.utcnow().isoformat()),
@@ -61,6 +99,11 @@ def extract_metrics(results: dict, commit: str = "", branch: str = "") -> dict:
         "total": total,
         "passed": passed_count,
         "failed": failed_count,
+        # Surfaced so a reader can tell "the renderer is bad" from "the
+        # instrument did not run". A gate that hides this distinction is
+        # decorative.
+        "not_measured": not_measured_count,
+        "measured": measured_count,
         "average_diff": avg_diff,
         "worst_case": {
             "name": worst["name"],

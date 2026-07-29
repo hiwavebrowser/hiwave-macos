@@ -111,10 +111,27 @@ def compare_runs(
     
     case_changes = []
     for case_id in sorted(all_case_ids):
-        old_diff = old_cases.get(case_id, {}).get("diff_pct", 100)
-        new_diff = new_cases.get(case_id, {}).get("diff_pct", 100)
+        # `.get(k, 100)` returns None when the key EXISTS with value null,
+        # which it now does for cells the instrument refused to measure. A
+        # default only fires on a missing key, never on a present null — that
+        # distinction is what made this a live TypeError rather than a
+        # harmless fallback.
+        old_diff = old_cases.get(case_id, {}).get("diff_pct")
+        new_diff = new_cases.get(case_id, {}).get("diff_pct")
         case_type = new_cases.get(case_id, old_cases.get(case_id, {})).get("type", "unknown")
-        
+
+        if old_diff is None or new_diff is None:
+            # No delta exists between a measurement and a non-measurement.
+            case_changes.append({
+                "case_id": case_id,
+                "type": case_type,
+                "old_diff": old_diff,
+                "new_diff": new_diff,
+                "delta": None,
+                "not_measured": True,
+            })
+            continue
+
         delta = new_diff - old_diff
         
         case_changes.append({

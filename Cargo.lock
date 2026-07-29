@@ -2496,6 +2496,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hiwave-mcp"
+version = "0.1.0"
+dependencies = [
+ "rustkit-engine",
+ "rustkit-viewhost",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "hiwave-shell"
 version = "0.1.0"
 dependencies = [

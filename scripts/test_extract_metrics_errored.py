@@ -1,8 +1,17 @@
-"""Regression check: errored parity cases score as worst-case, never pass.
+"""Regression check: errored parity cases never pass, and never carry a score.
 
 Guards the CI/local discrepancy fixed in trench night-2: parity_test.py
 scored errored captures as 100 while extract_parity_metrics.py crashed on
 pixel=None (or would have defaulted a missing diffPercent to 0.0 — a pass).
+
+CONTRACT CHANGE 2026-07-29: the guard is unchanged — an errored case must
+never pass and must never read as 0.0 — but the representation is now
+three-state. An errored case reports diff=None and not_measured=True instead
+of diff=100.0. A capture timeout is an ABSENCE of measurement, not a 100%
+render diff, and averaging it in as one is what made the nightly gate report
+73.36 for a tree measuring 6.75. The `== 100.0` assertions below were the old
+mechanism of this guard, not its intent; they are replaced by assertions on
+the intent itself.
 Run: python3 scripts/test_extract_metrics_errored.py
 """
 import json
@@ -39,15 +48,29 @@ healthy = {
 m = extract_metrics({"results": [errored, legacy_errored, healthy]})
 by_name = {t["name"]: t for t in m["tests"]}
 
-assert by_name["settings"]["diff"] == 100.0, by_name["settings"]
+# The intent: an errored case NEVER passes and NEVER reads as a low diff.
 assert by_name["settings"]["passed"] is False
+assert by_name["settings"]["diff"] != 0.0, "an errored case must never read as a pass"
+assert by_name["settings"]["not_measured"] is True
+assert by_name["settings"]["diff"] is None, by_name["settings"]
 assert by_name["settings"]["error"] == "Capture failed: Timeout"
-assert by_name["legacy"]["diff"] == 100.0, by_name["legacy"]
+
+# Same for the legacy shape that carried no diff_pct at all.
 assert by_name["legacy"]["passed"] is False
+assert by_name["legacy"]["not_measured"] is True
+assert by_name["legacy"]["diff"] is None, by_name["legacy"]
+
+# A healthy case is untouched by any of this.
 assert by_name["about"]["diff"] == 3.2
 assert by_name["about"]["passed"] is True
-assert m["passed"] == 1 and m["failed"] == 2
-assert m["worst_case"]["diff"] == 100.0
+assert by_name["about"]["not_measured"] is False
 
-print("OK: errored cases score 100.0 and fail; healthy case unaffected")
+assert m["passed"] == 1 and m["failed"] == 2
+assert m["measured"] == 1 and m["not_measured"] == 2
+# The average and worst case describe the RENDERER, so they see only the
+# one case that was actually measured.
+assert m["average_diff"] == 3.2, m["average_diff"]
+assert m["worst_case"]["diff"] == 3.2
+
+print("OK: errored cases are refusals (diff=None, never pass); healthy case unaffected")
 print(json.dumps(m["worst_case"]))
