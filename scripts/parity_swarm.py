@@ -59,6 +59,19 @@ from parity_lib import (
 # Work unit generation
 # ============================================================================
 
+
+def fmt_diff(diff_pct) -> str:
+    """Render a score, or say plainly that there is not one.
+
+    diff_pct is Optional since 2026-07-29: None means the instrument refused
+    to measure (dimension mismatch, blank frame, missing baseline) rather than
+    measuring a 100% difference. Every display path has to say which, because
+    printing "100.00%" for a capture that never happened is the exact lie the
+    three-state model exists to stop.
+    """
+    return "NOT-MEASURED" if diff_pct is None else f"{diff_pct:.2f}%"
+
+
 def generate_work_units(
     scope: str = "all",
     cases: Optional[List[str]] = None,
@@ -220,7 +233,11 @@ def run_scout_phase(
     # Summary
     passed = sum(1 for r in results if r.passed)
     errors = sum(1 for r in results if r.error)
-    avg_diff = sum(r.diff_pct for r in results if not r.error) / max(1, len(results) - errors)
+    # Average over MEASURED results only. `not r.error` already excludes
+    # refusals (they always carry an error), but the None-guard is explicit so
+    # a future path that sets diff_pct=None without an error cannot poison it.
+    measured = [r.diff_pct for r in results if not r.error and r.diff_pct is not None]
+    avg_diff = sum(measured) / max(1, len(measured))
     
     print(f"\nScout complete: {passed}/{len(results)} passed, {errors} errors")
     print(f"Average diff: {avg_diff:.2f}%")
@@ -243,7 +260,7 @@ def run_exploit_phase(
     case_info: Dict[str, Tuple[str, str]] = {}  # case_id -> (html_path, case_type)
     
     for r in scout_results:
-        if not r.error:
+        if not r.error and r.diff_pct is not None:
             existing = case_diffs.get(r.case_id, float('inf'))
             if r.diff_pct > existing or r.case_id not in case_diffs:
                 case_diffs[r.case_id] = r.diff_pct
@@ -316,13 +333,13 @@ def run_exploit_phase(
             result = worker_execute(arg)
             results.append(result)
             status = "✓" if result.passed else "✗" if not result.error else "E"
-            print(f"  [{i+1}/{len(args)}] {result.case_id}@{result.viewport}: {status} {result.diff_pct:.2f}%")
+            print(f"  [{i+1}/{len(args)}] {result.case_id}@{result.viewport}: {status} {fmt_diff(result.diff_pct)}")
     else:
         with mp.Pool(processes=config.jobs) as pool:
             for i, result in enumerate(pool.imap_unordered(worker_execute, args)):
                 results.append(result)
                 status = "✓" if result.passed else "✗" if not result.error else "E"
-                print(f"  [{i+1}/{len(args)}] {result.case_id}@{result.viewport}: {status} {result.diff_pct:.2f}%")
+                print(f"  [{i+1}/{len(args)}] {result.case_id}@{result.viewport}: {status} {fmt_diff(result.diff_pct)}")
     
     elapsed = time.time() - start
     print(f"\nExploit complete. Elapsed: {elapsed:.1f}s")

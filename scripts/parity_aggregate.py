@@ -70,7 +70,9 @@ class CaseSummary:
     """Summary for a single case."""
     case_id: str
     viewport: str
-    diff_pct: float
+    # None = the instrument refused to measure this cell. Distinct from 100.0,
+    # which means it measured a total mismatch.
+    diff_pct: Optional[float]
     passed: bool
     stable: bool
     threshold: float
@@ -79,6 +81,16 @@ class CaseSummary:
     attribution_path: Optional[str] = None
     top_contributors: List[Dict] = field(default_factory=list)
     taxonomy: Dict[str, float] = field(default_factory=dict)
+    error: Optional[str] = None
+
+
+def _worst_first(c: "CaseSummary"):
+    """Sort key: unmeasured cells first, then worst measured diff.
+
+    Unmeasured leads because a cell nobody measured needs attention before any
+    number does, and because -None is a TypeError.
+    """
+    return (c.diff_pct is not None, -(c.diff_pct or 0.0))
 
 
 # ============================================================================
@@ -169,7 +181,11 @@ def aggregate_from_results(results: List[Dict]) -> Dict[str, Any]:
     for r in results:
         case_id = r.get("case_id", "")
         viewport = r.get("viewport", "")
-        diff_pct = r.get("diff_pct_median", r.get("diff_pct", 100))
+        # Preserve None. Defaulting a refusal to 100 here is how an
+        # instrument failure became a render score in the first place.
+        diff_pct = r.get("diff_pct_median")
+        if diff_pct is None:
+            diff_pct = r.get("diff_pct")
         
         summary = CaseSummary(
             case_id=case_id,
@@ -178,6 +194,7 @@ def aggregate_from_results(results: List[Dict]) -> Dict[str, Any]:
             passed=r.get("passed", False),
             stable=r.get("stable", False),
             threshold=r.get("threshold", 15),
+            error=r.get("error"),
             pixel_runs=int(r.get("iterations") or r.get("pixel_runs") or 1),
             overlay_path=r.get("best_overlay_path"),
             attribution_path=r.get("best_attribution_path"),
@@ -268,7 +285,13 @@ def aggregate_from_results(results: List[Dict]) -> Dict[str, Any]:
             "passed": sum(1 for c in case_summaries if c.passed),
             "failed": sum(1 for c in case_summaries if not c.passed),
             "stable": sum(1 for c in case_summaries if c.stable),
-            "avg_diff_pct": sum(c.diff_pct for c in case_summaries) / max(1, len(case_summaries)),
+            # Measured cells only — see CaseSummary.diff_pct.
+            "avg_diff_pct": (
+                sum(c.diff_pct for c in case_summaries if c.diff_pct is not None)
+                / max(1, sum(1 for c in case_summaries if c.diff_pct is not None))
+            ),
+            "measured_cases": sum(1 for c in case_summaries if c.diff_pct is not None),
+            "not_measured_cases": sum(1 for c in case_summaries if c.diff_pct is None),
             "total_global_diff_pixels": total_global_diff_pixels,
         },
         "fix_scoreboard": {
@@ -314,7 +337,7 @@ def aggregate_from_results(results: List[Dict]) -> Dict[str, Any]:
                 "top_contributors": c.top_contributors[:3],
                 "taxonomy": c.taxonomy,
             }
-            for c in sorted(case_summaries, key=lambda x: -x.diff_pct)
+            for c in sorted(case_summaries, key=_worst_first)
         ],
         # CI-1 schema alias (2026-07-11): parity_gate reads `results[]` with
         # `diff_pct_median`. Without this alias, a re-homed aggregate passed
@@ -330,9 +353,12 @@ def aggregate_from_results(results: List[Dict]) -> Dict[str, Any]:
                 "stable": c.stable,
                 "threshold": c.threshold,
                 "pixel_runs": c.pixel_runs,
-                "error": None,
+                # Was hardcoded None. The aggregate was ERASING shard errors
+                # before parity_gate could see them, so a gate that correctly
+                # fails on `error` never got one to fail on.
+                "error": c.error,
             }
-            for c in sorted(case_summaries, key=lambda x: -x.diff_pct)
+            for c in sorted(case_summaries, key=_worst_first)
         ],
     }
 

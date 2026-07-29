@@ -47,6 +47,12 @@ from parity_lib import BUILTINS, WEBSUITE, MICRO_TESTS  # noqa: E402
 from parity_lib import THRESHOLDS, get_threshold  # noqa: E402, F401
 
 
+
+def _fmt(diff_pct) -> str:
+    """None means the instrument refused to measure, not a 100% difference."""
+    return "NOT-MEASURED" if diff_pct is None else f"{diff_pct:.2f}%"
+
+
 def run_rustkit_capture(case_id: str, html_path: str, width: int, height: int) -> dict:
     """Capture RustKit rendering for a case."""
     output_dir = OUTPUT_DIR / "captures" / case_id
@@ -451,14 +457,14 @@ def main():
             stable_str = ""
             if iterations >= 3:
                 stable_str = " stable" if stable else " UNSTABLE"
-            print(f"✓ {result['diff_pct']:.2f}% (threshold: {result['threshold']}%){stable_str}")
+            print(f"✓ {_fmt(result.get('diff_pct'))} (threshold: {result['threshold']}%){stable_str}")
             passed += 1
         else:
             stable = result.get("stable")
             stable_str = ""
             if iterations >= 3:
                 stable_str = " stable" if stable else " UNSTABLE"
-            print(f"✗ {result['diff_pct']:.2f}% (threshold: {result['threshold']}%){stable_str}")
+            print(f"✗ {_fmt(result.get('diff_pct'))} (threshold: {result['threshold']}%){stable_str}")
             failed += 1
     
     # Save results
@@ -484,16 +490,24 @@ def main():
     print(f"Failed: {failed}/{len(results)}")
     
     if results:
-        avg_diff = sum(r.get("diff_pct", 100) for r in results) / len(results)
-        print(f"Average Diff: {avg_diff:.1f}%")
+        measured = [r["diff_pct"] for r in results if r.get("diff_pct") is not None]
+        if measured:
+            print(f"Average Diff: {sum(measured) / len(measured):.1f}% "
+                  f"({len(measured)}/{len(results)} measured)")
+        else:
+            print(f"Average Diff: NOT-MEASURED (0/{len(results)} measured)")
     
     print(f"\nResults saved to: {output_path}")
     
     # Show worst cases
-    sorted_results = sorted(results, key=lambda r: r.get("diff_pct", 100), reverse=True)
+    # Unmeasured sort first — they need attention before any diff does.
+    sorted_results = sorted(
+        results,
+        key=lambda r: (r.get("diff_pct") is not None, r.get("diff_pct") or 0.0),
+    )
     print("\nWorst 3 Cases:")
     for r in sorted_results[:3]:
-        print(f"  {r['case_id']}: {r.get('diff_pct', 'N/A')}%")
+        print(f"  {r['case_id']}: {_fmt(r.get('diff_pct'))}")
     
     sys.exit(0 if failed == 0 else 1)
 
