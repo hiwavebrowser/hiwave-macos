@@ -377,11 +377,15 @@ def aggregate_swarm_results(
         agg = aggregate_iterations(results, config.max_variance)
         aggregated.append(aggregated_to_dict(agg))
     
-    # Sort by diff descending
-    aggregated.sort(key=lambda x: -x["diff_pct_median"])
-    
-    # Global stats
-    all_diffs = [a["diff_pct_median"] for a in aggregated]
+    # Sort worst-first, unmeasured leading. Unary minus on an Optional raises,
+    # and a cell nobody measured needs attention before any number does — the
+    # same ordering parity_aggregate._worst_first uses.
+    aggregated.sort(key=lambda x: (x["diff_pct_median"] is not None,
+                                   -(x["diff_pct_median"] or 0.0)))
+
+    # Global stats over MEASURED cells only.
+    all_diffs = [a["diff_pct_median"] for a in aggregated
+                 if a["diff_pct_median"] is not None]
     passed = sum(1 for a in aggregated if a["passed"])
     stable = sum(1 for a in aggregated if a.get("stable", False))
     
@@ -414,9 +418,15 @@ def aggregate_swarm_results(
             "passed": passed,
             "failed": len(aggregated) - passed,
             "stable": stable,
-            "avg_diff_pct": sum(all_diffs) / len(all_diffs) if all_diffs else 100,
-            "min_diff_pct": min(all_diffs) if all_diffs else 100,
-            "max_diff_pct": max(all_diffs) if all_diffs else 100,
+            # `else 100` published a total mismatch for a run that measured
+            # NOTHING — the decorative lie this whole change set removes,
+            # surviving one function past where it was fixed. No measurements
+            # means no statistics.
+            "measured_cases": len(all_diffs),
+            "not_measured_cases": len(aggregated) - len(all_diffs),
+            "avg_diff_pct": (sum(all_diffs) / len(all_diffs)) if all_diffs else None,
+            "min_diff_pct": min(all_diffs) if all_diffs else None,
+            "max_diff_pct": max(all_diffs) if all_diffs else None,
         },
         "global_taxonomy": dict(sorted(global_taxonomy.items(), key=lambda x: -x[1])),
         "results": aggregated,

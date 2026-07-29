@@ -130,7 +130,11 @@ class CaseResult:
     # Results
     # None means NOT MEASURED (instrument failure). 100.0 means measured
     # as a total mismatch. Collapsing the two is the bug this file had.
-    diff_pct: Optional[float] = 100.0
+    #
+    # The DEFAULT is None: a result that never reached a comparison has not
+    # measured anything, and defaulting to 100.0 meant every early return had
+    # to remember to override it. Three of them did not.
+    diff_pct: Optional[float] = None
     instrument_failure: Optional[str] = None
     diff_pixels: int = 0
     total_pixels: int = 0
