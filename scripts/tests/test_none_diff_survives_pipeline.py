@@ -67,6 +67,41 @@ def test_aggregate_does_not_erase_shard_errors():
     assert cell.error, "CaseSummary must carry the shard's error through"
 
 
+def test_compare_reports_survives_an_unmeasured_cell():
+    """65-A (Prometheus): compare_reports subtracted two diff_pcts unguarded.
+
+    Atlas missed this on the third pass, having already been bitten by the
+    same class twice. It is here as an EXERCISE of the arithmetic, not a grep
+    — 65-E's point was that grepping for a string pattern does not prove a
+    code path survives.
+    """
+    import parity_aggregate
+    baseline = {"cases": [
+        {"case_id": "a", "viewport": "800x600", "diff_pct": 5.0, "passed": True},
+        {"case_id": "b", "viewport": "800x600", "diff_pct": None, "passed": False},
+    ]}
+    current = {"cases": [
+        {"case_id": "a", "viewport": "800x600", "diff_pct": 6.0, "passed": True},
+        {"case_id": "b", "viewport": "800x600", "diff_pct": 4.0, "passed": True},
+    ]}
+    report = parity_aggregate.compare_reports(baseline, current, regression_budget=0.1)
+    assert report["summary"]["not_measured"] == 1, report["summary"]
+    assert [r["case_id"] for r in report["not_measured"]] == ["b"]
+    # The measured pair still produces its real regression.
+    assert [r["case_id"] for r in report["regressions"]] == ["a"]
+
+
+def test_zero_measured_average_is_none_not_zero():
+    """65-B (Prometheus): 0.0 reads as PERFECT PARITY from zero evidence.
+
+    A worse lie than the 100.0 this change set exists to remove, and it
+    disagreed with extract_parity_metrics, which already returned None.
+    """
+    import parity_aggregate
+    assert parity_aggregate._mean_or_none([]) is None
+    assert parity_aggregate._mean_or_none([6.0, 8.0]) == 7.0
+
+
 def test_comparison_tools_survive_a_present_null():
     """`.get(key, default)` does NOT fire on a present null — only a missing key.
 

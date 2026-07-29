@@ -268,7 +268,7 @@ def run_test(
     chrome_png = baseline_dir / "baseline.png"
     if not chrome_png.exists():
         result["error"] = "No Chrome baseline"
-        result["diff_pct"] = 100.0
+        result["diff_pct"] = None  # refusal, not a measured 100% diff
         return result
 
     chrome_rects = baseline_dir / "layout-rects.json"
@@ -282,14 +282,14 @@ def run_test(
         capture_result = run_rustkit_capture(case_id, html_path, width, height)
         if not capture_result.get("success"):
             result["error"] = f"Capture failed: {capture_result.get('error', 'Unknown')}"
-            result["diff_pct"] = 100.0
+            result["diff_pct"] = None  # refusal, not a measured 100% diff
             return result
 
         # Find RustKit output
         rustkit_ppm = capture_dir / "frame.ppm"
         if not rustkit_ppm.exists():
             result["error"] = "No RustKit capture output"
-            result["diff_pct"] = 100.0
+            result["diff_pct"] = None  # refusal, not a measured 100% diff
             return result
 
         # 1. Pixel comparison (per-run output)
@@ -308,7 +308,7 @@ def run_test(
 
         if pixel_result.get("error"):
             result["error"] = f"Pixel compare error: {pixel_result.get('error')}"
-            result["diff_pct"] = 100.0
+            result["diff_pct"] = None  # refusal, not a measured 100% diff
             return result
 
         run_diffs.append(float(pixel_result.get("diffPercent", 100.0)))

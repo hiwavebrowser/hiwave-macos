@@ -573,7 +573,12 @@ def execute_work_unit(
     
     if result.is_blank_frame:
         result.error = f"BLANK_FRAME: {result.blank_frame_ratio*100:.1f}% background, {result.unique_colors} colors"
-        result.diff_pct = 100.0  # Blank = 100% diff
+        # 65-D (Prometheus): a blank frame is a REFUSAL, not a 100% render
+        # diff. Stamping 100.0 here left any consumer that reads diff_pct
+        # without also reading error seeing a fake score — the three-state
+        # contract has to hold at the SOURCE, not only after extract_metrics
+        # heals it.
+        result.diff_pct = None
         result.passed = False
         return result
     

@@ -84,6 +84,14 @@ class CaseSummary:
     error: Optional[str] = None
 
 
+def _mean_or_none(values):
+    """Average, or None when there is nothing to average.
+
+    Returning 0.0 for an empty set claims perfect parity from zero evidence.
+    """
+    return (sum(values) / len(values)) if values else None
+
+
 def _worst_first(c: "CaseSummary"):
     """Sort key: unmeasured cells first, then worst measured diff.
 
@@ -286,10 +294,14 @@ def aggregate_from_results(results: List[Dict]) -> Dict[str, Any]:
             "failed": sum(1 for c in case_summaries if not c.passed),
             "stable": sum(1 for c in case_summaries if c.stable),
             # Measured cells only — see CaseSummary.diff_pct.
-            "avg_diff_pct": (
-                sum(c.diff_pct for c in case_summaries if c.diff_pct is not None)
-                / max(1, sum(1 for c in case_summaries if c.diff_pct is not None))
-            ),
+            # 65-B (Prometheus): max(1, 0) turned "nothing was measured" into
+            # 0.0 — which reads as PERFECT PARITY and is a worse lie than the
+            # 100.0 this whole change set exists to remove. It also disagreed
+            # with extract_parity_metrics, which correctly returns None. No
+            # measurements means no average.
+            "avg_diff_pct": _mean_or_none([
+                c.diff_pct for c in case_summaries if c.diff_pct is not None
+            ]),
             "measured_cases": sum(1 for c in case_summaries if c.diff_pct is not None),
             "not_measured_cases": sum(1 for c in case_summaries if c.diff_pct is None),
             "total_global_diff_pixels": total_global_diff_pixels,
@@ -424,6 +436,7 @@ def compare_reports(
     regressions = []
     improvements = []
     new_failures = []
+    not_measured = []
     
     for key, cur in current_cases.items():
         base = baseline_cases.get(key)
@@ -439,6 +452,21 @@ def compare_reports(
                 })
             continue
         
+        # 65-A (Prometheus): CaseSummary.diff_pct is Optional since the
+        # three-state change, so either side of this subtraction can be None.
+        # No delta exists between a measurement and a non-measurement — and
+        # inventing one manufactures a regression when a capture fails, then
+        # an improvement when it recovers. Report it as unmeasured instead.
+        if cur["diff_pct"] is None or base["diff_pct"] is None:
+            not_measured.append({
+                "case_id": cur["case_id"],
+                "viewport": cur["viewport"],
+                "baseline_diff": base["diff_pct"],
+                "current_diff": cur["diff_pct"],
+                "type": "not_measured",
+            })
+            continue
+
         delta = cur["diff_pct"] - base["diff_pct"]
         
         if delta > regression_budget:
@@ -488,6 +516,7 @@ def compare_reports(
             "regressions": len(regressions),
             "improvements": len(improvements),
             "new_failures": len(new_failures),
+            "not_measured": len(not_measured),
             "total_regression_delta": total_regression,
             "total_improvement_delta": total_improvement,
             "net_delta": total_regression - total_improvement,
@@ -496,6 +525,7 @@ def compare_reports(
         "regressions": sorted(regressions, key=lambda x: -x["delta"]),
         "improvements": sorted(improvements, key=lambda x: x["delta"]),
         "new_failures": new_failures,
+        "not_measured": not_measured,
         "taxonomy_shifts": sorted(taxonomy_shifts, key=lambda x: -abs(x["delta"])),
     }
 
