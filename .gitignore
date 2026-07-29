@@ -52,7 +52,12 @@ parity-history/
 parity-baseline/captures/
 parity-baseline/failure_packets/
 progress_report.json
-scripts/__pycache__/
+# Global, not per-directory. The old `scripts/__pycache__/` line was why
+# scripts/tests/__pycache__/ kept getting committed — a narrow ignore looks
+# like coverage and isn't. Five .pyc files reached master this way.
+__pycache__/
+*.pyc
+*.pyo
 
 fastrender/
 
