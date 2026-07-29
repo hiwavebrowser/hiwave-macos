@@ -29,7 +29,7 @@ pub mod download;
 pub mod intercept;
 pub mod security;
 
-pub use cache::{CacheConfig, CacheKey, CacheStats, CachedResponse, MemoryCache, parse_cache_control};
+pub use cache::{cache_eligibility, CacheConfig, CacheKey, CacheStats, CachedResponse, Ineligible, MemoryCache, parse_cache_control};
 pub use download::{Download, DownloadEvent, DownloadId, DownloadManager, DownloadState};
 pub use intercept::{InterceptAction, InterceptHandler, RequestInterceptor};
 pub use security::{
@@ -507,7 +507,7 @@ impl ResourceLoader {
         }
         
         // Check cache for GET requests
-        let cache_key = if request.method == Method::GET {
+        let cache_key = if request.method == Method::GET && self.cache.enabled() {
             let key = CacheKey::new(&request.url);
             if let Some(cached) = self.cache.get(&key) {
                 debug!(url = %request.url, "Serving from cache");
@@ -593,6 +593,28 @@ impl ResourceLoader {
                 // (300s) became dead config that the cache still announces in
                 // its startup log. A number printed at boot and applied
                 // nowhere is worse than no number.
+                // Eligibility BEFORE freshness. A response can carry a
+                // perfectly good max-age and still be ineligible — credentialed
+                // requests, Cache-Control: private, and anything carrying Vary
+                // (which this cache does not key on, so serving it would return
+                // the wrong body for a differing request).
+                if let Some(reason) = cache_eligibility(
+                    self.cache.enabled(),
+                    &request.headers,
+                    &http_response.headers,
+                ) {
+                    debug!(url = %request.url, ?reason, "Response not cacheable");
+                    return Ok(Response {
+                        request_id: request.id,
+                        url: request.url.clone(),
+                        status: http_response.status,
+                        headers: http_response.headers,
+                        content_type,
+                        content_length,
+                        body: ResponseBody::Full(http_response.body),
+                    });
+                }
+
                 let ttl = if self.cache.respects_cache_control() {
                     parse_cache_control(&http_response.headers)
                         .unwrap_or_else(|| self.cache.default_ttl())
