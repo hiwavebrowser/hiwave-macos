@@ -6545,23 +6545,32 @@ fn parse_transform_op(func: &str, args: &str) -> Option<rustkit_css::TransformOp
 /// Parse a CSS angle value (e.g., "45deg", "1rad", "0.5turn") into degrees.
 fn parse_angle(value: &str) -> Option<f32> {
     let value = value.trim();
-    if value.ends_with("deg") {
+    // LONGEST SUFFIX FIRST. `grad` ends with `rad`, so testing `rad` first
+    // swallows every gradian angle: "200grad" matched the rad arm, lost three
+    // characters instead of four, failed to parse, and returned None — while
+    // the grad arm below sat unreachable, looking like support. Silent None,
+    // not a wrong number: rotate(200grad) simply did not rotate.
+    //
+    // Same shape as rem-before-em. Any new unit whose suffix ends with an
+    // existing one goes ABOVE it, and the round-trip test below is what
+    // catches it if this comment is not read.
+    if value.ends_with("grad") {
+        value[..value.len() - 4]
+            .parse::<f32>()
+            .ok()
+            .map(|g| g * 0.9)
+    } else if value.ends_with("turn") {
+        value[..value.len() - 4]
+            .parse::<f32>()
+            .ok()
+            .map(|t| t * 360.0)
+    } else if value.ends_with("deg") {
         value[..value.len() - 3].parse().ok()
     } else if value.ends_with("rad") {
         value[..value.len() - 3]
             .parse::<f32>()
             .ok()
             .map(|r| r.to_degrees())
-    } else if value.ends_with("turn") {
-        value[..value.len() - 4]
-            .parse::<f32>()
-            .ok()
-            .map(|t| t * 360.0)
-    } else if value.ends_with("grad") {
-        value[..value.len() - 4]
-            .parse::<f32>()
-            .ok()
-            .map(|g| g * 0.9)
     } else {
         // Try parsing as number (defaults to degrees)
         value.parse().ok()
@@ -7879,5 +7888,56 @@ mod tests {
             id_spec > multi_class_spec,
             "ID should beat multiple classes"
         );
+    }
+}
+
+#[cfg(test)]
+mod grad_suffix_tests {
+    use super::*;
+
+    // `grad` ends with `rad`. parse_angle tested `rad` FIRST, so every gradian
+    // angle matched the radian arm, had three characters stripped instead of
+    // four, failed to parse, and returned None — and the `grad` arm below it
+    // was unreachable dead code that looked like support.
+    //
+    // Silent None, not a wrong number: `transform: rotate(200grad)` did not
+    // rotate at all. Found by Athena on Windows (#48); macOS carried it
+    // verbatim. Same shape as the rem-before-em bug she fixed in #38 — a
+    // shorter unit suffix tested before a longer one that ends with it.
+
+    #[test]
+    fn grad_is_not_swallowed_by_the_rad_arm() {
+        // 200grad == 180deg. If `rad` wins, this is None.
+        assert_eq!(parse_angle("200grad"), Some(180.0));
+        assert_eq!(parse_angle("100grad"), Some(90.0));
+        assert_eq!(parse_angle("400grad"), Some(360.0));
+    }
+
+    #[test]
+    fn rad_still_works_after_the_reorder() {
+        let half_turn = parse_angle("3.14159rad").expect("rad must still parse");
+        assert!((half_turn - 180.0).abs() < 0.01, "got {half_turn}");
+    }
+
+    #[test]
+    fn the_other_angle_units_are_unaffected() {
+        assert_eq!(parse_angle("90deg"), Some(90.0));
+        assert_eq!(parse_angle("0.5turn"), Some(180.0));
+        assert_eq!(parse_angle("45"), Some(45.0), "bare number defaults to deg");
+    }
+
+    #[test]
+    fn every_unit_round_trips_to_the_same_quarter_turn() {
+        // One angle, five spellings. If any suffix is being eaten by another,
+        // exactly one of these disagrees — which is the property a per-unit
+        // test cannot see.
+        for input in ["90deg", "100grad", "0.25turn", "1.5708rad", "90"] {
+            let got = parse_angle(input)
+                .unwrap_or_else(|| panic!("{input} did not parse at all"));
+            assert!(
+                (got - 90.0).abs() < 0.01,
+                "{input} parsed to {got}, expected ~90"
+            );
+        }
     }
 }
