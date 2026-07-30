@@ -127,6 +127,23 @@ impl Server {
         serde_json::from_str(&raw).map_err(|e| format!("layout JSON unreadable: {e}"))
     }
 
+    /// The paint commands the engine built from the layout tree, in order.
+    ///
+    /// Paired with `hiwave_layout` this is the whole point of the crate: with
+    /// both, an agent can ask whether a wrong pixel came from the box being
+    /// computed wrong or from the box being painted wrong, instead of
+    /// inferring the answer from the pixel.
+    fn display_list(&mut self, _args: &Value) -> Result<Value, String> {
+        let dir = self.scratch().map_err(|e| e.to_string())?;
+        let out = dir.join("display_list.json");
+        let s = self.session_mut()?;
+        s.engine
+            .export_display_list_json(s.view_id, out.to_str().unwrap())
+            .map_err(|e| format!("display list export failed: {e:?}"))?;
+        let raw = fs::read_to_string(&out).map_err(|e| e.to_string())?;
+        serde_json::from_str(&raw).map_err(|e| format!("display list JSON unreadable: {e}"))
+    }
+
     fn screenshot(&mut self, args: &Value) -> Result<Value, String> {
         let dir = self.scratch().map_err(|e| e.to_string())?;
         let out = match args.get("path").and_then(Value::as_str) {
@@ -159,6 +176,7 @@ impl Server {
         match name {
             "hiwave_open" => self.open(args),
             "hiwave_layout" => self.layout(args),
+            "hiwave_display_list" => self.display_list(args),
             "hiwave_screenshot" => self.screenshot(args),
             "hiwave_status" => self.status(args),
             other => Err(format!("unknown tool: {other}")),
@@ -184,6 +202,15 @@ fn tool_list() -> Value {
             "description": "The engine's computed layout tree for the loaded page, as JSON. \
                             This is what RustKit decided, not what it painted — use it to \
                             attribute a diff to a stage instead of guessing from pixels.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "hiwave_display_list",
+            "description": "The engine's paint commands for the loaded page, flat and in paint \
+                            order. Pair it with hiwave_layout to attribute a visual bug to a \
+                            stage: if the layout box is right and the paint rect is wrong, the \
+                            bug is in paint. Later commands cover earlier ones. Commands the \
+                            exporter has not modelled carry \"modelled\": false and a debug dump.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {

@@ -4754,6 +4754,330 @@ impl Engine {
         Ok(())
     }
 
+    /// Export the view's display list — the paint commands built from the
+    /// layout tree — as JSON.
+    ///
+    /// This is the other half of `export_layout_json`. Layout answers "what
+    /// box did the engine compute"; this answers "what did it then decide to
+    /// paint, in what order". A pixel diff cannot separate the two, so every
+    /// paint-stage bug this engine has shipped — the advance contract, the
+    /// gradient axis routing, the SVG break — had to be diagnosed by reading
+    /// `{:?}` off a trace log. Emitting the list in a walkable form is the
+    /// difference between inspecting the boundary and inferring it.
+    ///
+    /// The command list is FLAT and ORDERED, exactly as the renderer consumes
+    /// it. Paint order is load-bearing (later commands cover earlier ones) and
+    /// the push/pop clip, stacking-context, and transform commands only make
+    /// sense as a sequence, so nesting them into a tree would invent structure
+    /// the renderer does not have. `index` is the position in that sequence.
+    ///
+    /// Commands the exporter has not modelled are emitted as
+    /// `{"op": "...", "modelled": false, "debug": "..."}` rather than dropped
+    /// or flattened into a lie: an agent can still read the value, and the
+    /// `modelled` flag says plainly that the shape is not a stable contract.
+    pub fn export_display_list_json(
+        &self,
+        id: EngineViewId,
+        path: &str,
+    ) -> Result<(), EngineError> {
+        use rustkit_layout::DisplayCommand as Cmd;
+
+        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+
+        let display_list = view.display_list.as_ref().ok_or_else(|| {
+            EngineError::RenderError("No display list available".into())
+        })?;
+
+        fn color(c: &rustkit_css::Color) -> serde_json::Value {
+            serde_json::json!({ "r": c.r, "g": c.g, "b": c.b, "a": c.a })
+        }
+
+        fn rect(r: &rustkit_layout::Rect) -> serde_json::Value {
+            serde_json::json!({
+                "x": r.x,
+                "y": r.y,
+                "width": r.width,
+                "height": r.height
+            })
+        }
+
+        fn radius(r: &rustkit_layout::BorderRadius) -> serde_json::Value {
+            serde_json::json!({
+                "top_left": r.top_left,
+                "top_right": r.top_right,
+                "bottom_right": r.bottom_right,
+                "bottom_left": r.bottom_left
+            })
+        }
+
+        fn stops(list: &[rustkit_css::ColorStop]) -> serde_json::Value {
+            serde_json::Value::Array(
+                list.iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "color": color(&s.color),
+                            "position": s.position.as_ref().map(|p| format!("{:?}", p))
+                        })
+                    })
+                    .collect(),
+            )
+        }
+
+        fn command_to_json(cmd: &Cmd) -> serde_json::Value {
+            match cmd {
+                Cmd::SolidColor(c, r) => serde_json::json!({
+                    "op": "solid_color", "color": color(c), "rect": rect(r)
+                }),
+                Cmd::RoundedRect {
+                    color: c,
+                    rect: r,
+                    radius: rad,
+                } => serde_json::json!({
+                    "op": "rounded_rect",
+                    "color": color(c),
+                    "rect": rect(r),
+                    "radius": radius(rad)
+                }),
+                Cmd::Border {
+                    color: c,
+                    rect: r,
+                    top,
+                    right,
+                    bottom,
+                    left,
+                } => serde_json::json!({
+                    "op": "border",
+                    "color": color(c),
+                    "rect": rect(r),
+                    "widths": {
+                        "top": top, "right": right, "bottom": bottom, "left": left
+                    }
+                }),
+                Cmd::Text {
+                    text,
+                    x,
+                    y,
+                    color: c,
+                    font_size,
+                    font_family,
+                    font_weight,
+                    font_style,
+                    advances,
+                    ascent,
+                } => serde_json::json!({
+                    "op": "text",
+                    "text": text,
+                    "x": x,
+                    "y": y,
+                    "color": color(c),
+                    "font_size": font_size,
+                    "font_family": font_family,
+                    "font_weight": font_weight,
+                    "font_style": font_style,
+                    // The ADVANCE CONTRACT, made visible. `advances: null`
+                    // means paint fell back to re-deriving its own metrics
+                    // instead of using layout's — the exact condition behind
+                    // the width-drift class of bugs, and previously only
+                    // observable by reading a trace log.
+                    "advances": advances,
+                    "ascent": ascent
+                }),
+                Cmd::TextDecoration {
+                    x,
+                    y,
+                    width,
+                    thickness,
+                    color: c,
+                    style,
+                } => serde_json::json!({
+                    "op": "text_decoration",
+                    "x": x,
+                    "y": y,
+                    "width": width,
+                    "thickness": thickness,
+                    "color": color(c),
+                    "style": format!("{:?}", style)
+                }),
+                Cmd::Image {
+                    url,
+                    src_rect,
+                    dest_rect,
+                    object_fit,
+                    opacity,
+                } => serde_json::json!({
+                    "op": "image",
+                    "url": url,
+                    "src_rect": src_rect.as_ref().map(rect),
+                    "dest_rect": rect(dest_rect),
+                    "object_fit": format!("{:?}", object_fit),
+                    "opacity": opacity
+                }),
+                Cmd::BackgroundImage {
+                    url,
+                    rect: r,
+                    size,
+                    position,
+                    repeat,
+                } => serde_json::json!({
+                    "op": "background_image",
+                    "url": url,
+                    "rect": rect(r),
+                    "size": format!("{:?}", size),
+                    "position": { "x": position.0, "y": position.1 },
+                    "repeat": format!("{:?}", repeat)
+                }),
+                Cmd::BoxShadow {
+                    offset_x,
+                    offset_y,
+                    blur_radius,
+                    spread_radius,
+                    color: c,
+                    rect: r,
+                    inset,
+                } => serde_json::json!({
+                    "op": "box_shadow",
+                    "offset_x": offset_x,
+                    "offset_y": offset_y,
+                    "blur_radius": blur_radius,
+                    "spread_radius": spread_radius,
+                    "color": color(c),
+                    "rect": rect(r),
+                    "inset": inset
+                }),
+                Cmd::LinearGradient {
+                    rect: r,
+                    direction,
+                    stops: s,
+                    repeating,
+                    border_radius,
+                } => serde_json::json!({
+                    "op": "linear_gradient",
+                    "rect": rect(r),
+                    "direction": format!("{:?}", direction),
+                    "stops": stops(s),
+                    "repeating": repeating,
+                    "border_radius": radius(border_radius)
+                }),
+                Cmd::RadialGradient {
+                    rect: r,
+                    shape,
+                    size,
+                    center,
+                    stops: s,
+                    repeating,
+                    border_radius,
+                } => serde_json::json!({
+                    "op": "radial_gradient",
+                    "rect": rect(r),
+                    "shape": format!("{:?}", shape),
+                    "size": format!("{:?}", size),
+                    "center": { "x": center.0, "y": center.1 },
+                    "stops": stops(s),
+                    "repeating": repeating,
+                    "border_radius": radius(border_radius)
+                }),
+                Cmd::ConicGradient {
+                    rect: r,
+                    from_angle,
+                    center,
+                    stops: s,
+                    repeating,
+                    border_radius,
+                } => serde_json::json!({
+                    "op": "conic_gradient",
+                    "rect": rect(r),
+                    "from_angle": from_angle,
+                    "center": { "x": center.0, "y": center.1 },
+                    "stops": stops(s),
+                    "repeating": repeating,
+                    "border_radius": radius(border_radius)
+                }),
+                Cmd::PushClip(r) => serde_json::json!({
+                    "op": "push_clip", "rect": rect(r)
+                }),
+                Cmd::PopClip => serde_json::json!({ "op": "pop_clip" }),
+                Cmd::PushStackingContext { z_index, rect: r } => serde_json::json!({
+                    "op": "push_stacking_context", "z_index": z_index, "rect": rect(r)
+                }),
+                Cmd::PopStackingContext => {
+                    serde_json::json!({ "op": "pop_stacking_context" })
+                }
+                Cmd::PushTransform { matrix, origin } => serde_json::json!({
+                    "op": "push_transform",
+                    "matrix": matrix,
+                    "origin": { "x": origin.0, "y": origin.1 }
+                }),
+                Cmd::PopTransform => serde_json::json!({ "op": "pop_transform" }),
+                // Not yet modelled: form controls, carets, focus rings, and
+                // the SVG primitives. Named and dumped rather than dropped.
+                other => serde_json::json!({
+                    "op": display_command_op_name(other),
+                    "modelled": false,
+                    "debug": format!("{:?}", other)
+                }),
+            }
+        }
+
+        /// The variant name, for commands the exporter does not model. Kept
+        /// separate so an agent can still filter by op without parsing Debug.
+        fn display_command_op_name(cmd: &Cmd) -> &'static str {
+            match cmd {
+                Cmd::TextInput { .. } => "text_input",
+                Cmd::Button { .. } => "button",
+                Cmd::FocusRing { .. } => "focus_ring",
+                Cmd::Caret { .. } => "caret",
+                Cmd::BackdropFilter { .. } => "backdrop_filter",
+                Cmd::GradientText { .. } => "gradient_text",
+                Cmd::FillRect { .. } => "fill_rect",
+                Cmd::StrokeRect { .. } => "stroke_rect",
+                Cmd::FillCircle { .. } => "fill_circle",
+                Cmd::StrokeCircle { .. } => "stroke_circle",
+                Cmd::FillEllipse { .. } => "fill_ellipse",
+                Cmd::Line { .. } => "line",
+                Cmd::Polyline { .. } => "polyline",
+                Cmd::FillPolygon { .. } => "fill_polygon",
+                Cmd::StrokePolygon { .. } => "stroke_polygon",
+                _ => "unknown",
+            }
+        }
+
+        let commands: Vec<serde_json::Value> = display_list
+            .commands
+            .iter()
+            .enumerate()
+            .map(|(index, cmd)| {
+                let mut value = command_to_json(cmd);
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("index".into(), serde_json::json!(index));
+                }
+                value
+            })
+            .collect();
+
+        let (width, height) = self
+            .compositor
+            .get_surface_size(view.viewhost_id)
+            .unwrap_or((0, 0));
+
+        let wrapper = serde_json::json!({
+            "version": 1,
+            "viewport": { "width": width, "height": height },
+            "count": commands.len(),
+            "commands": commands
+        });
+
+        let json_str = serde_json::to_string_pretty(&wrapper).map_err(|e| {
+            EngineError::RenderError(format!("JSON serialization failed: {}", e))
+        })?;
+
+        std::fs::write(path, json_str).map_err(|e| {
+            EngineError::RenderError(format!("Failed to write display list file: {}", e))
+        })?;
+
+        info!(?id, path, count = display_list.commands.len(), "Display list exported");
+        Ok(())
+    }
+
     /// Render a view (internal).
     #[tracing::instrument(skip(self), fields(view_id = ?id))]
     fn render(&mut self, id: EngineViewId) -> Result<(), EngineError> {
