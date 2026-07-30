@@ -340,7 +340,15 @@ impl Engine {
     }
 
     /// Create a new view (macOS stub - will be implemented in Phase 3).
-    #[cfg(not(target_os = "windows"))]
+    ///
+    /// Gated on macOS specifically, not `not(windows)`: the body calls
+    /// `ViewHostTrait::get_raw_window_handle` and
+    /// `Compositor::create_surface_for_raw_handle`, both of which are
+    /// themselves `cfg(target_os = "macos")`. The wider gate promised a
+    /// non-Windows build it could not deliver, so the crate failed to compile
+    /// anywhere else — including the headless path, which needs no window at
+    /// all. No behaviour changes on macOS or Windows: both gates agree there.
+    #[cfg(target_os = "macos")]
     pub fn create_view(
         &mut self,
         parent: WindowHandle,
