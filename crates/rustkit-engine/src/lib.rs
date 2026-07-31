@@ -5418,7 +5418,7 @@ impl Engine {
                     properties.entry(decl.property.as_str()).or_default().push(decl);
                 }
 
-                let declared: Vec<serde_json::Value> = properties
+                let mut declared: Vec<serde_json::Value> = properties
                     .into_iter()
                     .map(|(property, mut decls)| {
                         decls.sort_by_key(|d| d.order);
@@ -5432,10 +5432,39 @@ impl Engine {
                             "property": property,
                             "computed": Self::computed_value_of_recorded(record, property),
                             "winner": winner.map(Self::declaration_to_json),
+                            "origin": winner.map(|w| w.origin),
                             "overridden": overridden,
                         })
                     })
                     .collect();
+
+                // A property that no author rule set still has a computed
+                // value, and "nothing declared this" is an ANSWER — it is how
+                // an agent tells "the author's rule lost" apart from "the
+                // author never wrote one". Emitting it with a null winner
+                // says that; omitting the property entirely would leave the
+                // caller unable to distinguish the two without guessing.
+                let authored: std::collections::BTreeSet<&str> = record
+                    .declarations
+                    .iter()
+                    .map(|d| d.property.as_str())
+                    .collect();
+                for property in Self::COMPUTED_PROPERTIES {
+                    if authored.contains(property) {
+                        continue;
+                    }
+                    declared.push(serde_json::json!({
+                        "property": property,
+                        "computed": Self::computed_value_of_recorded(record, property),
+                        "winner": serde_json::Value::Null,
+                        // Not a cop-out: the UA sheet is a hardcoded match on
+                        // tag name rather than parsed rules, so there is no
+                        // selector to cite, and the initial value is
+                        // indistinguishable from it at this layer.
+                        "origin": "user-agent-or-initial",
+                        "overridden": [],
+                    }));
+                }
 
                 let computed: serde_json::Map<String, serde_json::Value> = record
                     .computed

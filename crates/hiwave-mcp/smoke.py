@@ -247,10 +247,36 @@ def main():
     # not echoed back from the declaration text: NO rule in the fixture spells
     # `padding-left`. 16px can only come from the engine expanding `padding`.
     assert hero_style["computed"]["padding-left"] == "16px", hero_style["computed"]
-    assert not any(d["property"] == "padding-left" for d in hero_style["declared"]), \
-        "padding-left was declared — the shorthand-expansion assertion is void"
-    print(f"ok  computed expansion padding-left=16px with no padding-left "
-          f"declaration (expanded from `padding: 16px`)")
+    pad_left = next(d for d in hero_style["declared"] if d["property"] == "padding-left")
+    # No rule spells `padding-left`, so it cites none — yet it computed to
+    # 16px. The value can therefore only have come from the engine expanding
+    # the `padding` shorthand, not from echoing declaration text back.
+    assert pad_left["winner"] is None, pad_left
+    assert pad_left["computed"] == "16px", pad_left
+    assert any(d["property"] == "padding" and d["winner"]["value"] == "16px"
+               for d in hero_style["declared"]), hero_style["declared"]
+    print(f"ok  computed expansion padding-left=16px, winner=None — no rule "
+          f"spells it; expanded from `padding: 16px`")
+
+    # "no author rule set this" is an ANSWER, not an omission: it is how an
+    # agent tells "the author's rule lost" apart from "the author never wrote
+    # one". h1's bold comes from the UA stylesheet, which is a hardcoded match
+    # on tag name — real, but with no selector to cite, so the winner is null.
+    h1_style, error = client.tool("hiwave_style", selector="h1")
+    assert error is None, error
+    assert h1_style["count"] == 1, h1_style["count"]
+    h1_el = h1_style["elements"][0]
+    assert h1_el["computed"]["font-weight"] == "700", h1_el["computed"]
+    weight = next(d for d in h1_el["declared"] if d["property"] == "font-weight")
+    assert weight["winner"] is None, weight
+    assert weight["origin"] == "user-agent-or-initial", weight
+    # ...whereas font-size on the same element IS authored, so it cites a rule.
+    size = next(d for d in h1_el["declared"] if d["property"] == "font-size")
+    assert size["computed"] == "32px", size
+    assert size["winner"]["selector"] == "h1", size["winner"]
+    assert size["origin"] == "author", size
+    print(f"ok  origin split      h1 font-weight=700 winner=None "
+          f"(UA, no rule to cite); font-size=32px winner=h1 (author)")
 
     # A query it cannot honestly answer is refused, not approximated. Matching
     # `div p` needs tree context the trace does not keep, and quietly matching
