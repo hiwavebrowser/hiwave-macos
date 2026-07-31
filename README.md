@@ -40,6 +40,63 @@ Modern browsers are designed to keep you browsing. More tabs, more tracking, mor
 
 ---
 
+## Engine Status — macOS
+
+macOS is the **reference tree** for RustKit: the Windows and Linux ports are
+measured against this tree's behaviour. It is also currently the only platform
+with pixel-level parity capture against Chrome.
+
+| | |
+|---|---|
+| Build | **passing** (`cargo build --workspace`, 0 errors) |
+| Tests | **985 passing**, 0 failing, 5 ignored (76/76 test binaries reported — crashed suites can't hide in these sums) |
+| Rust source | ~96,400 lines across 38 crates |
+| Visual parity vs Chrome | **88.1% average over 26 cases, 21 passing** — measured 2026-07-10, and the badge says so when that gets old |
+
+The five failing parity cases, named rather than averaged away: `settings`,
+`shelf`, `css-selectors`, `image-gallery`, `sticky-scroll` (worst diff ~48%).
+
+### What landed recently
+
+- **WPT Tier-1 seed** (#69) — first Web Platform Tests wired into the trench,
+  with the scoring banner fixed (it had been naming the best cases "worst")
+- **CRLF is one mandatory break, not two** (#71) — text breaker fix, both call
+  sites
+- **Post-redirect URL restored** (#70) — a fetch after a redirect reported the
+  pre-redirect URL
+- **The nightly parity gate measured nothing and published 73.36** (#65) —
+  empty captures now score nothing instead of a confident number
+- **hiwave-mcp Phase 0** (#66) — the engine's computed layout served to agents
+  over MCP
+- **Rail D classification** (#63) — 136 engine functions port to other
+  platforms verbatim, 23 need one pin, zero are unportable
+
+### Known gaps — stated, not hidden
+
+- **Gradient angles with `grad`/`turn` suffixes are silently dropped**
+  ([#72](https://github.com/hiwavebrowser/hiwave-macos/pull/72), fix open) —
+  `parse_angle` tested `rad` before `grad`, so `100grad` parsed as `100rad`'s
+  prefix and the angle vanished
+- **Animations are parsed, not executed** — transition/animation properties
+  compute and survive the cascade; nothing ticks yet
+- **Text metrics** remain the largest single source of parity diff vs Chrome
+- **No build/tests feed to the umbrella yet** — this repo's `metrics-history`
+  branch carries parity data only, so the umbrella's macOS *build* badge
+  honestly reads "unknown" until we publish the Windows/Linux-shaped feed
+
+### How these numbers are produced
+
+Tests: `cargo test --workspace`, with the exit status captured before any
+count is read and a started-vs-reported reconciliation (76 binaries running,
+76 result lines — a crashed suite shows up as a missing name, not a clean
+sum). Parity: `scripts/parity_swarm.py` against Chrome baselines, published
+to [`metrics-history`](https://github.com/hiwavebrowser/hiwave-macos/tree/metrics-history)
+and aggregated by the [umbrella repo](https://github.com/hiwavebrowser/hiwave)'s
+`metrics.yml`, which renders the badges. A number with no path back to a
+machine that measured it does not appear on this page.
+
+---
+
 ## Features
 
 ### 🗂️ The Shelf
@@ -160,7 +217,6 @@ We have strong opinions about how browsing should work, but we offer three modes
 - ✅ Flow Shield (ad blocking)
 - ✅ Flow Vault (password manager)
 - ✅ Command palette
-- ✅ Flow Shield (ad blocking)
 - ✅ Settings page
 - 🔄 Bidirectional IPC 
 - ✅ Find in Page (Ctrl+F)
