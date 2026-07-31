@@ -32,9 +32,16 @@ from pathlib import Path
 
 BIN = Path(__file__).resolve().parents[2] / "target" / "debug" / "hiwave-mcp"
 
+# `div { width: 100px }` sits AFTER `.hero` on purpose and is load-bearing for
+# the hiwave_style assertions: it matches the same element, it is later in
+# source order, and it has LOWER specificity (0,0,1 vs 0,1,0). So it must lose.
+# That makes the cascade's decision visible in two independent places — the
+# geometry stays 432x152 only if specificity beat source order, and
+# hiwave_style has to name `.hero` as the winner and `div` as the loser.
 FIXTURE = """<!DOCTYPE html><html><head><style>
 body { margin: 0 }
 .hero { width: 400px; height: 120px; padding: 16px; background: #08c }
+div { width: 100px }
 h1 { font-size: 32px; margin: 0 }
 </style></head><body><div class="hero"><h1>Attribution</h1></div></body></html>"""
 
@@ -99,7 +106,7 @@ def main():
 
     names = [t["name"] for t in client.call("tools/list")["result"]["tools"]]
     assert set(names) == {
-        "hiwave_open", "hiwave_layout", "hiwave_display_list",
+        "hiwave_open", "hiwave_layout", "hiwave_display_list", "hiwave_style",
         "hiwave_screenshot", "hiwave_status",
     }, names
     print(f"ok  tools/list        {names}")
@@ -109,6 +116,9 @@ def main():
         value, error = client.tool(tool)
         assert value is None and "hiwave_open" in error, (tool, value, error)
         print(f"ok  {tool}-before-open  refused: {error}")
+    value, error = client.tool("hiwave_style", selector=".hero")
+    assert value is None and "hiwave_open" in error, (value, error)
+    print(f"ok  hiwave_style-before-open  refused: {error}")
 
     value, error = client.tool("hiwave_open", html=FIXTURE, width=800, height=600)
     assert error is None, error
@@ -195,6 +205,60 @@ def main():
           f"{len('Attribution')} chars, font_size={glyphs['font_size']} "
           f"weight={glyphs['font_weight']} x={glyphs['x']}")
 
+    # ---- hiwave_style -------------------------------------------------------
+    # Layout and paint both report a CONSEQUENCE. This is the tool that reports
+    # the CAUSE, so the assertion is not "a value came back" — it is that the
+    # engine names the rule it chose and the rule it rejected.
+    style, error = client.tool("hiwave_style", selector=".hero")
+    assert error is None, error
+    assert style["count"] == 1, f"expected exactly one .hero, got {style['count']}"
+    hero_style = style["elements"][0]
+    assert hero_style["tag"] == "div" and hero_style["classes"] == ["hero"], hero_style
+
+    # The computed value the engine actually laid out with. 400px is what
+    # `.hero` declares; `div { width: 100px }` is later in source order, so a
+    # cascade that ignored specificity would report 100px here.
+    assert hero_style["computed"]["width"] == "400px", hero_style["computed"]
+
+    width = next(d for d in hero_style["declared"] if d["property"] == "width")
+    assert width["computed"] == "400px", width
+
+    # THE ASSERTION hiwave_style EXISTS FOR: the winning rule is named, with
+    # its specificity, and it is the CLASS rule — (0,1,0) beats (0,0,1) even
+    # though `div` came second in the sheet.
+    assert width["winner"]["selector"] == ".hero", width["winner"]
+    assert width["winner"]["specificity"] == [0, 1, 0], width["winner"]
+    assert width["winner"]["value"] == "400px", width["winner"]
+    assert width["winner"]["origin"] == "author", width["winner"]
+
+    # And the rule it BEAT is reported rather than dropped. This is the half
+    # that finds "parsed but dead": you cannot see an overridden declaration by
+    # looking at the value that survived it.
+    assert len(width["overridden"]) == 1, width["overridden"]
+    loser = width["overridden"][0]
+    assert loser["selector"] == "div", loser
+    assert loser["specificity"] == [0, 0, 1], loser
+    assert loser["value"] == "100px", loser
+    print(f"ok  hiwave_style      width=400px won by {width['winner']['selector']} "
+          f"{width['winner']['specificity']} over {loser['selector']} "
+          f"{loser['specificity']} (later in source, lower specificity)")
+
+    # The computed value is read off the ComputedStyle the cascade produced,
+    # not echoed back from the declaration text: NO rule in the fixture spells
+    # `padding-left`. 16px can only come from the engine expanding `padding`.
+    assert hero_style["computed"]["padding-left"] == "16px", hero_style["computed"]
+    assert not any(d["property"] == "padding-left" for d in hero_style["declared"]), \
+        "padding-left was declared — the shorthand-expansion assertion is void"
+    print(f"ok  computed expansion padding-left=16px with no padding-left "
+          f"declaration (expanded from `padding: 16px`)")
+
+    # A query it cannot honestly answer is refused, not approximated. Matching
+    # `div p` needs tree context the trace does not keep, and quietly matching
+    # every `p` would answer a different question invisibly.
+    value, error = client.tool("hiwave_style", selector="div p")
+    assert value is None and "simple selectors only" in error, (value, error)
+    print(f"ok  selector guard    refused 'div p'")
+
     shot, error = client.tool("hiwave_screenshot")
     assert error is None, error
     frame = Path(shot["path"])
@@ -208,8 +272,8 @@ def main():
     print(f"ok  argument guard    {error}")
 
     client.close()
-    print("\nPASS: hiwave-mcp serves the engine's computed layout AND its paint "
-          "commands over MCP")
+    print("\nPASS: hiwave-mcp serves the engine's computed layout, its paint "
+          "commands, AND the cascade behind them over MCP")
 
 
 if __name__ == "__main__":

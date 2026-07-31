@@ -97,6 +97,12 @@ impl Server {
             .create_headless_view(Bounds { x: 0, y: 0, width, height })
             .map_err(|e| format!("headless view failed: {e:?}"))?;
 
+        // Always on here, and it must precede the load: the cascade records
+        // as it runs, so arming it afterwards would leave `hiwave_style` with
+        // an empty trace for a page that is plainly loaded. This server is a
+        // diagnostic tool — recording provenance is the job, not overhead.
+        engine.set_style_recording(true);
+
         engine
             .load_html(view_id, &html)
             .map_err(|e| format!("load failed: {e:?}"))?;
@@ -144,6 +150,30 @@ impl Server {
         serde_json::from_str(&raw).map_err(|e| format!("display list JSON unreadable: {e}"))
     }
 
+    /// The cascade behind the computed style: winning rule, origin, and the
+    /// declarations that lost.
+    ///
+    /// Layout and the display list both report a CONSEQUENCE. When a rule is
+    /// parsed and matched and then overridden, neither can say so — the box
+    /// is simply the wrong size and the cause is invisible. This is the tool
+    /// that answers "why", which is why it returns the overridden
+    /// declarations rather than only the value that survived.
+    fn style(&mut self, args: &Value) -> Result<Value, String> {
+        let selector = args
+            .get("selector")
+            .and_then(Value::as_str)
+            .ok_or("`selector` is required")?
+            .to_string();
+        let dir = self.scratch().map_err(|e| e.to_string())?;
+        let out = dir.join("style.json");
+        let s = self.session_mut()?;
+        s.engine
+            .export_style_json(s.view_id, &selector, out.to_str().unwrap())
+            .map_err(|e| format!("style export failed: {e:?}"))?;
+        let raw = fs::read_to_string(&out).map_err(|e| e.to_string())?;
+        serde_json::from_str(&raw).map_err(|e| format!("style JSON unreadable: {e}"))
+    }
+
     fn screenshot(&mut self, args: &Value) -> Result<Value, String> {
         let dir = self.scratch().map_err(|e| e.to_string())?;
         let out = match args.get("path").and_then(Value::as_str) {
@@ -177,6 +207,7 @@ impl Server {
             "hiwave_open" => self.open(args),
             "hiwave_layout" => self.layout(args),
             "hiwave_display_list" => self.display_list(args),
+            "hiwave_style" => self.style(args),
             "hiwave_screenshot" => self.screenshot(args),
             "hiwave_status" => self.status(args),
             other => Err(format!("unknown tool: {other}")),
@@ -212,6 +243,22 @@ fn tool_list() -> Value {
                             bug is in paint. Later commands cover earlier ones. Commands the \
                             exporter has not modelled carry \"modelled\": false and a debug dump.",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "hiwave_style",
+            "description": "The cascade for the elements matching a simple selector: computed \
+                            values, and per declared property the WINNING rule (selector, \
+                            specificity, origin) plus every declaration it overrode. Use it when \
+                            a box is the wrong size and layout looks right — the cause is usually \
+                            a rule that matched and then lost. Queries accept simple selectors \
+                            only (`tag`, `.class`, `#id`, `tag.class`) and are refused otherwise. \
+                            `origin` is author or author-inline: the UA stylesheet is hardcoded, \
+                            not parsed, so it has no rule to cite. `!important` is reported but \
+                            NOT honoured by this cascade — an important declaration that lost is \
+                            an engine bug the tool will show you.",
+            "inputSchema": { "type": "object", "properties": {
+                "selector": { "type": "string", "description": "Simple selector, e.g. \".hero\"" }
+            }, "required": ["selector"] }
         },
         {
             "name": "hiwave_screenshot",
