@@ -1,0 +1,151 @@
+{
+  "schema": 1,
+  "wpt_pin": "a6f29b0bedaf3f1edba7b6739127fe8e713bfcb3",
+  "hiwave_git_sha": "c1386271a049e6812041cd04dce53e73ada2d62e",
+  "runner": "scripts/wpt_tier1.py",
+  "viewport": {
+    "width": 800,
+    "height": 600
+  },
+  "wpt_max_diff_pct": 0.0,
+  "ts": "2026-07-30T23:49:01.807140+00:00",
+  "n": 14,
+  "pass": 6,
+  "fail": 6,
+  "skip": 0,
+  "error": 2,
+  "rate": 0.5,
+  "cases": [
+    {
+      "id": "css-text/overflow-wrap/overflow-wrap-001",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 0.7054,
+      "diff_pixels": 3386,
+      "rel_match": "ok",
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-text/overflow-wrap/overflow-wrap-002",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 2.495,
+      "diff_pixels": 11976,
+      "rel_match": "ok",
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-text/overflow-wrap/overflow-wrap-004",
+      "status": "PASS",
+      "reason": null,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
+      "rel_match": "ok",
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-text/overflow-wrap/overflow-wrap-anywhere-011",
+      "status": "PASS",
+      "reason": null,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
+      "rel_match": "ok",
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-text/word-break/break-word-overflow-wrap-interactions",
+      "status": "PASS",
+      "reason": null,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
+      "rel_match": "ok",
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-inline/br-font-size",
+      "status": "PASS",
+      "reason": null,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
+      "rel_match": "ok",
+      "maps_to": "A"
+    },
+    {
+      "id": "css-inline/br-line-height",
+      "status": "PASS",
+      "reason": null,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
+      "rel_match": "ok",
+      "maps_to": "A"
+    },
+    {
+      "id": "css-inline/empty-span-height",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 2.94,
+      "diff_pixels": 14112,
+      "rel_match": "ok",
+      "maps_to": "B"
+    },
+    {
+      "id": "css-inline/empty-span-scroll",
+      "status": "ERROR",
+      "reason": "blank frame (test+ref) \u2014 render refusal, not a match",
+      "diff_pct": null,
+      "diff_pixels": null,
+      "rel_match": "ok",
+      "maps_to": "B"
+    },
+    {
+      "id": "css-inline/empty-span-size-001",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 16.5271,
+      "diff_pixels": 79330,
+      "rel_match": "ok",
+      "maps_to": "B"
+    },
+    {
+      "id": "css-inline/empty-span-size-002",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 0.6658,
+      "diff_pixels": 3196,
+      "rel_match": "ok",
+      "maps_to": "B"
+    },
+    {
+      "id": "css-inline/empty-text-node-001",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 1.4083,
+      "diff_pixels": 6760,
+      "rel_match": "ok",
+      "maps_to": "B2"
+    },
+    {
+      "id": "css-flexbox/align-self-015",
+      "status": "PASS",
+      "reason": null,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
+      "rel_match": "ok",
+      "maps_to": "flex"
+    },
+    {
+      "id": "css-flexbox/align-items-baseline-overflow-non-visible",
+      "status": "ERROR",
+      "reason": "blank frame (test+ref) \u2014 render refusal, not a match",
+      "diff_pct": null,
+      "diff_pixels": null,
+      "rel_match": "ok",
+      "maps_to": "flex"
+    }
+  ],
+  "honesty": {
+    "all_green_suspect": true,
+    "negative_control": "FAIL as required (checked every run; run aborts otherwise)",
+    "note": "First run with pass==n and fail==0 and error==0 is presumptively a lying harness unless N is tiny exploratory \u2014 W0b exit forbids that shape for full seed."
+  }
+}
