@@ -1,14 +1,14 @@
 {
   "schema": 1,
   "wpt_pin": "a6f29b0bedaf3f1edba7b6739127fe8e713bfcb3",
-  "hiwave_git_sha": "c1386271a049e6812041cd04dce53e73ada2d62e",
+  "hiwave_git_sha": "2fe1dee678470fa9b1af82e2bf9ab929babc2b30",
   "runner": "scripts/wpt_tier1.py",
   "viewport": {
     "width": 800,
     "height": 600
   },
   "wpt_max_diff_pct": 0.0,
-  "ts": "2026-07-30T23:49:01.807140+00:00",
+  "ts": "2026-07-31T00:51:50.795736+00:00",
   "n": 14,
   "pass": 6,
   "fail": 6,
@@ -144,8 +144,9 @@
     }
   ],
   "honesty": {
-    "all_green_suspect": true,
+    "all_green": false,
+    "all_green_suspect": false,
     "negative_control": "FAIL as required (checked every run; run aborts otherwise)",
-    "note": "First run with pass==n and fail==0 and error==0 is presumptively a lying harness unless N is tiny exploratory \u2014 W0b exit forbids that shape for full seed."
+    "note": "Not suspect: this run contains red (6 FAIL, 2 ERROR), so the oracle demonstrably distinguishes pass from fail on real cases. A run with pass==n and fail==0 and error==0 would flip this field."
   }
 }
