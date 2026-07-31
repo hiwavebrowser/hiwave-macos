@@ -9,6 +9,11 @@ on:
 
 env:
   RUST_BACKTRACE: 1
+  # Lifted to workflow scope on purpose: the umbrella-dispatch steps below
+  # test this in their `if`, and a step's OWN env block is not visible to
+  # its own condition (the `if` is evaluated before the step env is built).
+  # Job/workflow-level env IS visible there, so it has to live up here.
+  UMBRELLA_PAT: ${{ secrets.UMBRELLA_PAT }}
 
 jobs:
   # ===========================================================================
@@ -198,15 +203,36 @@ jobs:
           path: parity-results/commit-${{ github.run_number }}/
           retention-days: 14
 
-      # Notify umbrella repo to update metrics visualizations
+      # Notify umbrella repo to update metrics visualizations.
+      #
+      # This is a COURTESY PING, not a gate. It was failing "Bad credentials"
+      # on every single master push because UMBRELLA_PAT is not set yet, and
+      # because it is the last step of the job, a red X landed on master each
+      # time — sourced entirely from a notification step, while the parity
+      # gate above it passed. That is worse than noise: it trains everyone to
+      # read this workflow's failures as meaningless, so the day the ACTUAL
+      # gate goes red nobody looks.
+      #
+      # Two guards, both needed. The env check skips cleanly when the token
+      # is absent (today's state) rather than calling the API with an empty
+      # string; continue-on-error covers the token being PRESENT BUT WRONG —
+      # a revoked or expired PAT must not be able to fail a parity run
+      # either. The moment a valid UMBRELLA_PAT exists this starts working
+      # with no further edit.
       - name: Trigger umbrella metrics update
-        if: success()
+        if: success() && env.UMBRELLA_PAT != ''
+        continue-on-error: true
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.UMBRELLA_PAT }}
           repository: hiwavebrowser/hiwave
           event-type: metrics-updated
           client-payload: '{"platform": "macos", "run_id": "${{ github.run_number }}"}'
+
+      - name: Note when the umbrella ping was skipped
+        if: success() && env.UMBRELLA_PAT == ''
+        run: |
+          echo "::notice::UMBRELLA_PAT not set — skipped the umbrella metrics dispatch. The parity gate itself passed. Set the secret to re-enable the ping."
 
   # ===========================================================================
   # Nightly: Full swarm with stability testing
@@ -364,12 +390,19 @@ jobs:
             parity-results/regression_report.json
           retention-days: 90
 
-      # Notify umbrella repo to update metrics visualizations
+      # Same courtesy ping, same guards — see the commit-gate copy above for
+      # why a notification step must never be able to redden a parity run.
       - name: Trigger umbrella metrics update
-        if: success()
+        if: success() && env.UMBRELLA_PAT != ''
+        continue-on-error: true
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.UMBRELLA_PAT }}
           repository: hiwavebrowser/hiwave
           event-type: metrics-updated
           client-payload: '{"platform": "macos", "run_id": "${{ github.run_number }}"}'
+
+      - name: Note when the umbrella ping was skipped
+        if: success() && env.UMBRELLA_PAT == ''
+        run: |
+          echo "::notice::UMBRELLA_PAT not set — skipped the umbrella metrics dispatch. The nightly aggregate itself succeeded. Set the secret to re-enable the ping."

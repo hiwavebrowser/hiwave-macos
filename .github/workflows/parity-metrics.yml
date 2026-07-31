@@ -2,7 +2,13 @@ name: Parity Metrics
 
 on:
   push:
-    branches: ['**']  # Run on all branches
+    # Master only. This job books a 30-minute macos-14 runner, but the only
+    # step that produces anything durable — "Update metrics history" — is
+    # already gated to master/main. On a feature branch the whole run
+    # existed to upload an artifact nobody reads, while emitting a CI
+    # notification per push. Branch work is covered by the Parity Gate's
+    # pr-swarm, which actually gates.
+    branches: [master, main]
   workflow_dispatch:  # Allow manual triggers
 
 env:
