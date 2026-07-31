@@ -51,10 +51,13 @@ with pixel-level parity capture against Chrome.
 | Build | **passing** (`cargo build --workspace`, 0 errors) |
 | Tests | **985 passing**, 0 failing, 5 ignored (76/76 test binaries reported — crashed suites can't hide in these sums) |
 | Rust source | ~96,400 lines across 38 crates |
-| Visual parity vs Chrome | **88.1% average over 26 cases, 21 passing** — measured 2026-07-10, and the badge says so when that gets old |
+| Visual parity vs Chrome | **93.4% average over 26 cases, 26 passing** (avg diff 6.65%) — measured 2026-07-31 on `2fe1dee` |
+| WPT Tier-1 conformance | **6 / 12 scored** (6 pass, 6 fail, 2 blank-frame errors, n=14) — see `trench/wpt/last-run.json` |
 
-The five failing parity cases, named rather than averaged away: `settings`,
-`shelf`, `css-selectors`, `image-gallery`, `sticky-scroll` (worst diff ~48%).
+Every campaign case is now within threshold, so the campaign meter is
+**saturated** — it can no longer tell improvement from plateau, which is why
+the WPT row above exists and is the number to watch. The worst remaining
+campaign case is `gradient-backgrounds` at 14.44% diff.
 
 ### What landed recently
 
@@ -73,12 +76,18 @@ The five failing parity cases, named rather than averaged away: `settings`,
 
 ### Known gaps — stated, not hidden
 
-- **Gradient angles with `grad`/`turn` suffixes are silently dropped**
-  ([#72](https://github.com/hiwavebrowser/hiwave-macos/pull/72), fix open) —
-  `parse_angle` tested `rad` before `grad`, so `100grad` parsed as `100rad`'s
-  prefix and the angle vanished
+- **CI does not build or test the workspace.** Every cargo invocation across
+  all three workflows is `cargo build --release -p parity-capture` — one crate
+  of 38 — and there is no `cargo test` anywhere. The test count above is real
+  but is produced by developer machines, not by a gate. This is how
+  `rustkit-svg` stayed uncompilable for 17 days across 40 green merges (#59),
+  and it is the largest open hole in this repo.
 - **Animations are parsed, not executed** — transition/animation properties
   compute and survive the cascade; nothing ticks yet
+- **Two WPT cases render blank** (`empty-span-scroll`,
+  `align-items-baseline-overflow-non-visible`) — recorded as render refusals
+  rather than scored, because two blank frames "match" each other for the
+  worst possible reason
 - **Text metrics** remain the largest single source of parity diff vs Chrome
 - **No build/tests feed to the umbrella yet** — this repo's `metrics-history`
   branch carries parity data only, so the umbrella's macOS *build* badge
@@ -86,14 +95,30 @@ The five failing parity cases, named rather than averaged away: `settings`,
 
 ### How these numbers are produced
 
-Tests: `cargo test --workspace`, with the exit status captured before any
+**Tests** — `cargo test --workspace`, with the exit status captured before any
 count is read and a started-vs-reported reconciliation (76 binaries running,
-76 result lines — a crashed suite shows up as a missing name, not a clean
-sum). Parity: `scripts/parity_swarm.py` against Chrome baselines, published
-to [`metrics-history`](https://github.com/hiwavebrowser/hiwave-macos/tree/metrics-history)
-and aggregated by the [umbrella repo](https://github.com/hiwavebrowser/hiwave)'s
-`metrics.yml`, which renders the badges. A number with no path back to a
-machine that measured it does not appear on this page.
+76 result lines, so a crashed suite shows up as a missing name rather than a
+clean sum). **Run on a developer machine, not in CI** — see the first known
+gap above. Treat it as a snapshot, not a continuously-enforced guarantee.
+
+**Parity** — `scripts/parity_swarm.py` against Chrome baselines, published per
+master commit to
+[`metrics-history`](https://github.com/hiwavebrowser/hiwave-macos/tree/metrics-history)
+(`metrics/history.csv`, append-only) and aggregated by the
+[umbrella repo](https://github.com/hiwavebrowser/hiwave)'s `metrics.yml`,
+which renders the badges. The figure above is the last `master` row of that
+CSV, not the committed `parity-baseline/` snapshot — those diverge, and
+reading the snapshot is how an earlier version of this section reported a
+three-week-old 88.1% / 21-of-26 while the live feed already said 93.4% /
+26-of-26.
+
+**WPT** — `scripts/wpt_tier1.py`, engine-vs-engine reftests at the manifest
+pin; the rate excludes skips and errors from its denominator, and the harness
+refuses to publish unless a deliberately-mismatched control fails first.
+
+A number with no path back to a machine that measured it does not appear on
+this page — and a number whose path leads to a stale file is the same defect
+wearing better clothes.
 
 ---
 
