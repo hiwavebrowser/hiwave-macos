@@ -279,6 +279,16 @@ def main():
     scored = counts["PASS"] + counts["FAIL"]
     rate = round(counts["PASS"] / scored, 4) if scored else None
 
+    # Whether THIS run has the shape the pin calls presumptively dishonest:
+    # everything green, nothing red, on the full seed. Computed, not asserted
+    # — a field hardcoded to true says the same thing after a 6-FAIL run as
+    # after a suspicious one, which makes it decoration rather than a check.
+    all_green = (
+        counts["PASS"] == len(cases)
+        and counts["FAIL"] == 0
+        and counts["ERROR"] == 0
+    )
+
     last_run = {
         "schema": 1,
         "wpt_pin": manifest["wpt_pin"],
@@ -295,11 +305,19 @@ def main():
         "rate": rate,
         "cases": cases,
         "honesty": {
-            "all_green_suspect": True,
+            "all_green": all_green,
+            "all_green_suspect": all_green,
             "negative_control": "FAIL as required (checked every run; run aborts otherwise)",
-            "note": "First run with pass==n and fail==0 and error==0 is presumptively "
-                    "a lying harness unless N is tiny exploratory — W0b exit forbids "
-                    "that shape for full seed.",
+            "note": (
+                "SUSPECT: this run is all-green on the full seed, which the W0b "
+                "exit criteria treat as presumptively a lying harness rather than "
+                "a passing engine. Verify the oracle before quoting this rate."
+                if all_green else
+                "Not suspect: this run contains red "
+                f"({counts['FAIL']} FAIL, {counts['ERROR']} ERROR), so the oracle "
+                "demonstrably distinguishes pass from fail on real cases. A run "
+                "with pass==n and fail==0 and error==0 would flip this field."
+            ),
         },
     }
 
