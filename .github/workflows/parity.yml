@@ -220,6 +220,7 @@ jobs:
       # either. The moment a valid UMBRELLA_PAT exists this starts working
       # with no further edit.
       - name: Trigger umbrella metrics update
+        id: umbrella_dispatch
         if: success() && env.UMBRELLA_PAT != ''
         continue-on-error: true
         uses: peter-evans/repository-dispatch@v3
@@ -228,6 +229,23 @@ jobs:
           repository: hiwavebrowser/hiwave
           event-type: metrics-updated
           client-payload: '{"platform": "macos", "run_id": "${{ github.run_number }}"}'
+
+      # continue-on-error keeps a broken ping from failing the gate, but on
+      # its own it also makes the ping's failure INVISIBLE: the step reports
+      # conclusion=success while its outcome was failure, and the job goes
+      # green with the umbrella never notified. That is the same shape as
+      # every other defect this repo has caught — a failure mode
+      # indistinguishable from success. Fatal and silent are both wrong; the
+      # answer is loud and non-fatal.
+      #
+      # Measured 2026-07-31 on master 2fe1dee: the token is SET but REJECTED
+      # ("Bad credentials"), so the empty-token branch never fires and this
+      # warning is the only thing that will tell anyone the umbrella has
+      # stopped being pinged. It needs a rotated PAT, not a new secret.
+      - name: Report umbrella ping status
+        if: always() && steps.umbrella_dispatch.outcome == 'failure'
+        run: |
+          echo "::warning::UMBRELLA_PAT is set but was REJECTED by the API — the umbrella metrics dispatch did NOT fire, so hiwavebrowser/hiwave will not refresh its badges from this run. The parity gate itself passed; this is a stale-credential problem. Rotate the PAT."
 
       - name: Note when the umbrella ping was skipped
         if: success() && env.UMBRELLA_PAT == ''
@@ -393,6 +411,7 @@ jobs:
       # Same courtesy ping, same guards — see the commit-gate copy above for
       # why a notification step must never be able to redden a parity run.
       - name: Trigger umbrella metrics update
+        id: umbrella_dispatch
         if: success() && env.UMBRELLA_PAT != ''
         continue-on-error: true
         uses: peter-evans/repository-dispatch@v3
@@ -401,6 +420,12 @@ jobs:
           repository: hiwavebrowser/hiwave
           event-type: metrics-updated
           client-payload: '{"platform": "macos", "run_id": "${{ github.run_number }}"}'
+
+      # See the commit-gate copy: non-fatal must not mean invisible.
+      - name: Report umbrella ping status
+        if: always() && steps.umbrella_dispatch.outcome == 'failure'
+        run: |
+          echo "::warning::UMBRELLA_PAT is set but was REJECTED by the API — the umbrella metrics dispatch did NOT fire, so hiwavebrowser/hiwave will not refresh its badges from this nightly. The aggregate itself succeeded; this is a stale-credential problem. Rotate the PAT."
 
       - name: Note when the umbrella ping was skipped
         if: success() && env.UMBRELLA_PAT == ''
