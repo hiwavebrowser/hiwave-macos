@@ -2368,17 +2368,49 @@ pub(crate) fn estimate_max_content_width(layout_box: &LayoutBox) -> f32 {
     max_contribution + padding_border
 }
 
+/// Resolve a length used in an intrinsic-size contribution to px.
+///
+/// These used to be `if let Length::Px(v) = l { v } else { 0.0 }`, which
+/// silently dropped EVERY relative unit. `padding: 0.25rem 0.5rem` — an
+/// entirely ordinary declaration — contributed zero, so an element's
+/// min/max-content width came out one padding-box too small.
+///
+/// The consequences were not cosmetic. Grid tracks sized from these
+/// contributions were too narrow, and flex items floored at an
+/// automatic-minimum computed here could be shrunk by exactly their own
+/// padding — which is how a `kbd` chip whose basis was 34.66px got squeezed
+/// to 18.66px while paint still drew its glyphs at full width.
+///
+/// Percentages are the one case still returning 0.0: they resolve against the
+/// containing block, which is not available at intrinsic-sizing time. That is
+/// a real remaining gap, left explicit here rather than hidden behind the
+/// same silent fallback that caused this bug.
+fn intrinsic_len_px(l: &Length, font_size: f32) -> f32 {
+    match l {
+        Length::Percent(_) => 0.0,
+        other => other.to_px_with_viewport(font_size, 16.0, 0.0, 800.0, 600.0),
+    }
+}
+
+/// The font size a relative length on this element resolves against.
+fn style_font_size_px(style: &ComputedStyle) -> f32 {
+    match style.font_size {
+        Length::Px(px) => px,
+        ref other => other.to_px_with_viewport(16.0, 16.0, 0.0, 800.0, 600.0),
+    }
+}
+
 fn horizontal_margins(style: &ComputedStyle) -> f32 {
-    let px = |l: &Length| if let Length::Px(v) = l { *v } else { 0.0 };
-    px(&style.margin_left) + px(&style.margin_right)
+    let fs = style_font_size_px(style);
+    intrinsic_len_px(&style.margin_left, fs) + intrinsic_len_px(&style.margin_right, fs)
 }
 
 fn horizontal_padding_border(style: &ComputedStyle) -> f32 {
-    let px = |l: &Length| if let Length::Px(v) = l { *v } else { 0.0 };
-    px(&style.padding_left)
-        + px(&style.padding_right)
-        + px(&style.border_left_width)
-        + px(&style.border_right_width)
+    let fs = style_font_size_px(style);
+    intrinsic_len_px(&style.padding_left, fs)
+        + intrinsic_len_px(&style.padding_right, fs)
+        + intrinsic_len_px(&style.border_left_width, fs)
+        + intrinsic_len_px(&style.border_right_width, fs)
 }
 
 fn size_grid_tracks(tracks: &mut [GridTrack], container_size: f32, gap: f32) {
@@ -2834,6 +2866,73 @@ mod tests {
         ]);
 
         LayoutBox::new(BoxType::Block, style)
+    }
+
+    /// Intrinsic contributions must count padding expressed in ANY unit.
+    ///
+    /// T-RED: with the old `if let Length::Px(v) = l { v } else { 0.0 }`
+    /// closure, the rem case returns the bare text width and this fails —
+    /// a whole padding box goes missing from the element's min-content size.
+    ///
+    /// That is not a rounding error. A flex item floored at this value could
+    /// be shrunk by exactly its own padding, which is how a `kbd` chip with
+    /// `padding: 0.25rem 0.5rem` and a basis of 34.66px got squeezed to
+    /// 18.66px while paint still drew its glyphs at full width.
+    #[test]
+    fn min_content_width_counts_padding_in_relative_units() {
+        let text_only = {
+            let mut s = ComputedStyle::new();
+            s.font_size = Length::Px(12.0);
+            let mut b = LayoutBox::new(BoxType::Block, s.clone());
+            b.children
+                .push(LayoutBox::new(BoxType::Text("Ctrl".to_string()), s));
+            estimate_min_content_width(&b)
+        };
+
+        let with_rem_padding = {
+            let mut s = ComputedStyle::new();
+            s.font_size = Length::Px(12.0);
+            s.padding_left = Length::Rem(0.5); // 8px against the 16px root
+            s.padding_right = Length::Rem(0.5);
+            let mut child = ComputedStyle::new();
+            child.font_size = Length::Px(12.0);
+            let mut b = LayoutBox::new(BoxType::Block, s);
+            b.children
+                .push(LayoutBox::new(BoxType::Text("Ctrl".to_string()), child));
+            estimate_min_content_width(&b)
+        };
+
+        // Assert the baseline is non-zero first: if the text measured 0 the
+        // delta below would be 0 too and the test would pass vacuously.
+        assert!(
+            text_only > 1.0,
+            "setup failed: unpadded min-content was {text_only}, so this test cannot detect anything"
+        );
+
+        let delta = with_rem_padding - text_only;
+        assert!(
+            (delta - 16.0).abs() < 0.01,
+            "rem padding contributed {delta}px, expected 16px (0.5rem each side). \
+             Relative units are being dropped from intrinsic sizing."
+        );
+    }
+
+    /// The same for em, which resolves against the ELEMENT's own font-size
+    /// rather than the root — a different code path through the resolver.
+    #[test]
+    fn min_content_width_counts_em_padding_against_element_font_size() {
+        let mut s = ComputedStyle::new();
+        s.font_size = Length::Px(20.0);
+        s.padding_left = Length::Em(1.0); // 20px, not 16
+        s.padding_right = Length::Em(1.0);
+        let b = LayoutBox::new(BoxType::Block, s);
+
+        let got = estimate_min_content_width(&b);
+        assert!(
+            (got - 40.0).abs() < 0.01,
+            "em padding on a 20px font contributed {got}px, expected 40px — \
+             em is resolving against the wrong font size (or being dropped)"
+        );
     }
 
     #[test]

@@ -699,8 +699,60 @@ fn create_flex_item<'a>(
     // This ensures flex items have proper sizing even without explicit min-width/height
     let intrinsic_cross =
         get_intrinsic_cross_size(&layout_box.box_type, main_axis, &layout_box.style);
+    // CSS Flexbox §4.5 — automatic minimum size.
+    //
+    // `min-width: auto` is the DEFAULT for a flex item, and the spec resolves
+    // it to the item's content-based minimum (min-content), not to zero.
+    // Flooring at zero let shrink_items() squeeze items arbitrarily narrow,
+    // including text: layout believed a run was 9.36px wide while paint drew
+    // it at its true 18.66px, because the shaper is downstream of this and
+    // never saw the squeeze. That mismatch is what put overlapping keyboard
+    // chips on the new-tab page.
+    //
+    // Note the shape of the bug: the CROSS axis a few lines below already
+    // falls back to `intrinsic_cross + cross_pb`. Only the main axis fell
+    // through to 0.0, so the two axes disagreed about whether an unset
+    // minimum means "no floor" or "the content floor".
+    //
+    // Conditions, both required by the spec:
+    //   - the specified minimum is `auto` — an AUTHOR writing `min-width: 0`
+    //     is explicitly asking to shrink to nothing and must keep getting it,
+    //     which is why this tests the Length variant rather than `> 0.0`
+    //     (resolve_length maps both Auto and Px(0) to 0.0).
+    //   - the item's own overflow on the main axis is `visible`; any other
+    //     value means the item can clip its content, so the content stops
+    //     floring the box.
+    //
+    // estimate_min_content_width already returns a border-box figure for
+    // element boxes (it adds padding+border itself) and a bare text measure
+    // for text runs, which have neither. So it is used RAW — passing it
+    // through spec_main_to_border_box would count padding twice.
+    let specified_min_is_auto = matches!(
+        match main_axis {
+            Axis::Horizontal => &layout_box.style.min_width,
+            Axis::Vertical => &layout_box.style.min_height,
+        },
+        rustkit_css::Length::Auto
+    );
+    let main_overflow_is_visible = matches!(
+        match main_axis {
+            Axis::Horizontal => layout_box.style.overflow_x,
+            Axis::Vertical => layout_box.style.overflow_y,
+        },
+        rustkit_css::Overflow::Visible
+    );
+
     let min_main = if css_min_main > 0.0 {
         spec_main_to_border_box(css_min_main)
+    } else if specified_min_is_auto && main_overflow_is_visible {
+        match main_axis {
+            Axis::Horizontal => crate::grid::estimate_min_content_width(layout_box),
+            // No min-content HEIGHT estimator exists yet. Returning 0.0 keeps
+            // the previous behaviour on the vertical main axis rather than
+            // inventing a number — stated so the gap is visible instead of
+            // looking like the rule is implemented on both axes.
+            Axis::Vertical => 0.0,
+        }
     } else {
         0.0
     };
