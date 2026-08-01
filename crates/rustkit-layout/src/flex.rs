@@ -225,7 +225,19 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
     // For column direction, cross axis is horizontal (width)
     let has_definite_cross_size = match cross_axis {
         Axis::Vertical => !matches!(container.style.height, Length::Auto),
-        Axis::Horizontal => !matches!(container.style.width, Length::Auto),
+        // A block-level flex container with `width: auto` still has a
+        // DEFINITE used width — it resolves against its containing block.
+        // Treating auto as indefinite sent the stretch path down the
+        // "auto container" arm, where the target is the largest item in the
+        // line instead of the container width, so column children stretched
+        // to each other rather than to the viewport.
+        //
+        // The height case is deliberately NOT symmetric: an auto-height row
+        // container really is indefinite (it is sized BY its content), and
+        // test_auto_height_stretch depends on that staying true.
+        Axis::Horizontal => {
+            !matches!(container.style.width, Length::Auto) || container_cross_size > 0.0
+        }
     };
 
     // The definite inner cross size, resolved from STYLE rather than from
@@ -318,6 +330,7 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
             container_cross_size,
             style.align_items,
             has_definite_cross_size,
+            cross_axis,
         );
     }
 
@@ -994,6 +1007,7 @@ fn calculate_cross_sizes(
     container_cross: f32,
     align_items: AlignItems,
     has_definite_cross_size: bool,
+    cross_axis: Axis,
 ) {
     // PASS 1: Calculate content-based cross sizes for ALL items (ignore stretch for now)
     // This determines the "natural" height of each item
@@ -1005,7 +1019,7 @@ fn calculate_cross_sizes(
         // the item's own padding+border.
         let content_cross_size = match item.explicit_cross_size {
             Some(explicit) => explicit,
-            None => get_content_cross_size(item.layout_box) + item.cross_pb(),
+            None => get_content_cross_size(item.layout_box, cross_axis) + item.cross_pb(),
         };
 
         // Apply min/max constraints to content size
@@ -1074,7 +1088,83 @@ fn calculate_cross_sizes(
 
 /// Get the content-based cross size for a layout box.
 /// This computes the hypothetical cross size based on content, intrinsic sizing, or children.
-fn get_content_cross_size(layout_box: &LayoutBox) -> f32 {
+/// Content-based size of an item along the CROSS axis.
+///
+/// This used to be height-only, with no idea which axis it was measuring. In
+/// a `flex-direction: column` container the cross axis is HORIZONTAL, so a
+/// height was being handed back as a width: `apply_positions` then wrote it
+/// into the box's width and produced literally square boxes whose width
+/// tracked their line count. A two-line item came out 32x32.
+///
+/// Splitting on the axis is the fix. The vertical path is the original
+/// behaviour, untouched; the horizontal path is new and must never fall back
+/// to line-height, which is the specific wrong answer that caused this.
+fn get_content_cross_size(layout_box: &LayoutBox, cross_axis: Axis) -> f32 {
+    match cross_axis {
+        Axis::Vertical => get_content_cross_height(layout_box),
+        Axis::Horizontal => get_content_cross_width(layout_box),
+    }
+}
+
+/// Content-based WIDTH, for items in a column flex container.
+///
+/// Returns a CONTENT-box figure: the caller adds the item's own padding and
+/// border via `cross_pb()`, so including them here would double-count.
+fn get_content_cross_width(layout_box: &LayoutBox) -> f32 {
+    // An already-laid-out width is the best answer available.
+    if layout_box.dimensions.content.width > 0.0 {
+        return layout_box.dimensions.content.width;
+    }
+
+    let font_size = match layout_box.style.font_size {
+        Length::Px(px) => px,
+        _ => 16.0,
+    };
+
+    if let crate::BoxType::Text(text) = &layout_box.box_type {
+        return crate::measure_text_advanced(
+            text,
+            &layout_box.style.font_family,
+            font_size,
+            layout_box.style.font_weight,
+            layout_box.style.font_style,
+        )
+        .width;
+    }
+
+    if let crate::BoxType::Image { natural_width, .. } = &layout_box.box_type {
+        if *natural_width > 0.0 {
+            return *natural_width;
+        }
+    }
+
+    match layout_box.style.width {
+        Length::Px(px) if px > 0.0 => return px,
+        Length::Em(em) if em > 0.0 => return em * font_size,
+        _ => {}
+    }
+
+    // Block-level children STACK vertically, so the container's content width
+    // is the widest child — not the sum, which is the row-axis answer.
+    if !layout_box.children.is_empty() {
+        let widest = layout_box
+            .children
+            .iter()
+            .map(|c| c.dimensions.margin_box().width)
+            .fold(0.0f32, f32::max);
+        if widest > 0.0 {
+            return widest;
+        }
+    }
+
+    // Deliberately 0.0 rather than line-height. On the horizontal axis a line
+    // height is not a width, and returning one is what produced square boxes.
+    // Zero lets the stretch path supply the real number.
+    0.0
+}
+
+/// Content-based HEIGHT — the original implementation, unchanged in behaviour.
+fn get_content_cross_height(layout_box: &LayoutBox) -> f32 {
     // If the box already has a computed height from layout, use it
     if layout_box.dimensions.content.height > 0.0 {
         return layout_box.dimensions.content.height;
@@ -2036,6 +2126,106 @@ mod tests {
         let child_y = container.children[0].dimensions.content.y;
         // Note: actual centering depends on line cross_size calculation
         assert!(child_y >= 0.0);
+    }
+
+    /// Column flex items must STRETCH to the container width by default.
+    ///
+    /// `align-items` defaults to `stretch`, and in a column container the
+    /// cross axis is horizontal — so children fill the width and keep their
+    /// content heights.
+    ///
+    /// T-RED: before the axis-aware split of get_content_cross_size, this
+    /// failed with widths tracking the items' own heights, producing square
+    /// boxes. The existing test_column_direction could not catch it because
+    /// it only asserts vertical ORDER, never a width.
+    ///
+    /// Root-caused by Prometheus from the repro in defect-report 8e21b9e12ffc.
+    #[test]
+    fn test_column_stretch_fills_cross_axis_width() {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        // width stays Auto on purpose: a block-level flex container with
+        // auto width still has a definite USED width from its containing
+        // block, and treating that as indefinite is half of the bug.
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        for h in [16.0f32, 32.0f32] {
+            let mut cs = ComputedStyle::new();
+            cs.height = Length::Px(h);
+            cs.flex_basis = rustkit_css::FlexBasis::Length(h);
+            container.children.push(LayoutBox::new(BoxType::Block, cs));
+        }
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 1000.0, 600.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        for (i, child) in container.children.iter().enumerate() {
+            let w = child.dimensions.content.width;
+            assert!(
+                (w - 1000.0).abs() < 0.5,
+                "column child {i} width {w}, expected 1000 (align-items:stretch on the \
+                 cross axis). A width equal to the child's own height means the cross \
+                 size is being measured on the main axis."
+            );
+        }
+
+        // Heights must survive: stretching the cross axis must not disturb
+        // main-axis sizing, or "fixed" would just mean "square".
+        assert!((container.children[0].dimensions.content.height - 16.0).abs() < 0.5);
+        assert!((container.children[1].dimensions.content.height - 32.0).abs() < 0.5);
+    }
+
+    /// With stretch OFF, a column item's cross size is its content WIDTH.
+    ///
+    /// This is the companion to test_column_stretch_fills_cross_axis_width,
+    /// and it exists because that test turned out NOT to be a T-RED for the
+    /// axis fix: when stretch applies it overwrites the content-cross value,
+    /// so a height-measured cross size is invisible. I found that by reverting
+    /// the axis split and watching the stretch test stay green.
+    ///
+    /// `align-items: flex-start` is what makes the content measurement
+    /// load-bearing, so this is the test that actually fails if
+    /// get_content_cross_size goes back to measuring height on both axes.
+    #[test]
+    fn test_column_non_stretch_item_uses_content_width_not_height() {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.align_items = AlignItems::FlexStart; // no stretch to mask it
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        // A tall, narrow child whose width is AUTO. The auto width is what
+        // makes this bite: an explicit cross size short-circuits the content
+        // measurement entirely, so a test that sets `width` cannot reach
+        // get_content_cross_size at all. (I wrote it that way first and the
+        // T-RED stayed green — the code under test was simply unreachable.)
+        //
+        // Pre-seeding the laid-out rect at 200x400 gives the measurement two
+        // clearly different numbers to pick from, so a wrong-axis read is
+        // unambiguous rather than a near miss.
+        let mut cs = ComputedStyle::new();
+        cs.height = Length::Px(400.0);
+        cs.flex_basis = rustkit_css::FlexBasis::Length(400.0);
+        let mut child = LayoutBox::new(BoxType::Block, cs);
+        child.dimensions.content = Rect::new(0.0, 0.0, 200.0, 400.0);
+        container.children.push(child);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 1000.0, 600.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        let w = container.children[0].dimensions.content.width;
+        assert!(
+            (w - 200.0).abs() < 0.5,
+            "non-stretch column child width {w}, expected 200. A value near 400 means \
+             the cross size was measured as a HEIGHT."
+        );
     }
 
     #[test]
