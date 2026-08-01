@@ -24,6 +24,12 @@ and the layout — geometry, colour, cascade, paint order. Font-metric outputs
 (baseline y, ascent, advance widths) are NOT asserted: they legitimately
 differ by text stack, and pinning them would make the gate report a platform
 difference as an engine regression.
+
+`hiwave_diff` is checked in BOTH directions, because a comparison tool that
+can only agree is not a comparison tool. `hero` must agree with its reference
+on every hand-derived value; `important-width` must DISAGREE, on a real bug —
+the cascade parses `!important` and never reads it — and must name the two
+paths and both numbers. See `cases/README.md`.
 """
 import json
 import subprocess
@@ -31,6 +37,7 @@ import sys
 from pathlib import Path
 
 BIN = Path(__file__).resolve().parents[2] / "target" / "debug" / "hiwave-mcp"
+CASES = Path(__file__).resolve().parent / "cases"
 
 # `div { width: 100px }` sits AFTER `.hero` on purpose and is load-bearing for
 # the hiwave_style assertions: it matches the same element, it is later in
@@ -107,7 +114,7 @@ def main():
     names = [t["name"] for t in client.call("tools/list")["result"]["tools"]]
     assert set(names) == {
         "hiwave_open", "hiwave_layout", "hiwave_display_list", "hiwave_style",
-        "hiwave_screenshot", "hiwave_status",
+        "hiwave_diff", "hiwave_screenshot", "hiwave_status",
     }, names
     print(f"ok  tools/list        {names}")
 
@@ -285,6 +292,98 @@ def main():
     assert value is None and "simple selectors only" in error, (value, error)
     print(f"ok  selector guard    refused 'div p'")
 
+    # ---- hiwave_diff --------------------------------------------------------
+    # The join. Layout, paint and cascade each report what the engine did;
+    # this reports whether that MATCHES what it should have done, per stage,
+    # naming every field that disagrees and both values.
+
+    # The agreeing path. `checked` is asserted against the reference file's own
+    # length so this cannot pass vacuously: an empty `expect` array would also
+    # report agrees=True, and a diff tool that agrees with nothing is the
+    # decorative gate this trench exists to avoid.
+    hero_ref = json.loads((CASES / "hero" / "spec.layout.json").read_text())
+    hero_expect = hero_ref["expect"]
+    by_path = {e["path"]: e["value"] for e in hero_expect}
+    # The reference must actually pin the number the whole crate is built on.
+    assert by_path["root.children[0].children[0].border_box.width"] == 432.0, by_path
+    assert by_path["root.children[0].children[0].border_box.height"] == 152.0, by_path
+
+    d, error = client.tool("hiwave_diff", case="hero", stage="layout", reference="spec")
+    assert error is None, error
+    assert d["checked"] == len(hero_expect) >= 12, (d["checked"], len(hero_expect))
+    assert d["differences"] == 0 and d["agrees"] is True, d
+    assert d["disagreements"] == [], d["disagreements"]
+    print(f"ok  hiwave_diff       hero/layout agrees with the spec reference on "
+          f"{d['checked']}/{d['checked']} hand-derived values (incl. border_box 432x152)")
+
+    # Same machinery, the other stage — so `stage` is a real argument and not a
+    # single-stage tool wearing a parameter.
+    dl_expect = json.loads((CASES / "hero" / "spec.display_list.json").read_text())["expect"]
+    d, error = client.tool("hiwave_diff", case="hero", stage="display_list", reference="spec")
+    assert error is None, error
+    assert d["checked"] == len(dl_expect) >= 17, (d["checked"], len(dl_expect))
+    assert d["agrees"] is True, d
+    print(f"ok  hiwave_diff       hero/display_list agrees on {d['checked']} values "
+          f"(paint order, #08c over 432x152, 32px/700 text at x=16)")
+
+    # THE ASSERTION hiwave_diff EXISTS FOR — the disagreeing path, on a REAL
+    # engine bug rather than a contrived one.
+    #
+    #     .hero { width: 400px }
+    #     div   { width: 100px !important }
+    #
+    # `!important` outranks a normal declaration of the same origin regardless
+    # of specificity, so the width is 100px in every browser. RustKit parses
+    # the flag, carries it, and then never reads it — the cascade sorts by
+    # specificity and source order only — so it computes 400px. The diff must
+    # report exactly that, with both numbers, at the two paths width reaches.
+    #
+    # NOTE FOR WHOEVER FIXES THE CASCADE: when `!important` is honoured this
+    # case starts AGREEING and the three asserts below go red. That flip is the
+    # signal working, not a broken test — set expected differences to 0.
+    d, error = client.tool("hiwave_diff", case="important-width",
+                           stage="layout", reference="spec")
+    assert error is None, error
+    assert d["agrees"] is False, d
+    assert d["checked"] == 4 and d["differences"] == 2, d
+    widths = {x["path"]: x for x in d["disagreements"]}
+    border = widths["root.children[0].children[0].border_box.width"]
+    assert border["expected"] == 100.0 and border["actual"] == 400.0, border
+    content = widths["root.children[0].children[0].content_rect.width"]
+    assert content["expected"] == 100.0 and content["actual"] == 400.0, content
+    # ...and the two uncontested values in the same reference still agree, so
+    # the disagreement is attributed to one property rather than "everything".
+    assert "root.children[0].children[0].border_box.height" not in widths, d
+    assert "root.children[0].children[0].border_box.x" not in widths, d
+    print(f"ok  hiwave_diff       important-width DISAGREES: border_box.width "
+          f"expected {border['expected']} (spec: !important wins), engine computed "
+          f"{border['actual']} — 2 of 4, height and x still agree")
+
+    # The diff runs its case in its own engine, so it must not have disturbed
+    # the page the session has open. Re-asserting the original number is the
+    # cheapest way to prove it.
+    tree_again, error = client.tool("hiwave_layout")
+    assert error is None, error
+    hero_again = find(tree_again["root"],
+                      lambda n: (n.get("border_box") or {}).get("width") == 432.0)
+    assert hero_again is not None, "the diff clobbered the open session's page"
+    print(f"ok  session isolation open page still 432x152 after three diffs")
+
+    # Inputs it cannot honestly answer are refused, not guessed at. `case` and
+    # `reference` are joined onto a directory, so a name that escapes it is a
+    # bug worth a test rather than a comment.
+    for args, expect in (
+        (dict(case="hero", stage="style", reference="spec"), "unknown stage"),
+        (dict(case="no-such-case", reference="spec"), "no such case"),
+        (dict(case="hero", reference="no-such-reference"), "no reference"),
+        (dict(case="../../etc", reference="spec"), "must be a plain name"),
+        (dict(case="hero"), "`reference` is required"),
+    ):
+        value, error = client.tool("hiwave_diff", **args)
+        assert value is None and expect in error, (args, value, error)
+    print(f"ok  diff guards       unknown stage, unknown case, unknown reference, "
+          f"path escape and missing argument all refused")
+
     shot, error = client.tool("hiwave_screenshot")
     assert error is None, error
     frame = Path(shot["path"])
@@ -299,7 +398,8 @@ def main():
 
     client.close()
     print("\nPASS: hiwave-mcp serves the engine's computed layout, its paint "
-          "commands, AND the cascade behind them over MCP")
+          "commands, the cascade behind them, AND whether any of it agrees "
+          "with a committed reference")
 
 
 if __name__ == "__main__":

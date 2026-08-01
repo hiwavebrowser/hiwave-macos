@@ -40,6 +40,93 @@ use serde_json::{json, Value};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
+/// Where `hiwave_diff` looks for cases. Baked to this crate's directory so the
+/// tool works from any cwd; `HIWAVE_MCP_CASES` overrides it for a checkout in
+/// another location.
+fn cases_dir() -> PathBuf {
+    std::env::var_os("HIWAVE_MCP_CASES")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cases"))
+}
+
+/// A required argument that names a directory entry, not a path.
+///
+/// `case` and `reference` are joined onto a directory, so `..` or a separator
+/// would let a caller read outside the case tree. This server already reads any
+/// file the developer can read via `hiwave_open { path }` — deliberately, see
+/// the module header — but that is an explicit argument, and a name silently
+/// escaping its directory is a different thing.
+fn name_arg(args: &Value, key: &str) -> Result<String, String> {
+    let value = args
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("`{key}` is required"))?;
+    if value.is_empty()
+        || value.contains(['/', '\\'])
+        || value.contains("..")
+        || value.starts_with('.')
+    {
+        return Err(format!("`{key}` must be a plain name, got {value:?}"));
+    }
+    Ok(value.to_string())
+}
+
+/// Resolve a dotted path with array indices — `root.children[0].border_box.width`.
+fn resolve<'a>(doc: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut cur = doc;
+    for segment in path.split('.') {
+        if segment.is_empty() {
+            return None;
+        }
+        let mut parts = segment.split('[');
+        let name = parts.next().unwrap();
+        if !name.is_empty() {
+            cur = cur.get(name)?;
+        }
+        for index in parts {
+            let index = index.strip_suffix(']')?;
+            cur = cur.get(index.parse::<usize>().ok()?)?;
+        }
+    }
+    Some(cur)
+}
+
+/// Build a headless engine, load `html`, render it.
+///
+/// Shared by `hiwave_open` and `hiwave_diff` on purpose: a diff that configured
+/// the engine even slightly differently from the session would report the
+/// difference between two setups as a difference in the engine.
+fn build_view(
+    html: &str,
+    width: u32,
+    height: u32,
+) -> Result<(Engine, rustkit_engine::EngineViewId), String> {
+    let mut engine = EngineBuilder::new()
+        .with_config(EngineConfig::for_parity_testing())
+        .user_agent("HiWaveMCP/0.1")
+        .javascript_enabled(false)
+        .build()
+        .map_err(|e| format!("engine build failed: {e:?}"))?;
+
+    let view_id = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width, height })
+        .map_err(|e| format!("headless view failed: {e:?}"))?;
+
+    // Always on here, and it must precede the load: the cascade records as it
+    // runs, so arming it afterwards would leave `hiwave_style` with an empty
+    // trace for a page that is plainly loaded. This server is a diagnostic
+    // tool — recording provenance is the job, not overhead.
+    engine.set_style_recording(true);
+
+    engine
+        .load_html(view_id, html)
+        .map_err(|e| format!("load failed: {e:?}"))?;
+    engine
+        .render_view(view_id)
+        .map_err(|e| format!("render failed: {e:?}"))?;
+    Ok((engine, view_id))
+}
+
 /// One loaded page: the engine, its headless view, and how it was created.
 struct Session {
     engine: Engine,
@@ -86,29 +173,7 @@ impl Server {
             (None, None) => return Err("one of `html` or `path` is required".into()),
         };
 
-        let mut engine = EngineBuilder::new()
-            .with_config(EngineConfig::for_parity_testing())
-            .user_agent("HiWaveMCP/0.1")
-            .javascript_enabled(false)
-            .build()
-            .map_err(|e| format!("engine build failed: {e:?}"))?;
-
-        let view_id = engine
-            .create_headless_view(Bounds { x: 0, y: 0, width, height })
-            .map_err(|e| format!("headless view failed: {e:?}"))?;
-
-        // Always on here, and it must precede the load: the cascade records
-        // as it runs, so arming it afterwards would leave `hiwave_style` with
-        // an empty trace for a page that is plainly loaded. This server is a
-        // diagnostic tool — recording provenance is the job, not overhead.
-        engine.set_style_recording(true);
-
-        engine
-            .load_html(view_id, &html)
-            .map_err(|e| format!("load failed: {e:?}"))?;
-        engine
-            .render_view(view_id)
-            .map_err(|e| format!("render failed: {e:?}"))?;
+        let (engine, view_id) = build_view(&html, width, height)?;
 
         self.session = Some(Session { engine, view_id, width, height, source: source.clone() });
         Ok(json!({ "loaded": source, "width": width, "height": height }))
@@ -174,6 +239,158 @@ impl Server {
         serde_json::from_str(&raw).map_err(|e| format!("style JSON unreadable: {e}"))
     }
 
+    /// Stage-wise agreement between what this engine computes and a committed
+    /// reference — the join the other three tools were built to feed.
+    ///
+    /// The artefacts it compares are TEXT: layout trees and display lists, not
+    /// framebuffers. That is the whole point. A porting seat asking "did my
+    /// port compute the same thing the reference computed" cannot answer it
+    /// with a pixel capture on a machine whose GPU capture is untrusted, and a
+    /// unit-test count can be cfg-gated out without anyone noticing. A stage
+    /// diff answers it directly and is deterministic on any machine.
+    ///
+    /// It runs the case in its OWN engine rather than the open session, so a
+    /// diff never depends on what someone happened to load first, and never
+    /// disturbs it.
+    fn diff(&mut self, args: &Value) -> Result<Value, String> {
+        let case = name_arg(args, "case")?;
+        let reference = name_arg(args, "reference")?;
+        let stage = args
+            .get("stage")
+            .and_then(Value::as_str)
+            .unwrap_or("layout")
+            .to_string();
+        if stage != "layout" && stage != "display_list" {
+            return Err(format!(
+                "unknown stage `{stage}` — this tool diffs `layout` or `display_list`. \
+                 Those are the deterministic text stages; `style` and `screenshot` are not \
+                 diffable here yet."
+            ));
+        }
+
+        let dir = cases_dir().join(&case);
+        if !dir.is_dir() {
+            return Err(format!("no such case `{case}` — expected {}", dir.display()));
+        }
+        let page = dir.join("page.html");
+        let ref_path = dir.join(format!("{reference}.{stage}.json"));
+        let raw = fs::read_to_string(&ref_path).map_err(|e| {
+            format!(
+                "no reference `{reference}` for case `{case}` at stage `{stage}` \
+                 ({}): {e}",
+                ref_path.display()
+            )
+        })?;
+        let doc: Value = serde_json::from_str(&raw)
+            .map_err(|e| format!("reference {} is not readable JSON: {e}", ref_path.display()))?;
+
+        // A reference that does not say what it is cannot be trusted to say
+        // what the engine should be. Every field below is required.
+        let kind = doc
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or("reference has no `kind`")?;
+        if kind != "expectations" {
+            return Err(format!(
+                "reference kind `{kind}` is not implemented — this tool reads \
+                 `expectations` (a list of hand-derived path/value pairs). Full committed \
+                 captures are the other reference kind the plan calls for and they are NOT \
+                 supported yet."
+            ));
+        }
+        if doc.get("stage").and_then(Value::as_str) != Some(stage.as_str()) {
+            return Err(format!(
+                "reference {} declares stage {:?}, not `{stage}`",
+                ref_path.display(),
+                doc.get("stage")
+            ));
+        }
+        let expectations = doc
+            .get("expect")
+            .and_then(Value::as_array)
+            .ok_or("reference has no `expect` array")?;
+
+        // Layout depends on the viewport, so the reference states the one its
+        // numbers were derived at rather than inheriting whatever is open.
+        let vp = doc.get("viewport").ok_or("reference has no `viewport`")?;
+        let width = vp.get("width").and_then(Value::as_u64).ok_or("viewport.width")? as u32;
+        let height = vp.get("height").and_then(Value::as_u64).ok_or("viewport.height")? as u32;
+
+        let html = fs::read_to_string(&page)
+            .map_err(|e| format!("cannot read {}: {e}", page.display()))?;
+        let live = self.export_stage(&html, &stage, width, height)?;
+
+        let mut differences = Vec::new();
+        for (i, want) in expectations.iter().enumerate() {
+            let path = want
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("expect[{i}] has no `path`"))?;
+            let expected = want
+                .get("value")
+                .ok_or_else(|| format!("expect[{i}] has no `value`"))?;
+            let why = want.get("why").cloned().unwrap_or(Value::Null);
+            let tolerance = want.get("tolerance").and_then(Value::as_f64);
+
+            match resolve(&live, path) {
+                None => differences.push(json!({
+                    "path": path, "expected": expected, "actual": null, "why": why,
+                    "note": "no such path in the live export",
+                })),
+                Some(actual) => {
+                    // Compared as numbers when both are numbers, so `432` in a
+                    // reference and `432.0` from the engine are not a false diff.
+                    let same = match (expected.as_f64(), actual.as_f64()) {
+                        (Some(e), Some(a)) => match tolerance {
+                            Some(t) => (e - a).abs() <= t,
+                            None => e == a,
+                        },
+                        _ => expected == actual,
+                    };
+                    if !same {
+                        differences.push(json!({
+                            "path": path, "expected": expected, "actual": actual,
+                            "why": why, "tolerance": tolerance,
+                        }));
+                    }
+                }
+            }
+        }
+
+        Ok(json!({
+            "case": case,
+            "stage": stage,
+            "reference": reference,
+            "reference_kind": kind,
+            "reference_origin": doc.get("origin").cloned().unwrap_or(Value::Null),
+            "viewport": { "width": width, "height": height },
+            "checked": expectations.len(),
+            "differences": differences.len(),
+            "agrees": differences.is_empty(),
+            "disagreements": differences,
+        }))
+    }
+
+    /// Load `html` into a throwaway engine and return one stage's export.
+    fn export_stage(
+        &mut self,
+        html: &str,
+        stage: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<Value, String> {
+        let dir = self.scratch().map_err(|e| e.to_string())?;
+        let out = dir.join(format!("diff.{stage}.json"));
+        let (engine, view_id) = build_view(html, width, height)?;
+        match stage {
+            "layout" => engine.export_layout_json(view_id, out.to_str().unwrap()),
+            _ => engine.export_display_list_json(view_id, out.to_str().unwrap()),
+        }
+        .map_err(|e| format!("{stage} export failed: {e:?}"))?;
+        let raw = fs::read_to_string(&out).map_err(|e| e.to_string())?;
+        serde_json::from_str(&raw).map_err(|e| format!("{stage} JSON unreadable: {e}"))
+    }
+
     fn screenshot(&mut self, args: &Value) -> Result<Value, String> {
         let dir = self.scratch().map_err(|e| e.to_string())?;
         let out = match args.get("path").and_then(Value::as_str) {
@@ -208,6 +425,7 @@ impl Server {
             "hiwave_layout" => self.layout(args),
             "hiwave_display_list" => self.display_list(args),
             "hiwave_style" => self.style(args),
+            "hiwave_diff" => self.diff(args),
             "hiwave_screenshot" => self.screenshot(args),
             "hiwave_status" => self.status(args),
             other => Err(format!("unknown tool: {other}")),
@@ -261,6 +479,23 @@ fn tool_list() -> Value {
             }, "required": ["selector"] }
         },
         {
+            "name": "hiwave_diff",
+            "description": "Compare what this engine computes for a committed case against a \
+                            committed reference, at one stage, and report every field that \
+                            disagrees with both values. Stages are `layout` and `display_list` \
+                            — text artefacts, so the answer is deterministic on any machine and \
+                            does not depend on trusting a GPU capture. The case is run in its \
+                            own engine, so a diff neither depends on nor disturbs the open page. \
+                            References today are `expectations`: hand-derived path/value pairs \
+                            with the derivation recorded alongside. Full committed captures are \
+                            NOT supported yet. `agrees` is the answer; `disagreements` is why.",
+            "inputSchema": { "type": "object", "properties": {
+                "case":      { "type": "string", "description": "Case name under crates/hiwave-mcp/cases/" },
+                "stage":     { "type": "string", "description": "`layout` (default) or `display_list`" },
+                "reference": { "type": "string", "description": "Reference name, e.g. \"spec\"" }
+            }, "required": ["case", "reference"] }
+        },
+        {
             "name": "hiwave_screenshot",
             "description": "Capture the rendered frame to a PPM file and return its path.",
             "inputSchema": { "type": "object", "properties": {
@@ -284,6 +519,61 @@ fn respond(id: Value, result: Result<Value, String>) -> Value {
             "content": [{ "type": "text", "text": message }],
             "isError": true
         }}),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tree() -> Value {
+        json!({ "root": { "children": [
+            { "border_box": { "width": 432.0 }, "children": [{ "x": 16.0 }] }
+        ]}, "commands": [{ "op": "text" }] })
+    }
+
+    #[test]
+    fn resolve_walks_names_and_indices() {
+        let doc = tree();
+        assert_eq!(
+            resolve(&doc, "root.children[0].border_box.width"),
+            Some(&json!(432.0))
+        );
+        assert_eq!(
+            resolve(&doc, "root.children[0].children[0].x"),
+            Some(&json!(16.0))
+        );
+        assert_eq!(resolve(&doc, "commands[0].op"), Some(&json!("text")));
+    }
+
+    #[test]
+    fn resolve_reports_a_missing_path_rather_than_guessing() {
+        // Every one of these must be None, not a nearby value: a diff that
+        // silently resolved a typo'd path would report agreement it never
+        // checked, which is worse than reporting nothing.
+        let doc = tree();
+        for path in [
+            "root.children[1].border_box.width", // index past the end
+            "root.children[0].margin_box.width", // no such field
+            "root.children[0].border_box.hight", // typo
+            "root..width",                       // empty segment
+            "commands[9].op",
+            "",
+        ] {
+            assert_eq!(resolve(&doc, path), None, "{path} should not resolve");
+        }
+    }
+
+    #[test]
+    fn name_arg_refuses_anything_that_escapes_the_case_directory() {
+        assert_eq!(name_arg(&json!({ "case": "hero" }), "case").unwrap(), "hero");
+        for bad in ["../etc", "a/b", "a\\b", ".hidden", "", "..", "x/../.."] {
+            assert!(
+                name_arg(&json!({ "case": bad }), "case").is_err(),
+                "{bad:?} should be refused"
+            );
+        }
+        assert!(name_arg(&json!({}), "case").is_err(), "missing is required");
     }
 }
 
