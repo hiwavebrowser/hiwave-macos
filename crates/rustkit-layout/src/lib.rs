@@ -4964,11 +4964,10 @@ impl DisplayList {
                     font_size,
                     text_color,
                     placeholder_color: Color::new(160, 160, 160, 1.0),
-                    background_color: if bg_color.a > 0.0 {
-                        bg_color
-                    } else {
-                        Color::WHITE
-                    },
+                    // The UA layer supplies the default background for form
+                    // controls, so an authored `transparent` survives here
+                    // instead of being replaced with white at paint time.
+                    background_color: bg_color,
                     border_color: if border_color.a > 0.0 {
                         border_color
                     } else {
@@ -4991,11 +4990,10 @@ impl DisplayList {
                     font_size,
                     text_color,
                     placeholder_color: Color::new(160, 160, 160, 1.0),
-                    background_color: if bg_color.a > 0.0 {
-                        bg_color
-                    } else {
-                        Color::WHITE
-                    },
+                    // The UA layer supplies the default background for form
+                    // controls, so an authored `transparent` survives here
+                    // instead of being replaced with white at paint time.
+                    background_color: bg_color,
                     border_color: if border_color.a > 0.0 {
                         border_color
                     } else {
@@ -5113,11 +5111,10 @@ impl DisplayList {
                     font_size,
                     text_color,
                     placeholder_color: Color::new(160, 160, 160, 1.0),
-                    background_color: if bg_color.a > 0.0 {
-                        bg_color
-                    } else {
-                        Color::WHITE
-                    },
+                    // The UA layer supplies the default background for form
+                    // controls, so an authored `transparent` survives here
+                    // instead of being replaced with white at paint time.
+                    background_color: bg_color,
                     border_color: if border_color.a > 0.0 {
                         border_color
                     } else {

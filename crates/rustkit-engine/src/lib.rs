@@ -2320,6 +2320,14 @@ impl Engine {
             }
             "input" => {
                 style.display = rustkit_css::Display::Inline;
+                // UA default background. This belongs in the UA layer, not in
+                // the painter: paint used to substitute WHITE whenever the
+                // computed background had alpha 0, which cannot tell "author
+                // said nothing" from "author said transparent". A field
+                // deliberately made transparent over a dark wrapper came out
+                // white. Setting it here lets the author cascade override it
+                // the ordinary way.
+                style.background_color = rustkit_css::Color::WHITE;
                 // Intrinsic sizing handled elsewhere
             }
             "button" => {
@@ -2327,10 +2335,14 @@ impl Engine {
             }
             "select" => {
                 style.display = rustkit_css::Display::Inline;
+                // UA default background — see the "input" arm.
+                style.background_color = rustkit_css::Color::WHITE;
             }
             "textarea" => {
                 style.display = rustkit_css::Display::Inline;
                 style.font_family = "monospace".to_string();
+                // UA default background — see the "input" arm.
+                style.background_color = rustkit_css::Color::WHITE;
             }
             // Table elements
             "table" => {
