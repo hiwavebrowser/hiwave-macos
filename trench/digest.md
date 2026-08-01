@@ -368,3 +368,206 @@ want the crates formatted as their own commit.
 Next slice: `hiwave_diff` — LAST by design, and it now has all three inputs
 it consumes. The first question to settle is not code: it is what `reference`
 means on a runner that is not the one the baselines came from.
+
+---
+
+## 2026-08-01 — night 3 (`hiwave_diff`)
+
+**Metric: 3 of 4 → 4 of 4**
+
+**Moved no → yes: `hiwave_diff`.** The trench's stop condition is met.
+
+### The assertion that proves it
+
+`hiwave_diff(case, stage, reference)` runs a committed case in its **own**
+engine, exports one stage, and reports every field where the engine disagrees
+with a committed reference — with both values. Stages are `layout` and
+`display_list`: text artefacts, so the answer is the same on any machine and
+does not depend on trusting a GPU capture. Cases live in
+`crates/hiwave-mcp/cases/<case>/`, references in `<reference>.<stage>.json`,
+with the derivation of every number written next to it.
+
+A comparison tool that can only agree is not a comparison tool, so it is
+asserted in **both directions**.
+
+**Agreeing**, and guarded against passing vacuously — an empty `expect` array
+would also report `agrees: true`, so the smoke test reads the reference file
+and pins both its length and the number the whole crate is built on:
+
+```python
+hero_ref = json.loads((CASES / "hero" / "spec.layout.json").read_text())
+by_path = {e["path"]: e["value"] for e in hero_ref["expect"]}
+assert by_path["root.children[0].children[0].border_box.width"] == 432.0, by_path
+assert by_path["root.children[0].children[0].border_box.height"] == 152.0, by_path
+
+d, error = client.tool("hiwave_diff", case="hero", stage="layout", reference="spec")
+assert d["checked"] == len(hero_expect) >= 12, (d["checked"], len(hero_expect))
+assert d["differences"] == 0 and d["agrees"] is True, d
+assert d["disagreements"] == [], d["disagreements"]
+```
+
+**Disagreeing** — and on a *real* engine bug rather than a contrived one. This
+is the assertion `hiwave_diff` exists for. The case is
+
+```css
+.hero { width: 400px; height: 120px }
+div   { width: 100px !important }
+```
+
+`!important` outranks a normal declaration of the same origin regardless of
+specificity, so the width is 100px in every browser. RustKit parses the flag,
+carries it, and never reads it (night 2's finding), so it computes 400px. The
+diff must report exactly that, at both paths width reaches, and must leave the
+two uncontested values in the same reference alone:
+
+```python
+d, error = client.tool("hiwave_diff", case="important-width",
+                       stage="layout", reference="spec")
+assert d["agrees"] is False, d
+assert d["checked"] == 4 and d["differences"] == 2, d
+widths = {x["path"]: x for x in d["disagreements"]}
+border = widths["root.children[0].children[0].border_box.width"]
+assert border["expected"] == 100.0 and border["actual"] == 400.0, border
+content = widths["root.children[0].children[0].content_rect.width"]
+assert content["expected"] == 100.0 and content["actual"] == 400.0, content
+# ...and the two uncontested values in the same reference still agree, so
+# the disagreement is attributed to one property rather than "everything".
+assert "root.children[0].children[0].border_box.height" not in widths, d
+assert "root.children[0].children[0].border_box.x" not in widths, d
+```
+
+Also asserted: the `display_list` stage on the same case (17 hand-derived
+values — paint order, `#08c` over the 432x152 border box, 32px/700 text at
+x=16), so `stage` is a real argument and not a single-stage tool wearing a
+parameter; that a diff does **not** disturb the open session, by re-asserting
+the session's page at 432 afterwards; and five refusals — unknown stage,
+unknown case, unknown reference, a `case` that escapes the case directory, and
+a missing argument. Three Rust unit tests pin the path resolver and the name
+guard, including that a typo'd path resolves to nothing rather than to a
+neighbouring value.
+
+```
+$ cargo build -p hiwave-mcp && python3 crates/hiwave-mcp/smoke.py
+ok  initialize        {'name': 'hiwave-mcp', 'version': '0.1.0'}
+ok  tools/list        ['hiwave_open', 'hiwave_layout', 'hiwave_display_list', 'hiwave_style', 'hiwave_diff', 'hiwave_screenshot', 'hiwave_status']
+ok  hiwave_layout-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_display_list-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_style-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_open       {'height': 600, 'loaded': '<inline>', 'width': 800}
+ok  hiwave_status     session survives between calls
+ok  hiwave_layout     .hero border_box = 432.0x152.0 (content-box: 400+2*16 x 120+2*16)
+ok  hiwave_display_list  .hero painted rgb(0,136,204) over 432.0x152.0 at (0.0,0.0) — same rect layout computed
+ok  paint order       canvas[0] < hero[1] < text[2]
+ok  advance contract  11 advances for 11 chars, font_size=32.0 weight=700 x=16.0
+ok  hiwave_style      width=400px won by .hero [0, 1, 0] over div [0, 0, 1] (later in source, lower specificity)
+ok  computed expansion padding-left=16px, winner=None — no rule spells it; expanded from `padding: 16px`
+ok  origin split      h1 font-weight=700 winner=None (UA, no rule to cite); font-size=32px winner=h1 (author)
+ok  selector guard    refused 'div p'
+ok  hiwave_diff       hero/layout agrees with the spec reference on 12/12 hand-derived values (incl. border_box 432x152)
+ok  hiwave_diff       hero/display_list agrees on 17 values (paint order, #08c over 432x152, 32px/700 text at x=16)
+ok  hiwave_diff       important-width DISAGREES: border_box.width expected 100.0 (spec: !important wins), engine computed 400.0 — 2 of 4, height and x still agree
+ok  session isolation open page still 432x152 after three diffs
+ok  diff guards       unknown stage, unknown case, unknown reference, path escape and missing argument all refused
+ok  hiwave_screenshot 1440015 bytes at ppm
+ok  argument guard    pass either `html` or `path`, not both
+
+PASS: hiwave-mcp serves the engine's computed layout, its paint commands, the cascade behind them, AND whether any of it agrees with a committed reference
+```
+
+**Checked that the gate can go red.** Changed the `hero` case's `padding: 16px`
+to `20px` — a change to what the engine computes, with the reference untouched
+— and both stages went red with exactly the hand-derived numbers
+(400+2·20 = 440, 120+2·20 = 160, x = 20):
+
+```
+--- hero/layout: agrees=False differences=5/12
+    root.children[0].children[0].border_box.width            expected 432.0  engine 440.0
+    root.children[0].children[0].border_box.height           expected 152.0  engine 160.0
+    root.children[0].children[0].padding.left                expected 16.0  engine 20.0
+    root.children[0].children[0].padding.top                 expected 16.0  engine 20.0
+    root.children[0].children[0].children[0].border_box.x    expected 16.0  engine 20.0
+--- hero/display_list: agrees=False differences=3/17
+    commands[1].rect.width                                   expected 432.0  engine 440.0
+    commands[1].rect.height                                  expected 152.0  engine 160.0
+    commands[2].x                                            expected 16.0  engine 20.0
+```
+
+Perturbation reverted; the committed `page.html` has `padding: 16px`.
+
+### Night 2's open question, answered without needing a ruling
+
+Nights 1 and 2 both asked whether a Linux-verified receipt is acceptable or
+whether the trench needs a macOS runner, and both flagged `hiwave_diff` as the
+slice where the runner would stop being a workaround. It did not, because the
+question was about the wrong `reference`. The plan (§10.3) names two — Chrome,
+and a committed macOS capture — and both are captures from elsewhere, so both
+would have made this slice runner-bound.
+
+The reference this night ships is neither: it is **hand-derived expectations**,
+machine-independent by construction. That is also the only reference kind that
+could have adjudicated the `important-width` case at all — no capture of RustKit
+can show a bug that RustKit is the source of, and a Chrome screenshot would show
+a 100px box without saying which stage lost the declaration.
+
+So the ruling is no longer blocking. It is still needed for the capture-kind
+reference below, which is genuinely runner-bound.
+
+### What the engine still cannot answer
+
+- **Capture-kind references are not implemented.** The plan's port-verification
+  story (§10.3 — "did my port compute the same thing macOS computes?") needs a
+  full committed macOS export diffed structurally against a live one. A
+  reference declaring `"kind": "capture"` is today **refused with a message
+  saying so** rather than misread. I did not build it because I cannot test it
+  here: this runner is Linux, so any capture I produced would be a Linux capture
+  diffed against itself — a gate that cannot go red, which is precisely the
+  instrument failure this trench exists to avoid. This is the one place a macOS
+  runner is load-bearing.
+- **`style` is not a diffable stage.** `hiwave_style` answers per-selector, so a
+  reference would need a selector per expectation. The stage argument refuses
+  `style` rather than approximating it. Tractable, not done.
+- **Two cases, not a corpus.** `hero` and `important-width`. Nothing diffs a
+  real page, so clipping, stacking contexts, transforms, grid and every form
+  control have zero diff coverage — the same gap nights 1 and 2 named for their
+  own tools, now inherited here.
+- **The `important-width` reference pins a known bug's correct answer, which
+  makes it a tripwire.** When the cascade is fixed to honour `!important`, that
+  case starts agreeing and three smoke assertions go red. That flip is the
+  signal working; it is documented in the case file and in `smoke.py`, but
+  whoever fixes the cascade must update the expectation rather than route around
+  it.
+- Everything nights 1 and 2 named is still true: UA-origin properties have no
+  rule to cite, computed values cover 15 longhands, shorthand provenance does
+  not reach longhands, `hiwave_style` takes simple selectors only, and the
+  display list's unmodelled ops (form controls, carets, focus rings, backdrop
+  filters, gradient text, SVG primitives) carry `"modelled": false` with no
+  contract and no coverage.
+
+### Tests
+
+`cargo test --workspace --no-fail-fast`, excluding `hiwave-app` and
+`hiwave-smoke` (need GTK — `gdk-sys` build fails) and `rustkit-media` (needs
+ALSA): **906 passed, 1 failed**. The one failure is
+`rustkit-layout::probe_normal_line_height_vs_chrome` — the same pre-existing
+failure nights 1 and 2 reported, with the same signature (`0/20 pairs`), and
+`rustkit-layout` has no dependency on `hiwave-mcp`, so this night's change
+cannot reach it. The three new unit tests ran in that same workspace run and
+passed.
+
+Scope stayed inside `crates/hiwave-mcp/`: no parity harness, no `.github/`, no
+Windows or Linux port work, and the existing `hiwave_layout` export untouched.
+The runner needed `mesa-vulkan-drivers` installed again (fresh container;
+environment only, nothing committed — and `apt-get update` first, since the
+cached index 404s).
+
+### Decisions needed from Pete
+
+1. **4 of 4 is reached — stop, or open a new loop?** `BASELINE.md`'s stop
+   condition is met and I am stopping per the instruction. If a follow-on is
+   wanted, the two candidates are the capture-kind reference (needs a macOS
+   runner; serves the porting seats) and a real-page case corpus (serves
+   diagnosis). Both are new metrics, not continuations of this one.
+2. **`!important` is still dead in the cascade** — carried from night 2, now
+   pinned by a case so it cannot be quietly forgotten. Still my read that it
+   should be filed as a parity-corpus event rather than fixed inside an export
+   loop.
