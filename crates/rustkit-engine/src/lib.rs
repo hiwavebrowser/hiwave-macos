@@ -754,6 +754,26 @@ impl Engine {
 
         info!(?id, len = html.len(), "Loading HTML content");
 
+        // This is a NEW document, and load_html deliberately fetches no
+        // subresources — so nothing downstream will ever overwrite the
+        // stylesheets a previous document left on this view. Clearing here
+        // is what stops inline content from silently inheriting the last
+        // navigated page's CSS.
+        //
+        // This is the second door onto the same leak as the one fixed in
+        // load_subresources: that one carried stale CSS forward when the new
+        // document had no <link>; this one carried it forward whenever the
+        // new document arrived via load_html at all. Closing one and not the
+        // other would leave the bug reachable by the shorter route.
+        if !view.external_stylesheets.is_empty() {
+            debug!(
+                ?id,
+                dropped = view.external_stylesheets.len(),
+                "Clearing previous document's external stylesheets for inline load"
+            );
+            view.external_stylesheets.clear();
+        }
+
         // Use a synthetic about:blank URL for inline content
         // SAFETY: "about:blank" is a constant URL that will always parse successfully
         let url = Url::parse("about:blank").unwrap();
@@ -3590,19 +3610,41 @@ impl Engine {
 
     /// Load all subresources (stylesheets, images) for a view.
     pub async fn load_subresources(&mut self, id: EngineViewId) -> Result<(), EngineError> {
-        // Load external stylesheets
+        // Load external stylesheets.
+        //
+        // The assignment below is UNCONDITIONAL on purpose. It used to sit
+        // inside `if !external_stylesheets.is_empty()`, which meant a
+        // document with no <link> never cleared the field — so navigating
+        // from a styled page to an unstyled one left the PREVIOUS document's
+        // rules applying to the new one. That is a cross-document style leak:
+        // the new page renders wrong and nothing logs anything.
+        //
+        // Found by Athena on hiwave-windows (her #54 -> #59) and reported
+        // across the fleet; this tree is the one she ported the shape FROM,
+        // so it had the defect first.
         let external_stylesheets = self.load_external_stylesheets(id).await?;
+        let count = external_stylesheets.len();
 
-        if !external_stylesheets.is_empty() {
-            info!(
-                count = external_stylesheets.len(),
-                "Loaded external stylesheets"
-            );
-            // Store for use during relayout
-            if let Some(view) = self.views.get_mut(&id) {
-                view.external_stylesheets = external_stylesheets;
-            }
-            // Trigger relayout with new styles
+        // Relayout is needed when we HAVE new sheets, and equally when we
+        // just cleared sheets a previous document left behind — dropping
+        // rules changes rendering exactly as much as adding them does.
+        let had_previous = self
+            .views
+            .get(&id)
+            .map(|v| !v.external_stylesheets.is_empty())
+            .unwrap_or(false);
+
+        if let Some(view) = self.views.get_mut(&id) {
+            view.external_stylesheets = external_stylesheets;
+        }
+
+        if count > 0 {
+            info!(count, "Loaded external stylesheets");
+        } else if had_previous {
+            info!("No external stylesheets on this document — cleared the previous document's");
+        }
+
+        if count > 0 || had_previous {
             self.relayout(id)?;
         }
 
@@ -6825,6 +6867,75 @@ mod tests {
 
         assert_eq!(builder.config.user_agent, "Test/1.0");
         assert!(!builder.config.javascript_enabled);
+    }
+
+    /// A new document must not inherit the previous document's stylesheets.
+    ///
+    /// T-RED: with the `load_html` clear removed, this fails — the view still
+    /// reports the stale sheet after loading unrelated inline content, which
+    /// is a cross-document style leak (the new page renders under the old
+    /// page's rules and nothing logs it).
+    ///
+    /// Reported across the fleet by Athena from hiwave-windows #54 -> #59.
+    /// This tree is the one that shape was ported FROM, so it had the defect
+    /// first; the reference tree being wrong is exactly why a port finding
+    /// has to be checked upstream instead of assumed local.
+    // REQUIRES: cargo test -p rustkit-engine --features headless
+    //
+    // `headless` is not a default feature, and I checked rather than assumed:
+    // `cargo test --workspace` does NOT compile this test in — feature
+    // unification from parity-capture does not reach this crate's own lib-test
+    // target, so the workspace run reports it as "0 tests" with no warning.
+    // Stated here because a gated test that nobody notices is skipped provides
+    // the appearance of coverage and none of the substance, which is the same
+    // defect class as everything else this engine keeps getting caught by.
+    //
+    // This is a live argument for the workspace test gate that CI still does
+    // not have (CI builds one crate of 38 and runs no tests at all).
+    #[cfg(feature = "headless")]
+    #[test]
+    fn load_html_does_not_inherit_the_previous_documents_stylesheets() {
+        let mut engine = match EngineBuilder::new().javascript_enabled(false).build() {
+            Ok(e) => e,
+            Err(_) => return, // no GPU adapter in this environment; nothing to assert
+        };
+        let bounds = rustkit_viewhost::Bounds {
+            x: 0,
+            y: 0,
+            width: 400,
+            height: 300,
+        };
+        let id = match engine.create_headless_view(bounds) {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+
+        // Stand in for "a previous document brought stylesheets with it".
+        // Asserting the setup took effect first, so a later green cannot come
+        // from the field having been empty all along — that would make this
+        // test pass for the wrong reason.
+        engine
+            .views
+            .get_mut(&id)
+            .expect("view exists")
+            .external_stylesheets
+            .push(Stylesheet::default());
+        assert_eq!(
+            engine.views[&id].external_stylesheets.len(),
+            1,
+            "setup failed: the stale sheet was never installed, so this test would be vacuous"
+        );
+
+        engine
+            .load_html(id, "<html><body><p>unrelated</p></body></html>")
+            .expect("inline load succeeds");
+
+        assert!(
+            engine.views[&id].external_stylesheets.is_empty(),
+            "load_html left {} stylesheet(s) from the previous document on the view — \
+             cross-document style leak",
+            engine.views[&id].external_stylesheets.len()
+        );
     }
 
     #[test]
