@@ -1,0 +1,22 @@
+{
+  "case": "important-width",
+  "stage": "layout",
+  "kind": "expectations",
+  "origin": "hand-derived from CSS Cascade §6.6.3 (`!important` outranks normal declarations of the same origin, regardless of specificity) — NOT captured from any engine",
+  "note": "THIS CASE IS EXPECTED TO DISAGREE. RustKit parses `!important` and carries the flag through to the cascade, but `compute_style_for_element` orders matching rules by specificity and source index only — nothing reads the flag. So the engine computes 400px where every browser computes 100px. The reference states the CORRECT answer, so `hiwave_diff` reports the bug rather than blessing it. When the cascade is fixed, this case starts AGREEING and crates/hiwave-mcp/smoke.py must be updated to expect zero disagreements — that flip is the intended signal, not a test failure to route around.",
+  "viewport": { "width": 800, "height": 600 },
+  "expect": [
+    { "path": "root.children[0].children[0].content_rect.width",
+      "value": 100.0,
+      "why": "`div { width: 100px !important }` outranks `.hero { width: 400px }` despite lower specificity" },
+    { "path": "root.children[0].children[0].border_box.width",
+      "value": 100.0,
+      "why": "no padding and no border declared, so the border box is the content width" },
+    { "path": "root.children[0].children[0].border_box.height",
+      "value": 120.0,
+      "why": "height: 120px is declared once and uncontested — this one must AGREE, so a disagreement here would mean the case broke rather than the cascade" },
+    { "path": "root.children[0].children[0].border_box.x",
+      "value": 0.0,
+      "why": "body margin 0 — also expected to agree" }
+  ]
+}

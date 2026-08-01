@@ -210,6 +210,116 @@ pub struct Engine {
     views: HashMap<EngineViewId, ViewState>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
     event_rx: Option<mpsc::UnboundedReceiver<EngineEvent>>,
+    /// Cascade provenance, recorded by the REAL cascade when armed.
+    ///
+    /// `None` = not recording, which is the default and costs nothing. See
+    /// [`Engine::set_style_recording`] for why this is a side table rather
+    /// than a field on `ComputedStyle`.
+    style_trace: std::cell::RefCell<Option<Vec<StyleRecord>>>,
+}
+
+/// One author declaration that MATCHED an element, win or lose.
+///
+/// Losers are kept deliberately. "Parsed but dead" is the bug class this
+/// exists to catch, and you cannot see that a declaration was overridden by
+/// looking at the value that survived — only by seeing what it beat.
+#[derive(Debug, Clone)]
+pub struct DeclarationRecord {
+    /// Property name exactly as authored, so `background` stays `background`
+    /// rather than being reported as the longhands it happens to set.
+    pub property: String,
+    /// Declared value, after CSS-variable substitution.
+    pub value: String,
+    /// The selector of the rule that carried it — the citable rule.
+    pub selector: String,
+    /// `(ids, classes, tags)`, as the cascade itself computed it.
+    pub specificity: (usize, usize, usize),
+    /// `author` or `author-inline`. The UA sheet cannot appear here; it is a
+    /// hardcoded Rust `match`, not parsed rules, so it has no selector to cite.
+    pub origin: &'static str,
+    /// Whether the declaration carried `!important`.
+    ///
+    /// Recorded but NOT acted on: this cascade orders by specificity alone.
+    /// An `!important` declaration that lost is therefore a real engine bug,
+    /// and reporting the flag is how the tool shows it instead of hiding it.
+    pub important: bool,
+    /// Position in application order. The highest `order` for a given
+    /// property is the winner, because it wrote the field last.
+    pub order: usize,
+}
+
+/// The subset of selector syntax `export_style_json` accepts as a QUERY.
+///
+/// Deliberately not the engine's full selector matcher. Matching a descendant
+/// or sibling selector needs the tree context the cascade had, which the
+/// trace does not keep; accepting `div p` and quietly matching every `p`
+/// would answer the wrong question in a way the caller could not see.
+/// Refusing what it cannot do is the point.
+#[derive(Debug, Default)]
+struct SimpleSelector {
+    tag: Option<String>,
+    id: Option<String>,
+    classes: Vec<String>,
+}
+
+impl SimpleSelector {
+    fn parse(input: &str) -> Option<Self> {
+        let input = input.trim();
+        if input.is_empty() || input.contains([' ', '>', '+', '~', ',', '[', ':', '*']) {
+            return None;
+        }
+        let mut query = SimpleSelector::default();
+        // Leading run before any '.'/'#' is the tag name, if present.
+        let first_marker = input.find(['.', '#']).unwrap_or(input.len());
+        if first_marker > 0 {
+            query.tag = Some(input[..first_marker].to_lowercase());
+        }
+        let mut rest = &input[first_marker..];
+        while !rest.is_empty() {
+            let kind = rest.as_bytes()[0];
+            let end = rest[1..].find(['.', '#']).map(|i| i + 1).unwrap_or(rest.len());
+            let name = &rest[1..end];
+            if name.is_empty() {
+                return None;
+            }
+            match kind {
+                b'.' => query.classes.push(name.to_string()),
+                b'#' => query.id = Some(name.to_string()),
+                _ => return None,
+            }
+            rest = &rest[end..];
+        }
+        if query.tag.is_none() && query.id.is_none() && query.classes.is_empty() {
+            return None;
+        }
+        Some(query)
+    }
+
+    fn matches(&self, record: &StyleRecord) -> bool {
+        if let Some(tag) = &self.tag {
+            if &record.tag != tag {
+                return false;
+            }
+        }
+        if let Some(id) = &self.id {
+            if record.id.as_deref() != Some(id.as_str()) {
+                return false;
+            }
+        }
+        self.classes.iter().all(|c| record.classes.contains(c))
+    }
+}
+
+/// The cascade as it ran for one element.
+#[derive(Debug, Clone)]
+pub struct StyleRecord {
+    pub tag: String,
+    pub id: Option<String>,
+    pub classes: Vec<String>,
+    pub declarations: Vec<DeclarationRecord>,
+    /// Computed values, read back off the `ComputedStyle` this cascade
+    /// produced — so the reported value is the one layout actually used.
+    pub computed: Vec<(String, String)>,
 }
 
 impl Engine {
@@ -271,7 +381,28 @@ impl Engine {
             views: HashMap::new(),
             event_tx,
             event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
         })
+    }
+
+    /// Arm or disarm cascade provenance recording.
+    ///
+    /// Off by default. When on, the cascade records every author declaration
+    /// that matched each element — including the ones that lost — so
+    /// `export_style_json` can name the winning rule rather than only the
+    /// value that survived.
+    ///
+    /// This is a side table rather than a field on `ComputedStyle` on
+    /// purpose: `ComputedStyle` is cloned per box (and per pseudo-element,
+    /// and per text child), so hanging a provenance map off it would put the
+    /// cost on every page instead of on the pages someone is debugging. The
+    /// recording happens inside the ONE real cascade, not a re-implementation
+    /// of it — a second cascade written for the exporter could disagree with
+    /// the first, and then the tool would be inventing an answer.
+    ///
+    /// The trace is cleared and refilled on each layout build.
+    pub fn set_style_recording(&mut self, on: bool) {
+        *self.style_trace.borrow_mut() = if on { Some(Vec::new()) } else { None };
     }
 
     /// Take the event receiver.
@@ -340,7 +471,15 @@ impl Engine {
     }
 
     /// Create a new view (macOS stub - will be implemented in Phase 3).
-    #[cfg(not(target_os = "windows"))]
+    ///
+    /// Gated on macOS specifically, not `not(windows)`: the body calls
+    /// `ViewHostTrait::get_raw_window_handle` and
+    /// `Compositor::create_surface_for_raw_handle`, both of which are
+    /// themselves `cfg(target_os = "macos")`. The wider gate promised a
+    /// non-Windows build it could not deliver, so the crate failed to compile
+    /// anywhere else — including the headless path, which needs no window at
+    /// all. No behaviour changes on macOS or Windows: both gates agree there.
+    #[cfg(target_os = "macos")]
     pub fn create_view(
         &mut self,
         parent: WindowHandle,
@@ -1174,6 +1313,14 @@ impl Engine {
         stylesheets.extend(external_stylesheets.iter().cloned());
 
         let css_vars = self.extract_css_variables(&stylesheets);
+
+        // A trace describes ONE build. Keeping entries from the previous
+        // page would let `hiwave_style` answer with a stale element that no
+        // longer exists — the same class of lie as a gate reading a stale
+        // snapshot.
+        if let Some(trace) = self.style_trace.borrow_mut().as_mut() {
+            trace.clear();
+        }
 
         info!(
             inline_count = stylesheets.len() - external_stylesheets.len(),
@@ -2270,8 +2417,17 @@ impl Engine {
             a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2))
         });
 
+        // Provenance is recorded from INSIDE this loop rather than by a
+        // separate pass, so "which rule won" is answered by the same code
+        // that decided it. A recorder that walked the rules again could
+        // disagree with the cascade, and a diagnostic tool that disagrees
+        // with the engine is worse than no tool.
+        let recording = self.style_trace.borrow().is_some();
+        let mut records: Vec<DeclarationRecord> = Vec::new();
+        let mut order = 0usize;
+
         // Apply matching rules in order
-        for (rule, _, _) in matching_rules {
+        for (rule, specificity, _) in matching_rules {
             for decl in &rule.declarations {
                 // Extract string value from PropertyValue
                 let value_str = match &decl.value {
@@ -2289,15 +2445,145 @@ impl Engine {
                     );
                 }
                 self.apply_style_property(&mut style, &decl.property, &resolved_value);
+                if recording {
+                    records.push(DeclarationRecord {
+                        property: decl.property.clone(),
+                        value: resolved_value,
+                        selector: rule.selector.clone(),
+                        specificity,
+                        origin: "author",
+                        important: decl.important,
+                        order,
+                    });
+                    order += 1;
+                }
             }
         }
 
         // Parse inline style attribute if present (highest specificity)
         if let Some(style_attr) = attributes.get("style") {
             self.apply_inline_style(&mut style, style_attr, css_vars);
+            if recording {
+                self.record_inline_style(style_attr, css_vars, &mut records, &mut order);
+            }
+        }
+
+        if recording {
+            let id = attributes.get("id").cloned();
+            let classes = attributes
+                .get("class")
+                .map(|c| c.split_whitespace().map(str::to_string).collect())
+                .unwrap_or_default();
+            // The full supported set, not just the declared properties: the
+            // fixture sets padding via the `padding` shorthand, and an agent
+            // asking for the computed `padding-left` should get 16px rather
+            // than a hole because no rule spelled that longhand.
+            let computed = Self::COMPUTED_PROPERTIES
+                .iter()
+                .filter_map(|p| {
+                    Self::computed_value_of(&style, p).map(|v| (p.to_string(), v))
+                })
+                .collect();
+            if let Some(trace) = self.style_trace.borrow_mut().as_mut() {
+                trace.push(StyleRecord {
+                    tag: tag_name.to_lowercase(),
+                    id,
+                    classes,
+                    declarations: records,
+                    computed,
+                });
+            }
         }
 
         style
+    }
+
+    /// Record the inline `style=` declarations that `apply_inline_style` just
+    /// applied. Split out rather than folded into that function so the
+    /// applying path stays byte-identical when recording is off.
+    fn record_inline_style(
+        &self,
+        style_attr: &str,
+        css_vars: &HashMap<String, String>,
+        records: &mut Vec<DeclarationRecord>,
+        order: &mut usize,
+    ) {
+        for declaration in style_attr.split(';') {
+            let declaration = declaration.trim();
+            if declaration.is_empty() {
+                continue;
+            }
+            if let Some((property, value)) = declaration.split_once(':') {
+                records.push(DeclarationRecord {
+                    property: property.trim().to_lowercase(),
+                    value: self.resolve_css_variables(value.trim(), css_vars),
+                    selector: "style=".to_string(),
+                    // An inline declaration outranks any selector; CSS gives
+                    // it a specificity above (1,0,0) rather than a tuple.
+                    specificity: (usize::MAX, 0, 0),
+                    origin: "author-inline",
+                    important: false,
+                    order: *order,
+                });
+                *order += 1;
+            }
+        }
+    }
+
+    /// Read one computed property back off the style the cascade produced.
+    ///
+    /// Deliberately a SUBSET. Every arm here is a property whose computed
+    /// form is unambiguous to serialize; anything not listed returns `None`
+    /// and the exporter reports it as unsupported rather than guessing. A
+    /// wrong computed value in a tool built to adjudicate computed values
+    /// would be the worst possible failure, so the honest gap is the safer
+    /// default.
+    const COMPUTED_PROPERTIES: &'static [&'static str] = &[
+        "width",
+        "height",
+        "padding-top",
+        "padding-right",
+        "padding-bottom",
+        "padding-left",
+        "margin-top",
+        "margin-right",
+        "margin-bottom",
+        "margin-left",
+        "font-size",
+        "font-weight",
+        "color",
+        "background-color",
+        "display",
+    ];
+
+    fn computed_value_of(style: &ComputedStyle, property: &str) -> Option<String> {
+        fn len(l: &rustkit_css::Length) -> String {
+            match l {
+                rustkit_css::Length::Px(v) => format!("{v}px"),
+                other => format!("{other:?}"),
+            }
+        }
+        fn color(c: &rustkit_css::Color) -> String {
+            format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, c.a)
+        }
+        Some(match property {
+            "width" => len(&style.width),
+            "height" => len(&style.height),
+            "padding-top" => len(&style.padding_top),
+            "padding-right" => len(&style.padding_right),
+            "padding-bottom" => len(&style.padding_bottom),
+            "padding-left" => len(&style.padding_left),
+            "margin-top" => len(&style.margin_top),
+            "margin-right" => len(&style.margin_right),
+            "margin-bottom" => len(&style.margin_bottom),
+            "margin-left" => len(&style.margin_left),
+            "font-size" => len(&style.font_size),
+            "font-weight" => style.font_weight.0.to_string(),
+            "color" => color(&style.color),
+            "background-color" => color(&style.background_color),
+            "display" => format!("{:?}", style.display).to_lowercase(),
+            _ => return None,
+        })
     }
 
     /// Apply inline style attribute to computed style.
@@ -4788,6 +5074,511 @@ impl Engine {
         Ok(())
     }
 
+    /// Export the view's display list — the paint commands built from the
+    /// layout tree — as JSON.
+    ///
+    /// This is the other half of `export_layout_json`. Layout answers "what
+    /// box did the engine compute"; this answers "what did it then decide to
+    /// paint, in what order". A pixel diff cannot separate the two, so every
+    /// paint-stage bug this engine has shipped — the advance contract, the
+    /// gradient axis routing, the SVG break — had to be diagnosed by reading
+    /// `{:?}` off a trace log. Emitting the list in a walkable form is the
+    /// difference between inspecting the boundary and inferring it.
+    ///
+    /// The command list is FLAT and ORDERED, exactly as the renderer consumes
+    /// it. Paint order is load-bearing (later commands cover earlier ones) and
+    /// the push/pop clip, stacking-context, and transform commands only make
+    /// sense as a sequence, so nesting them into a tree would invent structure
+    /// the renderer does not have. `index` is the position in that sequence.
+    ///
+    /// Commands the exporter has not modelled are emitted as
+    /// `{"op": "...", "modelled": false, "debug": "..."}` rather than dropped
+    /// or flattened into a lie: an agent can still read the value, and the
+    /// `modelled` flag says plainly that the shape is not a stable contract.
+    pub fn export_display_list_json(
+        &self,
+        id: EngineViewId,
+        path: &str,
+    ) -> Result<(), EngineError> {
+        use rustkit_layout::DisplayCommand as Cmd;
+
+        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+
+        let display_list = view.display_list.as_ref().ok_or_else(|| {
+            EngineError::RenderError("No display list available".into())
+        })?;
+
+        fn color(c: &rustkit_css::Color) -> serde_json::Value {
+            serde_json::json!({ "r": c.r, "g": c.g, "b": c.b, "a": c.a })
+        }
+
+        fn rect(r: &rustkit_layout::Rect) -> serde_json::Value {
+            serde_json::json!({
+                "x": r.x,
+                "y": r.y,
+                "width": r.width,
+                "height": r.height
+            })
+        }
+
+        fn radius(r: &rustkit_layout::BorderRadius) -> serde_json::Value {
+            serde_json::json!({
+                "top_left": r.top_left,
+                "top_right": r.top_right,
+                "bottom_right": r.bottom_right,
+                "bottom_left": r.bottom_left
+            })
+        }
+
+        fn stops(list: &[rustkit_css::ColorStop]) -> serde_json::Value {
+            serde_json::Value::Array(
+                list.iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "color": color(&s.color),
+                            "position": s.position.as_ref().map(|p| format!("{:?}", p))
+                        })
+                    })
+                    .collect(),
+            )
+        }
+
+        fn command_to_json(cmd: &Cmd) -> serde_json::Value {
+            match cmd {
+                Cmd::SolidColor(c, r) => serde_json::json!({
+                    "op": "solid_color", "color": color(c), "rect": rect(r)
+                }),
+                Cmd::RoundedRect {
+                    color: c,
+                    rect: r,
+                    radius: rad,
+                } => serde_json::json!({
+                    "op": "rounded_rect",
+                    "color": color(c),
+                    "rect": rect(r),
+                    "radius": radius(rad)
+                }),
+                Cmd::Border {
+                    color: c,
+                    rect: r,
+                    top,
+                    right,
+                    bottom,
+                    left,
+                } => serde_json::json!({
+                    "op": "border",
+                    "color": color(c),
+                    "rect": rect(r),
+                    "widths": {
+                        "top": top, "right": right, "bottom": bottom, "left": left
+                    }
+                }),
+                Cmd::Text {
+                    text,
+                    x,
+                    y,
+                    color: c,
+                    font_size,
+                    font_family,
+                    font_weight,
+                    font_style,
+                    advances,
+                    ascent,
+                } => serde_json::json!({
+                    "op": "text",
+                    "text": text,
+                    "x": x,
+                    "y": y,
+                    "color": color(c),
+                    "font_size": font_size,
+                    "font_family": font_family,
+                    "font_weight": font_weight,
+                    "font_style": font_style,
+                    // The ADVANCE CONTRACT, made visible. `advances: null`
+                    // means paint fell back to re-deriving its own metrics
+                    // instead of using layout's — the exact condition behind
+                    // the width-drift class of bugs, and previously only
+                    // observable by reading a trace log.
+                    "advances": advances,
+                    "ascent": ascent
+                }),
+                Cmd::TextDecoration {
+                    x,
+                    y,
+                    width,
+                    thickness,
+                    color: c,
+                    style,
+                } => serde_json::json!({
+                    "op": "text_decoration",
+                    "x": x,
+                    "y": y,
+                    "width": width,
+                    "thickness": thickness,
+                    "color": color(c),
+                    "style": format!("{:?}", style)
+                }),
+                Cmd::Image {
+                    url,
+                    src_rect,
+                    dest_rect,
+                    object_fit,
+                    opacity,
+                } => serde_json::json!({
+                    "op": "image",
+                    "url": url,
+                    "src_rect": src_rect.as_ref().map(rect),
+                    "dest_rect": rect(dest_rect),
+                    "object_fit": format!("{:?}", object_fit),
+                    "opacity": opacity
+                }),
+                Cmd::BackgroundImage {
+                    url,
+                    rect: r,
+                    size,
+                    position,
+                    repeat,
+                } => serde_json::json!({
+                    "op": "background_image",
+                    "url": url,
+                    "rect": rect(r),
+                    "size": format!("{:?}", size),
+                    "position": { "x": position.0, "y": position.1 },
+                    "repeat": format!("{:?}", repeat)
+                }),
+                Cmd::BoxShadow {
+                    offset_x,
+                    offset_y,
+                    blur_radius,
+                    spread_radius,
+                    color: c,
+                    rect: r,
+                    inset,
+                } => serde_json::json!({
+                    "op": "box_shadow",
+                    "offset_x": offset_x,
+                    "offset_y": offset_y,
+                    "blur_radius": blur_radius,
+                    "spread_radius": spread_radius,
+                    "color": color(c),
+                    "rect": rect(r),
+                    "inset": inset
+                }),
+                Cmd::LinearGradient {
+                    rect: r,
+                    direction,
+                    stops: s,
+                    repeating,
+                    border_radius,
+                } => serde_json::json!({
+                    "op": "linear_gradient",
+                    "rect": rect(r),
+                    "direction": format!("{:?}", direction),
+                    "stops": stops(s),
+                    "repeating": repeating,
+                    "border_radius": radius(border_radius)
+                }),
+                Cmd::RadialGradient {
+                    rect: r,
+                    shape,
+                    size,
+                    center,
+                    stops: s,
+                    repeating,
+                    border_radius,
+                } => serde_json::json!({
+                    "op": "radial_gradient",
+                    "rect": rect(r),
+                    "shape": format!("{:?}", shape),
+                    "size": format!("{:?}", size),
+                    "center": { "x": center.0, "y": center.1 },
+                    "stops": stops(s),
+                    "repeating": repeating,
+                    "border_radius": radius(border_radius)
+                }),
+                Cmd::ConicGradient {
+                    rect: r,
+                    from_angle,
+                    center,
+                    stops: s,
+                    repeating,
+                    border_radius,
+                } => serde_json::json!({
+                    "op": "conic_gradient",
+                    "rect": rect(r),
+                    "from_angle": from_angle,
+                    "center": { "x": center.0, "y": center.1 },
+                    "stops": stops(s),
+                    "repeating": repeating,
+                    "border_radius": radius(border_radius)
+                }),
+                Cmd::PushClip(r) => serde_json::json!({
+                    "op": "push_clip", "rect": rect(r)
+                }),
+                Cmd::PopClip => serde_json::json!({ "op": "pop_clip" }),
+                Cmd::PushStackingContext { z_index, rect: r } => serde_json::json!({
+                    "op": "push_stacking_context", "z_index": z_index, "rect": rect(r)
+                }),
+                Cmd::PopStackingContext => {
+                    serde_json::json!({ "op": "pop_stacking_context" })
+                }
+                Cmd::PushTransform { matrix, origin } => serde_json::json!({
+                    "op": "push_transform",
+                    "matrix": matrix,
+                    "origin": { "x": origin.0, "y": origin.1 }
+                }),
+                Cmd::PopTransform => serde_json::json!({ "op": "pop_transform" }),
+                // Not yet modelled: form controls, carets, focus rings, and
+                // the SVG primitives. Named and dumped rather than dropped.
+                other => serde_json::json!({
+                    "op": display_command_op_name(other),
+                    "modelled": false,
+                    "debug": format!("{:?}", other)
+                }),
+            }
+        }
+
+        /// The variant name, for commands the exporter does not model. Kept
+        /// separate so an agent can still filter by op without parsing Debug.
+        fn display_command_op_name(cmd: &Cmd) -> &'static str {
+            match cmd {
+                Cmd::TextInput { .. } => "text_input",
+                Cmd::Button { .. } => "button",
+                Cmd::FocusRing { .. } => "focus_ring",
+                Cmd::Caret { .. } => "caret",
+                Cmd::BackdropFilter { .. } => "backdrop_filter",
+                Cmd::GradientText { .. } => "gradient_text",
+                Cmd::FillRect { .. } => "fill_rect",
+                Cmd::StrokeRect { .. } => "stroke_rect",
+                Cmd::FillCircle { .. } => "fill_circle",
+                Cmd::StrokeCircle { .. } => "stroke_circle",
+                Cmd::FillEllipse { .. } => "fill_ellipse",
+                Cmd::Line { .. } => "line",
+                Cmd::Polyline { .. } => "polyline",
+                Cmd::FillPolygon { .. } => "fill_polygon",
+                Cmd::StrokePolygon { .. } => "stroke_polygon",
+                _ => "unknown",
+            }
+        }
+
+        let commands: Vec<serde_json::Value> = display_list
+            .commands
+            .iter()
+            .enumerate()
+            .map(|(index, cmd)| {
+                let mut value = command_to_json(cmd);
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("index".into(), serde_json::json!(index));
+                }
+                value
+            })
+            .collect();
+
+        let (width, height) = self
+            .compositor
+            .get_surface_size(view.viewhost_id)
+            .unwrap_or((0, 0));
+
+        let wrapper = serde_json::json!({
+            "version": 1,
+            "viewport": { "width": width, "height": height },
+            "count": commands.len(),
+            "commands": commands
+        });
+
+        let json_str = serde_json::to_string_pretty(&wrapper).map_err(|e| {
+            EngineError::RenderError(format!("JSON serialization failed: {}", e))
+        })?;
+
+        std::fs::write(path, json_str).map_err(|e| {
+            EngineError::RenderError(format!("Failed to write display list file: {}", e))
+        })?;
+
+        info!(?id, path, count = display_list.commands.len(), "Display list exported");
+        Ok(())
+    }
+
+    /// Export the cascade for the elements matching `selector`: the computed
+    /// values, and for each declared property the rule that WON plus every
+    /// rule it beat.
+    ///
+    /// Layout answers what box the engine computed and the display list
+    /// answers what it painted; neither answers *why*. When a declaration is
+    /// parsed, matched, and then silently overridden, both of those tools
+    /// report the consequence and none of them report the cause — which is
+    /// how seven dead behaviours in this engine were found by hand rather
+    /// than by asking it.
+    ///
+    /// Requires [`Engine::set_style_recording(true)`] before the page was
+    /// loaded, and says so rather than returning an empty result: a tool that
+    /// answers "no rules" when it simply was not listening is worse than one
+    /// that refuses.
+    ///
+    /// Two limits are reported in the payload rather than papered over:
+    ///
+    /// - **`origin` is only ever `author` or `author-inline`.** The UA sheet
+    ///   is a hardcoded Rust `match` on tag name, not parsed rules, so a
+    ///   UA-set property has no selector to cite. Properties with no author
+    ///   declaration carry `"winner": null` and `"origin": "user-agent-or-initial"`.
+    /// - **`!important` is recorded but not honoured by the cascade**, which
+    ///   orders by specificity alone. An `important: true` declaration that
+    ///   is not the winner is a real engine bug, and it is visible here.
+    pub fn export_style_json(
+        &self,
+        id: EngineViewId,
+        selector: &str,
+        path: &str,
+    ) -> Result<(), EngineError> {
+        self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+
+        let borrowed = self.style_trace.borrow();
+        let trace = borrowed.as_ref().ok_or_else(|| {
+            EngineError::RenderError(
+                "style recording is off — call set_style_recording(true) before loading".into(),
+            )
+        })?;
+
+        let query = SimpleSelector::parse(selector).ok_or_else(|| {
+            EngineError::RenderError(format!(
+                "hiwave_style understands simple selectors only \
+                 (`tag`, `.class`, `#id`, `tag.class`); got {selector:?}"
+            ))
+        })?;
+
+        let elements: Vec<serde_json::Value> = trace
+            .iter()
+            .filter(|record| query.matches(record))
+            .map(|record| {
+                // Winner = highest application order for that property, which
+                // is by construction the declaration that wrote the field
+                // last. Deriving it from the recorded order rather than
+                // re-comparing specificity keeps this from being a second
+                // opinion about what the cascade did.
+                let mut properties: std::collections::BTreeMap<&str, Vec<&DeclarationRecord>> =
+                    std::collections::BTreeMap::new();
+                for decl in &record.declarations {
+                    properties.entry(decl.property.as_str()).or_default().push(decl);
+                }
+
+                let mut declared: Vec<serde_json::Value> = properties
+                    .into_iter()
+                    .map(|(property, mut decls)| {
+                        decls.sort_by_key(|d| d.order);
+                        let winner = decls.last().copied();
+                        let overridden: Vec<serde_json::Value> = decls
+                            [..decls.len().saturating_sub(1)]
+                            .iter()
+                            .map(|d| Self::declaration_to_json(d))
+                            .collect();
+                        serde_json::json!({
+                            "property": property,
+                            "computed": Self::computed_value_of_recorded(record, property),
+                            "winner": winner.map(Self::declaration_to_json),
+                            "origin": winner.map(|w| w.origin),
+                            "overridden": overridden,
+                        })
+                    })
+                    .collect();
+
+                // A property that no author rule set still has a computed
+                // value, and "nothing declared this" is an ANSWER — it is how
+                // an agent tells "the author's rule lost" apart from "the
+                // author never wrote one". Emitting it with a null winner
+                // says that; omitting the property entirely would leave the
+                // caller unable to distinguish the two without guessing.
+                let authored: std::collections::BTreeSet<&str> = record
+                    .declarations
+                    .iter()
+                    .map(|d| d.property.as_str())
+                    .collect();
+                for property in Self::COMPUTED_PROPERTIES {
+                    if authored.contains(property) {
+                        continue;
+                    }
+                    declared.push(serde_json::json!({
+                        "property": property,
+                        "computed": Self::computed_value_of_recorded(record, property),
+                        "winner": serde_json::Value::Null,
+                        // Not a cop-out: the UA sheet is a hardcoded match on
+                        // tag name rather than parsed rules, so there is no
+                        // selector to cite, and the initial value is
+                        // indistinguishable from it at this layer.
+                        "origin": "user-agent-or-initial",
+                        "overridden": [],
+                    }));
+                }
+
+                let computed: serde_json::Map<String, serde_json::Value> = record
+                    .computed
+                    .iter()
+                    .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                    .collect();
+
+                serde_json::json!({
+                    "tag": record.tag,
+                    "id": record.id,
+                    "classes": record.classes,
+                    "computed": computed,
+                    "declared": declared,
+                })
+            })
+            .collect();
+
+        let wrapper = serde_json::json!({
+            "version": 1,
+            "selector": selector,
+            "count": elements.len(),
+            "elements": elements,
+            "limits": {
+                "origins": "author and author-inline only — the UA stylesheet is a \
+                            hardcoded match on tag name, not parsed rules, so it has no \
+                            selector to cite",
+                "important": "recorded but NOT honoured by this cascade, which orders by \
+                              specificity alone; an important declaration that is not the \
+                              winner is an engine bug, not a reporting artefact",
+                "computed_properties": Self::COMPUTED_PROPERTIES,
+            }
+        });
+
+        let json_str = serde_json::to_string_pretty(&wrapper).map_err(|e| {
+            EngineError::RenderError(format!("JSON serialization failed: {}", e))
+        })?;
+        std::fs::write(path, json_str).map_err(|e| {
+            EngineError::RenderError(format!("Failed to write style file: {}", e))
+        })?;
+
+        info!(?id, path, selector, count = elements.len(), "Style cascade exported");
+        Ok(())
+    }
+
+    fn declaration_to_json(d: &DeclarationRecord) -> serde_json::Value {
+        let (a, b, c) = d.specificity;
+        serde_json::json!({
+            "value": d.value,
+            "selector": d.selector,
+            // usize::MAX marks an inline declaration, which CSS ranks above
+            // every selector rather than giving it a tuple.
+            "specificity": if a == usize::MAX {
+                serde_json::Value::String("inline".into())
+            } else {
+                serde_json::json!([a, b, c])
+            },
+            "origin": d.origin,
+            "important": d.important,
+        })
+    }
+
+    /// The computed value for a declared property, or `null` when the
+    /// property is a shorthand or otherwise outside the serializable subset.
+    fn computed_value_of_recorded(record: &StyleRecord, property: &str) -> serde_json::Value {
+        record
+            .computed
+            .iter()
+            .find(|(k, _)| k == property)
+            .map(|(_, v)| serde_json::Value::String(v.clone()))
+            .unwrap_or(serde_json::Value::Null)
+    }
+
     /// Render a view (internal).
     #[tracing::instrument(skip(self), fields(view_id = ?id))]
     fn render(&mut self, id: EngineViewId) -> Result<(), EngineError> {
@@ -6852,6 +7643,47 @@ mod tests {
         assert_ne!(id1, id2);
     }
 
+    fn record(tag: &str, id: Option<&str>, classes: &[&str]) -> StyleRecord {
+        StyleRecord {
+            tag: tag.to_string(),
+            id: id.map(str::to_string),
+            classes: classes.iter().map(|c| c.to_string()).collect(),
+            declarations: Vec::new(),
+            computed: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn simple_selector_matches_tag_class_and_id() {
+        let hero = record("div", Some("main"), &["hero", "wide"]);
+
+        assert!(SimpleSelector::parse(".hero").unwrap().matches(&hero));
+        assert!(SimpleSelector::parse("div").unwrap().matches(&hero));
+        assert!(SimpleSelector::parse("#main").unwrap().matches(&hero));
+        assert!(SimpleSelector::parse("div.hero").unwrap().matches(&hero));
+        // Every class in the query must be present, not just one.
+        assert!(SimpleSelector::parse(".hero.wide").unwrap().matches(&hero));
+        assert!(!SimpleSelector::parse(".hero.narrow").unwrap().matches(&hero));
+        assert!(!SimpleSelector::parse("span.hero").unwrap().matches(&hero));
+        assert!(!SimpleSelector::parse("#other").unwrap().matches(&hero));
+    }
+
+    #[test]
+    fn simple_selector_refuses_what_it_cannot_answer() {
+        // Combinators, attribute and pseudo selectors need tree/state context
+        // the style trace does not keep. Refusing them is the contract: an
+        // approximate match would answer a different question invisibly.
+        for unsupported in [
+            "div p", "div > p", "div + p", "div ~ p", "a, b", "[type=text]",
+            "a:hover", "*", "", "   ", ".", "#",
+        ] {
+            assert!(
+                SimpleSelector::parse(unsupported).is_none(),
+                "should have refused {unsupported:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_engine_config_default() {
         let config = EngineConfig::default();
@@ -6978,6 +7810,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
         };
 
         // Build layout tree from document
@@ -7068,6 +7901,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -7158,6 +7992,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -7268,6 +8103,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -7342,6 +8178,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -7408,6 +8245,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -7493,6 +8331,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -7564,6 +8403,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -7945,6 +8785,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
         };
 
         // Test type selector: (0, 0, 1)
