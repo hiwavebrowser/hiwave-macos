@@ -571,3 +571,110 @@ cached index 404s).
    pinned by a case so it cannot be quietly forgotten. Still my read that it
    should be filed as a parity-corpus event rather than fixed inside an export
    loop.
+
+---
+
+## 2026-08-02 — night 4 (stop condition — trench complete)
+
+**Metric: 4 of 4 → 4 of 4**
+
+**Moved no → yes: NONE.** No new work was started, and this is not a dry
+night: `BASELINE.md`'s stop condition 1 was already met by night 3, and the
+instruction on reaching it is to stop rather than to find more to do. Clause 2
+(two consecutive dry nights) does not apply — nights 1, 2 and 3 each moved a
+tool. So this entry is a close-out, not a funeral.
+
+### What I did instead: re-ran the receipt rather than trusting it
+
+Night 3's receipt was written on the trench branch. Since then it landed on
+master (`5aa912d`), and a squash-merge is exactly the kind of step where a
+receipt can quietly stop being true. So the one thing worth doing tonight was
+checking the four assertions still pass **on the merged tree** — checked out
+at `5aa912d`, clean working tree, nothing of mine applied:
+
+```
+$ cargo build -p hiwave-mcp && python3 crates/hiwave-mcp/smoke.py
+ok  initialize        {'name': 'hiwave-mcp', 'version': '0.1.0'}
+ok  tools/list        ['hiwave_open', 'hiwave_layout', 'hiwave_display_list', 'hiwave_style', 'hiwave_diff', 'hiwave_screenshot', 'hiwave_status']
+ok  hiwave_layout-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_display_list-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_style-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_open       {'height': 600, 'loaded': '<inline>', 'width': 800}
+ok  hiwave_status     session survives between calls
+ok  hiwave_layout     .hero border_box = 432.0x152.0 (content-box: 400+2*16 x 120+2*16)
+ok  hiwave_display_list  .hero painted rgb(0,136,204) over 432.0x152.0 at (0.0,0.0) — same rect layout computed
+ok  paint order       canvas[0] < hero[1] < text[2]
+ok  advance contract  11 advances for 11 chars, font_size=32.0 weight=700 x=16.0
+ok  hiwave_style      width=400px won by .hero [0, 1, 0] over div [0, 0, 1] (later in source, lower specificity)
+ok  computed expansion padding-left=16px, winner=None — no rule spells it; expanded from `padding: 16px`
+ok  origin split      h1 font-weight=700 winner=None (UA, no rule to cite); font-size=32px winner=h1 (author)
+ok  selector guard    refused 'div p'
+ok  hiwave_diff       hero/layout agrees with the spec reference on 12/12 hand-derived values (incl. border_box 432x152)
+ok  hiwave_diff       hero/display_list agrees on 17 values (paint order, #08c over 432x152, 32px/700 text at x=16)
+ok  hiwave_diff       important-width DISAGREES: border_box.width expected 100.0 (spec: !important wins), engine computed 400.0 — 2 of 4, height and x still agree
+ok  session isolation open page still 432x152 after three diffs
+ok  diff guards       unknown stage, unknown case, unknown reference, path escape and missing argument all refused
+ok  hiwave_screenshot 1440015 bytes at ppm
+ok  argument guard    pass either `html` or `path`, not both
+
+PASS: hiwave-mcp serves the engine's computed layout, its paint commands, the cascade behind them, AND whether any of it agrees with a committed reference
+```
+
+One assertion per tool, each a hand-derivable value, all four green on master:
+
+- `hiwave_layout` — `.hero border_box = 432.0x152.0` (400+2·16 × 120+2·16)
+- `hiwave_display_list` — `#08c` = rgb(0,136,204) filling that same 432×152 rect
+- `hiwave_style` — `width=400px` won by `.hero` [0,1,0] over `div` [0,0,1]
+- `hiwave_diff` — `important-width` reports expected 100.0 vs engine 400.0
+
+Note the last one is a **red** assertion by design: it pins a known engine bug's
+correct answer, so the suite proves the diff can disagree, not only agree.
+
+**Final tally: 4 of 4.** The trench is complete and I am stopping.
+
+### What the engine still cannot answer
+
+Unchanged from night 3 — re-listed rather than waved at, because "complete" here
+means the metric hit 4 of 4, not that the exports are finished:
+
+- **Capture-kind references are not implemented** — a reference declaring
+  `"kind": "capture"` is refused with a message saying so. This is the one item
+  that genuinely needs a macOS runner: producing a capture here would diff a
+  Linux capture against itself, a gate that cannot go red.
+- **`style` is not a diffable stage** — refused rather than approximated,
+  because a reference would need a selector per expectation.
+- **Two cases, not a corpus** — `hero` and `important-width`. No real page is
+  diffed, so clipping, stacking contexts, transforms, grid and form controls
+  have zero coverage across all four tools.
+- **UA-origin properties have no rule to cite** — the UA sheet is a hardcoded
+  Rust `match`, so `winner: null` cannot distinguish "the UA sheet set it" from
+  "nobody set it".
+- **Computed values cover 15 longhands**; `line-height`, `font-family`,
+  `text-align`, `border-*`, `position` and every background-layer field return
+  `null`.
+- **Shorthand provenance does not reach longhands** — "which rule set
+  `padding-left`" is still not answerable.
+- **Unmodelled display-list ops** — form controls, carets, focus rings, backdrop
+  filters, gradient text and SVG primitives carry `"modelled": false`, with no
+  contract and no coverage.
+- **The `important-width` reference is a tripwire**: fixing the cascade to
+  honour `!important` will make that case agree and turn three smoke assertions
+  red. That flip is the signal working — update the expectation, do not route
+  around it.
+
+### Decisions needed from Pete
+
+1. **The trench is closed at 4 of 4 — does a follow-on loop open, and on which
+   metric?** Carried unchanged from night 3 because it was never answered, and
+   it is the only thing standing between here and the next slice. The two
+   candidates remain the capture-kind reference (needs a macOS runner; serves
+   the porting seats) and a real-page case corpus (serves diagnosis). Both are
+   new metrics with their own baselines, not continuations of this one.
+2. **`!important` is dead in the cascade** — carried from nights 2 and 3, still
+   unfixed, now pinned by a case. My read is unchanged: file it as a
+   parity-corpus event.
+
+No third question. The Linux-vs-macOS runner question that nights 1 and 2 both
+raised is not repeated here — night 3 answered it for everything this trench
+shipped, and it survives only inside decision 1, where it is a property of the
+capture-kind option rather than an open ruling.
