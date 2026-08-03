@@ -678,3 +678,45 @@ No third question. The Linux-vs-macOS runner question that nights 1 and 2 both
 raised is not repeated here — night 3 answered it for everything this trench
 shipped, and it survives only inside decision 1, where it is a property of the
 capture-kind option rather than an open ruling.
+
+---
+
+## 2026-08-03 — night 5 (no-op firing; the trench is already closed)
+
+**Metric: 4 of 4 → 4 of 4. Moved no → yes: NONE.**
+
+No work started, and no re-verification run either. `BASELINE.md`'s stop
+condition 1 was met by night 3 and the trench was closed out by night 4
+(`cf92bfa`), which re-ran the full smoke suite on the merged master tip
+`5aa912d`. `origin/master` is **still `5aa912d`** and this branch is still
+`cf92bfa`, so nothing has changed underneath that receipt — re-running it
+tonight would produce the same output for the same tree, which is motion, not
+evidence. Night 4's paste stands as the receipt for all four tools.
+
+**The only new fact tonight is about the loop, not the metric:** the nightly
+schedule is still firing after the trench reached its stop condition, and the
+close-out commit `cf92bfa` is pushed but unmerged with no PR open (PR #79
+carried nights 1–3 and is closed). Both need Pete or Atlas, not another night.
+
+**A future firing should not append another entry.** If the schedule is still
+enabled and the state is unchanged, the correct action is to notify and stop —
+one close-out is the record; a nightly chorus of them is padding.
+
+### What the engine still cannot answer
+
+Unchanged from night 4 and not re-listed here: capture-kind references, `style`
+as a diffable stage, a real-page case corpus, UA-origin rule citation, the 15
+covered longhands, shorthand→longhand provenance, the unmodelled display-list
+ops, and the `important-width` tripwire. See night 4's entry for each in full.
+
+### Decisions needed from Pete
+
+1. **Turn the nightly schedule off, or point it at a new metric?** It is firing
+   nightly against a completed trench. This is the same question night 3 and
+   night 4 asked about a follow-on loop, now with a cost attached.
+2. **`cf92bfa` (the close-out entry) is unmerged and has no PR** — Atlas opens
+   PRs by design, so this is a handoff note, not a request to open one.
+
+`!important` in the cascade is deliberately not repeated as a third question:
+nights 2, 3 and 4 all filed it with the same read (a parity-corpus event, not a
+trench fix), and repeating it a fourth time would be manufacturing volume.
