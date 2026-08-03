@@ -265,7 +265,28 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
                     Some(*v)
                 }
             }
-            _ if container_cross_size > 0.0 => Some(container_cross_size),
+            // `container_cross_size` is the CONTAINING BLOCK's content size,
+            // not this container's. For the `width: auto` case above, the
+            // used inner cross size is that minus the container's OWN margin,
+            // border and padding — handing back the raw containing-block
+            // number stretches every child past the container by exactly its
+            // own edges. That is #81's defect inverted: items grew by their
+            // padding instead of shrinking by it.
+            _ if container_cross_size > 0.0 => {
+                let own_edges = match cross_axis {
+                    Axis::Horizontal => {
+                        container.dimensions.margin.horizontal()
+                            + container.dimensions.border.horizontal()
+                            + container.dimensions.padding.horizontal()
+                    }
+                    Axis::Vertical => {
+                        container.dimensions.margin.vertical()
+                            + container.dimensions.border.vertical()
+                            + container.dimensions.padding.vertical()
+                    }
+                };
+                Some((container_cross_size - own_edges).max(0.0))
+            }
             _ => None,
         }
     } else {
@@ -324,10 +345,16 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
 
     // 5. Calculate cross sizes for each line
     // Pass has_definite_cross_size so stretch behavior is correct for auto-height containers
+    //
+    // Stretch targets the container's INNER cross size, not the containing
+    // block's content size. Those differ by the container's own margin,
+    // border and padding, and handing over the outer number makes every
+    // stretched child overflow its parent by exactly those edges.
+    let stretch_cross_size = definite_inner_cross.unwrap_or(container_cross_size);
     for line in &mut lines {
         calculate_cross_sizes(
             line,
-            container_cross_size,
+            stretch_cross_size,
             style.align_items,
             has_definite_cross_size,
             cross_axis,
@@ -2380,6 +2407,59 @@ mod tests {
         assert!(
             (39.0..=42.0).contains(&hdr_h),
             "header height should be ~40-41 once the button is 24, got {}", hdr_h
+        );
+    }
+
+    #[test]
+    fn test_auto_width_column_stretches_to_inner_width_not_containing_block() {
+        // A `width: auto` column flex container takes its used width from the
+        // containing block, but its children stretch to its INNER width --
+        // containing block minus the container's own margin, border, padding.
+        //
+        // Reaching for the containing block's content width directly makes
+        // every child overflow by exactly the container's own edges. That is
+        // the #81 defect inverted (items grew by their padding instead of
+        // shrinking by it), and it is what regressed the `shelf` parity case
+        // from 3.71% to 33.87%: a full-width bar whose child ran past it.
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.width = Length::Auto;
+        style.align_items = AlignItems::Stretch;
+
+        let mut container = LayoutBox::new(BoxType::Block, style);
+        container.dimensions.padding = EdgeSizes {
+            left: 20.0,
+            right: 20.0,
+            ..Default::default()
+        };
+        container.dimensions.border = EdgeSizes {
+            left: 5.0,
+            right: 5.0,
+            ..Default::default()
+        };
+
+        let mut child_style = ComputedStyle::new();
+        child_style.width = Length::Auto;
+        child_style.height = Length::Px(40.0);
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, child_style));
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 600.0),
+            ..Default::default()
+        };
+
+        layout_flex_container(&mut container, &containing);
+
+        // 1280 - (20+20 padding) - (5+5 border) = 1230.
+        let child_width = container.children[0].dimensions.content.width;
+        assert!(
+            (child_width - 1230.0).abs() < 0.5,
+            "stretched child width {} should be the container's inner width 1230, \
+             not the containing block's 1280 (overflowing by the container's own edges)",
+            child_width
         );
     }
 }
