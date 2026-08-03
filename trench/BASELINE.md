@@ -1,11 +1,18 @@
-# Trench baseline — MCP Phase 1 engine exports
+# Trench baseline — MCP engine exports
 
 **Started:** 2026-07-29 · **Authorized by:** Pete ("good trench candidate. Do it.")
 **Plan:** `HIWAVE_MCP_PLAN.md` §11 · **Branch:** `atlas/trench-mcp-exports`
 
+> **Trench 1 closed 2026-08-02 at 4 of 4** (nights 0–4). Its metric — how many
+> Tier-1 MCP reads the engine can answer — is **complete and is no longer the
+> live metric**. It is kept below as the record and the model for how a metric
+> is pinned. **Trench 2 is live; its metric is at the bottom of this file, and
+> that is the number a working night moves.** Pete, 2026-08-03: *"Point at new
+> metrics, eat off the next chunk of the elephant."*
+
 ---
 
-## The one metric
+## Trench 1 (CLOSED) — the one metric
 
 **Engine export coverage — how many of the four Tier-1 MCP reads the engine can
 ANSWER.**
@@ -88,3 +95,94 @@ Appended to `trench/digest.md`. Not "worked on display list":
 2. The smoke assertion that proves it — run, with output pasted.
 3. What it still cannot answer, named rather than omitted.
 4. At most three decisions needed from Pete.
+
+---
+
+# Trench 2 — computed-style answer coverage (LIVE)
+
+**Started:** 2026-08-03 · **Authorized by:** Pete ("Point at new metrics, eat
+off the next chunk of the elephant.") · Same branch, same receipt discipline.
+
+## The one metric
+
+**How many properties in the DIAGNOSIS SET `hiwave_style` can answer, where an
+answer is a value the engine COMPUTED and a provenance that does not lie.**
+
+```
+BASELINE (2026-08-03):  0 of 12
+```
+
+### The diagnosis set, and why these twelve
+
+Not "all of CSS" and not "whatever is easy to serialize". These are the
+properties that decide **where pixels land**, chosen because the parity backlog
+already blames them — text metrics account for ~59% of the remaining diff, and
+an agent cannot currently ask which line-height or family the cascade handed to
+layout.
+
+| # | Property | Why it is in the set |
+|---|---|---|
+| 1 | `line-height` | Text metrics, the largest single parity bucket |
+| 2 | `font-family` | Which face was chosen decides every advance |
+| 3 | `text-align` | Horizontal placement of every line box |
+| 4 | `font-style` | Synthetic vs real italic changes advances |
+| 5 | `letter-spacing` | Directly perturbs the ADVANCE CONTRACT |
+| 6 | `white-space` | Decides whether a line breaks at all |
+| 7 | `border-top-width` | Set almost only via the `border` shorthand |
+| 8 | `border-top-color` | Same, and paint reads it |
+| 9 | `box-sizing` | Silently redefines what `width` means |
+| 10 | `position` | Decides whether the box is in flow |
+| 11 | `overflow-x` | Decides whether a clip is pushed |
+| 12 | `opacity` | Decides whether a layer is created |
+
+## What counts as answered
+
+A property counts **only** when all three hold:
+
+1. `crates/hiwave-mcp/smoke.py` asserts its computed value, run and pasted.
+2. The asserted value is one the engine **computed**, not echoed from the
+   declaration text — the fixture must make value ≠ authored text (a resolved
+   multiplier, a shorthand expansion, an inherited value, a unit conversion).
+   `line-height: 1.5` on a 20px element asserting `"1.5"` proves nothing;
+   asserting `"30px"` proves the engine resolved it.
+3. **The reported provenance does not lie.** If a shorthand set it, the winner
+   cites that shorthand. If it was inherited, the origin says `inherited` and
+   not `user-agent-or-initial`. **A property whose reported value can differ
+   from the value layout used does not count at all** — a tool that disagrees
+   with the engine is worse than a gap, so the gap is the honest answer.
+
+Clause 3 is the one that will keep the count low, and that is deliberate.
+
+## Stop condition
+
+Whichever comes first:
+
+1. **12 of 12**, each with a passing smoke assertion.
+2. **Two consecutive nights with no property moving no → yes.**
+
+Same as trench 1: two dry nights ends it with a funeral note, not silence.
+
+## Order, and why
+
+1. **The text group first** (`line-height`, `font-family`, `text-align`,
+   `font-style`, `letter-spacing`, `white-space`) — parity blames text for the
+   majority of the remaining diff, so this is where an answer is worth most.
+2. **Then the shorthand group** (`border-top-width`, `border-top-color`) —
+   these are the ones that force shorthand→longhand provenance, which trench 1
+   named as the one place the output can currently mislead.
+3. **Then the box group** (`box-sizing`, `position`, `overflow-x`, `opacity`)
+   — cheapest, and least likely to surface engine surgery, so it is the tail
+   rather than the head.
+
+## Hard scope limits
+
+Unchanged from trench 1, and they still bind: no parity harness, no Windows or
+Linux port work, no CI workflow changes, no refactoring unrelated code, and do
+not "improve" exports that already have passing assertions. One addition:
+
+- **Do not fix the engine to make a property answerable.** If the cascade is
+  wrong, or the value the tool sees is not the value layout uses, that is a
+  FINDING — report it, pin it with a tripwire assertion, and leave the property
+  uncounted. Rendering changes belong to the parity corpus, not to an export
+  loop. Trench 1 held this line twice (`!important`, night 2) and it is why
+  those findings are trustworthy.

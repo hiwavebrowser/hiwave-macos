@@ -320,6 +320,14 @@ pub struct StyleRecord {
     /// Computed values, read back off the `ComputedStyle` this cascade
     /// produced — so the reported value is the one layout actually used.
     pub computed: Vec<(String, String)>,
+    /// Properties this element did not declare and whose computed value came
+    /// from the PARENT rather than from a UA default or the initial value.
+    ///
+    /// Recorded because "nothing declared this" is three different answers —
+    /// inherited, UA default, initial — and collapsing them loses the only one
+    /// that points at another element. An agent chasing a wrong font-size wants
+    /// to be sent up the tree, not told the property is unset.
+    pub inherited: Vec<String>,
 }
 
 impl Engine {
@@ -2484,6 +2492,10 @@ impl Engine {
                     Self::computed_value_of(&style, p).map(|v| (p.to_string(), v))
                 })
                 .collect();
+            // Which undeclared values came DOWN the tree rather than from a UA
+            // default. Decided here, where the parent's computed style is in
+            // hand, rather than in the exporter, which only sees one element.
+            let inherited = Self::inherited_properties(&style, parent_style, &records);
             if let Some(trace) = self.style_trace.borrow_mut().as_mut() {
                 trace.push(StyleRecord {
                     tag: tag_name.to_lowercase(),
@@ -2491,6 +2503,7 @@ impl Engine {
                     classes,
                     declarations: records,
                     computed,
+                    inherited,
                 });
             }
         }
@@ -2554,7 +2567,59 @@ impl Engine {
         "color",
         "background-color",
         "display",
+        // The text group. Parity attribution blames text metrics for ~59% of
+        // the remaining diff, and until now an agent could not ask which
+        // line-height, family or alignment the cascade handed to layout.
+        "line-height",
+        "font-family",
+        "text-align",
     ];
+
+    /// The shorthands that can write `property` without naming it.
+    ///
+    /// Needed so an inherited-looking value is not claimed as inherited when a
+    /// shorthand on THIS element happened to set it to the parent's value.
+    /// Deliberately a small explicit table covering the recorded set rather
+    /// than a general expansion model — the general one is a separate slice,
+    /// and guessing it here would put the wrong origin on a real declaration.
+    fn shorthands_setting(property: &str) -> &'static [&'static str] {
+        match property {
+            "line-height" | "font-family" | "font-size" | "font-weight" => &["font"],
+            _ => &[],
+        }
+    }
+
+    /// Inherited properties this element did not declare and whose computed
+    /// value matches the parent's.
+    ///
+    /// Both halves are required. `is_inherited_property` alone would claim
+    /// inheritance for a value the UA default happened to supply; value
+    /// equality alone would claim it for a property that does not inherit at
+    /// all and merely shares its initial value with the parent.
+    fn inherited_properties(
+        style: &ComputedStyle,
+        parent_style: Option<&ComputedStyle>,
+        records: &[DeclarationRecord],
+    ) -> Vec<String> {
+        let Some(parent) = parent_style else {
+            return Vec::new();
+        };
+        Self::COMPUTED_PROPERTIES
+            .iter()
+            .filter(|property| is_inherited_property(property))
+            .filter(|property| {
+                !records.iter().any(|r| {
+                    r.property == **property
+                        || Self::shorthands_setting(property).contains(&r.property.as_str())
+                })
+            })
+            .filter(|property| {
+                let own = Self::computed_value_of(style, property);
+                own.is_some() && own == Self::computed_value_of(parent, property)
+            })
+            .map(|property| property.to_string())
+            .collect()
+    }
 
     fn computed_value_of(style: &ComputedStyle, property: &str) -> Option<String> {
         fn len(l: &rustkit_css::Length) -> String {
@@ -2582,6 +2647,27 @@ impl Engine {
             "color" => color(&style.color),
             "background-color" => color(&style.background_color),
             "display" => format!("{:?}", style.display).to_lowercase(),
+            // `normal` is derived from the FONT (ascent + descent + line-gap),
+            // so it differs by platform and by installed face. Reporting the
+            // keyword is the honest answer: a px number here would look
+            // machine-independent and would not be. `Number`/`Px` ARE
+            // font-independent, so those resolve — through the same helper the
+            // line-box code calls, so the reported value cannot drift from the
+            // one layout used.
+            "line-height" => match &style.line_height {
+                rustkit_css::LineHeight::Normal => "normal".to_string(),
+                resolved => match style.font_size {
+                    rustkit_css::Length::Px(font_px) => {
+                        // normal_px is unreachable on these two arms.
+                        format!("{}px", resolved.to_px_with_normal(font_px, f32::NAN))
+                    }
+                    // A non-px font-size means the multiplier has nothing to
+                    // resolve against; a guess would be worse than a hole.
+                    _ => return None,
+                },
+            },
+            "font-family" => style.font_family.clone(),
+            "text-align" => format!("{:?}", style.text_align).to_lowercase(),
             _ => return None,
         })
     }
@@ -5499,11 +5585,18 @@ impl Engine {
                         "property": property,
                         "computed": Self::computed_value_of_recorded(record, property),
                         "winner": serde_json::Value::Null,
-                        // Not a cop-out: the UA sheet is a hardcoded match on
-                        // tag name rather than parsed rules, so there is no
-                        // selector to cite, and the initial value is
+                        // "Nothing declared this" is three answers, not one.
+                        // Inheritance is the one that points at another
+                        // element, so it is reported separately; the remaining
+                        // two stay fused because the UA sheet is a hardcoded
+                        // match on tag name rather than parsed rules, so there
+                        // is no selector to cite and the initial value is
                         // indistinguishable from it at this layer.
-                        "origin": "user-agent-or-initial",
+                        "origin": if record.inherited.iter().any(|p| p == property) {
+                            "inherited"
+                        } else {
+                            "user-agent-or-initial"
+                        },
                         "overridden": [],
                     }));
                 }
@@ -5530,9 +5623,15 @@ impl Engine {
             "count": elements.len(),
             "elements": elements,
             "limits": {
-                "origins": "author and author-inline only — the UA stylesheet is a \
-                            hardcoded match on tag name, not parsed rules, so it has no \
-                            selector to cite",
+                "origins": "author, author-inline, and inherited (the parent's computed \
+                            value, with no declaration on this element). The UA stylesheet \
+                            is a hardcoded match on tag name, not parsed rules, so it has \
+                            no selector to cite and `user-agent-or-initial` cannot say \
+                            which of the two it was",
+                "line_height_normal": "`normal` is reported as the keyword, not as pixels: \
+                                       it resolves against the font's own ascent, descent \
+                                       and line-gap, so a px number would differ by \
+                                       platform and by installed face",
                 "important": "recorded but NOT honoured by this cascade, which orders by \
                               specificity alone; an important declaration that is not the \
                               winner is an engine bug, not a reporting artefact",
@@ -7650,7 +7749,62 @@ mod tests {
             classes: classes.iter().map(|c| c.to_string()).collect(),
             declarations: Vec::new(),
             computed: Vec::new(),
+            inherited: Vec::new(),
         }
+    }
+
+    fn decl(property: &str) -> DeclarationRecord {
+        DeclarationRecord {
+            property: property.to_string(),
+            value: "center".to_string(),
+            selector: ".x".to_string(),
+            specificity: (0, 1, 0),
+            origin: "author",
+            important: false,
+            order: 0,
+        }
+    }
+
+    /// `inherited` must need BOTH halves. Value equality alone would claim
+    /// inheritance for every property that merely shares an initial value with
+    /// its parent, which is most of them on a plain page.
+    #[test]
+    fn inherited_needs_an_inheriting_property_and_a_matching_parent() {
+        let mut parent = ComputedStyle::new();
+        parent.text_align = rustkit_css::TextAlign::Center;
+        parent.font_family = "Georgia, serif".to_string();
+        let child = parent.clone();
+
+        let inherited = Engine::inherited_properties(&child, Some(&parent), &[]);
+        assert!(inherited.iter().any(|p| p == "text-align"), "{inherited:?}");
+        assert!(inherited.iter().any(|p| p == "font-family"), "{inherited:?}");
+        // `display` does not inherit in CSS, so an identical parent value is a
+        // coincidence rather than provenance.
+        assert!(!inherited.iter().any(|p| p == "display"), "{inherited:?}");
+
+        // No parent at all — the root can inherit from nothing.
+        assert!(Engine::inherited_properties(&child, None, &[]).is_empty());
+    }
+
+    /// A declaration on THIS element is provenance, so it must win over the
+    /// inherited label even when it sets exactly the parent's value — including
+    /// when it is the shorthand that writes the longhand without naming it.
+    #[test]
+    fn a_declaration_here_beats_the_inherited_label_including_via_shorthand() {
+        let mut parent = ComputedStyle::new();
+        parent.text_align = rustkit_css::TextAlign::Center;
+        parent.font_family = "Georgia, serif".to_string();
+        let child = parent.clone();
+
+        let named = Engine::inherited_properties(&child, Some(&parent), &[decl("text-align")]);
+        assert!(!named.iter().any(|p| p == "text-align"), "{named:?}");
+
+        // `font` sets font-family without spelling it. Reporting that as
+        // inherited would send an agent up the tree to a rule that is not there.
+        let shorthand = Engine::inherited_properties(&child, Some(&parent), &[decl("font")]);
+        assert!(!shorthand.iter().any(|p| p == "font-family"), "{shorthand:?}");
+        // ...and it must not swallow properties that shorthand cannot set.
+        assert!(shorthand.iter().any(|p| p == "text-align"), "{shorthand:?}");
     }
 
     #[test]

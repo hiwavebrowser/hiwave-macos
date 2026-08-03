@@ -50,7 +50,9 @@ body { margin: 0 }
 .hero { width: 400px; height: 120px; padding: 16px; background: #08c }
 div { width: 100px }
 h1 { font-size: 32px; margin: 0 }
-</style></head><body><div class="hero"><h1>Attribution</h1></div></body></html>"""
+.copy { font-size: 20px; line-height: 1.5; font-family: Georgia, serif; text-align: center }
+</style></head><body><div class="hero"><h1>Attribution</h1></div>\
+<div class="copy"><span>inherited</span></div></body></html>"""
 
 
 class Client:
@@ -284,6 +286,79 @@ def main():
     assert size["origin"] == "author", size
     print(f"ok  origin split      h1 font-weight=700 winner=None "
           f"(UA, no rule to cite); font-size=32px winner=h1 (author)")
+
+    # ---- the text group -----------------------------------------------------
+    # Parity attribution blames text metrics for ~59% of the remaining diff, and
+    # until now an agent could not ask which line-height, family or alignment
+    # the cascade handed to layout. These are the first three of that group.
+    copy_style, error = client.tool("hiwave_style", selector=".copy")
+    assert error is None, error
+    assert copy_style["count"] == 1, copy_style["count"]
+    copy = copy_style["elements"][0]
+
+    # 20 x 1.5 = 30. NO rule in the fixture spells a px line-height, so a
+    # serializer echoing declaration text would report "1.5" here. 30px can only
+    # come from the engine resolving the multiplier against the computed
+    # font-size — the same resolution the line-box code does.
+    assert copy["computed"]["font-size"] == "20px", copy["computed"]
+    assert copy["computed"]["line-height"] == "30px", copy["computed"]
+    lh = next(d for d in copy["declared"] if d["property"] == "line-height")
+    assert lh["winner"]["value"] == "1.5", lh    # authored as a bare multiplier
+    assert lh["winner"]["selector"] == ".copy", lh
+    assert lh["computed"] == "30px", lh          # ...reported as pixels
+    print(f"ok  line-height       .copy 20px x 1.5 = 30px — authored '1.5', "
+          f"computed {lh['computed']} (resolved, not echoed)")
+
+    # ...and `normal` deliberately stays a KEYWORD. It resolves against the
+    # font's own ascent/descent/line-gap, so a px number would look
+    # machine-independent and would differ by platform and installed face.
+    # .hero declares no line-height and neither does body.
+    assert hero_style["computed"]["line-height"] == "normal", hero_style["computed"]
+    print(f"ok  normal not faked  .hero line-height=normal (keyword, not px — "
+          f"resolving it needs font metrics)")
+
+    # "Nothing declared this" was one answer where CSS has three. Inheritance is
+    # the one that points at ANOTHER element, so it is now reported apart from
+    # UA-default/initial. The span declares nothing at all: every value below
+    # came DOWN the tree from .copy, and an agent chasing a wrong value here
+    # needs to be sent to the parent rather than told the property is unset.
+    span_style, error = client.tool("hiwave_style", selector="span")
+    assert error is None, error
+    assert span_style["count"] == 1, span_style["count"]
+    span = span_style["elements"][0]
+    assert not [d for d in span["declared"] if d["winner"] is not None], span["declared"]
+    for prop, expected in (("font-family", "Georgia, serif"),
+                           ("text-align", "center")):
+        d = next(x for x in span["declared"] if x["property"] == prop)
+        assert d["computed"] == expected, d
+        assert d["winner"] is None, d
+        assert d["origin"] == "inherited", d
+    # The distinction is only worth anything if it can still say UA/initial:
+    # `display` does not inherit, so the span's block/inline default is NOT
+    # inheritance even though .copy also has a value for it.
+    disp = next(x for x in span["declared"] if x["property"] == "display")
+    assert disp["origin"] == "user-agent-or-initial", disp
+    print(f"ok  inherited origin  span font-family='Georgia, serif' "
+          f"text-align=center both origin=inherited; display still UA-or-initial")
+
+    # A TRIPWIRE, not an endorsement. The span inherits no line-height in the
+    # CASCADE — `compute_style_for_element` seeds font-size/family/weight/
+    # style/color/letter-spacing/word-spacing/text-align from the parent but
+    # deliberately not line-height, which is inherited one layer later, in
+    # build_layout_box ("a value of Normal here reliably means not specified:
+    # inherit the parent's computed value", lib.rs ~1541). So LAYOUT lays this
+    # span out at 30px while hiwave_style reports `normal` — the tool and the
+    # engine disagree on this one property, which is why line-height is NOT
+    # counted as answerable for the trench metric even though the .copy
+    # assertion above passes. Pinned here so the divergence cannot be
+    # forgotten: whoever moves that inheritance into the cascade will see this
+    # go red, and should assert "30px" and count the property, not route around
+    # it. See trench/digest.md, night 6.
+    span_lh = next(x for x in span["declared"] if x["property"] == "line-height")
+    assert span_lh["computed"] == "normal", span_lh
+    assert span_lh["origin"] == "user-agent-or-initial", span_lh
+    print(f"ok  KNOWN DIVERGENCE  span line-height reported '{span_lh['computed']}' "
+          f"but laid out at 30px — inherited in build_layout_box, after the trace")
 
     # A query it cannot honestly answer is refused, not approximated. Matching
     # `div p` needs tree context the trace does not keep, and quietly matching

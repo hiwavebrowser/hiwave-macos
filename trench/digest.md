@@ -720,3 +720,215 @@ ops, and the `important-width` tripwire. See night 4's entry for each in full.
 `!important` in the cascade is deliberately not repeated as a third question:
 nights 2, 3 and 4 all filed it with the same read (a parity-corpus event, not a
 trench fix), and repeating it a fourth time would be manufacturing volume.
+
+---
+---
+
+# TRENCH 2 — computed-style answer coverage
+
+New metric, pinned in `BASELINE.md` on Pete's ruling of 2026-08-03: *"Point at
+new metrics, eat off the next chunk of the elephant."* Trench 1 closed at 4 of
+4; this one counts **properties `hiwave_style` can answer with a value the
+engine COMPUTED and a provenance that does not lie**, over a named 12-property
+diagnosis set. Same branch, same receipt discipline, same scope limits.
+
+---
+
+## 2026-08-03 — night 6 (`text-align`, `font-family`)
+
+**Metric: 0 of 12 → 2 of 12**
+
+**Moved no → yes: `text-align` and `font-family`.** `line-height` is
+implemented, asserted, and deliberately **NOT counted** — see the divergence
+below. That is the whole story of the night.
+
+### The assertions that prove it
+
+The fixture gained one rule and one subtree, both load-bearing:
+
+```css
+.copy { font-size: 20px; line-height: 1.5; font-family: Georgia, serif; text-align: center }
+```
+```html
+<div class="copy"><span>inherited</span></div>
+```
+
+The `span` declares **nothing**. So every value it reports came down the tree,
+and the assertion is not "a value came back" — it is that the engine says
+*where from*:
+
+```python
+assert not [d for d in span["declared"] if d["winner"] is not None], span["declared"]
+for prop, expected in (("font-family", "Georgia, serif"),
+                       ("text-align", "center")):
+    d = next(x for x in span["declared"] if x["property"] == prop)
+    assert d["computed"] == expected, d
+    assert d["winner"] is None, d
+    assert d["origin"] == "inherited", d
+# The distinction is only worth anything if it can still say UA/initial:
+# `display` does not inherit, so the span's block/inline default is NOT
+# inheritance even though .copy also has a value for it.
+disp = next(x for x in span["declared"] if x["property"] == "display")
+assert disp["origin"] == "user-agent-or-initial", disp
+```
+
+Before tonight, every one of those came back `"origin": "user-agent-or-initial"`
+— "nothing declared this" was one answer where CSS has three, and the one it
+collapsed is the only one that points at **another element**. An agent chasing a
+wrong font on the span was told the property was unset; it is now sent to
+`.copy`.
+
+`line-height` is also implemented, and its value assertion is real and
+hand-derived — 20px x 1.5 = 30px, where no rule in the fixture spells a px
+line-height, so an echoing serializer would report `1.5`:
+
+```python
+assert copy["computed"]["line-height"] == "30px", copy["computed"]
+lh = next(d for d in copy["declared"] if d["property"] == "line-height")
+assert lh["winner"]["value"] == "1.5", lh    # authored as a bare multiplier
+assert lh["computed"] == "30px", lh          # ...reported as pixels
+```
+
+`normal` is deliberately left as the keyword rather than resolved to px: it
+derives from the font's own ascent/descent/line-gap, so a number there would
+look machine-independent and would not be.
+
+```
+$ cargo build -p hiwave-mcp && python3 crates/hiwave-mcp/smoke.py
+ok  initialize        {'name': 'hiwave-mcp', 'version': '0.1.0'}
+ok  tools/list        ['hiwave_open', 'hiwave_layout', 'hiwave_display_list', 'hiwave_style', 'hiwave_diff', 'hiwave_screenshot', 'hiwave_status']
+ok  hiwave_layout-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_display_list-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_style-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_open       {'height': 600, 'loaded': '<inline>', 'width': 800}
+ok  hiwave_status     session survives between calls
+ok  hiwave_layout     .hero border_box = 432.0x152.0 (content-box: 400+2*16 x 120+2*16)
+ok  hiwave_display_list  .hero painted rgb(0,136,204) over 432.0x152.0 at (0.0,0.0) — same rect layout computed
+ok  paint order       canvas[0] < hero[1] < text[2]
+ok  advance contract  11 advances for 11 chars, font_size=32.0 weight=700 x=16.0
+ok  hiwave_style      width=400px won by .hero [0, 1, 0] over div [0, 0, 1] (later in source, lower specificity)
+ok  computed expansion padding-left=16px, winner=None — no rule spells it; expanded from `padding: 16px`
+ok  origin split      h1 font-weight=700 winner=None (UA, no rule to cite); font-size=32px winner=h1 (author)
+ok  line-height       .copy 20px x 1.5 = 30px — authored '1.5', computed 30px (resolved, not echoed)
+ok  normal not faked  .hero line-height=normal (keyword, not px — resolving it needs font metrics)
+ok  inherited origin  span font-family='Georgia, serif' text-align=center both origin=inherited; display still UA-or-initial
+ok  KNOWN DIVERGENCE  span line-height reported 'normal' but laid out at 30px — inherited in build_layout_box, after the trace
+ok  selector guard    refused 'div p'
+ok  hiwave_diff       hero/layout agrees with the spec reference on 12/12 hand-derived values (incl. border_box 432x152)
+ok  hiwave_diff       hero/display_list agrees on 17 values (paint order, #08c over 432x152, 32px/700 text at x=16)
+ok  hiwave_diff       important-width DISAGREES: border_box.width expected 100.0 (spec: !important wins), engine computed 400.0 — 2 of 4, height and x still agree
+ok  session isolation open page still 432x152 after three diffs
+ok  diff guards       unknown stage, unknown case, unknown reference, path escape and missing argument all refused
+ok  hiwave_screenshot 1440015 bytes at ppm
+ok  argument guard    pass either `html` or `path`, not both
+
+PASS: hiwave-mcp serves the engine's computed layout, its paint commands, the cascade behind them, AND whether any of it agrees with a committed reference
+```
+
+**Checked that the gate can go red.** Changed the fixture's `line-height: 1.5`
+to `2` and the tool reported `40px` — exactly what hand-derivation predicts from
+20 x 2 — failing the 30px assertion:
+
+```
+AssertionError: {... 'font-size': '20px', 'line-height': '40px', ...}
+```
+
+The number tracks the engine, not the call. Perturbation reverted; the
+committed fixture says `1.5`.
+
+### The finding: `hiwave_style`'s line-height is not layout's line-height
+
+This is why `line-height` is not counted, and it is the more valuable half of
+the night. The cascade seeds inherited properties from the parent in
+`compute_style_for_element` — font-size, font-family, font-weight, font-style,
+font-stretch, color, letter-spacing, word-spacing, text-align — and
+**deliberately not line-height**, whose own comment says so. Line-height is
+inherited one layer later, in `build_layout_box`:
+
+```rust
+// The UA defaults in `compute_style_for_element` never set `line_height`, so a value
+// of `Normal` here reliably means "not specified by UA or author": inherit the
+// parent's computed value.
+if let Some(parent) = parent_style {
+    if matches!(style.line_height, rustkit_css::LineHeight::Normal)
+        && !matches!(parent.line_height, rustkit_css::LineHeight::Normal)
+    { style.line_height = parent.line_height.clone(); }
+}
+```
+
+The style trace is recorded during the cascade, so it sees the **pre**-
+inheritance value. For the span: `hiwave_style` reports `normal`; layout lays it
+out at 30px. Per `BASELINE.md` clause 3, a property whose reported value can
+differ from the value layout used does not count — a tool that disagrees with
+the engine is worse than a gap.
+
+I did **not** fix it. Moving that inheritance into the cascade is plausibly
+value-identical (the later guard would then find the value already set and do
+nothing), but "plausibly value-identical" on the inherited line-height of every
+element is a parity-corpus event, not an export slice — and this trench's own
+scope limit now says so in writing. Instead it is pinned as a tripwire, the way
+night 3 pinned `!important`:
+
+```python
+span_lh = next(x for x in span["declared"] if x["property"] == "line-height")
+assert span_lh["computed"] == "normal", span_lh
+assert span_lh["origin"] == "user-agent-or-initial", span_lh
+```
+
+Whoever moves that inheritance will see this go red, and should then assert
+`"30px"` and count the property — not route around it.
+
+### What the engine still cannot answer
+
+- **`line-height` for any element that inherits it** — the divergence above. The
+  value is right only where the element declares it directly.
+- **Ten of the twelve**: `font-style`, `letter-spacing`, `white-space`,
+  `border-top-width`, `border-top-color`, `box-sizing`, `position`,
+  `overflow-x`, `opacity` are not in the computed set at all, and `line-height`
+  is uncounted. The border pair is the one that forces shorthand→longhand
+  provenance, still unbuilt.
+- **Non-px lengths come back as Rust `Debug` strings, not CSS.** The perturbation
+  output above shows it plainly: `'height': 'Auto'`, `'margin-top': 'Zero'`,
+  `'padding-left': 'Zero'`. An agent comparing against Chrome's `auto` / `0px`
+  gets a spurious mismatch. It is a small fix in `computed_value_of`'s `len()`
+  helper and it is the cheapest correct thing left; I did not fold it into
+  tonight because it changes values the existing `hiwave_diff` references may
+  quote, so it wants its own slice and its own red-check.
+- **`inherited` is decided by value equality plus CSS inheritance, guarded by a
+  small explicit shorthand table** (`font` → font-size/family/weight and
+  line-height). A shorthand outside that table which sets an inherited property
+  to exactly the parent's value would still be mislabelled `inherited`. Two unit
+  tests pin both halves and the shorthand guard; the general expansion model is
+  the same missing piece trench 1 named.
+- Everything trench 1 named is still true: UA-origin properties have no rule to
+  cite, `hiwave_style` takes simple selectors only, capture-kind references are
+  refused, `style` is not a diffable stage, and there is no real-page corpus.
+
+### Tests
+
+`cargo test -p rustkit-engine`: **31 passed, 0 failed** — including the two new
+unit tests and `test_line_height_inherits_from_html_through_body`, which is the
+test that documents the layout-side inheritance path described above.
+`cargo test -p hiwave-mcp`: **3 passed, 0 failed**.
+
+I ran the two crates I touched rather than the whole workspace, because the
+night's cap was up and the change is additive recording plus serialization — it
+reads `ComputedStyle` and writes JSON, and applies no property, so no rendering
+path changes. That is a smaller run than nights 1–3 did and I am flagging it as
+such rather than implying a workspace run happened. The runner needed
+`mesa-vulkan-drivers` installed again (fresh container; environment only,
+nothing committed).
+
+### Decisions needed from Pete
+
+1. **The line-height inheritance split — move it into the cascade, or leave the
+   tripwire?** Moving it would make the tool and layout agree and would count
+   the property; it also touches the inherited line-height of every element, so
+   it is a parity-corpus event. My read: leave it, and let whoever next works
+   the text bucket in the parity trench do it there, where the corpus is
+   watching.
+
+Next slice: `font-style`, `letter-spacing` and `white-space` — the rest of the
+text group, all three seeded by the cascade already (so no divergence expected),
+each needing a fixture case where the value is inherited or converted rather
+than echoed.
