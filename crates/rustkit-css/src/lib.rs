@@ -2090,8 +2090,17 @@ impl ComputedStyle {
             // Width/height defaults to auto (fill available space)
             width: Length::Auto,
             height: Length::Auto,
-            min_width: Length::Zero,
-            min_height: Length::Zero,
+            // CSS 2.1 / Flexbox §4.5: the INITIAL value of min-width and
+            // min-height is `auto`, not zero. The distinction is invisible in
+            // most contexts — Length::Auto and Length::Zero both resolve to
+            // 0.0 in to_px_with_viewport — but it is load-bearing for flex
+            // items, where `auto` means "floor at the content-based minimum"
+            // and an explicitly authored `0` means "you may shrink me to
+            // nothing". Defaulting to Zero made those two indistinguishable,
+            // so every flex item was shrinkable to zero and text got squeezed
+            // below the width it actually paints at.
+            min_width: Length::Auto,
+            min_height: Length::Auto,
             max_width: Length::Auto, // No max constraint
             max_height: Length::Auto,
             // Image/replaced element defaults
