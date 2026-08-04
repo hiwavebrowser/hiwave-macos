@@ -31,11 +31,11 @@ Literal bit-parity with Chrome is the wrong north star: Chrome is not bit-stable
 | Gate | What | Bar | Role |
 |---|---|---|---|
 | **A Geometry** | RustKit `layout.json` vs `chrome-148 layout-rects.json` | ≤ 0.5px per box, per-box attribution on fail | Primary grind driver |
-
-Geometry fail output schema, fixed now so PR prose cannot invent formats mid-campaign: one line per failing box — `case_id · box path (root-relative child indices + selector when known) · axis · expected · actual · Δ`. Nothing else counts as a geometry receipt.
 | **B Paint** | per-channel tolerance. **The pinned constant is `aa_tolerance: 5` in `docs/VISUAL_DIFF_POLICY.md`** — parity_gate must cite it from there; the ±3/255 figure from earlier drafts is retired so exactly one number exists | ≥ 99% within tolerance; **discrete structural failures (paint-outside-box, missing clip, wrong solid color) auto-FAIL regardless of %** | Keeps real paint bugs loud; stops AA noise counting |
 | **C Forensic** | full raw pixel heatmap + worst-N | **non-gating**, published on every PR | Catches what A+B can miss: stacking/z-order, shadows/outlines/selection not in rects, resample kernels |
 | Stability | 3 iterations, enforced at pr_merge **and** nightly | closes the `stable:false`-never-gates hole in parity_gate.py | |
+
+Geometry fail output schema, fixed now so PR prose cannot invent formats mid-campaign: one line per failing box — `case_id · box path (root-relative child indices + selector when known) · axis · expected · actual · Δ`. Nothing else counts as a geometry receipt.
 
 Ground rules: no engine behavior change in the re-instrument PRs (metric change must be attributable). Mean-diff-only "wins" banned from PR descriptions — report geometry+paint pairs.
 
