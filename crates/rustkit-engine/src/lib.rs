@@ -1383,6 +1383,7 @@ impl Engine {
                 1,
                 "body",
                 &element_ids,
+                false,
             );
             // CSS 2.1 §14.2: the CANVAS background comes from the html
             // element, or from body when html's is transparent. The root box
@@ -1471,10 +1472,17 @@ impl Engine {
         attributes: &HashMap<String, String>,
         same_tag_index: usize,
         same_tag_total: usize,
+        is_foreign: bool,
     ) -> String {
         let mut segment = String::from(tag_lower);
 
-        if let Some(class_attr) = attributes.get("class") {
+        // Chrome's capture guards on `typeof el.className === 'string'`. For an
+        // SVG or MathML element `className` is an SVGAnimatedString object, so
+        // the guard fails and the class is DROPPED: a classed `<svg>` is keyed
+        // as plain `svg`. Reproducing that is not optional — shelf.html has a
+        // classed inline svg, and getting this wrong lost the svg and both of
+        // its children from the join.
+        if let Some(class_attr) = attributes.get("class").filter(|_| !is_foreign) {
             let classes = class_attr.split_whitespace().collect::<Vec<_>>().join(" ");
             if !classes.is_empty() {
                 segment.push('.');
@@ -1504,12 +1512,33 @@ impl Engine {
         }
     }
 
+    /// Whether this tag opens a foreign-content subtree. Everything at or below
+    /// it is SVG/MathML, so `className` is not a string there.
+    fn enters_foreign_content(tag_lower: &str) -> bool {
+        matches!(tag_lower, "svg" | "math")
+    }
+
+    /// Extend a parent path with one child segment.
+    ///
+    /// Returns the empty string — meaning "identity not tracked" — when the
+    /// parent is untracked or the child is not an element. Anonymous and text
+    /// boxes must never inherit a path.
+    fn child_selector_path(selector_path: &str, segment: Option<&str>) -> String {
+        match (selector_path.is_empty(), segment) {
+            (false, Some(segment)) => format!("{} > {}", selector_path, segment),
+            _ => String::new(),
+        }
+    }
+
     /// Compute the selector segment for each child node, aligned by index with
     /// `children`. Non-element nodes yield `None` — they have no identity.
     ///
     /// Done in the parent because `:nth-of-type` needs the full same-tag
     /// sibling count, which a child cannot see from its own position.
-    fn child_selector_segments(children: &[Rc<Node>]) -> Vec<Option<String>> {
+    fn child_selector_segments(
+        children: &[Rc<Node>],
+        parent_is_foreign: bool,
+    ) -> Vec<Option<String>> {
         let mut totals: HashMap<String, usize> = HashMap::new();
         for child in children {
             if let NodeType::Element { tag_name, .. } = &child.node_type {
@@ -1533,7 +1562,14 @@ impl Engine {
                         *counter
                     };
                     let total = totals.get(&tag_lower).copied().unwrap_or(1);
-                    Some(Self::selector_segment(&tag_lower, attributes, index, total))
+                    let is_foreign = parent_is_foreign || Self::enters_foreign_content(&tag_lower);
+                    Some(Self::selector_segment(
+                        &tag_lower,
+                        attributes,
+                        index,
+                        total,
+                        is_foreign,
+                    ))
                 }
                 _ => None,
             })
@@ -1558,6 +1594,7 @@ impl Engine {
             1,
             "",
             &Cell::new(0),
+            false,
         )
     }
 
@@ -1585,6 +1622,7 @@ impl Engine {
         sibling_count: usize,
         selector_path: &str,
         element_ids: &Cell<usize>,
+        in_foreign_content: bool,
     ) -> LayoutBox {
         match &node.node_type {
             NodeType::Element {
@@ -1911,15 +1949,15 @@ impl Engine {
                     Vec::with_capacity(child_element_count);
                 // Selector segments are computed here, not in the child, because
                 // `:nth-of-type` needs the full same-tag sibling count.
-                let child_segments = Self::child_selector_segments(&child_nodes);
+                let children_are_foreign =
+                    in_foreign_content || Self::enters_foreign_content(&tag_lower);
+                let child_segments =
+                    Self::child_selector_segments(&child_nodes, children_are_foreign);
                 for (child_index, child) in child_nodes.iter().enumerate() {
-                    let child_path = match (
-                        selector_path.is_empty(),
+                    let child_path = Self::child_selector_path(
+                        selector_path,
                         child_segments.get(child_index).and_then(|s| s.as_deref()),
-                    ) {
-                        (false, Some(segment)) => format!("{} > {}", selector_path, segment),
-                        _ => String::new(),
-                    };
+                    );
                     let child_box = self.build_layout_from_parent_style_and_path(
                         child,
                         stylesheets,
@@ -1931,6 +1969,7 @@ impl Engine {
                         child_element_count,
                         &child_path,
                         element_ids,
+                        children_are_foreign,
                     );
                     if let NodeType::Element {
                         tag_name,
@@ -9101,14 +9140,14 @@ mod element_identity_tests {
     fn selector_segments_match_committed_chrome_baseline() {
         // `body > div.header:nth-of-type(1)` — two sibling divs, so indexed.
         assert_eq!(
-            Engine::selector_segment("div", &attrs(&[("class", "header")]), 1, 2),
+            Engine::selector_segment("div", &attrs(&[("class", "header")]), 1, 2, false),
             "div.header:nth-of-type(1)"
         );
         // `... > h1` — the only h1 among its siblings, so NO nth-of-type.
-        assert_eq!(Engine::selector_segment("h1", &attrs(&[]), 1, 1), "h1");
+        assert_eq!(Engine::selector_segment("h1", &attrs(&[]), 1, 1, false), "h1");
         // A unique tag that nonetheless carries a class.
         assert_eq!(
-            Engine::selector_segment("div", &attrs(&[("class", "grid")]), 2, 2),
+            Engine::selector_segment("div", &attrs(&[("class", "grid")]), 2, 2, false),
             "div.grid:nth-of-type(2)"
         );
     }
@@ -9121,16 +9160,16 @@ mod element_identity_tests {
     #[test]
     fn multi_class_selector_keeps_the_baseline_space_form() {
         assert_eq!(
-            Engine::selector_segment("div", &attrs(&[("class", "card-icon purple")]), 1, 1),
+            Engine::selector_segment("div", &attrs(&[("class", "card-icon purple")]), 1, 1, false),
             "div.card-icon purple"
         );
     }
 
     #[test]
     fn nth_of_type_is_omitted_for_a_lone_sibling_and_present_otherwise() {
-        assert_eq!(Engine::selector_segment("p", &attrs(&[]), 1, 1), "p");
+        assert_eq!(Engine::selector_segment("p", &attrs(&[]), 1, 1, false), "p");
         assert_eq!(
-            Engine::selector_segment("p", &attrs(&[]), 2, 3),
+            Engine::selector_segment("p", &attrs(&[]), 2, 3, false),
             "p:nth-of-type(2)"
         );
     }
@@ -9247,5 +9286,132 @@ mod element_identity_tests {
         });
         assert_eq!(b.element_id(), Some(42));
         assert_eq!(b.identity().map(|i| i.element_id), Some(42));
+    }
+
+    /// The join key is only worth anything if it actually JOINS. This walks the
+    /// real fixture DOMs with the same three helpers the layout builder uses
+    /// (`child_selector_segments`, `child_selector_path`, `reported_selector`)
+    /// and checks the selectors produced against the committed Chrome
+    /// baselines. Needs no GPU, so it runs everywhere.
+    ///
+    /// Chrome's capture skips zero-size elements and head-ish tags, so RustKit
+    /// legitimately produces selectors Chrome does not have. The direction that
+    /// matters for the oracle is the other one: every Chrome element must be
+    /// findable, or the geometry gate silently scores fewer boxes than it
+    /// claims.
+    #[test]
+    fn every_chrome_baseline_selector_is_reproduced_on_the_real_corpus() {
+        use rustkit_dom::NodeType;
+        use std::path::PathBuf;
+
+        fn walk(node: &Rc<Node>, path: &str, foreign: bool, out: &mut Vec<String>) {
+            if path.is_empty() {
+                return;
+            }
+            let mut children_foreign = foreign;
+            if let NodeType::Element {
+                tag_name,
+                attributes,
+                ..
+            } = &node.node_type
+            {
+                out.push(Engine::reported_selector(path, attributes));
+                children_foreign =
+                    foreign || Engine::enters_foreign_content(&tag_name.to_lowercase());
+            }
+            let children = node.children();
+            let segments = Engine::child_selector_segments(&children, children_foreign);
+            for (i, child) in children.iter().enumerate() {
+                let child_path =
+                    Engine::child_selector_path(path, segments.get(i).and_then(|s| s.as_deref()));
+                walk(child, &child_path, children_foreign, out);
+            }
+        }
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let cases = [
+            ("websuite/cases/card-grid", "baselines/chrome-148/websuite/card-grid"),
+            ("websuite/cases/article-typography", "baselines/chrome-148/websuite/article-typography"),
+            ("websuite/cases/flex-positioning", "baselines/chrome-148/websuite/flex-positioning"),
+            ("websuite/cases/css-selectors", "baselines/chrome-148/websuite/css-selectors"),
+            ("websuite/cases/sticky-scroll", "baselines/chrome-148/websuite/sticky-scroll"),
+            ("websuite/cases/image-gallery", "baselines/chrome-148/websuite/image-gallery"),
+            ("websuite/cases/form-elements", "baselines/chrome-148/websuite/form-elements"),
+            ("websuite/cases/gradient-backgrounds", "baselines/chrome-148/websuite/gradient-backgrounds"),
+            ("websuite/micro/backgrounds", "baselines/chrome-148/micro/backgrounds"),
+            ("websuite/micro/bg-pure", "baselines/chrome-148/micro/bg-pure"),
+            ("websuite/micro/bg-solid", "baselines/chrome-148/micro/bg-solid"),
+            ("websuite/micro/combinators", "baselines/chrome-148/micro/combinators"),
+            ("websuite/micro/form-controls", "baselines/chrome-148/micro/form-controls"),
+            ("websuite/micro/gpu-gradient-regression", "baselines/chrome-148/micro/gpu-gradient-regression"),
+            ("websuite/micro/gradient-no-radius", "baselines/chrome-148/micro/gradient-no-radius"),
+            ("websuite/micro/gradient-radius-only", "baselines/chrome-148/micro/gradient-radius-only"),
+            ("websuite/micro/gradients", "baselines/chrome-148/micro/gradients"),
+            ("websuite/micro/images-intrinsic", "baselines/chrome-148/micro/images-intrinsic"),
+            ("websuite/micro/pseudo-classes", "baselines/chrome-148/micro/pseudo-classes"),
+            ("websuite/micro/rounded-corners", "baselines/chrome-148/micro/rounded-corners"),
+            ("websuite/micro/specificity", "baselines/chrome-148/micro/specificity"),
+            ("crates/hiwave-app/src/ui|about.html", "baselines/chrome-148/builtins/about"),
+            ("crates/hiwave-app/src/ui|new_tab.html", "baselines/chrome-148/builtins/new_tab"),
+            ("crates/hiwave-app/src/ui|settings.html", "baselines/chrome-148/builtins/settings"),
+            ("crates/hiwave-app/src/ui|shelf.html", "baselines/chrome-148/builtins/shelf"),
+            ("crates/hiwave-app/src/ui|chrome_rustkit.html", "baselines/chrome-148/builtins/chrome_rustkit"),
+        ];
+
+        let mut checked = 0usize;
+        let mut total_expected = 0usize;
+        let mut missing: Vec<String> = Vec::new();
+
+        for (case_dir, baseline_dir) in cases {
+            let html_path = match case_dir.split_once('|') {
+                Some((dir, file)) => root.join(dir).join(file),
+                None => root.join(case_dir).join("index.html"),
+            };
+            let rects_path = root.join(baseline_dir).join("layout-rects.json");
+            let (html, rects) = match (
+                std::fs::read_to_string(&html_path),
+                std::fs::read_to_string(&rects_path),
+            ) {
+                (Ok(h), Ok(r)) => (h, r),
+                _ => continue, // corpus not checked out; nothing to assert
+            };
+
+            let document = Rc::new(Document::parse_html(&html).expect("fixture parses"));
+            let body = document.body().expect("fixture has a body");
+            let mut produced = Vec::new();
+            walk(&body, "body", false, &mut produced);
+            let produced: std::collections::HashSet<&str> =
+                produced.iter().map(|s| s.as_str()).collect();
+
+            let baseline: serde_json::Value = serde_json::from_str(&rects).expect("baseline parses");
+            let elements = baseline["elements"].as_array().expect("elements array");
+            assert!(!elements.is_empty(), "{case_dir}: empty baseline");
+
+            for element in elements {
+                let selector = element["selector"].as_str().expect("selector is a string");
+                total_expected += 1;
+                if !produced.contains(selector) {
+                    missing.push(format!("{case_dir} :: {selector}"));
+                }
+            }
+            checked += 1;
+        }
+
+        assert!(checked > 0, "no corpus cases were readable; test would be vacuous");
+        assert!(
+            missing.is_empty(),
+            "{} of {} Chrome baseline selectors across {} cases could not be reproduced \
+             by RustKit's generator, so the geometry oracle would silently skip them:\n{}",
+            missing.len(),
+            total_expected,
+            checked,
+            missing
+                .iter()
+                .take(20)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        eprintln!("join check: {total_expected} baseline selectors reproduced across {checked} cases");
     }
 }
