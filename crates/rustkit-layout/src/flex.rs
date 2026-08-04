@@ -761,20 +761,6 @@ fn create_flex_item<'a>(
     } else {
         max_main
     };
-    let min_cross = if css_min_cross > 0.0 {
-        spec_cross_to_border_box(css_min_cross)
-    } else {
-        intrinsic_cross + cross_pb
-    };
-    let max_cross = if max_cross.is_finite() {
-        spec_cross_to_border_box(max_cross)
-    } else {
-        max_cross
-    };
-
-    // Hypothetical main size (clamped)
-    let hypothetical_main_size = flex_basis.max(min_main).min(max_main);
-
     // Check if the cross size is explicitly set (not auto)
     // Per CSS spec, items with explicit cross size should NOT be stretched
     let explicit_cross_length = match main_axis {
@@ -789,6 +775,30 @@ fn create_flex_item<'a>(
         l => Some(spec_cross_to_border_box(resolve_length(l, container_cross))),
     };
     let has_explicit_cross_size = !matches!(explicit_cross_length, rustkit_css::Length::Auto);
+
+    let min_cross = if css_min_cross > 0.0 {
+        spec_cross_to_border_box(css_min_cross)
+    } else if explicit_cross_size.is_some() {
+        // An author-specified cross size is used as specified. The intrinsic
+        // floor below is for CONTENT-sized items; applying it to an explicit
+        // size makes any control smaller than its intrinsic box impossible to
+        // author. css-flexbox-1 4.5's automatic minimum is a MAIN-axis rule
+        // and only applies when the size is `auto` — note min_main above
+        // correctly floors at 0.0. This asymmetry is what rendered the shelf's
+        // 24x24 close button 36 tall (font_size*1.5+12, the intrinsic button
+        // height) and inflated the header to 53 against Chrome's 41.
+        0.0
+    } else {
+        intrinsic_cross + cross_pb
+    };
+    let max_cross = if max_cross.is_finite() {
+        spec_cross_to_border_box(max_cross)
+    } else {
+        max_cross
+    };
+
+    // Hypothetical main size (clamped)
+    let hypothetical_main_size = flex_basis.max(min_main).min(max_main);
 
     FlexItem {
         layout_box,
@@ -2119,6 +2129,67 @@ mod tests {
             child2_height < 100.0,
             "Child2 height {} should be less than 100px (stretched to match tallest, not parent)",
             child2_height
+        );
+    }
+
+    #[test]
+    fn test_explicitly_sized_button_in_a_flex_row_keeps_its_size() {
+        // The shelf header, reduced. Chrome 148 puts #closeBtn at
+        // 1240,8,24,24 inside a 1280x41 header; RustKit rendered it 24x36 and
+        // the header came out 53 tall instead of 41.
+        //
+        // A <button> is a FormControl with an intrinsic cross size
+        // (font_size*1.5+12 = 36 at 16px). That intrinsic was used as the
+        // item's minimum on the cross axis even when the author specified a
+        // height, so `height: 24px` could not go below it. Any author-sized
+        // control in a flex row is affected; the shelf is only where it was
+        // measured.
+        let mut hdr_style = ComputedStyle::new();
+        hdr_style.display = rustkit_css::Display::Flex;
+        hdr_style.flex_direction = FlexDirection::Row;
+        hdr_style.align_items = AlignItems::Center;
+        hdr_style.justify_content = rustkit_css::JustifyContent::SpaceBetween;
+        hdr_style.width = Length::Px(1280.0);
+        hdr_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+
+        let mut hdr = LayoutBox::new(BoxType::Block, hdr_style);
+        hdr.dimensions.padding = EdgeSizes { top: 8.0, bottom: 8.0, left: 16.0, right: 16.0 };
+
+        let mut title_style = ComputedStyle::new();
+        title_style.width = Length::Px(105.0);
+        title_style.height = Length::Px(15.0);
+        hdr.children.push(LayoutBox::new(BoxType::Block, title_style));
+
+        let mut close_style = ComputedStyle::new();
+        close_style.width = Length::Px(24.0);
+        close_style.height = Length::Px(24.0);
+        close_style.display = rustkit_css::Display::Flex;
+        close_style.font_size = Length::Px(16.0);
+        hdr.children.push(LayoutBox::new(
+            BoxType::FormControl(crate::FormControlType::Button {
+                label: "\u{00d7}".to_string(),
+                button_type: "button".to_string(),
+            }),
+            close_style,
+        ));
+
+        let containing = Dimensions { content: Rect::new(0.0, 0.0, 1280.0, 600.0), ..Default::default() };
+        layout_flex_container(&mut hdr, &containing);
+
+        let close = &hdr.children[1].dimensions.content;
+        assert!(
+            (close.width - 24.0).abs() < 0.5 && (close.height - 24.0).abs() < 0.5,
+            "explicitly sized button should stay 24x24, got {}x{}",
+            close.width, close.height
+        );
+        assert!(close.x >= 1200.0, "space-between should push it to the end, got x={}", close.x);
+
+        // The header height follows: 8 + max(15, 24) + 8 = 40 (Chrome 41 with
+        // its 1px border). While the button measured 36, this was 52.
+        let hdr_h = hdr.dimensions.content.height + hdr.dimensions.padding.vertical();
+        assert!(
+            (39.0..=42.0).contains(&hdr_h),
+            "header height should be ~40-41 once the button is 24, got {}", hdr_h
         );
     }
 }
