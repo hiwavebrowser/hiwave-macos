@@ -50,9 +50,16 @@ body { margin: 0 }
 .hero { width: 400px; height: 120px; padding: 16px; background: #08c }
 div { width: 100px }
 h1 { font-size: 32px; margin: 0 }
-.copy { font-size: 20px; line-height: 1.5; font-family: Georgia, serif; text-align: center }
+.copy { font-size: 20px; line-height: 1.5; font-family: Georgia, serif; text-align: center;
+        font-style: italic }
+.plain  { width: 400px; font-size: 20px; font-family: Georgia, serif }
+.spaced { width: 400px; font-size: 20px; font-family: Georgia, serif; letter-spacing: 0.1em }
+.pre { white-space: pre }
 </style></head><body><div class="hero"><h1>Attribution</h1></div>\
-<div class="copy"><span>inherited</span></div></body></html>"""
+<div class="copy"><span id="inherits">inherited</span></div>\
+<div class="plain"><span>spacing</span></div>\
+<div class="spaced"><span>spacing</span></div>\
+<div class="pre">a  b<span class="nested">c  d</span></div></body></html>"""
 
 
 class Client:
@@ -322,7 +329,9 @@ def main():
     # UA-default/initial. The span declares nothing at all: every value below
     # came DOWN the tree from .copy, and an agent chasing a wrong value here
     # needs to be sent to the parent rather than told the property is unset.
-    span_style, error = client.tool("hiwave_style", selector="span")
+    # Queried by id rather than by tag: the fixture now has four spans, and a
+    # bare `span` query would silently average four elements into one answer.
+    span_style, error = client.tool("hiwave_style", selector="#inherits")
     assert error is None, error
     assert span_style["count"] == 1, span_style["count"]
     span = span_style["elements"][0]
@@ -359,6 +368,93 @@ def main():
     assert span_lh["origin"] == "user-agent-or-initial", span_lh
     print(f"ok  KNOWN DIVERGENCE  span line-height reported '{span_lh['computed']}' "
           f"but laid out at 30px — inherited in build_layout_box, after the trace")
+
+    # ---- font-style: an inherited value, and the value PAINT drew with -------
+    # The span declares nothing, so `italic` cannot be an echo of declaration
+    # text — it came down the tree from `.copy`. The second half is what makes
+    # it count: the paint command carries the italic flag, so the value the
+    # tool reports is the value the shaper selected a face with. A tool that
+    # agreed with the cascade but not with paint would be worse than a gap.
+    fstyle = next(x for x in span["declared"] if x["property"] == "font-style")
+    assert fstyle["computed"] == "italic", fstyle
+    assert fstyle["winner"] is None, fstyle          # nothing on the span said so
+    assert fstyle["origin"] == "inherited", fstyle   # ...`.copy` did
+    italic_run = [c for c in commands if c["op"] == "text" and c["text"] == "inherited"]
+    assert len(italic_run) == 1, italic_run
+    assert italic_run[0]["font_style"] == 1, italic_run[0]   # 0 normal, 1 italic
+    # ...and the h1, which inherits nothing italic, is still upright — so the
+    # flag tracks the cascade rather than being on for every run.
+    assert glyphs["font_style"] == 0, glyphs
+    print(f"ok  font-style        span computed=italic origin=inherited (declares "
+          f"nothing); paint drew it font_style=1, h1 still 0")
+
+    # ---- letter-spacing: a unit conversion, checked against what layout used --
+    # `0.1em` on a 20px element is 2px. No rule spells a px letter-spacing, so
+    # an echoing serializer would report `0.1em` — the engine has to resolve
+    # the em against the computed font-size to get here.
+    spaced_style, error = client.tool("hiwave_style", selector=".spaced")
+    assert error is None, error
+    assert spaced_style["count"] == 1, spaced_style["count"]
+    spaced = spaced_style["elements"][0]
+    assert spaced["computed"]["font-size"] == "20px", spaced["computed"]
+    assert spaced["computed"]["letter-spacing"] == "2px", spaced["computed"]
+    ls = next(d for d in spaced["declared"] if d["property"] == "letter-spacing")
+    assert ls["winner"]["value"] == "0.1em", ls      # authored as a multiple of em
+    assert ls["winner"]["selector"] == ".spaced", ls
+    assert ls["computed"] == "2px", ls               # ...reported as pixels
+
+    # THE HALF THAT MAKES IT COUNT: 2px is the number LAYOUT spaced glyphs by.
+    # `.plain` and `.spaced` carry the same text, family and size and differ in
+    # exactly one declaration, so every font metric cancels in the difference
+    # and what is left is the letter-spacing alone. That is why this is a
+    # DELTA and not an absolute advance: the absolute values are this runner's
+    # font, the delta is the engine's arithmetic.
+    runs = [c for c in commands if c["op"] == "text" and c["text"] == "spacing"]
+    assert len(runs) == 2, [c["index"] for c in runs]
+    plain_run, spaced_run = sorted(runs, key=lambda c: c["index"])
+    assert plain_run["advances"] is not None and spaced_run["advances"] is not None, runs
+    assert len(plain_run["advances"]) == len(spaced_run["advances"]) == len("spacing") == 7, runs
+    deltas = [round(s - p, 4) for p, s in zip(plain_run["advances"], spaced_run["advances"])]
+    assert deltas == [2.0] * 7, deltas
+    print(f"ok  letter-spacing    .spaced 0.1em x 20px = 2px (authored '0.1em'); "
+          f"every advance is exactly +2.0 over .plain — {deltas}")
+
+    # ---- white-space: implemented, asserted, and NOT counted ------------------
+    # A TRIPWIRE, the same shape as line-height above. `white-space` inherits in
+    # CSS, but this cascade never seeds it onto an ELEMENT — only onto text
+    # nodes, from their immediate parent (build_layout_box). So a span inside a
+    # `pre` div computes `normal`, and `inherited_properties` deliberately
+    # refuses to label it `inherited`, because the parent did not supply it.
+    pre_style, error = client.tool("hiwave_style", selector=".pre")
+    assert error is None, error
+    pre = pre_style["elements"][0]
+    # On the element that declares it, the value is an ECHO of the declaration
+    # text — which is exactly why this property is not counted for the metric.
+    assert pre["computed"]["white-space"] == "pre", pre["computed"]
+    nested_style, error = client.tool("hiwave_style", selector="span.nested")
+    assert error is None, error
+    assert nested_style["count"] == 1, nested_style["count"]
+    nested = nested_style["elements"][0]
+    #
+    # Verified to flip: seeding `style.white_space = parent.white_space` in
+    # compute_style_for_element makes this report `pre` and fails here. Whoever
+    # does that must ALSO drop white-space from the exclusion list in
+    # `inherited_properties`, or the origin will keep saying UA-or-initial for a
+    # value that is by then genuinely inherited — then assert `pre`/`inherited`
+    # and count the property. See trench/digest.md, night 7.
+    ws = next(x for x in nested["declared"] if x["property"] == "white-space")
+    assert ws["computed"] == "normal", ws            # CSS says this should be `pre`
+    assert ws["origin"] == "user-agent-or-initial", ws   # NOT "inherited"
+    # ...and the consequence is visible in paint, which is what makes this a bug
+    # report rather than a reporting quirk: the div's OWN text keeps both of its
+    # spaces (4 advances for "a  b"), the nested element's collapses to one.
+    texts = {c["text"]: c for c in commands if c["op"] == "text"}
+    assert "a  b" in texts, sorted(texts)
+    assert len(texts["a  b"]["advances"]) == 4, texts["a  b"]
+    assert "c d" in texts and "c  d" not in texts, sorted(texts)
+    assert len(texts["c d"]["advances"]) == 3, texts["c d"]
+    print(f"ok  KNOWN DIVERGENCE  .pre keeps 'a  b' (4 advances) but its nested span "
+          f"collapsed 'c  d' to 'c d' — white-space is not inherited onto elements")
 
     # A query it cannot honestly answer is refused, not approximated. Matching
     # `div p` needs tree context the trace does not keep, and quietly matching

@@ -2573,6 +2573,15 @@ impl Engine {
         "line-height",
         "font-family",
         "text-align",
+        // The rest of the text group. `font-style` and `letter-spacing` are
+        // seeded from the parent by the cascade itself (see
+        // `compute_style_for_element`), so what this reports is the value
+        // layout and paint read. `white-space` is NOT seeded there — it is
+        // reported anyway, and the gap is pinned by a smoke tripwire rather
+        // than hidden; see `inherited_properties` and trench/digest.md night 7.
+        "font-style",
+        "letter-spacing",
+        "white-space",
     ];
 
     /// The shorthands that can write `property` without naming it.
@@ -2607,6 +2616,14 @@ impl Engine {
         Self::COMPUTED_PROPERTIES
             .iter()
             .filter(|property| is_inherited_property(property))
+            // `white-space` inherits in CSS but NOT in this cascade: elements
+            // are never seeded from the parent (only text nodes are, in
+            // `build_layout_box`). So a child matching its parent's value
+            // matches it by coincidence — both are the initial `normal` — and
+            // labelling that `inherited` would point an agent at a parent that
+            // did not supply it. Excluded on purpose; the real gap is a finding,
+            // pinned by a smoke tripwire. See trench/digest.md night 7.
+            .filter(|property| **property != "white-space")
             .filter(|property| {
                 !records.iter().any(|r| {
                     r.property == **property
@@ -2668,6 +2685,36 @@ impl Engine {
             },
             "font-family" => style.font_family.clone(),
             "text-align" => format!("{:?}", style.text_align).to_lowercase(),
+            "font-style" => format!("{:?}", style.font_style).to_lowercase(),
+            // Resolved through exactly the arms LAYOUT resolves (`Px` as-is,
+            // `Em` against this element's own computed font-size, `Rem`
+            // against the 16px root default) so the reported number cannot
+            // differ from the one the shaper spaced the glyphs by. Layout
+            // treats every OTHER arm as 0.0; rather than echo that, the
+            // unresolvable arms return a hole, because "0px" for a percentage
+            // would be a confident wrong answer where null is a true one.
+            "letter-spacing" => match &style.letter_spacing {
+                rustkit_css::Length::Zero => "0px".to_string(),
+                rustkit_css::Length::Px(v) => format!("{v}px"),
+                rustkit_css::Length::Em(em) => match style.font_size {
+                    rustkit_css::Length::Px(font_px) => format!("{}px", em * font_px),
+                    _ => return None,
+                },
+                rustkit_css::Length::Rem(rem) => format!("{}px", rem * 16.0),
+                _ => return None,
+            },
+            // Kebab-cased by hand: `{:?}`.to_lowercase() would emit `prewrap`
+            // and `breakspaces`, which are not CSS values, and an agent
+            // diffing against Chrome would read the difference as a bug.
+            "white-space" => match style.white_space {
+                rustkit_css::WhiteSpace::Normal => "normal",
+                rustkit_css::WhiteSpace::Nowrap => "nowrap",
+                rustkit_css::WhiteSpace::Pre => "pre",
+                rustkit_css::WhiteSpace::PreWrap => "pre-wrap",
+                rustkit_css::WhiteSpace::PreLine => "pre-line",
+                rustkit_css::WhiteSpace::BreakSpaces => "break-spaces",
+            }
+            .to_string(),
             _ => return None,
         })
     }
@@ -5635,6 +5682,11 @@ impl Engine {
                 "important": "recorded but NOT honoured by this cascade, which orders by \
                               specificity alone; an important declaration that is not the \
                               winner is an engine bug, not a reporting artefact",
+                "white_space": "inherits in CSS but not in this cascade: only TEXT nodes take \
+                                it from their parent, so an ELEMENT nested inside a `pre` \
+                                ancestor reports (and lays out) `normal`. The value is \
+                                truthful about the engine and is never labelled `inherited`; \
+                                the missing inheritance is an engine bug",
                 "computed_properties": Self::COMPUTED_PROPERTIES,
             }
         });
@@ -7805,6 +7857,80 @@ mod tests {
         assert!(!shorthand.iter().any(|p| p == "font-family"), "{shorthand:?}");
         // ...and it must not swallow properties that shorthand cannot set.
         assert!(shorthand.iter().any(|p| p == "text-align"), "{shorthand:?}");
+    }
+
+    /// `letter-spacing` must resolve through exactly the arms LAYOUT resolves,
+    /// because a reported value that differs from the one the shaper spaced by
+    /// is worse than no value at all. The arms layout cannot resolve must come
+    /// back as a hole rather than as layout's silent 0.0 fallback: "0px" for a
+    /// percentage is a confident wrong answer where null is a true one.
+    #[test]
+    fn letter_spacing_resolves_the_way_layout_does_or_not_at_all() {
+        let mut style = ComputedStyle::new();
+        style.font_size = rustkit_css::Length::Px(20.0);
+
+        style.letter_spacing = rustkit_css::Length::Em(0.1);
+        assert_eq!(
+            Engine::computed_value_of(&style, "letter-spacing").as_deref(),
+            Some("2px"), // 0.1 x 20px, the same product layout takes
+        );
+        style.letter_spacing = rustkit_css::Length::Px(3.5);
+        assert_eq!(
+            Engine::computed_value_of(&style, "letter-spacing").as_deref(),
+            Some("3.5px"),
+        );
+        style.letter_spacing = rustkit_css::Length::Zero;
+        assert_eq!(
+            Engine::computed_value_of(&style, "letter-spacing").as_deref(),
+            Some("0px"),
+        );
+        // Rem resolves against the 16px root default, as layout does.
+        style.letter_spacing = rustkit_css::Length::Rem(0.5);
+        assert_eq!(
+            Engine::computed_value_of(&style, "letter-spacing").as_deref(),
+            Some("8px"),
+        );
+        // An em with no px font-size to resolve against has nothing to multiply.
+        style.letter_spacing = rustkit_css::Length::Em(0.1);
+        style.font_size = rustkit_css::Length::Auto;
+        assert_eq!(Engine::computed_value_of(&style, "letter-spacing"), None);
+        // Percent: layout treats it as 0.0; reporting that would be a guess.
+        style.font_size = rustkit_css::Length::Px(20.0);
+        style.letter_spacing = rustkit_css::Length::Percent(10.0);
+        assert_eq!(Engine::computed_value_of(&style, "letter-spacing"), None);
+    }
+
+    /// `white-space` inherits in CSS but not in this cascade — only text nodes
+    /// take it from their parent. So a child whose value merely EQUALS its
+    /// parent's must not be labelled `inherited`: that would point an agent at
+    /// a parent which did not supply it. Pinned because the fix (seeding it in
+    /// `compute_style_for_element`) has to remove this guard in the same change.
+    #[test]
+    fn white_space_is_never_labelled_inherited_because_the_cascade_does_not_seed_it() {
+        let mut parent = ComputedStyle::new();
+        parent.white_space = rustkit_css::WhiteSpace::Pre;
+        parent.text_align = rustkit_css::TextAlign::Center;
+        let mut child = parent.clone();
+
+        // Even with the values identical, white-space is withheld while its
+        // sibling text properties are reported.
+        let inherited = Engine::inherited_properties(&child, Some(&parent), &[]);
+        assert!(!inherited.iter().any(|p| p == "white-space"), "{inherited:?}");
+        assert!(inherited.iter().any(|p| p == "text-align"), "{inherited:?}");
+
+        // ...and the VALUE is still reported, in CSS spelling rather than the
+        // Rust variant name: `PreWrap` is not a CSS value and an agent diffing
+        // against Chrome would read the difference as an engine bug.
+        child.white_space = rustkit_css::WhiteSpace::PreWrap;
+        assert_eq!(
+            Engine::computed_value_of(&child, "white-space").as_deref(),
+            Some("pre-wrap"),
+        );
+        child.white_space = rustkit_css::WhiteSpace::BreakSpaces;
+        assert_eq!(
+            Engine::computed_value_of(&child, "white-space").as_deref(),
+            Some("break-spaces"),
+        );
     }
 
     #[test]
