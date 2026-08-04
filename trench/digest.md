@@ -932,3 +932,274 @@ Next slice: `font-style`, `letter-spacing` and `white-space` — the rest of the
 text group, all three seeded by the cascade already (so no divergence expected),
 each needing a fixture case where the value is inherited or converted rather
 than echoed.
+
+---
+
+## 2026-08-04 — night 7 (`font-style`, `letter-spacing`; `white-space` is a finding)
+
+**Metric: 2 of 12 → 4 of 12**
+
+**Moved no → yes: `font-style` and `letter-spacing`.** `white-space` is
+implemented and asserted and deliberately **NOT counted** — see the finding
+below. That is the rest of the text group, and the divergence is the more
+useful half of the night.
+
+### First, the stored prompt is still stale
+
+Tonight's firing again described the metric as trench 1's "four Tier-1 MCP
+reads" and told me to stop at 4 of 4. `BASELINE.md` (which the same prompt
+names as binding, and reads first) says that trench closed on 2026-08-02 and
+that trench 2 is the live metric. I worked trench 2 and report `N of 12`, per
+the file. Night 6 already flagged this; it is now the second night spent on a
+prompt that names a finished trench, so it is a decision below rather than a
+note.
+
+### The assertions that prove it
+
+The fixture gained one declaration and three subtrees.
+
+**`font-style`** is asserted on a span that declares **nothing**, so `italic`
+came down the tree from `.copy` and cannot be an echo of declaration text:
+
+```python
+fstyle = next(x for x in span["declared"] if x["property"] == "font-style")
+assert fstyle["computed"] == "italic", fstyle
+assert fstyle["winner"] is None, fstyle          # nothing on the span said so
+assert fstyle["origin"] == "inherited", fstyle   # ...`.copy` did
+italic_run = [c for c in commands if c["op"] == "text" and c["text"] == "inherited"]
+assert italic_run[0]["font_style"] == 1, italic_run[0]   # 0 normal, 1 italic
+# ...and the h1, which inherits nothing italic, is still upright — so the
+# flag tracks the cascade rather than being on for every run.
+assert glyphs["font_style"] == 0, glyphs
+```
+
+The second half is what makes it *count* rather than merely pass: the paint
+command carries the italic flag, so the value the tool reports is the value the
+shaper picked a face with. Clause 3 asks whether the tool can disagree with the
+engine; this checks the two against each other instead of asserting the cascade
+twice.
+
+**`letter-spacing`** is a unit conversion — `0.1em` on a 20px element is 2px,
+and no rule in the fixture spells a px letter-spacing:
+
+```python
+assert spaced["computed"]["letter-spacing"] == "2px", spaced["computed"]
+ls = next(d for d in spaced["declared"] if d["property"] == "letter-spacing")
+assert ls["winner"]["value"] == "0.1em", ls      # authored as a multiple of em
+assert ls["computed"] == "2px", ls               # ...reported as pixels
+```
+
+and then the half that makes it count — that 2px is the number **layout**
+spaced glyphs by. `.plain` and `.spaced` carry the same text, family and size
+and differ in exactly one declaration, so every font metric cancels in the
+difference and what is left is the spacing alone:
+
+```python
+runs = [c for c in commands if c["op"] == "text" and c["text"] == "spacing"]
+plain_run, spaced_run = sorted(runs, key=lambda c: c["index"])
+assert len(plain_run["advances"]) == len(spaced_run["advances"]) == len("spacing") == 7
+deltas = [round(s - p, 4) for p, s in zip(plain_run["advances"], spaced_run["advances"])]
+assert deltas == [2.0] * 7, deltas
+```
+
+A **delta**, not an absolute advance, and deliberately: the absolute values are
+this runner's font, the delta is the engine's arithmetic. (Worth saying plainly:
+this runner has no Georgia, so its fallback advances happen to be uniform, and
+on this machine the absolutes would have passed too. The delta form is what
+makes the assertion portable to a runner where they are not — it is written for
+the machine it may move to, not the one it ran on.)
+
+The resolution path is the same one layout takes — px as-is, em against the
+element's own computed font-size, rem against 16 — so the reported number
+cannot drift from the one the shaper used. Arms layout *cannot* resolve return
+a hole instead of layout's silent `0.0` fallback, because `0px` for a
+percentage is a confident wrong answer where `null` is a true one.
+
+```
+$ cargo build -p hiwave-mcp && python3 crates/hiwave-mcp/smoke.py
+ok  initialize        {'name': 'hiwave-mcp', 'version': '0.1.0'}
+ok  tools/list        ['hiwave_open', 'hiwave_layout', 'hiwave_display_list', 'hiwave_style', 'hiwave_diff', 'hiwave_screenshot', 'hiwave_status']
+ok  hiwave_layout-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_display_list-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_style-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_open       {'height': 600, 'loaded': '<inline>', 'width': 800}
+ok  hiwave_status     session survives between calls
+ok  hiwave_layout     .hero border_box = 432.0x152.0 (content-box: 400+2*16 x 120+2*16)
+ok  hiwave_display_list  .hero painted rgb(0,136,204) over 432.0x152.0 at (0.0,0.0) — same rect layout computed
+ok  paint order       canvas[0] < hero[1] < text[2]
+ok  advance contract  11 advances for 11 chars, font_size=32.0 weight=700 x=16.0
+ok  hiwave_style      width=400px won by .hero [0, 1, 0] over div [0, 0, 1] (later in source, lower specificity)
+ok  computed expansion padding-left=16px, winner=None — no rule spells it; expanded from `padding: 16px`
+ok  origin split      h1 font-weight=700 winner=None (UA, no rule to cite); font-size=32px winner=h1 (author)
+ok  line-height       .copy 20px x 1.5 = 30px — authored '1.5', computed 30px (resolved, not echoed)
+ok  normal not faked  .hero line-height=normal (keyword, not px — resolving it needs font metrics)
+ok  inherited origin  span font-family='Georgia, serif' text-align=center both origin=inherited; display still UA-or-initial
+ok  KNOWN DIVERGENCE  span line-height reported 'normal' but laid out at 30px — inherited in build_layout_box, after the trace
+ok  font-style        span computed=italic origin=inherited (declares nothing); paint drew it font_style=1, h1 still 0
+ok  letter-spacing    .spaced 0.1em x 20px = 2px (authored '0.1em'); every advance is exactly +2.0 over .plain — [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+ok  KNOWN DIVERGENCE  .pre keeps 'a  b' (4 advances) but its nested span collapsed 'c  d' to 'c d' — white-space is not inherited onto elements
+ok  selector guard    refused 'div p'
+ok  hiwave_diff       hero/layout agrees with the spec reference on 12/12 hand-derived values (incl. border_box 432x152)
+ok  hiwave_diff       hero/display_list agrees on 17 values (paint order, #08c over 432x152, 32px/700 text at x=16)
+ok  hiwave_diff       important-width DISAGREES: border_box.width expected 100.0 (spec: !important wins), engine computed 400.0 — 2 of 4, height and x still agree
+ok  session isolation open page still 432x152 after three diffs
+ok  diff guards       unknown stage, unknown case, unknown reference, path escape and missing argument all refused
+ok  hiwave_screenshot 1440015 bytes at ppm
+ok  argument guard    pass either `html` or `path`, not both
+
+PASS: hiwave-mcp serves the engine's computed layout, its paint commands, the cascade behind them, AND whether any of it agrees with a committed reference
+```
+
+**Checked that the gate can go red — three times, once per claim.**
+
+1. `letter-spacing: 0.1em` → `0.2em`: reported `4px`, exactly what hand
+   derivation predicts from 0.2 x 20, failing the 2px assertion.
+   ```
+   AssertionError: {... 'font-size': '20px', 'letter-spacing': '4px', ...}
+   ```
+2. `.copy`'s `font-style: italic` → `normal`: the span reports `normal`, so the
+   value tracks the parent's declaration rather than being a constant.
+   ```
+   AssertionError: {'computed': 'normal', 'origin': 'inherited', 'property': 'font-style', 'winner': None}
+   ```
+3. The white-space tripwire, which is the one that matters, because a tripwire's
+   whole claim is that it fires when the bug is fixed. Adding the single line
+   `style.white_space = parent.white_space` to `compute_style_for_element` —
+   i.e. actually fixing the inheritance — makes the nested span report `pre` and
+   the tripwire goes red:
+   ```
+   AssertionError: {'computed': 'pre', 'origin': 'user-agent-or-initial', 'property': 'white-space', 'winner': None}
+   ```
+
+All three perturbations reverted; `grep -r RED-CHECK crates/` returns 0 on the
+committed tree.
+
+### The finding: `white-space` does not inherit onto elements, and text collapses
+
+`white-space` inherits in CSS. This cascade never seeds it onto an **element** —
+`compute_style_for_element` seeds font-size/family/weight/style/stretch/colour/
+letter-spacing/word-spacing/text-align from the parent, and white-space is not
+in that list. It is inherited one layer down, in `build_layout_box`, and only
+onto **text nodes**, from their immediate parent:
+
+```rust
+// Wrapping behavior is inherited; without these a
+// nowrap/pre parent's text still wrapped (shelf bug).
+s.white_space = parent.white_space;
+```
+
+So a text node directly inside `<div class="pre">` gets `Pre`, but a text node
+inside a `<span>` inside that div gets the span's own initial `Normal` — the
+span was never told. **The consequence is real and visible in paint**, which is
+what makes this a bug report rather than a reporting quirk:
+
+```
+{"index": 6, "text": "a  b", "n_adv": 4}   <- the div's own text: both spaces kept
+{"index": 7, "text": "c d",  "n_adv": 3}   <- the nested span's: collapsed
+```
+
+Same `pre` ancestor, one element apart, different answers. Chrome keeps both.
+
+`white-space` is therefore **not counted**, on two independent grounds, and it
+is worth separating them:
+
+- On the element that *declares* it, the reported value is an **echo** of the
+  declaration text — clause 2 fails. The natural non-echo route for this
+  property is inheritance, and inheritance is exactly what is broken.
+- Its provenance would otherwise lie. `inherited_properties` decides the
+  `inherited` label by value equality plus CSS inheritance, and by that rule a
+  child matching its parent's `normal` would be labelled `inherited` when the
+  cascade never seeded it — pointing an agent at a parent that supplied
+  nothing. `white-space` is now **explicitly excluded** from that label, with
+  the reason in the code.
+
+I did **not** fix it, per this trench's scope limit, which now says so in
+writing: the one-line seeding above is a change to the inherited white-space of
+every element and therefore a parity-corpus event, not an export slice. The
+tripwire and the `limits` payload both carry the reason, and the smoke comment
+names the second half a fixer must not miss — dropping the exclusion in
+`inherited_properties`, or the origin will keep saying `user-agent-or-initial`
+for a value that is by then genuinely inherited.
+
+This is the **second** property in the diagnosis set (after `line-height`) whose
+inheritance happens below the cascade. Two of twelve is a pattern, not a
+coincidence, and it is the same shape both times: the cascade is not the single
+source of computed style. Named here rather than absorbed.
+
+### What the engine still cannot answer
+
+- **`white-space` for any element that inherits it**, and **`line-height` for
+  any element that inherits it** (night 6). Both values are right only where the
+  element declares them directly.
+- **Eight of the twelve remain**: `border-top-width`, `border-top-color`,
+  `box-sizing`, `position`, `overflow-x`, `opacity` are not in the computed set
+  at all, and `line-height` and `white-space` are implemented-but-uncounted. The
+  border pair is next in `BASELINE.md`'s order and is the one that forces
+  shorthand→longhand provenance, still unbuilt.
+- **Non-px lengths still come back as Rust `Debug` strings** — `'height':
+  'Auto'`, `'margin-top': 'Zero'`, `'padding-left': 'Zero'` are all visible in
+  tonight's own probe output. Named by night 6 as the cheapest correct thing
+  left, and still not done: it changes values the existing `hiwave_diff`
+  references quote, so it wants its own slice and its own red-check. Tonight's
+  new arms avoid adding to the pile — `letter-spacing: 0` reports `0px`, not
+  `Zero` — which makes the inconsistency *within one payload* worse, not
+  better, until that slice lands. Flagging that honestly rather than counting it
+  as tidy.
+- **`letter-spacing` in percent or any other unresolvable unit returns `null`**
+  rather than layout's silent `0.0`. Honest, but it is a hole: an agent asking
+  why a percentage letter-spacing did nothing is told nothing rather than told
+  that layout dropped it.
+- Everything trench 1 named is still true: UA-origin properties have no rule to
+  cite, `hiwave_style` takes simple selectors only, shorthand provenance does
+  not reach longhands, capture-kind references are refused, `style` is not a
+  diffable stage, and there is no real-page corpus.
+
+### Tests
+
+`cargo test --workspace --no-fail-fast`, excluding `hiwave-app` and
+`hiwave-smoke` (need GTK — `gdk-sys` build fails) and `rustkit-media` (needs
+ALSA): **882 passed, 1 failed**. The one failure is
+`rustkit-layout::probe_normal_line_height_vs_chrome`, the same pre-existing
+failure nights 1–3 reported, at `normal_line_height_probe.rs:87`. Confirmed it
+cannot be mine structurally rather than by assertion: `rustkit-layout`'s
+dependencies are `rustkit-dom`, `rustkit-css` and `rustkit-text` — it does not
+depend on `rustkit-engine`, which is the only crate this night changed outside
+the smoke script.
+
+`cargo test -p rustkit-engine`: **33 passed, 0 failed**, including the two new
+unit tests (one pinning that letter-spacing resolves the way layout does *or
+returns a hole*, one pinning that white-space is never labelled `inherited` and
+that its CSS spelling is kebab-cased — `{:?}`.to_lowercase() would emit
+`prewrap` and `breakspaces`, which are not CSS values).
+
+Scope stayed inside `crates/rustkit-engine/src/lib.rs` and
+`crates/hiwave-mcp/smoke.py`: no parity harness, no `.github/`, no Windows or
+Linux port work, no engine behaviour changed (the new code reads `ComputedStyle`
+and writes JSON; it applies no property), and the exports that already had
+passing assertions were left alone — the one edit to an existing assertion is
+the `span` → `#inherits` selector, forced because the fixture now has four
+spans and a bare `span` query would silently average four elements into one
+answer. The runner needed `mesa-vulkan-drivers` installed again (fresh
+container; environment only, nothing committed).
+
+### Decisions needed from Pete
+
+1. **The nightly prompt still describes trench 1 and tells the agent to stop at
+   4 of 4.** Two nights have now had to override it from `BASELINE.md`. It
+   cannot be edited from inside a session (created via the API; agents may only
+   edit routines they created), so it needs you. Until then every night spends
+   its first move deciding whether to believe the prompt or the repo — and the
+   failure mode is silent: a night that believes the prompt stops immediately
+   and reports a completed trench.
+2. **Two of twelve properties inherit below the cascade** (`line-height`,
+   `white-space`), both now pinned as tripwires rather than fixed. If the answer
+   to "move them into the cascade" is yes, it is one change with one parity
+   run, not two — worth doing together, and worth doing in the parity trench
+   where the corpus is watching. My read is unchanged from night 6: leave them,
+   but the count is now two and the next one will make it three.
+
+Next slice: `border-top-width` and `border-top-color` — the shorthand group, and
+the one that forces shorthand→longhand provenance, which trench 1 named as the
+single place the output can currently mislead (`padding-left` reports
+`"winner": null` when `padding: 16px` plainly set it). Expect that to be the
+whole slice: the values are easy, the provenance is the work.
