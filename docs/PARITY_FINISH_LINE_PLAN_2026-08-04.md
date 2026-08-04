@@ -1,6 +1,10 @@
 # macOS Chrome-parity finish line — campaign plan
 
-> **Status:** DRAFT — awaiting Pete's approval to hand to the trench.
+> **Status:** **RATIFIED by Pete 2026-08-04.** All three §7 asks approved: the
+> finish line (§3) is the acceptance bar, the trench runs §5 config on the §4
+> queue, and the product-feel number stays unsigned until P5's holdout board.
+> This retires the 100%-raw-pixel acceptance criterion in
+> `100pct-pixel-parity-plan.md` — the bar changes, the ruthlessness does not.
 > **Authors:** Atlas (assessment + plan) · Prometheus (independent attack + amendments, exchange reply 2026-08-04). Disagreements are recorded, not smoothed over.
 > **Scope:** macOS only. This finish line is **engine correctness**, not product launch. Windows/Linux port their own flavors of the defect classes; they do not join this re-instrument.
 > **Exists in service of:** HiWave.
@@ -84,11 +88,15 @@ Each class shipped on macOS with a mutation-checked T-RED. Port seats verify the
 | Stretch targets containing block instead of container inner width | dba3d53 (in #82) | #81 inverted |
 | Instrument classes: metric prefers broken layout · stale attribution (#84) · unenforced stability | this doc §1 | every seat's parity harness should be audited for all three |
 
-## 7. Approval asks (Pete)
+## 7. Approval — GRANTED (Pete, 2026-08-04)
 
-1. Ratify the finish line (§3) — this retires "100% raw pixel parity" as the acceptance bar.
-2. Approve the trench on §5 config with the §4 queue.
-3. The product-feel number stays unsigned until P5's holdout board exists — accept ~70–85% as the honest working estimate until then.
+1. ✅ Finish line (§3) ratified — "100% raw pixel parity" retired as the acceptance bar.
+2. ✅ Trench approved on §5 config with the §4 queue. Starts at P0a (re-instrument), not at a family.
+3. ✅ Product-feel number stays unsigned until P5's holdout board; ~70–85% is the honest working estimate until measured.
+
+Public language for the milestone, per Prometheus and adopted: *"old pixel gate
+fully green; dual-oracle re-instrument is the new truth."* Not "parity done."
+No README or PR prose may drift past that line.
 
 ## 8. Appendix — full board (master 962efc1)
 
