@@ -4339,6 +4339,34 @@ impl DisplayList {
                     container.height,
                 );
 
+                // The background painting area is the CONTAINER, always.
+                // `background-size: 400% 400%` scales the gradient IMAGE, not
+                // where it may paint — Chrome shows a 4x-zoomed slice inside
+                // the box. Without this clip the oversized rect painted in
+                // full: square-cornered, covering the neighbouring grid cards
+                // (the gradient-backgrounds "-45deg Rainbow" card, 14.44% of
+                // that parity case). The old comment claimed the viewport
+                // would clip it; the viewport clips at the VIEWPORT, which is
+                // exactly how far the bleed reached. Tile edges in the repeat
+                // arms had the same leak — tiles were intersect-tested against
+                // the container but each intersecting tile painted full-size.
+                // One clip closes every path.
+                //
+                // Residual, stated: PushClip is a plain rect, so a scaled
+                // gradient under border-radius paints square into the corner
+                // notches (~0.05% of a 227x180 card at 16px radius). The
+                // normal-size path keeps its rounded clipping via
+                // border_radius on the gradient rect itself.
+                let needs_clip = positioned_rect.x < container.x
+                    || positioned_rect.y < container.y
+                    || positioned_rect.x + positioned_rect.width
+                        > container.x + container.width
+                    || positioned_rect.y + positioned_rect.height
+                        > container.y + container.height;
+                if needs_clip {
+                    self.commands.push(DisplayCommand::PushClip(container));
+                }
+
                 // Handle background-repeat for gradients
                 match layer.repeat {
                     rustkit_css::BackgroundRepeat::NoRepeat => {
@@ -4431,6 +4459,10 @@ impl DisplayList {
                         // TODO: Implement proper spacing/scaling
                         self.render_gradient(gradient, positioned_rect, border_radius);
                     }
+                }
+
+                if needs_clip {
+                    self.commands.push(DisplayCommand::PopClip);
                 }
             }
             rustkit_css::BackgroundImage::Url(url) => {
@@ -5263,6 +5295,78 @@ pub fn measure_text(text: &str, _font_family: &str, font_size: f32) -> text::Tex
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_oversized_gradient_paint_is_clipped_to_its_box() {
+        // The gradient-backgrounds "-45deg Rainbow" card: `background-size:
+        // 400% 400%` scales the gradient IMAGE; the paint stays inside the
+        // border box. Without a clip the 4x rect painted in full — square
+        // corners, covering the neighbouring cards. Geometry was verified
+        // exact against Chrome (227x180 both sides); only paint escaped.
+        let mut style = ComputedStyle::new();
+        style.background_layers = vec![rustkit_css::BackgroundLayer {
+            image: rustkit_css::BackgroundImage::Gradient(rustkit_css::Gradient::Linear(
+                rustkit_css::LinearGradient {
+                    direction: rustkit_css::GradientDirection::Angle(-45.0),
+                    stops: vec![
+                        rustkit_css::ColorStop { color: Color { r: 238, g: 119, b: 82, a: 1.0 }, position: None },
+                        rustkit_css::ColorStop { color: Color { r: 35, g: 213, b: 171, a: 1.0 }, position: None },
+                    ],
+                    repeating: false,
+                },
+            )),
+            // Percentages ride the Explicit variant as negative values:
+            // -400.0 => container * 4.0 (see calculate_background_rect).
+            size: rustkit_css::BackgroundSize::Explicit { width: Some(-400.0), height: Some(-400.0) },
+            ..Default::default()
+        }];
+
+        let mut card = LayoutBox::new(BoxType::Block, style);
+        card.dimensions.content = Rect::new(533.0, 400.0, 227.0, 180.0);
+
+        let list = DisplayList::build(&card);
+        let container = card.dimensions.border_box();
+
+        let push = list.commands.iter().position(|c| matches!(c, DisplayCommand::PushClip(r) if (r.x - container.x).abs() < 0.5 && (r.width - container.width).abs() < 0.5));
+        let grad = list.commands.iter().position(|c| matches!(c, DisplayCommand::LinearGradient { rect, .. } if rect.width > 900.0));
+        let pop = list.commands.iter().position(|c| matches!(c, DisplayCommand::PopClip));
+
+        let (push, grad, pop) = (
+            push.expect("oversized gradient must push a clip at its own box"),
+            grad.expect("gradient must still paint at the scaled 4x rect (the zoomed slice)"),
+            pop.expect("clip must be popped"),
+        );
+        assert!(push < grad && grad < pop, "order must be PushClip < gradient < PopClip, got {push}/{grad}/{pop}");
+    }
+
+    #[test]
+    fn test_normal_size_gradient_pushes_no_clip() {
+        // Control: an auto-sized gradient fills exactly its box; adding a
+        // clip there would be noise (and would mask a future regression in
+        // the needs_clip predicate by making the clip unconditional).
+        let mut style = ComputedStyle::new();
+        style.background_layers = vec![rustkit_css::BackgroundLayer {
+            image: rustkit_css::BackgroundImage::Gradient(rustkit_css::Gradient::Linear(
+                rustkit_css::LinearGradient {
+                    direction: rustkit_css::GradientDirection::ToBottom,
+                    stops: vec![
+                        rustkit_css::ColorStop { color: Color { r: 0, g: 0, b: 0, a: 1.0 }, position: None },
+                        rustkit_css::ColorStop { color: Color { r: 255, g: 255, b: 255, a: 1.0 }, position: None },
+                    ],
+                    repeating: false,
+                },
+            )),
+            ..Default::default()
+        }];
+        let mut card = LayoutBox::new(BoxType::Block, style);
+        card.dimensions.content = Rect::new(0.0, 0.0, 227.0, 180.0);
+
+        let list = DisplayList::build(&card);
+        assert!(
+            !list.commands.iter().any(|c| matches!(c, DisplayCommand::PushClip(_))),
+            "a gradient that fits its box must not push a clip"
+        );
+    }
 
     #[test]
     fn test_rect() {
