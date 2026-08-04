@@ -24,7 +24,10 @@ use rustkit_css::{parse_display, ComputedStyle, Rule, Stylesheet};
 use rustkit_dom::{Document, Node, NodeType};
 use rustkit_image::ImageManager;
 use rustkit_js::JsRuntime;
-use rustkit_layout::{BoxType, Dimensions, DisplayList, LayoutBox, Position, Rect};
+use rustkit_layout::{
+    BoxType, Dimensions, DisplayList, ElementIdentity, LayoutBox, Position, Rect,
+};
+use std::cell::Cell;
 use rustkit_net::{LoaderConfig, NetError, Request, ResourceLoader};
 use rustkit_renderer::Renderer;
 use rustkit_viewhost::{Bounds, ViewHost, ViewHostTrait, ViewId, WindowHandle};
@@ -1366,7 +1369,10 @@ impl Engine {
         // Get the body element and build layout from it
         if let Some(body) = document.body() {
             debug!("Found body element, building layout with stylesheets");
-            let body_box = self.build_layout_from_node_with_parent_style(
+            // Identity tracking starts at body, matching Chrome's capture: it
+            // skips `html`, so `body` is the root of every selector path.
+            let element_ids = Cell::new(0);
+            let body_box = self.build_layout_from_parent_style_and_path(
                 &body,
                 &stylesheets,
                 &css_vars,
@@ -1375,6 +1381,9 @@ impl Engine {
                 &[],
                 0,
                 1,
+                "body",
+                &element_ids,
+                false,
             );
             // CSS 2.1 §14.2: the CANVAS background comes from the html
             // element, or from body when html's is transparent. The root box
@@ -1435,6 +1444,138 @@ impl Engine {
     }
 
     /// Build a layout box from a DOM node with stylesheet support.
+    /// Build the Chrome-compatible selector SEGMENT for one element, e.g.
+    /// `div.hero:nth-of-type(1)`.
+    ///
+    /// This mirrors `getSelector()` in `tools/parity_oracle/capture_baseline.mjs`
+    /// as it stood when `baselines/chrome-148/**/layout-rects.json` was
+    /// captured. It is a JOIN KEY, not a display string: it must reproduce
+    /// Chrome's output byte-for-byte or the geometry oracle silently fails to
+    /// pair boxes — and a silent failure to pair reads as "no geometry error",
+    /// which is the exact class of lying instrument this campaign exists to end.
+    ///
+    /// Two quirks of the capture script are reproduced DELIBERATELY, not fixed:
+    ///
+    /// 1. A multi-class element yields `div.card featured`: the raw `className`
+    ///    is concatenated after a single dot, so the internal space survives.
+    ///    The result is not a valid CSS selector — it is the key committed in
+    ///    the baselines, and 572 baseline selectors depend on it.
+    /// 2. `:nth-of-type(N)` is appended ONLY when the element has more than one
+    ///    same-tag element sibling, so a unique child carries no index.
+    ///
+    /// Class whitespace is normalized (runs collapsed, ends trimmed) to match
+    /// `el.className` for well-formed markup; all 886 class attributes in the
+    /// corpus are already normal, so this is a robustness measure and not a
+    /// behavioral difference on any current case.
+    fn selector_segment(
+        tag_lower: &str,
+        attributes: &HashMap<String, String>,
+        same_tag_index: usize,
+        same_tag_total: usize,
+        is_foreign: bool,
+    ) -> String {
+        let mut segment = String::from(tag_lower);
+
+        // Chrome's capture guards on `typeof el.className === 'string'`. For an
+        // SVG or MathML element `className` is an SVGAnimatedString object, so
+        // the guard fails and the class is DROPPED: a classed `<svg>` is keyed
+        // as plain `svg`. Reproducing that is not optional — shelf.html has a
+        // classed inline svg, and getting this wrong lost the svg and both of
+        // its children from the join.
+        if let Some(class_attr) = attributes.get("class").filter(|_| !is_foreign) {
+            let classes = class_attr.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !classes.is_empty() {
+                segment.push('.');
+                segment.push_str(&classes);
+            }
+        }
+
+        if same_tag_total > 1 {
+            segment.push_str(&format!(":nth-of-type({})", same_tag_index));
+        }
+
+        segment
+    }
+
+    /// The selector Chrome REPORTS for an element, given its structural path.
+    ///
+    /// Chrome's `getSelector()` short-circuits to `#id` before walking the tree,
+    /// and stops the walk at `body`, so the body element reports `html > body`.
+    /// Neither affects descendant paths — a child of an id'd element still
+    /// reports the full tag/class path — which is why the reported selector and
+    /// the path used to build children are computed separately.
+    fn reported_selector(selector_path: &str, attributes: &HashMap<String, String>) -> String {
+        match attributes.get("id") {
+            Some(id) if !id.is_empty() => format!("#{}", id),
+            _ if selector_path == "body" => "html > body".to_string(),
+            _ => selector_path.to_string(),
+        }
+    }
+
+    /// Whether this tag opens a foreign-content subtree. Everything at or below
+    /// it is SVG/MathML, so `className` is not a string there.
+    fn enters_foreign_content(tag_lower: &str) -> bool {
+        matches!(tag_lower, "svg" | "math")
+    }
+
+    /// Extend a parent path with one child segment.
+    ///
+    /// Returns the empty string — meaning "identity not tracked" — when the
+    /// parent is untracked or the child is not an element. Anonymous and text
+    /// boxes must never inherit a path.
+    fn child_selector_path(selector_path: &str, segment: Option<&str>) -> String {
+        match (selector_path.is_empty(), segment) {
+            (false, Some(segment)) => format!("{} > {}", selector_path, segment),
+            _ => String::new(),
+        }
+    }
+
+    /// Compute the selector segment for each child node, aligned by index with
+    /// `children`. Non-element nodes yield `None` — they have no identity.
+    ///
+    /// Done in the parent because `:nth-of-type` needs the full same-tag
+    /// sibling count, which a child cannot see from its own position.
+    fn child_selector_segments(
+        children: &[Rc<Node>],
+        parent_is_foreign: bool,
+    ) -> Vec<Option<String>> {
+        let mut totals: HashMap<String, usize> = HashMap::new();
+        for child in children {
+            if let NodeType::Element { tag_name, .. } = &child.node_type {
+                *totals.entry(tag_name.to_lowercase()).or_insert(0) += 1;
+            }
+        }
+
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        children
+            .iter()
+            .map(|child| match &child.node_type {
+                NodeType::Element {
+                    tag_name,
+                    attributes,
+                    ..
+                } => {
+                    let tag_lower = tag_name.to_lowercase();
+                    let index = {
+                        let counter = seen.entry(tag_lower.clone()).or_insert(0);
+                        *counter += 1;
+                        *counter
+                    };
+                    let total = totals.get(&tag_lower).copied().unwrap_or(1);
+                    let is_foreign = parent_is_foreign || Self::enters_foreign_content(&tag_lower);
+                    Some(Self::selector_segment(
+                        &tag_lower,
+                        attributes,
+                        index,
+                        total,
+                        is_foreign,
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     fn build_layout_from_node_with_styles(
         &self,
         node: &Rc<Node>,
@@ -1442,7 +1583,7 @@ impl Engine {
         css_vars: &HashMap<String, String>,
         ancestors: &[(String, Vec<String>, Option<String>)],
     ) -> LayoutBox {
-        self.build_layout_from_node_with_parent_style(
+        self.build_layout_from_parent_style_and_path(
             node,
             stylesheets,
             css_vars,
@@ -1451,10 +1592,25 @@ impl Engine {
             &[],
             0,
             1,
+            "",
+            &Cell::new(0),
+            false,
         )
     }
 
-    fn build_layout_from_node_with_parent_style(
+    /// Build a layout box, additionally threading the element-identity context
+    /// the geometry oracle needs.
+    ///
+    /// `selector_path` is this element's Chrome-style path built from tag /
+    /// class / nth-of-type segments, e.g. `body > div.container`. It is `"body"`
+    /// for the body element and `""` when identity is not being tracked. Note
+    /// this is the path used to build DESCENDANT paths, which is not always the
+    /// reported selector: an element with an `id` reports `#id`, but its
+    /// children still hang off the full path, exactly as Chrome's capture does.
+    ///
+    /// `element_ids` is a document-order counter shared across one build.
+    #[allow(clippy::too_many_arguments)]
+    fn build_layout_from_parent_style_and_path(
         &self,
         node: &Rc<Node>,
         stylesheets: &[Stylesheet],
@@ -1464,6 +1620,9 @@ impl Engine {
         siblings_before: &[(String, Vec<String>, Option<String>)],
         element_index: usize,
         sibling_count: usize,
+        selector_path: &str,
+        element_ids: &Cell<usize>,
+        in_foreign_content: bool,
     ) -> LayoutBox {
         match &node.node_type {
             NodeType::Element {
@@ -1740,6 +1899,21 @@ impl Engine {
 
                 Self::transfer_positioning(&mut layout_box, &style);
 
+                // Attach element identity so the geometry oracle can join this
+                // box to Chrome's selector-keyed rects. Only ELEMENT boxes reach
+                // here; anonymous, text and pseudo-element boxes are built
+                // elsewhere and correctly keep `identity: None`.
+                if !selector_path.is_empty() {
+                    let reported = Self::reported_selector(selector_path, attributes);
+                    let next_id = element_ids.get() + 1;
+                    element_ids.set(next_id);
+                    layout_box.set_identity(ElementIdentity {
+                        element_id: next_id,
+                        tag: tag_lower.clone(),
+                        selector: reported,
+                    });
+                }
+
                 // Build ancestors list for child elements with class and ID info
                 // Insert at beginning so ancestors[0] is always the immediate parent
                 let classes: Vec<String> = attributes
@@ -1773,9 +1947,19 @@ impl Engine {
                     .count();
                 let mut preceding_siblings: Vec<(String, Vec<String>, Option<String>)> =
                     Vec::with_capacity(child_element_count);
-                for child in child_nodes {
-                    let child_box = self.build_layout_from_node_with_parent_style(
-                        &child,
+                // Selector segments are computed here, not in the child, because
+                // `:nth-of-type` needs the full same-tag sibling count.
+                let children_are_foreign =
+                    in_foreign_content || Self::enters_foreign_content(&tag_lower);
+                let child_segments =
+                    Self::child_selector_segments(&child_nodes, children_are_foreign);
+                for (child_index, child) in child_nodes.iter().enumerate() {
+                    let child_path = Self::child_selector_path(
+                        selector_path,
+                        child_segments.get(child_index).and_then(|s| s.as_deref()),
+                    );
+                    let child_box = self.build_layout_from_parent_style_and_path(
+                        child,
                         stylesheets,
                         css_vars,
                         &child_ancestors,
@@ -1783,6 +1967,9 @@ impl Engine {
                         &preceding_siblings,
                         preceding_siblings.len(),
                         child_element_count,
+                        &child_path,
+                        element_ids,
+                        children_are_foreign,
                     );
                     if let NodeType::Element {
                         tag_name,
@@ -4954,110 +5141,6 @@ impl Engine {
             .ok_or_else(|| EngineError::RenderError("No layout tree available".into()))?;
 
         // Convert layout tree to JSON-serializable structure
-        fn layout_box_to_json(layout_box: &LayoutBox) -> serde_json::Value {
-            let dims = &layout_box.dimensions;
-            let content = &dims.content;
-            let margin_box = dims.margin_box();
-            let padding_box = dims.padding_box();
-            let border_box = dims.border_box();
-
-            let box_type = match &layout_box.box_type {
-                BoxType::Block => "block",
-                BoxType::Inline => "inline",
-                BoxType::AnonymousBlock => "anonymous_block",
-                BoxType::Text(t) => {
-                    return serde_json::json!({
-                        "type": "text",
-                        "text": t.chars().take(50).collect::<String>(),
-                        "rect": {
-                            "x": content.x,
-                            "y": content.y,
-                            "width": content.width,
-                            "height": content.height
-                        }
-                    })
-                }
-                BoxType::Image {
-                    natural_width,
-                    natural_height,
-                    ..
-                } => {
-                    return serde_json::json!({
-                        "type": "image",
-                        "natural_width": natural_width,
-                        "natural_height": natural_height,
-                        "rect": {
-                            "x": content.x,
-                            "y": content.y,
-                            "width": content.width,
-                            "height": content.height
-                        }
-                    })
-                }
-                BoxType::FormControl(ctrl) => {
-                    return serde_json::json!({
-                        "type": "form_control",
-                        "control_type": format!("{:?}", ctrl),
-                        "rect": {
-                            "x": content.x,
-                            "y": content.y,
-                            "width": content.width,
-                            "height": content.height
-                        }
-                    })
-                }
-            };
-
-            let children: Vec<serde_json::Value> =
-                layout_box.children.iter().map(layout_box_to_json).collect();
-
-            serde_json::json!({
-                "type": box_type,
-                "content_rect": {
-                    "x": content.x,
-                    "y": content.y,
-                    "width": content.width,
-                    "height": content.height
-                },
-                "padding_box": {
-                    "x": padding_box.x,
-                    "y": padding_box.y,
-                    "width": padding_box.width,
-                    "height": padding_box.height
-                },
-                "border_box": {
-                    "x": border_box.x,
-                    "y": border_box.y,
-                    "width": border_box.width,
-                    "height": border_box.height
-                },
-                "margin_box": {
-                    "x": margin_box.x,
-                    "y": margin_box.y,
-                    "width": margin_box.width,
-                    "height": margin_box.height
-                },
-                "margin": {
-                    "top": dims.margin.top,
-                    "right": dims.margin.right,
-                    "bottom": dims.margin.bottom,
-                    "left": dims.margin.left
-                },
-                "padding": {
-                    "top": dims.padding.top,
-                    "right": dims.padding.right,
-                    "bottom": dims.padding.bottom,
-                    "left": dims.padding.left
-                },
-                "border": {
-                    "top": dims.border.top,
-                    "right": dims.border.right,
-                    "bottom": dims.border.bottom,
-                    "left": dims.border.left
-                },
-                "children": children
-            })
-        }
 
         let layout_json = layout_box_to_json(layout);
 
@@ -7644,6 +7727,131 @@ fn parse_grid_line_shorthand(
     Some((start, rustkit_css::GridLine::Auto))
 }
 
+/// Convert one layout box to its JSON form for `export_layout_json`.
+///
+/// Module-level rather than nested so it can be tested directly: the engine
+/// tests that go through `build_layout_from_document` need a GPU compositor and
+/// SKIP when none is present, which would make an identity test vacuous on any
+/// machine without a GPU adapter.
+fn layout_box_to_json(layout_box: &LayoutBox) -> serde_json::Value {
+    // Element identity, when this box came from a DOM element. Absent
+    // on anonymous and text boxes — the geometry oracle must SKIP
+    // those rather than pair them positionally with Chrome elements.
+    // Emitting a placeholder here would manufacture geometry failures.
+    let mut value = layout_box_body_to_json(layout_box);
+    if let (Some(identity), Some(object)) = (layout_box.identity(), value.as_object_mut()) {
+        object.insert("element_id".into(), identity.element_id.into());
+        object.insert("tag".into(), identity.tag.clone().into());
+        object.insert("selector".into(), identity.selector.clone().into());
+    }
+    value
+}
+
+fn layout_box_body_to_json(layout_box: &LayoutBox) -> serde_json::Value {
+    let dims = &layout_box.dimensions;
+    let content = &dims.content;
+    let margin_box = dims.margin_box();
+    let padding_box = dims.padding_box();
+    let border_box = dims.border_box();
+
+    let box_type = match &layout_box.box_type {
+        BoxType::Block => "block",
+        BoxType::Inline => "inline",
+        BoxType::AnonymousBlock => "anonymous_block",
+        BoxType::Text(t) => {
+            return serde_json::json!({
+                "type": "text",
+                "text": t.chars().take(50).collect::<String>(),
+                "rect": {
+                    "x": content.x,
+                    "y": content.y,
+                    "width": content.width,
+                    "height": content.height
+                }
+            })
+        }
+        BoxType::Image {
+            natural_width,
+            natural_height,
+            ..
+        } => {
+            return serde_json::json!({
+                "type": "image",
+                "natural_width": natural_width,
+                "natural_height": natural_height,
+                "rect": {
+                    "x": content.x,
+                    "y": content.y,
+                    "width": content.width,
+                    "height": content.height
+                }
+            })
+        }
+        BoxType::FormControl(ctrl) => {
+            return serde_json::json!({
+                "type": "form_control",
+                "control_type": format!("{:?}", ctrl),
+                "rect": {
+                    "x": content.x,
+                    "y": content.y,
+                    "width": content.width,
+                    "height": content.height
+                }
+            })
+        }
+    };
+
+    let children: Vec<serde_json::Value> =
+        layout_box.children.iter().map(layout_box_to_json).collect();
+
+    serde_json::json!({
+        "type": box_type,
+        "content_rect": {
+            "x": content.x,
+            "y": content.y,
+            "width": content.width,
+            "height": content.height
+        },
+        "padding_box": {
+            "x": padding_box.x,
+            "y": padding_box.y,
+            "width": padding_box.width,
+            "height": padding_box.height
+        },
+        "border_box": {
+            "x": border_box.x,
+            "y": border_box.y,
+            "width": border_box.width,
+            "height": border_box.height
+        },
+        "margin_box": {
+            "x": margin_box.x,
+            "y": margin_box.y,
+            "width": margin_box.width,
+            "height": margin_box.height
+        },
+        "margin": {
+            "top": dims.margin.top,
+            "right": dims.margin.right,
+            "bottom": dims.margin.bottom,
+            "left": dims.margin.left
+        },
+        "padding": {
+            "top": dims.padding.top,
+            "right": dims.padding.right,
+            "bottom": dims.padding.bottom,
+            "left": dims.padding.left
+        },
+        "border": {
+            "top": dims.border.top,
+            "right": dims.border.right,
+            "bottom": dims.border.bottom,
+            "left": dims.border.left
+        },
+        "children": children
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8903,5 +9111,307 @@ mod grad_suffix_tests {
                 "{input} parsed to {got}, expected ~90"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod element_identity_tests {
+    use super::*;
+
+    // ---- P0a-0: element identity for the geometry oracle ----
+    //
+    // These tests deliberately avoid `build_layout_from_document`, which needs a
+    // GPU compositor and silently `return`s when none is available. A test that
+    // skips on the machine running it is a gate that cannot go red, which is the
+    // instrument failure this campaign exists to end. Everything below runs on
+    // any machine.
+
+    fn attrs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// The join key must reproduce Chrome's capture byte-for-byte. Every string
+    /// asserted here is copied verbatim out of
+    /// `baselines/chrome-148/websuite/card-grid/layout-rects.json`.
+    #[test]
+    fn selector_segments_match_committed_chrome_baseline() {
+        // `body > div.header:nth-of-type(1)` — two sibling divs, so indexed.
+        assert_eq!(
+            Engine::selector_segment("div", &attrs(&[("class", "header")]), 1, 2, false),
+            "div.header:nth-of-type(1)"
+        );
+        // `... > h1` — the only h1 among its siblings, so NO nth-of-type.
+        assert_eq!(Engine::selector_segment("h1", &attrs(&[]), 1, 1, false), "h1");
+        // A unique tag that nonetheless carries a class.
+        assert_eq!(
+            Engine::selector_segment("div", &attrs(&[("class", "grid")]), 2, 2, false),
+            "div.grid:nth-of-type(2)"
+        );
+    }
+
+    /// Chrome's capture concatenated the RAW `className` after one dot, so a
+    /// multi-class element yields `div.card-icon purple` — space and all. It is
+    /// not valid CSS; it is the committed key, and 572 baseline selectors use
+    /// this form. Emitting the "correct" `div.card-icon.purple` would join
+    /// against nothing.
+    #[test]
+    fn multi_class_selector_keeps_the_baseline_space_form() {
+        assert_eq!(
+            Engine::selector_segment("div", &attrs(&[("class", "card-icon purple")]), 1, 1, false),
+            "div.card-icon purple"
+        );
+    }
+
+    #[test]
+    fn nth_of_type_is_omitted_for_a_lone_sibling_and_present_otherwise() {
+        assert_eq!(Engine::selector_segment("p", &attrs(&[]), 1, 1, false), "p");
+        assert_eq!(
+            Engine::selector_segment("p", &attrs(&[]), 2, 3, false),
+            "p:nth-of-type(2)"
+        );
+    }
+
+    /// An id short-circuits the whole path (`#versionBadge` in the about
+    /// baseline), and body reports `html > body`.
+    #[test]
+    fn reported_selector_honors_id_short_circuit_and_body_root() {
+        assert_eq!(
+            Engine::reported_selector("body > span.badge", &attrs(&[("id", "versionBadge")])),
+            "#versionBadge"
+        );
+        assert_eq!(
+            Engine::reported_selector("body", &attrs(&[])),
+            "html > body"
+        );
+        assert_eq!(
+            Engine::reported_selector("body > div.header:nth-of-type(1)", &attrs(&[])),
+            "body > div.header:nth-of-type(1)"
+        );
+        // An id on body still wins over the body special case.
+        assert_eq!(
+            Engine::reported_selector("body", &attrs(&[("id", "top")])),
+            "#top"
+        );
+    }
+
+    /// The `Option` on identity is load-bearing. Anonymous and text boxes have
+    /// no originating element; if the export gave them a selector the oracle
+    /// would pair them with real Chrome elements and report geometry failures
+    /// that do not exist.
+    #[test]
+    fn export_omits_identity_for_anonymous_and_text_boxes() {
+        use rustkit_css::ComputedStyle;
+
+        let text = LayoutBox::new(BoxType::Text("hello".into()), ComputedStyle::new());
+        let json = layout_box_to_json(&text);
+        assert_eq!(json["type"], "text");
+        assert!(
+            json.get("selector").is_none() && json.get("element_id").is_none(),
+            "text box leaked an identity into the export: {json}"
+        );
+
+        let anon = LayoutBox::new(BoxType::AnonymousBlock, ComputedStyle::new());
+        let json = layout_box_to_json(&anon);
+        assert_eq!(json["type"], "anonymous_block");
+        assert!(
+            json.get("selector").is_none() && json.get("element_id").is_none(),
+            "anonymous box leaked an identity into the export: {json}"
+        );
+    }
+
+    /// The other half: a box that DOES come from an element must carry all
+    /// three fields, or the oracle has no join key at all.
+    #[test]
+    fn export_emits_identity_for_element_boxes() {
+        use rustkit_css::ComputedStyle;
+
+        let mut element = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        element.set_identity(ElementIdentity {
+            element_id: 7,
+            tag: "div".into(),
+            selector: "body > div.header:nth-of-type(1)".into(),
+        });
+
+        let json = layout_box_to_json(&element);
+        assert_eq!(json["element_id"], 7);
+        assert_eq!(json["tag"], "div");
+        assert_eq!(json["selector"], "body > div.header:nth-of-type(1)");
+    }
+
+    /// Image and form-control boxes take early-return paths in the export. They
+    /// are still elements, so they must still be joinable — this is the case a
+    /// naive "add the fields at the end" change silently misses.
+    #[test]
+    fn export_emits_identity_for_image_and_form_control_boxes() {
+        use rustkit_css::ComputedStyle;
+
+        let mut image = LayoutBox::new(
+            BoxType::Image {
+                url: String::new(),
+                natural_width: 10.0,
+                natural_height: 10.0,
+            },
+            ComputedStyle::new(),
+        );
+        image.set_identity(ElementIdentity {
+            element_id: 3,
+            tag: "img".into(),
+            selector: "body > img".into(),
+        });
+        let json = layout_box_to_json(&image);
+        assert_eq!(json["type"], "image");
+        assert_eq!(
+            json["selector"], "body > img",
+            "image box lost its join key"
+        );
+        assert_eq!(json["element_id"], 3);
+    }
+
+    /// `set_identity` is the only way in, so `element_id` and `identity` can
+    /// never disagree — a box either joins or is excluded, never half of each.
+    #[test]
+    fn identity_and_element_id_stay_in_lockstep() {
+        use rustkit_css::ComputedStyle;
+
+        let mut b = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        assert!(b.identity().is_none() && b.element_id().is_none());
+
+        b.set_identity(ElementIdentity {
+            element_id: 42,
+            tag: "section".into(),
+            selector: "body > section".into(),
+        });
+        assert_eq!(b.element_id(), Some(42));
+        assert_eq!(b.identity().map(|i| i.element_id), Some(42));
+    }
+
+    /// The join key is only worth anything if it actually JOINS. This walks the
+    /// real fixture DOMs with the same three helpers the layout builder uses
+    /// (`child_selector_segments`, `child_selector_path`, `reported_selector`)
+    /// and checks the selectors produced against the committed Chrome
+    /// baselines. Needs no GPU, so it runs everywhere.
+    ///
+    /// Chrome's capture skips zero-size elements and head-ish tags, so RustKit
+    /// legitimately produces selectors Chrome does not have. The direction that
+    /// matters for the oracle is the other one: every Chrome element must be
+    /// findable, or the geometry gate silently scores fewer boxes than it
+    /// claims.
+    #[test]
+    fn every_chrome_baseline_selector_is_reproduced_on_the_real_corpus() {
+        use rustkit_dom::NodeType;
+        use std::path::PathBuf;
+
+        fn walk(node: &Rc<Node>, path: &str, foreign: bool, out: &mut Vec<String>) {
+            if path.is_empty() {
+                return;
+            }
+            let mut children_foreign = foreign;
+            if let NodeType::Element {
+                tag_name,
+                attributes,
+                ..
+            } = &node.node_type
+            {
+                out.push(Engine::reported_selector(path, attributes));
+                children_foreign =
+                    foreign || Engine::enters_foreign_content(&tag_name.to_lowercase());
+            }
+            let children = node.children();
+            let segments = Engine::child_selector_segments(&children, children_foreign);
+            for (i, child) in children.iter().enumerate() {
+                let child_path =
+                    Engine::child_selector_path(path, segments.get(i).and_then(|s| s.as_deref()));
+                walk(child, &child_path, children_foreign, out);
+            }
+        }
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let cases = [
+            ("websuite/cases/card-grid", "baselines/chrome-148/websuite/card-grid"),
+            ("websuite/cases/article-typography", "baselines/chrome-148/websuite/article-typography"),
+            ("websuite/cases/flex-positioning", "baselines/chrome-148/websuite/flex-positioning"),
+            ("websuite/cases/css-selectors", "baselines/chrome-148/websuite/css-selectors"),
+            ("websuite/cases/sticky-scroll", "baselines/chrome-148/websuite/sticky-scroll"),
+            ("websuite/cases/image-gallery", "baselines/chrome-148/websuite/image-gallery"),
+            ("websuite/cases/form-elements", "baselines/chrome-148/websuite/form-elements"),
+            ("websuite/cases/gradient-backgrounds", "baselines/chrome-148/websuite/gradient-backgrounds"),
+            ("websuite/micro/backgrounds", "baselines/chrome-148/micro/backgrounds"),
+            ("websuite/micro/bg-pure", "baselines/chrome-148/micro/bg-pure"),
+            ("websuite/micro/bg-solid", "baselines/chrome-148/micro/bg-solid"),
+            ("websuite/micro/combinators", "baselines/chrome-148/micro/combinators"),
+            ("websuite/micro/form-controls", "baselines/chrome-148/micro/form-controls"),
+            ("websuite/micro/gpu-gradient-regression", "baselines/chrome-148/micro/gpu-gradient-regression"),
+            ("websuite/micro/gradient-no-radius", "baselines/chrome-148/micro/gradient-no-radius"),
+            ("websuite/micro/gradient-radius-only", "baselines/chrome-148/micro/gradient-radius-only"),
+            ("websuite/micro/gradients", "baselines/chrome-148/micro/gradients"),
+            ("websuite/micro/images-intrinsic", "baselines/chrome-148/micro/images-intrinsic"),
+            ("websuite/micro/pseudo-classes", "baselines/chrome-148/micro/pseudo-classes"),
+            ("websuite/micro/rounded-corners", "baselines/chrome-148/micro/rounded-corners"),
+            ("websuite/micro/specificity", "baselines/chrome-148/micro/specificity"),
+            ("crates/hiwave-app/src/ui|about.html", "baselines/chrome-148/builtins/about"),
+            ("crates/hiwave-app/src/ui|new_tab.html", "baselines/chrome-148/builtins/new_tab"),
+            ("crates/hiwave-app/src/ui|settings.html", "baselines/chrome-148/builtins/settings"),
+            ("crates/hiwave-app/src/ui|shelf.html", "baselines/chrome-148/builtins/shelf"),
+            ("crates/hiwave-app/src/ui|chrome_rustkit.html", "baselines/chrome-148/builtins/chrome_rustkit"),
+        ];
+
+        let mut checked = 0usize;
+        let mut total_expected = 0usize;
+        let mut missing: Vec<String> = Vec::new();
+
+        for (case_dir, baseline_dir) in cases {
+            let html_path = match case_dir.split_once('|') {
+                Some((dir, file)) => root.join(dir).join(file),
+                None => root.join(case_dir).join("index.html"),
+            };
+            let rects_path = root.join(baseline_dir).join("layout-rects.json");
+            let (html, rects) = match (
+                std::fs::read_to_string(&html_path),
+                std::fs::read_to_string(&rects_path),
+            ) {
+                (Ok(h), Ok(r)) => (h, r),
+                _ => continue, // corpus not checked out; nothing to assert
+            };
+
+            let document = Rc::new(Document::parse_html(&html).expect("fixture parses"));
+            let body = document.body().expect("fixture has a body");
+            let mut produced = Vec::new();
+            walk(&body, "body", false, &mut produced);
+            let produced: std::collections::HashSet<&str> =
+                produced.iter().map(|s| s.as_str()).collect();
+
+            let baseline: serde_json::Value = serde_json::from_str(&rects).expect("baseline parses");
+            let elements = baseline["elements"].as_array().expect("elements array");
+            assert!(!elements.is_empty(), "{case_dir}: empty baseline");
+
+            for element in elements {
+                let selector = element["selector"].as_str().expect("selector is a string");
+                total_expected += 1;
+                if !produced.contains(selector) {
+                    missing.push(format!("{case_dir} :: {selector}"));
+                }
+            }
+            checked += 1;
+        }
+
+        assert!(checked > 0, "no corpus cases were readable; test would be vacuous");
+        assert!(
+            missing.is_empty(),
+            "{} of {} Chrome baseline selectors across {} cases could not be reproduced \
+             by RustKit's generator, so the geometry oracle would silently skip them:\n{}",
+            missing.len(),
+            total_expected,
+            checked,
+            missing
+                .iter()
+                .take(20)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        eprintln!("join check: {total_expected} baseline selectors reproduced across {checked} cases");
     }
 }

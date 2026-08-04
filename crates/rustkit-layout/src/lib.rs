@@ -750,6 +750,33 @@ pub struct TextLine {
     pub x_offset: f32,
 }
 
+/// Identity of the DOM element a layout box was generated from.
+///
+/// This exists so the geometry oracle can JOIN RustKit's exported layout tree
+/// against Chrome's `layout-rects.json`, which is keyed by selector. Positional
+/// matching is not an option: the two trees do not agree box-for-box (Chrome
+/// skips zero-size and non-rendered elements; RustKit synthesizes anonymous
+/// boxes), so pairing by index produces a confident WRONG answer rather than a
+/// missing one.
+///
+/// `LayoutBox::identity` is `Option` on purpose and the `Option` is load-bearing:
+/// anonymous boxes and text boxes have NO originating element, so they carry
+/// `None` and must be EXCLUDED from comparison. Giving them a synthesized
+/// identity would silently pair them with real Chrome elements and report
+/// geometry failures that do not exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElementIdentity {
+    /// Document-order index of the originating element, assigned during layout
+    /// tree construction. Stable within a single build; not stable across
+    /// builds of different documents.
+    pub element_id: usize,
+    /// Lowercased tag name, e.g. `div`.
+    pub tag: String,
+    /// Chrome-compatible selector, the join key against `layout-rects.json`.
+    /// Produced by mirroring `getSelector()` from the baseline capture script.
+    pub selector: String,
+}
+
 /// A layout box in the layout tree.
 #[derive(Debug)]
 pub struct LayoutBox {
@@ -783,6 +810,10 @@ pub struct LayoutBox {
     /// Optional element ID for intrinsic sizing cache.
     /// When set, enables caching of min-content/max-content calculations.
     pub element_id: Option<usize>,
+    /// Identity of the originating DOM element, or `None` for anonymous and
+    /// text boxes (which have no element and are excluded from oracle joins).
+    /// Kept in lockstep with `element_id`; see `ElementIdentity`.
+    pub identity: Option<Box<ElementIdentity>>,
     /// Wrapped lines for text boxes (`None` = single-run text, no wrap).
     pub text_lines: Option<Vec<TextLine>>,
     /// FLOW offset of visual line 0 when this text box was laid out
@@ -813,6 +844,7 @@ impl LayoutBox {
             viewport: (0.0, 0.0),
             sticky_state: None,
             element_id: None,
+            identity: None,
             text_lines: None,
             text_flow_first_offset: None,
         }
@@ -860,6 +892,21 @@ impl LayoutBox {
     /// Get the element ID if set.
     pub fn element_id(&self) -> Option<usize> {
         self.element_id
+    }
+
+    /// Attach the originating element's identity.
+    ///
+    /// Sets `element_id` and `identity` together so the two can never disagree:
+    /// a box with an identity always has the matching id, and a box without one
+    /// has neither. Callers must NOT call this for anonymous or text boxes.
+    pub fn set_identity(&mut self, identity: ElementIdentity) {
+        self.element_id = Some(identity.element_id);
+        self.identity = Some(Box::new(identity));
+    }
+
+    /// Get the originating element's identity, if this box came from an element.
+    pub fn identity(&self) -> Option<&ElementIdentity> {
+        self.identity.as_deref()
     }
 
     /// Set position offsets.
