@@ -31,7 +31,9 @@ Literal bit-parity with Chrome is the wrong north star: Chrome is not bit-stable
 | Gate | What | Bar | Role |
 |---|---|---|---|
 | **A Geometry** | RustKit `layout.json` vs `chrome-148 layout-rects.json` | ≤ 0.5px per box, per-box attribution on fail | Primary grind driver |
-| **B Paint** | per-channel tolerance (pin ONE constant in VISUAL_DIFF_POLICY + parity_gate — no floating duplicates) | ≥ 99% within tolerance; **discrete structural failures (paint-outside-box, missing clip, wrong solid color) auto-FAIL regardless of %** | Keeps real paint bugs loud; stops AA noise counting |
+
+Geometry fail output schema, fixed now so PR prose cannot invent formats mid-campaign: one line per failing box — `case_id · box path (root-relative child indices + selector when known) · axis · expected · actual · Δ`. Nothing else counts as a geometry receipt.
+| **B Paint** | per-channel tolerance. **The pinned constant is `aa_tolerance: 5` in `docs/VISUAL_DIFF_POLICY.md`** — parity_gate must cite it from there; the ±3/255 figure from earlier drafts is retired so exactly one number exists | ≥ 99% within tolerance; **discrete structural failures (paint-outside-box, missing clip, wrong solid color) auto-FAIL regardless of %** | Keeps real paint bugs loud; stops AA noise counting |
 | **C Forensic** | full raw pixel heatmap + worst-N | **non-gating**, published on every PR | Catches what A+B can miss: stacking/z-order, shadows/outlines/selection not in rects, resample kernels |
 | Stability | 3 iterations, enforced at pr_merge **and** nightly | closes the `stable:false`-never-gates hole in parity_gate.py | |
 
@@ -55,7 +57,7 @@ Before any corpus expansion, all 26 cases must hold **simultaneously**:
 **P0b — Dual-oracle baseline receipt on master** — one commit stating geometry-fail count and paint-fail count. New ground truth Pete can trust.
 **P1 — Gradient/clip family** (gradient-backgrounds 14.44, -no-radius 13.96, -radius-only 10.77, gpu-gradient-regression 5.24). First root already landed as #86 (scaled gradient painted unclipped — PushClip fix, mutation-checked). Remaining: rounded clip for scaled gradients (corner notches), the -no-radius/radius-only residuals, interpolation color match.
 **P2 — Grid/sticky family** (sticky-scroll 11.71, card-grid 7.25). The `1fr` min-content floor diagnosis from 07-08 gets *finished*, not re-theorized.
-**P3 — Flex residual post-#85** (flex-positioning 10.80). Likely sibling class: alignment/baseline/absolute-in-flex. Flex is not "done".
+**P3 — Flex residual post-#85** (flex-positioning 10.80). Likely sibling class: alignment/baseline/absolute-in-flex. Flex is not "done". The #82 pair is **gated, not merged** — it does not merge until its own gate passes post-#83, and the trench must not treat this lane as open runway until it lands.
 **P4 — Text advance widths** (article-typography 9.62; css-selectors 12.09 is cascade+text mixed). CoreText on both sides ⇒ metric-exact advances are achievable; AA stays under gate B tolerance.
 **P5 — Images family** (images-intrinsic 9.35, image-gallery 6.89) + **10-site live holdout board** (non-gating) — settles the product-feel number.
 **P6 — Forms/UA + about's cyan selection artifact** (form-controls 6.42, form-elements 5.13, about 13.14). Selection artifact is likely **paint-order/stacking**, a family Atlas's first draft missed entirely — it rides gate C until it earns a case.
