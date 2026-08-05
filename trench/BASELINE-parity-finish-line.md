@@ -40,7 +40,8 @@ run on master, and not before.
 | Blocker | State |
 |---|---|
 | RustKit `layout.json` had no join key — only `type`/`text`/`control_type`, while Chrome's rects are keyed by selector | **CLEARED** night 1 (P0a-0). 1593/1593 baseline selectors reproducible across all 26 cases. |
-| Gate A (geometry) not implemented — `scripts/layout_oracle_gate.py` is a stub whose `extract_layout_from_rustkit` returns `None` | open — P0a |
+| Gate A (geometry) not implemented — `scripts/layout_oracle_gate.py` is a stub whose `extract_layout_from_rustkit` returns `None` | **CLEARED** night 2. Gate built, joined on the P0a-0 key, 14/14 mutation-checked. It has never seen a real RustKit capture — see below. |
+| Gate A has no real RustKit input yet — every capture path needs a GPU adapter, and this trench seat is Linux with none | open. Not a code blocker: `parity-capture --dump-layout` already exists and CI is `macos-14`. The gate's join is proven against all 1593 committed Chrome boxes, but its *output on real engine data* is unobserved until it runs on macOS. |
 | Gate B (paint tolerance + discrete-structural auto-fail) not implemented | open — P0a |
 | Gate C (non-gating forensic board) not published | open — P0a |
 | Stability never enforced at `pr_merge` (`stable:false` does not gate in `parity_gate.py`) | open — P0a |

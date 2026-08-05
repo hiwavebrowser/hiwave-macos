@@ -108,3 +108,126 @@ a `git checkout --` used to revert a mutation. Both recovered, nothing shipped
 wrong, but the lesson for later nights is: commit before mutation-checking, and
 never blanket-format in a re-instrument PR where diff attributability is the
 whole point.
+
+---
+
+## 2026-08-05
+
+**Metric: UNMEASURABLE → UNMEASURABLE.** Gate A now exists and is honest, but
+it has never been pointed at a real RustKit capture: every capture path needs a
+GPU adapter and this seat is Linux without one. Gates B and C and the stability
+hole are still unbuilt. The number arrives at P0b, on macOS, as planned.
+
+**P-item: P0a (build the four gates). NOT completed — 1 of 4 landed.**
+Gate A (geometry) is done. Gate B (paint tolerance + discrete-structural
+auto-fail), Gate C (non-gating forensic board), and stability at
+`pr_merge`/`nightly` remain. I did not start them; reasoning below.
+
+### Commits
+
+- `00f02db` — Gate A: `scripts/layout_oracle_gate.py` stops being a stub and
+  compares RustKit `border_box` against Chrome `getBoundingClientRect` at 0.5px
+  per axis, joined on the P0a-0 selector. 13 tests.
+- `3970e83` — delete one decorative guard, make the other load-bearing, after
+  the mutation sweep caught both.
+- `610fb78` — score only the registry-viewport capture; an off-viewport dump is
+  unmeasured, not measured wrongly.
+
+Zero engine behavior changes across all three. Instrument only, so P0b's first
+`N/26` stays attributable.
+
+### What Gate A refuses to do
+
+Everything it cannot honestly score fails rather than passing quietly:
+
+| Situation | Verdict |
+|---|---|
+| box differs > 0.5px on x/y/width/height | `delta`, one receipt line per axis |
+| Chrome has the box, RustKit does not | `missing_box` |
+| two RustKit boxes claim one selector | `ambiguous_selector` — never first-matched |
+| RustKit sized something Chrome collapsed | `phantom_box` |
+| capture absent, unreadable, or off-viewport | UNMEASURED, which fails |
+| run measured nothing at all | FAIL, not "all 0 cases pass" |
+
+Anonymous and text boxes carry no selector and are excluded, never paired
+positionally. Chrome's own omissions (zero-size elements; the
+script/style/meta/link/head/title/html skip list in `capture_baseline.mjs`) are
+mirrored, or the gate would invent phantoms on every page.
+
+Receipt format is the one fixed in plan §2 and nothing else:
+
+```
+card-grid · 3 body > div.header:nth-of-type(1) > p · x · 40 · 46.25 · +6.25
+card-grid · — body > div.grid:nth-of-type(2) > div.card:nth-of-type(1) > h3 · missing_box · — · — · —
+```
+
+### Mutation-check results
+
+14 mutations, each applied, suite observed, fix restored. **14/14 RED.**
+
+| Mutation | Test that caught it |
+|---|---|
+| tolerance 0.5px → 50px | `every_axis_is_compared_independently` |
+| join on `content_rect` instead of `border_box` | `one_perturbed_box_produces_exactly_one_receipt` |
+| ambiguous selector first-matched | `a_duplicate_selector_is_reported_not_first_matched` |
+| identity `Option` ignored, unselectored boxes paired | `a_box_chrome_would_have_captured…` |
+| `missing_box` downgraded to a skip | `a_box_rustkit_never_emitted_is_a_failure` |
+| `phantom_box` detection removed | `a_box_chrome_would_have_captured…` |
+| Chrome skip-list not mirrored | `chromes_own_omissions_are_not_phantoms` |
+| zero-size boxes not exempt from phantom rule | `chromes_own_omissions_are_not_phantoms` |
+| unmeasured case recorded as green | `a_run_with_no_captures_fails…` |
+| `measured == 0` tripwire removed | `an_unknown_case_filter_discovers_nothing_and_fails` |
+| holdout scope allowed to gate | `a_run_with_no_captures_fails…` |
+| only x/y compared | `every_axis_is_compared_independently` |
+| receipt loses the selector column | `one_perturbed_box_produces_exactly_one_receipt` |
+| any viewport's capture accepted | `only_the_registry_viewport_capture_is_scored` |
+
+The first sweep was 12/14. Both failures were in `gate_passes`, and both were
+"0 cases discovered is not a pass" checks — the exact guard class this campaign
+exists to defend, shipped uncovered. One was genuinely subsumed and is deleted;
+the other defends a different failure and is now asserted against the predicate.
+
+### Decisions needed from Pete
+
+1. Night 1's question is still open and now blocks more: `capture_baseline.mjs`
+   emits `div.card.featured` where every committed baseline says
+   `div.card featured` — regenerating baselines today silently breaks 572 join
+   keys and Gate A with them; pin the script back (my recommendation) or
+   regenerate and re-mirror the engine?
+2. Should Gate A be wired into `.github/workflows/parity.yml` as advisory
+   (prints receipts, does not block) for one cycle before it gates, so its
+   behavior on real captures is observed on macOS before it can red-lock PRs?
+3. Nothing else.
+
+### Surprises
+
+- **The gate's own tripwires were decoration.** I wrote two "a run that measured
+  nothing is not a pass" checks, with a comment citing the B3 precedent, and
+  both stayed green when removed. The suite that was supposed to prove the
+  instrument honest had the instrument's own disease. Only the mutation sweep
+  found it — the tests were 13/13 green.
+- **My first mutation harness lied twice.** It reported RED for a mutation that
+  was actually green, and later reported 13/13 RED on a file with a
+  `SyntaxError` — every mutation "failed the suite" because nothing could
+  import. A mutation harness that cannot distinguish "the guard caught it" from
+  "the file does not parse" produces exactly the confident wrong number this
+  campaign is about. It now compiles the mutated file first, and the sweep is
+  scripted rather than eyeballed.
+- **Selectors are unique per case on the Chrome side** — 1757 elements across
+  all 32 baselines, zero duplicates — so the join is a dict lookup, not a
+  matching problem. The RustKit side is not guaranteed unique, which is why
+  `ambiguous_selector` exists rather than a first-match.
+- **The swarm's multi-viewport output was a live trap.** Naive discovery would
+  have scored a 1920x1080 dump against 800x600 baselines and produced a
+  page-wide geometry failure that looks precisely like the layout bugs P1–P6
+  are hunting. It would have been believed.
+
+### Why P0a stopped at one gate
+
+Gate A could be validated tonight because its input on the Chrome side is
+committed: 1593 real boxes to join against, so "the gate works" is a measured
+claim rather than an inspected one. Gate B needs real RustKit frames and Gate C
+needs real heatmaps, and neither can be produced on this seat. Writing them
+blind would have added two gates whose only evidence is that they look right —
+which is the kind of instrument this campaign was opened to stop shipping.
+So: one gate, measured. P0a continues next night.
