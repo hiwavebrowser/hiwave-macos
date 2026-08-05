@@ -1810,28 +1810,42 @@ impl Engine {
                 }
 
                 if tag_lower == "button" {
-                    // Get button label from inner text or value
-                    let text = node.text_content();
-                    let label = if text.trim().is_empty() {
-                        attributes
-                            .get("value")
-                            .cloned()
-                            .unwrap_or_else(|| "Button".to_string())
-                    } else {
-                        text
-                    };
-                    let button_type = attributes
-                        .get("type")
-                        .cloned()
-                        .unwrap_or_else(|| "button".to_string());
+                    // A <button> is a flow container in every real engine —
+                    // icon buttons (<button><svg/></button>, eBay-class UIs)
+                    // have element children and no text. Rendering those as
+                    // an opaque FormControl leaf discarded the children and
+                    // stamped a literal "Button" placeholder (2026-08-05
+                    // live session: whole grids of them). Only text-only
+                    // buttons keep the leaf-widget fast path.
+                    let has_element_children = node
+                        .children()
+                        .iter()
+                        .any(|c| matches!(c.node_type, NodeType::Element { .. }));
 
-                    return LayoutBox::new(
-                        BoxType::FormControl(rustkit_layout::FormControlType::Button {
-                            label,
-                            button_type,
-                        }),
-                        style,
-                    );
+                    if !has_element_children {
+                        let text = node.text_content();
+                        let label = if text.trim().is_empty() {
+                            // No text, no children: an empty button renders
+                            // empty, not a placeholder word.
+                            attributes.get("value").cloned().unwrap_or_default()
+                        } else {
+                            text
+                        };
+                        let button_type = attributes
+                            .get("type")
+                            .cloned()
+                            .unwrap_or_else(|| "button".to_string());
+
+                        return LayoutBox::new(
+                            BoxType::FormControl(rustkit_layout::FormControlType::Button {
+                                label,
+                                button_type,
+                            }),
+                            style,
+                        );
+                    }
+                    // Element children present: fall through to normal box
+                    // construction so the children lay out inside the button.
                 }
 
                 if tag_lower == "textarea" {
@@ -9568,5 +9582,89 @@ mod scroll_wiring_tests {
             view.scroll_offset.1.min(view.max_scroll_offset.1),
         );
         assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 300.0));
+    }
+}
+
+#[cfg(test)]
+mod button_children_tests {
+    use super::*;
+
+    // ---- 2026-08-05 live-session fix: <button> is a flow container ----
+    //
+    // Icon buttons (element children, no text) were collapsed to an opaque
+    // FormControl leaf stamped with the literal string "Button". These pin
+    // the three shapes. macOS-gated: Engine::new needs a GPU device (the
+    // macos CI leg runs these; see ua_form_control_defaults note).
+
+    #[cfg(target_os = "macos")]
+    fn build_button(children: Vec<Rc<Node>>) -> LayoutBox {
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let button = Node::new(
+            rustkit_dom::NodeId::new(1),
+            NodeType::Element {
+                tag_name: "button".into(),
+                namespace: String::new(),
+                attributes: HashMap::new(),
+            },
+        );
+        for c in children {
+            button.append_child(c);
+        }
+        engine.build_layout_from_parent_style_and_path(
+            &button,
+            &[],
+            &HashMap::new(),
+            &[],
+            None,
+            &[],
+            0,
+            1,
+            "button",
+            &Cell::new(0),
+            false,
+        )
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn icon_button_keeps_its_element_children() {
+        let svg = Node::new(
+            rustkit_dom::NodeId::new(2),
+            NodeType::Element {
+                tag_name: "svg".into(),
+                namespace: String::new(),
+                attributes: HashMap::new(),
+            },
+        );
+        let layout = build_button(vec![svg]);
+        assert!(
+            !matches!(layout.box_type, BoxType::FormControl(_)),
+            "a button with element children must be a flow container, got FormControl leaf"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn text_button_stays_a_widget_with_its_text() {
+        let text = Node::new(rustkit_dom::NodeId::new(2), NodeType::Text("Buy It Now".into()));
+        let layout = build_button(vec![text]);
+        match layout.box_type {
+            BoxType::FormControl(rustkit_layout::FormControlType::Button { ref label, .. }) => {
+                assert_eq!(label, "Buy It Now");
+            }
+            ref other => panic!("text-only button should stay a FormControl leaf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn empty_button_has_no_placeholder_word() {
+        let layout = build_button(vec![]);
+        match layout.box_type {
+            BoxType::FormControl(rustkit_layout::FormControlType::Button { ref label, .. }) => {
+                assert_eq!(label, "", "empty button must not be stamped with a literal 'Button'");
+            }
+            ref other => panic!("empty button should stay a FormControl leaf, got {other:?}"),
+        }
     }
 }
