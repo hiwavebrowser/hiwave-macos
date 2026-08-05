@@ -3477,7 +3477,9 @@ impl Renderer {
             let step_count = rect.width.max(2.0) as usize;
             let strip_width = rect.width / step_count as f32;
 
-            for i in 0..step_count {
+            let vp_w = self.viewport_size.0 as f32;
+            let (first, last) = self.visible_strip_range(rect.x, rect.width, step_count, vp_w);
+            for i in first..last {
                 let t = if reverse {
                     1.0 - (i as f32 + 0.5) / step_count as f32
                 } else {
@@ -3494,7 +3496,9 @@ impl Renderer {
             let step_count = rect.height.max(2.0) as usize;
             let strip_height = rect.height / step_count as f32;
 
-            for i in 0..step_count {
+            let vp_h = self.viewport_size.1 as f32;
+            let (first, last) = self.visible_strip_range(rect.y, rect.height, step_count, vp_h);
+            for i in first..last {
                 let t = if reverse {
                     1.0 - (i as f32 + 0.5) / step_count as f32
                 } else {
@@ -4974,6 +4978,42 @@ impl Renderer {
     }
 
     /// Apply the current transform to a point.
+    /// The index range of gradient strips that can possibly reach pixels,
+    /// given the current clip and the viewport. Strips are generated one per
+    /// CSS pixel along the gradient axis, so an unculled loop is O(document
+    /// extent): a single 3,000,000px-tall gradient emits 3M quads = 288MB of
+    /// color vertices and the frame dies with BufferTooLarge — every frame,
+    /// forever, which is exactly the repeating "Buffer 'Color Vertex Buffer'
+    /// size ... exceeds maximum" seen on real tab pages (2026-08-05).
+    ///
+    /// Only valid when no transform is active: with a transform on the stack
+    /// the strip's document position no longer predicts its screen position,
+    /// so we fall back to the full range rather than wrongly cull content a
+    /// transform moves into view. Cap stays either way as the last line.
+    fn visible_strip_range(
+        &self,
+        axis_start: f32,
+        axis_len: f32,
+        step_count: usize,
+        viewport_extent: f32,
+    ) -> (usize, usize) {
+        const MAX_STRIPS: usize = 32_768;
+        if !self.transform_stack.is_empty() {
+            return (0, step_count.min(MAX_STRIPS));
+        }
+        // Visible window along this axis is the viewport [0, extent).
+        // Per-strip clip culling still happens inside draw_solid_rect_f32;
+        // this range only bounds the LOOP, which is what the vertex budget
+        // needs — a strip inside the viewport but outside a clip costs one
+        // rejected call, not a quad.
+        let (lo, hi) = (0.0_f32, viewport_extent);
+        let strip = axis_len / step_count as f32;
+        let first = (((lo - axis_start) / strip).floor().max(0.0)) as usize;
+        let last = ((((hi - axis_start) / strip).ceil()).max(0.0) as usize).min(step_count);
+        let first = first.min(last);
+        (first, last.min(first + MAX_STRIPS))
+    }
+
     fn transform_point(&self, x: f32, y: f32) -> (f32, f32) {
         let m = self.current_transform();
         // [a, b, c, d, e, f] where:
