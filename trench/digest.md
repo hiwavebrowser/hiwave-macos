@@ -1203,3 +1203,275 @@ the one that forces shorthand→longhand provenance, which trench 1 named as the
 single place the output can currently mislead (`padding-left` reports
 `"winner": null` when `padding: 16px` plainly set it). Expect that to be the
 whole slice: the values are easy, the provenance is the work.
+
+---
+
+## 2026-08-05 — night 8 (`border-top-width`, `border-top-color`)
+
+**Metric: 4 of 12 → 6 of 12**
+
+**Moved no → yes: `border-top-width` and `border-top-color`.** That is the
+whole shorthand group, and the mechanism behind it is the more interesting
+half: attribution is now *measured* rather than predicted.
+
+### The stored prompt is still stale (third night)
+
+Tonight's firing again described the metric as trench 1's "four Tier-1 MCP
+reads" and told me to stop at 4 of 4. `BASELINE.md` — which the same prompt
+names as binding, and which I read first — says trench 1 closed on 2026-08-02
+and trench 2 is live. I worked trench 2 and report `N of 12`. Nights 6 and 7
+flagged this; it is now three nights, and it remains a decision below. A worse
+wrinkle showed up this time: the scheduler's checkout was on **master**, whose
+`trench/digest.md` stops at night 3 and whose `BASELINE.md` has no trench 2 in
+it at all. A night that read those files without also fetching this branch
+would have seen "4 of 4, stop condition met" in both the prompt *and* the repo,
+and stopped. The branch is the only place the live metric exists.
+
+### The assertions that prove it
+
+Three fixture rules, each load-bearing for a different claim:
+
+```css
+.framed    { width: 200px; height: 40px; font-size: 20px; border: 0.25em solid #c60 }
+.hairline  { width: 200px; height: 40px; border: 2px solid }
+.overruled { width: 200px; height: 40px; border: 3px solid #093; border-top-width: 9px }
+```
+
+**`border-top-width`** is two conversions away from the declaration text:
+nothing in the fixture spells `border-top-width`, and nothing spells a px
+border width. 5px requires the engine to expand the shorthand *and* resolve
+the em against the computed font-size.
+
+```python
+assert framed["computed"]["border-top-width"] == "5px", framed["computed"]
+btw = next(d for d in framed["declared"] if d["property"] == "border-top-width")
+assert btw["winner"]["property"] == "border", btw["winner"]
+assert btw["winner"]["via_shorthand"] is True, btw["winner"]
+assert btw["winner"]["value"] == "0.25em solid #c60", btw["winner"]
+assert btw["winner"]["selector"] == ".framed", btw["winner"]
+```
+
+**`border-top-color`** is a hex-triplet expansion — `#c60` is rgb(204, 102, 0),
+0xcc = 204 and 0x66 = 102 by hand — cited to the same shorthand.
+
+And the half that makes both **count** rather than merely pass: 5px is the
+width layout reserved and the height paint drew, in that colour.
+
+```python
+framed_box = find(tree["root"],
+                  lambda n: (n.get("border_box") or {}).get("width") == 210.0)
+assert framed_box["border"]["top"] == 5.0, framed_box["border"]   # 200 + 2*5
+assert framed_box["content_rect"]["width"] == 200.0, framed_box["content_rect"]
+bands = [c for c in commands
+         if c["op"] == "solid_color"
+         and c["color"] == {"r": 204, "g": 102, "b": 0, "a": 1.0}
+         and c["rect"]["height"] == 5.0]
+assert len(bands) == 2, [c["rect"] for c in bands]     # top and bottom
+top_band = [c for c in bands if c["rect"]["y"] == framed_box["border_box"]["y"]]
+assert top_band[0]["rect"]["width"] == 210.0, top_band[0]["rect"]
+```
+
+**The assertion the whole mechanism exists for.** `border: 2px solid` carries
+no colour, so `parse_border_shorthand` returns `None` for it and the cascade
+leaves `border_top_color` alone. A hand-written expansion table — "`border`
+sets the four widths and the four colours" — would cite that rule as the
+source of a colour it never wrote: a confident, plausible lie of exactly the
+kind clause 3 exists to exclude.
+
+```python
+hw = next(d for d in hair["declared"] if d["property"] == "border-top-width")
+assert hw["winner"]["property"] == "border", hw["winner"]      # the width: cited
+hc = next(d for d in hair["declared"] if d["property"] == "border-top-color")
+assert hc["winner"] is None, hc                                # the colour: NOT
+assert hc["origin"] == "user-agent-or-initial", hc
+```
+
+Plus the ordering a merged property list has to get right — a longhand after a
+shorthand wins, and the shorthand is reported as beaten rather than dropped:
+
+```python
+assert ow["computed"] == "9px", ow
+assert ow["winner"]["property"] == "border-top-width", ow["winner"]
+assert ow["winner"]["via_shorthand"] is False, ow["winner"]
+assert ow["overridden"][0]["property"] == "border", ow["overridden"]
+assert over_box["border"] == {"top": 9.0, "right": 3.0, "bottom": 3.0, "left": 3.0}
+assert over_box["border_box"]["height"] == 52.0, over_box["border_box"]  # 40 + 9 + 3
+```
+
+```
+$ cargo build -p hiwave-mcp && python3 crates/hiwave-mcp/smoke.py
+ok  initialize        {'name': 'hiwave-mcp', 'version': '0.1.0'}
+ok  tools/list        ['hiwave_open', 'hiwave_layout', 'hiwave_display_list', 'hiwave_style', 'hiwave_diff', 'hiwave_screenshot', 'hiwave_status']
+ok  hiwave_layout-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_display_list-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_style-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_open       {'height': 600, 'loaded': '<inline>', 'width': 800}
+ok  hiwave_status     session survives between calls
+ok  hiwave_layout     .hero border_box = 432.0x152.0 (content-box: 400+2*16 x 120+2*16)
+ok  hiwave_display_list  .hero painted rgb(0,136,204) over 432.0x152.0 at (0.0,0.0) — same rect layout computed
+ok  paint order       canvas[0] < hero[1] < text[2]
+ok  advance contract  11 advances for 11 chars, font_size=32.0 weight=700 x=16.0
+ok  hiwave_style      width=400px won by .hero [0, 1, 0] over div [0, 0, 1] (later in source, lower specificity)
+ok  computed expansion padding-left=16px, cited to `padding: 16px` on .hero (via_shorthand) — no rule spells the longhand
+ok  origin split      h1 font-weight=700 winner=None (UA, no rule to cite); font-size=32px winner=h1 (author)
+ok  line-height       .copy 20px x 1.5 = 30px — authored '1.5', computed 30px (resolved, not echoed)
+ok  normal not faked  .hero line-height=normal (keyword, not px — resolving it needs font metrics)
+ok  inherited origin  span font-family='Georgia, serif' text-align=center both origin=inherited; display still UA-or-initial
+ok  KNOWN DIVERGENCE  span line-height reported 'normal' but laid out at 30px — inherited in build_layout_box, after the trace
+ok  font-style        span computed=italic origin=inherited (declares nothing); paint drew it font_style=1, h1 still 0
+ok  letter-spacing    .spaced 0.1em x 20px = 2px (authored '0.1em'); every advance is exactly +2.0 over .plain — [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+ok  KNOWN DIVERGENCE  .pre keeps 'a  b' (4 advances) but its nested span collapsed 'c  d' to 'c d' — white-space is not inherited onto elements
+ok  border shorthand  .framed border-top-width=5px (0.25em x 20px) and border-top-color=rgba(204, 102, 0, 1), both cited to `border` on .framed; layout reserved 5.0 and paint drew a 210.0x5.0 band
+ok  no false citation `border: 2px solid` cites the width and NOT border-top-color (the declaration carried no colour)
+ok  longhand wins     .overruled border-top-width=9px beats `border: 3px solid #093`, which is reported in overridden; layout reserved {'bottom': 3.0, 'left': 3.0, 'right': 3.0, 'top': 9.0} and a 52.0-tall box
+ok  selector guard    refused 'div p'
+ok  hiwave_diff       hero/layout agrees with the spec reference on 12/12 hand-derived values (incl. border_box 432x152)
+ok  hiwave_diff       hero/display_list agrees on 17 values (paint order, #08c over 432x152, 32px/700 text at x=16)
+ok  hiwave_diff       important-width DISAGREES: border_box.width expected 100.0 (spec: !important wins), engine computed 400.0 — 2 of 4, height and x still agree
+ok  session isolation open page still 432x152 after three diffs
+ok  diff guards       unknown stage, unknown case, unknown reference, path escape and missing argument all refused
+ok  hiwave_screenshot 1440015 bytes at ppm
+ok  argument guard    pass either `html` or `path`, not both
+
+PASS: hiwave-mcp serves the engine's computed layout, its paint commands, the cascade behind them, AND whether any of it agrees with a committed reference
+```
+
+**Checked that the gate can go red — twice, once per claim.**
+
+1. `.framed`'s `border: 0.25em` → `0.4em`: reported `8px`, exactly 0.4 x 20 by
+   hand, failing the 5px assertion.
+   ```
+   AssertionError: {... 'border-top-color': 'rgba(204, 102, 0, 1)', 'border-top-width': '8px', 'font-size': '20px', ...}
+   ```
+2. The one that matters. Replaced the measurement with a name-based table —
+   `if property == "border" { return vec!["border-top-width", "border-top-color"] }`
+   — i.e. exactly the implementation a reasonable person would write first. The
+   `.hairline` assertion catches it citing a rule for a colour that rule never
+   set:
+   ```
+   AssertionError: {'computed': 'rgba(0, 0, 0, 1)', 'origin': 'author', 'overridden': [],
+    'property': 'border-top-color',
+    'winner': {'property': 'border', 'selector': '.hairline', 'specificity': [0, 1, 0],
+               'value': '2px solid', 'via_shorthand': True, ...}}
+   ```
+   Note what the perturbed tool reports: black, sourced to `.hairline`. Both
+   halves plausible, the citation false.
+
+Both perturbations reverted; `grep -r RED-CHECK crates/` returns nothing on the
+committed tree.
+
+### How the attribution works, and why not a table
+
+`longhands_written` (rustkit-engine) answers "did this declaration write this
+longhand" by **running the applying function**: two copies of the style as it
+stood before the declaration are made to disagree in exactly the longhand under
+test, the declaration is applied to both, and if they come out agreeing it wrote
+it. The two copies must be tellable apart *before* the declaration runs, or a
+property that reads as a hole on both would look written; that guard is pinned
+by a unit test over the whole recorded set.
+
+This is the same principle as night 2's: provenance is recorded from inside the
+cascade rather than by a second pass, because a second opinion can drift from
+the engine. A shorthand expansion table is exactly such a second opinion, and
+`border: 2px solid` is the case where it is wrong.
+
+### One existing assertion changed, disclosed rather than smuggled
+
+`padding-left` reported `"winner": null` from night 2 until tonight. Nights 2,
+3 and 7 all named it the one place this output could mislead — literally true
+(no rule spells the longhand) and read by anyone as "nothing set this", when
+`padding: 16px` plainly did. The general mechanism fixes it, so the night-2
+assertion that pinned the null now pins the citation instead:
+
+```python
+assert pad_left["winner"]["property"] == "padding", pad_left["winner"]
+assert pad_left["winner"]["via_shorthand"] is True, pad_left["winner"]
+assert pad_left["winner"]["selector"] == ".hero", pad_left["winner"]
+```
+
+This is the one edit to an already-passing export this night makes, and it is
+a supersession rather than a tidy-up: the old assertion pinned an answer the
+trench had already called misleading. The computed half is untouched — the
+value is still the engine's expansion, and the winner's own value is the
+shorthand's `16px`, not a longhand nobody wrote.
+
+### What the engine still cannot answer
+
+- **Six of twelve remain.** `box-sizing`, `position`, `overflow-x` and
+  `opacity` are not in the computed set at all — the box group, `BASELINE.md`'s
+  last block and the cheapest of the three. `line-height` (night 6) and
+  `white-space` (night 7) stay implemented-but-uncounted, both because they
+  inherit *below* the cascade; nothing about tonight changes that.
+- **Only the TOP border side is exported.** `border-right-width`,
+  `border-bottom-color` and the rest are not in the recorded set. The diagnosis
+  set names the top pair and the mechanism is per-side-agnostic, but an agent
+  asking about the right border gets nothing. Adding them is a table entry each
+  and no new mechanism — deliberately left, so this night's claim is exactly
+  what was asserted.
+- **`border-style` is invisible.** The cascade parses it only to decide whether
+  the width collapses to zero (`none`/`hidden`); it is stored nowhere, so
+  `hiwave_style` cannot report it and cannot distinguish `border: 0 solid` from
+  `border: 3px none`. Paint has the same blindness — every border side paints
+  as a solid band regardless of the declared style, so `dashed` and `dotted`
+  render as solid. Named here rather than absorbed; it is an engine gap, not a
+  reporting one, and no smoke assertion covers it.
+- **Percent and viewport border widths return null.** Layout resolves them
+  against the containing block, which the style trace does not keep. A hole
+  rather than a guess, and the same choice `letter-spacing` made — but still a
+  hole: an agent asking why a `border-top-width: 10%` did what it did is told
+  nothing.
+- **Non-px lengths still come back as Rust `Debug` strings.** Visible in
+  tonight's own red-check output: `'margin-top': 'Zero'`, `'padding-left':
+  'Zero'`. Named by nights 6 and 7 as the cheapest correct thing left, still
+  not done, and tonight makes the inconsistency *within one payload* worse
+  rather than better — `border-top-width` reports `0px` where `padding-left`
+  reports `Zero`. It changes values the existing `hiwave_diff` references
+  quote, so it wants its own slice and its own red-check.
+- **The `!important` finding is untouched** and still pinned by the
+  `important-width` diff case, as are trench 1's limits: UA-origin properties
+  have no rule to cite, `hiwave_style` takes simple selectors only,
+  capture-kind references are refused, `style` is not a diffable stage, and
+  there is no real-page corpus.
+
+### Tests
+
+`cargo test --workspace --no-fail-fast`, excluding `hiwave-app` and
+`hiwave-smoke` (need GTK — `gdk-sys` build fails) and `rustkit-media` (needs
+ALSA): **913 passed, 1 failed**. The one failure is
+`rustkit-layout::probe_normal_line_height_vs_chrome` — the same pre-existing
+failure nights 1-3 and 7 reported, same signature (`rounded model matched
+Chrome exactly on only 0/20 pairs`, `normal_line_height_probe.rs:87`). It
+cannot be tonight's, structurally: `rustkit-layout`'s dependencies are
+`rustkit-dom`, `rustkit-css` and `rustkit-text` — it does not depend on
+`rustkit-engine`, the only crate changed outside the smoke script. The two new
+unit tests ran in that workspace run and passed.
+
+`cargo build --release -p parity-capture` — the only thing CI actually builds
+— finishes clean, so nothing here slips the workspace gate.
+
+Scope stayed inside `crates/rustkit-engine/src/lib.rs` and
+`crates/hiwave-mcp/smoke.py`: no parity harness, no `.github/`, no Windows or
+Linux port work, and **no engine behaviour changed** — `longhands_written`
+applies declarations only to throwaway copies, and the applying path itself is
+byte-identical when recording is off. The runner needed `mesa-vulkan-drivers`
+installed again (fresh container; environment only, nothing committed).
+
+### Decisions needed from Pete
+
+1. **The nightly prompt still describes trench 1**, and tonight it was worse
+   than a nuisance: the scheduler's working tree was on `master`, where neither
+   `trench/digest.md` nor `BASELINE.md` knows trench 2 exists. Prompt and repo
+   agreed on the wrong answer, and only fetching this branch disagreed. It
+   cannot be edited from inside a session (created via the API; agents may only
+   edit routines they created). Two ways out, both yours: repoint the prompt, or
+   land this branch on master so the checkout tells the truth on its own.
+2. **Nothing else.** `!important` and the two below-the-cascade inheritances
+   were filed in nights 2, 3, 4, 6 and 7 with the same read each time; repeating
+   them a sixth time would be manufacturing volume, and none of them blocks the
+   remaining slice.
+
+Next slice: the box group — `box-sizing`, `position`, `overflow-x`, `opacity`.
+Cheapest of the three groups and the last block in `BASELINE.md`'s order.
+`box-sizing` is the one worth care: it silently redefines what `width` means,
+so the assertion should be a border box that differs from the declared width,
+cross-checked against layout rather than read back off the cascade.
