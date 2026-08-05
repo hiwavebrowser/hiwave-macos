@@ -219,6 +219,11 @@ pub struct Engine {
     /// [`Engine::set_style_recording`] for why this is a side table rather
     /// than a field on `ComputedStyle`.
     style_trace: std::cell::RefCell<Option<Vec<StyleRecord>>>,
+    /// Views whose most recent render attempt failed. A view entering this
+    /// set logs one `warn!`; leaving it logs recovery. Without this, a
+    /// persistently failing render (e.g. a wedged surface) freezes the
+    /// screen while the log stays silent.
+    render_failing: std::collections::HashSet<EngineViewId>,
 }
 
 /// One author declaration that MATCHED an element, win or lose.
@@ -385,6 +390,7 @@ impl Engine {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         })
     }
 
@@ -596,6 +602,7 @@ impl Engine {
             .views
             .remove(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
+        self.render_failing.remove(&id);
 
         // Destroy compositor surface
         let _ = self.compositor.destroy_surface(view.viewhost_id);
@@ -5065,8 +5072,23 @@ impl Engine {
     pub fn render_all_views(&mut self) {
         let view_ids: Vec<_> = self.views.keys().copied().collect();
         for id in view_ids {
-            if let Err(e) = self.render(id) {
-                trace!(?id, error = %e, "Failed to render view");
+            match self.render(id) {
+                Ok(()) => {
+                    if self.render_failing.remove(&id) {
+                        info!(?id, "View render recovered");
+                    }
+                }
+                Err(e) => {
+                    // Warn once per failure episode, not per frame: a wedged
+                    // surface renders at event rate and would flood the log,
+                    // but total silence is how a frozen screen goes
+                    // undiagnosed for a whole session.
+                    if self.render_failing.insert(id) {
+                        warn!(?id, error = %e, "View render failing; frames are NOT being presented (will log again on recovery)");
+                    } else {
+                        trace!(?id, error = %e, "View render still failing");
+                    }
+                }
             }
         }
     }
@@ -8023,6 +8045,7 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         };
 
         // Build layout tree from document
@@ -8114,6 +8137,7 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8205,6 +8229,7 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -8316,6 +8341,7 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8391,6 +8417,7 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8458,6 +8485,7 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -8544,6 +8572,7 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -8616,6 +8645,7 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8998,6 +9028,7 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         };
 
         // Test type selector: (0, 0, 1)
