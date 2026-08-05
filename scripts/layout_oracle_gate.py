@@ -453,9 +453,12 @@ def gate_passes(report: Dict[str, Any]) -> bool:
     "PASS: all 0 cases" is how a broken pipeline reports success. The same
     tripwire already guards parity_gate.py's test_results mode (B3); geometry
     gets it from the first commit rather than after the first time it lies.
+
+    Deliberately ONE tripwire, not two. A `total_cases == 0` check reads well
+    but is subsumed — zero cases means zero measured — so it mutates green and
+    is decoration. `measured == 0` catches both "the filter matched nothing"
+    and "26 cases, none of which the capture produced".
     """
-    if report["summary"]["total_cases"] == 0:
-        return False
     if report["summary"]["measured"] == 0:
         return False
     return report["summary"]["red"] == 0

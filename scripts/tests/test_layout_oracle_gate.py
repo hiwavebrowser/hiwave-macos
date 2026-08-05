@@ -292,6 +292,41 @@ def test_a_single_missing_capture_does_not_pass_by_omission():
         assert missing["reason"] == "no_rustkit_capture"
 
 
+def test_gate_passes_refuses_any_report_that_measured_nothing():
+    """The tripwires are tested on the predicate, not only through run_gate.
+
+    Routed through run_gate these two branches are unreachable — an unmeasured
+    case already carries green=False, so `red == 0` catches the same runs and
+    both tripwires mutate GREEN. That is the definition of decoration, and it
+    was true of this file until the mutation sweep said so.
+
+    They are kept because they defend a DIFFERENT failure than the one red
+    counts: a future refactor of how case records are built (or a caller
+    assembling a summary itself) can produce measured=0 with red=0, and
+    "PASS: all 0 cases" is how a broken pipeline turns green. Asserting them
+    against the predicate is what makes them load-bearing rather than ornament.
+    """
+    def report(**summary):
+        base = {"total_cases": 26, "measured": 26, "unmeasured": 0, "green": 26,
+                "red": 0, "geometry_failures": 0, "join_failures": 0}
+        base.update(summary)
+        return {"summary": base}
+
+    assert gate_passes(report()), "a genuinely green run must still pass"
+    assert not gate_passes(report(total_cases=0, measured=0, green=0)), \
+        "zero cases discovered is a pipeline bug, not a pass"
+    assert not gate_passes(report(measured=0, unmeasured=26)), \
+        "26 cases none of which were measured is not a pass"
+
+
+def test_an_unknown_case_filter_discovers_nothing_and_fails():
+    """The reachable route into the zero-cases tripwire."""
+    with tempfile.TemporaryDirectory() as empty:
+        report = run_gate(Path(empty), case_ids=["no-such-case"])
+    assert report["summary"]["total_cases"] == 0
+    assert not gate_passes(report)
+
+
 def test_the_holdout_scope_does_not_gate():
     """Canary-only until the 26 are green (plan §3.6)."""
     with tempfile.TemporaryDirectory() as empty:
