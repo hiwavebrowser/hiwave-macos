@@ -1566,11 +1566,23 @@ fn main() {
     #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
     {
         if !is_new_tab_url(&initial_url) {
-            if let UnifiedContentWebView::RustKit(ref v) = content_webview {
-                if let Err(e) = v.load_url(&initial_url) {
-                    error!("Failed to load initial URL: {}", e);
-                }
-            }
+            // DEFERRED, not loaded here (2026-08-05). This call used to run
+            // synchronously during setup, BEFORE the event loop's first
+            // iteration — and RustKit's load path blocks its thread through
+            // network + parse + layout. Result, measured live with a process
+            // sample while Pete stared at nothing: main thread parked in
+            // load_url_blocking -> tokio block_on, zero paints, zero events,
+            // a window that never appeared for as long as the restored tab
+            // took to load (minutes, on a heavy page in a debug build).
+            //
+            // Queuing it as the SAME UserEvent::Navigate the URL bar uses
+            // means the event loop starts, the window and chrome UI paint,
+            // and THEN the restore navigation runs. The engine still blocks
+            // its thread during the load — that is the engine-thread
+            // refactor, a separate unit — but it now blocks behind a
+            // painted, visibly-alive window instead of a void.
+            info!(url = %initial_url, "Deferring restored-tab navigation until after first paint");
+            let _ = proxy.send_event(UserEvent::Navigate(initial_url.clone()));
         }
         info!("Content WebView created (RustKit)");
     }
