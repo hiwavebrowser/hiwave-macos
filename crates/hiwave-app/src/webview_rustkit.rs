@@ -126,6 +126,26 @@ impl RustKitView {
         engine.render_all_views();
     }
 
+    /// Scroll the view by a wheel delta in physical pixels.
+    ///
+    /// Returns true if the scroll offset changed (a re-render is needed).
+    /// Wheel events that reach the tao window loop are exactly the ones the
+    /// UI-frame WebView did not consume, i.e. the pointer was over content.
+    pub fn scroll_by(&self, delta_x: f32, delta_y: f32) -> bool {
+        let mut engine = self.engine.borrow_mut();
+        if let Some(view_id) = self.view_id {
+            match engine.scroll_view(view_id, delta_x, delta_y) {
+                Ok(changed) => changed,
+                Err(e) => {
+                    debug!(error = %e, "scroll_by failed");
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    }
+
     /// Load HTML content directly.
     pub fn load_html_internal(&self, html: &str) -> HiWaveResult<()> {
         let mut engine = self.engine.borrow_mut();

@@ -21,7 +21,7 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder},
     window::{Icon, WindowBuilder},
 };
-use tracing::{error, info, warn, Level};
+use tracing::{error, info, trace, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use wry::{Rect, WebView, WebViewBuilder};
 
@@ -1895,15 +1895,25 @@ fn main() {
                 event: WindowEvent::MouseWheel { delta, .. },
                 ..
             } => {
-                // DIAGNOSTIC (2026-08-05, pre live-session): the RustKit
-                // content view receives no input anywhere in the stack — no
-                // scrollWheel override in the viewhost, no MouseWheel handling
-                // here, zero callers of Engine::scroll_by (aleph-verified).
-                // This arm answers the FIRST question for the hands-on
-                // session: do wheel events reach the window at all, or does a
-                // WebView layer swallow them before tao sees them? The log
-                // line is the instrument; wiring scroll is the next PR.
-                info!(?delta, "window-level MouseWheel received");
+                // Wheel events that reach the window loop were not consumed
+                // by the UI-frame WebView, so the pointer is over the content
+                // view (verified in the 2026-08-05 live session: flicks over
+                // page content arrive here; flicks over UI chrome do not).
+                // Forward them to the engine; render happens on
+                // MainEventsCleared, which this event wakes.
+                #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+                if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
+                    let (dx, dy) = match delta {
+                        tao::event::MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
+                        // Line deltas (external mice) arrive in rows/columns;
+                        // 40px per line matches common browser behavior.
+                        tao::event::MouseScrollDelta::LineDelta(x, y) => (x * 40.0, y * 40.0),
+                        _ => (0.0, 0.0),
+                    };
+                    if view.scroll_by(dx, dy) {
+                        trace!(dx, dy, "content scrolled");
+                    }
+                }
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,

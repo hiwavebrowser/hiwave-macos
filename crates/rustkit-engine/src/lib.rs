@@ -809,6 +809,8 @@ impl Engine {
         view.navigation
             .commit_navigation()
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
+        // A committed navigation replaces the document; start at the top.
+        view.scroll_offset = (0.0, 0.0);
 
         let _ = self.event_tx.send(EngineEvent::NavigationCommitted {
             view_id: id,
@@ -943,6 +945,8 @@ impl Engine {
         view.navigation
             .commit_navigation()
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
+        // A committed navigation replaces the document; start at the top.
+        view.scroll_offset = (0.0, 0.0);
 
         let _ = self.event_tx.send(EngineEvent::NavigationCommitted {
             view_id: id,
@@ -1176,6 +1180,13 @@ impl Engine {
         view.layout = Some(root_box);
         view.display_list = Some(display_list);
         view.max_scroll_offset = (0.0, max_scroll_y); // Update max scroll
+        // Re-clamp: a relayout can shrink the document (or a navigation can
+        // replace it) while the user is scrolled past the new maximum, which
+        // would render a translate into empty space.
+        view.scroll_offset = (
+            view.scroll_offset.0.min(view.max_scroll_offset.0),
+            view.scroll_offset.1.min(max_scroll_y),
+        );
 
         // Render
         self.render(id)?;
@@ -5778,13 +5789,36 @@ impl Engine {
                     .map_err(|e| EngineError::RenderError(e.to_string()))?
             };
 
+            // Scroll is applied at render time as a whole-page translate:
+            // the display list stays in document coordinates and the GPU
+            // shifts it by the clamped offset scroll_view() maintains.
+            let scroll_offset = self
+                .views
+                .get(&id)
+                .map(|v| v.scroll_offset)
+                .unwrap_or((0.0, 0.0));
+
             // Render using display list if available, otherwise just clear to background
             {
                 let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
                 if let (Some(renderer), Some(display_list)) = (&mut self.renderer, display_list) {
-                    renderer
-                        .execute(&display_list.commands, &texture_view)
-                        .map_err(|e| EngineError::RenderError(e.to_string()))?;
+                    if scroll_offset == (0.0, 0.0) {
+                        renderer
+                            .execute(&display_list.commands, &texture_view)
+                            .map_err(|e| EngineError::RenderError(e.to_string()))?;
+                    } else {
+                        let mut scrolled: Vec<rustkit_layout::DisplayCommand> =
+                            Vec::with_capacity(display_list.commands.len() + 2);
+                        scrolled.push(rustkit_layout::DisplayCommand::PushTransform {
+                            matrix: [1.0, 0.0, 0.0, 1.0, -scroll_offset.0, -scroll_offset.1],
+                            origin: (0.0, 0.0),
+                        });
+                        scrolled.extend(display_list.commands.iter().cloned());
+                        scrolled.push(rustkit_layout::DisplayCommand::PopTransform);
+                        renderer
+                            .execute(&scrolled, &texture_view)
+                            .map_err(|e| EngineError::RenderError(e.to_string()))?;
+                    }
                 } else if let Some(renderer) = &mut self.renderer {
                     // No display list, render empty (will clear to white or debug color)
                     renderer
@@ -9469,5 +9503,70 @@ mod element_identity_tests {
                 .join("\n")
         );
         eprintln!("join check: {total_expected} baseline selectors reproduced across {checked} cases");
+    }
+}
+
+#[cfg(test)]
+mod scroll_wiring_tests {
+    use super::*;
+
+    // ---- 2026-08-05 live-session fix: scroll wiring ----
+    //
+    // scroll_view/max_scroll_offset/PushTransform all existed with zero
+    // production callers (the orphan-module class). These tests pin the
+    // state machine the new wiring depends on. macOS-gated for the same
+    // reason as ua_form_control_defaults_reach_computed_style: Engine::new
+    // needs a real GPU device, which the macos CI leg has.
+
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn engine_with_scrollable_view(max_y: f32) -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        let view = engine.views.get_mut(&id).expect("view");
+        view.max_scroll_offset = (0.0, max_y);
+        (engine, id)
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn scroll_clamps_and_reports_change() {
+        let (mut engine, id) = engine_with_scrollable_view(1000.0);
+
+        // Trackpad flick down arrives as negative delta_y (observed live:
+        // PixelDelta y=-45..0 for a downward flick) and must ADVANCE the page.
+        assert!(engine.scroll_view(id, 0.0, -45.0).unwrap());
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 45.0));
+
+        // Scrolling above the top clamps to 0 and reports change=true only
+        // while there is distance to travel.
+        assert!(engine.scroll_view(id, 0.0, 100.0).unwrap());
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 0.0));
+        assert!(!engine.scroll_view(id, 0.0, 100.0).unwrap(), "at top: no change");
+
+        // Scrolling past the bottom clamps to max.
+        assert!(engine.scroll_view(id, 0.0, -99999.0).unwrap());
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 1000.0));
+        assert!(!engine.scroll_view(id, 0.0, -1.0).unwrap(), "at bottom: no change");
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn relayout_reclamps_offset_when_document_shrinks() {
+        let (mut engine, id) = engine_with_scrollable_view(1000.0);
+        engine.scroll_view(id, 0.0, -800.0).unwrap();
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 800.0));
+
+        // Simulate the relayout path shrinking the document: the clamp added
+        // alongside max_scroll_offset assignment must pull the offset back in
+        // range, or render would translate into empty space.
+        let view = engine.views.get_mut(&id).expect("view");
+        view.max_scroll_offset = (0.0, 300.0);
+        view.scroll_offset = (
+            view.scroll_offset.0.min(view.max_scroll_offset.0),
+            view.scroll_offset.1.min(view.max_scroll_offset.1),
+        );
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 300.0));
     }
 }
