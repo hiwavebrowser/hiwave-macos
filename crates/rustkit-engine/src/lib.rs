@@ -219,6 +219,11 @@ pub struct Engine {
     /// [`Engine::set_style_recording`] for why this is a side table rather
     /// than a field on `ComputedStyle`.
     style_trace: std::cell::RefCell<Option<Vec<StyleRecord>>>,
+    /// Views whose most recent render attempt failed. A view entering this
+    /// set logs one `warn!`; leaving it logs recovery. Without this, a
+    /// persistently failing render (e.g. a wedged surface) freezes the
+    /// screen while the log stays silent.
+    render_failing: std::collections::HashSet<EngineViewId>,
 }
 
 /// One author declaration that MATCHED an element, win or lose.
@@ -385,6 +390,7 @@ impl Engine {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         })
     }
 
@@ -596,6 +602,7 @@ impl Engine {
             .views
             .remove(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
+        self.render_failing.remove(&id);
 
         // Destroy compositor surface
         let _ = self.compositor.destroy_surface(view.viewhost_id);
@@ -802,6 +809,8 @@ impl Engine {
         view.navigation
             .commit_navigation()
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
+        // A committed navigation replaces the document; start at the top.
+        view.scroll_offset = (0.0, 0.0);
 
         let _ = self.event_tx.send(EngineEvent::NavigationCommitted {
             view_id: id,
@@ -936,6 +945,8 @@ impl Engine {
         view.navigation
             .commit_navigation()
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
+        // A committed navigation replaces the document; start at the top.
+        view.scroll_offset = (0.0, 0.0);
 
         let _ = self.event_tx.send(EngineEvent::NavigationCommitted {
             view_id: id,
@@ -1169,6 +1180,13 @@ impl Engine {
         view.layout = Some(root_box);
         view.display_list = Some(display_list);
         view.max_scroll_offset = (0.0, max_scroll_y); // Update max scroll
+        // Re-clamp: a relayout can shrink the document (or a navigation can
+        // replace it) while the user is scrolled past the new maximum, which
+        // would render a translate into empty space.
+        view.scroll_offset = (
+            view.scroll_offset.0.min(view.max_scroll_offset.0),
+            view.scroll_offset.1.min(max_scroll_y),
+        );
 
         // Render
         self.render(id)?;
@@ -1792,28 +1810,42 @@ impl Engine {
                 }
 
                 if tag_lower == "button" {
-                    // Get button label from inner text or value
-                    let text = node.text_content();
-                    let label = if text.trim().is_empty() {
-                        attributes
-                            .get("value")
-                            .cloned()
-                            .unwrap_or_else(|| "Button".to_string())
-                    } else {
-                        text
-                    };
-                    let button_type = attributes
-                        .get("type")
-                        .cloned()
-                        .unwrap_or_else(|| "button".to_string());
+                    // A <button> is a flow container in every real engine —
+                    // icon buttons (<button><svg/></button>, eBay-class UIs)
+                    // have element children and no text. Rendering those as
+                    // an opaque FormControl leaf discarded the children and
+                    // stamped a literal "Button" placeholder (2026-08-05
+                    // live session: whole grids of them). Only text-only
+                    // buttons keep the leaf-widget fast path.
+                    let has_element_children = node
+                        .children()
+                        .iter()
+                        .any(|c| matches!(c.node_type, NodeType::Element { .. }));
 
-                    return LayoutBox::new(
-                        BoxType::FormControl(rustkit_layout::FormControlType::Button {
-                            label,
-                            button_type,
-                        }),
-                        style,
-                    );
+                    if !has_element_children {
+                        let text = node.text_content();
+                        let label = if text.trim().is_empty() {
+                            // No text, no children: an empty button renders
+                            // empty, not a placeholder word.
+                            attributes.get("value").cloned().unwrap_or_default()
+                        } else {
+                            text
+                        };
+                        let button_type = attributes
+                            .get("type")
+                            .cloned()
+                            .unwrap_or_else(|| "button".to_string());
+
+                        return LayoutBox::new(
+                            BoxType::FormControl(rustkit_layout::FormControlType::Button {
+                                label,
+                                button_type,
+                            }),
+                            style,
+                        );
+                    }
+                    // Element children present: fall through to normal box
+                    // construction so the children lay out inside the button.
                 }
 
                 if tag_lower == "textarea" {
@@ -5065,8 +5097,23 @@ impl Engine {
     pub fn render_all_views(&mut self) {
         let view_ids: Vec<_> = self.views.keys().copied().collect();
         for id in view_ids {
-            if let Err(e) = self.render(id) {
-                trace!(?id, error = %e, "Failed to render view");
+            match self.render(id) {
+                Ok(()) => {
+                    if self.render_failing.remove(&id) {
+                        info!(?id, "View render recovered");
+                    }
+                }
+                Err(e) => {
+                    // Warn once per failure episode, not per frame: a wedged
+                    // surface renders at event rate and would flood the log,
+                    // but total silence is how a frozen screen goes
+                    // undiagnosed for a whole session.
+                    if self.render_failing.insert(id) {
+                        warn!(?id, error = %e, "View render failing; frames are NOT being presented (will log again on recovery)");
+                    } else {
+                        trace!(?id, error = %e, "View render still failing");
+                    }
+                }
             }
         }
     }
@@ -5756,13 +5803,36 @@ impl Engine {
                     .map_err(|e| EngineError::RenderError(e.to_string()))?
             };
 
+            // Scroll is applied at render time as a whole-page translate:
+            // the display list stays in document coordinates and the GPU
+            // shifts it by the clamped offset scroll_view() maintains.
+            let scroll_offset = self
+                .views
+                .get(&id)
+                .map(|v| v.scroll_offset)
+                .unwrap_or((0.0, 0.0));
+
             // Render using display list if available, otherwise just clear to background
             {
                 let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
                 if let (Some(renderer), Some(display_list)) = (&mut self.renderer, display_list) {
-                    renderer
-                        .execute(&display_list.commands, &texture_view)
-                        .map_err(|e| EngineError::RenderError(e.to_string()))?;
+                    if scroll_offset == (0.0, 0.0) {
+                        renderer
+                            .execute(&display_list.commands, &texture_view)
+                            .map_err(|e| EngineError::RenderError(e.to_string()))?;
+                    } else {
+                        let mut scrolled: Vec<rustkit_layout::DisplayCommand> =
+                            Vec::with_capacity(display_list.commands.len() + 2);
+                        scrolled.push(rustkit_layout::DisplayCommand::PushTransform {
+                            matrix: [1.0, 0.0, 0.0, 1.0, -scroll_offset.0, -scroll_offset.1],
+                            origin: (0.0, 0.0),
+                        });
+                        scrolled.extend(display_list.commands.iter().cloned());
+                        scrolled.push(rustkit_layout::DisplayCommand::PopTransform);
+                        renderer
+                            .execute(&scrolled, &texture_view)
+                            .map_err(|e| EngineError::RenderError(e.to_string()))?;
+                    }
                 } else if let Some(renderer) = &mut self.renderer {
                     // No display list, render empty (will clear to white or debug color)
                     renderer
@@ -8023,6 +8093,7 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         };
 
         // Build layout tree from document
@@ -8114,6 +8185,7 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8205,6 +8277,7 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -8316,6 +8389,7 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8391,6 +8465,7 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8458,6 +8533,7 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -8544,6 +8620,7 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -8616,6 +8693,7 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8998,6 +9076,7 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
         };
 
         // Test type selector: (0, 0, 1)
@@ -9438,5 +9517,154 @@ mod element_identity_tests {
                 .join("\n")
         );
         eprintln!("join check: {total_expected} baseline selectors reproduced across {checked} cases");
+    }
+}
+
+#[cfg(test)]
+mod scroll_wiring_tests {
+    use super::*;
+
+    // ---- 2026-08-05 live-session fix: scroll wiring ----
+    //
+    // scroll_view/max_scroll_offset/PushTransform all existed with zero
+    // production callers (the orphan-module class). These tests pin the
+    // state machine the new wiring depends on. macOS-gated for the same
+    // reason as ua_form_control_defaults_reach_computed_style: Engine::new
+    // needs a real GPU device, which the macos CI leg has.
+
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn engine_with_scrollable_view(max_y: f32) -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        let view = engine.views.get_mut(&id).expect("view");
+        view.max_scroll_offset = (0.0, max_y);
+        (engine, id)
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn scroll_clamps_and_reports_change() {
+        let (mut engine, id) = engine_with_scrollable_view(1000.0);
+
+        // Trackpad flick down arrives as negative delta_y (observed live:
+        // PixelDelta y=-45..0 for a downward flick) and must ADVANCE the page.
+        assert!(engine.scroll_view(id, 0.0, -45.0).unwrap());
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 45.0));
+
+        // Scrolling above the top clamps to 0 and reports change=true only
+        // while there is distance to travel.
+        assert!(engine.scroll_view(id, 0.0, 100.0).unwrap());
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 0.0));
+        assert!(!engine.scroll_view(id, 0.0, 100.0).unwrap(), "at top: no change");
+
+        // Scrolling past the bottom clamps to max.
+        assert!(engine.scroll_view(id, 0.0, -99999.0).unwrap());
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 1000.0));
+        assert!(!engine.scroll_view(id, 0.0, -1.0).unwrap(), "at bottom: no change");
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn relayout_reclamps_offset_when_document_shrinks() {
+        let (mut engine, id) = engine_with_scrollable_view(1000.0);
+        engine.scroll_view(id, 0.0, -800.0).unwrap();
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 800.0));
+
+        // Simulate the relayout path shrinking the document: the clamp added
+        // alongside max_scroll_offset assignment must pull the offset back in
+        // range, or render would translate into empty space.
+        let view = engine.views.get_mut(&id).expect("view");
+        view.max_scroll_offset = (0.0, 300.0);
+        view.scroll_offset = (
+            view.scroll_offset.0.min(view.max_scroll_offset.0),
+            view.scroll_offset.1.min(view.max_scroll_offset.1),
+        );
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 300.0));
+    }
+}
+
+#[cfg(test)]
+mod button_children_tests {
+    use super::*;
+
+    // ---- 2026-08-05 live-session fix: <button> is a flow container ----
+    //
+    // Icon buttons (element children, no text) were collapsed to an opaque
+    // FormControl leaf stamped with the literal string "Button". These pin
+    // the three shapes. macOS-gated: Engine::new needs a GPU device (the
+    // macos CI leg runs these; see ua_form_control_defaults note).
+
+    #[cfg(target_os = "macos")]
+    fn build_button(children: Vec<Rc<Node>>) -> LayoutBox {
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let button = Node::new(
+            rustkit_dom::NodeId::new(1),
+            NodeType::Element {
+                tag_name: "button".into(),
+                namespace: String::new(),
+                attributes: HashMap::new(),
+            },
+        );
+        for c in children {
+            button.append_child(c);
+        }
+        engine.build_layout_from_parent_style_and_path(
+            &button,
+            &[],
+            &HashMap::new(),
+            &[],
+            None,
+            &[],
+            0,
+            1,
+            "button",
+            &Cell::new(0),
+            false,
+        )
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn icon_button_keeps_its_element_children() {
+        let svg = Node::new(
+            rustkit_dom::NodeId::new(2),
+            NodeType::Element {
+                tag_name: "svg".into(),
+                namespace: String::new(),
+                attributes: HashMap::new(),
+            },
+        );
+        let layout = build_button(vec![svg]);
+        assert!(
+            !matches!(layout.box_type, BoxType::FormControl(_)),
+            "a button with element children must be a flow container, got FormControl leaf"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn text_button_stays_a_widget_with_its_text() {
+        let text = Node::new(rustkit_dom::NodeId::new(2), NodeType::Text("Buy It Now".into()));
+        let layout = build_button(vec![text]);
+        match layout.box_type {
+            BoxType::FormControl(rustkit_layout::FormControlType::Button { ref label, .. }) => {
+                assert_eq!(label, "Buy It Now");
+            }
+            ref other => panic!("text-only button should stay a FormControl leaf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn empty_button_has_no_placeholder_word() {
+        let layout = build_button(vec![]);
+        match layout.box_type {
+            BoxType::FormControl(rustkit_layout::FormControlType::Button { ref label, .. }) => {
+                assert_eq!(label, "", "empty button must not be stamped with a literal 'Button'");
+            }
+            ref other => panic!("empty button should stay a FormControl leaf, got {other:?}"),
+        }
     }
 }
