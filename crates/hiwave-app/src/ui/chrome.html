@@ -5801,6 +5801,20 @@
                 console.log('[Sidebar] Width set from backend:', clampedWidth);
             },
 
+            // State-aware restore: width AND whether the panel starts open.
+            // The old path restored only the number while `sidebarOpen`
+            // stayed hardcoded false, so the panel began collapsed on every
+            // launch regardless of settings.
+            setSidebarState: function(width, open) {
+                hiwaveChrome.setSidebarWidth(width);
+                if (open && !sidebarOpen) {
+                    sidebarOpen = true;
+                    sidebar.classList.remove('collapsed');
+                    syncSidebarLayout();
+                    console.log('[Sidebar] Opened from settings (default_open)');
+                }
+            },
+
             // Render tabs from backend state
             renderTabs: function(tabs) {
                 currentTabs = tabs;
