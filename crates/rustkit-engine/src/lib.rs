@@ -224,6 +224,11 @@ pub struct Engine {
     /// persistently failing render (e.g. a wedged surface) freezes the
     /// screen while the log stays silent.
     render_failing: std::collections::HashSet<EngineViewId>,
+    /// Parsed SVG documents keyed by URL. SVGs referenced from <img> are
+    /// vector content — they bypass ImageManager's raster decode (which
+    /// rejects them as "Unknown image format") and are spliced into the
+    /// display list as vector commands at build time.
+    svg_cache: std::collections::HashMap<String, rustkit_svg::SvgDocument>,
 }
 
 /// One author declaration that MATCHED an element, win or lose.
@@ -391,6 +396,7 @@ impl Engine {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         })
     }
 
@@ -1153,7 +1159,33 @@ impl Engine {
         // Generate display list
         let display_list = {
             let _display_list_span = tracing::info_span!("build_display_list").entered();
-            DisplayList::build(&root_box)
+            let mut dl = DisplayList::build(&root_box);
+            // Splice cached SVG documents in place of their Image commands.
+            // Done once per layout (not per frame): the renderer only speaks
+            // raster textures, so vector images become their own command
+            // runs positioned in the image's dest_rect.
+            if !self.svg_cache.is_empty() {
+                let mut expanded = Vec::with_capacity(dl.commands.len());
+                for cmd in dl.commands.drain(..) {
+                    match &cmd {
+                        rustkit_layout::DisplayCommand::Image { url, dest_rect, .. } => {
+                            if let Some(svg) = self.svg_cache.get(url) {
+                                expanded.extend(svg.render(
+                                    dest_rect.x,
+                                    dest_rect.y,
+                                    dest_rect.width,
+                                    dest_rect.height,
+                                ));
+                            } else {
+                                expanded.push(cmd);
+                            }
+                        }
+                        _ => expanded.push(cmd),
+                    }
+                }
+                dl.commands = expanded;
+            }
+            dl
         };
 
         debug!(
@@ -1760,11 +1792,25 @@ impl Engine {
                         }
                     });
 
-                    let (natural_width, natural_height) = match &loaded {
-                        Some(image) => (image.natural_width as f32, image.natural_height as f32),
+                    // Vector images: the SVG's own sizing (viewBox/width/height)
+                    // is the natural size the raster cache can't provide.
+                    let svg_size = Url::parse(&src).ok().and_then(|u| {
+                        self.svg_cache.get(u.as_str()).map(|svg| {
+                            svg.get_size(
+                                explicit_width.unwrap_or(300.0),
+                                explicit_height.unwrap_or(150.0),
+                            )
+                        })
+                    });
+
+                    let (natural_width, natural_height) = match (&loaded, svg_size) {
+                        (Some(image), _) => {
+                            (image.natural_width as f32, image.natural_height as f32)
+                        }
+                        (None, Some((w, h))) => (w, h),
                         // Image unavailable at layout time: fall back to the
                         // width=/height= attributes, then the placeholder size.
-                        None => match (explicit_width, explicit_height) {
+                        (None, None) => match (explicit_width, explicit_height) {
                             (Some(w), Some(h)) => (w, h),
                             (Some(w), None) => (w, w), // Assume square if only width
                             (None, Some(h)) => (h, h), // Assume square if only height
@@ -4109,14 +4155,44 @@ impl Engine {
         const MAX_CONCURRENT_IMAGE_LOADS: usize = 8;
 
         let mut pending = Vec::new();
+        let mut svg_urls = Vec::new();
         let mut loaded = 0;
         for (_src, url) in images {
-            if image_manager.is_cached(&url) {
+            if image_manager.is_cached(&url) || self.svg_cache.contains_key(url.as_str()) {
                 debug!(%url, "Image already cached");
                 loaded += 1;
                 continue;
             }
-            pending.push(url);
+            // SVG is vector content: ImageManager's raster decode rejects it
+            // ("Unknown image format", every Wikipedia logo in the live
+            // session). Routed by URL extension; SVG served from
+            // extensionless URLs still falls through to the raster lane
+            // (content-type routing is the named follow-up).
+            if url.path().to_ascii_lowercase().ends_with(".svg") {
+                svg_urls.push(url);
+            } else {
+                pending.push(url);
+            }
+        }
+
+        for url in svg_urls {
+            info!(%url, "Loading SVG image");
+            match self.loader.fetch(Request::get(url.clone())).await {
+                Ok(response) if response.ok() => match response.text().await {
+                    Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
+                        Ok(doc) => {
+                            self.svg_cache.insert(url.to_string(), doc);
+                            loaded += 1;
+                        }
+                        Err(e) => warn!(?e, %url, "Failed to parse SVG image"),
+                    },
+                    Err(e) => warn!(?e, %url, "Failed to read SVG body"),
+                },
+                Ok(response) => {
+                    warn!(status = %response.status, %url, "Failed to fetch SVG image")
+                }
+                Err(e) => warn!(?e, %url, "Failed to fetch SVG image"),
+            }
         }
 
         let results: Vec<bool> = futures::stream::iter(pending.into_iter().map(|url| {
@@ -8126,6 +8202,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         };
 
         // Build layout tree from document
@@ -8218,6 +8295,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8310,6 +8388,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -8422,6 +8501,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8498,6 +8578,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8566,6 +8647,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -8653,6 +8735,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -8726,6 +8809,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -9109,6 +9193,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         };
 
         // Test type selector: (0, 0, 1)
@@ -9697,6 +9782,66 @@ mod button_children_tests {
                 assert_eq!(label, "", "empty button must not be stamped with a literal 'Button'");
             }
             ref other => panic!("empty button should stay a FormControl leaf, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod svg_image_tests {
+    use super::*;
+
+    // ---- 2026-08-05 live-session fix: SVG in <img> ----
+    //
+    // rustkit-svg existed unwired (orphan-module class): every SVG <img>
+    // failed ImageManager's raster decode with "Unknown image format".
+    // Pins the layout half of the wire: a cached SVG document supplies the
+    // natural size the raster cache cannot. macOS-gated per the GPU-device
+    // rationale on the other Engine-constructing tests.
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn cached_svg_supplies_natural_size_to_img_layout() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let svg = rustkit_svg::SvgDocument::parse(r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"></svg>"#)
+            .expect("parse svg");
+        engine
+            .svg_cache
+            .insert("https://example.com/logo.svg".to_string(), svg);
+
+        let mut attrs = HashMap::new();
+        attrs.insert("src".to_string(), "https://example.com/logo.svg".to_string());
+        let img = Node::new(
+            rustkit_dom::NodeId::new(1),
+            NodeType::Element {
+                tag_name: "img".into(),
+                namespace: String::new(),
+                attributes: attrs,
+            },
+        );
+
+        let layout = engine.build_layout_from_parent_style_and_path(
+            &img,
+            &[],
+            &HashMap::new(),
+            &[],
+            None,
+            &[],
+            0,
+            1,
+            "img",
+            &Cell::new(0),
+            false,
+        );
+        match layout.box_type {
+            BoxType::Image {
+                natural_width,
+                natural_height,
+                ..
+            } => {
+                assert_eq!((natural_width, natural_height), (40.0, 20.0),
+                    "SVG natural size must come from the parsed document, not the 150x150 placeholder");
+            }
+            ref other => panic!("img should build an Image box, got {other:?}"),
         }
     }
 }
