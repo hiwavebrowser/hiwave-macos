@@ -4038,39 +4038,53 @@ impl Engine {
         let base_url = view.url.as_ref();
         let urls = self.discover_external_stylesheets(document.as_ref(), base_url);
 
-        let mut stylesheets = Vec::new();
+        // Fetch concurrently, but keep DOCUMENT ORDER in the result: the
+        // cascade depends on stylesheet order, so `buffered` (ordered) is
+        // load-bearing here where images use `buffer_unordered`.
+        use futures::stream::StreamExt;
+        const MAX_CONCURRENT_CSS_LOADS: usize = 6;
 
-        for url in urls {
-            info!(%url, "Loading external stylesheet");
-
-            match self.loader.fetch(Request::get(url.clone())).await {
-                Ok(response) => {
-                    if response.ok() {
-                        match response.text().await {
-                            Ok(css_text) => match Stylesheet::parse(&css_text) {
-                                Ok(stylesheet) => {
-                                    debug!(rules = stylesheet.rules.len(), %url, "Parsed external stylesheet");
-                                    stylesheets.push(stylesheet);
-                                }
+        let loader = self.loader.clone();
+        let fetched: Vec<Option<Stylesheet>> = futures::stream::iter(urls.into_iter().map(|url| {
+            let loader = loader.clone();
+            async move {
+                info!(%url, "Loading external stylesheet");
+                match loader.fetch(Request::get(url.clone())).await {
+                    Ok(response) => {
+                        if response.ok() {
+                            match response.text().await {
+                                Ok(css_text) => match Stylesheet::parse(&css_text) {
+                                    Ok(stylesheet) => {
+                                        debug!(rules = stylesheet.rules.len(), %url, "Parsed external stylesheet");
+                                        Some(stylesheet)
+                                    }
+                                    Err(e) => {
+                                        warn!(?e, %url, "Failed to parse external stylesheet");
+                                        None
+                                    }
+                                },
                                 Err(e) => {
-                                    warn!(?e, %url, "Failed to parse external stylesheet");
+                                    warn!(?e, %url, "Failed to read stylesheet body");
+                                    None
                                 }
-                            },
-                            Err(e) => {
-                                warn!(?e, %url, "Failed to read stylesheet body");
                             }
+                        } else {
+                            warn!(status = %response.status, %url, "Failed to fetch stylesheet");
+                            None
                         }
-                    } else {
-                        warn!(status = %response.status, %url, "Failed to fetch stylesheet");
+                    }
+                    Err(e) => {
+                        warn!(?e, %url, "Failed to fetch stylesheet");
+                        None
                     }
                 }
-                Err(e) => {
-                    warn!(?e, %url, "Failed to fetch stylesheet");
-                }
             }
-        }
+        }))
+        .buffered(MAX_CONCURRENT_CSS_LOADS)
+        .collect()
+        .await;
 
-        Ok(stylesheets)
+        Ok(fetched.into_iter().flatten().collect())
     }
 
     /// Load images asynchronously and store in cache.
@@ -4084,35 +4098,53 @@ impl Engine {
         let base_url = view.url.as_ref();
         let images = self.discover_images(document.as_ref(), base_url);
 
-        let mut loaded = 0;
         let image_manager = self.image_manager.clone();
 
+        // Fetch concurrently with bounded parallelism. The serial loop cost
+        // 69 seconds on a Wikipedia article whose ~30 thumbnails each burned
+        // a sequential round-trip failing (2026-08-05 live session);
+        // buffer_unordered polls the futures on this thread, so no Send
+        // bounds are required and the engine stays single-threaded.
+        use futures::stream::StreamExt;
+        const MAX_CONCURRENT_IMAGE_LOADS: usize = 8;
+
+        let mut pending = Vec::new();
+        let mut loaded = 0;
         for (_src, url) in images {
-            // Skip if already cached
             if image_manager.is_cached(&url) {
                 debug!(%url, "Image already cached");
                 loaded += 1;
                 continue;
             }
+            pending.push(url);
+        }
 
-            info!(%url, "Loading image via ImageManager");
-
-            // Use ImageManager to fetch, decode, and cache the image
-            match image_manager.load(url.clone()).await {
-                Ok(image) => {
-                    debug!(
-                        %url,
-                        width = image.natural_width,
-                        height = image.natural_height,
-                        "Image loaded and cached"
-                    );
-                    loaded += 1;
-                }
-                Err(e) => {
-                    warn!(?e, %url, "Failed to load image");
+        let results: Vec<bool> = futures::stream::iter(pending.into_iter().map(|url| {
+            let image_manager = image_manager.clone();
+            async move {
+                info!(%url, "Loading image via ImageManager");
+                match image_manager.load(url.clone()).await {
+                    Ok(image) => {
+                        debug!(
+                            %url,
+                            width = image.natural_width,
+                            height = image.natural_height,
+                            "Image loaded and cached"
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        warn!(?e, %url, "Failed to load image");
+                        false
+                    }
                 }
             }
-        }
+        }))
+        .buffer_unordered(MAX_CONCURRENT_IMAGE_LOADS)
+        .collect()
+        .await;
+
+        loaded += results.into_iter().filter(|ok| *ok).count();
 
         Ok(loaded)
     }

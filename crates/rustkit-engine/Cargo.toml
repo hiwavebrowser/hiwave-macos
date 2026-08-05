@@ -28,6 +28,7 @@ rustkit-renderer = { path = "../rustkit-renderer" }
 
 # Async runtime
 tokio = { version = "1.42", features = ["sync", "time", "rt"] }
+futures = "0.3"
 
 # URL handling
 url = "2.5"
