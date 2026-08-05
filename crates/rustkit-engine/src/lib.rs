@@ -2383,6 +2383,24 @@ impl Engine {
                 style.display = rustkit_css::Display::InlineBlock;
                 style.font_size = rustkit_css::Length::Px(13.333);
                 style.font_family = "system-ui".to_string();
+                // UA default background lives HERE, not in the painter: paint
+                // used to substitute WHITE whenever computed alpha was 0,
+                // which cannot tell "author said nothing" from "author said
+                // transparent" (#83). #83 put this in four per-tag arms
+                // further down the match — arms this grouped one had shadowed
+                // since before that merge, so the engine half of #83 was
+                // unreachable from the day it landed. The compiler said so on
+                // every build ("unreachable pattern"); nobody read it until
+                // Pete asked what the warnings meant.
+                if tag_name != "button" {
+                    // input/select/textarea get Chrome's white field; buttons
+                    // are ButtonFace-themed, not white — leave them to the
+                    // themed paint path.
+                    style.background_color = rustkit_css::Color::WHITE;
+                }
+                if tag_name == "textarea" {
+                    style.font_family = "monospace".to_string();
+                }
             }
             "small" => {
                 style.display = rustkit_css::Display::Inline;
@@ -2504,32 +2522,6 @@ impl Engine {
             }
             "label" => {
                 style.display = rustkit_css::Display::Inline;
-            }
-            "input" => {
-                style.display = rustkit_css::Display::Inline;
-                // UA default background. This belongs in the UA layer, not in
-                // the painter: paint used to substitute WHITE whenever the
-                // computed background had alpha 0, which cannot tell "author
-                // said nothing" from "author said transparent". A field
-                // deliberately made transparent over a dark wrapper came out
-                // white. Setting it here lets the author cascade override it
-                // the ordinary way.
-                style.background_color = rustkit_css::Color::WHITE;
-                // Intrinsic sizing handled elsewhere
-            }
-            "button" => {
-                style.display = rustkit_css::Display::Inline;
-            }
-            "select" => {
-                style.display = rustkit_css::Display::Inline;
-                // UA default background — see the "input" arm.
-                style.background_color = rustkit_css::Color::WHITE;
-            }
-            "textarea" => {
-                style.display = rustkit_css::Display::Inline;
-                style.font_family = "monospace".to_string();
-                // UA default background — see the "input" arm.
-                style.background_color = rustkit_css::Color::WHITE;
             }
             // Table elements
             "table" => {
