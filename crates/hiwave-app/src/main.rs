@@ -2037,6 +2037,20 @@ fn main() {
                             } else {
                                 format!("https://duckduckgo.com/?q={}", urlencoding::encode(&url))
                             };
+                            // Update the tab model BEFORE loading, like the
+                            // about/report branches above. Without this the
+                            // URL bar showed the typed URL only until the
+                            // next renderTabs, which rewrote it from the
+                            // stale model (live run 2026-08-05: typed
+                            // wikipedia, bar snapped back to the old eBay
+                            // URL).
+                            if let Ok(mut s) = state_for_events.lock() {
+                                if let Some(tab_id) = s.shell.get_active_tab().map(|tab| tab.id) {
+                                    if let Ok(parsed_url) = url::Url::parse(&full_url) {
+                                        let _ = s.shell.update_tab_url(tab_id, parsed_url);
+                                    }
+                                }
+                            }
                             #[cfg(target_os = "macos")]
                             {
                                 if let Err(e) = content_for_events.load_url(&full_url) {
