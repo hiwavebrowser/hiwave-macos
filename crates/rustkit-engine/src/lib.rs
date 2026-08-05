@@ -9129,6 +9129,39 @@ mod element_identity_tests {
     /// asserted here is copied verbatim out of
     /// `baselines/chrome-148/websuite/card-grid/layout-rects.json`.
     #[test]
+    #[cfg(target_os = "macos")]
+    fn ua_form_control_defaults_reach_computed_style() {
+        // Gated to macOS because it constructs a real Engine (Compositor::new
+        // wants a device) — which the macos-latest CI leg already does for the
+        // whole parity swarm, so this is exercised in CI, not vacuous.
+        //
+        // Why it exists: #83's four per-tag UA arms sat behind a shadowing
+        // grouped arm, unreachable from the day they merged, with every test
+        // green — the compiler's "unreachable pattern" warning was the only
+        // witness until Pete asked what the warnings meant.
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let empty = std::collections::HashMap::new();
+        let vars = HashMap::new();
+        let style_of = |tag: &str| {
+            engine.compute_style_for_element(tag, &empty, &[], &vars, &[], &[], 0, 1, None)
+        };
+
+        let input = style_of("input");
+        assert_eq!(input.background_color, rustkit_css::Color::WHITE,
+            "input must carry the UA white field background");
+        assert_eq!(input.display, rustkit_css::Display::InlineBlock);
+        assert_eq!(style_of("select").background_color, rustkit_css::Color::WHITE);
+        let textarea = style_of("textarea");
+        assert_eq!(textarea.background_color, rustkit_css::Color::WHITE);
+        assert_eq!(textarea.font_family, "monospace");
+
+        // input=WHITE ∧ button≠WHITE kills BOTH ancestors of this code:
+        // the grouped-arm-only version had no backgrounds anywhere, and the
+        // dead-arm version can never fire. Buttons are ButtonFace-themed.
+        assert_ne!(style_of("button").background_color, rustkit_css::Color::WHITE);
+    }
+
+    #[test]
     fn selector_segments_match_committed_chrome_baseline() {
         // `body > div.header:nth-of-type(1)` — two sibling divs, so indexed.
         assert_eq!(
