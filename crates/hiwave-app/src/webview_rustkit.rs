@@ -70,8 +70,13 @@ impl RustKitView {
             .as_raw();
 
         // Create engine builder with shield interceptor if counter provided
+        // Browser-plausible UA. "HiWave/1.0 RustKit/1.0" alone got us
+        // instantly rate-limited as a scraper even by Wikimedia (HTTP 429 on
+        // every thumbnail, 2026-08-05 live session) — servers gate on the
+        // Mozilla/AppleWebKit shape. Platform is reported honestly; HiWave
+        // stays visible as the product token.
         let mut builder = EngineBuilder::new()
-            .user_agent("HiWave/1.0 RustKit/1.0")
+            .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15 HiWave/1.0")
             .javascript_enabled(true)
             .cookies_enabled(true);
 

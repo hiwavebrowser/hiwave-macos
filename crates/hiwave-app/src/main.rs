@@ -2,7 +2,7 @@
 //!
 //! This is the primary entry point for the HiWave browser application.
 //! It uses a three-WebView architecture:
-//! - Chrome WebView: Full window (chrome UI + sidebar)
+//! - HiWave WebView: Full window (browser UI frame + sidebar)
 //! - Content WebView: Right pane (excludes sidebar, below top bar)
 //! - Shelf WebView: Bottom (collapsible, aligned to content pane)
 
@@ -1115,10 +1115,10 @@ fn main() {
             }
         })
         .build_as_child(&window)
-        .expect("Failed to create Chrome WebView");
+        .expect("Failed to create HiWave WebView");
 
     info!(
-        "Chrome WebView created (full window, top bar height {}px)",
+        "HiWave WebView created (full window, top bar height {}px)",
         CHROME_HEIGHT_DEFAULT
     );
 

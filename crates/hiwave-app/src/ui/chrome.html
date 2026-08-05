@@ -6972,6 +6972,29 @@
             }
         });
 
+        // macOS delivers End/Home as private-use codepoints (U+F72B/U+F729)
+        // that the WRY/tao layer hands to WebKit as literal text — pressing
+        // End in the URL bar inserted a tofu box instead of moving the caret
+        // (live run 2026-08-05). Own the keys: move the caret ourselves and
+        // preventDefault so the bogus character never inserts. Capture phase
+        // so per-input handlers can't shadow it.
+        document.addEventListener('keydown', (e) => {
+            const t = e.target;
+            if (!t || (t.tagName !== 'INPUT' && t.tagName !== 'TEXTAREA')) return;
+            const isEnd = e.key === 'End' || e.key === '';
+            const isHome = e.key === 'Home' || e.key === '';
+            if (!isEnd && !isHome) return;
+            e.preventDefault();
+            const len = t.value.length;
+            if (e.shiftKey) {
+                if (isEnd) t.setSelectionRange(t.selectionStart ?? 0, len);
+                else t.setSelectionRange(0, t.selectionEnd ?? 0, 'backward');
+            } else {
+                const pos = isEnd ? len : 0;
+                t.setSelectionRange(pos, pos);
+            }
+        }, true);
+
         console.log('HiWave Chrome initialized (sidebar UI)');
     </script>
 </body>
