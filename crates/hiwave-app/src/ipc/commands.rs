@@ -1455,7 +1455,16 @@ fn handle_save_sidebar_width(state: &Arc<Mutex<AppState>>, width: u32) -> IpcRes
 fn handle_get_sidebar_width(state: &Arc<Mutex<AppState>>) -> IpcResponse {
     let state = state.lock().unwrap();
     let settings = state.get_settings();
-    IpcResponse::success(serde_json::json!({ "width": settings.sidebar_width }))
+    IpcResponse::success(serde_json::json!({
+        "width": settings.sidebar_width,
+        // The frontend hardcoded `sidebarOpen = false` and never consulted
+        // this setting — it restored the WIDTH VALUE while keeping the panel
+        // collapsed, then dutifully reported width 0 back. "Sidebar does not
+        // load at all" (Pete, live run 2026-08-05) was a sidebar that never
+        // opened by default; settings.json said default_open=true the whole
+        // time, and no message carried it across.
+        "default_open": settings.sidebar_default_open,
+    }))
 }
 
 // Export/Import handlers

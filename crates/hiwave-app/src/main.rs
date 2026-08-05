@@ -1060,9 +1060,17 @@ fn main() {
                         let response = ipc::commands::handle_message(&chrome_state, msg);
                         if let ipc::IpcResponse::Success { data } = response {
                             if let Some(width) = data.get("width").and_then(|w| w.as_u64()) {
+                                let open = data
+                                    .get("default_open")
+                                    .and_then(|o| o.as_bool())
+                                    .unwrap_or(false);
+                                // Prefer the state-aware entry point; fall back
+                                // to the width-only one so an older chrome.html
+                                // keeps its previous (closed) behavior instead
+                                // of erroring.
                                 let script = format!(
-                                    "if(window.hiwaveChrome && window.hiwaveChrome.setSidebarWidth) {{ window.hiwaveChrome.setSidebarWidth({}); }}",
-                                    width
+                                    "if(window.hiwaveChrome && window.hiwaveChrome.setSidebarState) {{ window.hiwaveChrome.setSidebarState({w}, {o}); }} else if(window.hiwaveChrome && window.hiwaveChrome.setSidebarWidth) {{ window.hiwaveChrome.setSidebarWidth({w}); }}",
+                                    w = width, o = open
                                 );
                                 let _ = chrome_proxy.send_event(UserEvent::EvaluateScript(script));
                             }
