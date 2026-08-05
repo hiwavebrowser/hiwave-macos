@@ -292,6 +292,46 @@ def test_a_single_missing_capture_does_not_pass_by_omission():
         assert missing["reason"] == "no_rustkit_capture"
 
 
+def test_only_the_registry_viewport_capture_is_scored():
+    """A swarm run writes several viewports per case; the baselines have one.
+
+    Chrome's rects were captured at the registry viewport only. Scoring a
+    1920x1080 dump against 800x600 baselines reports a page-wide geometry
+    catastrophe that is entirely instrument mismatch — and, worse, one that
+    LOOKS like the campaign's own target defect class. A case captured only
+    off-viewport is unmeasured (which fails), never measured wrongly.
+    """
+    case_id, case = gate_cases()[0]
+    native = f"{case['width']}x{case['height']}"
+    chrome = json.load(open(chrome_rects_path(case_id, case["scope"])))
+    good = synthesize_rustkit_from_chrome(chrome)
+    shifted = copy.deepcopy(good)
+    for child in shifted["root"]["children"]:
+        child["border_box"]["x"] += 400  # what a wrong-viewport dump looks like
+
+    with tempfile.TemporaryDirectory() as root:
+        run = Path(root) / "run-1" / case_id
+        for viewport, tree in (("3840x2160", shifted), (native, good)):
+            out = run / viewport / "iter-1"
+            out.mkdir(parents=True)
+            with open(out / "layout.json", "w") as handle:
+                json.dump(tree, handle)
+
+        report = run_gate(Path(root), case_ids=[case_id])
+        assert report["cases"][0]["green"], report["cases"][0]["receipts"][:3]
+
+    # Off-viewport alone is a refusal, not a score.
+    with tempfile.TemporaryDirectory() as root:
+        out = Path(root) / "run-1" / case_id / "3840x2160" / "iter-1"
+        out.mkdir(parents=True)
+        with open(out / "layout.json", "w") as handle:
+            json.dump(shifted, handle)
+
+        report = run_gate(Path(root), case_ids=[case_id])
+        assert report["cases"][0]["reason"] == "no_native_viewport_capture"
+        assert not gate_passes(report)
+
+
 def test_gate_passes_refuses_any_report_that_measured_nothing():
     """The tripwires are tested on the predicate, not only through run_gate.
 

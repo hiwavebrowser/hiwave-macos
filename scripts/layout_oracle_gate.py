@@ -375,22 +375,39 @@ def unmeasured_case(case_id: str, reason: str) -> Dict[str, Any]:
     }
 
 
-def find_layout_json(layout_root: Path, case_id: str) -> Optional[Path]:
-    """Locate a case's RustKit layout dump under a capture root.
+def find_layout_json(
+    layout_root: Path, case_id: str, native_viewport: str
+) -> Tuple[Optional[Path], Optional[str]]:
+    """Locate a case's RustKit layout dump. Returns (path, refusal_reason).
 
-    Two layouts exist in the tree today: parity_test.py writes
-    `<root>/<case_id>/layout.json`, while parity_lib.py writes per-run,
-    per-viewport, per-iteration directories. Both are accepted; the shallowest
-    match wins so a stale deep artifact cannot shadow a fresh top-level one.
+    Two capture layouts exist in the tree. parity_test.py writes a flat
+    `<root>/<case_id>/layout.json`; parity_lib.py — the one the PR and nightly
+    swarms use — writes
+    `<root>/<run_id>/<case_id>/<viewport>/iter-<n>/layout.json`, so one case
+    yields several dumps at several viewports.
+
+    Only the case's REGISTRY viewport is accepted. Chrome's rects were captured
+    at that viewport and nowhere else, so scoring an 1920x1080 dump against
+    800x600 baselines would report a page-wide geometry catastrophe that is
+    purely an instrument mismatch — the same trap parity_gate.py's
+    primary_viewport_filter exists to close on the pixel side. A case captured
+    only off-viewport is UNMEASURED, which fails, rather than measured wrongly.
+
+    Iterations are interchangeable here: geometry is deterministic, and gate A
+    scores one dump. Stability across iterations is enforced separately.
     """
     direct = layout_root / case_id / "layout.json"
     if direct.exists():
-        return direct
-    matches = sorted(
-        layout_root.glob(f"**/{case_id}/**/layout.json"),
-        key=lambda p: len(p.parts),
-    )
-    return matches[0] if matches else None
+        return direct, None
+
+    matches = sorted(layout_root.glob(f"**/{case_id}/**/layout.json"))
+    if not matches:
+        return None, "no_rustkit_capture"
+
+    native = [p for p in matches if native_viewport in p.parts]
+    if not native:
+        return None, "no_native_viewport_capture"
+    return min(native, key=lambda p: (len(p.parts), str(p))), None
 
 
 def run_gate(
@@ -415,9 +432,11 @@ def run_gate(
         if chrome is None:
             cases.append(unmeasured_case(case_id, "no_chrome_baseline"))
             continue
-        layout_path = find_layout_json(layout_root, case_id)
+        layout_path, refusal = find_layout_json(
+            layout_root, case_id, f"{case['width']}x{case['height']}"
+        )
         if layout_path is None:
-            cases.append(unmeasured_case(case_id, "no_rustkit_capture"))
+            cases.append(unmeasured_case(case_id, refusal or "no_rustkit_capture"))
             continue
         rustkit = load_json(layout_path)
         if rustkit is None:
