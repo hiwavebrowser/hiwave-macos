@@ -246,6 +246,15 @@ pub struct DeclarationRecord {
     /// Position in application order. The highest `order` for a given
     /// property is the winner, because it wrote the field last.
     pub order: usize,
+    /// The recorded longhands this declaration ACTUALLY wrote, other than one
+    /// named by `property` itself — i.e. what a shorthand expanded into.
+    ///
+    /// Measured by running the applying function, not by consulting a table of
+    /// what each shorthand is supposed to set; see `longhands_written`. The
+    /// difference matters: `border: 2px solid` sets the width and leaves the
+    /// colour alone, so the property NAME would attribute a colour this
+    /// declaration never wrote.
+    pub writes: Vec<&'static str>,
 }
 
 /// The subset of selector syntax `export_style_json` accepts as a QUERY.
@@ -2452,8 +2461,15 @@ impl Engine {
                         "Resolved CSS variable"
                     );
                 }
+                // Snapshotted BEFORE applying, because "which longhands did
+                // this declaration write" is asked of the style as it stood
+                // when the declaration ran.
+                let before = recording.then(|| style.clone());
                 self.apply_style_property(&mut style, &decl.property, &resolved_value);
                 if recording {
+                    let writes = before
+                        .map(|b| self.longhands_written(&b, &decl.property, &resolved_value))
+                        .unwrap_or_default();
                     records.push(DeclarationRecord {
                         property: decl.property.clone(),
                         value: resolved_value,
@@ -2462,6 +2478,7 @@ impl Engine {
                         origin: "author",
                         important: decl.important,
                         order,
+                        writes,
                     });
                     order += 1;
                 }
@@ -2470,9 +2487,16 @@ impl Engine {
 
         // Parse inline style attribute if present (highest specificity)
         if let Some(style_attr) = attributes.get("style") {
+            let before_inline = recording.then(|| style.clone());
             self.apply_inline_style(&mut style, style_attr, css_vars);
             if recording {
-                self.record_inline_style(style_attr, css_vars, &mut records, &mut order);
+                self.record_inline_style(
+                    style_attr,
+                    css_vars,
+                    before_inline.as_ref(),
+                    &mut records,
+                    &mut order,
+                );
             }
         }
 
@@ -2518,18 +2542,35 @@ impl Engine {
         &self,
         style_attr: &str,
         css_vars: &HashMap<String, String>,
+        before_inline: Option<&ComputedStyle>,
         records: &mut Vec<DeclarationRecord>,
         order: &mut usize,
     ) {
+        // Replayed onto a scratch copy in the same order `apply_inline_style`
+        // applied them, so each declaration's `writes` is measured against the
+        // style as it stood when that declaration ran — the same question the
+        // rule loop asks, and the reason a later inline longhand can be seen
+        // to beat an earlier inline shorthand.
+        let mut scratch = before_inline.cloned();
         for declaration in style_attr.split(';') {
             let declaration = declaration.trim();
             if declaration.is_empty() {
                 continue;
             }
             if let Some((property, value)) = declaration.split_once(':') {
+                let property = property.trim().to_lowercase();
+                let value = self.resolve_css_variables(value.trim(), css_vars);
+                let writes = match scratch.as_mut() {
+                    Some(s) => {
+                        let w = self.longhands_written(s, &property, &value);
+                        self.apply_style_property(s, &property, &value);
+                        w
+                    }
+                    None => Vec::new(),
+                };
                 records.push(DeclarationRecord {
-                    property: property.trim().to_lowercase(),
-                    value: self.resolve_css_variables(value.trim(), css_vars),
+                    property,
+                    value,
                     selector: "style=".to_string(),
                     // An inline declaration outranks any selector; CSS gives
                     // it a specificity above (1,0,0) rather than a tuple.
@@ -2537,6 +2578,7 @@ impl Engine {
                     origin: "author-inline",
                     important: false,
                     order: *order,
+                    writes,
                 });
                 *order += 1;
             }
@@ -2582,7 +2624,120 @@ impl Engine {
         "font-style",
         "letter-spacing",
         "white-space",
+        // The shorthand group. Almost nobody writes these longhands; they are
+        // set by `border`, `border-top` or `border-width`, which is exactly
+        // why they are in the diagnosis set — they are the properties that
+        // force provenance to survive a shorthand. See `longhands_written`.
+        "border-top-width",
+        "border-top-color",
     ];
+
+    /// Which recorded longhands a declaration ACTUALLY wrote.
+    ///
+    /// Answered by RUNNING the applying function, not by consulting a table of
+    /// what each shorthand is supposed to set. Two copies of the style as it
+    /// stood before the declaration are made to disagree in exactly the
+    /// longhand under test; the declaration is applied to both; if they come
+    /// out agreeing, it wrote that longhand, and if each keeps its own
+    /// sentinel, it did not touch it.
+    ///
+    /// The indirection earns its keep because the property name lies. `border:
+    /// 2px solid` carries no colour, so `parse_border_shorthand` returns
+    /// `None` for it and `apply_style_property` leaves `border_top_color`
+    /// alone — a hand-written expansion table saying "`border` sets the four
+    /// widths and the four colours" would cite that rule as the source of a
+    /// colour it never set. This asks the cascade instead of predicting it,
+    /// which is the same reason provenance is recorded from inside the apply
+    /// loop rather than by a second pass.
+    ///
+    /// A longhand with no sentinel is never attributed: an unknown answer is
+    /// reported as "no rule declared this", which is the pre-existing
+    /// behaviour, rather than guessed.
+    fn longhands_written(
+        &self,
+        before: &ComputedStyle,
+        property: &str,
+        value: &str,
+    ) -> Vec<&'static str> {
+        Self::COMPUTED_PROPERTIES
+            .iter()
+            .copied()
+            .filter(|longhand| *longhand != property)
+            .filter(|longhand| {
+                let (Some(mut a), Some(mut b)) = (
+                    Self::with_sentinel(before, longhand, 0),
+                    Self::with_sentinel(before, longhand, 1),
+                ) else {
+                    return false;
+                };
+                // The two sentinels must be TELLABLE APART before the
+                // declaration runs, or "they agree afterwards" proves nothing:
+                // a property whose computed form is a hole on this style (a
+                // line-height multiplier under a non-px font-size, say) reports
+                // null for both copies whether or not anything wrote it, and
+                // the oracle would read that as written.
+                if Self::computed_value_of(&a, longhand) == Self::computed_value_of(&b, longhand) {
+                    return false;
+                }
+                self.apply_style_property(&mut a, property, value);
+                self.apply_style_property(&mut b, property, value);
+                Self::computed_value_of(&a, longhand) == Self::computed_value_of(&b, longhand)
+            })
+            .collect()
+    }
+
+    /// A copy of `style` differing from its sibling copy in exactly one
+    /// property. The two values are arbitrary; all that is required is that
+    /// they differ and that `computed_value_of` can tell them apart.
+    fn with_sentinel(style: &ComputedStyle, property: &str, which: usize) -> Option<ComputedStyle> {
+        use rustkit_css::{Color, Length};
+        let px = [Length::Px(9001.0), Length::Px(1337.0)];
+        let mut s = style.clone();
+        let pick = which & 1;
+        match property {
+            "width" => s.width = px[pick].clone(),
+            "height" => s.height = px[pick].clone(),
+            "padding-top" => s.padding_top = px[pick].clone(),
+            "padding-right" => s.padding_right = px[pick].clone(),
+            "padding-bottom" => s.padding_bottom = px[pick].clone(),
+            "padding-left" => s.padding_left = px[pick].clone(),
+            "margin-top" => s.margin_top = px[pick].clone(),
+            "margin-right" => s.margin_right = px[pick].clone(),
+            "margin-bottom" => s.margin_bottom = px[pick].clone(),
+            "margin-left" => s.margin_left = px[pick].clone(),
+            "border-top-width" => s.border_top_width = px[pick].clone(),
+            "letter-spacing" => s.letter_spacing = px[pick].clone(),
+            "font-size" => s.font_size = px[pick].clone(),
+            "font-weight" => s.font_weight = rustkit_css::FontWeight([301, 702][pick]),
+            "color" => s.color = [Color::new(1, 2, 3, 1.0), Color::new(4, 5, 6, 1.0)][pick],
+            "background-color" => {
+                s.background_color = [Color::new(1, 2, 3, 1.0), Color::new(4, 5, 6, 1.0)][pick]
+            }
+            "border-top-color" => {
+                s.border_top_color = [Color::new(1, 2, 3, 1.0), Color::new(4, 5, 6, 1.0)][pick]
+            }
+            "display" => {
+                s.display = [rustkit_css::Display::Block, rustkit_css::Display::Flex][pick]
+            }
+            "line-height" => {
+                s.line_height =
+                    [rustkit_css::LineHeight::Px(11.0), rustkit_css::LineHeight::Px(22.0)][pick]
+            }
+            "font-family" => s.font_family = ["sentinel-a", "sentinel-b"][pick].to_string(),
+            "text-align" => {
+                s.text_align = [rustkit_css::TextAlign::Left, rustkit_css::TextAlign::Right][pick]
+            }
+            "font-style" => {
+                s.font_style = [rustkit_css::FontStyle::Normal, rustkit_css::FontStyle::Italic][pick]
+            }
+            "white-space" => {
+                s.white_space =
+                    [rustkit_css::WhiteSpace::Normal, rustkit_css::WhiteSpace::Pre][pick]
+            }
+            _ => return None,
+        }
+        Some(s)
+    }
 
     /// The shorthands that can write `property` without naming it.
     ///
@@ -2627,6 +2782,7 @@ impl Engine {
             .filter(|property| {
                 !records.iter().any(|r| {
                     r.property == **property
+                        || r.writes.contains(property)
                         || Self::shorthands_setting(property).contains(&r.property.as_str())
                 })
             })
@@ -2715,6 +2871,24 @@ impl Engine {
                 rustkit_css::WhiteSpace::BreakSpaces => "break-spaces",
             }
             .to_string(),
+            // Resolved through exactly the arms LAYOUT resolves in
+            // `length_to_px` — `Px` as-is, `Em` against this element's own
+            // computed font-size, `Rem` against the 16px root default, `Zero`
+            // — so the reported width cannot differ from the one the box model
+            // reserved. Percent and the viewport units resolve against a
+            // containing block the style trace does not have, so they return a
+            // hole rather than a number derived from a guessed container.
+            "border-top-width" => match &style.border_top_width {
+                rustkit_css::Length::Zero => "0px".to_string(),
+                rustkit_css::Length::Px(v) => format!("{v}px"),
+                rustkit_css::Length::Em(em) => match style.font_size {
+                    rustkit_css::Length::Px(font_px) => format!("{}px", em * font_px),
+                    _ => return None,
+                },
+                rustkit_css::Length::Rem(rem) => format!("{}px", rem * 16.0),
+                _ => return None,
+            },
+            "border-top-color" => color(&style.border_top_color),
             _ => return None,
         })
     }
@@ -5591,22 +5765,37 @@ impl Engine {
                     std::collections::BTreeMap::new();
                 for decl in &record.declarations {
                     properties.entry(decl.property.as_str()).or_default().push(decl);
+                    // A longhand competes with every declaration that wrote
+                    // it, whether or not that declaration named it. Without
+                    // this, `border: 3px solid #08c` leaves `border-top-width`
+                    // reporting "no rule declared this" — literally true and
+                    // thoroughly misleading, since a rule plainly set it.
+                    // `writes` carries only what the applying function was
+                    // observed to write, so a shorthand is never credited with
+                    // a longhand it left alone.
+                    for written in &decl.writes {
+                        properties.entry(written).or_default().push(decl);
+                    }
                 }
 
                 let mut declared: Vec<serde_json::Value> = properties
                     .into_iter()
                     .map(|(property, mut decls)| {
+                        // Application order, exactly as for a directly named
+                        // property: the last declaration to write the field
+                        // wins, so a longhand after a shorthand beats it and a
+                        // shorthand after a longhand beats that.
                         decls.sort_by_key(|d| d.order);
                         let winner = decls.last().copied();
                         let overridden: Vec<serde_json::Value> = decls
                             [..decls.len().saturating_sub(1)]
                             .iter()
-                            .map(|d| Self::declaration_to_json(d))
+                            .map(|d| Self::declaration_to_json(d, property))
                             .collect();
                         serde_json::json!({
                             "property": property,
                             "computed": Self::computed_value_of_recorded(record, property),
-                            "winner": winner.map(Self::declaration_to_json),
+                            "winner": winner.map(|w| Self::declaration_to_json(w, property)),
                             "origin": winner.map(|w| w.origin),
                             "overridden": overridden,
                         })
@@ -5687,6 +5876,16 @@ impl Engine {
                                 ancestor reports (and lays out) `normal`. The value is \
                                 truthful about the engine and is never labelled `inherited`; \
                                 the missing inheritance is an engine bug",
+                "shorthands": "a longhand set by a shorthand cites that shorthand, with \
+                               `via_shorthand: true` and the declaration's own property name. \
+                               Attribution is measured by running the applying function, not \
+                               predicted from the shorthand's name, so `border: 2px solid` \
+                               (no colour) claims the width and NOT `border-top-color`",
+                "border_width_units": "`border-top-width` resolves px, em (against this \
+                                       element's font-size) and rem, which is what layout \
+                                       resolves; percent and viewport units need a containing \
+                                       block the trace does not keep and return null rather \
+                                       than a guess",
                 "computed_properties": Self::COMPUTED_PROPERTIES,
             }
         });
@@ -5702,10 +5901,17 @@ impl Engine {
         Ok(())
     }
 
-    fn declaration_to_json(d: &DeclarationRecord) -> serde_json::Value {
+    /// `queried` is the property the caller asked about, which is not always
+    /// the property the declaration named: a longhand's winner can be a
+    /// shorthand. Both are reported, so a reader can tell `border-top-width:
+    /// 3px` from `border: 3px solid #08c` without parsing the value.
+    fn declaration_to_json(d: &DeclarationRecord, queried: &str) -> serde_json::Value {
         let (a, b, c) = d.specificity;
         serde_json::json!({
             "value": d.value,
+            "property": d.property,
+            // The declaration set `queried` without naming it.
+            "via_shorthand": d.property != queried,
             "selector": d.selector,
             // usize::MAX marks an inline declaration, which CSS ranks above
             // every selector rather than giving it a tuple.
@@ -7814,6 +8020,7 @@ mod tests {
             origin: "author",
             important: false,
             order: 0,
+            writes: Vec::new(),
         }
     }
 
@@ -7857,6 +8064,76 @@ mod tests {
         assert!(!shorthand.iter().any(|p| p == "font-family"), "{shorthand:?}");
         // ...and it must not swallow properties that shorthand cannot set.
         assert!(shorthand.iter().any(|p| p == "text-align"), "{shorthand:?}");
+    }
+
+    /// `border-top-width` must resolve through exactly the arms LAYOUT resolves
+    /// in `length_to_px`, for the same reason as `letter-spacing`: a reported
+    /// width that differs from the one the box model reserved would make the
+    /// tool disagree with the engine it is reporting on.
+    #[test]
+    fn border_top_width_resolves_the_way_layout_does_or_not_at_all() {
+        let mut style = ComputedStyle::new();
+        style.font_size = rustkit_css::Length::Px(20.0);
+
+        style.border_top_width = rustkit_css::Length::Em(0.25);
+        assert_eq!(
+            Engine::computed_value_of(&style, "border-top-width").as_deref(),
+            Some("5px"), // 0.25 x 20px, the same product layout takes
+        );
+        style.border_top_width = rustkit_css::Length::Px(3.0);
+        assert_eq!(
+            Engine::computed_value_of(&style, "border-top-width").as_deref(),
+            Some("3px"),
+        );
+        style.border_top_width = rustkit_css::Length::Zero;
+        assert_eq!(
+            Engine::computed_value_of(&style, "border-top-width").as_deref(),
+            Some("0px"),
+        );
+        style.border_top_width = rustkit_css::Length::Rem(0.5);
+        assert_eq!(
+            Engine::computed_value_of(&style, "border-top-width").as_deref(),
+            Some("8px"), // 0.5 x the 16px root default
+        );
+
+        // An em width under a non-px font-size has nothing to multiply, and a
+        // percentage needs the containing block the trace does not keep.
+        // Layout silently uses 16px and the container respectively; a hole is
+        // the honest answer here, since a number would look derived.
+        style.border_top_width = rustkit_css::Length::Em(0.25);
+        style.font_size = rustkit_css::Length::Percent(120.0);
+        assert_eq!(Engine::computed_value_of(&style, "border-top-width"), None);
+
+        style.font_size = rustkit_css::Length::Px(20.0);
+        style.border_top_width = rustkit_css::Length::Percent(10.0);
+        assert_eq!(Engine::computed_value_of(&style, "border-top-width"), None);
+    }
+
+    /// The shorthand oracle can only answer for a property it can build two
+    /// TELLABLE-APART copies of; anything else silently gets no attribution
+    /// and goes back to reporting "no rule declared this". That silence is the
+    /// dangerous failure — it looks exactly like the truth — so every recorded
+    /// property must have a sentinel pair, and the pair must differ under the
+    /// same reader the oracle compares with.
+    #[test]
+    fn every_recorded_property_has_a_distinguishable_sentinel_pair() {
+        let mut base = ComputedStyle::new();
+        // A px font-size, since line-height and letter-spacing resolve against
+        // it and would otherwise read as holes on both copies.
+        base.font_size = rustkit_css::Length::Px(20.0);
+
+        for property in Engine::COMPUTED_PROPERTIES {
+            let a = Engine::with_sentinel(&base, property, 0)
+                .unwrap_or_else(|| panic!("no sentinel for {property}"));
+            let b = Engine::with_sentinel(&base, property, 1)
+                .unwrap_or_else(|| panic!("no sentinel for {property}"));
+            let (a, b) = (
+                Engine::computed_value_of(&a, property),
+                Engine::computed_value_of(&b, property),
+            );
+            assert!(a.is_some() && b.is_some(), "{property}: {a:?} {b:?}");
+            assert_ne!(a, b, "{property}: sentinels are indistinguishable");
+        }
     }
 
     /// `letter-spacing` must resolve through exactly the arms LAYOUT resolves,

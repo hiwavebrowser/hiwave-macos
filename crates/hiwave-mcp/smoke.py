@@ -55,11 +55,16 @@ h1 { font-size: 32px; margin: 0 }
 .plain  { width: 400px; font-size: 20px; font-family: Georgia, serif }
 .spaced { width: 400px; font-size: 20px; font-family: Georgia, serif; letter-spacing: 0.1em }
 .pre { white-space: pre }
+.framed    { width: 200px; height: 40px; font-size: 20px; border: 0.25em solid #c60 }
+.hairline  { width: 200px; height: 40px; border: 2px solid }
+.overruled { width: 200px; height: 40px; border: 3px solid #093; border-top-width: 9px }
 </style></head><body><div class="hero"><h1>Attribution</h1></div>\
 <div class="copy"><span id="inherits">inherited</span></div>\
 <div class="plain"><span>spacing</span></div>\
 <div class="spaced"><span>spacing</span></div>\
-<div class="pre">a  b<span class="nested">c  d</span></div></body></html>"""
+<div class="pre">a  b<span class="nested">c  d</span></div>\
+<div class="framed"></div><div class="hairline"></div><div class="overruled"></div>\
+</body></html>"""
 
 
 class Client:
@@ -264,15 +269,20 @@ def main():
     # `padding-left`. 16px can only come from the engine expanding `padding`.
     assert hero_style["computed"]["padding-left"] == "16px", hero_style["computed"]
     pad_left = next(d for d in hero_style["declared"] if d["property"] == "padding-left")
-    # No rule spells `padding-left`, so it cites none — yet it computed to
-    # 16px. The value can therefore only have come from the engine expanding
-    # the `padding` shorthand, not from echoing declaration text back.
-    assert pad_left["winner"] is None, pad_left
     assert pad_left["computed"] == "16px", pad_left
-    assert any(d["property"] == "padding" and d["winner"]["value"] == "16px"
-               for d in hero_style["declared"]), hero_style["declared"]
-    print(f"ok  computed expansion padding-left=16px, winner=None — no rule "
-          f"spells it; expanded from `padding: 16px`")
+    # Nights 2-7 reported `"winner": null` here and named it the one place this
+    # output could mislead: literally true (no rule spells `padding-left`) and
+    # read by anyone as "nothing set this", when `padding: 16px` plainly did.
+    # It now cites the declaration that actually wrote the field, and says it
+    # did so under another name. The value is still the engine's expansion, not
+    # an echo — the winner's own value is "16px" for the SHORTHAND.
+    assert pad_left["winner"]["property"] == "padding", pad_left["winner"]
+    assert pad_left["winner"]["via_shorthand"] is True, pad_left["winner"]
+    assert pad_left["winner"]["selector"] == ".hero", pad_left["winner"]
+    assert pad_left["origin"] == "author", pad_left
+    print(f"ok  computed expansion padding-left=16px, cited to `padding: "
+          f"{pad_left['winner']['value']}` on {pad_left['winner']['selector']} "
+          f"(via_shorthand) — no rule spells the longhand")
 
     # "no author rule set this" is an ANSWER, not an omission: it is how an
     # agent tells "the author's rule lost" apart from "the author never wrote
@@ -455,6 +465,102 @@ def main():
     assert len(texts["c d"]["advances"]) == 3, texts["c d"]
     print(f"ok  KNOWN DIVERGENCE  .pre keeps 'a  b' (4 advances) but its nested span "
           f"collapsed 'c  d' to 'c d' — white-space is not inherited onto elements")
+
+    # ---- the shorthand group: border-top-width and border-top-color ----------
+    # These are in the diagnosis set precisely because almost nobody writes the
+    # longhands: they are set by `border`, which is what forces provenance to
+    # survive a shorthand. Both halves have to hold — the value the engine
+    # computed, AND a citation that names the rule that really wrote it.
+    framed_style, error = client.tool("hiwave_style", selector=".framed")
+    assert error is None, error
+    assert framed_style["count"] == 1, framed_style["count"]
+    framed = framed_style["elements"][0]
+
+    # 0.25em on a 20px element is 5px. Nothing in the fixture spells a px
+    # border width, and nothing spells `border-top-width` at all: 5px requires
+    # the engine to expand the shorthand AND resolve the em against the
+    # computed font-size. Two conversions away from the declaration text.
+    assert framed["computed"]["font-size"] == "20px", framed["computed"]
+    assert framed["computed"]["border-top-width"] == "5px", framed["computed"]
+    btw = next(d for d in framed["declared"] if d["property"] == "border-top-width")
+    assert btw["computed"] == "5px", btw
+    assert btw["winner"]["property"] == "border", btw["winner"]
+    assert btw["winner"]["via_shorthand"] is True, btw["winner"]
+    assert btw["winner"]["value"] == "0.25em solid #c60", btw["winner"]
+    assert btw["winner"]["selector"] == ".framed", btw["winner"]
+    assert btw["origin"] == "author", btw
+
+    # #c60 is rgb(204, 102, 0) — 0xcc = 204, 0x66 = 102, by hand from the CSS.
+    assert framed["computed"]["border-top-color"] == "rgba(204, 102, 0, 1)", framed["computed"]
+    btc = next(d for d in framed["declared"] if d["property"] == "border-top-color")
+    assert btc["winner"]["property"] == "border", btc["winner"]
+    assert btc["winner"]["via_shorthand"] is True, btc["winner"]
+    assert btc["origin"] == "author", btc
+
+    # THE HALF THAT MAKES THEM COUNT: 5px is the width LAYOUT reserved and the
+    # height PAINT drew. 200 content + 5 border either side = 210, and the top
+    # border is a full-width band 5px tall in exactly that colour.
+    framed_box = find(tree["root"],
+                      lambda n: (n.get("border_box") or {}).get("width") == 210.0)
+    assert framed_box is not None, "no 210-wide box — expected .framed (200 + 2*5)"
+    assert framed_box["border"]["top"] == 5.0, framed_box["border"]
+    assert framed_box["content_rect"]["width"] == 200.0, framed_box["content_rect"]
+    bands = [c for c in commands
+             if c["op"] == "solid_color"
+             and c["color"] == {"r": 204, "g": 102, "b": 0, "a": 1.0}
+             and c["rect"]["height"] == 5.0]
+    # Two: the top band and the bottom one. The left and right sides are 5 WIDE
+    # and 50 tall, so they cannot be mistaken for these.
+    assert len(bands) == 2, [c["rect"] for c in bands]
+    top_band = [c for c in bands if c["rect"]["y"] == framed_box["border_box"]["y"]]
+    assert len(top_band) == 1, ([c["rect"] for c in bands], framed_box["border_box"])
+    assert top_band[0]["rect"]["width"] == 210.0, top_band[0]["rect"]
+    print(f"ok  border shorthand  .framed border-top-width=5px (0.25em x 20px) and "
+          f"border-top-color=rgba(204, 102, 0, 1), both cited to `border` on .framed; "
+          f"layout reserved 5.0 and paint drew a 210.0x5.0 band")
+
+    # THE ASSERTION THE MEASUREMENT EXISTS FOR. `border: 2px solid` carries no
+    # colour, so `parse_border_shorthand` returns None for it and the cascade
+    # leaves border_top_color alone. A hand-written table saying "`border` sets
+    # the four widths and the four colours" would cite this rule as the source
+    # of a colour it never wrote — a plausible, confident lie. Attribution is
+    # measured by running the applying function instead, so the width is cited
+    # and the colour is not.
+    hair_style, error = client.tool("hiwave_style", selector=".hairline")
+    assert error is None, error
+    hair = hair_style["elements"][0]
+    hw = next(d for d in hair["declared"] if d["property"] == "border-top-width")
+    assert hw["computed"] == "2px", hw
+    assert hw["winner"]["property"] == "border", hw["winner"]      # the width: cited
+    hc = next(d for d in hair["declared"] if d["property"] == "border-top-color")
+    assert hc["winner"] is None, hc                                # the colour: NOT
+    assert hc["origin"] == "user-agent-or-initial", hc
+    print(f"ok  no false citation `border: 2px solid` cites the width and NOT "
+          f"border-top-color (the declaration carried no colour)")
+
+    # ...and the ordering a merged property list has to get right: a longhand
+    # AFTER a shorthand beats it, and the shorthand is reported as beaten
+    # rather than dropped. 9px, not the shorthand's 3px, is also what layout
+    # reserved — 200 + 3 + 3 wide, 40 + 9 + 3 tall.
+    over_style, error = client.tool("hiwave_style", selector=".overruled")
+    assert error is None, error
+    over = over_style["elements"][0]
+    ow = next(d for d in over["declared"] if d["property"] == "border-top-width")
+    assert ow["computed"] == "9px", ow
+    assert ow["winner"]["property"] == "border-top-width", ow["winner"]
+    assert ow["winner"]["via_shorthand"] is False, ow["winner"]
+    assert len(ow["overridden"]) == 1, ow["overridden"]
+    assert ow["overridden"][0]["property"] == "border", ow["overridden"]
+    assert ow["overridden"][0]["via_shorthand"] is True, ow["overridden"]
+    over_box = find(tree["root"],
+                    lambda n: (n.get("border_box") or {}).get("width") == 206.0)
+    assert over_box is not None, "no 206-wide box — expected .overruled (200 + 2*3)"
+    assert over_box["border"] == {"top": 9.0, "right": 3.0, "bottom": 3.0, "left": 3.0}, \
+        over_box["border"]
+    assert over_box["border_box"]["height"] == 52.0, over_box["border_box"]  # 40 + 9 + 3
+    print(f"ok  longhand wins     .overruled border-top-width=9px beats `border: 3px "
+          f"solid #093`, which is reported in overridden; layout reserved "
+          f"{over_box['border']} and a {over_box['border_box']['height']}-tall box")
 
     # A query it cannot honestly answer is refused, not approximated. Matching
     # `div p` needs tree context the trace does not keep, and quietly matching
