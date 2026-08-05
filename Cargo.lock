@@ -5255,6 +5255,7 @@ dependencies = [
 name = "rustkit-engine"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "rustkit-bindings",
  "rustkit-compositor",
  "rustkit-core",
@@ -5265,6 +5266,7 @@ dependencies = [
  "rustkit-layout",
  "rustkit-net",
  "rustkit-renderer",
+ "rustkit-svg",
  "rustkit-viewhost",
  "serde_json",
  "thiserror 1.0.69",

@@ -1916,6 +1916,39 @@ fn main() {
                 }
             }
             Event::WindowEvent {
+                event: WindowEvent::KeyboardInput { event: key_event, .. },
+                ..
+            } => {
+                // Same delivery rule as MouseWheel: keys that reach the
+                // window loop were not consumed by a focused WebView text
+                // field, so scrolling the content is the right default.
+                // (Whether unfocused keys arrive at all on macOS is the
+                // diagnostic half — the wheel needed a live session to
+                // answer the same question.)
+                #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+                if key_event.state == tao::event::ElementState::Pressed {
+                    if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
+                        use tao::keyboard::Key;
+                        // scroll_by uses wheel sign convention: negative dy
+                        // advances the page (natural scrolling).
+                        let dy: Option<f32> = match key_event.logical_key {
+                            Key::ArrowDown => Some(-40.0),
+                            Key::ArrowUp => Some(40.0),
+                            Key::PageDown | Key::Space => Some(-600.0),
+                            Key::PageUp => Some(600.0),
+                            Key::End => Some(-f32::MAX),
+                            Key::Home => Some(f32::MAX),
+                            _ => None,
+                        };
+                        if let Some(dy) = dy {
+                            if view.scroll_by(0.0, dy) {
+                                trace!(dy, "content scrolled via keyboard");
+                            }
+                        }
+                    }
+                }
+            }
+            Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 window_id,
                 ..
