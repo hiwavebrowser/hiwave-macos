@@ -62,6 +62,20 @@ first real number unattributable and has to be redone.
 
 ---
 
+## Fleet rule banked from this campaign's tasking (Talos, 2026-08-04)
+
+**A blank Class-6 row is not a pass.** Asked to audit instrument integrity,
+Talos reported *"I have no parity harness on this seat, so there is no
+scoreboard here to catch lying"* — and returned NOT APPLICABLE instead of
+green. A seat with no instrument reports the same "nothing wrong" as a seat
+whose instrument is honest. In any cross-seat table, a seat without the
+instrument reads **NOT APPLICABLE — NO INSTRUMENT**, never blank, never green.
+
+He also withdrew his own advice to port the old parity harness to Linux, in
+his words: *"I wanted a number so much that I proposed adopting one already
+known to be false."* The old harness is not portable because it is the thing
+being replaced.
+
 ## Stop rule (hard)
 
 Any change that improves the metric while **any** oracle regresses on **any**
