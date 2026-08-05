@@ -5817,6 +5817,17 @@
 
             // Render tabs from backend state
             renderTabs: function(tabs) {
+                // Reflect the active tab's URL in the address bar — nothing
+                // ever wrote urlInput.value before this (zero assignments in
+                // the whole file), so the bar displayed nothing regardless of
+                // navigation. Skip while the user is typing, and show empty
+                // for internal pages so placeholder text stays useful.
+                try {
+                    const active = tabs.find(t => t.active);
+                    if (active && document.activeElement !== urlInput && !urlInputWasFocused) {
+                        urlInput.value = (active.url && !active.url.startsWith('hiwave://')) ? active.url : '';
+                    }
+                } catch (e) { console.log('[UrlBar] sync skipped:', e); }
                 currentTabs = tabs;
                 const container = document.getElementById('tabs');
                 container.innerHTML = '';
