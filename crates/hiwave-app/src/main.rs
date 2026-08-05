@@ -1880,6 +1880,20 @@ fn main() {
 
         match event {
             Event::WindowEvent {
+                event: WindowEvent::MouseWheel { delta, .. },
+                ..
+            } => {
+                // DIAGNOSTIC (2026-08-05, pre live-session): the RustKit
+                // content view receives no input anywhere in the stack — no
+                // scrollWheel override in the viewhost, no MouseWheel handling
+                // here, zero callers of Engine::scroll_by (aleph-verified).
+                // This arm answers the FIRST question for the hands-on
+                // session: do wheel events reach the window at all, or does a
+                // WebView layer swallow them before tao sees them? The log
+                // line is the instrument; wiring scroll is the next PR.
+                info!(?delta, "window-level MouseWheel received");
+            }
+            Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 window_id,
                 ..
