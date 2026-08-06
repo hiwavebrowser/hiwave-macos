@@ -1,20 +1,37 @@
 {
   "schema": 1,
   "wpt_pin": "a6f29b0bedaf3f1edba7b6739127fe8e713bfcb3",
-  "hiwave_git_sha": "2fe1dee678470fa9b1af82e2bf9ab929babc2b30",
+  "hiwave_git_sha": "427390c61cdebc9f2437275e61ac5c8169eefa3e",
   "runner": "scripts/wpt_tier1.py",
   "viewport": {
     "width": 800,
     "height": 600
   },
   "wpt_max_diff_pct": 0.0,
-  "ts": "2026-07-31T00:51:50.795736+00:00",
+  "ts": "2026-08-06T14:06:08.271431+00:00",
   "n": 14,
   "pass": 6,
-  "fail": 6,
-  "skip": 0,
-  "error": 2,
-  "rate": 0.5,
+  "fail": 3,
+  "skip": 4,
+  "error": 1,
+  "rate": 0.6667,
+  "attribution": {
+    "_comment": "Fails grouped by a named engine capability gap. Attribution only \u2014 these cases stay in the denominator. A gap here is a lane, not an excuse.",
+    "blocked_fails": {
+      "@font-face unimplemented (rustkit-layout FontLoader is dead code)": [
+        "css-text/overflow-wrap/overflow-wrap-001",
+        "css-text/overflow-wrap/overflow-wrap-002"
+      ]
+    },
+    "suspect_passes": {
+      "_comment": "PASSes on tests whose declared web font never loaded. The more dangerous direction: a green case that is not measuring its own assertion. Read these before quoting the rate.",
+      "ids": [
+        "css-inline/br-font-size",
+        "css-inline/br-line-height",
+        "css-text/overflow-wrap/overflow-wrap-004"
+      ]
+    }
+  },
   "cases": [
     {
       "id": "css-text/overflow-wrap/overflow-wrap-001",
@@ -23,6 +40,7 @@
       "diff_pct": 0.7054,
       "diff_pixels": 3386,
       "rel_match": "ok",
+      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
       "maps_to": "slice-0"
     },
     {
@@ -32,6 +50,7 @@
       "diff_pct": 2.495,
       "diff_pixels": 11976,
       "rel_match": "ok",
+      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
       "maps_to": "slice-0"
     },
     {
@@ -41,6 +60,7 @@
       "diff_pct": 0.0,
       "diff_pixels": 0,
       "rel_match": "ok",
+      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
       "maps_to": "slice-0"
     },
     {
@@ -50,6 +70,7 @@
       "diff_pct": 0.0,
       "diff_pixels": 0,
       "rel_match": "ok",
+      "blocked_by": null,
       "maps_to": "slice-0"
     },
     {
@@ -59,6 +80,7 @@
       "diff_pct": 0.0,
       "diff_pixels": 0,
       "rel_match": "ok",
+      "blocked_by": null,
       "maps_to": "slice-0"
     },
     {
@@ -68,6 +90,7 @@
       "diff_pct": 0.0,
       "diff_pixels": 0,
       "rel_match": "ok",
+      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
       "maps_to": "A"
     },
     {
@@ -77,33 +100,37 @@
       "diff_pct": 0.0,
       "diff_pixels": 0,
       "rel_match": "ok",
+      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
       "maps_to": "A"
     },
     {
       "id": "css-inline/empty-span-height",
-      "status": "FAIL",
-      "reason": null,
-      "diff_pct": 2.94,
-      "diff_pixels": 14112,
+      "status": "SKIP",
+      "reason": "reftest-wait: needs a scripted completion signal (no script host in parity-capture)",
+      "diff_pct": null,
+      "diff_pixels": null,
       "rel_match": "ok",
+      "blocked_by": null,
       "maps_to": "B"
     },
     {
       "id": "css-inline/empty-span-scroll",
-      "status": "ERROR",
-      "reason": "blank frame (test+ref) \u2014 render refusal, not a match",
+      "status": "SKIP",
+      "reason": "reftest-wait: needs a scripted completion signal (no script host in parity-capture)",
       "diff_pct": null,
       "diff_pixels": null,
       "rel_match": "ok",
+      "blocked_by": null,
       "maps_to": "B"
     },
     {
       "id": "css-inline/empty-span-size-001",
-      "status": "FAIL",
-      "reason": null,
-      "diff_pct": 16.5271,
-      "diff_pixels": 79330,
+      "status": "SKIP",
+      "reason": "reftest-wait: needs a scripted completion signal (no script host in parity-capture)",
+      "diff_pct": null,
+      "diff_pixels": null,
       "rel_match": "ok",
+      "blocked_by": null,
       "maps_to": "B"
     },
     {
@@ -113,15 +140,17 @@
       "diff_pct": 0.6658,
       "diff_pixels": 3196,
       "rel_match": "ok",
+      "blocked_by": null,
       "maps_to": "B"
     },
     {
       "id": "css-inline/empty-text-node-001",
-      "status": "FAIL",
-      "reason": null,
-      "diff_pct": 1.4083,
-      "diff_pixels": 6760,
+      "status": "SKIP",
+      "reason": "needs JS to reach the asserted state (no script host in parity-capture)",
+      "diff_pct": null,
+      "diff_pixels": null,
       "rel_match": "ok",
+      "blocked_by": null,
       "maps_to": "B2"
     },
     {
@@ -131,6 +160,7 @@
       "diff_pct": 0.0,
       "diff_pixels": 0,
       "rel_match": "ok",
+      "blocked_by": null,
       "maps_to": "flex"
     },
     {
@@ -140,6 +170,7 @@
       "diff_pct": null,
       "diff_pixels": null,
       "rel_match": "ok",
+      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
       "maps_to": "flex"
     }
   ],
@@ -147,6 +178,6 @@
     "all_green": false,
     "all_green_suspect": false,
     "negative_control": "FAIL as required (checked every run; run aborts otherwise)",
-    "note": "Not suspect: this run contains red (6 FAIL, 2 ERROR), so the oracle demonstrably distinguishes pass from fail on real cases. A run with pass==n and fail==0 and error==0 would flip this field."
+    "note": "Not suspect: this run contains red (3 FAIL, 1 ERROR), so the oracle demonstrably distinguishes pass from fail on real cases. A run with pass==n and fail==0 and error==0 would flip this field."
   }
 }
