@@ -874,6 +874,118 @@ impl Engine {
         )
     }
 
+    /// Build the submission for the form containing the focused control.
+    ///
+    /// Returns `None` when nothing is focused, the focused control has no
+    /// enclosing `<form>`, or the form has no submittable fields. Values come
+    /// from live edit state where it exists, so a submit carries what the
+    /// user actually typed rather than the authored attribute.
+    ///
+    /// GET only for now: the loader's public surface takes a URL, so a POST
+    /// body has nowhere to go until `load_url` grows a request variant. That
+    /// is a named follow-up, not a silent omission — a POST form returns
+    /// `None` rather than being submitted as a GET, because quietly changing
+    /// a form's method is worse than not submitting it.
+    pub fn form_submission_for_focus(
+        &self,
+        id: EngineViewId,
+    ) -> Option<rustkit_dom::forms::FormSubmission> {
+        use rustkit_dom::forms::{FormDataEntry, FormDataValue, FormState};
+
+        let view = self.views.get(&id)?;
+        let focused = view.focused_node?;
+        let document = view.document.as_ref()?;
+        let base = view.url.as_ref()?.to_string();
+
+        // Walk up to the enclosing <form>.
+        let form = {
+            let mut cur = document.get_node(focused)?;
+            loop {
+                match &cur.node_type {
+                    NodeType::Element { tag_name, .. } if tag_name.eq_ignore_ascii_case("form") => {
+                        break cur
+                    }
+                    _ => cur = cur.parent()?,
+                }
+            }
+        };
+
+        let NodeType::Element {
+            attributes: form_attrs,
+            ..
+        } = &form.node_type
+        else {
+            return None;
+        };
+
+        let state = FormState::new();
+        state.set_action(form_attrs.get("action").cloned().unwrap_or_default());
+        if let Some(m) = form_attrs.get("method") {
+            state.set_method(rustkit_dom::forms::FormMethod::from_str(m));
+        }
+
+        // Only GET is wired; see the doc comment.
+        if state.method() != rustkit_dom::forms::FormMethod::Get {
+            debug!(?id, "Form submit skipped: only GET is wired");
+            return None;
+        }
+
+        // Collect successful controls in document order.
+        let mut entries = Vec::new();
+        fn collect(
+            node: &std::rc::Rc<Node>,
+            engine: &Engine,
+            out: &mut Vec<FormDataEntry>,
+        ) {
+            if let NodeType::Element {
+                tag_name,
+                attributes,
+                ..
+            } = &node.node_type
+            {
+                let tag = tag_name.to_lowercase();
+                if matches!(tag.as_str(), "input" | "textarea") {
+                    // A control without a name is not successful (HTML §4.10),
+                    // and disabled controls never submit.
+                    let name = attributes.get("name").cloned().unwrap_or_default();
+                    let disabled = attributes.contains_key("disabled");
+                    let kind = attributes
+                        .get("type")
+                        .map(|t| t.to_lowercase())
+                        .unwrap_or_else(|| "text".into());
+                    let skip = matches!(kind.as_str(), "submit" | "button" | "reset" | "file")
+                        || (matches!(kind.as_str(), "checkbox" | "radio")
+                            && !attributes.contains_key("checked"));
+                    if !name.is_empty() && !disabled && !skip {
+                        let value = engine
+                            .edit_value(node.id.raw())
+                            .map(|(v, _)| v)
+                            .unwrap_or_else(|| {
+                                if tag == "textarea" {
+                                    node.text_content()
+                                } else {
+                                    attributes.get("value").cloned().unwrap_or_default()
+                                }
+                            });
+                        out.push(FormDataEntry {
+                            name,
+                            value: FormDataValue::String(value),
+                        });
+                    }
+                }
+            }
+            for child in node.children() {
+                collect(&child, engine, out);
+            }
+        }
+        collect(&form, self, &mut entries);
+
+        if entries.is_empty() {
+            return None;
+        }
+        Some(state.create_submission(&base, &entries))
+    }
+
     /// Current value of a control's live edit state, if it has one.
     ///
     /// Layout reads through this so an edited field renders its typed text
@@ -10454,5 +10566,121 @@ mod form_typing_tests {
         let (mut engine, id) =
             engine_with_html(r#"<html><body><input type="text"></body></html>"#);
         assert!(!engine.handle_text_key(id, 0, "c", false, false, false));
+    }
+}
+
+#[cfg(test)]
+mod form_submit_tests {
+    use super::*;
+
+    // ---- Enter in a form field submits it ----
+    //
+    // Typing is only useful if something happens on Enter. All fixtures are
+    // built from real HTML through the production layout/DOM path, per the
+    // node_id lesson: hand-built structures pass while the real path is
+    // broken.
+
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn engine_with(html: &str, url: &str) -> (Engine, EngineViewId, std::rc::Rc<Document>) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("view");
+        let doc = std::rc::Rc::new(Document::parse_html(html).expect("parse"));
+        let view = engine.views.get_mut(&id).expect("view");
+        view.document = Some(doc.clone());
+        view.url = Some(Url::parse(url).unwrap());
+        (engine, id, doc)
+    }
+
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn find_by_tag(n: &std::rc::Rc<Node>, tag: &str) -> Option<std::rc::Rc<Node>> {
+        if let NodeType::Element { tag_name, .. } = &n.node_type {
+            if tag_name.eq_ignore_ascii_case(tag) {
+                return Some(n.clone());
+            }
+        }
+        n.children().iter().find_map(|c| find_by_tag(c, tag))
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn submitting_carries_what_the_user_typed_not_the_authored_value() {
+        let (mut engine, id, doc) = engine_with(
+            r#"<html><body><form action="/search"><input name="q" value="old"></form></body></html>"#,
+            "https://example.com/page",
+        );
+        let input = find_by_tag(&doc.root(), "input").expect("input");
+        engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
+        engine.edit_states.insert(
+            input.id.raw(),
+            rustkit_dom::forms::TextEditState::with_value("typed"),
+        );
+
+        let sub = engine.form_submission_for_focus(id).expect("submission");
+        assert!(
+            sub.url.contains("q=typed"),
+            "submission must carry live edit state, got {}",
+            sub.url
+        );
+        assert!(!sub.url.contains("old"), "authored value must not win");
+        assert!(sub.url.starts_with("https://example.com/search"),
+            "action must resolve against the document URL, got {}", sub.url);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn unnamed_disabled_and_unchecked_controls_do_not_submit() {
+        // HTML §4.10 successful-controls rules. Each of these silently
+        // corrupts a query string if it leaks in.
+        let (mut engine, id, doc) = engine_with(
+            r#"<html><body><form action="/s">
+                 <input name="kept" value="1">
+                 <input value="no-name">
+                 <input name="off" value="2" disabled>
+                 <input type="checkbox" name="box" value="3">
+                 <input type="submit" name="btn" value="Go">
+               </form></body></html>"#,
+            "https://example.com/",
+        );
+        let input = find_by_tag(&doc.root(), "input").expect("input");
+        engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
+
+        let sub = engine.form_submission_for_focus(id).expect("submission");
+        assert!(sub.url.contains("kept=1"));
+        for forbidden in ["no-name", "off=", "box=", "btn="] {
+            assert!(
+                !sub.url.contains(forbidden),
+                "{forbidden} must not be submitted; got {}",
+                sub.url
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_post_form_is_declined_rather_than_downgraded_to_get() {
+        // Quietly turning a POST into a GET would send form data in a URL —
+        // worse than not submitting. Declining is the honest behavior until
+        // the loader accepts a body.
+        let (mut engine, id, doc) = engine_with(
+            r#"<html><body><form action="/s" method="post"><input name="q" value="x"></form></body></html>"#,
+            "https://example.com/",
+        );
+        let input = find_by_tag(&doc.root(), "input").expect("input");
+        engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
+        assert!(engine.form_submission_for_focus(id).is_none());
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_field_outside_any_form_submits_nothing() {
+        let (mut engine, id, doc) = engine_with(
+            r#"<html><body><input name="loose" value="x"></body></html>"#,
+            "https://example.com/",
+        );
+        let input = find_by_tag(&doc.root(), "input").expect("input");
+        engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
+        assert!(engine.form_submission_for_focus(id).is_none());
     }
 }
