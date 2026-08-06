@@ -6,8 +6,14 @@
 ## Start (Pete, one command)
 
 ```bash
-cd ~/Repos/hiwave-macos && git pull && ./scripts/pete-session.sh --release
+cd ~/Repos/hiwave-macos && git checkout develop && git pull && ./scripts/pete-session.sh --release
 ```
+
+**`develop`, not master, unless promote PR #110 has merged.** Everything worth
+testing tonight — typing into fields, Enter-to-search, the click gate, the
+lock-across-AppKit fix — landed after the last promotion. Master would run a
+build without them and the session would test nothing new. `git branch
+--show-current` before you start if unsure.
 
 `--release` must be the FIRST argument. Session #1 silently ran a debug
 build for its first 40 minutes, which cost an hour to a phantom "it's
@@ -33,6 +39,7 @@ frozen" that was really 100% CPU laying out eBay.
 | Capability | Verified how far |
 |---|---|
 | **Typing into web forms** | Model + plumbing tested; **no human has seen a character appear.** Click a text field on a real page, type, watch for characters and caret. |
+| **Enter submits a form** | Query-building tested against real HTML; **never seen to load a page.** Type in a site's search box, press Enter, expect results. GET forms only — a POST form deliberately does nothing rather than leak form data into a URL. |
 | **Click-to-focus** | Focus resolves in tests through the production layout path; clearing-on-background-click is pinned. |
 | Click gate bounds, concurrent SVG | Compile + suite only; behavioral change is invisible when correct. |
 
