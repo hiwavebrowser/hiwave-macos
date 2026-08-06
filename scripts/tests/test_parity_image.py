@@ -156,13 +156,23 @@ def test_alpha_is_dropped_and_recorded_never_composited():
         assert image.had_alpha is True
 
 
-def test_a_16_bit_png_is_refused_rather_than_truncated():
+def test_a_16_bit_png_is_refused_for_being_16_bit():
+    """The refusal must come from the depth check, not from a size accident.
+
+    The weaker version of this test only asserted that SOMETHING was raised —
+    and the mutation sweep showed it stayed green with the depth check deleted,
+    because a 16-bit scanline happens to be the wrong length for the 8-bit path
+    and the size check caught it instead. A 16-bit image whose byte count did
+    line up would have decoded as garbage. Asserting the reason is what makes
+    the depth check load-bearing.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         rows = [b"\x00" + bytes(12)]
         path = write(tmp, "d.png", make_png(2, 1, 3, rows, depth=16))
         try:
             read_png(path)
-        except UnsupportedImage:
+        except UnsupportedImage as exc:
+            assert "bit depth" in str(exc), f"refused for the wrong reason: {exc}"
             return
         raise AssertionError("a 16-bit PNG was decoded as if it were 8-bit")
 

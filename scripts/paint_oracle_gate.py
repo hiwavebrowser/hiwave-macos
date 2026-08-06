@@ -375,12 +375,17 @@ def parse_radius(value: Optional[str]) -> float:
     radii and per-corner shorthands return 0 and the element is skipped: the
     notch geometry below assumes a circular arc, and applying it to an ellipse
     would carve the notch in the wrong place and auto-fail a correct render.
+
+    The exclusion is the `fullmatch` and nothing else. An earlier version also
+    rejected values containing a space, a slash or a percent sign before
+    matching; the mutation sweep found that check stays green when removed,
+    because `([0-9.]+)px` anchored at both ends already rejects every one of
+    them. It was deleted rather than kept as reassurance — a guard that cannot
+    fail is a guard nobody can trust the next reader to re-derive.
     """
     if not value:
         return 0.0
     text = value.strip()
-    if " " in text or "/" in text or "%" in text:
-        return 0.0
     match = re.fullmatch(r"([0-9.]+)px", text)
     if not match:
         return 0.0

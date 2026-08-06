@@ -197,15 +197,24 @@ def test_a_delta_exactly_at_tolerance_is_within_and_one_more_is_not():
     assert count_outside_tolerance(base, over, TOLERANCE) == 1
 
 
-def test_channels_are_compared_independently_not_averaged():
-    """A red/blue swap has a zero mean delta and must still fail.
+def test_every_channel_is_compared_not_just_the_first():
+    """A change confined to ONE channel must fail, whichever channel it is.
 
-    Averaging channels is the paint-side version of averaging cases: it makes
-    the loudest possible defect disappear into an arithmetic mean.
+    The weaker version of this test compared red-vs-blue, which a gate that
+    only ever looked at the red channel still passes. A defect that lives
+    entirely in blue — a wrong link colour, a tinted gradient stop — is exactly
+    the thing that would then score green forever.
     """
-    base = solid(1, 1, (255, 0, 0))
-    swapped = solid(1, 1, (0, 0, 255))
-    assert count_outside_tolerance(base, swapped, TOLERANCE) == 1
+    base = solid(1, 1, (0, 0, 0))
+    for channel in range(3):
+        color = [0, 0, 0]
+        color[channel] = TOLERANCE + 1
+        assert count_outside_tolerance(base, solid(1, 1, tuple(color)), TOLERANCE) == 1, (
+            f"a delta confined to channel {channel} was not counted"
+        )
+
+    # And an average must not launder it: two channels equal, one far off.
+    assert count_outside_tolerance(base, solid(1, 1, (255, 0, 0)), TOLERANCE) == 1
 
 
 def test_exactly_at_the_bar_passes_and_just_under_fails():
@@ -368,6 +377,21 @@ def test_a_partially_filled_notch_is_not_reported_as_a_missing_clip():
     selector, corner, fill = first_testable_corner(chrome, elements, styles)
     rustkit = with_pixels(chrome, corner.notch[:-1], fill)
     result = score("card-grid", chrome, rustkit, elements, styles)
+    assert not [f for f in result["failures"] if f["kind"] == "missing_clip"]
+
+
+def test_a_notch_whose_backdrop_matches_the_fill_is_not_reported():
+    """When Chrome shows the same colour behind the corner, there is no evidence.
+
+    A square corner and a round one are indistinguishable against a backdrop of
+    the element's own fill. Firing here would auto-fail a correct render on a
+    coincidence of colour.
+    """
+    chrome, elements, styles = load_case("card-grid")
+    selector, corner, fill = first_testable_corner(chrome, elements, styles)
+    # Both sides show the fill in the notch: identical frames, no defect.
+    painted = with_pixels(chrome, corner.notch, fill)
+    result = score("card-grid", painted, painted, elements, styles)
     assert not [f for f in result["failures"] if f["kind"] == "missing_clip"]
 
 
