@@ -224,6 +224,24 @@ pub struct Engine {
     /// persistently failing render (e.g. a wedged surface) freezes the
     /// screen while the log stays silent.
     render_failing: std::collections::HashSet<EngineViewId>,
+    /// Focused node of the view currently being laid out.
+    ///
+    /// Focus is per-VIEW but the recursive layout builder is view-agnostic,
+    /// so the alternative was checking "is this node focused in ANY view",
+    /// which would mark a node focused in one view while building another.
+    /// Set by `relayout` around the build; `None` outside one.
+    building_focus: std::cell::Cell<Option<rustkit_dom::NodeId>>,
+    /// Live text-editing state for focused form controls, keyed by raw
+    /// `NodeId`.
+    ///
+    /// It lives here rather than in the DOM because `NodeType::Element`
+    /// attributes are immutable — there is no `set_attribute`, and adding one
+    /// would touch selector matching and layout for every element in the
+    /// tree. Layout READS THROUGH this map when building form-control boxes,
+    /// so an edited value renders without the DOM ever changing (the same
+    /// override shape `svg_cache` uses). A page reload drops the map, which
+    /// is the correct lifetime for uncommitted field text.
+    edit_states: std::collections::HashMap<usize, rustkit_dom::forms::TextEditState>,
     /// Parsed SVG documents keyed by URL. SVGs referenced from <img> are
     /// vector content — they bypass ImageManager's raster decode (which
     /// rejects them as "Unknown image format") and are spliced into the
@@ -397,6 +415,8 @@ impl Engine {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            edit_states: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
         })
     }
 
@@ -779,6 +799,35 @@ impl Engine {
             }
         });
 
+        // Seed edit state from the element's authored value the FIRST time it
+        // is focused. Re-focusing must not reset what the user has typed, so
+        // the seed is guarded by the entry being absent.
+        if let Some((raw, ref tag)) = focusable {
+            if matches!(tag.as_str(), "input" | "textarea")
+                && !self.edit_states.contains_key(&raw)
+            {
+                let seed = self
+                    .views
+                    .get(&id)
+                    .and_then(|v| v.document.as_ref())
+                    .and_then(|d| d.get_node(rustkit_dom::NodeId::new(raw)))
+                    .map(|node| match &node.node_type {
+                        NodeType::Element { attributes, .. } => {
+                            if tag == "textarea" {
+                                node.text_content()
+                            } else {
+                                attributes.get("value").cloned().unwrap_or_default()
+                            }
+                        }
+                        _ => String::new(),
+                    })
+                    .unwrap_or_default();
+                let state = rustkit_dom::forms::TextEditState::with_value(seed);
+                state.move_to_end(false);
+                self.edit_states.insert(raw, state);
+            }
+        }
+
         let view = self.views.get_mut(&id)?;
         match focusable {
             Some((raw, tag)) => {
@@ -791,6 +840,48 @@ impl Engine {
                 None
             }
         }
+    }
+
+    /// Deliver a key to the focused form control.
+    ///
+    /// `key_code` uses the Win32 virtual-key numbering that
+    /// `rustkit_dom::forms::keyboard` already speaks (the model predates any
+    /// platform wiring); `key` carries the typed character for insertions.
+    /// Returns true when the control's value or caret changed, i.e. when the
+    /// caller must relayout.
+    pub fn handle_text_key(
+        &mut self,
+        id: EngineViewId,
+        key_code: u32,
+        key: &str,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) -> bool {
+        use rustkit_dom::forms::{keyboard, KeyHandleResult};
+
+        let Some(focused) = self.views.get(&id).and_then(|v| v.focused_node) else {
+            return false;
+        };
+        let Some(state) = self.edit_states.get(&focused.raw()) else {
+            return false;
+        };
+
+        let result = keyboard::handle_input_key(state, key_code, key, ctrl, shift, alt);
+        matches!(
+            result,
+            KeyHandleResult::ValueChanged | KeyHandleResult::SelectionChanged
+        )
+    }
+
+    /// Current value of a control's live edit state, if it has one.
+    ///
+    /// Layout reads through this so an edited field renders its typed text
+    /// while the DOM attribute stays untouched.
+    pub fn edit_value(&self, node_raw: usize) -> Option<(String, usize)> {
+        self.edit_states
+            .get(&node_raw)
+            .map(|s| (s.value(), s.caret_position()))
     }
 
     /// The DOM node currently holding focus in a view, if any.
@@ -1117,7 +1208,12 @@ impl Engine {
 
     /// Re-layout a view.
     #[tracing::instrument(skip(self), fields(view_id = ?id))]
-    fn relayout(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+    /// Rebuild layout and repaint a view.
+    ///
+    /// Public so the shell can refresh after an edit changes a form
+    /// control's value — the value lives in engine-side edit state, so
+    /// nothing else would trigger a rebuild.
+    pub fn relayout(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         let _span = tracing::info_span!("relayout", ?id).entered();
 
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
@@ -1168,7 +1264,13 @@ impl Engine {
         // Build layout tree from DOM with tracing
         let root_box = {
             let _build_span = tracing::info_span!("build_layout_tree").entered();
-            self.build_layout_from_document(&document, &external_stylesheets)
+            // Scope the focused node to THIS view for the duration of the
+            // build; cleared immediately after so no later build inherits it.
+            self.building_focus
+                .set(self.views.get(&id).and_then(|v| v.focused_node));
+            let built = self.build_layout_from_document(&document, &external_stylesheets);
+            self.building_focus.set(None);
+            built
         };
 
         // Layout computation
@@ -1922,7 +2024,15 @@ impl Engine {
                         .get("type")
                         .cloned()
                         .unwrap_or_else(|| "text".to_string());
-                    let value = attributes.get("value").cloned().unwrap_or_default();
+                    // Read through live edit state when the user has typed
+                    // into this field; fall back to the authored value.
+                    // The DOM attribute is never rewritten (there is no
+                    // set_attribute), so this override is what makes typed
+                    // text visible.
+                    let value = self
+                        .edit_value(node.id.raw())
+                        .map(|(v, _)| v)
+                        .unwrap_or_else(|| attributes.get("value").cloned().unwrap_or_default());
                     let placeholder = attributes.get("placeholder").cloned().unwrap_or_default();
 
                     let control = match input_type.as_str() {
@@ -1940,7 +2050,18 @@ impl Engine {
                         },
                     };
 
-                    return LayoutBox::new(BoxType::FormControl(control), style);
+                    // Stamp identity BEFORE returning. Form controls return
+                    // early, so they never reach the general element path's
+                    // node_id assignment — which meant a hit test on an input
+                    // reported no node and focus could never resolve. The
+                    // unit tests missed it by hand-building boxes; only the
+                    // production path exercises this.
+                    let mut b = LayoutBox::new(BoxType::FormControl(control), style);
+                    b.node_id = Some(node.id.raw());
+                    if self.building_focus.get() == Some(node.id) {
+                        b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                    }
+                    return b;
                 }
 
                 if tag_lower == "button" {
@@ -1983,7 +2104,12 @@ impl Engine {
                 }
 
                 if tag_lower == "textarea" {
-                    let value = node.text_content();
+                    // Same read-through as <input>; a textarea's authored
+                    // value is its text content rather than an attribute.
+                    let value = self
+                        .edit_value(node.id.raw())
+                        .map(|(v, _)| v)
+                        .unwrap_or_else(|| node.text_content());
                     let placeholder = attributes.get("placeholder").cloned().unwrap_or_default();
                     let rows = attributes
                         .get("rows")
@@ -1994,7 +2120,7 @@ impl Engine {
                         .and_then(|c| c.parse().ok())
                         .unwrap_or(20);
 
-                    return LayoutBox::new(
+                    let mut b = LayoutBox::new(
                         BoxType::FormControl(rustkit_layout::FormControlType::TextArea {
                             value,
                             placeholder,
@@ -2003,6 +2129,11 @@ impl Engine {
                         }),
                         style,
                     );
+                    b.node_id = Some(node.id.raw());
+                    if self.building_focus.get() == Some(node.id) {
+                        b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                    }
+                    return b;
                 }
 
                 if tag_lower == "select" {
@@ -2034,7 +2165,7 @@ impl Engine {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(if attributes.contains_key("multiple") { 4 } else { 0 });
 
-                    return LayoutBox::new(
+                    let mut b = LayoutBox::new(
                         BoxType::FormControl(rustkit_layout::FormControlType::Select {
                             options,
                             selected_index,
@@ -2042,6 +2173,11 @@ impl Engine {
                         }),
                         style,
                     );
+                    b.node_id = Some(node.id.raw());
+                    if self.building_focus.get() == Some(node.id) {
+                        b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                    }
+                    return b;
                 }
 
                 // Box type follows the COMPUTED display, not the tag:
@@ -2084,6 +2220,13 @@ impl Engine {
                 // This is what lets a click resolve to an element (focus,
                 // form editing, event dispatch) instead of just a rectangle.
                 layout_box.node_id = Some(node.id.raw());
+
+                // Carry caret position onto the box when this element is the
+                // focused text control, so the painter can draw the caret and
+                // focus ring without reaching back into engine state.
+                if self.building_focus.get() == Some(node.id) {
+                    layout_box.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                }
 
                 // Links carry their RAW href so a hit test can navigate
                 // without walking back into the DOM. Resolution against the
@@ -8340,6 +8483,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            edit_states: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
         };
 
         // Build layout tree from document
@@ -8433,6 +8578,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            edit_states: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8526,6 +8673,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            edit_states: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -8639,6 +8788,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            edit_states: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8716,6 +8867,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            edit_states: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8785,6 +8938,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            edit_states: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -8873,6 +9028,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            edit_states: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -8947,6 +9104,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            edit_states: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -9331,6 +9490,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            edit_states: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
         };
 
         // Test type selector: (0, 0, 1)
@@ -10163,5 +10324,135 @@ mod node_identity_tests {
         // going to an element the user visibly clicked away from.
         assert_eq!(engine.focus_at_point(id, 10.0, 110.0), None);
         assert_eq!(engine.focused_node(id), None);
+    }
+}
+
+#[cfg(test)]
+mod form_typing_tests {
+    use super::*;
+
+    // ---- typing into web forms: routing keys to the orphaned text model ----
+    //
+    // rustkit-dom's TextEditState (insert/delete/caret/selection, ~2000
+    // lines) had only test callers, and the engine's key handler was
+    // cfg(windows). These tests go through the PRODUCTION layout path on
+    // purpose: an earlier version of this change stamped node_id only on the
+    // general element branch, and form controls return before reaching it —
+    // so hit testing an <input> reported no node and focus silently could
+    // never work. Hand-built layout boxes passed anyway. Only building from
+    // real HTML catches it.
+
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn engine_with_html(html: &str) -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        let doc = std::rc::Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&doc, &[]);
+        let view = engine.views.get_mut(&id).expect("view");
+        view.document = Some(doc);
+        view.layout = Some(layout);
+        (engine, id)
+    }
+
+    /// Walk a layout tree collecting every box that carries a node id.
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn boxes_with_nodes(b: &LayoutBox, out: &mut Vec<(usize, BoxType)>) {
+        if let Some(n) = b.node_id {
+            out.push((n, b.box_type.clone()));
+        }
+        for c in &b.children {
+            boxes_with_nodes(c, out);
+        }
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_form_control_box_built_from_real_html_carries_its_node_id() {
+        // THE REGRESSION TEST for the bug above: form controls take an early
+        // return, so they need their own identity stamp.
+        let (engine, id) = engine_with_html(r#"<html><body><input type="text"></body></html>"#);
+        let layout = engine.views.get(&id).unwrap().layout.as_ref().unwrap();
+        let mut found = Vec::new();
+        boxes_with_nodes(layout, &mut found);
+        assert!(
+            found
+                .iter()
+                .any(|(_, bt)| matches!(bt, BoxType::FormControl(_))),
+            "the <input>'s FormControl box must carry a node_id; without it a \
+             hit test finds a rectangle with no element and focus cannot resolve"
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn typing_into_a_focused_input_changes_what_layout_renders() {
+        let (mut engine, id) =
+            engine_with_html(r#"<html><body><input type="text" value="ab"></body></html>"#);
+
+        // Focus the input by NodeId taken from the built layout, not invented.
+        let node_raw = {
+            let layout = engine.views.get(&id).unwrap().layout.as_ref().unwrap();
+            let mut found = Vec::new();
+            boxes_with_nodes(layout, &mut found);
+            found
+                .iter()
+                .find(|(_, bt)| matches!(bt, BoxType::FormControl(_)))
+                .expect("form control box")
+                .0
+        };
+        engine.views.get_mut(&id).unwrap().focused_node =
+            Some(rustkit_dom::NodeId::new(node_raw));
+        engine.edit_states.insert(
+            node_raw,
+            rustkit_dom::forms::TextEditState::with_value("ab"),
+        );
+        engine.edit_states.get(&node_raw).unwrap().move_to_end(false);
+
+        // 'c' (no modifiers) must insert.
+        assert!(engine.handle_text_key(id, 0, "c", false, false, false));
+        assert_eq!(engine.edit_value(node_raw).unwrap().0, "abc");
+
+        // Backspace (VK 0x08) must delete.
+        assert!(engine.handle_text_key(id, 0x08, "", false, false, false));
+        assert_eq!(engine.edit_value(node_raw).unwrap().0, "ab");
+
+        // And the change must reach LAYOUT — the DOM attribute still says
+        // "ab" forever (there is no set_attribute), so if layout did not read
+        // through edit state the typed text would be invisible.
+        engine.edit_states.get(&node_raw).unwrap().insert_text("XY");
+        let doc = engine.views.get(&id).unwrap().document.clone().unwrap();
+        engine
+            .building_focus
+            .set(Some(rustkit_dom::NodeId::new(node_raw)));
+        let relaid = engine.build_layout_from_document(&doc, &[]);
+        engine.building_focus.set(None);
+
+        fn find_input_value(b: &LayoutBox) -> Option<String> {
+            if let BoxType::FormControl(rustkit_layout::FormControlType::TextInput {
+                value, ..
+            }) = &b.box_type
+            {
+                return Some(value.clone());
+            }
+            b.children.iter().find_map(find_input_value)
+        }
+        assert_eq!(
+            find_input_value(&relaid).as_deref(),
+            Some("abXY"),
+            "layout must read through live edit state, not the frozen DOM attribute"
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn keys_go_nowhere_when_nothing_is_focused() {
+        // The property that makes it safe to route window-level keys here:
+        // with no focus, handle_text_key must decline so the caller can fall
+        // back to scrolling.
+        let (mut engine, id) =
+            engine_with_html(r#"<html><body><input type="text"></body></html>"#);
+        assert!(!engine.handle_text_key(id, 0, "c", false, false, false));
     }
 }

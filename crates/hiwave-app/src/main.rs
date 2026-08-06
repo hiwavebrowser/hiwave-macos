@@ -1890,6 +1890,9 @@ fn main() {
     // MouseInput without a position, so the CursorMoved stream is what makes
     // a click locatable.
     let cursor_position = std::rc::Rc::new(std::cell::Cell::new((0.0f64, 0.0f64)));
+    // tao delivers modifiers as their own event rather than on each KeyEvent,
+    // so the current state has to be carried between them.
+    let modifiers = std::rc::Rc::new(std::cell::Cell::new(tao::keyboard::ModifiersState::empty()));
     let click_proxy = proxy.clone();
 
     // Run the event loop
@@ -1920,6 +1923,12 @@ fn main() {
                         trace!(dx, dy, "content scrolled");
                     }
                 }
+            }
+            Event::WindowEvent {
+                event: WindowEvent::ModifiersChanged(state),
+                ..
+            } => {
+                modifiers.set(state);
             }
             Event::WindowEvent {
                 event: WindowEvent::CursorMoved { position, .. },
@@ -1994,6 +2003,44 @@ fn main() {
                 if key_event.state == tao::event::ElementState::Pressed {
                     if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
                         use tao::keyboard::Key;
+
+                        // A focused form control claims keys first. Win32
+                        // virtual-key numbering because rustkit-dom's editing
+                        // model already speaks it (it predates any platform
+                        // wiring); mapping here keeps that model untouched.
+                        if view.has_focused_element() {
+                            let mods = modifiers.get();
+                            let (vk, text) = match &key_event.logical_key {
+                                Key::ArrowLeft => (0x25u32, String::new()),
+                                Key::ArrowRight => (0x27, String::new()),
+                                Key::Home => (0x24, String::new()),
+                                Key::End => (0x23, String::new()),
+                                Key::Backspace => (0x08, String::new()),
+                                Key::Delete => (0x2E, String::new()),
+                                Key::Enter => (0x0D, String::new()),
+                                Key::Character(c) => (0, c.to_string()),
+                                _ => (0, String::new()),
+                            };
+                            if vk != 0 || !text.is_empty() {
+                                if view.handle_text_key(
+                                    vk,
+                                    &text,
+                                    mods.control_key() || mods.super_key(),
+                                    mods.shift_key(),
+                                    mods.alt_key(),
+                                ) {
+                                    // The edit lives in engine state, so
+                                    // nothing else would repaint it.
+                                    view.relayout();
+                                    return;
+                                }
+                            }
+                            // Focused but unhandled (e.g. Tab): swallow rather
+                            // than scroll — scrolling the page while a field
+                            // has focus is never what was meant.
+                            return;
+                        }
+
                         // scroll_by uses wheel sign convention: negative dy
                         // advances the page (natural scrolling).
                         let dy: Option<f32> = match key_event.logical_key {

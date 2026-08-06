@@ -131,6 +131,42 @@ impl RustKitView {
         engine.render_all_views();
     }
 
+    /// Deliver a key to the focused form control, if any.
+    ///
+    /// Returns true when the control consumed it (value or caret changed),
+    /// which tells the caller NOT to fall back to scrolling.
+    pub fn handle_text_key(
+        &self,
+        key_code: u32,
+        key: &str,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) -> bool {
+        let mut engine = self.engine.borrow_mut();
+        self.view_id
+            .map(|view_id| engine.handle_text_key(view_id, key_code, key, ctrl, shift, alt))
+            .unwrap_or(false)
+    }
+
+    /// Whether a content element currently holds focus.
+    pub fn has_focused_element(&self) -> bool {
+        let engine = self.engine.borrow();
+        self.view_id
+            .and_then(|view_id| engine.focused_node(view_id))
+            .is_some()
+    }
+
+    /// Rebuild layout and repaint after an edit changed a control's value.
+    pub fn relayout(&self) {
+        let mut engine = self.engine.borrow_mut();
+        if let Some(view_id) = self.view_id {
+            if let Err(e) = engine.relayout(view_id) {
+                debug!(error = %e, "relayout after edit failed");
+            }
+        }
+    }
+
     /// Focus whatever focusable element sits at these viewport coordinates,
     /// clearing focus when nothing focusable is there. Returns the focused
     /// element's tag name.
