@@ -131,6 +131,13 @@ impl RustKitView {
         engine.render_all_views();
     }
 
+    /// Resolve a click at viewport coordinates to a link URL, if any.
+    pub fn link_at_point(&self, x: f32, y: f32) -> Option<String> {
+        let engine = self.engine.borrow();
+        self.view_id
+            .and_then(|view_id| engine.link_at_point(view_id, x, y))
+    }
+
     /// Scroll the view by a wheel delta in physical pixels.
     ///
     /// Returns true if the scroll offset changed (a re-render is needed).

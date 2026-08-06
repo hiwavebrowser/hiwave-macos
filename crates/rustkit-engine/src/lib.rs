@@ -710,6 +710,34 @@ impl Engine {
         Ok(changed)
     }
 
+    /// Hit-test a click in VIEWPORT coordinates and return the link URL it
+    /// resolves to, if any.
+    ///
+    /// The click point is translated into document coordinates by the
+    /// current scroll offset (layout lives in document space; scroll is a
+    /// render-time translate), then the nearest `<a href>` ancestor's raw
+    /// href is resolved against the view's URL. Returns `None` for clicks
+    /// that hit no link — including `javascript:` links, which are dropped
+    /// at layout time.
+    pub fn link_at_point(
+        &self,
+        id: EngineViewId,
+        viewport_x: f32,
+        viewport_y: f32,
+    ) -> Option<String> {
+        let view = self.views.get(&id)?;
+        let doc_x = viewport_x + view.scroll_offset.0;
+        let doc_y = viewport_y + view.scroll_offset.1;
+        let hit = view.layout.as_ref()?.hit_test(doc_x, doc_y)?;
+        let href = hit.link_href?;
+        match view.url.as_ref() {
+            Some(base) => base.join(&href).ok().map(|u| u.to_string()),
+            // No base (e.g. loaded HTML with no URL): only absolute hrefs
+            // can navigate.
+            None => Url::parse(&href).ok().map(|u| u.to_string()),
+        }
+    }
+
     /// Get the current scroll offset of a view.
     pub fn get_scroll_offset(&self, id: EngineViewId) -> Result<(f32, f32), EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
@@ -1990,6 +2018,23 @@ impl Engine {
                         tag: tag_lower.clone(),
                         selector: reported,
                     });
+                }
+
+                // Links carry their RAW href so a hit test can navigate
+                // without walking back into the DOM. Resolution against the
+                // document base URL happens at click time, where the view —
+                // and therefore the base — is unambiguous; this builder is
+                // view-agnostic and must not guess.
+                if tag_lower == "a" {
+                    if let Some(href) = attributes.get("href") {
+                        let href = href.trim();
+                        // javascript: and empty hrefs are not navigations;
+                        // leaving them None keeps the click a no-op rather
+                        // than a load of a bogus URL.
+                        if !href.is_empty() && !href.starts_with("javascript:") {
+                            layout_box.link_href = Some(href.to_string());
+                        }
+                    }
                 }
 
                 // Build ancestors list for child elements with class and ID info
@@ -9843,5 +9888,96 @@ mod svg_image_tests {
             }
             ref other => panic!("img should build an Image box, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod link_click_tests {
+    use super::*;
+
+    // ---- 2026-08-05 live-session fix: clicking links ----
+    //
+    // Layout carried no way to answer "what link is at this point", so a
+    // click could never navigate. These pin the two properties that make
+    // link_at_point trustworthy: nested content resolves to its enclosing
+    // link, and the viewport->document translation honors scroll.
+
+    fn link_box(href: &str, x: f32, y: f32, w: f32, h: f32) -> LayoutBox {
+        let mut b = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        b.link_href = Some(href.to_string());
+        b.dimensions.content = rustkit_layout::Rect::new(x, y, w, h);
+        b
+    }
+
+    #[test]
+    fn a_click_on_content_inside_a_link_resolves_to_that_link() {
+        // <a href><img></a>: the image is the hit box and has no href of its
+        // own; the enclosing link must supply it.
+        let mut anchor = link_box("/deep", 0.0, 0.0, 200.0, 100.0);
+        let mut img = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        img.dimensions.content = rustkit_layout::Rect::new(10.0, 10.0, 50.0, 50.0);
+        anchor.children.push(img);
+
+        let hit = anchor.hit_test(20.0, 20.0).expect("hit");
+        assert_eq!(hit.link_href.as_deref(), Some("/deep"),
+            "content nested in a link must resolve to the link's href");
+    }
+
+    #[test]
+    fn the_nearest_link_wins_over_an_outer_one() {
+        let mut outer = link_box("/outer", 0.0, 0.0, 200.0, 100.0);
+        let inner = link_box("/inner", 10.0, 10.0, 50.0, 50.0);
+        outer.children.push(inner);
+
+        let hit = outer.hit_test(20.0, 20.0).expect("hit");
+        assert_eq!(hit.link_href.as_deref(), Some("/inner"));
+    }
+
+    #[test]
+    fn a_click_outside_any_link_resolves_to_nothing() {
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 200.0, 100.0);
+        root.children.push(link_box("/somewhere", 0.0, 0.0, 20.0, 20.0));
+
+        let hit = root.hit_test(100.0, 80.0).expect("hit");
+        assert_eq!(hit.link_href, None);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn link_at_point_translates_viewport_coords_by_scroll() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+
+        // A link 500px down the document.
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 800.0, 2000.0);
+        root.children.push(link_box("/target", 0.0, 500.0, 100.0, 20.0));
+
+        {
+            let view = engine.views.get_mut(&id).expect("view");
+            view.layout = Some(root);
+            view.url = Some(Url::parse("https://example.com/page").unwrap());
+            view.max_scroll_offset = (0.0, 1400.0);
+        }
+
+        // Unscrolled: viewport y=505 is document y=505 — a hit, resolved
+        // against the document base URL.
+        assert_eq!(
+            engine.link_at_point(id, 10.0, 505.0).as_deref(),
+            Some("https://example.com/target")
+        );
+
+        // Scrolled down 500: the same link now sits at viewport y=5, and the
+        // old viewport coordinate must MISS. Without the scroll translation
+        // every click would be wrong by exactly the scroll offset.
+        engine.scroll_view(id, 0.0, -500.0).unwrap();
+        assert_eq!(
+            engine.link_at_point(id, 10.0, 5.0).as_deref(),
+            Some("https://example.com/target")
+        );
+        assert_eq!(engine.link_at_point(id, 10.0, 505.0), None);
     }
 }
