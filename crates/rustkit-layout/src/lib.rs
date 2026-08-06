@@ -814,6 +814,11 @@ pub struct LayoutBox {
     /// text boxes (which have no element and are excluded from oracle joins).
     /// Kept in lockstep with `element_id`; see `ElementIdentity`.
     pub identity: Option<Box<ElementIdentity>>,
+    /// Resolved `href` when this box came from an `<a href>`. Hit testing
+    /// reports the nearest such ancestor so a click on a link's text (or on
+    /// an image inside it) navigates, without the hit path needing DOM
+    /// access.
+    pub link_href: Option<String>,
     /// Wrapped lines for text boxes (`None` = single-run text, no wrap).
     pub text_lines: Option<Vec<TextLine>>,
     /// FLOW offset of visual line 0 when this text box was laid out
@@ -845,6 +850,7 @@ impl LayoutBox {
             sticky_state: None,
             element_id: None,
             identity: None,
+            link_href: None,
             text_lines: None,
             text_flow_first_offset: None,
         }
@@ -3253,6 +3259,11 @@ impl LayoutBox {
                     z_index: self.z_index,
                     position: self.position,
                 });
+                // Nearest link wins: only fill in from an ancestor if no
+                // closer box already supplied one.
+                if result.link_href.is_none() {
+                    result.link_href = self.link_href.clone();
+                }
                 return Some(result);
             }
         }
@@ -3273,6 +3284,7 @@ impl LayoutBox {
             z_index: self.z_index,
             position: self.position,
             is_scrollable,
+            link_href: self.link_href.clone(),
         })
     }
 
@@ -3337,6 +3349,7 @@ impl LayoutBox {
             z_index: self.z_index,
             position: self.position,
             is_scrollable: false,
+            link_href: self.link_href.clone(),
         });
 
         // Check all children
@@ -3371,6 +3384,11 @@ pub struct HitTestResult {
     pub position: Position,
     /// Whether the element is scrollable.
     pub is_scrollable: bool,
+    /// `href` of the nearest `<a href>` ancestor (or the hit box itself).
+    /// A click on a link's text, or on an image nested inside it, resolves
+    /// to the same link — which is what makes a hit test navigable without
+    /// walking back into the DOM.
+    pub link_href: Option<String>,
 }
 
 impl HitTestResult {

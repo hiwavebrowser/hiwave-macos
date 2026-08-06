@@ -1456,7 +1456,11 @@ fn handle_get_sidebar_width(state: &Arc<Mutex<AppState>>) -> IpcResponse {
     let state = state.lock().unwrap();
     let settings = state.get_settings();
     IpcResponse::success(serde_json::json!({
-        "width": settings.sidebar_width,
+        // Restore clamps to a usable minimum: the panel's content needs
+        // ~180px, but the drag path persists anything >=48, so a stale
+        // narrow value (147px, live run 2026-08-05) restored a sidebar with
+        // everything past "MODE / Zen" clipped off the right edge.
+        "width": settings.sidebar_width.max(180),
         // The frontend hardcoded `sidebarOpen = false` and never consulted
         // this setting — it restored the WIDTH VALUE while keeping the panel
         // collapsed, then dutifully reported width 0 back. "Sidebar does not

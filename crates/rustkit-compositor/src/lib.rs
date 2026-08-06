@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use rustkit_layout::DisplayCommand;
 use rustkit_renderer::Renderer;
@@ -569,12 +569,26 @@ impl Compositor {
         &self,
         view_id: ViewId,
     ) -> Result<(wgpu::SurfaceTexture, wgpu::TextureView), CompositorError> {
-        let surfaces = self.surfaces.read().unwrap();
+        // Write lock: an Outdated/Lost surface must be reconfigured in place,
+        // otherwise every subsequent acquire fails and the last presented
+        // frame stays on screen indefinitely.
+        let mut surfaces = self.surfaces.write().unwrap();
         let state = surfaces
-            .get(&view_id)
+            .get_mut(&view_id)
             .ok_or(CompositorError::SurfaceNotFound(view_id))?;
 
-        let output = state.get_current_texture()?;
+        let output = match state.surface.get_current_texture() {
+            Ok(output) => output,
+            Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
+                warn!(?view_id, "Surface outdated/lost; reconfiguring and retrying acquire");
+                state.surface.configure(&self.device, &state.config);
+                state
+                    .surface
+                    .get_current_texture()
+                    .map_err(|e| CompositorError::Swapchain(e.to_string()))?
+            }
+            Err(e) => return Err(CompositorError::Swapchain(e.to_string())),
+        };
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
