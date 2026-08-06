@@ -242,21 +242,27 @@ impl MacOSViewHost {
             .get(&view_id)
             .ok_or(ViewHostError::ViewNotFound(view_id))?;
 
-        let mut state = state.lock().map_err(|e| {
-            tracing::error!("ViewState lock poisoned in set_bounds: {}", e);
-            ViewHostError::LockPoisoned
-        })?;
-        state.bounds = bounds;
+        // Record the new bounds under the lock, then release it before any
+        // AppKit call: `setFrame:` runs layout callbacks synchronously on a
+        // subclassed view. See `focus` for the full rationale.
+        let view: id = {
+            let mut guard = state.lock().map_err(|e| {
+                tracing::error!("ViewState lock poisoned in set_bounds: {}", e);
+                ViewHostError::LockPoisoned
+            })?;
+            guard.bounds = bounds;
+            guard.view
+        };
 
         unsafe {
             // Get the superview to determine parent height for coordinate conversion
-            let superview: id = msg_send![state.view, superview];
+            let superview: id = msg_send![view, superview];
             let parent_height = if superview != nil {
                 let parent_frame: cocoa::foundation::NSRect = msg_send![superview, frame];
                 parent_frame.size.height
             } else {
                 // Fallback: try to get window content view height
-                let window: id = msg_send![state.view, window];
+                let window: id = msg_send![view, window];
                 if window != nil {
                     let content_view: id = msg_send![window, contentView];
                     if content_view != nil {
@@ -272,7 +278,7 @@ impl MacOSViewHost {
 
             // Convert from top-left origin to Cocoa's bottom-left origin
             let frame = Self::convert_to_cocoa_frame(bounds, parent_height);
-            let _: () = msg_send![state.view, setFrame: frame];
+            let _: () = msg_send![view, setFrame: frame];
         }
 
         debug!(?view_id, ?bounds, "View bounds updated");
@@ -308,15 +314,21 @@ impl MacOSViewHost {
             .get(&view_id)
             .ok_or(ViewHostError::ViewNotFound(view_id))?;
 
-        let mut state = state.lock().map_err(|e| {
-            tracing::error!("ViewState lock poisoned in set_visible: {}", e);
-            ViewHostError::LockPoisoned
-        })?;
-        state.visible = visible;
+        // Mutate state under the lock, then release before AppKit:
+        // `setHidden:` runs viewDidHide/viewDidUnhide synchronously on a
+        // subclassed view. See `focus` for the full rationale.
+        let view: id = {
+            let mut guard = state.lock().map_err(|e| {
+                tracing::error!("ViewState lock poisoned in set_visible: {}", e);
+                ViewHostError::LockPoisoned
+            })?;
+            guard.visible = visible;
+            guard.view
+        };
 
         unsafe {
             let hidden: bool = !visible;
-            let _: () = msg_send![state.view, setHidden: hidden];
+            let _: () = msg_send![view, setHidden: hidden];
         }
 
         debug!(?view_id, visible, "View visibility changed");
@@ -324,24 +336,42 @@ impl MacOSViewHost {
     }
 
     /// Focus a view
+    ///
+    /// COPY THE VIEW POINTER, DROP EVERY LOCK, *THEN* CALL APPKIT.
+    ///
+    /// `makeFirstResponder:` is synchronous and re-enters the responder
+    /// chain — `resignFirstResponder` / `becomeFirstResponder` and any focus
+    /// notification run before it returns. The moment this NSView gains
+    /// responder overrides that call back into the ViewHost (the next unit:
+    /// content keyboard input), holding the per-view `Mutex` across that call
+    /// would deadlock the process forever on a non-reentrant lock, with no
+    /// error and no log past this line.
+    ///
+    /// Athena hit exactly this on Windows (`SetFocus` dispatching
+    /// `WM_SETFOCUS` into our own wnd_proc, hiwave-windows#85): every focus
+    /// call hung the process from the day it was written, and nothing found
+    /// it because nothing ever called it. An unused API is not a working API,
+    /// it is an untested one — this method has zero callers here too.
     pub fn focus(&self, view_id: ViewId) -> Result<(), ViewHostError> {
-        let views = self.views.read().map_err(|e| {
-            tracing::error!("Views RwLock poisoned in focus: {}", e);
-            ViewHostError::LockPoisoned
-        })?;
-        let state = views
-            .get(&view_id)
-            .ok_or(ViewHostError::ViewNotFound(view_id))?;
-
-        let state = state.lock().map_err(|e| {
-            tracing::error!("ViewState lock poisoned in focus: {}", e);
-            ViewHostError::LockPoisoned
-        })?;
+        let view: id = {
+            let views = self.views.read().map_err(|e| {
+                tracing::error!("Views RwLock poisoned in focus: {}", e);
+                ViewHostError::LockPoisoned
+            })?;
+            let state = views
+                .get(&view_id)
+                .ok_or(ViewHostError::ViewNotFound(view_id))?;
+            let guard = state.lock().map_err(|e| {
+                tracing::error!("ViewState lock poisoned in focus: {}", e);
+                ViewHostError::LockPoisoned
+            })?;
+            guard.view
+        }; // both guards released here, before any AppKit call
 
         unsafe {
-            let window: id = msg_send![state.view, window];
+            let window: id = msg_send![view, window];
             if window != nil {
-                let _: () = msg_send![window, makeFirstResponder: state.view];
+                let _: () = msg_send![window, makeFirstResponder: view];
             }
         }
 
