@@ -58,12 +58,27 @@ h1 { font-size: 32px; margin: 0 }
 .framed    { width: 200px; height: 40px; font-size: 20px; border: 0.25em solid #c60 }
 .hairline  { width: 200px; height: 40px; border: 2px solid }
 .overruled { width: 200px; height: 40px; border: 3px solid #093; border-top-width: 9px }
+.bordered  { width: 200px; height: 40px; padding: 10px; border: 5px solid #333;
+             box-sizing: border-box }
+.content   { width: 200px; height: 40px; padding: 10px; border: 5px solid #333 }
+.host      { width: 300px }
+.floater   { position: absolute; width: 50px; height: 40px }
+.clipped   { width: 260px; overflow: hidden }
+.unclipped { width: 240px }
+.kid       { margin-top: 10px; height: 5px }
+.faded     { width: 100px; height: 10px; background: #f00; opacity: 0.5 }
+div { box-sizing: content-box; position: static }
 </style></head><body><div class="hero"><h1>Attribution</h1></div>\
 <div class="copy"><span id="inherits">inherited</span></div>\
 <div class="plain"><span>spacing</span></div>\
 <div class="spaced"><span>spacing</span></div>\
 <div class="pre">a  b<span class="nested">c  d</span></div>\
 <div class="framed"></div><div class="hairline"></div><div class="overruled"></div>\
+<div class="bordered"></div><div class="content"></div>\
+<div class="host"><div class="floater"></div></div>\
+<div class="clipped"><div class="kid"></div></div>\
+<div class="unclipped"><div class="kid"></div></div>\
+<div class="faded"></div>\
 </body></html>"""
 
 
@@ -561,6 +576,154 @@ def main():
     print(f"ok  longhand wins     .overruled border-top-width=9px beats `border: 3px "
           f"solid #093`, which is reported in overridden; layout reserved "
           f"{over_box['border']} and a {over_box['border_box']['height']}-tall box")
+
+    # ---- the box group: box-sizing and position ------------------------------
+    # These decide the SHAPE of the box rather than a number inside it. Both are
+    # keywords, so no unit conversion can prove the value was computed rather
+    # than echoed; two other things do. First, `div { box-sizing: content-box;
+    # position: static }` sits LAST in the sheet and matches the same elements,
+    # so the last declaration a naive serializer would echo is the losing one.
+    # Second — and this is what makes them count — the reported value is
+    # cross-checked against the geometry LAYOUT produced, which differs
+    # observably between the two settings.
+    bordered_style, error = client.tool("hiwave_style", selector=".bordered")
+    assert error is None, error
+    assert bordered_style["count"] == 1, bordered_style["count"]
+    bordered = bordered_style["elements"][0]
+
+    assert bordered["computed"]["box-sizing"] == "border-box", bordered["computed"]
+    bs = next(d for d in bordered["declared"] if d["property"] == "box-sizing")
+    assert bs["winner"]["selector"] == ".bordered", bs["winner"]
+    assert bs["winner"]["specificity"] == [0, 1, 0], bs["winner"]
+    assert bs["winner"]["value"] == "border-box", bs["winner"]
+    assert bs["origin"] == "author", bs
+    # The rule it beat is the LAST one in the sheet, so "echo the final
+    # declaration" and "report what the cascade decided" give different answers
+    # here, and only the second one is right.
+    assert len(bs["overridden"]) == 1, bs["overridden"]
+    assert bs["overridden"][0]["selector"] == "div", bs["overridden"]
+    assert bs["overridden"][0]["value"] == "content-box", bs["overridden"]
+
+    # THE HALF THAT MAKES IT COUNT: `border-box` means the declared 200px IS
+    # the border box, so the content shrinks to 200 - 2*10 padding - 2*5 border
+    # = 170, and the height to 40 - 20 - 10 = 10.
+    bordered_box = find(tree["root"],
+                        lambda n: (n.get("border_box") or {}).get("width") == 200.0)
+    assert bordered_box is not None, "no 200-wide box — expected .bordered (border-box)"
+    assert bordered_box["border_box"]["height"] == 40.0, bordered_box["border_box"]
+    assert bordered_box["content_rect"]["width"] == 170.0, bordered_box["content_rect"]
+    assert bordered_box["content_rect"]["height"] == 10.0, bordered_box["content_rect"]
+
+    # ...and the control proves the engine is not simply always doing that.
+    # `.content` declares the SAME 200px width, the same padding and the same
+    # border, and differs only in box-sizing: 200 + 2*10 + 2*5 = 230.
+    content_style, error = client.tool("hiwave_style", selector=".content")
+    assert error is None, error
+    assert content_style["elements"][0]["computed"]["box-sizing"] == "content-box", \
+        content_style["elements"][0]["computed"]
+    content_box = find(tree["root"],
+                       lambda n: (n.get("border_box") or {}).get("width") == 230.0)
+    assert content_box is not None, "no 230-wide box — expected .content (content-box)"
+    assert content_box["content_rect"]["width"] == 200.0, content_box["content_rect"]
+    assert content_box["border_box"]["height"] == 70.0, content_box["border_box"]  # 40+20+10
+    print(f"ok  box-sizing        .bordered border-box: declared 200px IS the border box, "
+          f"content 170.0x10.0; .content content-box, same declarations, border box 230.0x70.0")
+
+    # `position` — the value that decides whether the box is in flow at all.
+    floater_style, error = client.tool("hiwave_style", selector=".floater")
+    assert error is None, error
+    assert floater_style["count"] == 1, floater_style["count"]
+    floater = floater_style["elements"][0]
+    assert floater["computed"]["position"] == "absolute", floater["computed"]
+    pos = next(d for d in floater["declared"] if d["property"] == "position")
+    assert pos["winner"]["selector"] == ".floater", pos["winner"]
+    assert pos["winner"]["specificity"] == [0, 1, 0], pos["winner"]
+    assert pos["origin"] == "author", pos
+    assert len(pos["overridden"]) == 1, pos["overridden"]
+    assert pos["overridden"][0]["selector"] == "div", pos["overridden"]
+    assert pos["overridden"][0]["value"] == "static", pos["overridden"]
+
+    # THE HALF THAT MAKES IT COUNT: out of flow. `.host` is auto-height and its
+    # only child is 40px tall, so a static child would make it 40; absolute
+    # takes the child out of flow and the parent collapses to 0. The child is
+    # still really 40 tall, and the next block starts at the host's OWN y —
+    # i.e. the 40px box reserved no space for itself.
+    host_box = find(tree["root"],
+                    lambda n: (n.get("border_box") or {}).get("width") == 300.0)
+    assert host_box is not None, "no 300-wide box — expected .host"
+    assert host_box["border_box"]["height"] == 0.0, host_box["border_box"]
+    assert len(host_box["children"]) == 1, host_box["children"]
+    assert host_box["children"][0]["border_box"]["height"] == 40.0, host_box["children"][0]
+    clipped_box = find(tree["root"],
+                       lambda n: (n.get("border_box") or {}).get("width") == 260.0)
+    assert clipped_box is not None, "no 260-wide box — expected .clipped"
+    assert clipped_box["border_box"]["y"] == host_box["border_box"]["y"], \
+        (clipped_box["border_box"], host_box["border_box"])
+    print(f"ok  position          .floater absolute (beat `div{{position:static}}`, last in "
+          f"sheet); .host is 0.0 tall around a 40.0-tall child and the next block starts at "
+          f"the same y — out of flow")
+
+    # ---- overflow-x and opacity: reported, NOT counted ----------------------
+    # Both are in the diagnosis set and both now come back with a computed value
+    # and honest provenance. Neither counts for the metric, because the trench's
+    # clause 3 asks for more than a value: the reported value has to be the one
+    # the engine USED, and for these two nothing downstream uses it.
+    #
+    # `overflow-x` is cited correctly — no rule spells the longhand, and the
+    # citation names the `overflow` shorthand that really wrote it...
+    clipped_style, error = client.tool("hiwave_style", selector=".clipped")
+    assert error is None, error
+    clipped = clipped_style["elements"][0]
+    assert clipped["computed"]["overflow-x"] == "hidden", clipped["computed"]
+    ox = next(d for d in clipped["declared"] if d["property"] == "overflow-x")
+    assert ox["winner"]["property"] == "overflow", ox["winner"]
+    assert ox["winner"]["via_shorthand"] is True, ox["winner"]
+    assert ox["winner"]["selector"] == ".clipped", ox["winner"]
+    # ...but A TRIPWIRE, not an endorsement: `hidden` reaches layout only through
+    # `establishes_bfc` (margin_collapse.rs), and that distinction changes
+    # nothing observable in the block path. `.clipped` (hidden, a BFC) and
+    # `.unclipped` (visible, not one) lay their identical child out identically:
+    # in both, the kid's 10px top margin stays inside and the parent is 15 tall.
+    # In a browser these differ. Nothing clips in paint either — there is no
+    # push_clip for overflow at all. So the engine cannot be shown to have USED
+    # the value this tool reports, and the property stays uncounted. Whoever
+    # makes overflow observable will see this go red and should then count it.
+    unclipped_box = find(tree["root"],
+                         lambda n: (n.get("border_box") or {}).get("width") == 240.0)
+    assert unclipped_box is not None, "no 240-wide box — expected .unclipped"
+    assert clipped_box["border_box"]["height"] == 15.0, clipped_box["border_box"]
+    assert unclipped_box["border_box"]["height"] == 15.0, unclipped_box["border_box"]
+    kid_offset = (clipped_box["children"][0]["border_box"]["y"]
+                  - clipped_box["border_box"]["y"])
+    unclipped_kid_offset = (unclipped_box["children"][0]["border_box"]["y"]
+                            - unclipped_box["border_box"]["y"])
+    assert kid_offset == unclipped_kid_offset == 10.0, (kid_offset, unclipped_kid_offset)
+    assert not [c for c in commands if c["op"] in ("push_clip", "pop_clip")], \
+        [c for c in commands if c["op"] in ("push_clip", "pop_clip")]
+    print(f"ok  KNOWN GAP        .clipped overflow-x=hidden cited to `overflow`, but it lays "
+          f"out identically to .unclipped (both {clipped_box['border_box']['height']} tall, "
+          f"kid at +{kid_offset}) and paint pushes no clip — reported, not counted")
+
+    # `opacity` is the clearer case: the cascade CLAMPS it, so 0.5 is a computed
+    # number rather than an echo, and the clamp is the engine's own. But paint
+    # never reads it for anything but images, and the renderer discards it even
+    # there (`opacity: _` in the Image arm). So the fill for .faded comes out at
+    # full alpha, and a tool reporting 0.5 would be describing a transparency
+    # the engine does not draw.
+    faded_style, error = client.tool("hiwave_style", selector=".faded")
+    assert error is None, error
+    faded = faded_style["elements"][0]
+    assert faded["computed"]["opacity"] == "0.5", faded["computed"]
+    faded_fill = [c for c in commands
+                  if c["op"] == "solid_color"
+                  and c["color"]["r"] == 255 and c["color"]["g"] == 0 and c["color"]["b"] == 0]
+    assert len(faded_fill) == 1, [c["rect"] for c in faded_fill]
+    assert faded_fill[0]["rect"]["width"] == 100.0, faded_fill[0]["rect"]
+    # The tripwire: full alpha, for a half-transparent element.
+    assert faded_fill[0]["color"]["a"] == 1.0, faded_fill[0]["color"]
+    print(f"ok  KNOWN GAP        .faded opacity=0.5 computed, but paint filled it at "
+          f"a={faded_fill[0]['color']['a']} — opacity never reaches the solid-colour path, "
+          f"so it is reported, not counted")
 
     # A query it cannot honestly answer is refused, not approximated. Matching
     # `div p` needs tree context the trace does not keep, and quietly matching

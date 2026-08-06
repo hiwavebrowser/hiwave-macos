@@ -2630,6 +2630,22 @@ impl Engine {
         // force provenance to survive a shorthand. See `longhands_written`.
         "border-top-width",
         "border-top-color",
+        // The box group. These decide the SHAPE of the box rather than a
+        // number inside it — what `width` even means, whether the box is in
+        // flow, whether a clip is pushed, whether a layer is created. Two of
+        // the four are cross-checked against layout and count; the other two
+        // are reported because an agent asking is better served by a value
+        // plus a named limitation than by silence, and both limitations are
+        // pinned by smoke tripwires. See trench/digest.md night 9.
+        "box-sizing",
+        "position",
+        // NOT cross-checkable today, and reported as findings rather than
+        // counted: `overflow-x` reaches layout only through `establishes_bfc`,
+        // whose effect is not observable in the block path (a BFC parent and a
+        // flow parent lay out identically here), and `opacity` reaches paint
+        // for images only, where the renderer then discards it.
+        "overflow-x",
+        "opacity",
     ];
 
     /// Which recorded longhands a declaration ACTUALLY wrote.
@@ -2734,6 +2750,17 @@ impl Engine {
                 s.white_space =
                     [rustkit_css::WhiteSpace::Normal, rustkit_css::WhiteSpace::Pre][pick]
             }
+            "box-sizing" => {
+                s.box_sizing =
+                    [rustkit_css::BoxSizing::ContentBox, rustkit_css::BoxSizing::BorderBox][pick]
+            }
+            "position" => {
+                s.position = [rustkit_css::Position::Static, rustkit_css::Position::Absolute][pick]
+            }
+            "overflow-x" => {
+                s.overflow_x = [rustkit_css::Overflow::Visible, rustkit_css::Overflow::Hidden][pick]
+            }
+            "opacity" => s.opacity = [0.25, 0.75][pick],
             _ => return None,
         }
         Some(s)
@@ -2889,6 +2916,36 @@ impl Engine {
                 _ => return None,
             },
             "border-top-color" => color(&style.border_top_color),
+            // Kebab-cased by hand for the same reason `white-space` is:
+            // `{:?}`.to_lowercase() emits `contentbox`, which is not a CSS
+            // value, and an agent diffing against Chrome would read the
+            // difference as a bug rather than as a serialization artefact.
+            "box-sizing" => match style.box_sizing {
+                rustkit_css::BoxSizing::ContentBox => "content-box",
+                rustkit_css::BoxSizing::BorderBox => "border-box",
+            }
+            .to_string(),
+            "position" => match style.position {
+                rustkit_css::Position::Static => "static",
+                rustkit_css::Position::Relative => "relative",
+                rustkit_css::Position::Absolute => "absolute",
+                rustkit_css::Position::Fixed => "fixed",
+                rustkit_css::Position::Sticky => "sticky",
+            }
+            .to_string(),
+            "overflow-x" => match style.overflow_x {
+                rustkit_css::Overflow::Visible => "visible",
+                rustkit_css::Overflow::Hidden => "hidden",
+                rustkit_css::Overflow::Scroll => "scroll",
+                rustkit_css::Overflow::Auto => "auto",
+                rustkit_css::Overflow::Clip => "clip",
+            }
+            .to_string(),
+            // The cascade clamps to [0,1] on the way in, so this is the
+            // clamped number and not the authored one — `opacity: 1.5`
+            // reports `1`. Formatting an f32 with `{}` gives CSS's own form
+            // for the values that matter (`0.5`, `1`, `0`).
+            "opacity" => style.opacity.to_string(),
             _ => return None,
         })
     }
