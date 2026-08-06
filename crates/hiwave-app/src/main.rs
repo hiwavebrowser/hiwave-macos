@@ -1886,6 +1886,12 @@ fn main() {
     });
     info!("Started focus mode auto-trigger checker");
 
+    // Last known cursor position in WINDOW logical coordinates. tao reports
+    // MouseInput without a position, so the CursorMoved stream is what makes
+    // a click locatable.
+    let cursor_position = std::rc::Rc::new(std::cell::Cell::new((0.0f64, 0.0f64)));
+    let click_proxy = proxy.clone();
+
     // Run the event loop
     event_loop.run(move |event, event_loop_target, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -1912,6 +1918,40 @@ fn main() {
                     };
                     if view.scroll_by(dx, dy) {
                         trace!(dx, dy, "content scrolled");
+                    }
+                }
+            }
+            Event::WindowEvent {
+                event: WindowEvent::CursorMoved { position, .. },
+                ..
+            } => {
+                let scale = window.scale_factor();
+                cursor_position.set((position.x / scale, position.y / scale));
+            }
+            Event::WindowEvent {
+                event:
+                    WindowEvent::MouseInput {
+                        state: tao::event::ElementState::Released,
+                        button: tao::event::MouseButton::Left,
+                        ..
+                    },
+                ..
+            } => {
+                // Clicks reaching the window loop were not consumed by the UI
+                // frame, i.e. the pointer is over content — the same delivery
+                // rule the wheel path established. Translate window logical
+                // coordinates into the content view's viewport space, then
+                // ask the engine what link (if any) sits there.
+                #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+                if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
+                    let (cx, cy) = cursor_position.get();
+                    let content_x = cx - *sidebar_width_for_events.lock().unwrap();
+                    let content_y = cy - *chrome_height_for_events.lock().unwrap();
+                    if content_x >= 0.0 && content_y >= 0.0 {
+                        if let Some(url) = view.link_at_point(content_x as f32, content_y as f32) {
+                            info!(%url, "Link clicked");
+                            let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                        }
                     }
                 }
             }
