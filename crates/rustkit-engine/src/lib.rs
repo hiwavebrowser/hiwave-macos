@@ -152,6 +152,20 @@ struct ViewState {
     nav_event_rx: mpsc::UnboundedReceiver<LoadEvent>,
     /// Currently focused DOM node.
     focused_node: Option<rustkit_dom::NodeId>,
+    /// Live text-editing state for this view's form controls, keyed by raw
+    /// `NodeId`.
+    ///
+    /// Per-VIEW, not engine-global: `NodeId` is per-DOCUMENT (every
+    /// `Document` restarts its counter at 1), so a global map lets one
+    /// document's node 4 collide with another's. Living on the view also
+    /// makes the lifetime obvious — drop the view, drop the map — and gives
+    /// document replacement one clear place to clear.
+    ///
+    /// This is the IDL-value side table browsers keep separate from the
+    /// content attribute: `getAttribute("value")` is the authored default,
+    /// this is the live value. Mutating the DOM instead would conflate the
+    /// two and break form-reset semantics.
+    edit_states: std::collections::HashMap<usize, rustkit_dom::forms::TextEditState>,
     /// Whether the view itself has focus.
     view_focused: bool,
     /// Current scroll offset (x, y) in pixels.
@@ -224,6 +238,9 @@ pub struct Engine {
     /// persistently failing render (e.g. a wedged surface) freezes the
     /// screen while the log stays silent.
     render_failing: std::collections::HashSet<EngineViewId>,
+    /// View currently being laid out, so the view-agnostic recursive builder
+    /// can read that view's edit states (and only that view's).
+    building_view: std::cell::Cell<Option<EngineViewId>>,
     /// Focused node of the view currently being laid out.
     ///
     /// Focus is per-VIEW but the recursive layout builder is view-agnostic,
@@ -231,17 +248,6 @@ pub struct Engine {
     /// which would mark a node focused in one view while building another.
     /// Set by `relayout` around the build; `None` outside one.
     building_focus: std::cell::Cell<Option<rustkit_dom::NodeId>>,
-    /// Live text-editing state for focused form controls, keyed by raw
-    /// `NodeId`.
-    ///
-    /// It lives here rather than in the DOM because `NodeType::Element`
-    /// attributes are immutable — there is no `set_attribute`, and adding one
-    /// would touch selector matching and layout for every element in the
-    /// tree. Layout READS THROUGH this map when building form-control boxes,
-    /// so an edited value renders without the DOM ever changing (the same
-    /// override shape `svg_cache` uses). A page reload drops the map, which
-    /// is the correct lifetime for uncommitted field text.
-    edit_states: std::collections::HashMap<usize, rustkit_dom::forms::TextEditState>,
     /// Parsed SVG documents keyed by URL. SVGs referenced from <img> are
     /// vector content — they bypass ImageManager's raster decode (which
     /// rejects them as "Unknown image format") and are spliced into the
@@ -415,8 +421,8 @@ impl Engine {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
-            edit_states: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         })
     }
 
@@ -487,6 +493,7 @@ impl Engine {
             navigation,
             nav_event_rx: nav_rx,
             focused_node: None,
+            edit_states: std::collections::HashMap::new(),
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -541,6 +548,7 @@ impl Engine {
             navigation,
             nav_event_rx: nav_rx,
             focused_node: None,
+            edit_states: std::collections::HashMap::new(),
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -604,6 +612,7 @@ impl Engine {
             navigation,
             nav_event_rx: nav_rx,
             focused_node: None,
+            edit_states: std::collections::HashMap::new(),
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -803,9 +812,12 @@ impl Engine {
         // is focused. Re-focusing must not reset what the user has typed, so
         // the seed is guarded by the entry being absent.
         if let Some((raw, ref tag)) = focusable {
-            if matches!(tag.as_str(), "input" | "textarea")
-                && !self.edit_states.contains_key(&raw)
-            {
+            let already_seeded = self
+                .views
+                .get(&id)
+                .map(|v| v.edit_states.contains_key(&raw))
+                .unwrap_or(false);
+            if matches!(tag.as_str(), "input" | "textarea") && !already_seeded {
                 let seed = self
                     .views
                     .get(&id)
@@ -824,7 +836,9 @@ impl Engine {
                     .unwrap_or_default();
                 let state = rustkit_dom::forms::TextEditState::with_value(seed);
                 state.move_to_end(false);
-                self.edit_states.insert(raw, state);
+                if let Some(v) = self.views.get_mut(&id) {
+                    v.edit_states.insert(raw, state);
+                }
             }
         }
 
@@ -863,7 +877,11 @@ impl Engine {
         let Some(focused) = self.views.get(&id).and_then(|v| v.focused_node) else {
             return false;
         };
-        let Some(state) = self.edit_states.get(&focused.raw()) else {
+        let Some(state) = self
+            .views
+            .get(&id)
+            .and_then(|v| v.edit_states.get(&focused.raw()))
+        else {
             return false;
         };
 
@@ -935,6 +953,7 @@ impl Engine {
         fn collect(
             node: &std::rc::Rc<Node>,
             engine: &Engine,
+            view_id: EngineViewId,
             out: &mut Vec<FormDataEntry>,
         ) {
             if let NodeType::Element {
@@ -958,7 +977,7 @@ impl Engine {
                             && !attributes.contains_key("checked"));
                     if !name.is_empty() && !disabled && !skip {
                         let value = engine
-                            .edit_value(node.id.raw())
+                            .edit_value_in(view_id, node.id.raw())
                             .map(|(v, _)| v)
                             .unwrap_or_else(|| {
                                 if tag == "textarea" {
@@ -975,10 +994,10 @@ impl Engine {
                 }
             }
             for child in node.children() {
-                collect(&child, engine, out);
+                collect(&child, engine, view_id, out);
             }
         }
-        collect(&form, self, &mut entries);
+        collect(&form, self, id, &mut entries);
 
         if entries.is_empty() {
             return None;
@@ -991,7 +1010,18 @@ impl Engine {
     /// Layout reads through this so an edited field renders its typed text
     /// while the DOM attribute stays untouched.
     pub fn edit_value(&self, node_raw: usize) -> Option<(String, usize)> {
-        self.edit_states
+        // Resolves against the view currently being laid out; outside a
+        // build there is no unambiguous answer, so it declines rather than
+        // guessing across views.
+        let view_id = self.building_view.get()?;
+        self.edit_value_in(view_id, node_raw)
+    }
+
+    /// Live value + caret for a control in a SPECIFIC view.
+    pub fn edit_value_in(&self, id: EngineViewId, node_raw: usize) -> Option<(String, usize)> {
+        self.views
+            .get(&id)?
+            .edit_states
             .get(&node_raw)
             .map(|s| (s.value(), s.caret_position()))
     }
@@ -1131,6 +1161,17 @@ impl Engine {
         view.url = Some(url.clone());
         view.document = Some(document.clone());
         view.title = title.clone();
+        // A new document invalidates every per-node side table. NodeId is
+        // PER-DOCUMENT (each Document restarts its counter at 1), so a
+        // surviving entry keyed by raw id 4 would be read as the NEW page's
+        // node 4: the previous page's typed text painted into a fresh
+        // control, with first-focus seeding skipped because the key already
+        // exists. The old doc comment claimed reload dropped this map; it
+        // did not, and asserting a lifetime the code does not implement is
+        // how a silent correctness bug hides in plain sight.
+        // (Prometheus, #110 R1 must-fix.)
+        view.edit_states.clear();
+        view.focused_node = None;
 
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
@@ -1266,6 +1307,17 @@ impl Engine {
         view.url = Some(url.clone());
         view.document = Some(document.clone());
         view.title = title.clone();
+        // A new document invalidates every per-node side table. NodeId is
+        // PER-DOCUMENT (each Document restarts its counter at 1), so a
+        // surviving entry keyed by raw id 4 would be read as the NEW page's
+        // node 4: the previous page's typed text painted into a fresh
+        // control, with first-focus seeding skipped because the key already
+        // exists. The old doc comment claimed reload dropped this map; it
+        // did not, and asserting a lifetime the code does not implement is
+        // how a silent correctness bug hides in plain sight.
+        // (Prometheus, #110 R1 must-fix.)
+        view.edit_states.clear();
+        view.focused_node = None;
 
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
@@ -1378,11 +1430,7 @@ impl Engine {
             let _build_span = tracing::info_span!("build_layout_tree").entered();
             // Scope the focused node to THIS view for the duration of the
             // build; cleared immediately after so no later build inherits it.
-            self.building_focus
-                .set(self.views.get(&id).and_then(|v| v.focused_node));
-            let built = self.build_layout_from_document(&document, &external_stylesheets);
-            self.building_focus.set(None);
-            built
+            self.build_layout_for_view(id, &document, &external_stylesheets)
         };
 
         // Layout computation
@@ -1654,6 +1702,28 @@ impl Engine {
             };
             layout_box.set_offsets(px(&style.top), px(&style.right), px(&style.bottom), px(&style.left));
         }
+    }
+
+    /// Build a layout tree FOR A SPECIFIC VIEW.
+    ///
+    /// Owns the `building_view`/`building_focus` scoping so no caller can
+    /// forget it: without them the view-agnostic recursive builder cannot
+    /// find live edit state and SILENTLY falls back to the frozen DOM
+    /// attribute — typed text vanishes with no error. Every layout build
+    /// goes through here.
+    fn build_layout_for_view(
+        &self,
+        id: EngineViewId,
+        document: &Document,
+        external_stylesheets: &[Stylesheet],
+    ) -> LayoutBox {
+        self.building_view.set(Some(id));
+        self.building_focus
+            .set(self.views.get(&id).and_then(|v| v.focused_node));
+        let built = self.build_layout_from_document(document, external_stylesheets);
+        self.building_focus.set(None);
+        self.building_view.set(None);
+        built
     }
 
     fn build_layout_from_document(
@@ -8595,8 +8665,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
-            edit_states: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         };
 
         // Build layout tree from document
@@ -8690,8 +8760,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
-            edit_states: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8785,8 +8855,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
-            edit_states: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -8900,8 +8970,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
-            edit_states: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8979,8 +9049,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
-            edit_states: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -9050,8 +9120,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
-            edit_states: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -9140,8 +9210,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
-            edit_states: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -9216,8 +9286,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
-            edit_states: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -9602,8 +9672,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
-            edit_states: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         };
 
         // Test type selector: (0, 0, 1)
@@ -10461,7 +10531,7 @@ mod form_typing_tests {
             .create_headless_view(Bounds::new(0, 0, 800, 600))
             .expect("headless view");
         let doc = std::rc::Rc::new(Document::parse_html(html).expect("parse"));
-        let layout = engine.build_layout_from_document(&doc, &[]);
+        let layout = engine.build_layout_for_view(id, &doc, &[]);
         let view = engine.views.get_mut(&id).expect("view");
         view.document = Some(doc);
         view.layout = Some(layout);
@@ -10516,30 +10586,34 @@ mod form_typing_tests {
         };
         engine.views.get_mut(&id).unwrap().focused_node =
             Some(rustkit_dom::NodeId::new(node_raw));
-        engine.edit_states.insert(
+        let view = engine.views.get_mut(&id).unwrap();
+        view.edit_states.insert(
             node_raw,
             rustkit_dom::forms::TextEditState::with_value("ab"),
         );
-        engine.edit_states.get(&node_raw).unwrap().move_to_end(false);
+        view.edit_states.get(&node_raw).unwrap().move_to_end(false);
 
         // 'c' (no modifiers) must insert.
         assert!(engine.handle_text_key(id, 0, "c", false, false, false));
-        assert_eq!(engine.edit_value(node_raw).unwrap().0, "abc");
+        assert_eq!(engine.edit_value_in(id, node_raw).unwrap().0, "abc");
 
         // Backspace (VK 0x08) must delete.
         assert!(engine.handle_text_key(id, 0x08, "", false, false, false));
-        assert_eq!(engine.edit_value(node_raw).unwrap().0, "ab");
+        assert_eq!(engine.edit_value_in(id, node_raw).unwrap().0, "ab");
 
         // And the change must reach LAYOUT — the DOM attribute still says
         // "ab" forever (there is no set_attribute), so if layout did not read
         // through edit state the typed text would be invisible.
-        engine.edit_states.get(&node_raw).unwrap().insert_text("XY");
-        let doc = engine.views.get(&id).unwrap().document.clone().unwrap();
         engine
-            .building_focus
-            .set(Some(rustkit_dom::NodeId::new(node_raw)));
-        let relaid = engine.build_layout_from_document(&doc, &[]);
-        engine.building_focus.set(None);
+            .views
+            .get(&id)
+            .unwrap()
+            .edit_states
+            .get(&node_raw)
+            .unwrap()
+            .insert_text("XY");
+        let doc = engine.views.get(&id).unwrap().document.clone().unwrap();
+        let relaid = engine.build_layout_for_view(id, &doc, &[]);
 
         fn find_input_value(b: &LayoutBox) -> Option<String> {
             if let BoxType::FormControl(rustkit_layout::FormControlType::TextInput {
@@ -10612,7 +10686,7 @@ mod form_submit_tests {
         );
         let input = find_by_tag(&doc.root(), "input").expect("input");
         engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
-        engine.edit_states.insert(
+        engine.views.get_mut(&id).unwrap().edit_states.insert(
             input.id.raw(),
             rustkit_dom::forms::TextEditState::with_value("typed"),
         );
@@ -10682,5 +10756,82 @@ mod form_submit_tests {
         let input = find_by_tag(&doc.root(), "input").expect("input");
         engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
         assert!(engine.form_submission_for_focus(id).is_none());
+    }
+}
+
+#[cfg(test)]
+mod edit_state_lifecycle_tests {
+    use super::*;
+
+    // ---- the side table's lifetime is part of the side table ----
+    //
+    // Prometheus's #110 R1 must-fix. NodeId is PER-DOCUMENT: every Document
+    // restarts its counter at 1. An edit_states entry surviving a navigation
+    // is therefore read as the NEW page's node with the same raw id — the
+    // previous page's typed text painted into a fresh control, with
+    // first-focus seeding skipped because the key already exists. The
+    // original code carried a doc comment claiming reload dropped the map;
+    // it did not.
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn typed_text_does_not_survive_a_navigation_into_the_next_page() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("view");
+
+        // Page one: type into a field.
+        let doc1 = std::rc::Rc::new(
+            Document::parse_html(r#"<html><body><input name="q"></body></html>"#).expect("parse"),
+        );
+        fn first_input(n: &std::rc::Rc<Node>) -> Option<std::rc::Rc<Node>> {
+            if let NodeType::Element { tag_name, .. } = &n.node_type {
+                if tag_name.eq_ignore_ascii_case("input") {
+                    return Some(n.clone());
+                }
+            }
+            n.children().iter().find_map(first_input)
+        }
+        let input1 = first_input(&doc1.root()).expect("input");
+        {
+            let view = engine.views.get_mut(&id).expect("view");
+            view.document = Some(doc1.clone());
+            view.focused_node = Some(input1.id);
+            view.edit_states.insert(
+                input1.id.raw(),
+                rustkit_dom::forms::TextEditState::with_value("secret"),
+            );
+        }
+        assert_eq!(
+            engine.edit_value_in(id, input1.id.raw()).unwrap().0,
+            "secret"
+        );
+
+        // Navigate through the REAL path. load_html shares the document
+        // replacement code with load_url and needs no network, so this
+        // exercises production rather than re-implementing it in the test —
+        // the distinction that let the node_id bug pass a green suite.
+        engine
+            .load_html(id, r#"<html><body><input name="other"></body></html>"#)
+            .expect("load_html");
+
+        // The next document's first input reuses the same raw NodeId. If the
+        // map survived, this reads back "secret" — the previous page's typed
+        // text, in a control the user has never touched.
+        let doc2 = engine.views.get(&id).unwrap().document.clone().unwrap();
+        let input2 = first_input(&doc2.root()).expect("input");
+        assert_eq!(
+            input2.id.raw(),
+            input1.id.raw(),
+            "precondition: NodeId is per-document, so the ids DO collide — \
+             that collision is exactly why the map must be cleared"
+        );
+        assert_eq!(
+            engine.edit_value_in(id, input2.id.raw()),
+            None,
+            "the new page's control must have no inherited value"
+        );
+        assert_eq!(engine.focused_node(id), None, "focus must not survive either");
     }
 }
