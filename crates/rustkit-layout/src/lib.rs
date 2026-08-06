@@ -819,6 +819,14 @@ pub struct LayoutBox {
     /// an image inside it) navigates, without the hit path needing DOM
     /// access.
     pub link_href: Option<String>,
+    /// Raw `NodeId` of the originating DOM node, when there is one.
+    ///
+    /// Carried as a plain `usize` so `rustkit-layout` keeps no dependency on
+    /// `rustkit-dom`; the engine converts back at the boundary. This is the
+    /// long-standing "requires node_id tracking in LayoutBox" TODO that
+    /// blocked click-to-focus and keyboard dispatch — without it a hit test
+    /// can locate a box but not the element it came from.
+    pub node_id: Option<usize>,
     /// Wrapped lines for text boxes (`None` = single-run text, no wrap).
     pub text_lines: Option<Vec<TextLine>>,
     /// FLOW offset of visual line 0 when this text box was laid out
@@ -851,6 +859,7 @@ impl LayoutBox {
             element_id: None,
             identity: None,
             link_href: None,
+            node_id: None,
             text_lines: None,
             text_flow_first_offset: None,
         }
@@ -3285,6 +3294,7 @@ impl LayoutBox {
             position: self.position,
             is_scrollable,
             link_href: self.link_href.clone(),
+            node_id: self.node_id,
         })
     }
 
@@ -3350,6 +3360,7 @@ impl LayoutBox {
             position: self.position,
             is_scrollable: false,
             link_href: self.link_href.clone(),
+            node_id: self.node_id,
         });
 
         // Check all children
@@ -3389,6 +3400,10 @@ pub struct HitTestResult {
     /// to the same link — which is what makes a hit test navigable without
     /// walking back into the DOM.
     pub link_href: Option<String>,
+    /// Raw `NodeId` of the hit box's DOM node, if it had one. Unlike
+    /// `link_href` this is NOT inherited from ancestors: the caller wants
+    /// the element actually under the cursor.
+    pub node_id: Option<usize>,
 }
 
 impl HitTestResult {

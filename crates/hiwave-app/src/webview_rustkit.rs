@@ -131,6 +131,15 @@ impl RustKitView {
         engine.render_all_views();
     }
 
+    /// Focus whatever focusable element sits at these viewport coordinates,
+    /// clearing focus when nothing focusable is there. Returns the focused
+    /// element's tag name.
+    pub fn focus_at_point(&self, x: f32, y: f32) -> Option<String> {
+        let mut engine = self.engine.borrow_mut();
+        self.view_id
+            .and_then(|view_id| engine.focus_at_point(view_id, x, y))
+    }
+
     /// Resolve a click at viewport coordinates to a link URL, if any.
     pub fn link_at_point(&self, x: f32, y: f32) -> Option<String> {
         let engine = self.engine.borrow();

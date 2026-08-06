@@ -1966,6 +1966,13 @@ fn main() {
                         && content_x < content_w
                         && content_y < content_h
                     {
+                        // Focus first, then navigate. A click that lands on a
+                        // form control focuses it; a click on anything else
+                        // clears focus, which is what makes a later keystroke
+                        // unambiguous about where it belongs.
+                        if let Some(tag) = view.focus_at_point(content_x as f32, content_y as f32) {
+                            info!(%tag, "Focused content element");
+                        }
                         if let Some(url) = view.link_at_point(content_x as f32, content_y as f32) {
                             info!(%url, "Link clicked");
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
