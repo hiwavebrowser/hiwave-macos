@@ -819,6 +819,12 @@ pub struct LayoutBox {
     /// an image inside it) navigates, without the hit path needing DOM
     /// access.
     pub link_href: Option<String>,
+    /// Caret offset when this box is the FOCUSED text control, else `None`.
+    /// Set by the engine at layout-build time from live edit state; the
+    /// painter uses it to draw the caret and the focus ring. This was
+    /// previously impossible ("focus tracking requires DOM node ID in
+    /// LayoutBox") and is unblocked by `node_id` below.
+    pub focused_caret: Option<usize>,
     /// Raw `NodeId` of the originating DOM node, when there is one.
     ///
     /// Carried as a plain `usize` so `rustkit-layout` keeps no dependency on
@@ -859,6 +865,7 @@ impl LayoutBox {
             element_id: None,
             identity: None,
             link_href: None,
+            focused_caret: None,
             node_id: None,
             text_lines: None,
             text_flow_first_offset: None,
@@ -5086,10 +5093,11 @@ impl DisplayList {
                         Color::new(200, 200, 200, 1.0)
                     },
                     border_width: 1.0,
-                    // Focus tracking requires DOM node ID in LayoutBox (architectural change)
-                    // For now, focus state is managed at the Engine level via focus_element()
-                    focused: false,
-                    caret_position: None,
+                    // Focus and caret come from the engine's live edit state,
+                    // carried on the box via `focused_caret` (unblocked by
+                    // LayoutBox::node_id).
+                    focused: layout_box.focused_caret.is_some(),
+                    caret_position: layout_box.focused_caret,
                 });
             }
             FormControlType::TextArea {
@@ -5112,8 +5120,8 @@ impl DisplayList {
                         Color::new(200, 200, 200, 1.0)
                     },
                     border_width: 1.0,
-                    focused: false,
-                    caret_position: None,
+                    focused: layout_box.focused_caret.is_some(),
+                    caret_position: layout_box.focused_caret,
                 });
             }
             FormControlType::Button { label, .. } => {
