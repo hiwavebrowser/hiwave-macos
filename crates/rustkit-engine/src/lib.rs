@@ -738,6 +738,66 @@ impl Engine {
         }
     }
 
+    /// Hit-test a click in VIEWPORT coordinates and focus the element under
+    /// it if that element is focusable (a form control today).
+    ///
+    /// Returns the tag name of the newly focused element, or `None` when the
+    /// click landed on nothing focusable — in which case focus is CLEARED,
+    /// matching the behavior of clicking a page's background.
+    pub fn focus_at_point(
+        &mut self,
+        id: EngineViewId,
+        viewport_x: f32,
+        viewport_y: f32,
+    ) -> Option<String> {
+        let (doc_x, doc_y) = {
+            let view = self.views.get(&id)?;
+            (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1)
+        };
+
+        let hit_node = self
+            .views
+            .get(&id)
+            .and_then(|v| v.layout.as_ref())
+            .and_then(|l| l.hit_test(doc_x, doc_y))
+            .and_then(|h| h.node_id);
+
+        // Resolve focusability against the DOM, not the layout box: a
+        // FormControl box type would miss `contenteditable` and tabindex
+        // later, and the tag name is what callers want reported.
+        let focusable = hit_node.and_then(|raw| {
+            let view = self.views.get(&id)?;
+            let doc = view.document.as_ref()?;
+            let node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
+            match &node.node_type {
+                NodeType::Element { tag_name, .. } => {
+                    let tag = tag_name.to_lowercase();
+                    matches!(tag.as_str(), "input" | "textarea" | "select")
+                        .then_some((raw, tag))
+                }
+                _ => None,
+            }
+        });
+
+        let view = self.views.get_mut(&id)?;
+        match focusable {
+            Some((raw, tag)) => {
+                view.focused_node = Some(rustkit_dom::NodeId::new(raw));
+                debug!(?id, %tag, "Focused element");
+                Some(tag)
+            }
+            None => {
+                view.focused_node = None;
+                None
+            }
+        }
+    }
+
+    /// The DOM node currently holding focus in a view, if any.
+    pub fn focused_node(&self, id: EngineViewId) -> Option<rustkit_dom::NodeId> {
+        self.views.get(&id).and_then(|v| v.focused_node)
+    }
+
     /// Get the current scroll offset of a view.
     pub fn get_scroll_offset(&self, id: EngineViewId) -> Result<(f32, f32), EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
@@ -2019,6 +2079,11 @@ impl Engine {
                         selector: reported,
                     });
                 }
+
+                // Every element box remembers which DOM node it came from.
+                // This is what lets a click resolve to an element (focus,
+                // form editing, event dispatch) instead of just a rectangle.
+                layout_box.node_id = Some(node.id.raw());
 
                 // Links carry their RAW href so a hit test can navigate
                 // without walking back into the DOM. Resolution against the
@@ -10006,5 +10071,97 @@ mod link_click_tests {
             Some("https://example.com/target")
         );
         assert_eq!(engine.link_at_point(id, 10.0, 505.0), None);
+    }
+}
+
+#[cfg(test)]
+mod node_identity_tests {
+    use super::*;
+
+    // ---- click-to-focus: closing the "requires node_id tracking" TODO ----
+    //
+    // Layout boxes carried no DOM identity, so a hit test could locate a
+    // rectangle but never the element it came from. That single gap is what
+    // the mouse/keyboard handlers cite as the reason focus and event
+    // dispatch were left unimplemented. These pin the plumbing.
+
+    #[test]
+    fn hit_test_reports_the_node_of_the_box_actually_under_the_cursor() {
+        // node_id must NOT inherit from ancestors the way link_href does:
+        // the caller wants the element under the cursor, not the nearest
+        // interesting one above it.
+        let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        parent.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 200.0, 100.0);
+        parent.node_id = Some(1);
+
+        let mut child = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        child.dimensions.content = rustkit_layout::Rect::new(10.0, 10.0, 50.0, 50.0);
+        child.node_id = Some(2);
+        parent.children.push(child);
+
+        assert_eq!(parent.hit_test(20.0, 20.0).unwrap().node_id, Some(2), "child wins");
+        assert_eq!(parent.hit_test(150.0, 80.0).unwrap().node_id, Some(1), "parent when child missed");
+    }
+
+    #[test]
+    fn an_anonymous_box_reports_no_node() {
+        // Text and anonymous boxes have no element; they must stay None
+        // rather than borrowing a neighbour's identity.
+        let mut b = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        b.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 50.0, 50.0);
+        assert_eq!(b.hit_test(10.0, 10.0).unwrap().node_id, None);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn clicking_a_form_control_focuses_it_and_clicking_away_clears_focus() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+
+        let html = r#"<html><body><input type="text" id="a"><div id="plain">x</div></body></html>"#;
+        let doc = std::rc::Rc::new(
+            rustkit_dom::Document::parse_html(html).expect("parse"),
+        );
+        // Find the input's real NodeId by walking the parsed document, so the
+        // test cannot pass against a hand-invented id.
+        fn find<'a>(n: &std::rc::Rc<Node>, tag: &str) -> Option<std::rc::Rc<Node>> {
+            if let NodeType::Element { tag_name, .. } = &n.node_type {
+                if tag_name.eq_ignore_ascii_case(tag) {
+                    return Some(n.clone());
+                }
+            }
+            n.children().iter().find_map(|c| find(c, tag))
+        }
+        let root = doc.root();
+        let input = find(&root, "input").expect("input node");
+        let div = find(&root, "div").expect("div node");
+
+        let mut layout = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        layout.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut input_box = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        input_box.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 100.0, 20.0);
+        input_box.node_id = Some(input.id.raw());
+        let mut div_box = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        div_box.dimensions.content = rustkit_layout::Rect::new(0.0, 100.0, 100.0, 20.0);
+        div_box.node_id = Some(div.id.raw());
+        layout.children.push(input_box);
+        layout.children.push(div_box);
+
+        {
+            let view = engine.views.get_mut(&id).expect("view");
+            view.document = Some(doc);
+            view.layout = Some(layout);
+        }
+
+        assert_eq!(engine.focus_at_point(id, 10.0, 10.0).as_deref(), Some("input"));
+        assert_eq!(engine.focused_node(id), Some(input.id));
+
+        // Clicking a non-focusable element clears focus, like clicking page
+        // background — NOT "keeps the previous focus", which would leave keys
+        // going to an element the user visibly clicked away from.
+        assert_eq!(engine.focus_at_point(id, 10.0, 110.0), None);
+        assert_eq!(engine.focused_node(id), None);
     }
 }
