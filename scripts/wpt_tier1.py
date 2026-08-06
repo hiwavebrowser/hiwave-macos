@@ -17,6 +17,20 @@ W0b of WPT Phase 0.5. The contract (docs/WPT_W0B_IMPLEMENT_PIN_2026-07-29.md):
 - A blank frame is never a match. Two blank frames agree with each other for
   the worst possible reason (the engine rendered neither document), which is
   the empty-capture-scores-100 lie wearing a reftest costume. Blank -> ERROR.
+- A reftest that cannot reach the state it asserts about is not scored.
+  reftest-wait / script-driven tests never reach that state without a script
+  host, so their frames measure "no JS", not the behaviour under test — and
+  upstream WPT reports TIMEOUT for them, not FAIL. They are SKIP, with the
+  reason recorded. (Added 2026-08-06 night 20: three of the seed's six fails
+  were this.)
+- Root-absolute references (/fonts/ahem.css) are staged to resolve against the
+  WPT root, because wptserve serves / from there and file:// does not. A
+  reftest whose declared font silently fails to load is not measuring its own
+  assertion. The fonts themselves are MANIFEST.support_paths.
+- A fail whose test declares a web font is still a FAIL — @font-face is
+  unimplemented, and that is an engine gap, not a harness one — but it is
+  tagged `blocked_by` so a digest can name one capability instead of counting
+  N unrelated text bugs.
 - The oracle must be able to go red. Every run starts by rendering a
   deliberately mismatched fixture pair (trench/wpt/negative-control/); if the
   harness cannot fail THAT, the run aborts and publishes nothing.
@@ -55,6 +69,21 @@ REL_MATCH_RE = re.compile(
     r"<link\b[^>]*\brel\s*=\s*[\"']?match[\"']?[^>]*>", re.IGNORECASE
 )
 HREF_RE = re.compile(r"\bhref\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
+
+# wptserve maps / to the WPT root; file:// has no such mapping, so root-absolute
+# references (e.g. /fonts/ahem.css) resolve to the filesystem root and silently
+# load nothing. Staged copies live NEXT TO the originals so relative references
+# keep working and the fixtures on disk stay verbatim.
+STAGED_SUFFIX = ".__staged"
+ROOT_ABS_ATTR_RE = re.compile(r"((?:href|src)\s*=\s*[\"'])(/(?!/)[^\"']*)([\"'])", re.IGNORECASE)
+ROOT_ABS_URL_RE = re.compile(r"(url\(\s*[\"']?)(/(?!/)[^\"')]*)([\"']?\s*\))", re.IGNORECASE)
+
+# A test whose declared web font never loads is still a real engine failure —
+# @font-face is unimplemented (rustkit-layout FontLoader::load_font never
+# fetches or registers; queue_font_face has no caller outside its own unit
+# test). It is NOT excluded from the score; it is ATTRIBUTED, so a digest can
+# say "N of the fails are one capability gap" instead of "N text bugs".
+WEBFONT_GAP = "@font-face unimplemented (rustkit-layout FontLoader is dead code)"
 
 
 def read_ppm(path: Path):
@@ -109,6 +138,67 @@ def rel_match_hrefs(test_file: Path):
     ]
 
 
+def stage_css(src: Path) -> Path:
+    """Copy a CSS file beside itself with root-absolute url(...) values resolved."""
+    staged = src.with_name(src.stem + STAGED_SUFFIX + src.suffix)
+    css = ROOT_ABS_URL_RE.sub(
+        lambda m: m.group(1) + str(WPT_ROOT / m.group(2).lstrip("/")) + m.group(3),
+        src.read_text(errors="replace"),
+    )
+    staged.write_text(css)
+    return staged
+
+
+def stage_html(src: Path) -> Path:
+    """Copy an HTML file beside itself with root-absolute references resolved
+    against the WPT root — what wptserve would have served. Referenced CSS is
+    staged recursively so its own url(...) values resolve too."""
+    def rewrite(m):
+        target = WPT_ROOT / m.group(2).lstrip("/")
+        if target.suffix.lower() == ".css" and target.is_file():
+            target = stage_css(target)
+        return m.group(1) + str(target) + m.group(3)
+
+    html = ROOT_ABS_ATTR_RE.sub(rewrite, src.read_text(errors="replace"))
+    html = ROOT_ABS_URL_RE.sub(
+        lambda m: m.group(1) + str(WPT_ROOT / m.group(2).lstrip("/")) + m.group(3), html
+    )
+    staged = src.with_name(src.stem + STAGED_SUFFIX + src.suffix)
+    staged.write_text(html)
+    return staged
+
+
+def unrunnable_reason(test_src: str, ref_src: str):
+    """Why this reftest cannot probe its own assertion in the capture path.
+
+    These are not engine verdicts. A reftest-wait test never reaches the state
+    it asserts about without a script host, so comparing its frames measures
+    "no JS", not the line-box behaviour under test — upstream WPT would report
+    TIMEOUT here, not FAIL. Scoring them as FAIL charges the renderer for the
+    harness's missing capability, which is the decorative-instrument class this
+    campaign keeps finding (forensics 2026-07-24).
+    """
+    if "reftest-wait" in test_src or "reftest-wait" in ref_src:
+        return "reftest-wait: needs a scripted completion signal (no script host in parity-capture)"
+    if "<script" in test_src.lower() or "<script" in ref_src.lower():
+        return "needs JS to reach the asserted state (no script host in parity-capture)"
+    if re.search(r"name\s*=\s*[\"']fuzzy[\"']", test_src, re.IGNORECASE):
+        return "fuzzy annotation: tolerance matching not implemented"
+    return None
+
+
+def webfont_dependent(test_src: str, ref_src: str) -> bool:
+    """Does either side declare a web font it needs to render as designed?"""
+    for src in (test_src, ref_src):
+        if re.search(r"name\s*=\s*[\"']flags[\"'][^>]*ahem", src, re.IGNORECASE):
+            return True
+        if re.search(r"href\s*=\s*[\"']/fonts/", src, re.IGNORECASE):
+            return True
+        if "@font-face" in src:
+            return True
+    return False
+
+
 def capture(html_file: Path, out_ppm: Path, viewport):
     """Render through the engine. Returns None on success, reason on failure."""
     cmd = [
@@ -130,10 +220,14 @@ def capture(html_file: Path, out_ppm: Path, viewport):
     return None
 
 
-def run_pair(test_file: Path, ref_file: Path, viewport, workdir: Path):
+def run_pair(test_file: Path, ref_file: Path, viewport, workdir: Path, stage: bool = True):
     """Render both sides and compare. Returns a partial case dict."""
     test_ppm = workdir / "test.ppm"
     ref_ppm = workdir / "ref.ppm"
+
+    if stage:
+        test_file = stage_html(test_file)
+        ref_file = stage_html(ref_file)
 
     for label, src, dst in (("test", test_file, test_ppm),
                             ("ref", ref_file, ref_ppm)):
@@ -172,7 +266,7 @@ def negative_control(viewport) -> bool:
         print("HARNESS ERROR: negative-control fixtures missing", file=sys.stderr)
         return False
     with tempfile.TemporaryDirectory(prefix="wpt-negctl-") as td:
-        result = run_pair(test, notref, viewport, Path(td))
+        result = run_pair(test, notref, viewport, Path(td), stage=False)
     if result["status"] != "FAIL":
         print(
             f"HARNESS ERROR: negative control returned {result['status']} "
@@ -232,6 +326,7 @@ def main():
             "diff_pct": None,
             "diff_pixels": None,
             "rel_match": None,
+            "blocked_by": None,
             "maps_to": entry.get("maps_to"),
         }
         test_file = WPT_ROOT / entry["path"]
@@ -264,8 +359,16 @@ def main():
                     )
                 else:
                     case["rel_match"] = "ok"
-                    with tempfile.TemporaryDirectory(prefix="wpt-") as td:
-                        case.update(run_pair(test_file, ref_file, viewport, Path(td)))
+                    test_src = test_file.read_text(errors="replace")
+                    ref_src = ref_file.read_text(errors="replace")
+                    unrunnable = unrunnable_reason(test_src, ref_src)
+                    if unrunnable:
+                        case.update(status="SKIP", reason=unrunnable)
+                    else:
+                        if webfont_dependent(test_src, ref_src):
+                            case["blocked_by"] = WEBFONT_GAP
+                        with tempfile.TemporaryDirectory(prefix="wpt-") as td:
+                            case.update(run_pair(test_file, ref_file, viewport, Path(td)))
 
         cases.append(case)
         if args.verbose or case["status"] != "PASS":
@@ -303,6 +406,20 @@ def main():
         "skip": counts["SKIP"],
         "error": counts["ERROR"],
         "rate": rate,
+        "attribution": {
+            "_comment": "Fails grouped by a named engine capability gap. Attribution only — these cases stay in the denominator. A gap here is a lane, not an excuse.",
+            "blocked_fails": {
+                gap: sorted(c["id"] for c in cases
+                            if c["status"] == "FAIL" and c.get("blocked_by") == gap)
+                for gap in sorted({c["blocked_by"] for c in cases
+                                   if c["status"] == "FAIL" and c.get("blocked_by")})
+            },
+            "suspect_passes": {
+                "_comment": "PASSes on tests whose declared web font never loaded. The more dangerous direction: a green case that is not measuring its own assertion. Read these before quoting the rate.",
+                "ids": sorted(c["id"] for c in cases
+                              if c["status"] == "PASS" and c.get("blocked_by")),
+            },
+        },
         "cases": cases,
         "honesty": {
             "all_green": all_green,
@@ -329,6 +446,12 @@ def main():
           f"(pass {counts['PASS']} / fail {counts['FAIL']} / "
           f"skip {counts['SKIP']} / error {counts['ERROR']}, n={len(cases)}) "
           f"@ pin {manifest['wpt_pin'][:12]}")
+    for gap, ids in last_run["attribution"]["blocked_fails"].items():
+        print(f"  attributed: {len(ids)} fail(s) blocked by {gap}")
+    suspect = last_run["attribution"]["suspect_passes"]["ids"]
+    if suspect:
+        print(f"  SUSPECT: {len(suspect)} PASS(es) on tests whose web font never loaded: "
+              + ", ".join(suspect))
     return 0
 
 

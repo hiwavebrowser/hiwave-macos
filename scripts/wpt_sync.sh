@@ -39,13 +39,16 @@ for e in m["entries"]:
     out.append(e["path"])
     if e.get("ref"):
         out.append(e["ref"])
+# Shared support files (fonts served from / by wptserve). Not tests, but a
+# reftest whose font never loads is not measuring what it asserts.
+out.extend(m.get("support_paths", {}).get("paths", []))
 print("\n".join(sorted(set(out))))
 ' "$MANIFEST")"
 
 N="$(printf "%s\n" "$PATHS" | grep -c . || true)"
 echo "manifest: $MANIFEST"
 echo "pin:      $PIN"
-echo "files:    $N (tests + refs)"
+echo "files:    $N (tests + refs + support)"
 echo "dest:     $DEST"
 
 if [ "$MODE" = "check" ]; then

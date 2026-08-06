@@ -18,6 +18,13 @@
     "not_verified": "The test->ref BINDING is not verified. WPT's authority for a reference is the test file's own <link rel=match href=...>, which requires reading each test. The `ref` field below is the same-directory candidate seen in the listing; W0b's runner MUST read rel=match from the test and treat a disagreement with this field as an instrument error, not a render diff.",
     "seat_limitation": "This seat cannot clone or curl (git ls-remote / curl / git clone are all off the Bash allowlist), so scripts/wpt_sync.sh below has NEVER BEEN RUN. It ships un-dry-run. See README.md §Known gaps."
   },
+  "support_paths": {
+    "_comment": "Shared WPT support files that tests reference by ROOT-ABSOLUTE URL (wptserve serves / from the WPT root; file:// has no such mapping). They are never scored — but a reftest whose declared font never loads is not measuring what it asserts, so they are part of the instrument, not decoration. Materialised by wpt_sync.sh alongside the tests; the runner rewrites root-absolute references to point at them.",
+    "paths": [
+      "fonts/ahem.css",
+      "fonts/Ahem.ttf"
+    ]
+  },
   "buckets": {
     "1A": "css-text soft wrap / overflow-wrap — funds line-box slices 0-1 (wrap production callers)",
     "1B": "css-inline line-box metrics + baseline — funds IFC slices A/B/B2/C (#31/#37/#44)",
