@@ -4220,23 +4220,50 @@ impl Engine {
             }
         }
 
-        for url in svg_urls {
-            info!(%url, "Loading SVG image");
-            match self.loader.fetch(Request::get(url.clone())).await {
-                Ok(response) if response.ok() => match response.text().await {
-                    Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
-                        Ok(doc) => {
-                            self.svg_cache.insert(url.to_string(), doc);
-                            loaded += 1;
+        // Concurrent like the raster lane (Prometheus, #104 R1: SVG was left
+        // serial while images were parallelized). Parsing happens inside the
+        // futures; only the cache insert is serialized afterwards, because
+        // &mut self cannot be held across them.
+        {
+            use futures::stream::StreamExt;
+            let loader = self.loader.clone();
+            let parsed: Vec<Option<(String, rustkit_svg::SvgDocument)>> =
+                futures::stream::iter(svg_urls.into_iter().map(|url| {
+                    let loader = loader.clone();
+                    async move {
+                        info!(%url, "Loading SVG image");
+                        match loader.fetch(Request::get(url.clone())).await {
+                            Ok(response) if response.ok() => match response.text().await {
+                                Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
+                                    Ok(doc) => Some((url.to_string(), doc)),
+                                    Err(e) => {
+                                        warn!(?e, %url, "Failed to parse SVG image");
+                                        None
+                                    }
+                                },
+                                Err(e) => {
+                                    warn!(?e, %url, "Failed to read SVG body");
+                                    None
+                                }
+                            },
+                            Ok(response) => {
+                                warn!(status = %response.status, %url, "Failed to fetch SVG image");
+                                None
+                            }
+                            Err(e) => {
+                                warn!(?e, %url, "Failed to fetch SVG image");
+                                None
+                            }
                         }
-                        Err(e) => warn!(?e, %url, "Failed to parse SVG image"),
-                    },
-                    Err(e) => warn!(?e, %url, "Failed to read SVG body"),
-                },
-                Ok(response) => {
-                    warn!(status = %response.status, %url, "Failed to fetch SVG image")
-                }
-                Err(e) => warn!(?e, %url, "Failed to fetch SVG image"),
+                    }
+                }))
+                .buffer_unordered(MAX_CONCURRENT_IMAGE_LOADS)
+                .collect()
+                .await;
+
+            for (url, doc) in parsed.into_iter().flatten() {
+                self.svg_cache.insert(url, doc);
+                loaded += 1;
             }
         }
 

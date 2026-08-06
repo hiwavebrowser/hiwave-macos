@@ -1947,7 +1947,25 @@ fn main() {
                     let (cx, cy) = cursor_position.get();
                     let content_x = cx - *sidebar_width_for_events.lock().unwrap();
                     let content_y = cy - *chrome_height_for_events.lock().unwrap();
-                    if content_x >= 0.0 && content_y >= 0.0 {
+                    // Both bounds, not just the origin side (Prometheus, #104
+                    // R1): the delivery rule says clicks reaching this loop are
+                    // content-directed, but that is an inference about the UI
+                    // frame's behavior, not a geometric fact. A half-open gate
+                    // turns any leak into a navigation at whatever the hit test
+                    // finds under an out-of-bounds coordinate.
+                    let size = window.inner_size().to_logical::<f64>(window.scale_factor());
+                    let content_w = size.width
+                        - *sidebar_width_for_events.lock().unwrap()
+                        - if *right_sidebar_open_for_events.lock().unwrap() { SIDEBAR_WIDTH } else { 0.0 };
+                    let content_h = size.height
+                        - *chrome_height_for_events.lock().unwrap()
+                        - *shelf_height_for_events.lock().unwrap()
+                        - *inspector_height_for_events.lock().unwrap();
+                    if content_x >= 0.0
+                        && content_y >= 0.0
+                        && content_x < content_w
+                        && content_y < content_h
+                    {
                         if let Some(url) = view.link_at_point(content_x as f32, content_y as f32) {
                             info!(%url, "Link clicked");
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
