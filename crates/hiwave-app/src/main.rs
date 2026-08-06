@@ -2017,7 +2017,20 @@ fn main() {
                                 Key::End => (0x23, String::new()),
                                 Key::Backspace => (0x08, String::new()),
                                 Key::Delete => (0x2E, String::new()),
-                                Key::Enter => (0x0D, String::new()),
+                                Key::Enter => {
+                                    // Enter in a form field submits it. Done
+                                    // before the edit model sees the key: the
+                                    // model reports Submit but cannot
+                                    // navigate, and swallowing Enter into a
+                                    // single-line field would do nothing
+                                    // visible at all.
+                                    if let Some(url) = view.form_submit_url() {
+                                        info!(%url, "Form submitted");
+                                        let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                                        return;
+                                    }
+                                    (0x0D, String::new())
+                                }
                                 Key::Character(c) => (0, c.to_string()),
                                 _ => (0, String::new()),
                             };
