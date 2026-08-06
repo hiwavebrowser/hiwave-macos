@@ -40,10 +40,27 @@ run on master, and not before.
 | Blocker | State |
 |---|---|
 | RustKit `layout.json` had no join key — only `type`/`text`/`control_type`, while Chrome's rects are keyed by selector | **CLEARED** night 1 (P0a-0). 1593/1593 baseline selectors reproducible across all 26 cases. |
-| Gate A (geometry) not implemented — `scripts/layout_oracle_gate.py` is a stub whose `extract_layout_from_rustkit` returns `None` | open — P0a |
-| Gate B (paint tolerance + discrete-structural auto-fail) not implemented | open — P0a |
-| Gate C (non-gating forensic board) not published | open — P0a |
-| Stability never enforced at `pr_merge` (`stable:false` does not gate in `parity_gate.py`) | open — P0a |
+| Gate A (geometry) not implemented — `scripts/layout_oracle_gate.py` is a stub whose `extract_layout_from_rustkit` returns `None` | **CLEARED** night 2. Gate built, joined on the P0a-0 key, 14/14 mutation-checked. It has never seen a real RustKit capture — see below. |
+| Gate A has no real RustKit input yet — every capture path needs a GPU adapter, and this trench seat is Linux with none | open. Not a code blocker: `parity-capture --dump-layout` already exists and CI is `macos-14`. The gate's join is proven against all 1593 committed Chrome boxes, but its *output on real engine data* is unobserved until it runs on macOS. |
+| Gate B (paint tolerance + discrete-structural auto-fail) not implemented | **CLEARED** night 3, with one gap: 2 of 3 discrete kinds. `paint_outside_box` is unbuilt because the obvious form was measured to be decoration (0.00% of the viewport lies outside Chrome's rects on all 26 cases) and the attributable form needs Gate A's per-element verdict as a precondition. |
+| Gate C (non-gating forensic board) not published | open — P0a. Cannot be validated on a seat with no RustKit frames: a heatmap of Chrome against itself is blank. |
+| **WebP images do not decode at all** — `DecodeError("Unsupported image format: WebP")` | open, and NOT a parity-instrument blocker: it is a product gap found in Pete's live session 2026-08-06, where every eBay listing photo failed. Recorded here because P5 (images) cannot produce an honest number on any modern site while the dominant photo format on the web is undecodable. Belongs to the engine lane, not this trench — do not fix it inside a re-instrument PR. |
+| Stability never enforced at `pr_merge` (`stable:false` does not gate in `parity_gate.py`) | open — P0a. **Narrower than written here:** `require_stable` does gate, but only for rows with ≥2 runs, and the PR scout phase runs each case once — so nothing is ever held to the bar in practice. Closing it needs the scout phase to run 3 iterations, not just a stricter gate. |
+
+### P0a completion checklist — tick these, do not infer
+
+P0a is complete only when all four are ticked. Two nights have each landed one
+gate and correctly reported P0a incomplete; a night that reads "gates exist"
+and moves to P0b would produce an unattributable first number.
+
+- [x] **Gate A — geometry** (night 2). Never yet run on a real RustKit capture.
+- [x] **Gate B — paint** (night 3). 2 of 3 discrete kinds; `paint_outside_box`
+      deliberately unbuilt (measured decoration; needs Gate A's per-element
+      verdict first).
+- [ ] **Gate C — non-gating forensic board.** Blocked on this seat: a heatmap
+      of Chrome against itself is blank, so it cannot be validated here.
+- [ ] **Stability at `pr_merge`.** Needs the scout phase to run 3 iterations,
+      not a stricter gate. Doable on this seat.
 
 ---
 
@@ -51,7 +68,9 @@ run on master, and not before.
 
 Per plan §4, worked strictly in sequence, one item per night, no skipping:
 
-**P0a-0** export element identity → **P0a** build the four gates → **P0b** first
+**P0a-0** export element identity → **P0a** build the four gates (**2 of 4
+landed: A geometry, B paint; C forensic board and stability-at-`pr_merge`
+remain — P0a is NOT complete**) → **P0b** first
 real `N/26` receipt → **P1** gradient/clip → **P2** grid/sticky → **P3** flex
 residual → **P4** text advance widths → **P5** images + 10-site holdout board →
 **P6** forms and paint-order/stacking.

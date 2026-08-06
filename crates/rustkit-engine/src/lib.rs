@@ -1017,6 +1017,31 @@ impl Engine {
         self.edit_value_in(view_id, node_raw)
     }
 
+    /// Resolve a possibly-relative resource URL against the document being
+    /// laid out.
+    ///
+    /// The load path already resolves and caches under the ABSOLUTE url
+    /// (`discover_images`), while layout and paint used the raw attribute —
+    /// so `src="portal/img/logo.png"` was cached under
+    /// `https://.../portal/img/logo.png` and then looked up under
+    /// `portal/img/logo.png`, matching nothing. Paint additionally re-parsed
+    /// it and logged `Invalid URL for image` once per image PER FRAME (1120
+    /// warnings in one live session). One resolution point, at build, fixes
+    /// the cache key, the natural size, and the paint lookup together.
+    fn resolve_resource_url(&self, raw: &str) -> Option<Url> {
+        let id = self.building_view.get()?;
+        self.resolve_resource_url_in(id, raw)
+    }
+
+    /// Same, against a named view. Used where the build scope has already
+    /// been cleared (display-list assembly runs after the layout build).
+    fn resolve_resource_url_in(&self, id: EngineViewId, raw: &str) -> Option<Url> {
+        match self.views.get(&id).and_then(|v| v.url.as_ref()) {
+            Some(base) => base.join(raw).ok(),
+            None => Url::parse(raw).ok(),
+        }
+    }
+
     /// Live value + caret for a control in a SPECIFIC view.
     pub fn edit_value_in(&self, id: EngineViewId, node_raw: usize) -> Option<(String, usize)> {
         self.views
@@ -1514,27 +1539,43 @@ impl Engine {
             // Done once per layout (not per frame): the renderer only speaks
             // raster textures, so vector images become their own command
             // runs positioned in the image's dest_rect.
-            if !self.svg_cache.is_empty() {
-                let mut expanded = Vec::with_capacity(dl.commands.len());
-                for cmd in dl.commands.drain(..) {
-                    match &cmd {
-                        rustkit_layout::DisplayCommand::Image { url, dest_rect, .. } => {
-                            if let Some(svg) = self.svg_cache.get(url) {
-                                expanded.extend(svg.render(
-                                    dest_rect.x,
-                                    dest_rect.y,
-                                    dest_rect.width,
-                                    dest_rect.height,
-                                ));
-                            } else {
-                                expanded.push(cmd);
-                            }
+            // Normalize resource URLs to absolute, then splice SVGs.
+            //
+            // CSS `url(...)` is parsed without a base (the parser is a free
+            // function with no document in scope), and `<img>` boxes carry
+            // whatever the build produced. The loader caches under ABSOLUTE
+            // urls, so any relative key here misses the cache and then fails
+            // to parse in the paint path — `Invalid URL for image`, once per
+            // image per frame. Rewriting here means the renderer only ever
+            // sees keys that match what the loader stored.
+            let mut expanded = Vec::with_capacity(dl.commands.len());
+            for mut cmd in dl.commands.drain(..) {
+                match &mut cmd {
+                    rustkit_layout::DisplayCommand::Image { url, .. }
+                    | rustkit_layout::DisplayCommand::BackgroundImage { url, .. } => {
+                        if let Some(abs) = self.resolve_resource_url_in(id, url) {
+                            *url = abs.to_string();
                         }
-                        _ => expanded.push(cmd),
                     }
+                    _ => {}
                 }
-                dl.commands = expanded;
+                match &cmd {
+                    rustkit_layout::DisplayCommand::Image { url, dest_rect, .. } => {
+                        if let Some(svg) = self.svg_cache.get(url) {
+                            expanded.extend(svg.render(
+                                dest_rect.x,
+                                dest_rect.y,
+                                dest_rect.width,
+                                dest_rect.height,
+                            ));
+                            continue;
+                        }
+                    }
+                    _ => {}
+                }
+                expanded.push(cmd);
             }
+            dl.commands = expanded;
             dl
         };
 
@@ -2154,6 +2195,13 @@ impl Engine {
                     // Layout previously never consulted ImageManager and gave every
                     // CSS-sized <img> a 150x150 placeholder, so pages sized by
                     // stylesheet rules (not width=/height= attributes) drifted.
+                    // Absolute from here on: the box, the cache lookup and
+                    // the display command must all use the same key.
+                    let src = self
+                        .resolve_resource_url(&src)
+                        .map(|u| u.to_string())
+                        .unwrap_or(src);
+
                     let loaded = Url::parse(&src).ok().and_then(|parsed_url| {
                         if let Some(cached) = self.image_manager.get_cached(&parsed_url) {
                             Some(cached)
@@ -10833,5 +10881,110 @@ mod edit_state_lifecycle_tests {
             "the new page's control must have no inherited value"
         );
         assert_eq!(engine.focused_node(id), None, "focus must not survive either");
+    }
+}
+
+#[cfg(test)]
+mod relative_url_tests {
+    use super::*;
+
+    // ---- relative resource URLs (live session, 2026-08-06) ----
+    //
+    // Wikipedia painted no images and emitted 1120 `Invalid URL for image`
+    // warnings in one session. The loader resolves and caches under the
+    // ABSOLUTE url; layout and paint used the raw attribute. Cached under
+    // https://www.wikipedia.org/portal/img/logo.png, looked up under
+    // portal/img/logo.png — a miss every time, plus a parse failure per
+    // image PER FRAME.
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_relative_image_src_reaches_the_display_list_absolute() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("view");
+
+        // Exactly Wikipedia's shape, including the CSS background that takes
+        // a separate path through the parser (which has no base in scope).
+        engine
+            .load_html(
+                id,
+                r#"<html><body>
+                     <img src="portal/wikipedia.org/assets/img/Wikipedia-logo-v2.png">
+                     <div style="background-image: url(portal/wikipedia.org/assets/img/sprite.svg); width:10px; height:10px"></div>
+                   </body></html>"#,
+            )
+            .expect("load_html");
+
+        // load_html sets the base to about:blank, which is correct for inline
+        // content and useless here. Put the view in the state a real
+        // navigation leaves it in — document plus document URL — then rebuild.
+        {
+            let view = engine.views.get_mut(&id).expect("view");
+            view.url = Some(Url::parse("https://www.wikipedia.org/").unwrap());
+        }
+        engine.relayout(id).expect("relayout");
+
+        let dl = engine
+            .views
+            .get(&id)
+            .unwrap()
+            .display_list
+            .as_ref()
+            .expect("display list");
+
+        let urls: Vec<&str> = dl
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                rustkit_layout::DisplayCommand::Image { url, .. }
+                | rustkit_layout::DisplayCommand::BackgroundImage { url, .. } => {
+                    Some(url.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert!(!urls.is_empty(), "precondition: the page must emit image commands");
+        for u in &urls {
+            assert!(
+                Url::parse(u).is_ok(),
+                "every image URL reaching paint must parse; got {u:?} — a relative \
+                 key here is both a cache miss and a per-frame warning"
+            );
+            assert!(
+                u.starts_with("https://www.wikipedia.org/portal/"),
+                "must resolve against the document base, got {u:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn an_absolute_src_is_left_alone() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("view");
+        {
+            let view = engine.views.get_mut(&id).expect("view");
+            view.url = Some(Url::parse("https://example.com/a/b").unwrap());
+        }
+        assert_eq!(
+            engine
+                .resolve_resource_url_in(id, "https://cdn.example.net/x.png")
+                .map(|u| u.to_string())
+                .as_deref(),
+            Some("https://cdn.example.net/x.png")
+        );
+        // Root-relative resolves against the ORIGIN, not the directory.
+        assert_eq!(
+            engine
+                .resolve_resource_url_in(id, "/x.png")
+                .map(|u| u.to_string())
+                .as_deref(),
+            Some("https://example.com/x.png")
+        );
     }
 }
