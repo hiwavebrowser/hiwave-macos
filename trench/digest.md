@@ -1475,3 +1475,268 @@ Cheapest of the three groups and the last block in `BASELINE.md`'s order.
 `box-sizing` is the one worth care: it silently redefines what `width` means,
 so the assertion should be a border box that differs from the declared width,
 cross-checked against layout rather than read back off the cascade.
+
+---
+
+## 2026-08-06 — night 9 (`box-sizing`, `position`)
+
+**Metric: 6 of 12 → 8 of 12**
+
+**Moved no → yes: `box-sizing` and `position`.** That is the first half of the
+box group. The other half — `overflow-x` and `opacity` — is **reported but not
+counted**, and the reason is a finding rather than a shortfall in the export.
+
+### The stored prompt is still stale (fourth night), and tonight it nearly won
+
+The firing again described the metric as trench 1's "four Tier-1 MCP reads" and
+told me to stop at 4 of 4. Worse, exactly as night 8 predicted, the scheduler's
+checkout was on **master**, whose `trench/digest.md` ends at night 3 and whose
+`BASELINE.md` has no trench 2 in it. Prompt and repo agreed on "4 of 4, stop
+condition met"; only fetching this branch disagreed. Night 8's warning inside
+`BASELINE.md` is what stopped me from closing the loop on a stale metric — it
+worked, but it is a tripwire, not a fix, and it only works if the next night
+reads the branch's copy rather than master's. Decision below, unchanged.
+
+### The assertions that prove it
+
+Both properties are **keywords**, so no unit conversion or shorthand expansion
+can show the value was computed rather than echoed. Two other things do it.
+
+First, the fixture's last rule matches the same elements and loses:
+
+```css
+.bordered  { width: 200px; height: 40px; padding: 10px; border: 5px solid #333;
+             box-sizing: border-box }
+.content   { width: 200px; height: 40px; padding: 10px; border: 5px solid #333 }
+.host      { width: 300px }
+.floater   { position: absolute; width: 50px; height: 40px }
+div { box-sizing: content-box; position: static }   /* LAST in the sheet — must lose */
+```
+
+So "echo the final matching declaration" and "report what the cascade decided"
+give **different answers here**, and only the second is right:
+
+```python
+assert bordered["computed"]["box-sizing"] == "border-box", bordered["computed"]
+bs = next(d for d in bordered["declared"] if d["property"] == "box-sizing")
+assert bs["winner"]["selector"] == ".bordered", bs["winner"]
+assert bs["winner"]["specificity"] == [0, 1, 0], bs["winner"]
+assert len(bs["overridden"]) == 1, bs["overridden"]
+assert bs["overridden"][0]["selector"] == "div", bs["overridden"]
+assert bs["overridden"][0]["value"] == "content-box", bs["overridden"]
+```
+
+Second — and this is the half that makes them **count** — the reported value is
+cross-checked against the geometry layout produced, which differs observably
+between the two settings. `border-box` means the declared 200px **is** the
+border box, so the content shrinks to 200 − 2·10 − 2·5 = 170 and 40 − 20 − 10 =
+10; `.content` declares the same width, padding and border and differs only in
+`box-sizing`, giving 200 + 2·10 + 2·5 = 230:
+
+```python
+assert bordered_box["border_box"]["height"] == 40.0, bordered_box["border_box"]
+assert bordered_box["content_rect"]["width"] == 170.0, bordered_box["content_rect"]
+assert bordered_box["content_rect"]["height"] == 10.0, bordered_box["content_rect"]
+# ...and the control proves the engine is not simply always doing that:
+assert content_box["content_rect"]["width"] == 200.0, content_box["content_rect"]
+assert content_box["border_box"]["height"] == 70.0, content_box["border_box"]
+```
+
+`position` is cross-checked the same way, against **being in flow at all**:
+`.host` is auto-height around a single 40px child, so a static child would make
+it 40. Absolute takes the child out of flow, the parent collapses to 0, the
+child is still really 40 tall, and the next block starts at the host's own y —
+i.e. the 40px box reserved no space for itself.
+
+```python
+assert floater["computed"]["position"] == "absolute", floater["computed"]
+assert pos["overridden"][0]["value"] == "static", pos["overridden"]   # the later rule
+assert host_box["border_box"]["height"] == 0.0, host_box["border_box"]
+assert host_box["children"][0]["border_box"]["height"] == 40.0, host_box["children"][0]
+assert clipped_box["border_box"]["y"] == host_box["border_box"]["y"], \
+    (clipped_box["border_box"], host_box["border_box"])
+```
+
+```
+$ cargo build -p hiwave-mcp && python3 crates/hiwave-mcp/smoke.py
+ok  initialize        {'name': 'hiwave-mcp', 'version': '0.1.0'}
+ok  tools/list        ['hiwave_open', 'hiwave_layout', 'hiwave_display_list', 'hiwave_style', 'hiwave_diff', 'hiwave_screenshot', 'hiwave_status']
+ok  hiwave_layout-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_display_list-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_style-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_open       {'height': 600, 'loaded': '<inline>', 'width': 800}
+ok  hiwave_status     session survives between calls
+ok  hiwave_layout     .hero border_box = 432.0x152.0 (content-box: 400+2*16 x 120+2*16)
+ok  hiwave_display_list  .hero painted rgb(0,136,204) over 432.0x152.0 at (0.0,0.0) — same rect layout computed
+ok  paint order       canvas[0] < hero[1] < text[2]
+ok  advance contract  11 advances for 11 chars, font_size=32.0 weight=700 x=16.0
+ok  hiwave_style      width=400px won by .hero [0, 1, 0] over div [0, 0, 1] (later in source, lower specificity)
+ok  computed expansion padding-left=16px, cited to `padding: 16px` on .hero (via_shorthand) — no rule spells the longhand
+ok  origin split      h1 font-weight=700 winner=None (UA, no rule to cite); font-size=32px winner=h1 (author)
+ok  line-height       .copy 20px x 1.5 = 30px — authored '1.5', computed 30px (resolved, not echoed)
+ok  normal not faked  .hero line-height=normal (keyword, not px — resolving it needs font metrics)
+ok  inherited origin  span font-family='Georgia, serif' text-align=center both origin=inherited; display still UA-or-initial
+ok  KNOWN DIVERGENCE  span line-height reported 'normal' but laid out at 30px — inherited in build_layout_box, after the trace
+ok  font-style        span computed=italic origin=inherited (declares nothing); paint drew it font_style=1, h1 still 0
+ok  letter-spacing    .spaced 0.1em x 20px = 2px (authored '0.1em'); every advance is exactly +2.0 over .plain — [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+ok  KNOWN DIVERGENCE  .pre keeps 'a  b' (4 advances) but its nested span collapsed 'c  d' to 'c d' — white-space is not inherited onto elements
+ok  border shorthand  .framed border-top-width=5px (0.25em x 20px) and border-top-color=rgba(204, 102, 0, 1), both cited to `border` on .framed; layout reserved 5.0 and paint drew a 210.0x5.0 band
+ok  no false citation `border: 2px solid` cites the width and NOT border-top-color (the declaration carried no colour)
+ok  longhand wins     .overruled border-top-width=9px beats `border: 3px solid #093`, which is reported in overridden; layout reserved {'bottom': 3.0, 'left': 3.0, 'right': 3.0, 'top': 9.0} and a 52.0-tall box
+ok  box-sizing        .bordered border-box: declared 200px IS the border box, content 170.0x10.0; .content content-box, same declarations, border box 230.0x70.0
+ok  position          .floater absolute (beat `div{position:static}`, last in sheet); .host is 0.0 tall around a 40.0-tall child and the next block starts at the same y — out of flow
+ok  KNOWN GAP        .clipped overflow-x=hidden cited to `overflow`, but it lays out identically to .unclipped (both 15.0 tall, kid at +10.0) and paint pushes no clip — reported, not counted
+ok  KNOWN GAP        .faded opacity=0.5 computed, but paint filled it at a=1.0 — opacity never reaches the solid-colour path, so it is reported, not counted
+ok  selector guard    refused 'div p'
+ok  hiwave_diff       hero/layout agrees with the spec reference on 12/12 hand-derived values (incl. border_box 432x152)
+ok  hiwave_diff       hero/display_list agrees on 17 values (paint order, #08c over 432x152, 32px/700 text at x=16)
+ok  hiwave_diff       important-width DISAGREES: border_box.width expected 100.0 (spec: !important wins), engine computed 400.0 — 2 of 4, height and x still agree
+ok  session isolation open page still 432x152 after three diffs
+ok  diff guards       unknown stage, unknown case, unknown reference, path escape and missing argument all refused
+ok  hiwave_screenshot 1440015 bytes at ppm
+ok  argument guard    pass either `html` or `path`, not both
+
+PASS: hiwave-mcp serves the engine's computed layout, its paint commands, the cascade behind them, AND whether any of it agrees with a committed reference
+```
+
+**Checked that the gate can go red — three times, and the third is the point.**
+
+1. Cascade drops `border-box` (`"border-box" => BoxSizing::ContentBox` in
+   `apply_style_property`). The tool follows the engine rather than the
+   stylesheet, and fails on the value:
+   ```
+   AssertionError: {... 'box-sizing': 'content-box', 'height': '40px', 'padding-left': '10px', ...}
+   ```
+2. Same cascade break, plus the **tool forced to report `border-box` anyway**
+   (`"box-sizing" => "border-box".to_string()`). This is the failure clause 3
+   exists to catch: a plausible value, correct provenance, and an engine that
+   did something else. The value assertion passes; the cross-check catches it:
+   ```
+   AssertionError: no 200-wide box — expected .bordered (border-box)
+   ```
+   Without the layout half, that perturbation ships green. With it, the
+   property genuinely counts.
+3. Cascade drops `absolute` (`"absolute" => Position::Static`):
+   ```
+   AssertionError: {... 'position': 'static', 'width': '50px', ...}
+   ```
+
+All three reverted; `grep -r RED-CHECK crates/` returns nothing on the
+committed tree.
+
+### Two findings, which is why the box group is half-counted
+
+Both properties parse, both reach `ComputedStyle`, and both now report a value
+with honest provenance. Neither counts, because clause 3 asks whether the
+engine **used** the value, and for these two nothing downstream does.
+
+- **`overflow-x` changes nothing observable.** The citation half is genuinely
+  good: no rule spells the longhand, and the winner names the `overflow`
+  shorthand that really wrote it, measured by `longhands_written`. But
+  `overflow_x` reaches layout only through `establishes_bfc`
+  (`margin_collapse.rs`), and that distinction has no consequence in the block
+  path — `.clipped` (`hidden`, a BFC) and `.unclipped` (`visible`, not one) lay
+  identical children out identically: both 15 tall, both with the kid's 10px
+  top margin retained inside. In a browser these differ, because a BFC parent
+  keeps the child's margin in and a flow parent lets it collapse through.
+  Nothing clips in paint either — **there is no `push_clip` for overflow at
+  all**, only for `background-clip`. So `overflow: hidden` on a real page is
+  currently decorative in RustKit, which is a rendering finding well beyond
+  this export.
+- **`opacity` never reaches paint.** The cascade clamps it to [0,1], so the
+  reported `0.5` is computed rather than echoed. But paint reads `opacity` only
+  on the `Image` command, and the renderer then **discards it** (`opacity: _`
+  in the `DisplayCommand::Image` arm, `rustkit-renderer/src/lib.rs`). The
+  `.faded` fill comes back at `a=1.0`, so a tool reporting 0.5 would be
+  describing a transparency the engine does not draw.
+
+Both are pinned by smoke tripwires that fail when the gap closes, in the shape
+nights 6 and 7 used for `line-height` and `white-space`: whoever makes overflow
+clip, or wires opacity into the solid-colour path, will see those assertions go
+red and should then assert the new behaviour and **count** the property.
+
+Per `BASELINE.md`'s scope limit I did **not** fix either. Both are rendering
+changes that would move the parity corpus, and this is an export loop.
+
+### What the engine still cannot answer
+
+- **Four of twelve remain**, and the two cheap ones are gone. `overflow-x` and
+  `opacity` are implemented-but-uncounted for the reasons above; `line-height`
+  (night 6) and `white-space` (night 7) remain implemented-but-uncounted
+  because they inherit **below** the cascade. Nothing tonight changes either
+  pair. **All four now need an engine change, not an export change** — that is
+  a real shift in the shape of the remaining work, and the next night should
+  know it before starting.
+- **`position` is answered for the value, not for the consequences.** `top`,
+  `left`, `right`, `bottom`, `z-index` and the containing-block chain are not
+  in the recorded set, so an agent can learn a box is absolute but not where it
+  was told to go or what it was positioned against.
+- **`overflow-y` is not exported**, only `overflow-x` — the diagnosis set names
+  the x axis, and the shorthand writes both, so an agent asking about vertical
+  clipping gets nothing. One table entry, no new mechanism, deliberately left
+  so tonight's claim is exactly what was asserted.
+- **Only the TOP border side is exported** (night 8's gap, unchanged), and
+  **`border-style` is still invisible**, so `border: 3px none` and
+  `border: 3px solid` report identically.
+- **Non-px lengths still come back as Rust `Debug` strings** — visible in
+  tonight's own red-check output as `'margin-top': 'Zero'`. Named by nights 6,
+  7 and 8 as the cheapest correct thing left, still not done. It changes values
+  the existing `hiwave_diff` references quote, so it wants its own slice.
+- The fixture is now **66px from the viewport's 600px height** (body = 534),
+  and two of tonight's red-checks initially failed on the pre-existing
+  `800x600 canvas` assertion rather than on the property under test, because
+  the perturbed page grew past the viewport. I shrank the new elements to buy
+  headroom rather than touch that assertion. The next night that adds fixture
+  elements will hit this — either budget height, or give the box group its own
+  page.
+- Everything trench 1 named is still true: `!important` is dead in the cascade
+  (pinned by the `important-width` diff case), UA-origin properties have no
+  rule to cite, `hiwave_style` takes simple selectors only, capture-kind
+  references are refused, `style` is not a diffable stage, and there is no
+  real-page corpus.
+
+### Tests
+
+`cargo test --workspace --no-fail-fast`, excluding `hiwave-app` and
+`hiwave-smoke` (need GTK — `gdk-sys` build fails) and `rustkit-media` (needs
+ALSA): **913 passed, 1 failed**. The one failure is
+`rustkit-layout::probe_normal_line_height_vs_chrome` — the same pre-existing
+failure nights 1-3, 7 and 8 reported, with the same `-apple-system` signature
+(`14.00` against Chrome's `17.00`, `normal_line_height_probe`). It cannot be
+tonight's: the only crate changed is `rustkit-engine`, and `rustkit-layout`
+depends on `rustkit-dom`, `rustkit-css` and `rustkit-text` — not on
+`rustkit-engine`, so this night's change cannot reach it.
+
+`cargo build --release -p parity-capture` — the only thing CI actually builds —
+finishes clean, so nothing here slips the workspace gate.
+
+Scope stayed inside `crates/rustkit-engine/src/lib.rs` (three tables —
+`COMPUTED_PROPERTIES`, `with_sentinel`, `computed_value_of`) and
+`crates/hiwave-mcp/smoke.py`. **No engine behaviour changed:** the three tables
+are read-only reporting paths, and `with_sentinel` only ever writes to
+throwaway copies. No parity harness, no `.github/`, no Windows or Linux port
+work, and no existing export altered — unlike night 8, this night supersedes
+no prior assertion. The runner needed `mesa-vulkan-drivers` installed again
+(fresh container; environment only, nothing committed).
+
+### Decisions needed from Pete
+
+1. **The nightly prompt still describes trench 1 — fourth night, and the
+   failure mode is now demonstrated rather than hypothetical.** Tonight the
+   scheduler's checkout was on `master`, where both `trench/digest.md` and
+   `BASELINE.md` still say "4 of 4, stop condition met". Only night 8's warning
+   block inside this branch's `BASELINE.md` prevented a wrongly-closed loop,
+   and that block only helps a night that thinks to read the branch. Two ways
+   out, both yours and both cheap: repoint the stored prompt at trench 2, or
+   land this branch on master so a default checkout tells the truth. I cannot
+   do either from inside a session — the routine was created via the API, and
+   agents may only edit routines they created.
+
+Next slice: the remaining four all need engine work before they can count, so
+the next night should pick the ONE whose engine change is smallest and treat
+the export as the easy half. My read: **`overflow-x`**, by making paint push a
+clip for `overflow: hidden` — it is the only one of the four whose gap is also
+a live rendering bug (`overflow: hidden` currently does not clip anything), so
+the engine change pays for itself in the parity corpus rather than only in the
+metric. That is a rendering change and therefore a corpus event, so it wants
+Pete's nod before it starts, not after.
