@@ -231,3 +231,152 @@ needs real heatmaps, and neither can be produced on this seat. Writing them
 blind would have added two gates whose only evidence is that they look right —
 which is the kind of instrument this campaign was opened to stop shipping.
 So: one gate, measured. P0a continues next night.
+
+---
+
+## 2026-08-06
+
+**Metric: UNMEASURABLE → UNMEASURABLE.** Gate B now exists alongside Gate A,
+but neither has ever been pointed at a real RustKit frame: every capture path
+needs a GPU adapter and this seat is Linux without one. Gate C and the
+stability hole remain. The number arrives at P0b, on macOS, as planned.
+
+**P-item: P0a (build the four gates). NOT completed — 2 of 4 landed.**
+Gate A (geometry, night 2) and Gate B (paint) are done. Gate C (non-gating
+forensic board) and stability at `pr_merge`/`nightly` remain. Gate B itself
+implements 2 of the 3 discrete kinds; the third is specified and deliberately
+unbuilt, reasoning below.
+
+### Commits
+
+- `2559d76` — Gate B: `scripts/paint_oracle_gate.py` + `scripts/parity_image.py`.
+  Percentage half at ≥99% within the pinned tolerance, plus discrete structural
+  auto-fails. 43 tests.
+- `cd4f62a` — close the three gaps the mutation sweep found; sweep goes 23/26 →
+  26/26 RED.
+
+Zero engine behavior changes in both, same as Gate A, so P0b's first `N/26`
+stays attributable.
+
+### What Gate B is
+
+Two halves, and the second is the one that matters. The percentage half is
+deliberately generous — Chrome is not bit-stable against itself on text AA or
+gradient dither, so most paint deltas really are noise. That generosity is also
+how a percentage gets bought: plan §1's collapsed shelf scored 3.71% and passed.
+So structural paint bugs auto-fail regardless of percentage.
+
+Both implemented detectors were shown firing on defects injected into real
+committed captures **while the percentage half passes**:
+
+| Injected defect | Case | Percentage | Verdict |
+|---|---|---|---|
+| flat fill recoloured by 6/255 on `#cb1` | form-controls | 99.9916% (pass) | RED — `wrong_solid_color` |
+| 36 corner-notch px painted with the card's own fill | card-grid | 99.9965% (pass) | RED — `missing_clip` |
+
+`#cb1` is 81px of a 960000px viewport — 0.008%. That is #83's shipped class
+(form controls painting white on `background: transparent`) and it now fails.
+
+The pinned constant is **read** from `docs/VISUAL_DIFF_POLICY.md`, not copied.
+
+### Measured, not inspected
+
+- **False-positive floor**: Chrome scored against itself, all 26 cases —
+  26/26 green, 0 discrete failures. A detector that fires here is broken.
+- **Detector surface**: 52 flat-interior elements across 14/26 cases;
+  232 testable rounded corners across 12/26 cases.
+- **Decoder**: byte-identical to an independent decoder on all 32 committed
+  baselines.
+
+### Mutation-check results
+
+26 mutations, each applied, mutant compiled, suite observed, source restored.
+**26/26 RED** on the clean run (23/26 on the first pass; all three survivors
+resolved and re-swept). Full table in `cd4f62a`. Highlights:
+
+| Mutation | Result |
+|---|---|
+| pass bar 0.99 → 0.5 | RED |
+| tolerance hardcoded instead of cited from the policy | RED |
+| only the red channel compared / channels averaged | RED |
+| either discrete detector removed | RED |
+| `wrong_solid_color` fires without attribution | RED |
+| notch demands any pixel rather than the whole notch | RED |
+| unmeasured case reported green | RED |
+| `gate_passes` `measured == 0` tripwire removed | RED |
+| any viewport's capture accepted | RED |
+| truncated PPM / short IDAT padded instead of refused | RED |
+
+### Decisions needed from Pete
+
+1. `capture_baseline.mjs` still emits `div.card.featured` where every committed
+   baseline says `div.card featured` — regenerating baselines today silently
+   breaks 572 join keys and both gates with them; pin the script back (my
+   recommendation) or regenerate and re-mirror the engine? **Open since night 1
+   and now blocking two gates rather than one.**
+2. Should Gates A and B land in `.github/workflows/parity.yml` as advisory
+   (print receipts, do not block) for one cycle, so their behaviour on real
+   macOS captures is observed before they can red-lock PRs? I have not wired
+   either in, pending this.
+3. `docs/VISUAL_DIFF_POLICY.md` states two tolerances, not the one plan §2
+   assumes: 5 for every gating suite and 10 under "Live Sites (non-gating)". I
+   read the pinned value from the default block and allow a section to differ
+   only if its heading says non-gating. Confirm that is the intended reading, or
+   should the 10 be retired too?
+
+### Surprises
+
+- **The obvious `paint_outside_box` detector is decoration, and measuring first
+  is the only reason that was caught.** "Differing pixels outside every Chrome
+  element box" sounds like exactly the #86 signature. Across all 26 gating
+  cases, **0.00%** of the viewport lies outside the union of Chrome's rects —
+  `body` and its block descendants tile the page — so it can never fire on any
+  case. It would have shipped green forever and been counted as one of the three
+  required kinds. It is not implemented; the docstring records the measurement.
+  The attributable version needs the element's geometry known-correct first, or
+  a sibling that shifted into the gap paints identical evidence and Gate B
+  auto-fails a case for what is really Gate A's layout delta. That is the next
+  unit on this gate.
+- **My first `missing_clip` had almost no surface either, for a different
+  reason.** Requiring a flat WHOLE interior to attribute the fill left exactly
+  **one** testable element in all 26 cases: cards and buttons have text and
+  children in the middle, so their interiors are never flat. Sampling the fill
+  at the corner instead — inside the arc, where the fill genuinely is — took it
+  from 1 element to 232 testable corners. Both versions passed their unit tests
+  identically. Only counting the surface told them apart.
+- **A same-length mutation leaked through `__pycache__`.** After the Paeth
+  mutation the harness called the restored file red. The source was fine; the
+  stale `.pyc` was not. Same byte length meant unchanged size and mtime, so
+  CPython reused the mutant's bytecode. This surfaced in its harmless
+  direction. The harmful one is identical: an unmutated `.pyc` served *during* a
+  mutation run reports a real guard as decoration and gets it deleted. Night 2's
+  harness lied twice; this is the third way, and it is not one the compile-check
+  fix covers. Harness now clears `__pycache__` and sets
+  `PYTHONDONTWRITEBYTECODE`. The full re-run reproduced all 23 original REDs
+  unchanged, so nothing earlier was contaminated.
+- **One "surviving guard" was an invalid mutation, not a gap.** `pa <= pb` →
+  `pa < pb` in the Paeth predictor changes nothing: exhaustive check over all
+  16,777,216 byte triples finds zero disagreements, because `pa == pb` with
+  `a != b` forces `c` to the midpoint and hence `pc == 0`, so both forms fall
+  through to `c`. Worth stating because the sweep's first pass would otherwise
+  read as three decorative guards when it was two plus a bad probe.
+
+### Why P0a stopped at two gates
+
+Same reason as night 2, and it is not going to change on this seat: Gate C is a
+raw-pixel heatmap board, and there are no RustKit frames here to build one from.
+Everything Gate B claims tonight is either measured against the 32 committed
+Chrome baselines or injected into them. Gate C's output cannot be validated that
+way — a heatmap of Chrome against itself is a blank image, which proves nothing
+about the board. Writing it blind would add a third gate whose only evidence is
+that it looks right.
+
+Stability at `pr_merge` is the remaining piece that *can* be done here, since it
+is a change to `parity_gate.py`'s existing logic rather than a new instrument.
+Worth flagging for the next night: the hole is narrower than the baseline file
+says. `require_stable` does gate — but only for rows with ≥2 runs, and the PR
+scout phase runs each case once, so in practice nothing is ever held to the
+stability bar at `pr_merge`. Closing it naively red-locks every PR the moment
+data flows, which is why the carve-out is there. It needs the scout phase to run
+3 iterations, not just a stricter gate, and that is a change to how the swarm is
+invoked.
