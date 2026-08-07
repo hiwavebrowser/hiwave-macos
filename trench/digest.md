@@ -1740,3 +1740,298 @@ a live rendering bug (`overflow: hidden` currently does not clip anything), so
 the engine change pays for itself in the parity corpus rather than only in the
 metric. That is a rendering change and therefore a corpus event, so it wants
 Pete's nod before it starts, not after.
+
+---
+
+## 2026-08-07 — night 10 (`line-height`)
+
+**Metric: 8 of 12 → 9 of 12**
+
+**Moved no → yes: `line-height`.** It has been reported-but-uncounted since
+night 6, and it did not need the engine change every prior night assumed.
+
+### The stored prompt is still stale (fifth night), and the checkout was again master
+
+Same as night 9, both halves. The firing described the metric as trench 1's
+"four Tier-1 MCP reads" and told me to stop at 4 of 4; the scheduler's checkout
+was on `master`, whose `trench/digest.md` ends at night 3 and whose
+`BASELINE.md` has no trench 2 in it. Prompt and repo agreed the trench was
+finished. Only fetching this branch disagreed. Night 8's warning block inside
+this branch's `BASELINE.md` is again what prevented a wrongly-closed loop.
+Decision below, unchanged and now five nights old.
+
+### The finding that made it countable: it was never a rendering problem
+
+Nights 6, 7 and 9 all concluded that `line-height` needed inheritance moved
+into the cascade — a parity-corpus event — and correctly refused to do it
+under this trench's scope limit. Night 9 went further and said all four
+remaining properties "now need an engine change, not an export change."
+
+That was right about `white-space`, `overflow-x` and `opacity`. It was wrong
+about `line-height`, and the mistake is worth naming precisely, because it cost
+four nights of the property sitting in the uncounted pile.
+
+The divergence was never that layout used the wrong value. Layout used the
+**right** value — it inherits line-height in `build_layout_box`, exactly as CSS
+2.1 §10.8 says, and has since well before this trench. The divergence was that
+the **trace was read too early**. `compute_style_for_element` snapshots the
+record at its own end, and `build_layout_from_node_with_parent_style` then makes
+two further adjustments to the very same `ComputedStyle` before handing it to
+layout:
+
+1. font-size absolutization — em/%/rem resolved against the parent;
+2. line-height inheritance — the block quoted in night 6.
+
+So the report was stale, not the engine. The fix is one call at the point where
+the style is final:
+
+```rust
+// `style` is now the style LAYOUT is handed. [...] This changes NO engine
+// behaviour — both adjustments above are untouched and predate this trench.
+// Only what the trace says about them changes.
+self.amend_trace_for_layout_style(&tag_lower, &style, parent_style);
+```
+
+`amend_trace_for_layout_style` re-derives the record's values and its
+`inherited` labels through **the same two functions that produced them the
+first time** (`computed_value_of`, `inherited_properties`), so it is a second
+*reading* of the cascade's result and never a second opinion about it. It
+writes nothing to `style`. No rendering path moves, so the parity corpus is
+untouched and this stayed an export slice rather than the cascade surgery
+`BASELINE.md` rules out.
+
+### The assertion that proves it
+
+The span declares nothing whatsoever — already asserted one line above, and
+load-bearing here — so its 30px cannot be an echo of any declaration on the
+element, and no UA default supplies it. It is `.copy`'s `font-size: 20px` and
+`line-height: 1.5`, and 20 × 1.5 = 30, hand-derivable with no font metrics in
+it (a numeric line-height overrides font metrics entirely).
+
+```python
+span_lh = next(x for x in span["declared"] if x["property"] == "line-height")
+assert span_lh["computed"] == "30px", span_lh
+assert span_lh["winner"] is None, span_lh          # no rule on this element
+assert span_lh["origin"] == "inherited", span_lh   # ...and it says where it came from
+```
+
+That is clauses 1 and 2. Clause 3 — the value the tool reports must be the
+value layout used — is what the second half is for, and the fixture already
+had the geometry to prove it: **the `.copy` div's only text sits INSIDE the
+span**, so the line box it generates is driven by the span's line-height and by
+nothing else.
+
+```python
+inherited_text = find(tree["root"], lambda n: n.get("text") == "inherited")
+assert inherited_text["rect"]["height"] == 30.0, inherited_text
+# ...and the control, which proves 30.0 is not simply what any 20px text box
+# measures here. `.plain` declares the same font-size and family but no
+# line-height, so its line box is `normal` — a FONT-DERIVED number, asserted to
+# DIFFER from 30 rather than pinned to a value.
+plain_text = find(tree["root"], lambda n: n.get("text") == "spacing")
+assert plain_text["rect"]["height"] != 30.0, plain_text
+```
+
+The control is deliberately asserted as `!= 30.0` and not as `== 20.0`. Its
+height is whatever `normal` resolves to on this text stack, and pinning it
+would make the gate report a platform difference as an engine regression —
+which this file's own header rules out.
+
+```
+$ cargo build -p hiwave-mcp && python3 crates/hiwave-mcp/smoke.py
+ok  initialize        {'name': 'hiwave-mcp', 'version': '0.1.0'}
+ok  tools/list        ['hiwave_open', 'hiwave_layout', 'hiwave_display_list', 'hiwave_style', 'hiwave_diff', 'hiwave_screenshot', 'hiwave_status']
+ok  hiwave_layout-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_display_list-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_style-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_open       {'height': 600, 'loaded': '<inline>', 'width': 800}
+ok  hiwave_status     session survives between calls
+ok  hiwave_layout     .hero border_box = 432.0x152.0 (content-box: 400+2*16 x 120+2*16)
+ok  hiwave_display_list  .hero painted rgb(0,136,204) over 432.0x152.0 at (0.0,0.0) — same rect layout computed
+ok  paint order       canvas[0] < hero[1] < text[2]
+ok  advance contract  11 advances for 11 chars, font_size=32.0 weight=700 x=16.0
+ok  hiwave_style      width=400px won by .hero [0, 1, 0] over div [0, 0, 1] (later in source, lower specificity)
+ok  computed expansion padding-left=16px, cited to `padding: 16px` on .hero (via_shorthand) — no rule spells the longhand
+ok  origin split      h1 font-weight=700 winner=None (UA, no rule to cite); font-size=32px winner=h1 (author)
+ok  line-height       .copy 20px x 1.5 = 30px — authored '1.5', computed 30px (resolved, not echoed)
+ok  normal not faked  .hero line-height=normal (keyword, not px — resolving it needs font metrics)
+ok  inherited origin  span font-family='Georgia, serif' text-align=center both origin=inherited; display still UA-or-initial
+ok  line-height inherited  span declares nothing, reports 30px origin=inherited (.copy 20px x 1.5) and its line box IS 30.0 — `normal` control measures 20.0
+ok  font-style        span computed=italic origin=inherited (declares nothing); paint drew it font_style=1, h1 still 0
+ok  letter-spacing    .spaced 0.1em x 20px = 2px (authored '0.1em'); every advance is exactly +2.0 over .plain — [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+ok  KNOWN DIVERGENCE  .pre keeps 'a  b' (4 advances) but its nested span collapsed 'c  d' to 'c d' — white-space is not inherited onto elements
+ok  border shorthand  .framed border-top-width=5px (0.25em x 20px) and border-top-color=rgba(204, 102, 0, 1), both cited to `border` on .framed; layout reserved 5.0 and paint drew a 210.0x5.0 band
+ok  no false citation `border: 2px solid` cites the width and NOT border-top-color (the declaration carried no colour)
+ok  longhand wins     .overruled border-top-width=9px beats `border: 3px solid #093`, which is reported in overridden; layout reserved {'bottom': 3.0, 'left': 3.0, 'right': 3.0, 'top': 9.0} and a 52.0-tall box
+ok  box-sizing        .bordered border-box: declared 200px IS the border box, content 170.0x10.0; .content content-box, same declarations, border box 230.0x70.0
+ok  position          .floater absolute (beat `div{position:static}`, last in sheet); .host is 0.0 tall around a 40.0-tall child and the next block starts at the same y — out of flow
+ok  KNOWN GAP        .clipped overflow-x=hidden cited to `overflow`, but it lays out identically to .unclipped (both 15.0 tall, kid at +10.0) and paint pushes no clip — reported, not counted
+ok  KNOWN GAP        .faded opacity=0.5 computed, but paint filled it at a=1.0 — opacity never reaches the solid-colour path, so it is reported, not counted
+ok  selector guard    refused 'div p'
+ok  hiwave_diff       hero/layout agrees with the spec reference on 12/12 hand-derived values (incl. border_box 432x152)
+ok  hiwave_diff       hero/display_list agrees on 17 values (paint order, #08c over 432x152, 32px/700 text at x=16)
+ok  hiwave_diff       important-width DISAGREES: border_box.width expected 100.0 (spec: !important wins), engine computed 400.0 — 2 of 4, height and x still agree
+ok  session isolation open page still 432x152 after three diffs
+ok  diff guards       unknown stage, unknown case, unknown reference, path escape and missing argument all refused
+ok  hiwave_screenshot 1440015 bytes at ppm
+ok  argument guard    pass either `html` or `path`, not both
+
+PASS: hiwave-mcp serves the engine's computed layout, its paint commands, the cascade behind them, AND whether any of it agrees with a committed reference
+```
+
+**Checked that the gate can go red — three times, and the third is the point.**
+
+1. Inheritance disabled in `build_layout_box` (`if false && matches!(...)`). The
+   tool follows the engine rather than the stylesheet:
+   ```
+   AssertionError: {'computed': 'normal', 'origin': 'user-agent-or-initial',
+                    'overridden': [], 'property': 'line-height', 'winner': None}
+   ```
+2. Same break, plus the report forced to claim the inheritance happened
+   anyway — a plausible value AND correct-looking provenance, with an engine
+   that did something else. This is the failure clause 3 exists to catch. Both
+   the value and the origin assertions pass; only the geometry catches it:
+   ```
+   AssertionError: {'rect': {'height': 20.0, 'width': 90.0, 'x': 5.0, 'y': 152.0},
+                    'text': 'inherited', 'type': 'text'}
+   ```
+   Without the layout half, that perturbation ships green. With it, the property
+   genuinely counts.
+3. The new unit test, with the amend call commented out:
+   ```
+   assertion `left == right` failed
+     left: "normal"
+    right: "30px"
+   ```
+
+All three reverted; `grep -rn RED-CHECK crates/` returns nothing on the
+committed tree.
+
+### A second, smaller correction rode along — and is NOT claimed
+
+The same staleness hid a second wrong value: an em/%/rem `font-size` was
+reported as an unresolved Rust `Debug` string (`Em(2.0)`) because
+absolutization also happens after the snapshot. That is now correct too — the
+new unit test pins `2em` against a 20px parent reporting `40px`, which is where
+it is verified, because the smoke fixture has no em font-size to assert against.
+
+I am **not** counting it and it is not in the diagnosis set. Flagging it because
+it is a behaviour change in an export that already had passing assertions, and
+the trench's rule is that those are left alone: nothing that previously passed
+changed its answer (the fixture declares every font-size in px), but a caller
+outside this fixture will now get `40px` where it used to get `Em(2.0)`. That is
+strictly more correct and it is the direction the "non-px lengths come back as
+Debug strings" gap has been asking for since night 6 — but it is a partial step
+into that gap, not the slice that closes it.
+
+### What the engine still cannot answer
+
+- **Three of twelve remain, and night 9's read of them stands — for these
+  three.** `white-space`, `overflow-x` and `opacity` all genuinely need an
+  engine change, and none of them has the shape `line-height` turned out to
+  have. `white-space` is not inherited onto elements at all (paint shows a
+  nested span collapsing spaces its `pre` parent kept), `overflow: hidden`
+  pushes no clip anywhere in paint, and `opacity` is discarded by the renderer
+  outside the `Image` arm. In each case layout/paint uses a value that is
+  **wrong**, so no amount of better reporting can make the tool agree with a
+  correct engine. Tonight's move does not generalise to them, and a night that
+  assumes it does will waste itself.
+- **`line-height: normal` is still reported as the keyword, not resolved to
+  px.** Deliberate and unchanged: resolving it needs the font's ascent/descent/
+  line-gap, so a number there would look machine-independent and would not be.
+  An agent asking "how tall is this line box" for a `normal` element still gets
+  `normal` and must read the layout tree instead. Pinned by the untouched
+  `normal not faked` assertion.
+- **The amendment covers the two adjustments that exist today, and is pinned to
+  them by a tag guard, not by a general mechanism.** If a future edit adds a
+  third post-cascade adjustment to `build_layout_from_node_with_parent_style`,
+  the trace goes stale again for that property and nothing will say so. The
+  honest description is "the trace is re-read at the one point the style is
+  final", and that point is a line in a function, not an invariant the type
+  system holds.
+- **Non-px lengths still come back as Rust `Debug` strings** for everything
+  except font-size — `'height': 'Auto'`, `'margin-top': 'Zero'`. Named by
+  nights 6, 7, 8 and 9 as the cheapest correct thing left, and tonight made the
+  inconsistency *within one payload* slightly worse rather than better, since
+  font-size now resolves and its neighbours do not. Still wants its own slice
+  and its own red-check, because it changes values the existing `hiwave_diff`
+  references quote.
+- **Only the TOP border side is exported**, **`border-style` is still
+  invisible**, **`overflow-y` is not exported**, and **`position` is answered
+  for the value, not the consequences** (`top`/`left`/`z-index`/containing
+  block are not recorded). All carried unchanged from nights 8 and 9.
+- **The fixture is 66px from the viewport's 600px height** (body = 534,
+  unchanged tonight — this slice added no elements). The next night that adds
+  any will hit it.
+- Everything trench 1 named is still true: `!important` is dead in the cascade
+  (pinned by the `important-width` diff case), UA-origin properties have no rule
+  to cite, `hiwave_style` takes simple selectors only, capture-kind references
+  are refused, `style` is not a diffable stage, and there is no real-page
+  corpus.
+
+### Tests
+
+`cargo test --workspace --no-fail-fast`, excluding `hiwave-app` and
+`hiwave-smoke` (need GTK — `gdk-sys` build fails) and `rustkit-media` (needs
+ALSA): **914 passed, 1 failed** — 913 from night 9 plus the one new unit test.
+
+The one failure is `rustkit-layout::probe_normal_line_height_vs_chrome`, the
+same pre-existing failure nights 1–3 and 7–9 reported, with the same
+`-apple-system` signature (`14.00` against Chrome's `17.00`). It deserves more
+than the usual note this night, because it is a **line-height** test and this
+was a line-height slice: confirmed structurally rather than by assertion —
+`rustkit-layout`'s dependencies are `rustkit-dom`, `rustkit-css` and
+`rustkit-text`, so it does not depend on `rustkit-engine`, which is the only
+crate this night changed outside the smoke script. It is also about `normal`
+resolution from font metrics, which is the one thing tonight deliberately did
+not touch.
+
+`cargo build --release -p parity-capture` — the only thing CI actually builds —
+**finishes clean** — `Finished release profile [optimized] target(s) in 4m 03s`
+— so nothing here slips the workspace gate.
+
+`cargo fmt --check -p rustkit-engine` reports **22 diffs both with and without
+this night's change** — i.e. tonight added none. All 22 are pre-existing on
+HEAD. I did not run `cargo fmt`, because it would reformat unrelated code and
+CI gates neither fmt nor clippy.
+
+Scope stayed inside `crates/rustkit-engine/src/lib.rs` and
+`crates/hiwave-mcp/smoke.py`. No parity harness, no `.github/`, no Windows or
+Linux port work, no engine behaviour changed, and no fixture change. The one
+edit to an existing assertion is night 6's `line-height` tripwire, which is
+exactly the edit that tripwire was written to invite ("whoever moves that
+inheritance will see this go red, and should assert `30px` and count the
+property, not route around it") — with the correction that no one had to move
+the inheritance. The runner needed `mesa-vulkan-drivers` installed again
+(fresh container; `apt-get update` first, since the cached index 404s;
+environment only, nothing committed).
+
+### Decisions needed from Pete
+
+1. **The nightly prompt still describes trench 1 — fifth night.** Unchanged
+   from nights 7, 8 and 9, and I cannot fix it from inside a session (the
+   routine was created via the API; agents may only edit routines they
+   created). Two cheap ways out, both yours: repoint the stored prompt at
+   trench 2, or land this branch on master so a default checkout stops saying
+   the trench is finished. Tonight is the fifth night that spent its first move
+   deciding whether to believe the prompt or the repo, and the failure mode is
+   silent — a night that believes the prompt reports a completed trench and
+   does nothing.
+2. **The three remaining properties need rendering changes, and that is now the
+   whole of the remaining work.** `white-space` inheritance, `overflow: hidden`
+   clipping, and `opacity` reaching the solid-colour path are each a real
+   rendering bug with parity-corpus consequences, and `BASELINE.md`'s scope
+   limit correctly forbids this loop from fixing them. So the trench is one
+   slice from its floor: unless that limit is relaxed or the work is handed to
+   the parity trench, the next two nights are NONE and the loop ends at 9 of 12
+   on the two-dry-nights clause. That is a legitimate ending and I am not
+   arguing against it — but it is now predictable, so it is better decided than
+   discovered.
+
+Next slice: there is no export-only slice left in the diagnosis set. If the
+answer to decision 2 is "leave them", the honest next action is the funeral
+note at 9 of 12 rather than two nights of going through the motions. If a
+rendering change is authorised, `overflow-x` remains the best-value one for the
+reason night 9 gave — it is the only one of the three whose gap is also a live
+rendering bug that pays for itself in the parity corpus — and the export half is
+already built and reporting.
