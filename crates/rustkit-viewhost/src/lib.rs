@@ -807,15 +807,23 @@ impl ViewHost {
             .get(&view_id)
             .ok_or(ViewHostError::ViewNotFound(view_id))?;
 
-        let mut state = state.lock().map_err(|e| {
-            tracing::error!("ViewState lock poisoned in set_bounds: {}", e);
-            ViewHostError::LockPoisoned
-        })?;
-        state.bounds = bounds;
+        // Record under the lock, release, THEN call the platform:
+        // SetWindowPos dispatches WM_SIZE synchronously back into wnd_proc,
+        // which re-locks this same mutex (same class as focus above).
+        let hwnd_raw = {
+            let mut guard = state.lock().map_err(|e| {
+                tracing::error!("ViewState lock poisoned in set_bounds: {}", e);
+                ViewHostError::LockPoisoned
+            })?;
+            guard.bounds = bounds;
+            guard.hwnd_raw
+        };
+        drop(views);
+        let _ = hwnd_raw;
 
         #[cfg(windows)]
         {
-            let hwnd = HWND(state.hwnd_raw as *mut _);
+            let hwnd = HWND(hwnd_raw as *mut _);
             unsafe {
                 let _ = SetWindowPos(
                     hwnd,
@@ -862,15 +870,22 @@ impl ViewHost {
             .get(&view_id)
             .ok_or(ViewHostError::ViewNotFound(view_id))?;
 
-        let mut state = state.lock().map_err(|e| {
-            tracing::error!("ViewState lock poisoned in set_visible: {}", e);
-            ViewHostError::LockPoisoned
-        })?;
-        state.visible = visible;
+        // Same copy-drop-call shape as focus/set_bounds: ShowWindow
+        // dispatches WM_SHOWWINDOW synchronously.
+        let hwnd_raw = {
+            let mut guard = state.lock().map_err(|e| {
+                tracing::error!("ViewState lock poisoned in set_visible: {}", e);
+                ViewHostError::LockPoisoned
+            })?;
+            guard.visible = visible;
+            guard.hwnd_raw
+        };
+        drop(views);
+        let _ = hwnd_raw;
 
         #[cfg(windows)]
         {
-            let hwnd = HWND(state.hwnd_raw as *mut _);
+            let hwnd = HWND(hwnd_raw as *mut _);
             unsafe {
                 let _ = ShowWindow(hwnd, if visible { SW_SHOW } else { SW_HIDE });
             }
@@ -890,14 +905,26 @@ impl ViewHost {
             .get(&view_id)
             .ok_or(ViewHostError::ViewNotFound(view_id))?;
 
-        let state = state.lock().map_err(|e| {
-            tracing::error!("ViewState lock poisoned in focus: {}", e);
-            ViewHostError::LockPoisoned
-        })?;
+        // Copy the handle, DROP BOTH GUARDS, then call the platform.
+        // SetFocus dispatches WM_SETFOCUS synchronously into our own
+        // wnd_proc (hiwave-windows#85: hung forever from the day it was
+        // written); makeFirstResponder re-enters the responder chain the
+        // moment the view has responder overrides — which, as of #115's
+        // RustKitContentView, it now does. #108 fixed exactly this shape in
+        // macos.rs, but on the ORPHAN TWIN of this function; this is the
+        // live one.
+        let hwnd_raw = state
+            .lock()
+            .map_err(|e| {
+                tracing::error!("ViewState lock poisoned in focus: {}", e);
+                ViewHostError::LockPoisoned
+            })?
+            .hwnd_raw;
+        drop(views);
 
         #[cfg(windows)]
         {
-            let hwnd = HWND(state.hwnd_raw as *mut _);
+            let hwnd = HWND(hwnd_raw as *mut _);
             unsafe {
                 let _ = SetFocus(hwnd);
             }
@@ -905,7 +932,7 @@ impl ViewHost {
 
         #[cfg(target_os = "macos")]
         {
-            let view = state.hwnd_raw as id;
+            let view = hwnd_raw as id;
             unsafe {
                 let window: id = msg_send![view, window];
                 if window != nil {
