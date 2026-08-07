@@ -48,6 +48,28 @@ run on master, and not before.
 
 ---
 
+## Decisions RATIFIED by Pete (2026-08-07 evening) — stop asking, start executing
+
+The three questions carried in digests since nights 1–4 are settled. Full text
+in `docs/RENDERING_GAP_PLAN_2026-08-07.md` §5 (on develop/master).
+
+1. **Selector drift: PIN `capture_baseline.mjs` back to the committed form**
+   (`div.card featured`), plus a test asserting the script reproduces the
+   committed baselines' keys. Do NOT regenerate. This unblocks all three
+   gates and is legitimate first work for the next night.
+2. **Gates A + B + the stability bar enter `parity.yml` ADVISORY-FIRST for
+   one cycle** (print receipts, never block), then flip blocking. Wiring
+   them in is in scope for the trench.
+3. **SwiftShader: approved for developing/validating instrument mechanics —
+   Gate C may be built and validated against SwiftShader frames on this
+   seat. NOTHING SwiftShader-derived is ever a receipt**; receipts are macOS
+   numbers only, and every SwiftShader figure carries the label.
+
+Also in scope per the ratified plan: the **livesuite freezer + harness**
+(frozen real-page snapshots, Chrome baseline, same gates — plan §3) once P0a
+completes. P0b's first N/26 still runs on macOS, and remains the campaign
+metric.
+
 ## Order, and why
 
 Per plan §4, worked strictly in sequence, one item per night, no skipping:
