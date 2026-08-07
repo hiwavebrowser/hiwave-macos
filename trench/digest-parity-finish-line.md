@@ -380,3 +380,162 @@ stability bar at `pr_merge`. Closing it naively red-locks every PR the moment
 data flows, which is why the carve-out is there. It needs the scout phase to run
 3 iterations, not just a stricter gate, and that is a change to how the swarm is
 invoked.
+
+---
+
+## 2026-08-07
+
+**Metric: UNMEASURABLE → UNMEASURABLE.** Three of the four gates now exist and
+none of them has ever been pointed at a RustKit frame. That is still the whole
+of what blocks the number, and it is unchanged by tonight's work.
+
+**P-item: P0a (build the four gates). NOT completed — 3 of 4 landed.**
+Gate A (night 2), Gate B (night 3), stability enforcement (tonight). Gate C,
+the non-gating forensic board, remains.
+
+### Commits
+
+- `13e9013` — stability gates at `pr_merge` and `nightly` on evidence rather
+  than exemption; the PR and nightly scout phases run `--iterations 3` in the
+  same commit so the evidence exists.
+- `60e53a9` — close the one real gap the 19-mutation sweep found.
+
+Zero engine behavior changes, same as Gates A and B. P0b's first `N/26` stays
+attributable.
+
+### What the defect actually was
+
+Reproduced before anything was edited:
+
+```
+gate_test_results({"results": [single-run row]}, require_stable=True)
+-> {"failures": [], "total": 1}
+```
+
+`require_stable` has been True at `pr_merge` and `nightly` since the levels
+were written. It gated nothing. `parity_gate` held only rows with ≥2 runs to
+the bar and waived the rest; the scout phase runs each case once;
+`--primary-viewport-only` then discards the multi-iteration exploit rows. Every
+row that reached the gate was a single-run row and every one was waived.
+
+The check was not lenient — it was unreachable. And the waiver's own comment
+says why it was written: failing single-run rows "would permanently red-lock
+every PR the moment data flows". That is true, and it is why the fix cannot be
+gate-side alone. Tightening the gate without producing the evidence swaps an
+inert check for a permanent red lock, which is the same instrument failure
+wearing the opposite sign.
+
+So three changes, and all three are load-bearing:
+
+1. A row that cannot show `STABILITY_MIN_RUNS` **measured** iterations fails as
+   `stability_unmeasured` — a distinct reason from `unstable`, because "we
+   looked once" and "we looked three times and it moved" are different facts.
+   Unknown counts as zero.
+2. Measured, never attempted. Three captures of which two errored is one
+   measurement; `parity_aggregate` now carries `measured_runs` through, and
+   `iterations` is deliberately not consulted anywhere in the path.
+3. The PR and nightly scout phases run `--iterations 3`. `commit-gate` does not
+   gate on stability and still runs once.
+
+This is the baseline file's blank-instrument-row rule turned on the gate's own
+output: a row with no measurement reads NOT MEASURED, never green.
+
+### Mutation-check results
+
+19 mutations, each applied, mutant run, source restored. First pass **18/19
+RED**; after closing the survivor, **19/19 RED**. Two probes in the first pass
+were bad rather than surviving (`if require_stable:` matches twice in
+`parity_gate`; a results[] anchor had drifted) — recorded so the first-pass
+count is not read as extra decorative guards.
+
+| Mutation | Result |
+|---|---|
+| drop the insufficient-evidence failure (the fix itself) | RED |
+| reinstate the old `>= 2` waiver | RED |
+| collapse `stability_unmeasured` into `unstable` | RED |
+| `measured_runs` falls back to the attempt count | RED |
+| `measured_runs` treats "unknown" as one run | RED |
+| `measured_runs` stops reading parity_test's list shape | RED |
+| gate copies the bar instead of citing `parity_lib` | RED |
+| gate stops checking the producer's `stable` flag | RED |
+| gate stops checking variance against its own budget | RED |
+| stability enforced where the level does not require it | RED |
+| `cases[]` fallback drops the run evidence | RED |
+| `aggregate_iterations` copies the bar instead of citing it | RED |
+| aggregate stops propagating `measured_runs` | RED |
+| aggregate's `_measured_runs` reads the attempt count | RED *(the survivor; see below)* |
+| aggregate `results[]` rows drop `measured_runs` | RED |
+| PR lane back to one scout iteration | RED |
+| nightly lane back to one scout iteration | RED |
+| commit lane tripled too, for no gate that reads it | RED |
+| PR timeout left at the pre-tripling budget | RED |
+
+**The survivor was real.** Every row in the first draft's tests carried
+`iteration_diffs`, so `_measured_runs`'s unknown path was never exercised and
+the mutant read the ATTEMPT count with the suite still green — exactly the
+conflation the function exists to prevent. Not hypothetical:
+`aggregate_from_attribution_files()` rebuilds rows from `attribution.json` on
+disk with no per-iteration diffs at all, so under the mutant every one of those
+rows would have arrived at the gate claiming a stability sample nobody took.
+
+**One thing I am NOT claiming as a guard.** `parity_test.py` now records
+`measured_runs = len(run_diffs)`. It is correct and it is the field the gate
+reads, but it is currently unfalsifiable there: every failure path in that
+function returns early, so measured always equals attempted and no mutation of
+it can go red. It is defensive, not a guard, and it is not in the 19.
+
+### Also fixed on the same line
+
+`int(r.get("pixel_runs") or ...)` raised `TypeError` against `parity_test.py`'s
+own schema, where `pixel_runs` is a **list** of per-run diffs and not an int.
+Pointing `parity_gate` straight at a `parity_test` report died on the stability
+branch instead of grading it. Latent only because CI reads the aggregate. Three
+producers spell the same fact three ways; `measured_runs()` now reads all three.
+
+`STABILITY_MIN_RUNS` is pinned in `parity_lib` and cited by `parity_test`,
+`aggregate_iterations` and `parity_gate`. It was a bare literal `3` in three
+places — the same second-number risk as `aa_tolerance`, and a producer and gate
+that drift on it can publish a row as stable that the gate then rejects as
+unmeasured. A test moves the constant and asserts both follow.
+
+### Decisions needed from Pete
+
+1. `tools/parity_oracle/capture_baseline.mjs` still emits `div.card.featured`
+   where every committed baseline says `div.card featured` — open since night 1,
+   now the join key for three gates rather than one; pin the script back to the
+   committed form (my recommendation, plus a test) or regenerate and re-mirror?
+2. The tightened stability bar is **blocking on merge, not advisory**: the first
+   PR after this lands may go red on real instability that has never been
+   measured on any of the 26 cases, which is the gate working, but say if you
+   want one advisory cycle first (this also covers night 3's same question about
+   Gates A and B, which are still not wired into `parity.yml` at all).
+3. Gate C is the last piece of P0a and cannot be honestly validated from this
+   Linux seat — accept it written blind and first exercised on macOS CI, or move
+   P0a's completion to a macOS seat?
+
+### Surprises
+
+- **Nightly was enforcing stability on a subset, by coincidence, and that is
+  worse than enforcing it nowhere.** Night 3 recorded the hole as "nothing is
+  ever held to the bar". Not quite: the exploit phase re-runs the top-10 worst
+  cases at three viewports, so a case whose *registry* viewport happened to be
+  one of those three landed in the same `(case_id, viewport)` group as its scout
+  row, cleared 2 runs, and got checked. Cases 11..26 never did, nor did any case
+  registered at a viewport outside that list. A board that is partially covered
+  by "whichever cases were worst last run" reads as covered and is not — and
+  which cases get checked changes run to run.
+- **`pixel_runs` is an `int` in one schema and a `list` in another, and the gate
+  called `int()` on it.** `parity_test.py` writes the per-run diff list under the
+  same key `parity_aggregate` uses for an attempt count. Pointing `parity_gate`
+  at a `parity_test` report raised `TypeError` on the stability branch. Worth
+  noting because it is the *good* failure mode — it crashed instead of lying —
+  and it survived only because CI happens to read the aggregate. The same
+  collision one field over would have gated silently on a wrong number.
+- **A pre-existing red in the script suite, not mine and not touched.**
+  `scripts/tests/test_no_unguarded_nullable_diff.py` fails on
+  `wpt_tier1.py:158,162` (ordering comparison and `round()` on a nullable
+  `diff_pct`). It is red at this branch's HEAD before any of tonight's edits. It
+  belongs to the WPT lane, so I left it; flagging it because it is an
+  instrument-integrity guard sitting red, which is the class of thing this
+  campaign exists to stop tolerating.
+
