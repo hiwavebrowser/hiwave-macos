@@ -539,3 +539,64 @@ unmeasured. A test moves the constant and asserts both follow.
   instrument-integrity guard sitting red, which is the class of thing this
   campaign exists to stop tolerating.
 
+### The seat can render after all — three nights of "no frames here" was wrong
+
+Nights 2 and 3 both stopped short of Gate C on the same reasoning: this trench
+seat is Linux with no GPU, so there are no RustKit frames to build or validate a
+forensic board from. I re-tested the assumption instead of inheriting it.
+
+There is a software Vulkan driver on this box — SwiftShader, shipped with the
+bundled Playwright Chromium at
+`/opt/pw-browsers/chromium-1194/chrome-linux/vk_swiftshader_icd.json`. wgpu picks
+it up with `VK_ICD_FILENAMES` set. With that one environment variable,
+`parity-capture` captured **32/32 registry cases, 0 failures**, frames and layout
+trees both, in about four minutes of wall clock after a 4m20s release build.
+
+The layout trees carry night 1's join key intact (32 of 33 boxes on `bg-pure`
+have a selector; the one without is the anonymous viewport root, which is
+correct).
+
+**Gate A then ran end-to-end against real engine output for the first time**, and
+produced per-box attributions in exactly the schema plan §2 fixes:
+
+```
+sticky-scroll · 0.0.0.1 body > header > div.header-content > nav · x · 835.8438 · 852 · +16.1562
+shelf         · —       #closeBtn                                · missing_box · — · — · —
+```
+
+Its summary on this seat: 26 gating cases, 26 measured, 0 unmeasured, **2 green**
+(`bg-pure`, `specificity`), 24 red, 2703 geometry failures, 115 join failures.
+
+**That is not `N/26` and nobody should read it as one.** Three independent
+reasons, any one of which disqualifies it:
+
+1. It is Gate A alone. The metric is a conjunction of four conditions; paint,
+   stability and discrete-structural are not in this number.
+2. The font stack is Linux, not CoreText. Plan §4's P4 exists precisely because
+   metric-exact advances depend on CoreText being on both sides, and it is not
+   on this side.
+3. The rasterizer is SwiftShader, not Metal.
+
+I also cannot cleanly separate real defects from platform noise here, and it is
+worth being explicit that I tried and failed. The axis histogram leans hard
+vertical — y 1190, height 784, against x 306 and width 423 — which is what line
+boxes driving block flow looks like, and would support "mostly text metrics".
+But `specificity` is text-bearing and scored geometry-green, so text presence
+alone does not predict failure. The split needs a macOS run to make, not a
+cleverer analysis of this one.
+
+What it does change, concretely: Gate C's plumbing can now be written against
+real frames instead of blind, and P0b can be **rehearsed** on this seat before it
+is run for real on macOS. That is the next unit, and it is a much better position
+than the last two nights assumed.
+
+One small trap found while doing it: `parity-capture` writes its `tracing`
+warnings to **stdout**, interleaved with the JSON result line, so a consumer
+doing `json.load(stdout)` breaks. My first tally script did exactly that and
+reported all 32 cases as crashed when all 32 had succeeded — a two-minute scare
+that was entirely my harness. `parity_test.py` is immune only by accident: it
+checks the return code and whether the frame file exists, and never parses
+stdout. (The return codes themselves are honest — 1 on no-adapter, 1 on missing
+file, 0 on success. I checked before writing this down, having initially
+misread `tail`'s exit status as the binary's.)
+
