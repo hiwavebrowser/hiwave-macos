@@ -2410,7 +2410,19 @@ fn main() {
                         info!("Going back");
                         #[cfg(target_os = "macos")]
                         {
-                            // TODO: Implement history.back() in RustKit
+                            // Real navigation on RustKit; JS only reaches the
+                            // WRY fallback (page JS does not execute in
+                            // RustKit, so the old evaluate_script stub was a
+                            // silent no-op — live finding 2026-08-07).
+                            #[cfg(all(feature = "rustkit", not(feature = "webview-fallback")))]
+                            if let UnifiedContentWebView::RustKit(ref v) = *content_for_events {
+                                if !v.nav_back() {
+                                    info!("GoBack: nowhere to go");
+                                }
+                            } else {
+                                let _ = content_for_events.evaluate_script("history.back();");
+                            }
+                            #[cfg(any(not(feature = "rustkit"), feature = "webview-fallback"))]
                             let _ = content_for_events.evaluate_script("history.back();");
                         }
                         #[cfg(not(target_os = "macos"))]
@@ -2422,7 +2434,19 @@ fn main() {
                         info!("Going forward");
                         #[cfg(target_os = "macos")]
                         {
-                            // TODO: Implement history.forward() in RustKit
+                            // Real navigation on RustKit; JS only reaches the
+                            // WRY fallback (page JS does not execute in
+                            // RustKit, so the old evaluate_script stub was a
+                            // silent no-op — live finding 2026-08-07).
+                            #[cfg(all(feature = "rustkit", not(feature = "webview-fallback")))]
+                            if let UnifiedContentWebView::RustKit(ref v) = *content_for_events {
+                                if !v.nav_forward() {
+                                    info!("GoForward: nowhere to go");
+                                }
+                            } else {
+                                let _ = content_for_events.evaluate_script("history.forward();");
+                            }
+                            #[cfg(any(not(feature = "rustkit"), feature = "webview-fallback"))]
                             let _ = content_for_events.evaluate_script("history.forward();");
                         }
                         #[cfg(not(target_os = "macos"))]
@@ -2434,7 +2458,19 @@ fn main() {
                         info!("Reloading");
                         #[cfg(target_os = "macos")]
                         {
-                            // TODO: Implement reload in RustKit
+                            // Real navigation on RustKit; JS only reaches the
+                            // WRY fallback (page JS does not execute in
+                            // RustKit, so the old evaluate_script stub was a
+                            // silent no-op — live finding 2026-08-07).
+                            #[cfg(all(feature = "rustkit", not(feature = "webview-fallback")))]
+                            if let UnifiedContentWebView::RustKit(ref v) = *content_for_events {
+                                if !v.nav_reload() {
+                                    info!("Reload: nowhere to go");
+                                }
+                            } else {
+                                let _ = content_for_events.evaluate_script("location.reload();");
+                            }
+                            #[cfg(any(not(feature = "rustkit"), feature = "webview-fallback"))]
                             let _ = content_for_events.evaluate_script("location.reload();");
                         }
                         #[cfg(not(target_os = "macos"))]
