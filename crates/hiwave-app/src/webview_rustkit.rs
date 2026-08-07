@@ -131,6 +131,55 @@ impl RustKitView {
         engine.render_all_views();
     }
 
+    /// Go back in this view's navigation history.
+    ///
+    /// Uses the view-local history Vec (every navigate() and load records
+    /// into it, including engine link clicks routed through
+    /// UserEvent::Navigate). NOT the SessionHistory-canonical shape from
+    /// the fleet pin — the full #81-style port is the named follow-up; this
+    /// makes the button work tonight without inventing a third stack.
+    pub fn nav_back(&self) -> bool {
+        let target = {
+            let mut index = self.history_index.borrow_mut();
+            if *index == 0 {
+                return false;
+            }
+            *index -= 1;
+            self.history.borrow()[*index].clone()
+        };
+        *self.current_url.borrow_mut() = Some(target.to_string());
+        self.load_url_blocking(target.as_str());
+        true
+    }
+
+    /// Go forward in this view's navigation history.
+    pub fn nav_forward(&self) -> bool {
+        let target = {
+            let mut index = self.history_index.borrow_mut();
+            let len = self.history.borrow().len();
+            if *index + 1 >= len {
+                return false;
+            }
+            *index += 1;
+            self.history.borrow()[*index].clone()
+        };
+        *self.current_url.borrow_mut() = Some(target.to_string());
+        self.load_url_blocking(target.as_str());
+        true
+    }
+
+    /// Reload the current page.
+    pub fn nav_reload(&self) -> bool {
+        let url = self.current_url.borrow().clone();
+        match url {
+            Some(u) => {
+                self.load_url_blocking(&u);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Route OS keyboard delivery to the content view (first responder).
     pub fn grab_keyboard(&self) {
         let engine = self.engine.borrow();
