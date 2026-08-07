@@ -375,24 +375,50 @@ def main():
     print(f"ok  inherited origin  span font-family='Georgia, serif' "
           f"text-align=center both origin=inherited; display still UA-or-initial")
 
-    # A TRIPWIRE, not an endorsement. The span inherits no line-height in the
-    # CASCADE — `compute_style_for_element` seeds font-size/family/weight/
-    # style/color/letter-spacing/word-spacing/text-align from the parent but
-    # deliberately not line-height, which is inherited one layer later, in
-    # build_layout_box ("a value of Normal here reliably means not specified:
-    # inherit the parent's computed value", lib.rs ~1541). So LAYOUT lays this
-    # span out at 30px while hiwave_style reports `normal` — the tool and the
-    # engine disagree on this one property, which is why line-height is NOT
-    # counted as answerable for the trench metric even though the .copy
-    # assertion above passes. Pinned here so the divergence cannot be
-    # forgotten: whoever moves that inheritance into the cascade will see this
-    # go red, and should assert "30px" and count the property, not route around
-    # it. See trench/digest.md, night 6.
+    # This was night 6's KNOWN DIVERGENCE and is now the assertion that counts
+    # `line-height`. The span inherits no line-height in the CASCADE —
+    # `compute_style_for_element` seeds font-size/family/weight/style/color/
+    # letter-spacing/word-spacing/text-align from the parent but deliberately
+    # not line-height, which is inherited one layer later, in build_layout_box.
+    # The trace used to be snapshotted before that, so the tool said `normal`
+    # while layout used 30px. The trace is now re-read AFTER those adjustments
+    # (`amend_trace_for_layout_style`), so the reported value is the one layout
+    # was handed. Note what did NOT change: the inheritance itself, which is
+    # untouched engine behaviour. See trench/digest.md, night 10.
+    #
+    # 30px is hand-derivable and carries no font metrics: `.copy` declares
+    # `font-size: 20px; line-height: 1.5`, and 20 x 1.5 = 30. The span declares
+    # nothing at all (asserted above), so 30px can only have come down the tree
+    # — it is neither an echo of any declaration on this element nor a value a
+    # UA default could supply.
     span_lh = next(x for x in span["declared"] if x["property"] == "line-height")
-    assert span_lh["computed"] == "normal", span_lh
-    assert span_lh["origin"] == "user-agent-or-initial", span_lh
-    print(f"ok  KNOWN DIVERGENCE  span line-height reported '{span_lh['computed']}' "
-          f"but laid out at 30px — inherited in build_layout_box, after the trace")
+    assert span_lh["computed"] == "30px", span_lh
+    assert span_lh["winner"] is None, span_lh          # no rule on this element
+    assert span_lh["origin"] == "inherited", span_lh   # ...and it says where it came from
+
+    # The half that makes it COUNT rather than merely report (BASELINE.md
+    # clause 3): the reported value is cross-checked against the geometry
+    # layout produced. The `.copy` div's only text sits INSIDE this span, so
+    # the line box it generates is driven by the span's line-height and by
+    # nothing else. If the span had kept `normal` — the value the tool used to
+    # report — this box could not be 30 tall.
+    inherited_text = find(tree["root"], lambda n: n.get("text") == "inherited")
+    assert inherited_text is not None, tree["root"]
+    assert inherited_text["rect"]["height"] == 30.0, inherited_text
+
+    # ...and the control, which proves 30.0 is not simply what any 20px text
+    # box measures here. `.plain` declares the same `font-size: 20px` and the
+    # same family but no line-height, so its line box is `normal` — a
+    # FONT-DERIVED number, which is why it is asserted to differ from 30 rather
+    # than pinned to a value. Pinning it would make this gate report a
+    # text-stack difference as an engine regression, which the header of this
+    # file rules out.
+    plain_text = find(tree["root"], lambda n: n.get("text") == "spacing")
+    assert plain_text is not None, tree["root"]
+    assert plain_text["rect"]["height"] != 30.0, plain_text
+    print(f"ok  line-height inherited  span declares nothing, reports 30px origin=inherited "
+          f"(.copy 20px x 1.5) and its line box IS 30.0 — `normal` control measures "
+          f"{plain_text['rect']['height']}")
 
     # ---- font-style: an inherited value, and the value PAINT drew with -------
     # The span declares nothing, so `italic` cannot be an echo of declaration

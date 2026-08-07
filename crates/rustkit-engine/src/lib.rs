@@ -1555,6 +1555,20 @@ impl Engine {
                     }
                 }
 
+                // `style` is now the style LAYOUT is handed. The style trace was
+                // snapshotted at the end of `compute_style_for_element`, i.e.
+                // BEFORE the two adjustments just above, so `hiwave_style` was
+                // reporting values layout did not use: `line-height` came back
+                // `normal` on every element that inherits it (night 6's known
+                // divergence), and an em/%/rem `font-size` came back as an
+                // unresolved `Debug` string. Re-reading the record here makes the
+                // report agree with the engine.
+                //
+                // This changes NO engine behaviour — both adjustments above are
+                // untouched and predate this trench. Only what the trace says
+                // about them changes. See trench/digest.md night 10.
+                self.amend_trace_for_layout_style(&tag_lower, &style, parent_style);
+
                 // Check for display: none
                 if style.display == rustkit_css::Display::None {
                     return LayoutBox::new(BoxType::Block, ComputedStyle::new());
@@ -2819,6 +2833,51 @@ impl Engine {
             })
             .map(|property| property.to_string())
             .collect()
+    }
+
+    /// Re-read the record this element just pushed so it reports the style
+    /// LAYOUT was handed rather than the style the cascade finished with.
+    ///
+    /// `build_layout_from_node_with_parent_style` adjusts the computed style
+    /// after `compute_style_for_element` returns — it absolutizes an em/%/rem
+    /// `font-size` against the parent, then inherits `line-height` when the
+    /// element has none of its own. The trace is taken before both, so without
+    /// this the tool disagreed with the engine on those properties, which
+    /// `trench/BASELINE.md` calls worse than a gap.
+    ///
+    /// Both the values and the `inherited` labels are re-derived through the
+    /// same two functions that produced them the first time, so this is a
+    /// second READING of the cascade's result and never a second opinion about
+    /// it. Nothing here writes to `style`.
+    fn amend_trace_for_layout_style(
+        &self,
+        tag: &str,
+        style: &ComputedStyle,
+        parent_style: Option<&ComputedStyle>,
+    ) {
+        let mut borrowed = self.style_trace.borrow_mut();
+        let Some(trace) = borrowed.as_mut() else {
+            return;
+        };
+        // The record for THIS element is the one `compute_style_for_element`
+        // pushed a few statements ago, and nothing between here and there
+        // computes another element's style. The tag check keeps that an
+        // enforced invariant rather than an assumption a later edit could
+        // silently break: on a mismatch the record is left alone, so the worst
+        // case is the stale value this function exists to fix, never another
+        // element's value reported as this one's.
+        let Some(record) = trace.last_mut() else {
+            return;
+        };
+        if record.tag != tag {
+            return;
+        }
+        record.computed = Self::COMPUTED_PROPERTIES
+            .iter()
+            .filter_map(|p| Self::computed_value_of(style, p).map(|v| (p.to_string(), v)))
+            .collect();
+        let inherited = Self::inherited_properties(style, parent_style, &record.declarations);
+        record.inherited = inherited;
     }
 
     fn computed_value_of(style: &ComputedStyle, property: &str) -> Option<String> {
@@ -9050,6 +9109,80 @@ mod tests {
             "p line-height did not inherit through the div: {:?}",
             get("Para")
         );
+    }
+
+    #[test]
+    fn test_style_trace_reports_the_style_layout_was_handed() {
+        // `build_layout_from_node_with_parent_style` adjusts the computed style
+        // AFTER `compute_style_for_element` returns — font-size absolutization
+        // and line-height inheritance — but the trace is snapshotted before
+        // both. `amend_trace_for_layout_style` re-reads it so `hiwave_style`
+        // cannot report a value layout did not use (trench/BASELINE.md clause
+        // 3). Both adjustments are pinned here, because the smoke fixture only
+        // covers the line-height one.
+        let html = r#"<!DOCTYPE html>
+            <html><body>
+              <div style="font-size: 20px; line-height: 1.5"><span id="kid">x</span></div>
+              <div style="font-size: 20px"><p id="em">y</p></div>
+            </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(Some(Vec::new())),
+        };
+
+        // `p#em` gets its font-size from a sheet rather than inline, so the
+        // recorded declaration is `2em` while layout is handed 40px — the
+        // reported value has to be the second one.
+        let sheet = Stylesheet::parse("#em { font-size: 2em }").expect("sheet");
+        let _ = engine.build_layout_from_document(&document, std::slice::from_ref(&sheet));
+
+        let trace = engine.style_trace.borrow();
+        let trace = trace.as_ref().expect("recording was on");
+        let record = |id: &str| {
+            trace
+                .iter()
+                .find(|r| r.id.as_deref() == Some(id))
+                .unwrap_or_else(|| panic!("no style record for #{id}"))
+        };
+        let value = |id: &str, property: &str| {
+            record(id)
+                .computed
+                .iter()
+                .find(|(p, _)| p == property)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("#{id} reported no {property}"))
+        };
+
+        // The span declares nothing; 20px x 1.5 = 30px came down the tree, and
+        // before the amendment this read `normal`.
+        assert_eq!(value("kid", "line-height"), "30px");
+        assert!(
+            record("kid").inherited.iter().any(|p| p == "line-height"),
+            "line-height arrived by inheritance but is not labelled so: {:?}",
+            record("kid").inherited
+        );
+
+        // 2em against the parent's 20px. Before the amendment this reported the
+        // unresolved `Length` as a Rust Debug string ("Em(2.0)").
+        assert_eq!(value("em", "font-size"), "40px");
     }
 
     #[test]
