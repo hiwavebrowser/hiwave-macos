@@ -1912,6 +1912,25 @@ fn main() {
                 // MainEventsCleared, which this event wakes.
                 #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
                 if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
+                    // First wheel event after a quiet gap logs at info, so a
+                    // flick is visible in a default-level session log without
+                    // flooding it (a trackpad flick emits ~50 events/s; the
+                    // rest stay trace). Restores the diagnosability #100
+                    // accidentally removed when the #95 diagnostic line was
+                    // replaced with wiring.
+                    thread_local! {
+                        static LAST_WHEEL: std::cell::Cell<std::time::Instant> =
+                            std::cell::Cell::new(std::time::Instant::now());
+                    }
+                    let quiet = LAST_WHEEL.with(|t| {
+                        let now = std::time::Instant::now();
+                        let gap = now.duration_since(t.get());
+                        t.set(now);
+                        gap > std::time::Duration::from_millis(500)
+                    });
+                    if quiet {
+                        info!(?delta, "wheel burst started (window loop)");
+                    }
                     let (dx, dy) = match delta {
                         tao::event::MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
                         // Line deltas (external mice) arrive in rows/columns;
@@ -1956,6 +1975,13 @@ fn main() {
                     let (cx, cy) = cursor_position.get();
                     let content_x = cx - *sidebar_width_for_events.lock().unwrap();
                     let content_y = cy - *chrome_height_for_events.lock().unwrap();
+                    // info-level ON PURPOSE: a click that arrives but resolves
+                    // to nothing was previously indistinguishable from a click
+                    // eaten by a WebView layer above us. Clicks are rare;
+                    // this cannot flood. (Live session 2026-08-06: an entire
+                    // session of link-clicking produced zero log evidence
+                    // either way.)
+                    info!(cx, cy, content_x, content_y, "window-level click received");
                     // Both bounds, not just the origin side (Prometheus, #104
                     // R1): the delivery rule says clicks reaching this loop are
                     // content-directed, but that is an inference about the UI
