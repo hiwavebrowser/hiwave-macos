@@ -509,9 +509,16 @@ unmeasured. A test moves the constant and asserts both follow.
    measured on any of the 26 cases, which is the gate working, but say if you
    want one advisory cycle first (this also covers night 3's same question about
    Gates A and B, which are still not wired into `parity.yml` at all).
-3. Gate C is the last piece of P0a and cannot be honestly validated from this
-   Linux seat — accept it written blind and first exercised on macOS CI, or move
-   P0a's completion to a macOS seat?
+3. ~~Gate C cannot be honestly validated from this Linux seat — accept it
+   written blind, or move P0a's completion to a macOS seat?~~ **Withdrawn by my
+   own measurement later the same night** (see below): the seat renders under
+   SwiftShader, so Gate C can be written against real frames here. The question
+   that replaces it is narrower — is a SwiftShader/Linux frame an acceptable
+   input for *developing and validating* Gate C's plumbing, given its numbers
+   are not macOS numbers and can never be the receipt? My reading is yes for
+   the board's mechanics and no for anything it prints, but this is the seam
+   where a convenient instrument becomes a false one, so I want it said out
+   loud rather than assumed.
 
 ### Surprises
 
