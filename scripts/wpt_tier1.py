@@ -249,6 +249,16 @@ def run_pair(test_file: Path, ref_file: Path, viewport, workdir: Path, stage: bo
         }
 
     diff_pixels, diff_pct = compare_frames(test_ppm, ref_ppm)
+    # compare_frames is total TODAY (dimension mismatch = full-frame diff),
+    # but `diff_pct` is a nullable field everywhere rows round-trip through
+    # JSON, and the guard test treats every consumer alike — rightly, since
+    # a refactor that routes a loaded row through here would make the
+    # ordering below silently compare None. Fail loud instead.
+    if diff_pct is None:
+        return {
+            "status": "ERROR",
+            "reason": "comparator returned no diff_pct — refusing to grade",
+        }
     status = "PASS" if diff_pct <= WPT_MAX_DIFF_PCT else "FAIL"
     return {
         "status": status,
