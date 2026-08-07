@@ -1,26 +1,38 @@
 {
   "schema": 1,
   "wpt_pin": "a6f29b0bedaf3f1edba7b6739127fe8e713bfcb3",
-  "hiwave_git_sha": "427390c61cdebc9f2437275e61ac5c8169eefa3e",
+  "hiwave_git_sha": "da8f0fc12d3d3c297713b20ad8652201dc4153d5",
   "runner": "scripts/wpt_tier1.py",
   "viewport": {
     "width": 800,
     "height": 600
   },
   "wpt_max_diff_pct": 0.0,
-  "ts": "2026-08-06T14:06:08.271431+00:00",
-  "n": 14,
-  "pass": 6,
-  "fail": 3,
+  "ts": "2026-08-07T05:31:43.125248+00:00",
+  "n": 30,
+  "pass": 7,
+  "fail": 18,
   "skip": 4,
   "error": 1,
-  "rate": 0.6667,
+  "rate": 0.28,
   "attribution": {
     "_comment": "Fails grouped by a named engine capability gap. Attribution only \u2014 these cases stay in the denominator. A gap here is a lane, not an excuse.",
     "blocked_fails": {
       "@font-face unimplemented (rustkit-layout FontLoader is dead code)": [
+        "css-text/line-break/line-break-anywhere-004",
+        "css-text/line-break/line-break-anywhere-005",
+        "css-text/line-break/line-break-anywhere-006",
+        "css-text/line-break/line-break-anywhere-007",
         "css-text/overflow-wrap/overflow-wrap-001",
-        "css-text/overflow-wrap/overflow-wrap-002"
+        "css-text/overflow-wrap/overflow-wrap-002",
+        "css-text/overflow-wrap/overflow-wrap-anywhere-001",
+        "css-text/overflow-wrap/overflow-wrap-anywhere-002",
+        "css-text/overflow-wrap/overflow-wrap-anywhere-003",
+        "css-text/overflow-wrap/overflow-wrap-anywhere-004",
+        "css-text/overflow-wrap/overflow-wrap-anywhere-005",
+        "css-text/word-break/word-break-break-all-010",
+        "css-text/word-break/word-break-break-all-011",
+        "css-text/word-break/word-break-break-all-012"
       ]
     },
     "suspect_passes": {
@@ -172,12 +184,172 @@
       "rel_match": "ok",
       "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
       "maps_to": "flex"
+    },
+    {
+      "id": "css-text/line-break/line-break-anywhere-001",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 0.274,
+      "diff_pixels": 1315,
+      "rel_match": "ok",
+      "blocked_by": null,
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-text/overflow-wrap/overflow-wrap-anywhere-001",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 2.0833,
+      "diff_pixels": 10000,
+      "rel_match": "ok",
+      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-text/word-break/break-boundary-2-chars-001",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 0.6169,
+      "diff_pixels": 2961,
+      "rel_match": "ok",
+      "blocked_by": null,
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-text/line-break/line-break-anywhere-002",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 0.2312,
+      "diff_pixels": 1110,
+      "rel_match": "ok",
+      "blocked_by": null,
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-text/overflow-wrap/overflow-wrap-anywhere-002",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 0.0644,
+      "diff_pixels": 309,
+      "rel_match": "ok",
+      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-text/word-break/break-boundary-2-chars-002",
+      "status": "PASS",
+      "reason": null,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
+      "rel_match": "ok",
+      "blocked_by": null,
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-text/line-break/line-break-anywhere-004",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 0.4154,
+      "diff_pixels": 1994,
+      "rel_match": "ok",
+      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-text/overflow-wrap/overflow-wrap-anywhere-003",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 0.0648,
+      "diff_pixels": 311,
+      "rel_match": "ok",
+      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-text/word-break/word-break-break-all-010",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 0.3031,
+      "diff_pixels": 1455,
+      "rel_match": "ok",
+      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-text/line-break/line-break-anywhere-005",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 4.4321,
+      "diff_pixels": 21274,
+      "rel_match": "ok",
+      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-text/overflow-wrap/overflow-wrap-anywhere-004",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 0.3031,
+      "diff_pixels": 1455,
+      "rel_match": "ok",
+      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-text/word-break/word-break-break-all-011",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 0.1229,
+      "diff_pixels": 590,
+      "rel_match": "ok",
+      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-text/line-break/line-break-anywhere-006",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 0.9023,
+      "diff_pixels": 4331,
+      "rel_match": "ok",
+      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-text/overflow-wrap/overflow-wrap-anywhere-005",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 3.0185,
+      "diff_pixels": 14489,
+      "rel_match": "ok",
+      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-text/word-break/word-break-break-all-012",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 0.3031,
+      "diff_pixels": 1455,
+      "rel_match": "ok",
+      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "maps_to": "slice-0"
+    },
+    {
+      "id": "css-text/line-break/line-break-anywhere-007",
+      "status": "FAIL",
+      "reason": null,
+      "diff_pct": 0.2877,
+      "diff_pixels": 1381,
+      "rel_match": "ok",
+      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "maps_to": "slice-0"
     }
   ],
   "honesty": {
     "all_green": false,
     "all_green_suspect": false,
     "negative_control": "FAIL as required (checked every run; run aborts otherwise)",
-    "note": "Not suspect: this run contains red (3 FAIL, 1 ERROR), so the oracle demonstrably distinguishes pass from fail on real cases. A run with pass==n and fail==0 and error==0 would flip this field."
+    "note": "Not suspect: this run contains red (18 FAIL, 1 ERROR), so the oracle demonstrably distinguishes pass from fail on real cases. A run with pass==n and fail==0 and error==0 would flip this field."
   }
 }
