@@ -25,6 +25,8 @@ pub use traits::{ViewHostTrait, WindowHandle};
 
 #[cfg(target_os = "macos")]
 pub use macos::MacOSViewHost;
+#[cfg(target_os = "macos")]
+pub use macos::{drain_pending_clicks, PendingClick};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -708,10 +710,18 @@ impl ViewHost {
             "Converting coordinates from top-left to bottom-left"
         );
 
-        // Create a new NSView for our content
+        // RustKitContentView, not a stock NSView: a stock view was measured
+        // to be an input dead end (hitTest routes clicks to it; they never
+        // surface as tao window events — synthetic sendEvent probe,
+        // 2026-08-07). The subclass records clicks into a queue the app
+        // drains each loop turn.
+        //
+        // NOTE: macos.rs carries a TWIN of this whole function
+        // (`MacOSViewHost::create_view_from_window`) with zero callers — the
+        // first version of this fix patched that one and changed nothing.
+        // The orphan-law twin-stack case, in the fix for an orphan.
         let view: id = unsafe {
-            use objc::runtime::Class;
-            let view_class = Class::get("NSView").expect("NSView class not found");
+            let view_class = crate::macos::rustkit_content_view_class();
             let view: id = msg_send![view_class, alloc];
             let frame = cocoa::foundation::NSRect::new(
                 cocoa::foundation::NSPoint::new(initial_bounds.x as f64, y_cocoa),

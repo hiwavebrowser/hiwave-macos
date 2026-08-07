@@ -33,6 +33,94 @@ pub struct MacOSViewHost {
     views: RwLock<HashMap<ViewId, Arc<Mutex<MacOSViewState>>>>,
 }
 
+/// A content-view click, in VIEW-LOCAL TOP-LEFT coordinates — exactly the
+/// viewport space the engine's hit testing speaks, no chrome/sidebar math.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy)]
+pub struct PendingClick {
+    pub x: f64,
+    pub y: f64,
+    pub down: bool,
+}
+
+/// Clicks captured by the RustKit NSView, drained by the app each loop turn.
+///
+/// A queue, not a callback: the handlers run inside AppKit's event dispatch,
+/// and calling back into app/engine state from there is the re-entrancy trap
+/// #108 exists to prevent. Push under a short lock, drain on the main loop.
+#[cfg(target_os = "macos")]
+static PENDING_CLICKS: Mutex<Vec<PendingClick>> = Mutex::new(Vec::new());
+
+#[cfg(target_os = "macos")]
+pub fn drain_pending_clicks() -> Vec<PendingClick> {
+    PENDING_CLICKS.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+}
+
+/// The NSView subclass that hosts RustKit content.
+///
+/// A stock NSView was measured to be a dead end for input: hitTest correctly
+/// routes clicks to it, but events delivered to it NEVER surface as tao
+/// window events — a synthetic mouseDown through `window sendEvent:` produced
+/// nothing at the event loop (2026-08-07 probe). So the view records clicks
+/// itself. Wheel is left alone: scroll DOES reach the window loop (verified
+/// live 2026-08-05) via a different AppKit forwarding path.
+#[cfg(target_os = "macos")]
+pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
+    use objc::declare::ClassDecl;
+    use objc::runtime::{Class, Object, Sel};
+    static REGISTER: std::sync::Once = std::sync::Once::new();
+    REGISTER.call_once(|| {
+        let superclass = Class::get("NSView").expect("NSView class");
+        let mut decl =
+            ClassDecl::new("RustKitContentView", superclass).expect("register RustKitContentView");
+
+        extern "C" fn record(this: &Object, event: id, down: bool) {
+            tracing::info!(down, "RustKitContentView mouse event handler entered");
+            unsafe {
+                // locationInWindow is window coords (bottom-left origin);
+                // convertPoint gives view-local, then flip to top-left.
+                let wpt: cocoa::foundation::NSPoint = msg_send![event, locationInWindow];
+                let lpt: cocoa::foundation::NSPoint =
+                    msg_send![this, convertPoint: wpt fromView: nil];
+                let frame: cocoa::foundation::NSRect = msg_send![this, frame];
+                let click = PendingClick {
+                    x: lpt.x,
+                    y: frame.size.height - lpt.y,
+                    down,
+                };
+                if let Ok(mut q) = PENDING_CLICKS.lock() {
+                    q.push(click);
+                }
+            }
+        }
+        extern "C" fn mouse_down(this: &Object, _sel: Sel, event: id) {
+            record(this, event, true);
+        }
+        extern "C" fn mouse_up(this: &Object, _sel: Sel, event: id) {
+            record(this, event, false);
+        }
+        extern "C" fn accepts_first_mouse(_this: &Object, _sel: Sel, _event: id) -> bool {
+            // A click on an inactive window should reach the page (this is
+            // what browsers do for links), and the synthetic probe runs
+            // before the window is ever key.
+            true
+        }
+        unsafe {
+            decl.add_method(
+                sel!(acceptsFirstMouse:),
+                accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> bool,
+            );
+            decl.add_method(
+                sel!(mouseDown:),
+                mouse_down as extern "C" fn(&Object, Sel, id),
+            );
+            decl.add_method(sel!(mouseUp:), mouse_up as extern "C" fn(&Object, Sel, id));
+        }
+        decl.register();
+    });
+    Class::get("RustKitContentView").expect("RustKitContentView registered")
+}
+
 #[cfg(target_os = "macos")]
 impl MacOSViewHost {
     pub fn new() -> Self {
@@ -107,8 +195,7 @@ impl MacOSViewHost {
         debug!(?bounds, cocoa_y = frame.origin.y, "Converted bounds to Cocoa coordinates");
 
         let view: id = unsafe {
-            use objc::runtime::Class;
-            let view_class = Class::get("NSView").expect("NSView class not found");
+            let view_class = rustkit_content_view_class();
             let view: id = msg_send![view_class, alloc];
             msg_send![view, initWithFrame: frame]
         };
