@@ -22,7 +22,14 @@ jobs:
   pr-swarm:
     if: github.event_name == 'pull_request'
     runs-on: macos-14
-    timeout-minutes: 20
+    # 20 -> 35 alongside the scout going 1 -> 3 iterations. Per shard that is
+    # ~7 scout units -> ~21, against a fixed 12 exploit units: roughly 1.7x
+    # the work. A shard killed by the timeout is a red PR with no receipt at
+    # all, which reads the same as a real failure, so the headroom is
+    # deliberate and generous. Wall-clock has NOT been measured on macos-14
+    # from this seat (no macOS runner available) — the first PR run after this
+    # lands is the measurement.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -47,12 +54,19 @@ jobs:
 
       - name: Run swarm shard ${{ matrix.shard }}
         run: |
+          # --iterations 3, not 1 (P0a, 2026-08-07). The pr_merge gate has
+          # required stability since it was written, but a one-iteration scout
+          # cannot produce a stability verdict, so parity_gate waived the
+          # check for every registry-viewport row and finish-line condition 3
+          # was enforced on nothing. The gate now fails a row it cannot judge;
+          # this is where the evidence to judge it comes from. The count is
+          # parity_lib.STABILITY_MIN_RUNS — keep the two in step.
           python3 scripts/parity_swarm.py \
             --jobs 2 \
             --shard-index ${{ matrix.shard }} \
             --shard-count 4 \
             --scope all \
-            --iterations 1 \
+            --iterations 3 \
             --exploit-top 3 \
             --exploit-iterations 2 \
             --exploit-viewports 800x600,1280x800 \
@@ -283,12 +297,20 @@ jobs:
 
       - name: Run nightly swarm shard ${{ matrix.shard }}
         run: |
+          # --iterations 3: same reason as the PR lane. Nightly did reach the
+          # stability bar on a handful of rows, but only by accident — the
+          # exploit phase re-ran the top-10 worst at three viewports, so a
+          # case whose REGISTRY viewport happened to be one of them landed in
+          # the same group and cleared 2 runs. Cases 11..26, and any case
+          # registered at a viewport outside the exploit list, were never
+          # checked. Stability is now judged from the scout phase, on every
+          # case, by design rather than by coincidence.
           python3 scripts/parity_swarm.py \
             --jobs 2 \
             --shard-index ${{ matrix.shard }} \
             --shard-count 4 \
             --scope all \
-            --iterations 1 \
+            --iterations 3 \
             --exploit-top 10 \
             --exploit-iterations 3 \
             --exploit-viewports 800x600,1280x800,1920x1080 \

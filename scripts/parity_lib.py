@@ -52,6 +52,16 @@ BUILTINS = _cases_for_scope("builtins")
 WEBSUITE = _cases_for_scope("websuite")
 MICRO_TESTS = _cases_for_scope("micro")
 
+# Iterations required before a stability verdict means anything — finish-line
+# condition 3, "stable across 3 iterations" (plan §2, §3.3).
+#
+# SINGLE SOURCE OF TRUTH, and pinned for the same reason `aa_tolerance` is:
+# the number lived as a bare literal `3` in three places (this file's
+# aggregate_iterations, parity_test.py's verdict, parity_test.py's printout).
+# Three copies of a bar is three chances for the producer to call a row stable
+# on evidence the gate would reject, or the reverse. Cite it, do not copy it.
+STABILITY_MIN_RUNS = 3
+
 # Standard viewports for multi-viewport testing
 VIEWPORTS = [
     (800, 600, "800x600"),
@@ -695,7 +705,7 @@ def aggregate_iterations(results: List[CaseResult], max_variance: float = 0.10) 
         agg.diff_pct_min = float(min(diffs))
         agg.diff_pct_max = float(max(diffs))
         agg.diff_pct_variance = agg.diff_pct_max - agg.diff_pct_min
-        agg.stable = len(diffs) >= 3 and agg.diff_pct_variance <= max_variance
+        agg.stable = len(diffs) >= STABILITY_MIN_RUNS and agg.diff_pct_variance <= max_variance
         agg.passed = agg.diff_pct_median <= agg.threshold
         
         if best_result:
