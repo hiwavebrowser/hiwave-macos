@@ -1051,6 +1051,16 @@ impl Engine {
             .map(|s| (s.value(), s.caret_position()))
     }
 
+    /// Make a view's NATIVE view the window's first responder so the OS
+    /// routes keyboard events to it. Engine-side focus (focused_node) decides
+    /// which element gets the keys; this decides whether the keys arrive at
+    /// all. Two systems, both required.
+    pub fn grab_keyboard(&self, id: EngineViewId) {
+        if let Some(view) = self.views.get(&id) {
+            let _ = <ViewHost as ViewHostTrait>::focus_view(&self.viewhost, view.viewhost_id);
+        }
+    }
+
     /// The DOM node currently holding focus in a view, if any.
     pub fn focused_node(&self, id: EngineViewId) -> Option<rustkit_dom::NodeId> {
         self.views.get(&id).and_then(|v| v.focused_node)
@@ -2254,6 +2264,16 @@ impl Engine {
                         .get("type")
                         .cloned()
                         .unwrap_or_else(|| "text".to_string());
+                    // type=hidden generates NO box (HTML §4.10.5.1.1). We were
+                    // rendering Google's hidden CSRF/state fields as a row of
+                    // visible hash-string boxes (live, 2026-08-07).
+                    if input_type.eq_ignore_ascii_case("hidden") {
+                        return LayoutBox::new(BoxType::Block, {
+                            let mut st = ComputedStyle::new();
+                            st.display = rustkit_css::Display::None;
+                            st
+                        });
+                    }
                     // Read through live edit state when the user has typed
                     // into this field; fall back to the authored value.
                     // The DOM attribute is never rewritten (there is no

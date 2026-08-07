@@ -2267,11 +2267,50 @@ fn main() {
                         info!(x = click.x, y = click.y, "content click (view-local)");
                         if let Some(tag) = view.focus_at_point(click.x as f32, click.y as f32) {
                             info!(%tag, "Focused content element");
+                            // ENGINE focus is not APPKIT focus: without
+                            // making the content view the window's first
+                            // responder, macOS keeps delivering keys to the
+                            // chrome WebView — observed live as "text entry
+                            // goes back up to the URL bar". First real
+                            // caller of ViewHost::focus, whose deadlock was
+                            // fixed preemptively in #116.
+                            view.grab_keyboard();
                             view.relayout();
                         }
                         if let Some(url) = view.link_at_point(click.x as f32, click.y as f32) {
                             info!(%url, "Link clicked");
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                        }
+                    }
+                    for key in rustkit_viewhost::drain_pending_keys() {
+                        if key.cmd {
+                            continue; // menu shortcuts are not text
+                        }
+                        // macOS keyCodes -> the Win32 VK numbering the edit
+                        // model speaks. Text keys carry their characters.
+                        let (vk, text): (u32, &str) = match key.mac_keycode {
+                            51 => (0x08, ""),   // delete (backspace)
+                            117 => (0x2E, ""),  // forward delete
+                            123 => (0x25, ""),  // left
+                            124 => (0x27, ""),  // right
+                            115 => (0x24, ""),  // home
+                            119 => (0x23, ""),  // end
+                            36 | 76 => (0x0D, ""), // return / keypad enter
+                            48 => (0x09, ""),   // tab
+                            53 => (0x1B, ""),   // escape
+                            _ => (0, key.text.as_str()),
+                        };
+                        if vk == 0x0D {
+                            if let Some(url) = view.form_submit_url() {
+                                info!(%url, "Form submitted");
+                                let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                                continue;
+                            }
+                        }
+                        if (vk != 0 || !text.is_empty())
+                            && view.handle_text_key(vk, text, key.ctrl, key.shift, key.alt)
+                        {
+                            view.relayout();
                         }
                     }
                     view.process_events();

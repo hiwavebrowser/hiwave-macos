@@ -131,6 +131,14 @@ impl RustKitView {
         engine.render_all_views();
     }
 
+    /// Route OS keyboard delivery to the content view (first responder).
+    pub fn grab_keyboard(&self) {
+        let engine = self.engine.borrow();
+        if let Some(view_id) = self.view_id {
+            engine.grab_keyboard(view_id);
+        }
+    }
+
     /// Deliver a key to the focused form control, if any.
     ///
     /// Returns true when the control consumed it (value or caret changed),
