@@ -56,6 +56,29 @@ pub fn drain_pending_clicks() -> Vec<PendingClick> {
     PENDING_CLICKS.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
 }
 
+/// A key event captured by the content view while it is first responder.
+///
+/// `text` carries the typed characters (empty for pure control keys);
+/// `mac_keycode` is the hardware-independent macOS keyCode for specials.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone)]
+pub struct PendingKey {
+    pub text: String,
+    pub mac_keycode: u16,
+    pub ctrl: bool,
+    pub cmd: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
+
+#[cfg(target_os = "macos")]
+static PENDING_KEYS: Mutex<Vec<PendingKey>> = Mutex::new(Vec::new());
+
+#[cfg(target_os = "macos")]
+pub fn drain_pending_keys() -> Vec<PendingKey> {
+    PENDING_KEYS.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+}
+
 /// The NSView subclass that hosts RustKit content.
 ///
 /// A stock NSView was measured to be a dead end for input: hitTest correctly
@@ -99,6 +122,48 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
         extern "C" fn mouse_up(this: &Object, _sel: Sel, event: id) {
             record(this, event, false);
         }
+        extern "C" fn accepts_first_responder(_this: &Object, _sel: Sel) -> bool {
+            // Without this, makeFirstResponder: refuses the view and macOS
+            // keeps routing keys to whoever held focus before — observed
+            // live 2026-08-07: click focused a page textarea (engine-side)
+            // while typed characters went to the chrome URL bar, because
+            // ENGINE focus and APPKIT first-responder are different systems
+            // and only one was wired.
+            true
+        }
+        extern "C" fn key_down(this: &Object, _sel: Sel, event: id) {
+            unsafe {
+                let chars: id = msg_send![event, characters];
+                let text = if chars != nil {
+                    let utf8: *const std::os::raw::c_char = msg_send![chars, UTF8String];
+                    if utf8.is_null() {
+                        String::new()
+                    } else {
+                        std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()
+                    }
+                } else {
+                    String::new()
+                };
+                let keycode: u16 = msg_send![event, keyCode];
+                let flags: u64 = msg_send![event, modifierFlags];
+                let key = PendingKey {
+                    text,
+                    mac_keycode: keycode,
+                    ctrl: flags & (1 << 18) != 0,   // NSEventModifierFlagControl
+                    cmd: flags & (1 << 20) != 0,    // NSEventModifierFlagCommand
+                    shift: flags & (1 << 17) != 0,  // NSEventModifierFlagShift
+                    alt: flags & (1 << 19) != 0,    // NSEventModifierFlagOption
+                };
+                if let Ok(mut q) = PENDING_KEYS.lock() {
+                    q.push(key);
+                }
+            }
+            let _ = this;
+            // Deliberately NOT calling super: consuming here is what keeps a
+            // keystroke from ALSO reaching whatever else might interpret it.
+            // Cmd-shortcuts still work: the menu system sees key equivalents
+            // before the responder chain does.
+        }
         extern "C" fn accepts_first_mouse(_this: &Object, _sel: Sel, _event: id) -> bool {
             // A click on an inactive window should reach the page (this is
             // what browsers do for links), and the synthetic probe runs
@@ -110,6 +175,11 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 sel!(acceptsFirstMouse:),
                 accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> bool,
             );
+            decl.add_method(
+                sel!(acceptsFirstResponder),
+                accepts_first_responder as extern "C" fn(&Object, Sel) -> bool,
+            );
+            decl.add_method(sel!(keyDown:), key_down as extern "C" fn(&Object, Sel, id));
             decl.add_method(
                 sel!(mouseDown:),
                 mouse_down as extern "C" fn(&Object, Sel, id),

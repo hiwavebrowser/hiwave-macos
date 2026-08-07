@@ -26,7 +26,7 @@ pub use traits::{ViewHostTrait, WindowHandle};
 #[cfg(target_os = "macos")]
 pub use macos::MacOSViewHost;
 #[cfg(target_os = "macos")]
-pub use macos::{drain_pending_clicks, PendingClick};
+pub use macos::{drain_pending_clicks, drain_pending_keys, PendingClick, PendingKey};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
