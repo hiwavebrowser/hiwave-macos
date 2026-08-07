@@ -189,6 +189,23 @@ def test_the_aggregate_carries_the_measured_count_to_the_gate():
     assert [f["reason"] for f in _gate(agg["results"])["failures"]] == ["stability_unmeasured"]
 
 
+def test_the_aggregate_does_not_invent_measurements_from_attempts():
+    """A row that reports only how many times it was ATTEMPTED must reach the
+    gate as unknown, not as that many measurements.
+
+    Not hypothetical: aggregate_from_attribution_files() reconstructs rows from
+    attribution.json files on disk and carries no per-iteration diffs at all.
+    Reading `iterations` here would hand those rows a stability sample nobody
+    took.
+    """
+    agg = aggregate_from_results([
+        {"case_id": "a", "viewport": "1280x800", "diff_pct": GOOD_DIFF,
+         "stable": True, "iterations": 3, "threshold": 15},
+    ])
+    assert agg["results"][0]["measured_runs"] is None
+    assert [f["reason"] for f in _gate(agg["results"])["failures"]] == ["stability_unmeasured"]
+
+
 def test_the_cases_only_fallback_keeps_its_evidence():
     """parity_gate's B2 fallback builds rows from `cases[]` when `results[]` is
     missing. If that mapping dropped the count, an otherwise healthy aggregate
