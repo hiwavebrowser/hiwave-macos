@@ -823,3 +823,70 @@ measured, because the gates were skipped on all three runs. But "the trench
 seat is Linux so P0b needs a macOS seat" is the same kind of inherited
 assumption as the selector drift, and it should be tested rather than
 ratified. The next run with `if: always()` in place is the test.
+
+### Third addendum — CI green, and the first macOS gate receipts exist
+
+Run 31242407101, all jobs green, `mergeable_state: clean`.
+
+**The sharding fix is confirmed by direct evidence**, not inference. The gate
+that failed 22/26 `stability_unmeasured` on three consecutive pushes now reads:
+
+```
+Require stable: True   Max variance: 0.1%
+✓ PASS: All 26 case(s) within max diff 25.0%
+GATE: PASSED
+```
+
+Same gate, same bar, same lane. The only change was where a cell's iterations
+live. Night 4's stability enforcement is now actually enforcing, four days
+after it was written.
+
+**And with `if: always()` in place, all three gates ran on macOS for the first
+time.** These are CoreText and Metal, not SwiftShader:
+
+| Gate | Result |
+|---|---|
+| A geometry | **4/26 green**, 0 unmeasured, 1691 geometry failures, 115 join failures |
+| B paint | **1/26 green**, 0 unmeasured, 51 discrete structural auto-fails |
+| C forensic | 26/26 measured, mean raw 23.23% (diagnostic only) |
+
+**This is not `N/26` and must not be recorded as one.** P0b is a dual-oracle
+baseline receipt taken on master and committed as one; this is a PR-branch run
+whose gates were advisory. What it is worth noting is that P0a's zero-engine-
+change rule means this branch's engine *is* master's engine, so the formal P0b
+number should land close to these. Taking it properly is the next unit.
+
+Three things in these numbers deserve recording now.
+
+**The platform caveat I insisted on all night was correct, and measurably so.**
+`bg-pure` read raw 2.083% / maxΔ 1 on the SwiftShader seat and reads **0.000% /
+maxΔ 0 / clean** on macOS. The 2% was entirely rasterizer noise. Every figure I
+labelled "not a receipt" tonight deserved the label.
+
+**115 join failures, identical on both platforms.** SwiftShader reported 115 and
+macOS reports 115. A number that does not move across a rasterizer and a font
+stack is not noise — it is a real gap where Chrome's baseline names a selector
+the engine's layout tree never produces. `verify_selector_key.mjs` proves
+Chrome's side still reproduces its 1757, so the gap is on the engine mirror or
+in boxes RustKit does not create at all. This is P0a-0 work that P0a-0 did not
+finish, and nobody had the instrument to see it until tonight.
+
+**Gate B's discrete half is earning its place immediately.** 51 structural
+auto-fails, and they are `missing_clip` on rounded corners with named selectors
+and fills — `image-gallery` 17, `sticky-scroll` 12, `new_tab` 10 — e.g.
+
+```
+image-gallery · body > div.gallery:nth-of-type(1) > div.gallery-item tall:nth-of-type(1)
+              · missing_clip · radius 12px top-left · fill #667de9 across all 17 notch px
+```
+
+That is P1's corner-notch defect, found by the gate rather than by a human
+staring at a diff, and it is exactly the class the plan predicted at §4.
+
+**The honest headline.** The old board read mean 6.64% and "~93% raw pixel
+agreement". The new instrument, pointed at the same engine on the same
+platform, reads 4/26 geometry-green and 1/26 paint-green. Nothing regressed
+tonight — the engine was never touched. The difference is entirely that the
+conjunction is being asked instead of the mean. That gap *is* the campaign's
+thesis, and this is the first time it has been a measurement rather than an
+argument.
