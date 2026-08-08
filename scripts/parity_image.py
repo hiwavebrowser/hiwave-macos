@@ -266,3 +266,41 @@ def read_image(path: Path) -> Image:
     if suffix in (".ppm", ".pnm"):
         return read_ppm(path)
     raise UnsupportedImage(f"{path}: unknown image extension {suffix!r}")
+
+
+# ---------------------------------------------------------------------------
+# PNG writing
+# ---------------------------------------------------------------------------
+
+
+def write_png(path: Path, image: Image) -> None:
+    """Write an 8-bit RGB PNG. Stdlib only, same reason as the readers.
+
+    Gate C publishes a heatmap per case, and a forensic board whose images
+    cannot be opened is a board nobody reads. Filter type 0 (None) on every
+    row: heatmaps are large flat regions of the background colour, which zlib
+    already collapses, and a real filter would buy compression at the cost of
+    another thing to get wrong in a file that exists to be looked at.
+    """
+    raw = bytearray()
+    stride = image.width * 3
+    for y in range(image.height):
+        raw.append(0)  # filter: None
+        start = y * stride
+        raw += image.rgb[start : start + stride]
+
+    def chunk(tag: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + tag
+            + payload
+            + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF)
+        )
+
+    ihdr = struct.pack(">IIBBBBB", image.width, image.height, 8, 2, 0, 0, 0)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(PNG_SIGNATURE)
+        handle.write(chunk(b"IHDR", ihdr))
+        handle.write(chunk(b"IDAT", zlib.compress(bytes(raw), 6)))
+        handle.write(chunk(b"IEND", b""))

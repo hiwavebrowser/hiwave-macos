@@ -185,6 +185,93 @@ jobs:
             --primary-viewport-only \
             --max-diff 25
 
+      # -----------------------------------------------------------------
+      # Dual oracle (plan §2). ADVISORY for one cycle, per Pete's ratified
+      # decision 2 — receipts printed, nothing blocked — then flipped to
+      # blocking for A and B in a follow-up that changes only these flags.
+      #
+      # Advisory means VISIBLE, not ignored: every receipt goes to the job
+      # summary, so an advisory gate that silently stopped running is
+      # readable on the PR rather than inferred from a green check. That
+      # distinction is the whole reason this campaign exists.
+      #
+      # The shard artifacts carry the captures — parity_lib writes
+      # parity-results/<run>/<case>/<viewport>/iter-N/capture/{frame.ppm,
+      # layout.json} and the re-homing step above restores that layout — so
+      # the gates read real frames here, not a re-render.
+      # -----------------------------------------------------------------
+      - name: Gate A — geometry (advisory)
+        id: gate_a
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 scripts/layout_oracle_gate.py \
+            --layout-root parity-results \
+            --json parity-results/gate-a.json | tee parity-results/gate-a.txt
+
+      - name: Gate B — paint (advisory)
+        id: gate_b
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 scripts/paint_oracle_gate.py \
+            --capture-root parity-results \
+            --json parity-results/gate-b.json | tee parity-results/gate-b.txt
+
+      - name: Gate C — forensic board (non-gating)
+        id: gate_c
+        continue-on-error: true
+        run: |
+          python3 scripts/forensic_board.py \
+            --capture-root parity-results \
+            --out parity-results/forensic
+
+      - name: Publish oracle receipts
+        if: always()
+        run: |
+          {
+            echo "## Dual oracle — advisory cycle"
+            echo
+            echo "Gates A and B are **advisory** for one cycle (ratified"
+            echo "2026-08-07): they print receipts and block nothing. Gate C is"
+            echo "non-gating by design and always will be."
+            echo
+            emit_receipt() {
+              echo "<details><summary>Gate $1 — outcome: $2</summary>"
+              echo
+              echo '```'
+              cat "$3" 2>/dev/null \
+                || echo "Gate $1 produced no receipt — it did not run. This is not a pass."
+              echo '```'
+              echo
+              echo "</details>"
+              echo
+            }
+            emit_receipt A "${{ steps.gate_a.outcome }}" parity-results/gate-a.txt
+            emit_receipt B "${{ steps.gate_b.outcome }}" parity-results/gate-b.txt
+            if [ -f parity-results/forensic/board.md ]; then
+              cat parity-results/forensic/board.md
+            else
+              echo "## Gate C — forensic board"
+              echo
+              echo "**No board was published.** Gate C is non-gating, which means"
+              echo "its numbers never fail a PR — it does not mean a board that"
+              echo "was never produced reads clean. Something stopped it running."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload oracle artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-oracle
+          path: |
+            parity-results/gate-a.json
+            parity-results/gate-b.json
+            parity-results/forensic/
+          retention-days: 14
+          if-no-files-found: warn
+
       - name: Upload aggregate report
         if: always()
         uses: actions/upload-artifact@v4
@@ -429,6 +516,77 @@ jobs:
             --require-stable \
             --max-variance 0.10 \
             --max-diff 25
+
+      # -----------------------------------------------------------------
+      # Dual oracle, nightly lane. Same advisory-for-one-cycle posture as
+      # the PR lane; plan §2 requires both lanes to carry the oracle, so
+      # they are flipped to blocking together rather than drifting apart.
+      # -----------------------------------------------------------------
+      - name: Gate A — geometry (advisory)
+        id: nightly_gate_a
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 scripts/layout_oracle_gate.py \
+            --layout-root parity-results \
+            --json parity-results/gate-a.json | tee parity-results/gate-a.txt
+
+      - name: Gate B — paint (advisory)
+        id: nightly_gate_b
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 scripts/paint_oracle_gate.py \
+            --capture-root parity-results \
+            --json parity-results/gate-b.json | tee parity-results/gate-b.txt
+
+      - name: Gate C — forensic board (non-gating)
+        continue-on-error: true
+        run: |
+          python3 scripts/forensic_board.py \
+            --capture-root parity-results \
+            --out parity-results/forensic
+
+      - name: Publish oracle receipts
+        if: always()
+        run: |
+          {
+            echo "## Dual oracle — nightly, advisory cycle"
+            echo
+            emit_receipt() {
+              echo "<details><summary>Gate $1 — outcome: $2</summary>"
+              echo
+              echo '```'
+              cat "$3" 2>/dev/null \
+                || echo "Gate $1 produced no receipt — it did not run. This is not a pass."
+              echo '```'
+              echo
+              echo "</details>"
+              echo
+            }
+            emit_receipt A "${{ steps.nightly_gate_a.outcome }}" parity-results/gate-a.txt
+            emit_receipt B "${{ steps.nightly_gate_b.outcome }}" parity-results/gate-b.txt
+            if [ -f parity-results/forensic/board.md ]; then
+              cat parity-results/forensic/board.md
+            else
+              echo "## Gate C — forensic board"
+              echo
+              echo "**No board was published.** Non-gating means its numbers"
+              echo "never fail a run — not that a board nobody produced reads clean."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload oracle artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-oracle
+          path: |
+            parity-results/gate-a.json
+            parity-results/gate-b.json
+            parity-results/forensic/
+          retention-days: 14
+          if-no-files-found: warn
 
       # Compare against previous nightly if available
       - name: Download previous nightly
