@@ -396,6 +396,15 @@ impl ImageManager {
         Ok(Arc::new(loaded))
     }
 
+    /// Decode bytes through the real engine path. Test-only surface so a
+    /// codec fix can be proven to REACH the engine rather than merely
+    /// existing in its own crate — the orphan shape this codebase keeps
+    /// producing. Calls the same private decoder production uses.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn decode_bytes_for_test(&self, url: &Url, bytes: &[u8]) -> ImageResult<LoadedImage> {
+        self.decode_bytes(url, bytes)
+    }
+
     /// Decode image from bytes
     fn decode_bytes(&self, url: &Url, bytes: &[u8]) -> ImageResult<LoadedImage> {
         // Guess format from bytes
