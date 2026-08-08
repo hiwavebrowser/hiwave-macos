@@ -17,6 +17,38 @@ env:
 
 jobs:
   # ===========================================================================
+  # Join-key contract (~1m). Cheap, corpus-wide, no Rust and no swarm.
+  # ===========================================================================
+  selector-key:
+    # Gates A, B and C all join RustKit boxes to Chrome rects on the selector
+    # produced by capture_baseline.mjs. A change to it does not fail loudly —
+    # unmatched elements drop out of comparison and score as "no geometry
+    # error" because they are never compared. This asserts all 1757 committed
+    # selectors are still reproducible before any gate is believed.
+    #
+    # Blocking from its first run, unlike Gates A/B which enter advisory-first:
+    # this one is already measured green on the committed corpus (1757/1757)
+    # and its output is DOM structure — tag, class, id, nth-of-type — with no
+    # dependence on font stack or rasterizer, so it cannot red-lock on a
+    # platform difference. If it does go red on macOS that is a real finding.
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install oracle deps
+        working-directory: tools/parity_oracle
+        run: npm ci
+
+      - name: Verify the join key still reproduces every committed selector
+        run: node tools/parity_oracle/verify_selector_key.mjs
+
+  # ===========================================================================
   # PR Gate: Sharded swarm (~30m total)
   # ===========================================================================
   pr-swarm:
