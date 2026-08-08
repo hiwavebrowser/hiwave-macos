@@ -601,6 +601,45 @@ mod tests {
     }
 
     #[test]
+    fn one_glyph_occupies_at_most_quantize_cache_slots() {
+        // ATLAS GROWTH BOUND (Argos's soft note on #131). The phase field
+        // multiplies cache entries per glyph, and this cache has NO eviction
+        // -- `clear()` is the only reset -- so the growth FACTOR is the whole
+        // safety story. It must be exactly SUBPIXEL_QUANTIZE, not "however
+        // many distinct fractions a page happens to produce".
+        use std::collections::HashSet;
+        let mut keys = HashSet::new();
+        // Sweep far more x positions than there are phases; the bucket count,
+        // not the position count, must bound the entries.
+        for i in 0..500 {
+            let x = i as f32 * 0.013;
+            keys.insert(key_at(subpixel_phase_for(x)));
+        }
+        assert_eq!(
+            keys.len(),
+            SUBPIXEL_QUANTIZE as usize,
+            "500 distinct x positions must collapse to exactly {} cache slots",
+            SUBPIXEL_QUANTIZE
+        );
+    }
+
+    #[test]
+    fn the_growth_bound_is_the_only_thing_this_unit_guarantees() {
+        // Deliberate documentation-as-test. Paying 4x atlas for a glyph is
+        // only worth it if the four phases produce four DIFFERENT bitmaps --
+        // and Atlas measured that CoreGraphics grid-fits glyph origins and
+        // rounds the offset away by default: at 36px, phases .25 and .50 gave
+        // a 0.00px and a 1.00px shift, i.e. TWO bitmaps in FOUR slots. That is
+        // fixed in the rasterizer half (#132, subpixel positioning on,
+        // subpixel quantization off), NOT here.
+        //
+        // This test exists so a reader of THIS file learns that the key alone
+        // does not buy distinct rendering, and does not mistake a green suite
+        // here for a working subpixel pipeline.
+        assert_eq!(SUBPIXEL_QUANTIZE, 4);
+    }
+
+    #[test]
     fn glyphs_at_different_phases_are_different_cache_entries() {
         // THE POINT OF THE WHOLE UNIT. Before the phase field, a glyph at
         // x=10.0 and the same glyph at x=10.5 collided on one key, so both got
