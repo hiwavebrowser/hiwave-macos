@@ -7849,32 +7849,6 @@ fn parse_length(value: &str) -> Option<rustkit_css::Length> {
 }
 
 
-/// Split CSS function arguments, respecting nested parentheses.
-fn split_css_args(s: &str) -> Vec<&str> {
-    let mut result = Vec::new();
-    let mut depth = 0;
-    let mut start = 0;
-
-    for (i, c) in s.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => depth -= 1,
-            ',' if depth == 0 => {
-                result.push(&s[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-
-    // Don't forget the last argument
-    if start < s.len() {
-        result.push(&s[start..]);
-    }
-
-    result
-}
-
 /// Parse a shorthand value with 1-4 parts (like margin, padding).
 /// Returns (top, right, bottom, left).
 /// Parse a `border` / `border-<side>` shorthand: `<width> || <style> || <color>`.

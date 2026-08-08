@@ -12,7 +12,6 @@ mod platform;
 use std::sync::{Arc, Mutex};
 use muda::{Menu, MenuEvent};
 use platform::get_platform_manager;
-use hiwave_shield::ResourceType;
 #[cfg(target_os = "macos")]
 use platform::menu_ids;
 use tao::{

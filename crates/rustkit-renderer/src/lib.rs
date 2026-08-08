@@ -562,8 +562,27 @@ impl Renderer {
             ..Default::default()
         });
 
-        // GPU gradients enabled via environment variable (default: disabled for stability)
-        let gpu_gradients_enabled = std::env::var("RUSTKIT_GPU_GRADIENTS").is_ok();
+        // GPU gradients: the flag is READ but the path is NOT IMPLEMENTED.
+        //
+        // The queues below are pushed to and cleared, never drained:
+        // `render_linear_gradient_gpu` has zero callers, and draw_linear_gradient
+        // does `push(...); return;` — skipping the CPU path. Honouring this flag
+        // therefore DELETED EVERY GRADIENT ON THE PAGE, silently, with the CPU
+        // renderer bypassed and nothing drawn in its place.
+        //
+        // Forced off until the queues are actually drained. The flag still logs
+        // loudly so an operator who sets it learns it did nothing, rather than
+        // debugging vanished gradients. Do NOT flip this to `is_ok()` without
+        // first wiring flush_to to consume the three queues.
+        let gpu_gradients_requested = std::env::var("RUSTKIT_GPU_GRADIENTS").is_ok();
+        if gpu_gradients_requested {
+            tracing::warn!(
+                "RUSTKIT_GPU_GRADIENTS is set but GPU gradient rendering is NOT implemented \
+                 (the queues are never drained). Ignoring the flag and using the CPU path. \
+                 Honouring it would render no gradients at all."
+            );
+        }
+        let gpu_gradients_enabled = false;
 
         Ok(Self {
             device,
