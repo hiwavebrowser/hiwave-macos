@@ -45,6 +45,16 @@ jobs:
         working-directory: tools/parity_oracle
         run: npm ci
 
+      - name: Install Chromium
+        working-directory: tools/parity_oracle
+        # `npm ci` installs the playwright PACKAGE but not its browsers, and
+        # this is the first job in the repo to need one — every other lane uses
+        # the oracle only for pngjs/pixelmatch diffing against the committed
+        # baselines, so nothing has ever launched a browser in CI. Without this
+        # the job dies on a missing chrome-headless-shell before it checks a
+        # single selector, which is a did-not-run wearing a red X.
+        run: npx playwright install --with-deps chromium
+
       - name: Verify the join key still reproduces every committed selector
         run: node tools/parity_oracle/verify_selector_key.mjs
 
