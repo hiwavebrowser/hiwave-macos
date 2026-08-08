@@ -65,7 +65,7 @@ h1 { font-size: 32px; margin: 0 }
 .floater   { position: absolute; width: 50px; height: 40px }
 .clipped   { width: 260px; overflow: hidden }
 .unclipped { width: 240px }
-.kid       { margin-top: 10px; height: 5px }
+.kid       { margin-top: 10px; height: 5px; margin-bottom: 20px }
 .faded     { width: 100px; height: 10px; background: #f00; opacity: 0.5 }
 div { box-sizing: content-box; position: static }
 </style></head><body><div class="hero"><h1>Attribution</h1></div>\
@@ -689,14 +689,11 @@ def main():
           f"sheet); .host is 0.0 tall around a 40.0-tall child and the next block starts at "
           f"the same y — out of flow")
 
-    # ---- overflow-x and opacity: reported, NOT counted ----------------------
-    # Both are in the diagnosis set and both now come back with a computed value
-    # and honest provenance. Neither counts for the metric, because the trench's
-    # clause 3 asks for more than a value: the reported value has to be the one
-    # the engine USED, and for these two nothing downstream uses it.
-    #
+    # ---- overflow-x: COUNTED. opacity: reported, NOT counted ----------------
     # `overflow-x` is cited correctly — no rule spells the longhand, and the
-    # citation names the `overflow` shorthand that really wrote it...
+    # citation names the `overflow` shorthand that really wrote it. That is
+    # clauses 1 and 2 (a shorthand expansion, so the value is not an echo of any
+    # declaration text).
     clipped_style, error = client.tool("hiwave_style", selector=".clipped")
     assert error is None, error
     clipped = clipped_style["elements"][0]
@@ -705,30 +702,65 @@ def main():
     assert ox["winner"]["property"] == "overflow", ox["winner"]
     assert ox["winner"]["via_shorthand"] is True, ox["winner"]
     assert ox["winner"]["selector"] == ".clipped", ox["winner"]
-    # ...but A TRIPWIRE, not an endorsement: `hidden` reaches layout only through
-    # `establishes_bfc` (margin_collapse.rs), and that distinction changes
-    # nothing observable in the block path. `.clipped` (hidden, a BFC) and
-    # `.unclipped` (visible, not one) lay their identical child out identically:
-    # in both, the kid's 10px top margin stays inside and the parent is 15 tall.
-    # In a browser these differ. Nothing clips in paint either — there is no
-    # push_clip for overflow at all. So the engine cannot be shown to have USED
-    # the value this tool reports, and the property stays uncounted. Whoever
-    # makes overflow observable will see this go red and should then count it.
+
+    # THE HALF THAT MAKES IT COUNT — clause 3: the value the tool reports is the
+    # value LAYOUT used. Night 9 looked for that here and concluded it was not
+    # observable, but it measured the kid's TOP margin, and
+    # `should_collapse_with_first_child` is never called by the block path.
+    # `should_collapse_with_last_child` IS (rustkit-layout/src/lib.rs), and it
+    # asks `establishes_bfc`, which reads `overflow_x` directly
+    # (margin_collapse.rs). So the LAST child's bottom margin is where the
+    # engine spends the value.
+    #
+    # `.clipped` and `.unclipped` hold the SAME `.kid` and differ in exactly one
+    # declaration — `overflow: hidden`. The kid is margin-top 10, height 5,
+    # margin-bottom 20:
+    #
+    #   .clipped   overflow:hidden -> a BFC -> no collapse-through, so the
+    #              pending 20px bottom margin is materialised INSIDE the parent:
+    #              10 + 5 + 20 = 35
+    #   .unclipped overflow:visible -> not a BFC -> collapse-through allowed and
+    #              the pending margin is not added:            10 + 5 = 15
+    #
+    # 20.0 of geometry, attributable to one keyword. NOTE what is NOT claimed:
+    # neither number is Chrome's. Chrome collapses the top margin out too (the
+    # engine does not — `should_collapse_with_first_child` is unwired) and
+    # adjoins the escaping bottom margin to the parent rather than dropping it
+    # (ledgered in the block-height comment). Both are pre-existing residuals,
+    # unrelated to this property. What is asserted is the engine's own
+    # behaviour and, in particular, the DIFFERENCE that overflow-x alone causes.
     unclipped_box = find(tree["root"],
                          lambda n: (n.get("border_box") or {}).get("width") == 240.0)
     assert unclipped_box is not None, "no 240-wide box — expected .unclipped"
-    assert clipped_box["border_box"]["height"] == 15.0, clipped_box["border_box"]
-    assert unclipped_box["border_box"]["height"] == 15.0, unclipped_box["border_box"]
+    clipped_h = clipped_box["border_box"]["height"]
+    unclipped_h = unclipped_box["border_box"]["height"]
+    assert clipped_h == 35.0, clipped_box["border_box"]
+    assert unclipped_h == 15.0, unclipped_box["border_box"]
+    # ...and the gap is exactly the kid's bottom margin, not some other drift:
+    # the two children are identical, so anything else differing would show up
+    # here instead.
+    assert clipped_h - unclipped_h == 20.0, (clipped_h, unclipped_h)
     kid_offset = (clipped_box["children"][0]["border_box"]["y"]
                   - clipped_box["border_box"]["y"])
     unclipped_kid_offset = (unclipped_box["children"][0]["border_box"]["y"]
                             - unclipped_box["border_box"]["y"])
     assert kid_offset == unclipped_kid_offset == 10.0, (kid_offset, unclipped_kid_offset)
+    assert clipped_box["children"][0]["border_box"]["height"] == 5.0, clipped_box["children"][0]
+    print(f"ok  overflow-x       .clipped overflow-x=hidden cited to `overflow`; it establishes "
+          f"a BFC so the kid's 20px bottom margin lands INSIDE — {clipped_h} tall against "
+          f"{unclipped_h} for .unclipped, same child, one keyword apart")
+
+    # THE LIMIT, still pinned: layout spends overflow-x, PAINT DOES NOT. There
+    # is no push_clip for overflow anywhere in the display list, so an agent
+    # reading `hidden` learns what layout did with it and must NOT conclude the
+    # content was clipped. Counted for the value (as `position` was on night 9,
+    # for the value and not its consequences), with the paint half named rather
+    # than implied. Whoever implements clipping will see this go red and should
+    # then assert the clip instead of deleting the line.
     assert not [c for c in commands if c["op"] in ("push_clip", "pop_clip")], \
         [c for c in commands if c["op"] in ("push_clip", "pop_clip")]
-    print(f"ok  KNOWN GAP        .clipped overflow-x=hidden cited to `overflow`, but it lays "
-          f"out identically to .unclipped (both {clipped_box['border_box']['height']} tall, "
-          f"kid at +{kid_offset}) and paint pushes no clip — reported, not counted")
+    print(f"ok  KNOWN GAP        ...but paint pushes no clip for it — overflow-x is answered "
+          f"for what LAYOUT did, not for whether anything was clipped")
 
     # `opacity` is the clearer case: the cascade CLAMPS it, so 0.5 is a computed
     # number rather than an echo, and the clamp is the engine's own. But paint

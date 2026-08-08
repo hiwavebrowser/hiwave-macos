@@ -2646,19 +2646,24 @@ impl Engine {
         "border-top-color",
         // The box group. These decide the SHAPE of the box rather than a
         // number inside it — what `width` even means, whether the box is in
-        // flow, whether a clip is pushed, whether a layer is created. Two of
-        // the four are cross-checked against layout and count; the other two
-        // are reported because an agent asking is better served by a value
-        // plus a named limitation than by silence, and both limitations are
-        // pinned by smoke tripwires. See trench/digest.md night 9.
+        // flow, whether a clip is pushed, whether a layer is created. Three of
+        // the four are cross-checked against layout and count.
         "box-sizing",
         "position",
-        // NOT cross-checkable today, and reported as findings rather than
-        // counted: `overflow-x` reaches layout only through `establishes_bfc`,
-        // whose effect is not observable in the block path (a BFC parent and a
-        // flow parent lay out identically here), and `opacity` reaches paint
-        // for images only, where the renderer then discards it.
+        // `overflow-x` reaches layout through `establishes_bfc`, and that IS
+        // observable: it decides whether the last child's bottom margin
+        // collapses through (`should_collapse_with_last_child`, the only one of
+        // the pair the block path calls) or is materialised inside the parent.
+        // Cross-checked in smoke.py against two boxes that differ in exactly
+        // this keyword. Night 9 read it as unobservable because it measured the
+        // TOP margin, whose collapse helper is unwired. What it still does NOT
+        // buy is the clip: paint pushes none, so this answers what layout did
+        // with the value, not whether anything was clipped. See `limits`.
         "overflow-x",
+        // NOT cross-checkable today, and reported as a finding rather than
+        // counted: `opacity` reaches paint for images only, where the renderer
+        // then discards it, so the fill for a half-transparent box comes out at
+        // full alpha. Pinned by a smoke tripwire.
         "opacity",
     ];
 
@@ -5992,6 +5997,16 @@ impl Engine {
                                 ancestor reports (and lays out) `normal`. The value is \
                                 truthful about the engine and is never labelled `inherited`; \
                                 the missing inheritance is an engine bug",
+                "overflow": "the reported value is the one LAYOUT used — it decides whether \
+                             this box establishes a BFC, and so whether its last child's \
+                             bottom margin collapses through or is materialised inside. It \
+                             does NOT describe clipping: paint emits no clip for overflow, \
+                             so `hidden` here must not be read as `the content was clipped`. \
+                             `overflow-y` is not exported at all",
+                "opacity": "computed and clamped by the cascade, but the renderer reads it \
+                            for images only and discards it even there, so a half-transparent \
+                            box is still filled at full alpha. The value is truthful about \
+                            the cascade and says nothing about what was drawn",
                 "shorthands": "a longhand set by a shorthand cites that shorthand, with \
                                `via_shorthand: true` and the declaration's own property name. \
                                Attribution is measured by running the applying function, not \
