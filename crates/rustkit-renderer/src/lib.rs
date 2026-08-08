@@ -4341,10 +4341,12 @@ impl Renderer {
 
         for (char_idx, ch) in text.chars().enumerate() {
             let key = GlyphKey {
-                // FROZEN AT 0 until the rasterizer can draw at a phase --
-                // see GlyphKey::subpixel_phase. Pixels are bit-identical to
-                // before this field existed.
-                subpixel_phase: 0,
+                // FLIPPED: the rasterizer honors phase as of #132, so the key
+                // now carries the bucket of cursor_x's fraction. The matching
+                // half of the FRACTION OWNERSHIP contract is below -- the quad
+                // is placed at floor(cursor_x), never at fractional cursor_x,
+                // because the fraction is already baked into the bitmap.
+                subpixel_phase: crate::glyph::subpixel_phase_for(cursor_x),
                 codepoint: ch,
                 font_family: font_family.to_string(),
                 font_size: (font_size * 10.0) as u32,
@@ -4353,7 +4355,7 @@ impl Renderer {
             };
 
             if let Some(entry) = self.glyph_cache.get_or_rasterize(&self.device, &self.queue, &key) {
-                let glyph_x = cursor_x + entry.offset[0];
+                let glyph_x = cursor_x.floor() + entry.offset[0];
                 let glyph_y = baseline + entry.offset[1];
                 let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
                 let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
@@ -4490,10 +4492,12 @@ impl Renderer {
 
         for (char_idx, ch) in text.chars().enumerate() {
             let key = GlyphKey {
-                // FROZEN AT 0 until the rasterizer can draw at a phase --
-                // see GlyphKey::subpixel_phase. Pixels are bit-identical to
-                // before this field existed.
-                subpixel_phase: 0,
+                // FLIPPED: the rasterizer honors phase as of #132, so the key
+                // now carries the bucket of cursor_x's fraction. The matching
+                // half of the FRACTION OWNERSHIP contract is below -- the quad
+                // is placed at floor(cursor_x), never at fractional cursor_x,
+                // because the fraction is already baked into the bitmap.
+                subpixel_phase: crate::glyph::subpixel_phase_for(cursor_x),
                 codepoint: ch,
                 font_family: font_family.to_string(),
                 font_size: (font_size * 10.0) as u32,
@@ -4511,10 +4515,16 @@ impl Renderer {
             #[cfg(not(target_os = "macos"))]
             let is_color = false;
             if is_color {
+                // COLOR PATH PINNED TO PHASE 0. Emoji are color bitmaps, not
+                // coverage masks tinted at a subpixel offset -- rasterizing
+                // them at 4 phases would mint 4 near-identical RGBA entries
+                // for no visible gain. Zeroing here (not at key construction)
+                // keeps the grayscale key above honest.
+                let key = GlyphKey { subpixel_phase: 0, ..key.clone() };
                 if let Some(entry) =
                     self.glyph_cache.get_or_rasterize_color(&self.device, &self.queue, &key)
                 {
-                    let glyph_x = cursor_x + entry.offset[0];
+                    let glyph_x = cursor_x.floor() + entry.offset[0];
                     let glyph_y = baseline + entry.offset[1];
                     let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
                     let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
@@ -4549,7 +4559,7 @@ impl Renderer {
 
             // Clone the entry to avoid borrow issues
             if let Some(entry) = self.glyph_cache.get_or_rasterize(&self.device, &self.queue, &key) {
-                let glyph_x = cursor_x + entry.offset[0];
+                let glyph_x = cursor_x.floor() + entry.offset[0];
                 let glyph_y = baseline + entry.offset[1];
 
                 // PAINT-0: sample chars only — x (ex-height), H (cap), g

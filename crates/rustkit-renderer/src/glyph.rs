@@ -394,7 +394,12 @@ impl GlyphCache {
                 key.font_weight,
                 italic,
             );
-            rasterizer.rasterize_char(key.codepoint, 0.0)
+            // Phase -> fractional offset. This is the join between Athena's
+            // key and the rasterizer: the bucket the key was built from must
+            // map back to the same offset the glyph is drawn at, or the cache
+            // is keyed on one thing and holding another.
+            let subpixel_x = key.subpixel_phase as f32 / SUBPIXEL_QUANTIZE as f32;
+            rasterizer.rasterize_char(key.codepoint, subpixel_x)
         };
 
         #[cfg(windows)]
