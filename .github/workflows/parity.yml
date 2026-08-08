@@ -212,6 +212,7 @@ jobs:
       # -----------------------------------------------------------------
       - name: Gate A — geometry (advisory)
         id: gate_a
+        if: always()
         continue-on-error: true
         run: |
           set -o pipefail
@@ -221,6 +222,7 @@ jobs:
 
       - name: Gate B — paint (advisory)
         id: gate_b
+        if: always()
         continue-on-error: true
         run: |
           set -o pipefail
@@ -230,6 +232,7 @@ jobs:
 
       - name: Gate C — forensic board (non-gating)
         id: gate_c
+        if: always()
         continue-on-error: true
         run: |
           python3 scripts/forensic_board.py \
@@ -534,6 +537,7 @@ jobs:
       # -----------------------------------------------------------------
       - name: Gate A — geometry (advisory)
         id: nightly_gate_a
+        if: always()
         continue-on-error: true
         run: |
           set -o pipefail
@@ -543,6 +547,7 @@ jobs:
 
       - name: Gate B — paint (advisory)
         id: nightly_gate_b
+        if: always()
         continue-on-error: true
         run: |
           set -o pipefail
@@ -551,6 +556,7 @@ jobs:
             --json parity-results/gate-b.json | tee parity-results/gate-b.txt
 
       - name: Gate C — forensic board (non-gating)
+        if: always()
         continue-on-error: true
         run: |
           python3 scripts/forensic_board.py \
