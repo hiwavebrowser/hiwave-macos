@@ -5028,7 +5028,11 @@ impl DisplayList {
                     "cover" => ObjectFit::Cover,
                     "none" => ObjectFit::None,
                     "scale-down" => ObjectFit::ScaleDown,
-                    _ => ObjectFit::Contain,
+                    // Unknown keyword falls back to the INITIAL value (fill,
+                    // CSS Images 3 §5.5), not to a different behaviour. The
+                    // old `contain` fallback silently letterboxed anything
+                    // whose object-fit failed to parse.
+                    _ => ObjectFit::Fill,
                 };
 
                 let (pos_x, pos_y) = layout_box.style.object_position;
