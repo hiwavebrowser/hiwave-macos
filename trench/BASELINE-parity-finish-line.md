@@ -43,7 +43,9 @@ run on master, and not before.
 | Gate A (geometry) not implemented — `scripts/layout_oracle_gate.py` is a stub whose `extract_layout_from_rustkit` returns `None` | **CLEARED** night 2. Gate built, joined on the P0a-0 key, 14/14 mutation-checked. It has never seen a real RustKit capture — see below. |
 | Gate A has no real RustKit input yet — every capture path needs a GPU adapter, and this trench seat is Linux with none | **Half cleared** night 4. The seat *does* render: SwiftShader ships with the bundled Playwright Chromium and wgpu takes it via `VK_ICD_FILENAMES`. 32/32 registry cases captured, and Gate A ran end-to-end on real engine output for the first time (26 measured, 2 green, 24 red, 2703 geometry failures, 115 join failures). Its **code path** is now observed; its **numbers** are still not macOS numbers — Linux font stack, not CoreText; SwiftShader, not Metal. Nothing from this seat can be the receipt. |
 | Gate B (paint tolerance + discrete-structural auto-fail) not implemented | **CLEARED** night 3, with one gap: 2 of 3 discrete kinds. `paint_outside_box` is unbuilt because the obvious form was measured to be decoration (0.00% of the viewport lies outside Chrome's rects on all 26 cases) and the attributable form needs Gate A's per-element verdict as a precondition. |
-| Gate C (non-gating forensic board) not published | open — P0a, and now the last piece of it. No longer blocked on frames: the SwiftShader route above supplies real ones, so the board can be built and its mechanics exercised here. What it prints from this seat remains Linux output, useful for developing the instrument and worthless as a receipt. |
+| Gate C (non-gating forensic board) not published | **CLEARED** night 5, 17/17 mutation-checked. `scripts/forensic_board.py`: raw heatmap, a tolerance sweep at 0/1x/2x/4x the pinned constant, 32px tiles ranked by above-tolerance pixels and attributed to the most specific Chrome element. Non-gating is enforced as *the numbers never fail a PR*, not *always exits 0* — a board that measured nothing exits 1. Validated end to end on real SwiftShader frames (26/26 measured, 21s); those numbers are mechanics, never a receipt. |
+| Gates A, B and C never wired into `parity.yml` at all | **CLEARED** night 5. All three run on the PR and nightly lanes against the shard artifacts' own captures. A and B are **advisory for one cycle** per ratified decision 2; C is non-gating forever. Advisory means visible, not ignored: every receipt, including did-not-run text, goes to the job summary. Flipping A and B to blocking is a follow-up that changes only `continue-on-error`. |
+| The join key was never guarded, only assumed | **CLEARED** night 5, 5/6 mutation-checked. `tools/parity_oracle/verify_selector_key.mjs` extracts `getSelector` from `capture_baseline.mjs` and asserts it reproduces all 1757 committed selectors. Blocking in CI from its first run. |
 | Stability never enforced at `pr_merge` (`stable:false` does not gate in `parity_gate.py`) | **CLEARED** night 4, 19/19 mutation-checked. The ≥2-run waiver is gone: a row that cannot show 3 **measured** iterations now fails as `stability_unmeasured`, a reason distinct from `unstable`, and unknown counts as zero. Measured ≠ attempted — three captures of which two errored is one measurement. The PR and nightly scout phases run `--iterations 3` in the same commit, because tightening the gate without producing the evidence is a permanent red lock rather than a stricter check. Like Gates A and B, it has never run against a real macOS capture. |
 
 ---
@@ -53,10 +55,13 @@ run on master, and not before.
 The three questions carried in digests since nights 1–4 are settled. Full text
 in `docs/RENDERING_GAP_PLAN_2026-08-07.md` §5 (on develop/master).
 
-1. **Selector drift: PIN `capture_baseline.mjs` back to the committed form**
-   (`div.card featured`), plus a test asserting the script reproduces the
-   committed baselines' keys. Do NOT regenerate. This unblocks all three
-   gates and is legitimate first work for the next night.
+1. ~~**Selector drift: PIN `capture_baseline.mjs` back to the committed form**~~
+   **The premise was false — measured night 5.** The script has never drifted:
+   it reproduces 1757/1757 committed selectors. The claim came from reading
+   `split(/\s+/).join('.')` as intent; the source says `/\\s+/`, which matches
+   a literal backslash and not whitespace, so the split is a no-op and the raw
+   className survives as `div.card featured`. The pin half is a no-op; the
+   test half shipped and is what actually holds the form.
 2. **Gates A + B + the stability bar enter `parity.yml` ADVISORY-FIRST for
    one cycle** (print receipts, never block), then flip blocking. Wiring
    them in is in scope for the trench.

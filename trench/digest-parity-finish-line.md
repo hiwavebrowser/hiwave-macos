@@ -607,3 +607,147 @@ stdout. (The return codes themselves are honest — 1 on no-adapter, 1 on missin
 file, 0 on success. I checked before writing this down, having initially
 misread `tail`'s exit status as the binary's.)
 
+
+---
+
+## 2026-08-08
+
+**Metric: UNMEASURABLE → UNMEASURABLE.** All four gates now exist and are wired
+into CI, which is the whole of P0a. What still blocks the number is unchanged
+and is now the *only* thing blocking it: none of the gates has run on macOS.
+Every figure below came off a Linux/SwiftShader seat and none of it is a
+receipt. P0b is next and it has to run somewhere with CoreText and Metal.
+
+**P-item: P0a (build the four gates). COMPLETED.** Gate A night 2, Gate B
+night 3, stability night 4, Gate C tonight — plus the CI wiring that all four
+were missing, and the join-key guard the campaign had been assuming since
+night 1.
+
+### Commits
+
+- `19116d5` — join-key verifier; extracts `getSelector` from
+  `capture_baseline.mjs` and asserts it reproduces all 1757 committed
+  selectors. Blocking in CI.
+- `c9121d4` — Gate C, the forensic board, non-gating by construction. Wires
+  Gates A/B/C into the PR and nightly lanes.
+
+Zero engine behavior changes across both, same as nights 2–4. P0b's first
+`N/26` stays attributable.
+
+### The selector drift never existed
+
+Ratified decision 1 asked me to pin `capture_baseline.mjs` back to the
+committed selector form. I measured before editing, and the premise is false:
+the script reproduces **1757/1757** committed selectors across all 32 cases,
+zero missing. It has never drifted.
+
+The claim has been in every digest since night 1 and was escalated to Pete as a
+blocker for three gates. It came from reading the code's intent —
+`split(/\s+/).filter(...).join('.')` obviously yields `div.card.featured` — and
+not its bytes. The source says `/\\s+/`, a regex matching a literal backslash
+followed by `s`. The split never fires, the raw `className` survives, and the
+key comes out `div.card featured` with the space intact, which is exactly what
+the 305 space-form baseline selectors require.
+
+So the form is load-bearing **by accident of a typo**, which is worse than
+drift and is the real thing to fix. A comment cannot hold it — someone tidies
+the regex and 305 join keys break silently, because an unmatched element is not
+reported as a failure, it drops out of comparison and scores as "no geometry
+error" for never having been compared. I did not rewrite the regex: on a night
+whose job is Gate C, changing the string three gates join on, to fix nothing
+measured, is the wrong trade. The guard is what holds it.
+
+Worth saying plainly: I spent four nights of digest space on a blocker that a
+thirty-second measurement would have retired, and Pete spent a ratification on
+it. The instruction to inspect rather than assume is one this campaign keeps
+writing down and I still had to be caught by it.
+
+### Gate C, and what "non-gating" had to mean
+
+The design risk in Gate C is not the numbers, it is that "non-gating" quietly
+becomes "always exits 0" — at which point a forensic board can stop being
+published and nobody notices, because the way you notice is by reading it. So
+the split is explicit and tested end to end:
+
+```
+ran, published, numbers terrible   -> exit 0
+ran, published, numbers perfect    -> exit 0
+could not run / measured nothing   -> exit 1
+```
+
+That is the baseline file's blank-row rule turned on the board's own exit
+status. `test_process_exits_zero_when_the_numbers_are_catastrophic` inverts a
+real baseline and asserts exit 0; `test_process_exits_nonzero_when_it_measured_nothing`
+asserts the other side.
+
+The tolerance sweep (0, 1x, 2x, 4x the one pinned constant) is the part I think
+earns its place. `bg-pure` on this seat reads **2.083% raw diff, 0.000% above
+tolerance, max delta 1** — a raw board would show it 2% broken and it is
+pixel-perfect within tolerance. That is the mean-diff failure mode reproducing
+itself in miniature on the cleanest case in the corpus.
+
+### Mutation-check results
+
+**Gate C: 17 mutations, 17 RED, control green.** Non-gating removed; `board_ran`
+always true; Gate C made to fail on high raw diff; `count_above` `>=` instead of
+`>`; sweep thresholds hardcoded rather than derived; tiles ranked raw; severity
+tiebreak removed; sub-tolerance tiles listed; attribution by largest box; overlap
+check dropped; agreement painted pure black; ramp continuous through the
+tolerance; unmeasured cases dropped; size mismatch compared; holdout charted by
+default; the "cannot fail a PR" warning removed from the board; shape classifier
+ignoring the sweep.
+
+**Join key: 6 mutations, 5 RED.** Regex "fixed" to real whitespace (549
+failures), nth-of-type always appended (1024), id short-circuit removed (63),
+`getSelector` renamed (extraction throws rather than shrugging), no baselines at
+all (empty-run tripwire). The sixth — `slice(0, 2)` to `slice(0, 1)` — stayed
+**GREEN and is not a guard**: the broken split means the class list always holds
+exactly one element, so slicing to 2 or to 1 is the same operation. Recorded so
+the count is not read as six.
+
+### Decisions needed from Pete
+
+1. P0b cannot run from this seat — it needs CoreText and Metal — so the first
+   real `N/26` needs a macOS runner or a macOS seat; is the nightly `macos-14`
+   lane the intended vehicle, or should the trench hand P0b off?
+2. Gates A and B are advisory for one cycle as ratified; say if you want the
+   flip to blocking to wait for the first *macOS* receipt rather than the first
+   CI cycle, since a Linux-only advisory cycle proves the plumbing and nothing
+   about the numbers.
+3. None beyond those two.
+
+### Surprises
+
+- **A registry case is not a gating case, and the board is 26 of 32.** The six
+  holdout cases are discovered, capturable and scored on request, and excluded
+  from the gate set by default. Nothing new, but it is the first night all three
+  gates agreed on the same 26 and it is worth having said once.
+- **Gate C's first real run exposed a ranking defect in Gate C.** Whole regions
+  saturate — every tile over a mis-positioned block has all 1024 pixels above
+  tolerance — so ranking on count alone returned eight adjacent tiles from one
+  `image-gallery` defect, the first at max delta 162 and the rest at 14–16,
+  ordered purely by position. A worse defect further down the page would never
+  have made worst-N. Severity now breaks the tie first. The unit tests were
+  green when this happened; the corpus found it. That is night 1's lesson
+  repeating exactly, in the instrument again.
+- **The captures were already in the CI artifacts and I nearly wrote a plan
+  around them not being.** `parity_test.py` writes to `parity-baseline/captures/`,
+  which is not uploaded, and I got as far as sketching a per-shard gate run to
+  work around it. `parity_lib.py` — the path the swarms actually use — writes to
+  `parity-results/<run>/<case>/<viewport>/iter-N/capture/`, which *is* the
+  uploaded artifact. Checking took two minutes and saved a job restructure.
+- **`parity-capture`'s flags are `--html-file`, `--dump-frame`, `--dump-layout`.**
+  Night 4's digest describes the SwiftShader capture without recording them, and
+  my first sweep failed 32/32 on `--html`. Noting them so night 6 does not spend
+  the same five minutes.
+- Gate C costs about 21 seconds for 26 cases in pure Python, heatmaps included,
+  and the whole board is 2MB. I had expected to need numpy and to have to argue
+  for the dependency.
+
+### What P0a completing does and does not mean
+
+Four gates exist, are tested, are mutation-checked, and run in CI. Not one of
+them has produced a number anyone should act on, because not one has run on the
+platform the campaign is about. The instrument is built; it has not yet been
+pointed at the thing it measures. `N/26` stays UNMEASURABLE tonight and the
+reason is now a one-liner: no macOS run.
