@@ -3758,9 +3758,9 @@ pub enum TextDecorationStyleValue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ObjectFit {
     /// Fill the box, possibly distorting the image
+    #[default]
     Fill,
     /// Scale to fit inside the box, preserving aspect ratio
-    #[default]
     Contain,
     /// Scale to cover the box, preserving aspect ratio
     Cover,
@@ -6752,4 +6752,22 @@ mod tests {
 fn paint0_probe() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RUSTKIT_PAINT_PROBE").as_deref() == Ok("1"))
+}
+
+#[cfg(test)]
+mod object_fit_default_tests {
+    use super::*;
+
+    /// CSS Images 3 §5.5: the initial value of `object-fit` is `fill`.
+    ///
+    /// #125 fixed the ComputedStyle initial value and the layout keyword
+    /// fallback but MISSED the `#[default]` on the enum itself, in two
+    /// crates (Prometheus caught it in the #110 tip R1). Same bug, four
+    /// sites, and a partial fix is the more dangerous state: the visible
+    /// path looks right while any code that goes through `Default` still
+    /// letterboxes. This pins the enum default so the two can never drift.
+    #[test]
+    fn object_fit_derived_default_is_fill_not_contain() {
+        assert_eq!(ObjectFit::default(), ObjectFit::Fill);
+    }
 }
