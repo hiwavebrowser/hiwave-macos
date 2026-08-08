@@ -751,3 +751,19 @@ them has produced a number anyone should act on, because not one has run on the
 platform the campaign is about. The instrument is built; it has not yet been
 pointed at the thing it measures. `N/26` stays UNMEASURABLE tonight and the
 reason is now a one-liner: no macOS run.
+
+### Post-push addendum — the first CI failure was mine and was informative
+
+PR #130's `selector-key` job went red immediately: `npm ci` installs the
+playwright package but not its browsers, and this is the **first job in the
+repo that has ever launched a browser in CI**. Every other lane uses the oracle
+only for pngjs/pixelmatch diffing against committed baselines, so the gap was
+invisible until something needed a real DOM. Fixed with an explicit
+`npx playwright install --with-deps chromium` (`fee8a8c`); the check itself is
+unchanged and still blocking.
+
+Worth recording rather than just fixing: a missing browser is a **did-not-run
+wearing a red X**, and it failed in the right direction — loudly, before
+checking a single selector, rather than checking zero selectors and reporting
+success. That is the empty-run tripwire's whole purpose, and the first thing to
+exercise it was the environment rather than the code.
