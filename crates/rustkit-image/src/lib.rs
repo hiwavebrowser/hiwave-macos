@@ -660,10 +660,10 @@ impl Default for ImageManager {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ObjectFit {
     /// Fill the box, possibly distorting the image
+    #[default]
     Fill,
 
     /// Scale to fit inside the box, preserving aspect ratio
-    #[default]
     Contain,
 
     /// Scale to cover the box, preserving aspect ratio
