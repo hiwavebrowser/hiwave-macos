@@ -767,3 +767,59 @@ wearing a red X**, and it failed in the right direction — loudly, before
 checking a single selector, rather than checking zero selectors and reporting
 success. That is the empty-run tripwire's whole purpose, and the first thing to
 exercise it was the environment rather than the code.
+
+### Second addendum — the PR lane was red-locked, and the cause was not the gate
+
+PR #130's `pr-aggregate` failed on all three pushes, deterministically:
+**22 of 26 cases `stability_unmeasured`**. My first reading was "night 4's
+stability bar working as designed on its first real PR". That reading was
+wrong, and the correct one is worse.
+
+Night 4 shipped two changes that are each correct — the gate fails a row that
+cannot show `STABILITY_MIN_RUNS` measured iterations, and the scouts run
+`--iterations 3` so the evidence exists. `shard_work_units` sits between them,
+was not part of either change, and quietly made their combination meaningless.
+Units are generated with iterations innermost and sharding was `i %
+shard_count`; with 3 iterations and 4 shards, coprime and the exact numbers the
+PR lane uses, each cell's three iterations landed in three different shards.
+Every shard aggregated one run per cell and `parity_aggregate` does not
+recombine runs across shards.
+
+The four survivors are the proof: they are the exploit phase's top cases, which
+pick up 2 extra runs at their own viewport. 1 + 2 = 3 exactly.
+
+So night 4 tripled the scout, widened the PR timeout from 20 to 35 minutes to
+pay for it, and bought **zero** additional stability evidence. The digest that
+night said tightening the gate without producing the evidence "swaps an inert
+check for a permanent red lock, which is the same instrument failure wearing
+the opposite sign". It then shipped exactly that, because the evidence it
+produced never survived sharding, and nothing tested the sharded path.
+
+Fixed in `a81431a` by sharding on the (case, viewport) cell. 9 mutations, 9
+RED after closing two survivors.
+
+**Both survivors were real, and the second is the more embarrassing.** My
+lane-check asserted `--iterations 3` appeared in the step, and it passed on the
+*comment* above the flag, which reads "--iterations 3, not 1" in prose. A guard
+satisfied by a comment describing the thing it guards is decoration — the exact
+category this campaign keeps writing down. It took a mutation to find it, which
+is what mutations are for, but it is the second time in one night that a test I
+wrote was weaker than the sentence I wrote about it.
+
+**And one defect of my own in the same lane.** Gates A/B/C had
+`continue-on-error: true` but no `if: always()`. That stops a step from failing
+the job; it does not run a step after an earlier one failed. Because `Gate
+check` failed, all three gates were SKIPPED on every run of this PR — the
+advisory cycle collected nothing, on precisely the PRs where a forensic board
+is most useful. The receipt step is the one part that behaved: it printed
+"produced no receipt — it did not run. This is not a pass." I built that line
+against a hypothetical and it caught a real one within the hour.
+
+**Correction to tonight's decision 1 for Pete.** `pr-aggregate` runs on
+`macos-14`, and so does `pr-swarm`. The captures the gates read are therefore
+already macOS captures — CoreText and Metal — which means P0b may not need a
+separate seat at all. I do not want to overclaim this: nothing has been
+measured, because the gates were skipped on all three runs. But "the trench
+seat is Linux so P0b needs a macOS seat" is the same kind of inherited
+assumption as the selector drift, and it should be tested rather than
+ratified. The next run with `if: always()` in place is the test.
