@@ -25,6 +25,7 @@ use rustkit_dom::{Document, Node, NodeType};
 use rustkit_image::ImageManager;
 use rustkit_js::JsRuntime;
 use rustkit_layout::{
+    FontLoader,
     BoxType, Dimensions, DisplayList, ElementIdentity, LayoutBox, Position, Rect,
 };
 use std::cell::Cell;
@@ -224,6 +225,14 @@ pub struct Engine {
     renderer: Option<Renderer>,
     loader: Arc<ResourceLoader>,
     image_manager: Arc<ImageManager>,
+    /// Webfont loader. PER-ENGINE AND Arc-SHARED per the 2026-08-08 design
+    /// pin: one loader for the whole engine, with cross-site isolation
+    /// provided by the partition key on every operation rather than by
+    /// handing each view its own object. Per-view loaders would refetch the
+    /// same face for every tab; an unpartitioned shared one would be a
+    /// cross-site timing oracle. The partitioned shared loader is the only
+    /// shape that is both.
+    font_loader: Arc<FontLoader>,
     views: HashMap<EngineViewId, ViewState>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
     event_rx: Option<mpsc::UnboundedReceiver<EngineEvent>>,
@@ -416,7 +425,8 @@ impl Engine {
             loader,
             image_manager,
             views: HashMap::new(),
-            event_tx,
+            
+            font_loader: Arc::new(FontLoader::new()),event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
@@ -8802,7 +8812,8 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
+            
+            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(
@@ -8897,7 +8908,8 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
+            
+            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(
@@ -8992,7 +9004,8 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
+            
+            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(
@@ -9107,7 +9120,8 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
+            
+            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(
@@ -9186,7 +9200,8 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
+            
+            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(
@@ -9259,7 +9274,8 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
+            
+            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
@@ -9349,7 +9365,8 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
+            
+            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
@@ -9425,7 +9442,8 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
+            
+            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
@@ -9809,7 +9827,8 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
+            
+            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(
