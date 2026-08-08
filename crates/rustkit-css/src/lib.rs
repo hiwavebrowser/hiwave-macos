@@ -2105,7 +2105,12 @@ impl ComputedStyle {
             max_height: Length::Auto,
             // Image/replaced element defaults
             image_url: None,
-            object_fit: "contain".to_string(),
+            // CSS Images 3 §5.5: the initial value of object-fit is FILL.
+            // We defaulted to `contain`, which letterboxes every image that
+            // does not set the property — i.e. almost all of them — and is
+            // why sized images rendered smaller than their box with visible
+            // gaps (Wikipedia globe, live session 2026-08-07).
+            object_fit: "fill".to_string(),
             object_position: (0.5, 0.5), // center center
             ..Default::default()
         }
@@ -2910,5 +2915,23 @@ mod tests {
         assert_eq!(expanded.len(), 2);
         assert_eq!(expanded[0].line_names, vec!["col-start".to_string()]);
         assert_eq!(expanded[1].line_names, vec!["col-start".to_string()]);
+    }
+}
+
+
+#[cfg(test)]
+mod object_fit_initial_value_tests {
+    use super::*;
+
+    /// CSS Images 3 §5.5 pins the initial value of `object-fit` to `fill`.
+    ///
+    /// We shipped `contain`, which letterboxes every image that does not set
+    /// the property — nearly all of them — so sized images rendered smaller
+    /// than their box with gaps (live session 2026-08-07). A default that is
+    /// "reasonable looking" but not the spec value is the shape that makes a
+    /// whole class of pages subtly wrong while every test passes.
+    #[test]
+    fn object_fit_initial_value_is_fill() {
+        assert_eq!(ComputedStyle::new().object_fit, "fill");
     }
 }
