@@ -394,7 +394,7 @@ impl GlyphCache {
                 key.font_weight,
                 italic,
             );
-            rasterizer.rasterize_char(key.codepoint)
+            rasterizer.rasterize_char(key.codepoint, 0.0)
         };
 
         #[cfg(windows)]
