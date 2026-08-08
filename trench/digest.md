@@ -2035,3 +2035,263 @@ rendering change is authorised, `overflow-x` remains the best-value one for the
 reason night 9 gave — it is the only one of the three whose gap is also a live
 rendering bug that pays for itself in the parity corpus — and the export half is
 already built and reporting.
+
+## 2026-08-08 — night 11 (`overflow-x`)
+
+**Metric: 9 of 12 → 10 of 12**
+
+**Moved no → yes: `overflow-x`.** Like `line-height` on night 10, it did not
+need the engine change the previous two nights assumed — and for the same
+underlying reason: the claim "the engine does not use this value" had been
+tested in the one place the engine does not use it.
+
+### The stored prompt is still stale (sixth night), and the checkout was again master
+
+Unchanged from nights 7–10. The firing described the metric as trench 1's "four
+Tier-1 MCP reads", told me the four were `hiwave_layout`, `hiwave_display_list`,
+`hiwave_style`, `hiwave_diff`, and instructed me to stop and write a completion
+note if the digest already showed 4 of 4 — which `master`'s copy of this file
+does, because it ends at night 3. Following the prompt literally would have
+closed a live trench at the first read. `BASELINE.md`'s warning block on this
+branch is again the only thing that prevented it. Decision below, now six nights
+old.
+
+### The finding that made it countable: night 9 measured the wrong margin
+
+Night 9 put `overflow-x` in the reported-but-uncounted pile with a specific
+justification, which nights 10 and this file's own smoke comment both repeated:
+`overflow-x` reaches layout only through `establishes_bfc`, and a BFC parent and
+a flow parent "lay out identically here". The fixture backed it up — `.clipped`
+and `.unclipped` were both 15.0 tall with their kid at +10.0.
+
+That was true of the fixture and false of the engine. The fixture's `.kid` had a
+`margin-top`, and **top-margin collapse is not wired**: `margin_collapse.rs`
+exports `should_collapse_with_first_child`, `rustkit-layout/src/lib.rs` imports
+it, and nothing ever calls it. So the top margin stays inside whatever the
+parent is, BFC or not, and the two boxes were bound to agree.
+
+`should_collapse_with_last_child` **is** called, once, at the end of block
+layout, and it asks `establishes_bfc`, which reads `style.overflow_x` directly:
+
+```rust
+// margin_collapse.rs
+if style.overflow_x != Overflow::Visible || style.overflow_y != Overflow::Visible {
+    return true;
+}
+```
+
+```rust
+// rustkit-layout/src/lib.rs — the only caller in the block path
+if !should_collapse_with_last_child(
+    &self.style, self.float,
+    self.dimensions.border.bottom, self.dimensions.padding.bottom,
+) {
+    cursor_y += margin_context.resolve();   // the pending bottom margin lands INSIDE
+    margin_context.reset();
+}
+```
+
+So the value is spent on the **last child's bottom margin**, not the first
+child's top margin. One word in the fixture (`margin-bottom: 20px` on the
+shared `.kid`) makes it observable. No engine behaviour was changed tonight;
+the export already reported the value correctly, and what was missing was proof
+that layout consumed it.
+
+### The assertion that proves it
+
+`.clipped` and `.unclipped` hold the **same** `.kid` and differ in exactly one
+declaration — `overflow: hidden`. The kid is `margin-top: 10px; height: 5px;
+margin-bottom: 20px`, so both numbers are hand-derivable with no font metrics
+in them:
+
+- `.clipped` — `overflow: hidden` → a BFC → no collapse-through → the pending
+  20px bottom margin is materialised inside the parent: 10 + 5 + 20 = **35**
+- `.unclipped` — `visible` → not a BFC → collapse-through allowed → the pending
+  margin is not added: 10 + 5 = **15**
+
+Clauses 1 and 2 (computed value, and not an echo — `overflow-x` is a longhand no
+rule spells, written by the `overflow` shorthand):
+
+```python
+assert clipped["computed"]["overflow-x"] == "hidden", clipped["computed"]
+ox = next(d for d in clipped["declared"] if d["property"] == "overflow-x")
+assert ox["winner"]["property"] == "overflow", ox["winner"]
+assert ox["winner"]["via_shorthand"] is True, ox["winner"]
+assert ox["winner"]["selector"] == ".clipped", ox["winner"]
+```
+
+Clause 3 — the reported value is the value **layout used** — is the half that
+makes it count, and it is 20.0 of geometry attributable to one keyword:
+
+```python
+assert clipped_h == 35.0, clipped_box["border_box"]
+assert unclipped_h == 15.0, unclipped_box["border_box"]
+# ...and the gap is exactly the kid's bottom margin, not some other drift:
+# the two children are identical, so anything else differing would show up here.
+assert clipped_h - unclipped_h == 20.0, (clipped_h, unclipped_h)
+```
+
+**What is deliberately NOT claimed: neither number is Chrome's.** Chrome
+collapses the top margin out as well (the engine does not — the unwired helper
+above) and adjoins the escaping bottom margin to the parent rather than dropping
+it (ledgered in the block-height comment as a known residual). Both are
+pre-existing and unrelated to this property. What is asserted is the engine's
+own behaviour, and specifically the difference `overflow-x` alone causes.
+
+```
+$ cargo build -p hiwave-mcp && python3 crates/hiwave-mcp/smoke.py
+ok  initialize        {'name': 'hiwave-mcp', 'version': '0.1.0'}
+ok  tools/list        ['hiwave_open', 'hiwave_layout', 'hiwave_display_list', 'hiwave_style', 'hiwave_diff', 'hiwave_screenshot', 'hiwave_status']
+ok  hiwave_layout-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_display_list-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_style-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_open       {'height': 600, 'loaded': '<inline>', 'width': 800}
+ok  hiwave_status     session survives between calls
+ok  hiwave_layout     .hero border_box = 432.0x152.0 (content-box: 400+2*16 x 120+2*16)
+ok  hiwave_display_list  .hero painted rgb(0,136,204) over 432.0x152.0 at (0.0,0.0) — same rect layout computed
+ok  paint order       canvas[0] < hero[1] < text[2]
+ok  advance contract  11 advances for 11 chars, font_size=32.0 weight=700 x=16.0
+ok  hiwave_style      width=400px won by .hero [0, 1, 0] over div [0, 0, 1] (later in source, lower specificity)
+ok  computed expansion padding-left=16px, cited to `padding: 16px` on .hero (via_shorthand) — no rule spells the longhand
+ok  origin split      h1 font-weight=700 winner=None (UA, no rule to cite); font-size=32px winner=h1 (author)
+ok  line-height       .copy 20px x 1.5 = 30px — authored '1.5', computed 30px (resolved, not echoed)
+ok  normal not faked  .hero line-height=normal (keyword, not px — resolving it needs font metrics)
+ok  inherited origin  span font-family='Georgia, serif' text-align=center both origin=inherited; display still UA-or-initial
+ok  line-height inherited  span declares nothing, reports 30px origin=inherited (.copy 20px x 1.5) and its line box IS 30.0 — `normal` control measures 20.0
+ok  font-style        span computed=italic origin=inherited (declares nothing); paint drew it font_style=1, h1 still 0
+ok  letter-spacing    .spaced 0.1em x 20px = 2px (authored '0.1em'); every advance is exactly +2.0 over .plain — [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+ok  KNOWN DIVERGENCE  .pre keeps 'a  b' (4 advances) but its nested span collapsed 'c  d' to 'c d' — white-space is not inherited onto elements
+ok  border shorthand  .framed border-top-width=5px (0.25em x 20px) and border-top-color=rgba(204, 102, 0, 1), both cited to `border` on .framed; layout reserved 5.0 and paint drew a 210.0x5.0 band
+ok  no false citation `border: 2px solid` cites the width and NOT border-top-color (the declaration carried no colour)
+ok  longhand wins     .overruled border-top-width=9px beats `border: 3px solid #093`, which is reported in overridden; layout reserved {'bottom': 3.0, 'left': 3.0, 'right': 3.0, 'top': 9.0} and a 52.0-tall box
+ok  box-sizing        .bordered border-box: declared 200px IS the border box, content 170.0x10.0; .content content-box, same declarations, border box 230.0x70.0
+ok  position          .floater absolute (beat `div{position:static}`, last in sheet); .host is 0.0 tall around a 40.0-tall child and the next block starts at the same y — out of flow
+ok  overflow-x       .clipped overflow-x=hidden cited to `overflow`; it establishes a BFC so the kid's 20px bottom margin lands INSIDE — 35.0 tall against 15.0 for .unclipped, same child, one keyword apart
+ok  KNOWN GAP        ...but paint pushes no clip for it — overflow-x is answered for what LAYOUT did, not for whether anything was clipped
+ok  KNOWN GAP        .faded opacity=0.5 computed, but paint filled it at a=1.0 — opacity never reaches the solid-colour path, so it is reported, not counted
+ok  selector guard    refused 'div p'
+ok  hiwave_diff       hero/layout agrees with the spec reference on 12/12 hand-derived values (incl. border_box 432x152)
+ok  hiwave_diff       hero/display_list agrees on 17 values (paint order, #08c over 432x152, 32px/700 text at x=16)
+ok  hiwave_diff       important-width DISAGREES: border_box.width expected 100.0 (spec: !important wins), engine computed 400.0 — 2 of 4, height and x still agree
+ok  session isolation open page still 432x152 after three diffs
+ok  diff guards       unknown stage, unknown case, unknown reference, path escape and missing argument all refused
+ok  hiwave_screenshot 1440015 bytes at ppm
+ok  argument guard    pass either `html` or `path`, not both
+
+PASS: hiwave-mcp serves the engine's computed layout, its paint commands, the cascade behind them, AND whether any of it agrees with a committed reference
+```
+
+**Checked that the gate can go red — and the interesting part is where it
+failed.** The overflow arm of `establishes_bfc` was disabled (`if false && ...`),
+so the engine stops spending the value while the cascade still computes it
+perfectly:
+
+```
+AssertionError: {'height': 15.0, 'width': 260.0, 'x': 0.0, 'y': 494.0}
+  crates/hiwave-mcp/smoke.py:737, in main
+    assert clipped_h == 35.0, clipped_box["border_box"]
+```
+
+It failed at the **geometry**, line 737 — every assertion above it (computed
+`hidden`, winner cited to `overflow`, `via_shorthand: true`) still passed. That
+is the exact failure clause 3 exists to catch: a plausible value with correct
+provenance, over an engine doing something else. Without the layout half this
+perturbation ships green. Perturbation reverted; `grep -rn RED-CHECK crates/`
+returns 0 on the committed tree.
+
+### What the engine still cannot answer
+
+- **`overflow-x` is answered for what LAYOUT did, NOT for whether anything was
+  clipped.** Paint emits no `push_clip` for overflow anywhere — the tripwire
+  asserting that is kept, not deleted — so an agent reading `hidden` learns
+  which margin-collapse branch was taken and must not conclude the content was
+  clipped. This is the same shape as night 9's `position`, counted "for the
+  value, not the consequences", and it is published in the payload's `limits`
+  rather than left for a reader to discover. Whoever implements clipping will
+  see that tripwire go red and should assert the clip instead of removing the
+  line.
+- **`overflow-y` is still not exported at all**, so `overflow: hidden` on the
+  block axis is invisible even though `establishes_bfc` reads it too.
+- **`white-space` — verified in code tonight, and night 10's read stands.**
+  `build_layout_box` seeds `white_space` from the parent only in the
+  `NodeType::Text` arm (`s.white_space = parent.white_space`, alongside the
+  other text properties); ELEMENTS are never seeded, so a `<span>` inside a
+  `pre` ancestor genuinely lays out `normal` and the paint tripwire showing its
+  collapsed `'c d'` is correct. There is no second route like the one
+  `overflow-x` turned out to have: the only derivation that would satisfy
+  clause 2 is inheritance, and inheritance is precisely what is missing.
+  Counting it requires seeding the property in the element cascade — a
+  rendering change, which `BASELINE.md` forbids this loop.
+- **`opacity` — unchanged and genuinely blocked.** The cascade computes and
+  clamps it, but the renderer discards it outside the `Image` arm (`opacity: _`),
+  so `.faded` is still filled at `a=1.0`. Clause 2 has no route either: opacity
+  is not inherited and no shorthand sets it, so its computed value can only ever
+  echo the declaration text. It needs the renderer honouring it.
+- **The fixture is now 46px from the viewport's 600px height** (body = 554, up
+  from 534 — this slice spent 20 of the 66 night 10 reported). The next night
+  that adds elements will hit it.
+- **Non-px lengths still come back as Rust `Debug` strings** for everything
+  except font-size (`'height': 'Auto'`, `'margin-top': 'Zero'`). Named by nights
+  6–10; still the cheapest correct thing left, still wants its own slice and its
+  own red-check because it changes values the `hiwave_diff` references quote.
+- **Only the TOP border side is exported**, **`border-style` is invisible**, and
+  **`position` is answered for the value, not the consequences** (`top`/`left`/
+  `z-index`/containing block are not recorded). Carried from nights 8 and 9.
+- Everything trench 1 named is still true: `!important` is dead in the cascade
+  (pinned by the `important-width` diff case), UA-origin properties have no rule
+  to cite, `hiwave_style` takes simple selectors only, capture-kind references
+  are refused, `style` is not a diffable stage, and there is no real-page corpus.
+
+### Tests
+
+`cargo test --workspace --no-fail-fast`, excluding `hiwave-app` and
+`hiwave-smoke` (need GTK — `gdk-sys` build fails) and `rustkit-media` (needs
+ALSA): **914 passed, 1 failed** — the same totals as night 10, which is expected
+since this night added no unit test (the proof is a smoke assertion over real
+layout, which is where the value is spent).
+
+The one failure is `rustkit-layout::probe_normal_line_height_vs_chrome`, the
+same pre-existing failure nights 1–3 and 7–10 reported, with the same
+`-apple-system` signature (`14.00` against Chrome's `17.00`). This night touched
+`rustkit-layout` only during the red-check perturbation, which was reverted and
+verified reverted (`git status` shows the crate clean); the committed change is
+confined to `crates/rustkit-engine/src/lib.rs` and `crates/hiwave-mcp/smoke.py`.
+
+The engine edit is comments and two new `limits` strings — **no executable
+change**. The export already served `overflow-x` correctly; what changed is that
+it is now cross-checked, and that the payload stops describing it as unusable.
+
+Scope stayed inside `crates/hiwave-mcp/` and `crates/rustkit-engine/`. No parity
+harness, no `.github/`, no Windows or Linux port work, no engine behaviour
+changed, and no export that already had passing assertions had its answers
+altered. The runner needed `mesa-vulkan-drivers` installed again (fresh
+container; `apt-get update` first, since the cached index 404s; environment
+only, nothing committed).
+
+### Decisions needed from Pete
+
+1. **The nightly prompt still describes trench 1 — sixth night.** Unchanged from
+   nights 7–10, and I still cannot fix it from inside a session (the routine was
+   created via the API; agents may only edit routines they created). Two cheap
+   fixes, both yours: repoint the stored prompt at trench 2, or land this branch
+   on master so a default checkout stops saying the trench is finished. Tonight
+   this cost more than the usual first move — the prompt's stop condition
+   explicitly matched what `master`'s digest says, so the instructed action was
+   to write a completion note and stop.
+2. **Two properties remain and both need rendering changes** — `white-space`
+   inheritance onto elements, and `opacity` reaching the solid-colour path. Both
+   were re-verified in code tonight rather than inherited from the previous
+   night's read, and neither has a second route like the one `overflow-x` turned
+   out to have. So night 10's endgame still holds, one property later: unless
+   the scope limit is relaxed or the work is handed to the parity trench, the
+   next two nights are NONE and the loop ends at 10 of 12 on the two-dry-nights
+   clause. Worth deciding rather than discovering — with the caveat that two
+   nights running have now overturned a confident "this needs engine surgery",
+   so I would not bet heavily against a third.
+
+Next slice: there is no export-only slice left in the diagnosis set that I can
+see, and tonight is the second night in a row that sentence turned out to be
+worth testing anyway. If a rendering change is authorised, `opacity` is the
+smaller of the two (one arm in the renderer, and the export half is already
+built and asserted); `white-space` is the more valuable, because its absence is
+visible in the parity corpus as collapsed text inside `pre`.
