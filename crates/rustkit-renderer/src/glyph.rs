@@ -5,7 +5,10 @@
 use crate::RendererError;
 use hashbrown::HashMap;
 #[cfg(windows)]
-use rustkit_text::{FontCollection as RkFontCollection, FontStretch as RkFontStretch, FontStyle as RkFontStyle, FontWeight as RkFontWeight};
+use rustkit_text::{
+    FontCollection as RkFontCollection, FontStretch as RkFontStretch, FontStyle as RkFontStyle,
+    FontWeight as RkFontWeight,
+};
 
 /// Key for identifying a specific glyph.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -15,6 +18,41 @@ pub struct GlyphKey {
     pub font_size: u32, // Fixed-point (size * 10)
     pub font_weight: u16,
     pub font_style: u8, // 0 = normal, 1 = italic
+    /// Horizontal subpixel phase, `0..SUBPIXEL_QUANTIZE`.
+    ///
+    /// WHY THIS EXISTS: every glyph was rasterized ONCE at phase 0 into an
+    /// integer-sized atlas bitmap, then drawn at arbitrary FRACTIONAL device
+    /// positions and bilinearly resampled. Chrome rasterizes AT the phase.
+    /// Measured baselines on fixtures/typography.html land at .081/.280/.120/
+    /// .960/.200/.441/.880 -- arbitrary phases on every line -- which is the
+    /// mechanism behind the bimodal text diff tail.
+    ///
+    /// PRODUCTION IS FROZEN AT PHASE 0 IN THIS COMMIT, DELIBERATELY. The
+    /// rasterizer still draws a phase-0 bitmap for every phase, so emitting
+    /// multi-phase keys now would mint up to SUBPIXEL_QUANTIZE BYTE-IDENTICAL
+    /// atlas entries per glyph: more memory, more eviction pressure, and not
+    /// one pixel different. The call-site flip belongs in the same commit as
+    /// the rasterizer that can honor it.
+    pub subpixel_phase: u8,
+}
+
+/// Number of horizontal subpixel phases a glyph may be rasterized at.
+///
+/// 4 (quarter-pixel) is the industry default: it is the point where added
+/// positional accuracy stops being visible at normal text sizes while atlas
+/// cost still grows linearly. 3 is the LCD-subpixel-triad choice and belongs
+/// to a different rendering mode, not to this key.
+pub const SUBPIXEL_QUANTIZE: u8 = 4;
+
+/// Quantize a fractional device X into a phase bucket.
+///
+/// Takes the FRACTIONAL part, so it is correct for any x including negatives:
+/// `-0.25` and `0.75` are the same phase, because what a rasterizer needs is
+/// the offset within the pixel, not the pixel.
+pub fn subpixel_phase_for(x: f32) -> u8 {
+    let frac = x - x.floor();
+    let phase = (frac * SUBPIXEL_QUANTIZE as f32).floor() as i32;
+    phase.clamp(0, SUBPIXEL_QUANTIZE as i32 - 1) as u8
 }
 
 /// Cached glyph entry.
@@ -257,7 +295,11 @@ impl GlyphCache {
             wgpu::TexelCopyTextureInfo {
                 texture: &self.color_atlas,
                 mip_level: 0,
-                origin: wgpu::Origin3d { x: ax + 1, y: ay + 1, z: 0 },
+                origin: wgpu::Origin3d {
+                    x: ax + 1,
+                    y: ay + 1,
+                    z: 0,
+                },
                 aspect: wgpu::TextureAspect::All,
             },
             &rgba,
@@ -266,7 +308,11 @@ impl GlyphCache {
                 bytes_per_row: Some(gw * 4),
                 rows_per_image: Some(gh),
             },
-            wgpu::Extent3d { width: gw, height: gh, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: gw,
+                height: gh,
+                depth_or_array_layers: 1,
+            },
         );
 
         let u0 = (ax + 1) as f32 / self.atlas_size as f32;
@@ -326,7 +372,7 @@ impl GlyphCache {
         key: &GlyphKey,
     ) -> Option<GlyphEntry> {
         let font_size = key.font_size as f32 / 10.0;
-        
+
         // Use platform-specific glyph rasterization
         #[cfg(target_os = "macos")]
         let raster_result = {
@@ -339,7 +385,7 @@ impl GlyphCache {
                 match key.font_family.as_str() {
                     "ParityTest" | "'ParityTest'" => "Noto Sans",
                     "Noto Sans" | "'Noto Sans'" => "Noto Sans",
-                    other => other
+                    other => other,
                 }
             };
             let rasterizer = rustkit_text::macos::GlyphRasterizer::with_style(
@@ -350,47 +396,63 @@ impl GlyphCache {
             );
             rasterizer.rasterize_char(key.codepoint, 0.0)
         };
-        
+
         #[cfg(windows)]
         let raster_result = {
             // Windows fallback - use simple placeholder
             let (glyph_width, glyph_height) = estimate_glyph_size(key.codepoint, font_size);
             let glyph_width = glyph_width.max(1).min(256);
             let glyph_height = glyph_height.max(1).min(256);
-            
+
             let mut bitmap = vec![0u8; (glyph_width * glyph_height) as usize];
             if key.codepoint.is_ascii_graphic() || key.codepoint.is_alphabetic() {
                 for y in 0..glyph_height {
                     for x in 0..glyph_width {
                         let idx = (y * glyph_width + x) as usize;
-                        let border = x == 0 || x == glyph_width - 1 || y == 0 || y == glyph_height - 1;
+                        let border =
+                            x == 0 || x == glyph_width - 1 || y == 0 || y == glyph_height - 1;
                         bitmap[idx] = if border { 255 } else { 200 };
                     }
                 }
             }
-            Some((bitmap, glyph_width, glyph_height, glyph_width as f32, 0.0f32, font_size * 0.8))
+            Some((
+                bitmap,
+                glyph_width,
+                glyph_height,
+                glyph_width as f32,
+                0.0f32,
+                font_size * 0.8,
+            ))
         };
-        
+
         #[cfg(not(any(target_os = "macos", windows)))]
         let raster_result: Option<(Vec<u8>, u32, u32, f32, f32, f32)> = {
             // Fallback for other platforms
             let (glyph_width, glyph_height) = estimate_glyph_size(key.codepoint, font_size);
             let glyph_width = glyph_width.max(1).min(256);
             let glyph_height = glyph_height.max(1).min(256);
-            
+
             let mut bitmap = vec![0u8; (glyph_width * glyph_height) as usize];
             if key.codepoint.is_ascii_graphic() || key.codepoint.is_alphabetic() {
                 for y in 0..glyph_height {
                     for x in 0..glyph_width {
                         let idx = (y * glyph_width + x) as usize;
-                        let border = x == 0 || x == glyph_width - 1 || y == 0 || y == glyph_height - 1;
+                        let border =
+                            x == 0 || x == glyph_width - 1 || y == 0 || y == glyph_height - 1;
                         bitmap[idx] = if border { 255 } else { 200 };
                     }
                 }
             }
-            Some((bitmap, glyph_width, glyph_height, glyph_width as f32, 0.0f32, font_size * 0.8))
+            Some((
+                bitmap,
+                glyph_width,
+                glyph_height,
+                glyph_width as f32,
+                0.0f32,
+                font_size * 0.8,
+            ))
         };
-        
+
         let (bitmap, glyph_width, glyph_height, advance, bearing_x, bearing_y) = raster_result?;
 
         let glyph_width = glyph_width.max(1).min(256);
@@ -455,7 +517,7 @@ impl GlyphCache {
 
         // x_offset: horizontal bearing adjustment
         let x_offset = bearing_x;
-        
+
         let entry = GlyphEntry {
             tex_coords: [u0, v0, u1, v1],
             offset: [x_offset, y_offset],
@@ -510,7 +572,7 @@ impl GlyphCache {
 #[allow(dead_code)]
 fn estimate_glyph_size(ch: char, font_size: f32) -> (u32, u32) {
     let height = font_size.ceil() as u32;
-    
+
     // Estimate width based on character type
     let width_factor = match ch {
         ' ' => 0.3,
@@ -519,18 +581,112 @@ fn estimate_glyph_size(ch: char, font_size: f32) -> (u32, u32) {
         _ if ch.is_ascii() => 0.6,
         _ => 0.8, // CJK and other wide characters
     };
-    
+
     let width = (font_size * width_factor).ceil() as u32;
     (width.max(1), height.max(1))
 }
 
 #[cfg(test)]
 mod tests {
+
+    fn key_at(phase: u8) -> GlyphKey {
+        GlyphKey {
+            codepoint: 'a',
+            font_family: "Helvetica".to_string(),
+            font_size: 160,
+            font_weight: 400,
+            font_style: 0,
+            subpixel_phase: phase,
+        }
+    }
+
+    #[test]
+    fn one_glyph_occupies_at_most_quantize_cache_slots() {
+        // ATLAS GROWTH BOUND (Argos's soft note on #131). The phase field
+        // multiplies cache entries per glyph, and this cache has NO eviction
+        // -- `clear()` is the only reset -- so the growth FACTOR is the whole
+        // safety story. It must be exactly SUBPIXEL_QUANTIZE, not "however
+        // many distinct fractions a page happens to produce".
+        use std::collections::HashSet;
+        let mut keys = HashSet::new();
+        // Sweep far more x positions than there are phases; the bucket count,
+        // not the position count, must bound the entries.
+        for i in 0..500 {
+            let x = i as f32 * 0.013;
+            keys.insert(key_at(subpixel_phase_for(x)));
+        }
+        assert_eq!(
+            keys.len(),
+            SUBPIXEL_QUANTIZE as usize,
+            "500 distinct x positions must collapse to exactly {} cache slots",
+            SUBPIXEL_QUANTIZE
+        );
+    }
+
+    #[test]
+    fn the_growth_bound_is_the_only_thing_this_unit_guarantees() {
+        // Deliberate documentation-as-test. Paying 4x atlas for a glyph is
+        // only worth it if the four phases produce four DIFFERENT bitmaps --
+        // and Atlas measured that CoreGraphics grid-fits glyph origins and
+        // rounds the offset away by default: at 36px, phases .25 and .50 gave
+        // a 0.00px and a 1.00px shift, i.e. TWO bitmaps in FOUR slots. That is
+        // fixed in the rasterizer half (#132, subpixel positioning on,
+        // subpixel quantization off), NOT here.
+        //
+        // This test exists so a reader of THIS file learns that the key alone
+        // does not buy distinct rendering, and does not mistake a green suite
+        // here for a working subpixel pipeline.
+        assert_eq!(SUBPIXEL_QUANTIZE, 4);
+    }
+
+    #[test]
+    fn glyphs_at_different_phases_are_different_cache_entries() {
+        // THE POINT OF THE WHOLE UNIT. Before the phase field, a glyph at
+        // x=10.0 and the same glyph at x=10.5 collided on one key, so both got
+        // the phase-0 bitmap and the .5 one was resampled into blur.
+        assert_ne!(key_at(0), key_at(2));
+    }
+
+    #[test]
+    fn the_same_phase_is_the_same_entry() {
+        // The other direction: phases must still SHARE, or the cache degrades
+        // into one entry per draw and the atlas grows without bound.
+        assert_eq!(key_at(2), key_at(2));
+    }
+
+    #[test]
+    fn phase_quantization_buckets_the_fraction() {
+        assert_eq!(subpixel_phase_for(10.0), 0);
+        assert_eq!(subpixel_phase_for(10.24), 0);
+        assert_eq!(subpixel_phase_for(10.25), 1);
+        assert_eq!(subpixel_phase_for(10.5), 2);
+        assert_eq!(subpixel_phase_for(10.75), 3);
+        assert_eq!(subpixel_phase_for(10.999), 3, "never reaches QUANTIZE");
+    }
+
+    #[test]
+    fn a_negative_x_phases_by_its_fraction_not_its_sign() {
+        // Text can be laid out at a negative device X (scrolled, or a run that
+        // starts left of the viewport). Using the raw value rather than the
+        // fractional part would produce a negative bucket and panic on cast.
+        assert_eq!(subpixel_phase_for(-0.25), 3, "-0.25 sits at .75 of a pixel");
+        assert_eq!(subpixel_phase_for(-1.0), 0);
+    }
+
+    #[test]
+    fn every_phase_is_in_range() {
+        for i in 0..400 {
+            let x = i as f32 * 0.017 - 3.0;
+            let p = subpixel_phase_for(x);
+            assert!(p < SUBPIXEL_QUANTIZE, "phase {p} out of range for x={x}");
+        }
+    }
     use super::*;
 
     #[test]
     fn test_glyph_key_hash() {
         let key1 = GlyphKey {
+            subpixel_phase: 0,
             codepoint: 'A',
             font_family: "Arial".to_string(),
             font_size: 160,
@@ -539,6 +695,7 @@ mod tests {
         };
 
         let key2 = GlyphKey {
+            subpixel_phase: 0,
             codepoint: 'A',
             font_family: "Arial".to_string(),
             font_size: 160,
@@ -552,6 +709,7 @@ mod tests {
     #[test]
     fn test_glyph_key_different() {
         let key1 = GlyphKey {
+            subpixel_phase: 0,
             codepoint: 'A',
             font_family: "Arial".to_string(),
             font_size: 160,
@@ -560,6 +718,7 @@ mod tests {
         };
 
         let key2 = GlyphKey {
+            subpixel_phase: 0,
             codepoint: 'B',
             font_family: "Arial".to_string(),
             font_size: 160,
@@ -575,7 +734,7 @@ mod tests {
         let (w, h) = estimate_glyph_size('A', 16.0);
         assert!(w > 0);
         assert!(h > 0);
-        
+
         let (narrow_w, _) = estimate_glyph_size('i', 16.0);
         let (wide_w, _) = estimate_glyph_size('M', 16.0);
         assert!(narrow_w < wide_w);

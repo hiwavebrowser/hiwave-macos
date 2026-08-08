@@ -4341,6 +4341,10 @@ impl Renderer {
 
         for (char_idx, ch) in text.chars().enumerate() {
             let key = GlyphKey {
+                // FROZEN AT 0 until the rasterizer can draw at a phase --
+                // see GlyphKey::subpixel_phase. Pixels are bit-identical to
+                // before this field existed.
+                subpixel_phase: 0,
                 codepoint: ch,
                 font_family: font_family.to_string(),
                 font_size: (font_size * 10.0) as u32,
@@ -4486,6 +4490,10 @@ impl Renderer {
 
         for (char_idx, ch) in text.chars().enumerate() {
             let key = GlyphKey {
+                // FROZEN AT 0 until the rasterizer can draw at a phase --
+                // see GlyphKey::subpixel_phase. Pixels are bit-identical to
+                // before this field existed.
+                subpixel_phase: 0,
                 codepoint: ch,
                 font_family: font_family.to_string(),
                 font_size: (font_size * 10.0) as u32,
