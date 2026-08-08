@@ -2177,7 +2177,14 @@ impl Engine {
 
                 // Handle replaced elements (images)
                 if tag_lower == "img" {
-                    let src = attributes.get("src").cloned().unwrap_or_default();
+                    // SAME selection rule as discover_images, or the loader
+                    // caches under one key and layout looks up another — the
+                    // exact cache-miss shape #113 fixed for relative URLs.
+                    let src = attributes
+                        .get("srcset")
+                        .and_then(|ss| Self::pick_from_srcset(ss))
+                        .or_else(|| attributes.get("src").cloned())
+                        .unwrap_or_default();
 
                     // Parse explicit dimensions from attributes
                     let explicit_width: Option<f32> =
@@ -4546,6 +4553,73 @@ impl Engine {
     }
 
     /// Discover images from <img> elements.
+    /// Choose one candidate from an `srcset` attribute.
+    ///
+    /// HTML §4.8.4.2. Deliberately a SUBSET: candidates are parsed and the
+    /// widest `w` (or highest `x`) wins, which is the right answer on a
+    /// retina display and a defensible one everywhere. Full selection needs
+    /// the `sizes` attribute and viewport/DPR math — that is a separate unit
+    /// and is NOT claimed here.
+    ///
+    /// Why it exists at all: `srcset` had ZERO support, so a page serving
+    /// images only via srcset (increasingly common; the `src` is often a
+    /// 1x1 placeholder or absent) rendered NO IMAGE AT ALL. A wrong-density
+    /// image is a rendering difference; no image is a hole.
+    fn pick_from_srcset(srcset: &str) -> Option<String> {
+        // `w` and `x` descriptors are NOT comparable — one is a pixel width,
+        // the other a device ratio. The first version scaled x by 1000 to
+        // rank them together; a test then showed 2x and 2000w colliding
+        // exactly, with the tie decided by document order. Inventing a
+        // common scale for incomparable units is the bug, not the tie.
+        //
+        // So: partition. If ANY width candidate exists, width decides
+        // (that is the descriptor authors reach for when the rendered size
+        // varies); otherwise density decides. Mixed srcsets are invalid per
+        // HTML §4.8.4.2 anyway.
+        let mut widest: Option<(f32, String)> = None;
+        let mut densest: Option<(f32, String)> = None;
+        let mut bare: Option<String> = None;
+
+        for cand in srcset.split(',') {
+            let mut parts = cand.split_whitespace();
+            let url = match parts.next() {
+                Some(u) if !u.is_empty() => u,
+                _ => continue,
+            };
+            match parts.next() {
+                // No descriptor means 1x (HTML §4.8.4.2).
+                None => {
+                    if bare.is_none() {
+                        bare = Some(url.to_string());
+                    }
+                    if densest.as_ref().map(|(d, _)| 1.0 > *d).unwrap_or(true) {
+                        densest = Some((1.0, url.to_string()));
+                    }
+                }
+                Some(d) if d.ends_with('w') => {
+                    if let Ok(w) = d[..d.len() - 1].parse::<f32>() {
+                        if widest.as_ref().map(|(b, _)| w > *b).unwrap_or(true) {
+                            widest = Some((w, url.to_string()));
+                        }
+                    }
+                }
+                Some(d) if d.ends_with('x') => {
+                    if let Ok(x) = d[..d.len() - 1].parse::<f32>() {
+                        if densest.as_ref().map(|(b, _)| x > *b).unwrap_or(true) {
+                            densest = Some((x, url.to_string()));
+                        }
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+
+        widest
+            .map(|(_, u)| u)
+            .or_else(|| densest.map(|(_, u)| u))
+            .or(bare)
+    }
+
     fn discover_images(&self, document: &Document, base_url: Option<&Url>) -> Vec<(String, Url)> {
         let mut images = Vec::new();
 
@@ -4554,12 +4628,19 @@ impl Engine {
 
         for img_el in img_elements {
             if let NodeType::Element { attributes, .. } = &img_el.node_type {
-                if let Some(src) = attributes.get("src") {
+                // srcset wins when present (that is the point of it); src is
+                // the fallback and is often a placeholder on srcset pages.
+                let chosen = attributes
+                    .get("srcset")
+                    .and_then(|ss| Self::pick_from_srcset(ss))
+                    .or_else(|| attributes.get("src").cloned());
+
+                if let Some(src) = chosen {
                     // Resolve relative URL
                     let resolved = if let Some(base) = base_url {
-                        base.join(src).ok()
+                        base.join(&src).ok()
                     } else {
-                        Url::parse(src).ok()
+                        Url::parse(&src).ok()
                     };
 
                     if let Some(url) = resolved {
@@ -11005,6 +11086,93 @@ mod relative_url_tests {
                 .map(|u| u.to_string())
                 .as_deref(),
             Some("https://example.com/x.png")
+        );
+    }
+}
+
+#[cfg(test)]
+mod srcset_tests {
+    use super::*;
+
+    // ---- srcset had ZERO support (live finding, 2026-08-08) ----
+    //
+    // A page serving images only via srcset rendered NO IMAGE AT ALL — the
+    // src is often a placeholder or absent on such pages. A wrong-density
+    // pick is a rendering difference; no pick is a hole.
+
+    #[test]
+    fn widest_w_candidate_wins() {
+        let picked = Engine::pick_from_srcset(
+            "small.jpg 400w, medium.jpg 800w, large.jpg 1600w",
+        );
+        assert_eq!(picked.as_deref(), Some("large.jpg"));
+    }
+
+    #[test]
+    fn density_candidates_are_ranked_among_themselves() {
+        let picked = Engine::pick_from_srcset("a.png, b.png 2x, c.png 3x");
+        assert_eq!(picked.as_deref(), Some("c.png"));
+    }
+
+    #[test]
+    fn a_bare_candidate_is_one_x_not_zero() {
+        // A no-descriptor candidate means 1x. Treating it as weight 0 would
+        // make a single-candidate srcset resolve to nothing, which is the
+        // no-image hole this whole change exists to close.
+        assert_eq!(
+            Engine::pick_from_srcset("only.png").as_deref(),
+            Some("only.png")
+        );
+    }
+
+    #[test]
+    fn density_never_outranks_width_by_scale_accident() {
+        // 2x and 2000w are on different scales. Without normalisation a
+        // naive max() picks the 2x candidate over a far larger w one.
+        let picked = Engine::pick_from_srcset("dense.png 2x, wide.png 2000w");
+        assert_eq!(picked.as_deref(), Some("wide.png"));
+    }
+
+    #[test]
+    fn malformed_input_yields_none_rather_than_a_bogus_url() {
+        assert_eq!(Engine::pick_from_srcset(""), None);
+        assert_eq!(Engine::pick_from_srcset("   "), None);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn an_img_with_only_srcset_still_gets_a_layout_box_with_that_url() {
+        // The end-to-end property: BOTH the loader's discovery and the
+        // layout box must choose the SAME candidate, or the loader caches
+        // under one key while layout looks up another — the cache-miss
+        // shape #113 fixed for relative URLs, one attribute over.
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("view");
+        engine
+            .load_html(
+                id,
+                r#"<html><body><img srcset="a.png 400w, b.png 1200w"></body></html>"#,
+            )
+            .expect("load_html");
+        {
+            let view = engine.views.get_mut(&id).expect("view");
+            view.url = Some(Url::parse("https://example.com/page").unwrap());
+        }
+        engine.relayout(id).expect("relayout");
+
+        fn find_image_url(b: &LayoutBox) -> Option<String> {
+            if let BoxType::Image { url, .. } = &b.box_type {
+                return Some(url.clone());
+            }
+            b.children.iter().find_map(find_image_url)
+        }
+        let layout = engine.views.get(&id).unwrap().layout.as_ref().unwrap();
+        let url = find_image_url(layout).expect("img must produce an Image box");
+        assert_eq!(
+            url, "https://example.com/b.png",
+            "layout must resolve the WIDEST srcset candidate, absolutely"
         );
     }
 }
