@@ -3,7 +3,6 @@
 //! This module provides the RustKit engine as the default WebView backend for content rendering.
 //! It wraps `rustkit_engine::Engine` and provides a WRY-like interface.
 
-#![allow(dead_code)]
 
 use super::shield_adapter::create_shield_interceptor_with_counter;
 use super::webview::IWebContent;
