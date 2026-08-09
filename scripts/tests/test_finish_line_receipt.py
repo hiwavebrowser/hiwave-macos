@@ -542,10 +542,23 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "parity.yml"
 
 
 def _workflow():
-    try:
-        import yaml
-    except ImportError:  # pragma: no cover - exercised only on a bare runner
-        return None
+    """Parse parity.yml, and NEVER skip when the parser is missing.
+
+    The first draft of this file wrapped the import in
+    `except ImportError: return None`, and every lane test below opened with
+    `if workflow is None: return`. On this seat pyyaml is installed and they
+    all ran; on a bare CI runner they would have returned immediately and
+    printed `ok`. A guard that reports success having checked nothing is the
+    decoration this campaign exists to refuse, and the escape hatch made all
+    five of them exactly that — on the runner where they matter most.
+
+    Caught because the guard suite's first CI run went red on this import in
+    a NEIGHBOURING file, which had the same hatch one level up. Hard failure
+    is the correct behaviour: if the lane cannot be parsed, the lane is
+    unverified, and unverified is not green.
+    """
+    import yaml  # noqa: E402 - a missing parser must fail, never skip
+
     with open(WORKFLOW) as handle:
         return yaml.safe_load(handle)
 
@@ -560,8 +573,6 @@ def _receipt_steps(workflow, job):
 
 def test_both_aggregate_lanes_compute_the_metric():
     workflow = _workflow()
-    if workflow is None:
-        return
     for job in ("pr-aggregate", "nightly-aggregate"):
         steps = _receipt_steps(workflow, job)
         assert len(steps) == 1, f"{job} runs the receipt {len(steps)} times"
@@ -570,8 +581,6 @@ def test_both_aggregate_lanes_compute_the_metric():
 def test_the_receipt_runs_even_after_an_earlier_step_failed():
     """`continue-on-error` stops a step failing the job. It does not run it."""
     workflow = _workflow()
-    if workflow is None:
-        return
     for job in ("pr-aggregate", "nightly-aggregate"):
         step = _receipt_steps(workflow, job)[0]
         assert step.get("if") == "always()", f"{job}: receipt is skippable"
@@ -581,8 +590,6 @@ def test_the_receipt_runs_even_after_an_earlier_step_failed():
 def test_the_receipt_is_fed_all_three_inputs():
     """Missing --aggregate would score stability unmeasured on all 26 forever."""
     workflow = _workflow()
-    if workflow is None:
-        return
     for job in ("pr-aggregate", "nightly-aggregate"):
         run = _receipt_steps(workflow, job)[0]["run"]
         for flag in ("--gate-a", "--gate-b", "--aggregate", "--json", "--markdown"):
@@ -597,8 +604,6 @@ def test_the_guard_suite_runs_in_ci():
     a place for a new guard to be silently left out.
     """
     workflow = _workflow()
-    if workflow is None:
-        return
     runs = [
         str(s.get("run", ""))
         for s in workflow["jobs"]["script-guards"]["steps"]
@@ -606,6 +611,62 @@ def test_the_guard_suite_runs_in_ci():
     body = "\n".join(runs)
     assert "scripts/tests/test_*.py" in body
     assert "python3" in body
+
+
+def test_the_guard_job_installs_the_yaml_parser_the_lane_guards_need():
+    """Every lane guard in scripts/tests/ parses parity.yml. Nothing else does.
+
+    pyyaml is not in the runner image, and it IS on the trench seat, so this
+    dependency is invisible locally and fatal in CI — which is exactly how it
+    was found. Asserted here so removing the install is caught at review
+    rather than by a red job.
+    """
+    workflow = _workflow()
+    body = "\n".join(
+        str(s.get("run", "")) for s in workflow["jobs"]["script-guards"]["steps"]
+    )
+    assert "pyyaml" in body
+
+
+def test_no_guard_file_skips_itself_when_the_yaml_parser_is_missing():
+    """The hatch that made five of this file's own guards vacuous in CI.
+
+    `try: import yaml / except ImportError: return` reads like defensive
+    portability and behaves like deletion: on the one machine where the lane
+    guards matter, they print `ok` having parsed nothing. Missing parser must
+    be a hard failure in every guard file, not just this one.
+
+    Checked on the parse tree, not the text: this file's own docstrings
+    discuss the hatch by name, and a grep-based version of this test failed on
+    its own prose.
+    """
+    import ast
+
+    def imports_yaml(node):
+        return any(
+            isinstance(n, ast.Import) and any(a.name == "yaml" for a in n.names)
+            for n in ast.walk(node)
+        )
+
+    def catches_import_error(handler):
+        names = []
+        if isinstance(handler.type, ast.Name):
+            names = [handler.type.id]
+        elif isinstance(handler.type, ast.Tuple):
+            names = [e.id for e in handler.type.elts if isinstance(e, ast.Name)]
+        return {"ImportError", "ModuleNotFoundError"} & set(names)
+
+    for path in sorted((REPO_ROOT / "scripts" / "tests").glob("test_*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
+                continue
+            if not any(imports_yaml(stmt) for stmt in node.body):
+                continue
+            for handler in node.handlers:
+                assert not catches_import_error(
+                    handler
+                ), f"{path.name} skips its lane guards when pyyaml is missing"
 
 
 def test_this_very_guard_file_is_matched_by_the_ci_glob():

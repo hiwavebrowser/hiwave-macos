@@ -80,6 +80,15 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install guard deps
+        # pyyaml, and only pyyaml: the lane guards parse parity.yml to assert
+        # that the steps they protect actually run. It is not in the runner
+        # image. Night 4's `test_both_gating_lanes_wire_the_scout_to_the_
+        # stability_minimum` has therefore never been runnable on a clean
+        # machine — it passed on the trench seat, where pyyaml happens to be
+        # installed, and died on ModuleNotFoundError the first time CI ran it.
+        run: python3 -m pip install --disable-pip-version-check pyyaml
+
       - name: Run every instrument guard
         run: |
           set -euo pipefail
