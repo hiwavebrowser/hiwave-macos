@@ -933,6 +933,21 @@ guards will be satisfied by the prose explaining the thing. The rule now lives
 in the tests' docstrings — assert on the command, never on the paragraph next
 to it — and the AST check is the general form of the fix.
 
+**Why two sessions were on this branch at once, since it will recur.** The
+trench cron (`0 5 * * *` UTC) starts a **fresh session** each night. My night-5
+session was still alive at 05:04 because it holds a `send_later` check-in loop
+watching PR #130, so night 6 started while night 5 was still working, both on
+`atlas/trench-parity-finish-line`. Hence three concurrent-push races and two
+independent fixes for one bug.
+
+Nothing was lost — every push was fetch-then-rebase, never a force-push — but
+the wasted duplicate work was real. Two things for whoever reads this next:
+a long-lived check-in loop will overlap the next nightly firing by design, and
+a check-in armed at a long interval keeps firing with **stale** context after
+you shorten the cadence during an incident. One of tonight's check-ins arrived
+describing a head SHA six commits old. Cancel the pending trigger before arming
+a replacement rather than letting both live.
+
 ---
 
 ## 2026-08-09
