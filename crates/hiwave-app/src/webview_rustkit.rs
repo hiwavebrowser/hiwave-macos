@@ -70,8 +70,13 @@ impl RustKitView {
             .as_raw();
 
         // Create engine builder with shield interceptor if counter provided
+        // Browser-plausible UA. "HiWave/1.0 RustKit/1.0" alone got us
+        // instantly rate-limited as a scraper even by Wikimedia (HTTP 429 on
+        // every thumbnail, 2026-08-05 live session) — servers gate on the
+        // Mozilla/AppleWebKit shape. Platform is reported honestly; HiWave
+        // stays visible as the product token.
         let mut builder = EngineBuilder::new()
-            .user_agent("HiWave/1.0 RustKit/1.0")
+            .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15 HiWave/1.0")
             .javascript_enabled(true)
             .cookies_enabled(true);
 
@@ -124,6 +129,33 @@ impl RustKitView {
     pub fn render(&self) {
         let mut engine = self.engine.borrow_mut();
         engine.render_all_views();
+    }
+
+    /// Resolve a click at viewport coordinates to a link URL, if any.
+    pub fn link_at_point(&self, x: f32, y: f32) -> Option<String> {
+        let engine = self.engine.borrow();
+        self.view_id
+            .and_then(|view_id| engine.link_at_point(view_id, x, y))
+    }
+
+    /// Scroll the view by a wheel delta in physical pixels.
+    ///
+    /// Returns true if the scroll offset changed (a re-render is needed).
+    /// Wheel events that reach the tao window loop are exactly the ones the
+    /// UI-frame WebView did not consume, i.e. the pointer was over content.
+    pub fn scroll_by(&self, delta_x: f32, delta_y: f32) -> bool {
+        let mut engine = self.engine.borrow_mut();
+        if let Some(view_id) = self.view_id {
+            match engine.scroll_view(view_id, delta_x, delta_y) {
+                Ok(changed) => changed,
+                Err(e) => {
+                    debug!(error = %e, "scroll_by failed");
+                    false
+                }
+            }
+        } else {
+            false
+        }
     }
 
     /// Load HTML content directly.

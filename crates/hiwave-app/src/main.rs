@@ -2,7 +2,7 @@
 //!
 //! This is the primary entry point for the HiWave browser application.
 //! It uses a three-WebView architecture:
-//! - Chrome WebView: Full window (chrome UI + sidebar)
+//! - HiWave WebView: Full window (browser UI frame + sidebar)
 //! - Content WebView: Right pane (excludes sidebar, below top bar)
 //! - Shelf WebView: Bottom (collapsible, aligned to content pane)
 
@@ -21,7 +21,7 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder},
     window::{Icon, WindowBuilder},
 };
-use tracing::{error, info, warn, Level};
+use tracing::{error, info, trace, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use wry::{Rect, WebView, WebViewBuilder};
 
@@ -1115,10 +1115,10 @@ fn main() {
             }
         })
         .build_as_child(&window)
-        .expect("Failed to create Chrome WebView");
+        .expect("Failed to create HiWave WebView");
 
     info!(
-        "Chrome WebView created (full window, top bar height {}px)",
+        "HiWave WebView created (full window, top bar height {}px)",
         CHROME_HEIGHT_DEFAULT
     );
 
@@ -1566,11 +1566,23 @@ fn main() {
     #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
     {
         if !is_new_tab_url(&initial_url) {
-            if let UnifiedContentWebView::RustKit(ref v) = content_webview {
-                if let Err(e) = v.load_url(&initial_url) {
-                    error!("Failed to load initial URL: {}", e);
-                }
-            }
+            // DEFERRED, not loaded here (2026-08-05). This call used to run
+            // synchronously during setup, BEFORE the event loop's first
+            // iteration — and RustKit's load path blocks its thread through
+            // network + parse + layout. Result, measured live with a process
+            // sample while Pete stared at nothing: main thread parked in
+            // load_url_blocking -> tokio block_on, zero paints, zero events,
+            // a window that never appeared for as long as the restored tab
+            // took to load (minutes, on a heavy page in a debug build).
+            //
+            // Queuing it as the SAME UserEvent::Navigate the URL bar uses
+            // means the event loop starts, the window and chrome UI paint,
+            // and THEN the restore navigation runs. The engine still blocks
+            // its thread during the load — that is the engine-thread
+            // refactor, a separate unit — but it now blocks behind a
+            // painted, visibly-alive window instead of a void.
+            info!(url = %initial_url, "Deferring restored-tab navigation until after first paint");
+            let _ = proxy.send_event(UserEvent::Navigate(initial_url.clone()));
         }
         info!("Content WebView created (RustKit)");
     }
@@ -1874,6 +1886,12 @@ fn main() {
     });
     info!("Started focus mode auto-trigger checker");
 
+    // Last known cursor position in WINDOW logical coordinates. tao reports
+    // MouseInput without a position, so the CursorMoved stream is what makes
+    // a click locatable.
+    let cursor_position = std::rc::Rc::new(std::cell::Cell::new((0.0f64, 0.0f64)));
+    let click_proxy = proxy.clone();
+
     // Run the event loop
     event_loop.run(move |event, event_loop_target, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -1883,15 +1901,92 @@ fn main() {
                 event: WindowEvent::MouseWheel { delta, .. },
                 ..
             } => {
-                // DIAGNOSTIC (2026-08-05, pre live-session): the RustKit
-                // content view receives no input anywhere in the stack — no
-                // scrollWheel override in the viewhost, no MouseWheel handling
-                // here, zero callers of Engine::scroll_by (aleph-verified).
-                // This arm answers the FIRST question for the hands-on
-                // session: do wheel events reach the window at all, or does a
-                // WebView layer swallow them before tao sees them? The log
-                // line is the instrument; wiring scroll is the next PR.
-                info!(?delta, "window-level MouseWheel received");
+                // Wheel events that reach the window loop were not consumed
+                // by the UI-frame WebView, so the pointer is over the content
+                // view (verified in the 2026-08-05 live session: flicks over
+                // page content arrive here; flicks over UI chrome do not).
+                // Forward them to the engine; render happens on
+                // MainEventsCleared, which this event wakes.
+                #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+                if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
+                    let (dx, dy) = match delta {
+                        tao::event::MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
+                        // Line deltas (external mice) arrive in rows/columns;
+                        // 40px per line matches common browser behavior.
+                        tao::event::MouseScrollDelta::LineDelta(x, y) => (x * 40.0, y * 40.0),
+                        _ => (0.0, 0.0),
+                    };
+                    if view.scroll_by(dx, dy) {
+                        trace!(dx, dy, "content scrolled");
+                    }
+                }
+            }
+            Event::WindowEvent {
+                event: WindowEvent::CursorMoved { position, .. },
+                ..
+            } => {
+                let scale = window.scale_factor();
+                cursor_position.set((position.x / scale, position.y / scale));
+            }
+            Event::WindowEvent {
+                event:
+                    WindowEvent::MouseInput {
+                        state: tao::event::ElementState::Released,
+                        button: tao::event::MouseButton::Left,
+                        ..
+                    },
+                ..
+            } => {
+                // Clicks reaching the window loop were not consumed by the UI
+                // frame, i.e. the pointer is over content — the same delivery
+                // rule the wheel path established. Translate window logical
+                // coordinates into the content view's viewport space, then
+                // ask the engine what link (if any) sits there.
+                #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+                if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
+                    let (cx, cy) = cursor_position.get();
+                    let content_x = cx - *sidebar_width_for_events.lock().unwrap();
+                    let content_y = cy - *chrome_height_for_events.lock().unwrap();
+                    if content_x >= 0.0 && content_y >= 0.0 {
+                        if let Some(url) = view.link_at_point(content_x as f32, content_y as f32) {
+                            info!(%url, "Link clicked");
+                            let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                        }
+                    }
+                }
+            }
+            Event::WindowEvent {
+                event: WindowEvent::KeyboardInput { event: key_event, .. },
+                ..
+            } => {
+                // Same delivery rule as MouseWheel: keys that reach the
+                // window loop were not consumed by a focused WebView text
+                // field, so scrolling the content is the right default.
+                // (Whether unfocused keys arrive at all on macOS is the
+                // diagnostic half — the wheel needed a live session to
+                // answer the same question.)
+                #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+                if key_event.state == tao::event::ElementState::Pressed {
+                    if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
+                        use tao::keyboard::Key;
+                        // scroll_by uses wheel sign convention: negative dy
+                        // advances the page (natural scrolling).
+                        let dy: Option<f32> = match key_event.logical_key {
+                            Key::ArrowDown => Some(-40.0),
+                            Key::ArrowUp => Some(40.0),
+                            Key::PageDown | Key::Space => Some(-600.0),
+                            Key::PageUp => Some(600.0),
+                            Key::End => Some(-f32::MAX),
+                            Key::Home => Some(f32::MAX),
+                            _ => None,
+                        };
+                        if let Some(dy) = dy {
+                            if view.scroll_by(0.0, dy) {
+                                trace!(dy, "content scrolled via keyboard");
+                            }
+                        }
+                    }
+                }
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -2015,6 +2110,20 @@ fn main() {
                             } else {
                                 format!("https://duckduckgo.com/?q={}", urlencoding::encode(&url))
                             };
+                            // Update the tab model BEFORE loading, like the
+                            // about/report branches above. Without this the
+                            // URL bar showed the typed URL only until the
+                            // next renderTabs, which rewrote it from the
+                            // stale model (live run 2026-08-05: typed
+                            // wikipedia, bar snapped back to the old eBay
+                            // URL).
+                            if let Ok(mut s) = state_for_events.lock() {
+                                if let Some(tab_id) = s.shell.get_active_tab().map(|tab| tab.id) {
+                                    if let Ok(parsed_url) = url::Url::parse(&full_url) {
+                                        let _ = s.shell.update_tab_url(tab_id, parsed_url);
+                                    }
+                                }
+                            }
                             #[cfg(target_os = "macos")]
                             {
                                 if let Err(e) = content_for_events.load_url(&full_url) {

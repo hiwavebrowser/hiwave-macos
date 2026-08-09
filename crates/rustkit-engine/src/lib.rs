@@ -219,6 +219,16 @@ pub struct Engine {
     /// [`Engine::set_style_recording`] for why this is a side table rather
     /// than a field on `ComputedStyle`.
     style_trace: std::cell::RefCell<Option<Vec<StyleRecord>>>,
+    /// Views whose most recent render attempt failed. A view entering this
+    /// set logs one `warn!`; leaving it logs recovery. Without this, a
+    /// persistently failing render (e.g. a wedged surface) freezes the
+    /// screen while the log stays silent.
+    render_failing: std::collections::HashSet<EngineViewId>,
+    /// Parsed SVG documents keyed by URL. SVGs referenced from <img> are
+    /// vector content — they bypass ImageManager's raster decode (which
+    /// rejects them as "Unknown image format") and are spliced into the
+    /// display list as vector commands at build time.
+    svg_cache: std::collections::HashMap<String, rustkit_svg::SvgDocument>,
 }
 
 /// One author declaration that MATCHED an element, win or lose.
@@ -385,6 +395,8 @@ impl Engine {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         })
     }
 
@@ -596,6 +608,7 @@ impl Engine {
             .views
             .remove(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
+        self.render_failing.remove(&id);
 
         // Destroy compositor surface
         let _ = self.compositor.destroy_surface(view.viewhost_id);
@@ -695,6 +708,34 @@ impl Engine {
         }
 
         Ok(changed)
+    }
+
+    /// Hit-test a click in VIEWPORT coordinates and return the link URL it
+    /// resolves to, if any.
+    ///
+    /// The click point is translated into document coordinates by the
+    /// current scroll offset (layout lives in document space; scroll is a
+    /// render-time translate), then the nearest `<a href>` ancestor's raw
+    /// href is resolved against the view's URL. Returns `None` for clicks
+    /// that hit no link — including `javascript:` links, which are dropped
+    /// at layout time.
+    pub fn link_at_point(
+        &self,
+        id: EngineViewId,
+        viewport_x: f32,
+        viewport_y: f32,
+    ) -> Option<String> {
+        let view = self.views.get(&id)?;
+        let doc_x = viewport_x + view.scroll_offset.0;
+        let doc_y = viewport_y + view.scroll_offset.1;
+        let hit = view.layout.as_ref()?.hit_test(doc_x, doc_y)?;
+        let href = hit.link_href?;
+        match view.url.as_ref() {
+            Some(base) => base.join(&href).ok().map(|u| u.to_string()),
+            // No base (e.g. loaded HTML with no URL): only absolute hrefs
+            // can navigate.
+            None => Url::parse(&href).ok().map(|u| u.to_string()),
+        }
     }
 
     /// Get the current scroll offset of a view.
@@ -802,6 +843,8 @@ impl Engine {
         view.navigation
             .commit_navigation()
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
+        // A committed navigation replaces the document; start at the top.
+        view.scroll_offset = (0.0, 0.0);
 
         let _ = self.event_tx.send(EngineEvent::NavigationCommitted {
             view_id: id,
@@ -936,6 +979,8 @@ impl Engine {
         view.navigation
             .commit_navigation()
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
+        // A committed navigation replaces the document; start at the top.
+        view.scroll_offset = (0.0, 0.0);
 
         let _ = self.event_tx.send(EngineEvent::NavigationCommitted {
             view_id: id,
@@ -1142,7 +1187,33 @@ impl Engine {
         // Generate display list
         let display_list = {
             let _display_list_span = tracing::info_span!("build_display_list").entered();
-            DisplayList::build(&root_box)
+            let mut dl = DisplayList::build(&root_box);
+            // Splice cached SVG documents in place of their Image commands.
+            // Done once per layout (not per frame): the renderer only speaks
+            // raster textures, so vector images become their own command
+            // runs positioned in the image's dest_rect.
+            if !self.svg_cache.is_empty() {
+                let mut expanded = Vec::with_capacity(dl.commands.len());
+                for cmd in dl.commands.drain(..) {
+                    match &cmd {
+                        rustkit_layout::DisplayCommand::Image { url, dest_rect, .. } => {
+                            if let Some(svg) = self.svg_cache.get(url) {
+                                expanded.extend(svg.render(
+                                    dest_rect.x,
+                                    dest_rect.y,
+                                    dest_rect.width,
+                                    dest_rect.height,
+                                ));
+                            } else {
+                                expanded.push(cmd);
+                            }
+                        }
+                        _ => expanded.push(cmd),
+                    }
+                }
+                dl.commands = expanded;
+            }
+            dl
         };
 
         debug!(
@@ -1169,6 +1240,13 @@ impl Engine {
         view.layout = Some(root_box);
         view.display_list = Some(display_list);
         view.max_scroll_offset = (0.0, max_scroll_y); // Update max scroll
+        // Re-clamp: a relayout can shrink the document (or a navigation can
+        // replace it) while the user is scrolled past the new maximum, which
+        // would render a translate into empty space.
+        view.scroll_offset = (
+            view.scroll_offset.0.min(view.max_scroll_offset.0),
+            view.scroll_offset.1.min(max_scroll_y),
+        );
 
         // Render
         self.render(id)?;
@@ -1742,11 +1820,25 @@ impl Engine {
                         }
                     });
 
-                    let (natural_width, natural_height) = match &loaded {
-                        Some(image) => (image.natural_width as f32, image.natural_height as f32),
+                    // Vector images: the SVG's own sizing (viewBox/width/height)
+                    // is the natural size the raster cache can't provide.
+                    let svg_size = Url::parse(&src).ok().and_then(|u| {
+                        self.svg_cache.get(u.as_str()).map(|svg| {
+                            svg.get_size(
+                                explicit_width.unwrap_or(300.0),
+                                explicit_height.unwrap_or(150.0),
+                            )
+                        })
+                    });
+
+                    let (natural_width, natural_height) = match (&loaded, svg_size) {
+                        (Some(image), _) => {
+                            (image.natural_width as f32, image.natural_height as f32)
+                        }
+                        (None, Some((w, h))) => (w, h),
                         // Image unavailable at layout time: fall back to the
                         // width=/height= attributes, then the placeholder size.
-                        None => match (explicit_width, explicit_height) {
+                        (None, None) => match (explicit_width, explicit_height) {
                             (Some(w), Some(h)) => (w, h),
                             (Some(w), None) => (w, w), // Assume square if only width
                             (None, Some(h)) => (h, h), // Assume square if only height
@@ -1792,28 +1884,42 @@ impl Engine {
                 }
 
                 if tag_lower == "button" {
-                    // Get button label from inner text or value
-                    let text = node.text_content();
-                    let label = if text.trim().is_empty() {
-                        attributes
-                            .get("value")
-                            .cloned()
-                            .unwrap_or_else(|| "Button".to_string())
-                    } else {
-                        text
-                    };
-                    let button_type = attributes
-                        .get("type")
-                        .cloned()
-                        .unwrap_or_else(|| "button".to_string());
+                    // A <button> is a flow container in every real engine —
+                    // icon buttons (<button><svg/></button>, eBay-class UIs)
+                    // have element children and no text. Rendering those as
+                    // an opaque FormControl leaf discarded the children and
+                    // stamped a literal "Button" placeholder (2026-08-05
+                    // live session: whole grids of them). Only text-only
+                    // buttons keep the leaf-widget fast path.
+                    let has_element_children = node
+                        .children()
+                        .iter()
+                        .any(|c| matches!(c.node_type, NodeType::Element { .. }));
 
-                    return LayoutBox::new(
-                        BoxType::FormControl(rustkit_layout::FormControlType::Button {
-                            label,
-                            button_type,
-                        }),
-                        style,
-                    );
+                    if !has_element_children {
+                        let text = node.text_content();
+                        let label = if text.trim().is_empty() {
+                            // No text, no children: an empty button renders
+                            // empty, not a placeholder word.
+                            attributes.get("value").cloned().unwrap_or_default()
+                        } else {
+                            text
+                        };
+                        let button_type = attributes
+                            .get("type")
+                            .cloned()
+                            .unwrap_or_else(|| "button".to_string());
+
+                        return LayoutBox::new(
+                            BoxType::FormControl(rustkit_layout::FormControlType::Button {
+                                label,
+                                button_type,
+                            }),
+                            style,
+                        );
+                    }
+                    // Element children present: fall through to normal box
+                    // construction so the children lay out inside the button.
                 }
 
                 if tag_lower == "textarea" {
@@ -1912,6 +2018,23 @@ impl Engine {
                         tag: tag_lower.clone(),
                         selector: reported,
                     });
+                }
+
+                // Links carry their RAW href so a hit test can navigate
+                // without walking back into the DOM. Resolution against the
+                // document base URL happens at click time, where the view —
+                // and therefore the base — is unambiguous; this builder is
+                // view-agnostic and must not guess.
+                if tag_lower == "a" {
+                    if let Some(href) = attributes.get("href") {
+                        let href = href.trim();
+                        // javascript: and empty hrefs are not navigations;
+                        // leaving them None keeps the click a no-op rather
+                        // than a load of a bogus URL.
+                        if !href.is_empty() && !href.starts_with("javascript:") {
+                            layout_box.link_href = Some(href.to_string());
+                        }
+                    }
                 }
 
                 // Build ancestors list for child elements with class and ID info
@@ -2368,6 +2491,18 @@ impl Engine {
             "s" | "strike" | "del" => {
                 style.display = rustkit_css::Display::Inline;
                 style.text_decoration_line = rustkit_css::TextDecorationLine::LINE_THROUGH;
+            }
+            // Ruby: Chrome's UA sheet computes display:ruby (inline-level).
+            // RustKit has no ruby layout, and css-ruby-1 §2.1 requires
+            // engines without it to treat the ruby display values as inline
+            // — falling through to the Block default laid a bare <ruby> out
+            // full-width (WPT css-inline/empty-span-size-002).
+            "ruby" | "rb" | "rt" | "rtc" => {
+                style.display = rustkit_css::Display::Inline;
+            }
+            // Chrome hides rp (the fallback parentheses) entirely.
+            "rp" => {
+                style.display = rustkit_css::Display::None;
             }
             // Form controls do NOT inherit the document font in Chrome's UA
             // sheet — they get the system control font at 13.333px unless
@@ -4006,39 +4141,53 @@ impl Engine {
         let base_url = view.url.as_ref();
         let urls = self.discover_external_stylesheets(document.as_ref(), base_url);
 
-        let mut stylesheets = Vec::new();
+        // Fetch concurrently, but keep DOCUMENT ORDER in the result: the
+        // cascade depends on stylesheet order, so `buffered` (ordered) is
+        // load-bearing here where images use `buffer_unordered`.
+        use futures::stream::StreamExt;
+        const MAX_CONCURRENT_CSS_LOADS: usize = 6;
 
-        for url in urls {
-            info!(%url, "Loading external stylesheet");
-
-            match self.loader.fetch(Request::get(url.clone())).await {
-                Ok(response) => {
-                    if response.ok() {
-                        match response.text().await {
-                            Ok(css_text) => match Stylesheet::parse(&css_text) {
-                                Ok(stylesheet) => {
-                                    debug!(rules = stylesheet.rules.len(), %url, "Parsed external stylesheet");
-                                    stylesheets.push(stylesheet);
-                                }
+        let loader = self.loader.clone();
+        let fetched: Vec<Option<Stylesheet>> = futures::stream::iter(urls.into_iter().map(|url| {
+            let loader = loader.clone();
+            async move {
+                info!(%url, "Loading external stylesheet");
+                match loader.fetch(Request::get(url.clone())).await {
+                    Ok(response) => {
+                        if response.ok() {
+                            match response.text().await {
+                                Ok(css_text) => match Stylesheet::parse(&css_text) {
+                                    Ok(stylesheet) => {
+                                        debug!(rules = stylesheet.rules.len(), %url, "Parsed external stylesheet");
+                                        Some(stylesheet)
+                                    }
+                                    Err(e) => {
+                                        warn!(?e, %url, "Failed to parse external stylesheet");
+                                        None
+                                    }
+                                },
                                 Err(e) => {
-                                    warn!(?e, %url, "Failed to parse external stylesheet");
+                                    warn!(?e, %url, "Failed to read stylesheet body");
+                                    None
                                 }
-                            },
-                            Err(e) => {
-                                warn!(?e, %url, "Failed to read stylesheet body");
                             }
+                        } else {
+                            warn!(status = %response.status, %url, "Failed to fetch stylesheet");
+                            None
                         }
-                    } else {
-                        warn!(status = %response.status, %url, "Failed to fetch stylesheet");
+                    }
+                    Err(e) => {
+                        warn!(?e, %url, "Failed to fetch stylesheet");
+                        None
                     }
                 }
-                Err(e) => {
-                    warn!(?e, %url, "Failed to fetch stylesheet");
-                }
             }
-        }
+        }))
+        .buffered(MAX_CONCURRENT_CSS_LOADS)
+        .collect()
+        .await;
 
-        Ok(stylesheets)
+        Ok(fetched.into_iter().flatten().collect())
     }
 
     /// Load images asynchronously and store in cache.
@@ -4052,35 +4201,83 @@ impl Engine {
         let base_url = view.url.as_ref();
         let images = self.discover_images(document.as_ref(), base_url);
 
-        let mut loaded = 0;
         let image_manager = self.image_manager.clone();
 
+        // Fetch concurrently with bounded parallelism. The serial loop cost
+        // 69 seconds on a Wikipedia article whose ~30 thumbnails each burned
+        // a sequential round-trip failing (2026-08-05 live session);
+        // buffer_unordered polls the futures on this thread, so no Send
+        // bounds are required and the engine stays single-threaded.
+        use futures::stream::StreamExt;
+        const MAX_CONCURRENT_IMAGE_LOADS: usize = 8;
+
+        let mut pending = Vec::new();
+        let mut svg_urls = Vec::new();
+        let mut loaded = 0;
         for (_src, url) in images {
-            // Skip if already cached
-            if image_manager.is_cached(&url) {
+            if image_manager.is_cached(&url) || self.svg_cache.contains_key(url.as_str()) {
                 debug!(%url, "Image already cached");
                 loaded += 1;
                 continue;
             }
-
-            info!(%url, "Loading image via ImageManager");
-
-            // Use ImageManager to fetch, decode, and cache the image
-            match image_manager.load(url.clone()).await {
-                Ok(image) => {
-                    debug!(
-                        %url,
-                        width = image.natural_width,
-                        height = image.natural_height,
-                        "Image loaded and cached"
-                    );
-                    loaded += 1;
-                }
-                Err(e) => {
-                    warn!(?e, %url, "Failed to load image");
-                }
+            // SVG is vector content: ImageManager's raster decode rejects it
+            // ("Unknown image format", every Wikipedia logo in the live
+            // session). Routed by URL extension; SVG served from
+            // extensionless URLs still falls through to the raster lane
+            // (content-type routing is the named follow-up).
+            if url.path().to_ascii_lowercase().ends_with(".svg") {
+                svg_urls.push(url);
+            } else {
+                pending.push(url);
             }
         }
+
+        for url in svg_urls {
+            info!(%url, "Loading SVG image");
+            match self.loader.fetch(Request::get(url.clone())).await {
+                Ok(response) if response.ok() => match response.text().await {
+                    Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
+                        Ok(doc) => {
+                            self.svg_cache.insert(url.to_string(), doc);
+                            loaded += 1;
+                        }
+                        Err(e) => warn!(?e, %url, "Failed to parse SVG image"),
+                    },
+                    Err(e) => warn!(?e, %url, "Failed to read SVG body"),
+                },
+                Ok(response) => {
+                    warn!(status = %response.status, %url, "Failed to fetch SVG image")
+                }
+                Err(e) => warn!(?e, %url, "Failed to fetch SVG image"),
+            }
+        }
+
+        let results: Vec<bool> = futures::stream::iter(pending.into_iter().map(|url| {
+            let image_manager = image_manager.clone();
+            async move {
+                info!(%url, "Loading image via ImageManager");
+                match image_manager.load(url.clone()).await {
+                    Ok(image) => {
+                        debug!(
+                            %url,
+                            width = image.natural_width,
+                            height = image.natural_height,
+                            "Image loaded and cached"
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        warn!(?e, %url, "Failed to load image");
+                        false
+                    }
+                }
+            }
+        }))
+        .buffer_unordered(MAX_CONCURRENT_IMAGE_LOADS)
+        .collect()
+        .await;
+
+        loaded += results.into_iter().filter(|ok| *ok).count();
 
         Ok(loaded)
     }
@@ -5065,8 +5262,23 @@ impl Engine {
     pub fn render_all_views(&mut self) {
         let view_ids: Vec<_> = self.views.keys().copied().collect();
         for id in view_ids {
-            if let Err(e) = self.render(id) {
-                trace!(?id, error = %e, "Failed to render view");
+            match self.render(id) {
+                Ok(()) => {
+                    if self.render_failing.remove(&id) {
+                        info!(?id, "View render recovered");
+                    }
+                }
+                Err(e) => {
+                    // Warn once per failure episode, not per frame: a wedged
+                    // surface renders at event rate and would flood the log,
+                    // but total silence is how a frozen screen goes
+                    // undiagnosed for a whole session.
+                    if self.render_failing.insert(id) {
+                        warn!(?id, error = %e, "View render failing; frames are NOT being presented (will log again on recovery)");
+                    } else {
+                        trace!(?id, error = %e, "View render still failing");
+                    }
+                }
             }
         }
     }
@@ -5756,13 +5968,36 @@ impl Engine {
                     .map_err(|e| EngineError::RenderError(e.to_string()))?
             };
 
+            // Scroll is applied at render time as a whole-page translate:
+            // the display list stays in document coordinates and the GPU
+            // shifts it by the clamped offset scroll_view() maintains.
+            let scroll_offset = self
+                .views
+                .get(&id)
+                .map(|v| v.scroll_offset)
+                .unwrap_or((0.0, 0.0));
+
             // Render using display list if available, otherwise just clear to background
             {
                 let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
                 if let (Some(renderer), Some(display_list)) = (&mut self.renderer, display_list) {
-                    renderer
-                        .execute(&display_list.commands, &texture_view)
-                        .map_err(|e| EngineError::RenderError(e.to_string()))?;
+                    if scroll_offset == (0.0, 0.0) {
+                        renderer
+                            .execute(&display_list.commands, &texture_view)
+                            .map_err(|e| EngineError::RenderError(e.to_string()))?;
+                    } else {
+                        let mut scrolled: Vec<rustkit_layout::DisplayCommand> =
+                            Vec::with_capacity(display_list.commands.len() + 2);
+                        scrolled.push(rustkit_layout::DisplayCommand::PushTransform {
+                            matrix: [1.0, 0.0, 0.0, 1.0, -scroll_offset.0, -scroll_offset.1],
+                            origin: (0.0, 0.0),
+                        });
+                        scrolled.extend(display_list.commands.iter().cloned());
+                        scrolled.push(rustkit_layout::DisplayCommand::PopTransform);
+                        renderer
+                            .execute(&scrolled, &texture_view)
+                            .map_err(|e| EngineError::RenderError(e.to_string()))?;
+                    }
                 } else if let Some(renderer) = &mut self.renderer {
                     // No display list, render empty (will clear to white or debug color)
                     renderer
@@ -8023,6 +8258,8 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         };
 
         // Build layout tree from document
@@ -8114,6 +8351,8 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8205,6 +8444,8 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -8316,6 +8557,8 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8391,6 +8634,8 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8458,6 +8703,8 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -8508,6 +8755,86 @@ mod tests {
     }
 
     #[test]
+    fn test_ruby_ua_display_inline() {
+        // css-ruby-1 §2.1: an engine without ruby layout must treat the ruby
+        // display values as inline. The UA match had no ruby arm, so <ruby>
+        // fell to the Block default and filled its container's width — WPT
+        // css-inline/empty-span-size-002 rendered its bordered <ruby> as a
+        // full-width 2px bar instead of a narrow inline box on a line with
+        // height. Drive the real engine: the bordered ruby must be an
+        // inline-level box that does not fill the containing block.
+        let html = r#"<!DOCTYPE html>
+            <html><body>
+              <div><ruby style="border: 3px solid"></ruby></div>
+            </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+        };
+
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        let containing_block = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        layout.layout(&containing_block);
+
+        // The ruby is the only box with a 3px border; find it by that.
+        fn find_ruby(b: &LayoutBox, out: &mut Vec<(rustkit_css::Display, BoxType, f32)>) {
+            if (b.dimensions.border.left - 3.0).abs() < 0.01 {
+                out.push((
+                    b.style.display,
+                    b.box_type.clone(),
+                    b.dimensions.border_box().width,
+                ));
+            }
+            for c in &b.children {
+                find_ruby(c, out);
+            }
+        }
+        let mut rubies = Vec::new();
+        find_ruby(&layout, &mut rubies);
+
+        assert_eq!(rubies.len(), 1, "expected exactly one 3px-bordered box (the ruby)");
+        let (display, box_type, border_width) = &rubies[0];
+        assert_eq!(
+            *display,
+            rustkit_css::Display::Inline,
+            "ruby UA display must compute to inline (css-ruby-1 §2.1 fallback)"
+        );
+        assert!(
+            matches!(box_type, BoxType::Inline),
+            "ruby must build an inline-level box, got {:?}",
+            box_type
+        );
+        assert!(
+            *border_width < 100.0,
+            "inline ruby must not fill the containing block: width {}",
+            border_width
+        );
+    }
+
+    #[test]
     fn test_bare_form_control_heights_match_chrome() {
         // form-controls t8 dig (2026-07-17): Chrome CfT-148 builds bare
         // single-line controls as a ~19px border-box (input/button/select at
@@ -8544,6 +8871,8 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -8616,6 +8945,8 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8998,6 +9329,8 @@ mod tests {
             event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
         };
 
         // Test type selector: (0, 0, 1)
@@ -9438,5 +9771,305 @@ mod element_identity_tests {
                 .join("\n")
         );
         eprintln!("join check: {total_expected} baseline selectors reproduced across {checked} cases");
+    }
+}
+
+#[cfg(test)]
+mod scroll_wiring_tests {
+    use super::*;
+
+    // ---- 2026-08-05 live-session fix: scroll wiring ----
+    //
+    // scroll_view/max_scroll_offset/PushTransform all existed with zero
+    // production callers (the orphan-module class). These tests pin the
+    // state machine the new wiring depends on. macOS-gated for the same
+    // reason as ua_form_control_defaults_reach_computed_style: Engine::new
+    // needs a real GPU device, which the macos CI leg has.
+
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn engine_with_scrollable_view(max_y: f32) -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        let view = engine.views.get_mut(&id).expect("view");
+        view.max_scroll_offset = (0.0, max_y);
+        (engine, id)
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn scroll_clamps_and_reports_change() {
+        let (mut engine, id) = engine_with_scrollable_view(1000.0);
+
+        // Trackpad flick down arrives as negative delta_y (observed live:
+        // PixelDelta y=-45..0 for a downward flick) and must ADVANCE the page.
+        assert!(engine.scroll_view(id, 0.0, -45.0).unwrap());
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 45.0));
+
+        // Scrolling above the top clamps to 0 and reports change=true only
+        // while there is distance to travel.
+        assert!(engine.scroll_view(id, 0.0, 100.0).unwrap());
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 0.0));
+        assert!(!engine.scroll_view(id, 0.0, 100.0).unwrap(), "at top: no change");
+
+        // Scrolling past the bottom clamps to max.
+        assert!(engine.scroll_view(id, 0.0, -99999.0).unwrap());
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 1000.0));
+        assert!(!engine.scroll_view(id, 0.0, -1.0).unwrap(), "at bottom: no change");
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn relayout_reclamps_offset_when_document_shrinks() {
+        let (mut engine, id) = engine_with_scrollable_view(1000.0);
+        engine.scroll_view(id, 0.0, -800.0).unwrap();
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 800.0));
+
+        // Simulate the relayout path shrinking the document: the clamp added
+        // alongside max_scroll_offset assignment must pull the offset back in
+        // range, or render would translate into empty space.
+        let view = engine.views.get_mut(&id).expect("view");
+        view.max_scroll_offset = (0.0, 300.0);
+        view.scroll_offset = (
+            view.scroll_offset.0.min(view.max_scroll_offset.0),
+            view.scroll_offset.1.min(view.max_scroll_offset.1),
+        );
+        assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 300.0));
+    }
+}
+
+#[cfg(test)]
+mod button_children_tests {
+    use super::*;
+
+    // ---- 2026-08-05 live-session fix: <button> is a flow container ----
+    //
+    // Icon buttons (element children, no text) were collapsed to an opaque
+    // FormControl leaf stamped with the literal string "Button". These pin
+    // the three shapes. macOS-gated: Engine::new needs a GPU device (the
+    // macos CI leg runs these; see ua_form_control_defaults note).
+
+    #[cfg(target_os = "macos")]
+    fn build_button(children: Vec<Rc<Node>>) -> LayoutBox {
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let button = Node::new(
+            rustkit_dom::NodeId::new(1),
+            NodeType::Element {
+                tag_name: "button".into(),
+                namespace: String::new(),
+                attributes: HashMap::new(),
+            },
+        );
+        for c in children {
+            button.append_child(c);
+        }
+        engine.build_layout_from_parent_style_and_path(
+            &button,
+            &[],
+            &HashMap::new(),
+            &[],
+            None,
+            &[],
+            0,
+            1,
+            "button",
+            &Cell::new(0),
+            false,
+        )
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn icon_button_keeps_its_element_children() {
+        let svg = Node::new(
+            rustkit_dom::NodeId::new(2),
+            NodeType::Element {
+                tag_name: "svg".into(),
+                namespace: String::new(),
+                attributes: HashMap::new(),
+            },
+        );
+        let layout = build_button(vec![svg]);
+        assert!(
+            !matches!(layout.box_type, BoxType::FormControl(_)),
+            "a button with element children must be a flow container, got FormControl leaf"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn text_button_stays_a_widget_with_its_text() {
+        let text = Node::new(rustkit_dom::NodeId::new(2), NodeType::Text("Buy It Now".into()));
+        let layout = build_button(vec![text]);
+        match layout.box_type {
+            BoxType::FormControl(rustkit_layout::FormControlType::Button { ref label, .. }) => {
+                assert_eq!(label, "Buy It Now");
+            }
+            ref other => panic!("text-only button should stay a FormControl leaf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn empty_button_has_no_placeholder_word() {
+        let layout = build_button(vec![]);
+        match layout.box_type {
+            BoxType::FormControl(rustkit_layout::FormControlType::Button { ref label, .. }) => {
+                assert_eq!(label, "", "empty button must not be stamped with a literal 'Button'");
+            }
+            ref other => panic!("empty button should stay a FormControl leaf, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod svg_image_tests {
+    use super::*;
+
+    // ---- 2026-08-05 live-session fix: SVG in <img> ----
+    //
+    // rustkit-svg existed unwired (orphan-module class): every SVG <img>
+    // failed ImageManager's raster decode with "Unknown image format".
+    // Pins the layout half of the wire: a cached SVG document supplies the
+    // natural size the raster cache cannot. macOS-gated per the GPU-device
+    // rationale on the other Engine-constructing tests.
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn cached_svg_supplies_natural_size_to_img_layout() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let svg = rustkit_svg::SvgDocument::parse(r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"></svg>"#)
+            .expect("parse svg");
+        engine
+            .svg_cache
+            .insert("https://example.com/logo.svg".to_string(), svg);
+
+        let mut attrs = HashMap::new();
+        attrs.insert("src".to_string(), "https://example.com/logo.svg".to_string());
+        let img = Node::new(
+            rustkit_dom::NodeId::new(1),
+            NodeType::Element {
+                tag_name: "img".into(),
+                namespace: String::new(),
+                attributes: attrs,
+            },
+        );
+
+        let layout = engine.build_layout_from_parent_style_and_path(
+            &img,
+            &[],
+            &HashMap::new(),
+            &[],
+            None,
+            &[],
+            0,
+            1,
+            "img",
+            &Cell::new(0),
+            false,
+        );
+        match layout.box_type {
+            BoxType::Image {
+                natural_width,
+                natural_height,
+                ..
+            } => {
+                assert_eq!((natural_width, natural_height), (40.0, 20.0),
+                    "SVG natural size must come from the parsed document, not the 150x150 placeholder");
+            }
+            ref other => panic!("img should build an Image box, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod link_click_tests {
+    use super::*;
+
+    // ---- 2026-08-05 live-session fix: clicking links ----
+    //
+    // Layout carried no way to answer "what link is at this point", so a
+    // click could never navigate. These pin the two properties that make
+    // link_at_point trustworthy: nested content resolves to its enclosing
+    // link, and the viewport->document translation honors scroll.
+
+    fn link_box(href: &str, x: f32, y: f32, w: f32, h: f32) -> LayoutBox {
+        let mut b = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        b.link_href = Some(href.to_string());
+        b.dimensions.content = rustkit_layout::Rect::new(x, y, w, h);
+        b
+    }
+
+    #[test]
+    fn a_click_on_content_inside_a_link_resolves_to_that_link() {
+        // <a href><img></a>: the image is the hit box and has no href of its
+        // own; the enclosing link must supply it.
+        let mut anchor = link_box("/deep", 0.0, 0.0, 200.0, 100.0);
+        let mut img = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        img.dimensions.content = rustkit_layout::Rect::new(10.0, 10.0, 50.0, 50.0);
+        anchor.children.push(img);
+
+        let hit = anchor.hit_test(20.0, 20.0).expect("hit");
+        assert_eq!(hit.link_href.as_deref(), Some("/deep"),
+            "content nested in a link must resolve to the link's href");
+    }
+
+    #[test]
+    fn the_nearest_link_wins_over_an_outer_one() {
+        let mut outer = link_box("/outer", 0.0, 0.0, 200.0, 100.0);
+        let inner = link_box("/inner", 10.0, 10.0, 50.0, 50.0);
+        outer.children.push(inner);
+
+        let hit = outer.hit_test(20.0, 20.0).expect("hit");
+        assert_eq!(hit.link_href.as_deref(), Some("/inner"));
+    }
+
+    #[test]
+    fn a_click_outside_any_link_resolves_to_nothing() {
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 200.0, 100.0);
+        root.children.push(link_box("/somewhere", 0.0, 0.0, 20.0, 20.0));
+
+        let hit = root.hit_test(100.0, 80.0).expect("hit");
+        assert_eq!(hit.link_href, None);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn link_at_point_translates_viewport_coords_by_scroll() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+
+        // A link 500px down the document.
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 800.0, 2000.0);
+        root.children.push(link_box("/target", 0.0, 500.0, 100.0, 20.0));
+
+        {
+            let view = engine.views.get_mut(&id).expect("view");
+            view.layout = Some(root);
+            view.url = Some(Url::parse("https://example.com/page").unwrap());
+            view.max_scroll_offset = (0.0, 1400.0);
+        }
+
+        // Unscrolled: viewport y=505 is document y=505 — a hit, resolved
+        // against the document base URL.
+        assert_eq!(
+            engine.link_at_point(id, 10.0, 505.0).as_deref(),
+            Some("https://example.com/target")
+        );
+
+        // Scrolled down 500: the same link now sits at viewport y=5, and the
+        // old viewport coordinate must MISS. Without the scroll translation
+        // every click would be wrong by exactly the scroll offset.
+        engine.scroll_view(id, 0.0, -500.0).unwrap();
+        assert_eq!(
+            engine.link_at_point(id, 10.0, 5.0).as_deref(),
+            Some("https://example.com/target")
+        );
+        assert_eq!(engine.link_at_point(id, 10.0, 505.0), None);
     }
 }
