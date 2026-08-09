@@ -59,6 +59,47 @@ jobs:
         run: node tools/parity_oracle/verify_selector_key.mjs
 
   # ===========================================================================
+  # Instrument guards (~1m). No Rust, no swarm, no captures.
+  # ===========================================================================
+  script-guards:
+    # Every gate in this campaign is held up by a mutation-checked guard in
+    # scripts/tests/, and until now not one of them ran in CI — the suite was
+    # executed by hand on the night it was written and never again. A guard
+    # that no longer runs is worse than the decoration this campaign keeps
+    # warning about: it reads as protection on a file nobody is checking.
+    #
+    # Blocking, and cheap enough to be: the whole suite is pure Python over
+    # committed fixtures and finishes in about a minute.
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run every instrument guard
+        run: |
+          set -euo pipefail
+          # Globbed rather than listed: a new guard file joins CI by existing,
+          # so a night that adds one cannot forget to register it here.
+          shopt -s nullglob
+          files=(scripts/tests/test_*.py)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No guard files matched. This is not a pass — the suite moved."
+            exit 1
+          fi
+          failed=0
+          for t in "${files[@]}"; do
+            echo "::group::$t"
+            if python3 "$t"; then echo "PASS $t"; else echo "FAIL $t"; failed=1; fi
+            echo "::endgroup::"
+          done
+          exit $failed
+
+  # ===========================================================================
   # PR Gate: Sharded swarm (~30m total)
   # ===========================================================================
   pr-swarm:
@@ -239,6 +280,47 @@ jobs:
             --capture-root parity-results \
             --out parity-results/forensic
 
+      # -----------------------------------------------------------------
+      # The metric itself. Gates A and B publish independent verdicts and
+      # the stability bar lives in parity_gate; until this step existed
+      # `N/26` was only ever stated in prose by a human reading three
+      # numbers and ANDing them by eye. This computes the conjunction.
+      #
+      # Non-gating on Gate C's precedent and for its reason: it is a
+      # measurement, not a fifth gate. The NUMBERS never fail a run — but a
+      # receipt that measured nothing exits 1, because "0/26" and "the
+      # receipt did not run" are different facts that must not print the
+      # same.
+      # -----------------------------------------------------------------
+      - name: Finish line — N/26 (receipt, non-gating)
+        id: finish_line
+        if: always()
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 scripts/finish_line_receipt.py \
+            --gate-a parity-results/gate-a.json \
+            --gate-b parity-results/gate-b.json \
+            --aggregate parity-results/aggregate_report.json \
+            --json parity-results/finish-line.json \
+            --markdown parity-results/finish-line.md \
+            | tee parity-results/finish-line.txt
+
+      - name: Publish the finish-line receipt
+        if: always()
+        run: |
+          {
+            if [ -f parity-results/finish-line.md ]; then
+              cat parity-results/finish-line.md
+            else
+              echo "## Finish line — N/26"
+              echo
+              echo "**No receipt was produced.** This is not \`0/26\`. The"
+              echo "metric was not computed on this run, and a missing number"
+              echo "must never be read as a bad one."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Publish oracle receipts
         if: always()
         run: |
@@ -281,6 +363,8 @@ jobs:
           path: |
             parity-results/gate-a.json
             parity-results/gate-b.json
+            parity-results/finish-line.json
+            parity-results/finish-line.md
             parity-results/forensic/
           retention-days: 14
           if-no-files-found: warn
@@ -563,6 +647,37 @@ jobs:
             --capture-root parity-results \
             --out parity-results/forensic
 
+      # Same receipt as the PR lane, same non-gating contract. Nightly is
+      # where the number is tracked over time, so it must be computed here
+      # rather than inferred from whenever the PR lane last ran.
+      - name: Finish line — N/26 (receipt, non-gating)
+        if: always()
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 scripts/finish_line_receipt.py \
+            --gate-a parity-results/gate-a.json \
+            --gate-b parity-results/gate-b.json \
+            --aggregate parity-results/aggregate_report.json \
+            --json parity-results/finish-line.json \
+            --markdown parity-results/finish-line.md \
+            | tee parity-results/finish-line.txt
+
+      - name: Publish the finish-line receipt
+        if: always()
+        run: |
+          {
+            if [ -f parity-results/finish-line.md ]; then
+              cat parity-results/finish-line.md
+            else
+              echo "## Finish line — N/26"
+              echo
+              echo "**No receipt was produced.** This is not \`0/26\`. The"
+              echo "metric was not computed on this run, and a missing number"
+              echo "must never be read as a bad one."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Publish oracle receipts
         if: always()
         run: |
@@ -600,6 +715,8 @@ jobs:
           path: |
             parity-results/gate-a.json
             parity-results/gate-b.json
+            parity-results/finish-line.json
+            parity-results/finish-line.md
             parity-results/forensic/
           retention-days: 14
           if-no-files-found: warn
