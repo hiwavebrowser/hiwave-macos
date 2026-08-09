@@ -891,6 +891,48 @@ conjunction is being asked instead of the mean. That gap *is* the campaign's
 thesis, and this is the first time it has been a measurement rather than an
 argument.
 
+### Fourth addendum — two sessions fixed the same CI failure at once, and a correction
+
+`script-guards` (new in night 6) went red on its first run:
+`test_sharding_preserves_stability_evidence.py` died on `ModuleNotFoundError:
+yaml`. That file is mine, from night 5.
+
+Night 6's session and I diagnosed it concurrently and reached the same two
+conclusions independently — install PyYAML in the job, and delete the
+`try/except ImportError: return None` hatch rather than copy it, because on the
+one runner where the lane guards matter they printed `ok` having parsed
+nothing. Their commit `6a22ea3` landed first and went further than mine: an AST
+guard forbidding any guard file from catching ImportError around `import yaml`,
+checked on the parse tree because a grep version failed on that file's own
+docstring.
+
+I dropped my version rather than merge two fixes for one bug. What I kept is
+the piece theirs did not cover: **my lane test was a duplicate and is now
+deleted.** It asserted the same property as night 4's
+`test_every_lane_that_gates_on_stability_runs_the_iterations`, which parses the
+workflow with a stdlib regex and predates it. My copy needed PyYAML, which is
+what made this file the one that took the job red. Verified before deleting:
+dropping `--iterations` from either lane, or lowering it below the bar, turns
+night 4's test RED. The file now needs no parser at all.
+
+**Correction to the third addendum.** I recorded the `--iterations` mutation as
+a survivor that exposed a real gap. That overstates it. My sweep only ran my own
+file, so it missed that night 4's guard in the neighbouring file caught all
+three variants. The weakness in my test was real — it was satisfied by the
+comment above the flag — but the repo was never unguarded, and I reported it as
+if it had been.
+
+**And the same mistake twice in two nights.** Fixing this, I wrote a guard
+asserting the job installs PyYAML, and deleting the install left it GREEN —
+because the explanatory comment above the install contains both "pip install"
+and "PyYAML" in prose. Identical to the `--iterations` defect I had written a
+paragraph about the night before. Night 6 hit the grep-on-its-own-docstring
+version of it in the same hours. Three instances in two days says this is not
+carelessness but a property of the shape: a guard that greps the file it
+guards will be satisfied by the prose explaining the thing. The rule now lives
+in the tests' docstrings — assert on the command, never on the paragraph next
+to it — and the AST check is the general form of the fix.
+
 ---
 
 ## 2026-08-09

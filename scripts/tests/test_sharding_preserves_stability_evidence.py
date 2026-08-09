@@ -159,47 +159,17 @@ def test_single_iteration_runs_are_unaffected():
     assert sum(len(s) for s in shards) == 12
 
 
-def test_both_gating_lanes_wire_the_scout_to_the_stability_minimum():
-    """The other half of the connection: sharding can preserve evidence only
-    if the scout was asked to produce any. If a lane drops `--iterations`,
-    sharding stays correct and that lane's gate red-locks again.
-
-    Checked per lane and on the ARGUMENT, not by grepping. Two drafts of this
-    test failed to catch a mutation that deleted the flag:
-
-      * a substring search over the whole workflow passed while one lane had
-        lost it, because the other still carried it
-      * a per-lane substring search over the step's `run` block passed on the
-        COMMENT above the flag, which says "--iterations 3, not 1" in prose
-
-    So the flag is tokenised out of the non-comment lines. A guard satisfied by
-    a comment describing the thing it guards is decoration.
-    """
-    import yaml
-
-    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "parity.yml").read_text())
-    for job in ("pr-swarm", "nightly-swarm"):
-        steps = workflow["jobs"][job]["steps"]
-        swarm = [s for s in steps if "parity_swarm.py" in (s.get("run") or "")]
-        assert swarm, f"{job} no longer runs parity_swarm.py"
-        for step in swarm:
-            tokens = []
-            for line in step["run"].split("\n"):
-                stripped = line.strip()
-                if stripped.startswith("#"):
-                    continue
-                tokens.extend(stripped.rstrip("\\").split())
-            assert "--iterations" in tokens, (
-                f"{job} no longer passes --iterations at all; its stability gate "
-                "has no evidence to judge and will fail every row as "
-                "stability_unmeasured"
-            )
-            value = tokens[tokens.index("--iterations") + 1]
-            assert value == str(STABILITY_MIN_RUNS), (
-                f"{job} scouts {value} iterations but the gate requires "
-                f"{STABILITY_MIN_RUNS} measured ones — every row will fail as "
-                "stability_unmeasured"
-            )
+# The other half of the connection — that both lanes actually REQUEST
+# STABILITY_MIN_RUNS scout iterations, so sharding has evidence to preserve —
+# is already guarded by test_stability_actually_gates's
+# `test_every_lane_that_gates_on_stability_runs_the_iterations`. That one
+# parses the workflow with a stdlib regex and predates this file.
+#
+# A duplicate of it lived here and has been removed. It asserted the same
+# property with PyYAML, which is what made this file the one that took
+# `script-guards` red on its first run. Verified before deleting: dropping
+# --iterations from either lane, or lowering it below the bar, turns night 4's
+# test RED — so the property is covered, by the copy that needs no parser.
 
 
 if __name__ == "__main__":
