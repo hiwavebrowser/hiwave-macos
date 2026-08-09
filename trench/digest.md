@@ -2295,3 +2295,260 @@ worth testing anyway. If a rendering change is authorised, `opacity` is the
 smaller of the two (one arm in the renderer, and the export half is already
 built and asserted); `white-space` is the more valuable, because its absence is
 visible in the parity corpus as collapsed text inside `pre`.
+
+---
+
+## 2026-08-09 — night 12 (NONE — `white-space` and `opacity` both re-tested)
+
+**Metric: 10 of 12 → 10 of 12**
+
+**Moved no → yes: NONE.** This is the **first** dry night of trench 2. Night 11
+moved `overflow-x`, so the two-dry-nights clause is not tripped; one more NONE
+ends the trench and the funeral note is next night's job, not tonight's.
+
+### Why I went looking anyway
+
+Nights 10 and 11 each overturned a confident "this needs engine surgery", and
+night 11 said it "would not bet heavily against a third". So the two remaining
+properties were re-tested from the source rather than inherited from the previous
+read. Both are genuinely blocked — but the *reasons* are sharper than night 11
+had, and one of them is a new bug.
+
+### `white-space`: the gap is bigger than "inheritance is missing"
+
+Night 11 named the blocker as absent ELEMENT inheritance. That is real, and
+re-confirmed: `build_layout_box` seeds `white_space` from `parent_style` only in
+the `NodeType::Text` arm (lib.rs:1954), so a `<span>` inside a `pre` genuinely
+lays out `normal`.
+
+**But there is a second, independent gap, and it is the one real pages hit:
+`<pre>` has no UA `white-space` at all.** The UA arm sets display, font-family
+and margins and then says so in the source:
+
+```rust
+"pre" => {
+    style.display = rustkit_css::Display::Block;
+    style.font_family = "monospace".to_string();
+    style.margin_top = rustkit_css::Length::Px(16.0); // 1em
+    style.margin_bottom = rustkit_css::Length::Px(16.0);
+    // white-space: pre (not implemented)
+}
+```
+
+So a bare `<pre>` collapses its whitespace like a div. Every prior white-space
+assertion needed an author `white-space: pre` to see anything, which is why six
+nights of work on this property never surfaced it — the fixture always supplied
+what the UA sheet does not.
+
+**Pinned with a tripwire**, which is what `BASELINE.md` asks for when the finding
+cannot be fixed inside this loop:
+
+```python
+bare_pre, error = client.tool("hiwave_style", selector="pre")
+assert bare["computed"]["white-space"] == "normal", bare["computed"]
+assert bare_ws["winner"] is None, bare_ws
+assert bare_ws["origin"] == "user-agent-or-initial", bare_ws
+# ...and the UA sheet DID reach this element for other properties, so `normal`
+# is a missing UA declaration and not a UA sheet that missed the element.
+assert bare["computed"]["display"] == "block", bare["computed"]
+# The consequence, in paint: the double space is gone.
+assert "x y" in texts and "x  y" not in texts, sorted(texts)
+assert len(texts["x y"]["advances"]) == 3, texts["x y"]
+```
+
+**This is still NOT countable, and the reason is now exhaustive rather than
+partial.** There are exactly three routes to a white-space value that is not an
+echo of declaration text, and all three are absent:
+
+1. **a shorthand** — nothing sets it; `shorthands_setting` maps only the `font`
+   family (`line-height | font-family | font-size | font-weight => &["font"]`);
+2. **inheritance** — absent for elements (night 11, re-verified);
+3. **a UA default** — absent, above.
+
+`normal` on a bare `<pre>` is the INITIAL value, so asserting it proves the
+engine defaulted rather than computed. Clause 3 holds; clause 2 has nowhere to
+come from.
+
+### `opacity`: blocked, and night 11's parenthetical was slightly wrong
+
+Night 11 wrote that the renderer "discards it outside the `Image` arm
+(`opacity: _`)". The `opacity: _` it cites is **inside** the Image arm — which
+matters, because as written it reads as though images honour opacity. They do
+not. Traced the whole path tonight:
+
+- `DisplayCommand::Image.opacity` **is** populated from the cascade —
+  `rustkit-layout/src/lib.rs:4925` passes `layout_box.style.opacity` into
+  `images::render_image`, and `hiwave_display_list` exports it. So the value
+  reaches paint's input.
+- The renderer's own Image arm then drops it: `DisplayCommand::Image { opacity: _, .. } => self.draw_image(url, *dest_rect)`.
+- **Not a route:** the text path. `rustkit-renderer` line ~4517 preserves "the
+  run's alpha for opacity/fade", but that alpha is `color.a` — the text colour's
+  own alpha, not `style.opacity`.
+- **Not a route:** layer creation. `BASELINE.md` lists `opacity` as deciding
+  "whether a layer is created", and in this engine it does not — `opacity` never
+  reaches `rustkit-compositor` at all (it appears in `rustkit-animation`,
+  `-css`, `-engine`, `-layout`, `-renderer`, `-svg`, and nowhere else).
+- **Not a route:** SVG. `rustkit-svg`'s `opacity`/`fill_opacity`/`stroke_opacity`
+  are SVG presentation attributes on SVG nodes, not the CSS cascade's field.
+
+So the only place the computed value is plumbed is a display-list field its sole
+consumer ignores. Clause 2 could be met (the cascade clamps, so `opacity: -0.5`
+computes `0` — not an echo), but clause 3 cannot: there is no consumer whose
+behaviour differs as a function of the value, so an assertion could only prove
+the cascade agrees with itself. That is a gate that cannot go red on anything
+except the cascade, and this trench does not count those.
+
+### The run
+
+```
+$ cargo build -p hiwave-mcp && python3 crates/hiwave-mcp/smoke.py
+ok  initialize        {'name': 'hiwave-mcp', 'version': '0.1.0'}
+ok  tools/list        ['hiwave_open', 'hiwave_layout', 'hiwave_display_list', 'hiwave_style', 'hiwave_diff', 'hiwave_screenshot', 'hiwave_status']
+ok  hiwave_layout-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_display_list-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_style-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_open       {'height': 600, 'loaded': '<inline>', 'width': 800}
+ok  hiwave_status     session survives between calls
+ok  hiwave_layout     .hero border_box = 432.0x152.0 (content-box: 400+2*16 x 120+2*16)
+ok  hiwave_display_list  .hero painted rgb(0,136,204) over 432.0x152.0 at (0.0,0.0) — same rect layout computed
+ok  paint order       canvas[0] < hero[1] < text[2]
+ok  advance contract  11 advances for 11 chars, font_size=32.0 weight=700 x=16.0
+ok  hiwave_style      width=400px won by .hero [0, 1, 0] over div [0, 0, 1] (later in source, lower specificity)
+ok  computed expansion padding-left=16px, cited to `padding: 16px` on .hero (via_shorthand) — no rule spells the longhand
+ok  origin split      h1 font-weight=700 winner=None (UA, no rule to cite); font-size=32px winner=h1 (author)
+ok  line-height       .copy 20px x 1.5 = 30px — authored '1.5', computed 30px (resolved, not echoed)
+ok  normal not faked  .hero line-height=normal (keyword, not px — resolving it needs font metrics)
+ok  inherited origin  span font-family='Georgia, serif' text-align=center both origin=inherited; display still UA-or-initial
+ok  line-height inherited  span declares nothing, reports 30px origin=inherited (.copy 20px x 1.5) and its line box IS 30.0 — `normal` control measures 20.0
+ok  font-style        span computed=italic origin=inherited (declares nothing); paint drew it font_style=1, h1 still 0
+ok  letter-spacing    .spaced 0.1em x 20px = 2px (authored '0.1em'); every advance is exactly +2.0 over .plain — [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+ok  KNOWN DIVERGENCE  .pre keeps 'a  b' (4 advances) but its nested span collapsed 'c  d' to 'c d' — white-space is not inherited onto elements
+ok  KNOWN GAP        a BARE <pre> computes white-space=normal (winner=None) and collapses 'x  y' to 'x y' — the UA sheet reached it (display=block, monospace) but has no white-space declaration to give
+ok  border shorthand  .framed border-top-width=5px (0.25em x 20px) and border-top-color=rgba(204, 102, 0, 1), both cited to `border` on .framed; layout reserved 5.0 and paint drew a 210.0x5.0 band
+ok  no false citation `border: 2px solid` cites the width and NOT border-top-color (the declaration carried no colour)
+ok  longhand wins     .overruled border-top-width=9px beats `border: 3px solid #093`, which is reported in overridden; layout reserved {'bottom': 3.0, 'left': 3.0, 'right': 3.0, 'top': 9.0} and a 52.0-tall box
+ok  box-sizing        .bordered border-box: declared 200px IS the border box, content 170.0x10.0; .content content-box, same declarations, border box 230.0x70.0
+ok  position          .floater absolute (beat `div{position:static}`, last in sheet); .host is 0.0 tall around a 40.0-tall child and the next block starts at the same y — out of flow
+ok  overflow-x       .clipped overflow-x=hidden cited to `overflow`; it establishes a BFC so the kid's 20px bottom margin lands INSIDE — 35.0 tall against 15.0 for .unclipped, same child, one keyword apart
+ok  KNOWN GAP        ...but paint pushes no clip for it — overflow-x is answered for what LAYOUT did, not for whether anything was clipped
+ok  KNOWN GAP        .faded opacity=0.5 computed, but paint filled it at a=1.0 — opacity never reaches the solid-colour path, so it is reported, not counted
+ok  selector guard    refused 'div p'
+ok  hiwave_diff       hero/layout agrees with the spec reference on 12/12 hand-derived values (incl. border_box 432x152)
+ok  hiwave_diff       hero/display_list agrees on 17 values (paint order, #08c over 432x152, 32px/700 text at x=16)
+ok  hiwave_diff       important-width DISAGREES: border_box.width expected 100.0 (spec: !important wins), engine computed 400.0 — 2 of 4, height and x still agree
+ok  session isolation open page still 432x152 after three diffs
+ok  diff guards       unknown stage, unknown case, unknown reference, path escape and missing argument all refused
+ok  hiwave_screenshot 1440015 bytes at ppm
+ok  argument guard    pass either `html` or `path`, not both
+
+PASS: hiwave-mcp serves the engine's computed layout, its paint commands, the cascade behind them, AND whether any of it agrees with a committed reference
+```
+
+**Checked that the new tripwire can go red**, by implementing the one missing
+line (`style.white_space = rustkit_css::WhiteSpace::Pre` in the `"pre"` UA arm):
+
+```
+AssertionError: {... 'display': 'block', 'font-family': 'monospace',
+                'white-space': 'pre', ...}
+  crates/hiwave-mcp/smoke.py:533, in main
+    assert bare["computed"]["white-space"] == "normal", bare["computed"]
+```
+
+and the paint half flips with it — the bare `<pre>` then keeps both spaces,
+`text='x  y' advances=4` against tonight's `'x y'`/3. That is worth stating
+plainly: **the whole bug is that one absent declaration**, not a chain of
+missing machinery. Perturbation reverted; `grep -c RED-CHECK` on
+`rustkit-engine/src/lib.rs` returns 0 and `git status` shows the crate clean.
+
+### A process note, because it cost most of the night
+
+The stored prompt is stale for the seventh night, and this time it did more than
+waste the first move. The session started on a **detached HEAD at master**, where
+`git branch -r` listed only `origin/master` — the clone's refspec does not fetch
+this branch — so the branch looked absent, `trench/digest.md` read as ending at
+night 3, and both the prompt's stop condition and the file agreed the trench was
+finished at 4 of 4. I wrote and committed that completion note before
+`git push` rejected it and revealed 62 commits of trench 2. The commit was
+discarded, not pushed. `BASELINE.md`'s warning block did not help here, because
+I was reading master's copy of it, which predates the warning.
+
+The cheap durable fix is unchanged and is still Pete's: land this branch on
+master, or repoint the prompt. Until then the reliable first move is
+`git ls-remote origin 'refs/heads/atlas/*'` rather than `git branch -r`, which is
+now in the note below for the next night.
+
+Second, smaller: **the fixture hit night 11's viewport ceiling, exactly as
+predicted.** A bare `<pre>` with UA margins (16 + 16 + a monospace line) does not
+fit in the 46px that were left, and the failure was the canvas assertion
+(`expected one 800x600 canvas fill`), not anything about white-space. `pre
+{ margin: 0 }` buys it back; that rule is viewport bookkeeping and not part of
+the finding. **The fixture is now roughly 28px from 600.** The next night that
+adds an element must either shrink something or open the page taller — this is
+the last night that can be solved by trimming a margin.
+
+### What the engine still cannot answer
+
+- **`white-space` — three named routes, all absent** (shorthand, element
+  inheritance, UA default). Both halves are now pinned by tripwires rather than
+  one. Counting it needs either the UA declaration or element inheritance, both
+  rendering changes; and note that even with the UA default it is not obviously
+  countable, because a UA keyword default is still not a computed value under
+  clause 2.
+- **`opacity` — plumbed to exactly one display-list field whose only consumer
+  ignores it**, with the text-alpha, compositor and SVG routes all ruled out
+  tonight. Needs the renderer honouring it.
+- **`overflow-y` is still not exported**, and `overflow-x` is still answered for
+  what layout did, not for whether anything was clipped.
+- **Non-px lengths still come back as Rust `Debug` strings** — visible in
+  tonight's own red-check output (`'height': 'Auto'`, `'margin-top': 'Zero'`,
+  `'padding-left': 'Zero'`). Named by nights 6–11; still the cheapest correct
+  thing left, still wants its own slice and its own red-check, because it changes
+  values the `hiwave_diff` references quote.
+- **Only the TOP border side is exported**, `border-style` is invisible, and
+  `position` is answered for the value and not the consequences (`top`/`left`/
+  `z-index`/containing block unrecorded).
+- Everything trench 1 named is still true: `!important` is dead in the cascade
+  (pinned by the `important-width` diff case), UA-origin properties have no rule
+  to cite, `hiwave_style` takes simple selectors only, capture-kind references
+  are refused, `style` is not a diffable stage, and there is no real-page corpus.
+
+### Tests
+
+**No Rust changed tonight** — the committed diff is `crates/hiwave-mcp/smoke.py`
+only, a Python file that nothing compiles. `cargo test -p rustkit-engine`
+(the crate whose behaviour the new assertion describes) — **36 passed, 0
+failed**. I did not re-run the full workspace, because no compiled input to it
+changed; nights 7–11's standing result (914 passed, 1 pre-existing
+`rustkit-layout::probe_normal_line_height_vs_chrome` failure) is unaffected by a
+test-script edit. The red-check perturbation touched `rustkit-engine` and was
+reverted and verified reverted before the commit.
+
+Scope stayed inside `crates/hiwave-mcp/`. No parity harness, no `.github/`, no
+Windows or Linux port work, no engine behaviour changed, and no export that
+already had passing assertions had its answers altered. The runner needed
+`mesa-vulkan-drivers` installed again (fresh container; `apt-get update` first —
+the cached index now 403s through the proxy rather than 404s; environment only,
+nothing committed).
+
+### Decisions needed from Pete
+
+1. **One line in the UA sheet fixes bare `<pre>`, and I am not allowed to write
+   it.** `style.white_space = WhiteSpace::Pre` in the `"pre"` arm; verified
+   tonight to be the entire fix, with the paint consequence flipping. This is a
+   parity-visible correctness bug on a plain HTML element, and it is a rendering
+   change, which `BASELINE.md` forbids this loop. Authorise it here, or hand it
+   to the parity trench — but it should not sit behind an export metric.
+2. **The stored prompt, seventh night, now with a concrete cost.** It caused a
+   real (discarded) commit closing a live trench tonight, because on master both
+   the prompt and the digest say 4 of 4. Land this branch or repoint the prompt.
+3. **The trench is one NONE from ending.** Both remaining properties need
+   rendering changes and tonight's re-test made those reasons exhaustive rather
+   than provisional. If `opacity` or `white-space` is not authorised as a
+   rendering change, next night is NONE and the correct action is the funeral
+   note at 10 of 12. Worth deciding rather than discovering.
+
+**Next night, first move:** `git ls-remote origin 'refs/heads/atlas/*'` and check
+out `atlas/trench-mcp-exports` BEFORE reading `trench/`, then rebuild
+(`cargo build -p hiwave-mcp`) — a stale `target/` from master silently fails
+night 8's provenance assertions and looks like a regression. Then: unless a
+rendering change is authorised, write the funeral note at 10 of 12.

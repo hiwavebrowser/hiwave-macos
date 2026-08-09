@@ -55,6 +55,7 @@ h1 { font-size: 32px; margin: 0 }
 .plain  { width: 400px; font-size: 20px; font-family: Georgia, serif }
 .spaced { width: 400px; font-size: 20px; font-family: Georgia, serif; letter-spacing: 0.1em }
 .pre { white-space: pre }
+pre { margin: 0 }
 .framed    { width: 200px; height: 40px; font-size: 20px; border: 0.25em solid #c60 }
 .hairline  { width: 200px; height: 40px; border: 2px solid }
 .overruled { width: 200px; height: 40px; border: 3px solid #093; border-top-width: 9px }
@@ -73,6 +74,7 @@ div { box-sizing: content-box; position: static }
 <div class="plain"><span>spacing</span></div>\
 <div class="spaced"><span>spacing</span></div>\
 <div class="pre">a  b<span class="nested">c  d</span></div>\
+<pre>x  y</pre>\
 <div class="framed"></div><div class="hairline"></div><div class="overruled"></div>\
 <div class="bordered"></div><div class="content"></div>\
 <div class="host"><div class="floater"></div></div>\
@@ -506,6 +508,45 @@ def main():
     assert len(texts["c d"]["advances"]) == 3, texts["c d"]
     print(f"ok  KNOWN DIVERGENCE  .pre keeps 'a  b' (4 advances) but its nested span "
           f"collapsed 'c  d' to 'c d' — white-space is not inherited onto elements")
+
+    # A SECOND, INDEPENDENT tripwire on the same property, and the one that bites
+    # real pages. The divergence above needs an author `white-space: pre` to be
+    # visible at all; this one needs no CSS whatsoever. Every browser's UA sheet
+    # gives `pre` white-space: pre. RustKit's UA arm for "pre" sets display,
+    # font-family and margins and then says, in the source,
+    # `// white-space: pre (not implemented)` — so a bare <pre> collapses its
+    # whitespace like a div. Night 11 named this property's gap as missing
+    # ELEMENT inheritance; that is real but it is not the whole gap, and it is
+    # not the half a page hits without stylesheets.
+    #
+    # This is also why white-space still cannot be COUNTED. The three routes to a
+    # value that is not an echo of declaration text are a shorthand (nothing sets
+    # white-space — `shorthands_setting` maps only the `font` family), inheritance
+    # (absent for elements, above), and a UA default (absent, here). `normal` on a
+    # bare <pre> is the INITIAL value, so asserting it proves the engine defaulted
+    # rather than computed. Clause 3 holds; clause 2 has nowhere to come from.
+    bare_pre, error = client.tool("hiwave_style", selector="pre")
+    assert error is None, error
+    assert bare_pre["count"] == 1, bare_pre["count"]
+    bare = bare_pre["elements"][0]
+    # CSS says `pre`, and no author rule in the fixture touches white-space here.
+    assert bare["computed"]["white-space"] == "normal", bare["computed"]
+    bare_ws = next(x for x in bare["declared"] if x["property"] == "white-space")
+    assert bare_ws["winner"] is None, bare_ws          # nothing declared it...
+    assert bare_ws["origin"] == "user-agent-or-initial", bare_ws
+    # ...and the UA sheet did reach this element for OTHER properties, so the
+    # `normal` above is a missing UA declaration and not a UA sheet that missed
+    # the element entirely. monospace + display:block are that same arm's work.
+    assert bare["computed"]["display"] == "block", bare["computed"]
+    # The consequence, in paint: the double space is gone. Whoever implements the
+    # UA default will see this line go red — assert 'x  y' with 4 advances then,
+    # and re-check clause 2 before counting the property (a UA default is still
+    # not a computed value).
+    assert "x y" in texts and "x  y" not in texts, sorted(texts)
+    assert len(texts["x y"]["advances"]) == 3, texts["x y"]
+    print(f"ok  KNOWN GAP        a BARE <pre> computes white-space=normal (winner=None) "
+          f"and collapses 'x  y' to 'x y' — the UA sheet reached it (display=block, "
+          f"monospace) but has no white-space declaration to give")
 
     # ---- the shorthand group: border-top-width and border-top-color ----------
     # These are in the diagnosis set precisely because almost nobody writes the
