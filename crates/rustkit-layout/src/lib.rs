@@ -1795,11 +1795,6 @@ impl LayoutBox {
         self.apply_position_offsets(containing_block);
     }
 
-    /// Layout a block-level box.
-    fn layout_block(&mut self, containing_block: &Dimensions) {
-        self.layout_block_with_definite_height(containing_block, containing_block.content.height);
-    }
-
     /// Layout a block-level box with an explicit definite height for percentage resolution.
     fn layout_block_with_definite_height(
         &mut self,

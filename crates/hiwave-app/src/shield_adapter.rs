@@ -9,7 +9,6 @@
 //! mirrors the most common blocking rules. Full adblock filtering still happens
 //! at the navigation level.
 
-#![allow(dead_code)]
 
 use hiwave_shield::ResourceType as ShieldResourceType;
 use rustkit_net::{InterceptAction, InterceptHandler, Request};

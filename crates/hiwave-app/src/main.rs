@@ -10,9 +10,15 @@ mod import;
 mod platform;
 
 use std::sync::{Arc, Mutex};
+// Used only by the WRY-content IPC/nav block, which is compiled out of the
+// default macos+rustkit build. Deleting this as an "unused import" broke
+// `--features webview-fallback` with E0433 at the two should_block call
+// sites: a green default build says nothing about a cfg arm your target
+// omits. Gate must match those sites, not the default target.
+#[cfg(any(not(target_os = "macos"), feature = "webview-fallback"))]
+use hiwave_shield::ResourceType;
 use muda::{Menu, MenuEvent};
 use platform::get_platform_manager;
-use hiwave_shield::ResourceType;
 #[cfg(target_os = "macos")]
 use platform::menu_ids;
 use tao::{
