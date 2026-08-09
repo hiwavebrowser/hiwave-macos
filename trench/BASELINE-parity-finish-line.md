@@ -23,22 +23,66 @@
 
 ```
 BASELINE (2026-08-04):  UNMEASURABLE
+P0b      (2026-08-09):  1/26 finish-line-green
 ```
 
-**UNMEASURABLE is the honest reading, not a placeholder for a bad number.**
-The oracle that would compute it does not exist yet. Any figure produced before
-it does would be a mean-pixel-diff wearing a conjunction's clothes, which is the
-exact substitution §1 of the plan documents: master's collapsed-shelf layout
-scored 3.71% (pass) while the geometrically correct tree scored 33.87% (fail).
-The metric preferred the broken layout.
+**UNMEASURABLE was the honest reading for five nights, not a placeholder for a
+bad number.** Any figure produced before the oracle existed would have been a
+mean-pixel-diff wearing a conjunction's clothes — the exact substitution §1 of
+the plan documents: master's collapsed-shelf layout scored 3.71% (pass) while
+the geometrically correct tree scored 33.87% (fail). The metric preferred the
+broken layout.
 
-Do not invent a number for this line. It gets one at **P0b**, from a dual-oracle
-run on master, and not before.
+### The P0b receipt
 
-### What blocked measurement, and what still does
+**`1/26`** — only `bg-pure` passes all four conditions simultaneously.
+
+| condition | green | measured |
+|---|---|---|
+| geometry (≤0.5px/box) | 4/26 | 26/26 |
+| paint (≥99% within ±5) | 1/26 | 26/26 |
+| stability (3 measured iterations) | 26/26 | 26/26 |
+| discrete (zero structural) | 18/26 | 26/26 |
+
+**The columns are 4, 1, 26, 18 and the metric is 1.** They are not meant to
+add up: a case is green only where every column is. Reporting the best column,
+or the mean of the columns, is the Goodhart substitution this campaign exists
+to end, and `scripts/finish_line_receipt.py` has a mutation-checked guard
+against the metric ever becoming `min()` of them.
+
+**Zero cases were unmeasured.** All 26 scored on all four conditions, so `1/26`
+is a measurement and not a coverage artefact. Three cases — `bg-solid`,
+`pseudo-classes`, `specificity` — are geometry-green, discrete-green and stable
+and are blocked by paint alone.
+
+Provenance, stated precisely because the plan asks for a receipt *on master*:
+run [31296359482](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/31296359482),
+`macos-14` (CoreText and Metal, not SwiftShader), commit `c9b2b5e` on
+`atlas/trench-parity-finish-line`. That commit's `crates/`, `Cargo.toml` and
+`Cargo.lock` are **byte-identical to master at `44389f1`** — P0a and P0b carry
+no engine changes, so the number is attributable to master's engine. It could
+not be taken on master literally: the gates that compute it do not exist there
+until #130 merges.
+
+**The honest headline.** The old board read mean 6.64% and "~93% raw pixel
+agreement" on this same engine. The conjunction reads 1/26. Nothing regressed —
+the engine was never touched. The gap between those two readings *is* the
+campaign's thesis, and it is now a measurement rather than an argument.
+
+### What blocked measurement
+
+**Every row below is now CLEARED, and the metric has a number.** The table is
+kept as the record of what had to exist before `1/26` could be honest.
+
+One thing the gates did not have until night 6 and is worth naming: nothing
+computed the conjunction. Gates A, B and C published three independent
+verdicts and the AND was left to whoever read them. `scripts/finish_line_receipt.py`
+closes that, and it is the last piece of the instrument rather than a fifth
+gate — it measures nothing itself and refuses to fill in a blank.
 
 | Blocker | State |
 |---|---|
+| Nothing computed the four-way conjunction — three gates, three separate numbers, the metric ANDed by eye in prose | **CLEARED** night 6, 26/26 mutation-checked. `scripts/finish_line_receipt.py`, run on both the PR and nightly lanes. Unmeasured is never green; paint and discrete stay separate columns; a receipt that measured nothing exits 1. |
 | RustKit `layout.json` had no join key — only `type`/`text`/`control_type`, while Chrome's rects are keyed by selector | **CLEARED** night 1 (P0a-0). 1593/1593 baseline selectors reproducible across all 26 cases. |
 | Gate A (geometry) not implemented — `scripts/layout_oracle_gate.py` is a stub whose `extract_layout_from_rustkit` returns `None` | **CLEARED** night 2. Gate built, joined on the P0a-0 key, 14/14 mutation-checked. It has never seen a real RustKit capture — see below. |
 | Gate A has no real RustKit input yet — every capture path needs a GPU adapter, and this trench seat is Linux with none | **Half cleared** night 4. The seat *does* render: SwiftShader ships with the bundled Playwright Chromium and wgpu takes it via `VK_ICD_FILENAMES`. 32/32 registry cases captured, and Gate A ran end-to-end on real engine output for the first time (26 measured, 2 green, 24 red, 2703 geometry failures, 115 join failures). Its **code path** is now observed; its **numbers** are still not macOS numbers — Linux font stack, not CoreText; SwiftShader, not Metal. Nothing from this seat can be the receipt. |

@@ -890,3 +890,184 @@ tonight — the engine was never touched. The difference is entirely that the
 conjunction is being asked instead of the mean. That gap *is* the campaign's
 thesis, and this is the first time it has been a measurement rather than an
 argument.
+
+---
+
+## 2026-08-09
+
+**Metric: UNMEASURABLE → 1/26 finish-line-green.** The line the baseline file
+has held open since night 1 has a number. Only `bg-pure` passes all four
+conditions. All 26 cases were measured on all four, so `1/26` is a measurement
+and not a coverage artefact.
+
+**P-item: P0b (the first real N/26 receipt). Completed.**
+
+### The receipt
+
+Run [31296359482](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/31296359482),
+`macos-14` — CoreText and Metal, not SwiftShader.
+
+```
+metric:     1/26 cases pass all four conditions
+measured:   26/26 scored on all four  (0 not fully measured)
+  geometry   4/26 green, 26/26 measured
+  paint      1/26 green, 26/26 measured
+  stability 26/26 green, 26/26 measured
+  discrete  18/26 green, 26/26 measured
+```
+
+The columns are 4, 1, 26, 18 and the metric is 1. They are not meant to add up.
+
+`bg-solid`, `pseudo-classes` and `specificity` are geometry-green,
+discrete-green and stable, and are blocked by paint alone — the three cases
+closest to the line. `about`, `card-grid`, `css-selectors`, `flex-positioning`,
+`gradient-backgrounds`, `image-gallery`, `new_tab` and `sticky-scroll` are red
+on three conditions each.
+
+**On "a receipt on master", stated precisely rather than glossed.** The plan
+says P0b is taken on master. It could not be, literally: the gates that compute
+it do not exist on master until #130 merges. What was done instead is that
+master was merged *into* the trench branch, and the measured commit `c9b2b5e`
+has `crates/`, `Cargo.toml` and `Cargo.lock` **byte-identical to master at
+`44389f1`** — verified with `git diff`, not asserted. P0a and P0b carry no
+engine changes, so the number is attributable to master's engine. If Pete wants
+the receipt to carry master's SHA rather than a branch SHA, that needs #130
+merged first and a re-run; I did not merge to master, which is banned in this
+loop.
+
+### Commits
+
+- `c9b2b5e` — `scripts/finish_line_receipt.py`: compute the conjunction. Also
+  wires the guard suite into CI, which had never run there.
+- `6a22ea3` — fix the two things the guard suite's first CI run found, one of
+  them mine.
+
+Zero engine behavior changes in both, same as nights 1–5.
+
+### What the work actually was
+
+The plan reads P0b as "run the gates and write down the number". That was not
+the state. The four gates each publish an independent verdict and **nothing
+joined them**. Night 5's digest states "4/26 geometry-green, 1/26 paint-green"
+and then correctly refuses to call that `N/26` — but there was no code that
+would have produced `N/26` either. The conjunction existed only as a sentence
+in the plan.
+
+So P0b's real content was building the join, and the join has its own ways of
+lying that the individual gates do not:
+
+- **Discrete would have read green from a Gate B that read nothing.** Gate B's
+  `unmeasured_case` carries `discrete_failures: 0` because it counted none.
+  A discrete column taking that zero at face value reports a case Gate B never
+  opened as structurally clean.
+- **Paint and discrete have to be separate columns even though one gate
+  produces both.** Gate B's per-case `green` is the AND of the percentage bar
+  and the discrete auto-fails. Using it as the paint column would report a case
+  with a missing clip and 99.99% of pixels within tolerance as *paint*-red, and
+  send the grind after a rasterizer bug that does not exist. On tonight's real
+  board that is not hypothetical: `image-gallery` reads 85.4% within tolerance
+  **and** 17 missing clips, and those are two different defects for two
+  different P-items.
+- **The metric must not become the best column.** Four columns at 25/26 with
+  the reds on different cases is a metric of 22/26. There is a test with those
+  worked numbers.
+
+### Mutation-check results
+
+**26 mutations, 26 RED, control green before and after.** One bad probe on the
+first pass (the receipt's CLI string appears in both lanes, so the probe matched
+twice); re-run against each lane separately, both RED. One genuine survivor,
+closed — see below.
+
+Covering: discrete reading an unmeasured Gate B; geometry green whenever
+measured; the paint column taken from Gate B's combined flag; the bar strict
+instead of inclusive; pass_fraction hardcoded; discrete kinds unfiltered; the
+metric as `min()` of the columns; blockers listing unmeasured instead of
+not-green; a condition dropped from `CONDITIONS`; iterating the gate's cases
+instead of the registry; holdout entering the metric; `STABILITY_MIN_RUNS`
+copied rather than cited; the variance budget copied; `measured_runs`
+re-derived so unknown counts as one; `stability_unmeasured` collapsed into
+`unstable`; the variance check dropped; exploit-viewport rows accepted as
+stability evidence; the `cases[]` fallback dropped; a receipt that measured
+nothing exiting 0; markdown listing only red cases; `if: always()` removed;
+`continue-on-error` removed; the receipt starved of `--aggregate`; the guard
+job's glob narrowed; the guard job's pyyaml install removed; a guard file
+re-adding the ImportError hatch.
+
+### The guard suite had never run in CI, and my own guards would have been vacuous
+
+`scripts/tests/` holds every mutation-checked guard this campaign has written —
+all four gates' — and **not one of them has ever executed in CI**. Each was
+hand-run on the night it was written and never again. I added a `script-guards`
+job, and it went red on its first run.
+
+The cause was `ModuleNotFoundError: No module named 'yaml'`. pyyaml is not in
+the runner image and *is* on this seat, so night 4's lane guard —
+`test_both_gating_lanes_wire_the_scout_to_the_stability_minimum` — has never
+been runnable on a clean machine. It has been passing here for five nights on a
+dependency CI does not have.
+
+The worse half is mine. My five new lane guards opened with:
+
+```python
+try: import yaml
+except ImportError: return None
+...
+if workflow is None: return
+```
+
+which reads as defensive portability and behaves as deletion. On the one
+machine where a lane guard matters, they would have printed `ok` having parsed
+nothing. The neighbouring file failed loudly *only because it had no hatch*. I
+wrote the hatch on the same night I wrote a module docstring about guards that
+report success having checked nothing.
+
+Fixed by installing pyyaml and deleting the hatch rather than copying it — a
+missing parser now hard-fails, because a lane that cannot be parsed is
+unverified and unverified is not green. Two guards added for the pair, both
+mutation-checked RED. The second is checked on the parse tree, after a grep
+version of it failed on this file's own docstring.
+
+**The survivor was real and is the same shape.** Nothing asserted that the CI
+job installs pyyaml — removing the install left the suite green here, and would
+have quietly restored the exact failure the night had just fixed.
+
+### Decisions needed from Pete
+
+1. Gates A and B have now had their advisory cycle and A, B, stability and the
+   receipt all produced clean macOS output — flip A and B to blocking (one-line
+   `continue-on-error` change), or hold until #130 merges?
+2. Does the P0b receipt need to carry master's own SHA — which means merging
+   #130 and re-running on master — or is "branch commit with `crates/`
+   byte-identical to master, verified by diff" the receipt you want?
+3. None beyond those two.
+
+### Surprises
+
+- **`N/26` had no implementation, only a definition.** I expected P0b to be a
+  run-and-record night. Four gates and five nights in, the thing the campaign
+  measures itself by was still arithmetic performed by a human reading three
+  numbers. Nobody had written it down as code, and the digests are careful
+  enough about it that the gap never showed.
+- **Stability came back 26/26 green.** After night 4 built the bar and night 5
+  found sharding had made it unmeasurable, I expected the first honest look to
+  find real instability somewhere in 26 cases. It found none: every case shows
+  three measured iterations within budget. That is the one condition already at
+  the finish line.
+- **The platform caveat is quantified now.** The same corpus on this Linux/
+  SwiftShader seat reads geometry **2/26** where macOS reads **4/26** — while
+  paint (1/26) and discrete (18/26) come out identical on both. So the font
+  stack moves geometry and only geometry, by two cases. Nights 4 and 5 labelled
+  every SwiftShader figure "not a receipt" without being able to say how wrong
+  it was; on this board, it is wrong by exactly the two cases where CoreText
+  matters and right everywhere else.
+- **Geometry did not move across master's last two engine commits.** The ruby
+  inline fix (`4c08a19`) and the nullable diff guard are in the measured tree
+  and the geometry column reads 4/26, the same as night 5's pre-merge run. Not
+  a criticism of either commit — neither targeted the 26 — but worth recording
+  that the board is insensitive to them.
+- **A missing `--aggregate` produces `0/26`, and the receipt says why.**
+  Running the gates locally without an aggregate, the receipt printed 0/26 with
+  `0 measured` and named the missing file, then exited 1. That is the
+  distinction between "0/26" and "did not run" working on real input rather
+  than in a test.
