@@ -1128,3 +1128,172 @@ have quietly restored the exact failure the night had just fixed.
   `0 measured` and named the missing file, then exited 1. That is the
   distinction between "0/26" and "did not run" working on real input rather
   than in a test.
+
+---
+
+## 2026-08-10
+
+**Metric: 1/26 → not re-measured.** No local `N/26` exists tonight and I am not
+going to invent one: the metric is taken on macOS CI, and the local sweep I ran
+used 1 iteration, so the receipt correctly reads `0/26, 26 not fully measured`
+with `stability_unmeasured` on every row. What I *can* report as measured, on
+this seat, is the pair the change targets — geometry unchanged and discrete
+structural failures down. The macOS number comes from the PR lane.
+
+**P-item: P1 (gradient/clip family). First root landed; the item is NOT
+complete.**
+
+### Commits
+
+- `6c7c6f3` — clip descendants to the rounded corner an overflow box cuts:
+  `DisplayCommand::PushClipRounded`, a clip stack that carries rounded
+  constraints, and `clip_quad_to_rounded` to decompose quads against them.
+- `a2e9d5a` — move the clipping decision into free functions so the WIRING is
+  mutation-checkable, not just its math. Two survivors closed.
+
+### What the defect actually was
+
+The plan reads P1's remaining work as "rounded clip for scaled gradients
+(corner notches)", and the residual comment in `render_background_layer` says
+the same: `PushClip` is a plain rect, so a *scaled* gradient under a radius
+paints square into the notch. I went looking for that and it is not what Gate B
+is reporting.
+
+`overflow` emits **no clip at all**. `PushClip` had exactly two call sites in
+the whole display list — `background-clip` and the scaled-gradient container —
+and neither is `overflow`. A descendant has never been clipped by an ancestor's
+overflow, rounded or square. The 51 `missing_clip` auto-fails from 2026-08-08
+are that, not a gradient bug:
+
+    .gallery-item { border-radius: 12px; overflow: hidden; }
+    .gallery-item > .image-placeholder { background: linear-gradient(...) }
+
+The child fills the parent exactly, so the only place the missing clip is
+visible is the four corners — which is why it reads as a corner-notch defect
+and why the gradient painter looked guilty. The gradient painter is fine; it
+has taken a `border_radius` and clipped to it all along.
+
+Scope held deliberately narrow: the clip is emitted only when the box **both**
+clips its overflow and has a radius. Square overflow clipping is not
+implemented. Switching that on for every `overflow: hidden` box in a renderer
+that has never clipped overflow is a change with its own blast radius, and
+landing both together would make neither attributable.
+`overflow_hidden_with_square_corners_pushes_no_clip` pins the line.
+
+### Measured, before → after (Linux/SwiftShader, 26 cases, 1 iteration)
+
+Same corpus, same seat, only the binary differs.
+
+| Oracle | Before | After |
+|---|---|---|
+| Gate A geometry | 2/26 green, 2631 geometry + 115 join failures | **identical, byte for byte** |
+| Gate B paint (%) | mean 81.27318% within tolerance | mean 81.27539% |
+| Gate B discrete | **79** structural auto-fails | **62** |
+| Gate B paint-green | 1/26 | 1/26 |
+
+`image-gallery` 18 → 2 discrete, `sticky-scroll` 8 → 7. Four cases changed at
+all; the other 22 are bit-identical. No case gained a discrete failure. Gate A
+reading identical is the check that the change is display-list-only as claimed,
+rather than my word for it.
+
+### The stop rule fired, and I did not revert. Reasoning, for Pete to overrule
+
+`sticky-scroll`'s percentage half regressed: 78.45244% → 78.45000%, which is 25
+net pixels of 1,024,000. Under the stop rule as written — *any oracle regresses
+on any case → auto-revert* — that is a revert.
+
+I classified every changed pixel against Chrome before deciding:
+
+| case | changed | crossed INTO tolerance | crossed OUT |
+|---|---|---|---|
+| image-gallery | 1032 | 398 | **0** |
+| new_tab | 173 | 170 | **0** |
+| settings | 82 | 36 | **0** |
+| sticky-scroll | 74 | 11 | **36** |
+
+Zero worsened pixels on three cases says the arc itself is right. All 36 on
+`sticky-scroll` are one shape: RustKit puts `div.article-card:nth-of-type(3)`
+at y=726.1 and Chrome puts it at y=688.1. A 38px vertical drift that Gate A
+already fails the case for. My clip cuts the corner of that card correctly —
+at the wrong y — where Chrome is 38px into the card's interior and paints the
+gradient. Before tonight RustKit painted a square corner there that *happened*
+to match Chrome's interior. The accidental match is what I removed.
+
+That is §1 of the plan reproducing itself: a correct change exposing a layout
+defect over more pixels, and the percentage preferring the broken version. I
+did not revert because the campaign exists to stop rewarding that. But the
+stop rule is written precisely so I cannot talk myself into keeping a change,
+so it is decision 1 below rather than a call I have quietly made.
+
+Two numbers that argue against me and belong here: the mean moved +0.0022
+percentage points, which is nothing, and the metric did not move at all. If
+Pete reads the stop rule literally, revert is defensible and cheap — it is two
+commits on an unmerged branch.
+
+### Mutation-check results
+
+**17 probes, 16 RED, control green before and after.** Full table in `a2e9d5a`.
+
+The first sweep had **two survivors, and both were the same mistake**: I had
+tested `clip_quad_to_rounded` thoroughly and nothing checked that anything ever
+*called* it. Deleting the decomposition from `draw_clipped_quad`, and making a
+nested clip replace its parent's arc instead of accumulating, both stayed
+green. Those live on `Renderer`, which needs a wgpu device, so no test on a
+GPU-less runner could reach them. Fixed by moving the whole clipping decision
+into two free functions — `clip_entry_for` and `collect_clipped_pieces` —
+leaving `Renderer` with only the emit loop.
+
+Two more survivors found while sweeping:
+
+- `the_box_own_background_is_not_inside_its_own_overflow_clip` asserted inside
+  `if let Some(own_bg)` on a fixture with no background. The assertion never
+  ran. This is the fourth instance in three nights of a guard satisfied by
+  something other than the thing it guards, and the first where the escape
+  hatch was a conditional rather than a comment.
+- nothing covered **positioned** children. The fixture's only child was
+  in-flow, so popping the clip before the positioned pass survived — while
+  `image-gallery`'s `.image-overlay` is `position: absolute` and sits on the
+  bottom corners, i.e. exactly the child that would escape and repaint the
+  notch this change exists to clear.
+
+`M11` is recorded GREEN and not counted: removing the early `radius.is_zero()`
+return is a no-op because a later `inner.is_zero()` return catches the same
+case. `M11b` removes both and goes red. The count is 16, not 17.
+
+### Decisions needed from Pete
+
+1. `sticky-scroll` lost 36 pixels to a correctly-placed clip on a card RustKit
+   lays out 38px too low — keep the change and treat the stop rule as aimed at
+   real correctness regressions (my reading), or revert it literally?
+2. Should the square half of overflow clipping be its own P1 unit before P2, or
+   does it wait until a gate reports a defect that needs it?
+3. None beyond those two.
+
+### Surprises
+
+- **`overflow` has never clipped anything.** I expected to find a clip that was
+  rectangular where it should be round. There is no clip. Every `overflow:
+  hidden` box in the corpus has been letting its descendants paint wherever
+  they like, and it stayed invisible because the corpus's overflow boxes mostly
+  contain children that fit — so the only leak is four corners a few pixels
+  wide. An instrument that reported means never saw it; the discrete half found
+  it the first time it ran.
+- **The plan's description of P1's remaining work pointed at the wrong file.**
+  "Rounded clip for scaled gradients" and the `render_background_layer` comment
+  both describe a real residual, but it is not what the 51 auto-fails are. I
+  spent the first stretch of the night reading the gradient painter, which was
+  already correct.
+- **62 discrete failures remain and they are not one root.** Of `new_tab`'s 5
+  distinct failing selectors, **5 of 5 carry a border**, and its own background
+  is within tolerance 5 of its border colour — consistent with `render_borders`
+  emitting four square `SolidColor` rects across the full border box and
+  ignoring the radius. But `css-selectors` (5 selectors), `flex-positioning`
+  (4) and `sticky-scroll` (6) have **no border at all**, so at least one more
+  root is unidentified. Stating that rather than claiming the border theory
+  covers the rest.
+- **The SwiftShader seat needs one environment variable and nobody wrote it
+  down.** `VK_ICD_FILENAMES=/opt/pw-browsers/chromium-1194/chrome-linux/vk_swiftshader_icd.json`.
+  Without it `parity-capture` fails every case in 0.2s with "No suitable GPU
+  adapter found". It failed in the right direction — 26/26 NOT-MEASURED, not
+  26/26 passed — which is the empty-run tripwire earning its place again.
+  A full 26-case sweep then costs 19 seconds.
