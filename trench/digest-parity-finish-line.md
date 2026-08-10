@@ -1297,3 +1297,30 @@ case. `M11b` removes both and goes red. The count is 16, not 17.
   adapter found". It failed in the right direction — 26/26 NOT-MEASURED, not
   26/26 passed — which is the empty-run tripwire earning its place again.
   A full 26-case sweep then costs 19 seconds.
+
+### Process note — I put engine changes on the re-instrument PR
+
+`atlas/trench-parity-finish-line` is the head of **PR #130**, which is P0a and
+P0b. Plan §2's ground rule is that the re-instrument PRs carry no engine
+behavior change, so the first `N/26` is attributable. Tonight's three commits
+are an engine behavior change and they are now on that PR.
+
+I noticed the conflict early — the night order says to work on this branch, the
+plan says keep this PR clean — and then worked the P-item without resolving it.
+That was the mistake: the branch instruction was written on night 1 when there
+was no PR, and the ratified plan should have won.
+
+I have not force-pushed and will not, so I cannot take it back off #130 from
+here. Three ways out, cheapest first:
+
+1. Merge #130 as it stands. The P0b receipt in it was measured at `c9b2b5e`,
+   whose `crates/` is byte-identical to master — that receipt does not change
+   because later commits exist on the same branch, but a reader of the merged
+   PR can no longer see that at a glance.
+2. Merge #130 at `e2dba9c` (cherry-pick or a merge commit at that point) and
+   open P1 as its own PR from these three commits.
+3. Pete force-resets the branch to `e2dba9c`; I will not.
+
+Recommending (2) if the attributability of the first receipt matters more than
+the extra step, which I think it does — that receipt is the campaign's new
+ground truth and it should be readable without archaeology.
