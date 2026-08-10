@@ -5591,6 +5591,43 @@ mod tests {
     }
 
     #[test]
+    fn positioned_children_are_inside_the_clip_too() {
+        // `overflow` clips EVERY descendant, not just the in-flow ones, so the
+        // pop belongs after the positioned pass. image-gallery's
+        // `.image-overlay` is `position: absolute` and sits on the parent's
+        // bottom corners — pop it early and the overlay paints square into
+        // exactly the notches this change exists to clear.
+        let mut parent = rounded_overflow_parent(12.0, true);
+        let mut overlay_style = ComputedStyle::new();
+        overlay_style.background_color = Color { r: 0, g: 0, b: 0, a: 0.7 };
+        let mut overlay = LayoutBox::new(BoxType::Block, overlay_style);
+        overlay.position = Position::Absolute;
+        overlay.dimensions.content = Rect::new(0.0, 120.0, 227.0, 60.0);
+        parent.children.push(overlay);
+
+        let list = DisplayList::build(&parent);
+        let push = list
+            .commands
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::PushClipRounded { .. }))
+            .expect("must push a clip");
+        let overlay_bg = list
+            .commands
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::SolidColor(color, _) if color.a == 0.7))
+            .expect("the positioned overlay's background must be in the list");
+        let pop = list
+            .commands
+            .iter()
+            .rposition(|c| matches!(c, DisplayCommand::PopClip))
+            .expect("the clip must be popped");
+        assert!(
+            push < overlay_bg && overlay_bg < pop,
+            "a positioned child must paint inside the clip, got push={push} overlay={overlay_bg} pop={pop}"
+        );
+    }
+
+    #[test]
     fn overflow_visible_pushes_no_clip_however_round_the_box_is() {
         // A radius alone does not clip descendants — `overflow: visible` lets a
         // child paint past the arc, and Chrome agrees.
@@ -5652,19 +5689,29 @@ mod tests {
         // The background already rounds itself (RoundedRect / the gradient's
         // own border_radius). Clipping it again would double the antialiasing
         // at every corner and darken the arc by a visible amount.
-        let list = DisplayList::build(&rounded_overflow_parent(12.0, true));
+        //
+        // The parent needs its OWN background for this to test anything. An
+        // earlier version asserted inside `if let Some(own_bg)` on a fixture
+        // with no background, so the assertion never ran and moving the
+        // content emission inside the clip left it green.
+        let mut parent = rounded_overflow_parent(12.0, true);
+        parent.style.background_color = Color { r: 45, g: 45, b: 68, a: 1.0 };
+
+        let list = DisplayList::build(&parent);
         let push = list
             .commands
             .iter()
             .position(|c| matches!(c, DisplayCommand::PushClipRounded { .. }))
-            .unwrap();
+            .expect("must push a clip");
         let own_bg = list
             .commands
             .iter()
-            .position(|c| matches!(c, DisplayCommand::RoundedRect { .. }));
-        if let Some(own_bg) = own_bg {
-            assert!(own_bg < push, "the box's own background paints before its clip");
-        }
+            .position(|c| matches!(c, DisplayCommand::RoundedRect { .. }))
+            .expect("the parent's own rounded background must be in the list");
+        assert!(
+            own_bg < push,
+            "the box's own background paints before its clip, got bg={own_bg} push={push}"
+        );
     }
 
     #[test]

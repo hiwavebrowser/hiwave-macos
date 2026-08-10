@@ -353,6 +353,9 @@ pub struct Renderer {
 
     // State stacks
     clip_stack: Vec<ClipEntry>,
+    /// Scratch buffer for `draw_clipped_quad`. Lives on the renderer so the
+    /// hot path allocates once, not once per quad.
+    clip_pieces: Vec<(Rect, f32)>,
     stacking_contexts: Vec<StackingContext>,
     /// Stack of 2D transform matrices and their origins.
     /// Each entry is (matrix [a,b,c,d,e,f], origin (x,y)).
@@ -593,6 +596,7 @@ impl Renderer {
             radial_gradient_queue: Vec::with_capacity(16),
             conic_gradient_queue: Vec::with_capacity(16),
             clip_stack: Vec::new(),
+            clip_pieces: Vec::new(),
             stacking_contexts: Vec::new(),
             transform_stack: Vec::new(),
             texture_cache,
@@ -2215,27 +2219,21 @@ impl Renderer {
     /// rounded half only runs when a rounded clip is actually on the stack, so
     /// a page without one emits exactly the vertices it always did.
     fn draw_clipped_quad(&mut self, rect: Rect, color: [f32; 4]) {
-        // Apply clipping
-        let rect = if let Some(clip) = self.current_clip() {
-            if let Some(clipped) = rect.intersect(&clip) {
-                clipped
-            } else {
-                return; // Fully clipped
-            }
-        } else {
-            rect
-        };
+        // Borrowed out and put back so the immutable borrow of `clip_stack`
+        // inside `collect_clipped_pieces` does not collide with the mutable
+        // borrow the emit loop needs. Reused rather than freshly allocated
+        // because gradients call this once per cell — up to 100k times a frame.
+        let mut pieces = std::mem::take(&mut self.clip_pieces);
+        pieces.clear();
+        collect_clipped_pieces(self.clip_stack.last(), rect, &mut pieces);
 
-        if !self.clip_is_rounded() {
-            self.push_color_quad(rect, color);
-            return;
-        }
-
-        for (piece, coverage) in self.rounded_clip_pieces(rect) {
+        for &(piece, coverage) in &pieces {
             let mut faded = color;
             faded[3] *= coverage;
             self.push_color_quad(piece, faded);
         }
+
+        self.clip_pieces = pieces;
     }
 
     /// Append one transformed quad to the color batch. No clipping — callers
@@ -4928,22 +4926,8 @@ impl Renderer {
     /// a nested rounded clip does not replace its parent, because a point has to
     /// be inside both.
     fn push_clip_rounded(&mut self, rect: Rect, radius: rustkit_layout::BorderRadius) {
-        let (clip, mut rounded) = if let Some(current) = self.clip_stack.last() {
-            let intersected = current
-                .rect
-                .intersect(&rect)
-                .unwrap_or_else(|| Rect::new(0.0, 0.0, 0.0, 0.0)); // Empty clip
-            (intersected, current.rounded.clone())
-        } else {
-            (rect, Vec::new())
-        };
-        if !radius.is_zero() {
-            rounded.push((rect, radius));
-        }
-        self.clip_stack.push(ClipEntry {
-            rect: clip,
-            rounded,
-        });
+        let entry = clip_entry_for(self.clip_stack.last(), rect, radius);
+        self.clip_stack.push(entry);
     }
 
     /// Pop the current clipping rectangle.
@@ -4956,23 +4940,6 @@ impl Renderer {
         self.clip_stack.last().map(|entry| entry.rect)
     }
 
-    /// Whether the innermost clip rounds any corner. False is the whole corpus
-    /// except boxes that clip their overflow under a border radius, and it is
-    /// the fast path: no decomposition, no allocation.
-    fn clip_is_rounded(&self) -> bool {
-        self.clip_stack
-            .last()
-            .is_some_and(|entry| !entry.rounded.is_empty())
-    }
-
-    /// The pieces of `rect` that survive the current rounded clip, with the
-    /// alpha coverage each carries. Only call when `clip_is_rounded()`.
-    fn rounded_clip_pieces(&self, rect: Rect) -> Vec<(Rect, f32)> {
-        match self.clip_stack.last() {
-            Some(entry) => clip_quad_to_rounded(rect, &entry.rounded),
-            None => vec![(rect, 1.0)],
-        }
-    }
 
     /// Push a 2D transform matrix onto the stack.
     fn push_transform(&mut self, matrix: [f32; 6], origin: (f32, f32)) {
@@ -5320,6 +5287,64 @@ struct ClipEntry {
     rounded: Vec<(Rect, rustkit_layout::BorderRadius)>,
 }
 
+/// The clip entry a `PushClip`/`PushClipRounded` produces on top of `current`.
+///
+/// Pure so it can be tested: the stack lives on `Renderer`, which needs a wgpu
+/// device, and a device is not available on every machine that runs these
+/// tests. Keeping the rule here rather than in the method means a mutation to
+/// the rule is caught rather than merely compiled.
+fn clip_entry_for(
+    current: Option<&ClipEntry>,
+    rect: Rect,
+    radius: rustkit_layout::BorderRadius,
+) -> ClipEntry {
+    let (clip, mut rounded) = match current {
+        Some(current) => (
+            current
+                .rect
+                .intersect(&rect)
+                .unwrap_or_else(|| Rect::new(0.0, 0.0, 0.0, 0.0)), // Empty clip
+            current.rounded.clone(),
+        ),
+        None => (rect, Vec::new()),
+    };
+    // Accumulate, never replace: a point under two rounded clips has to be
+    // inside both, and the outer arc does not stop existing because an inner
+    // box pushed its own.
+    if !radius.is_zero() {
+        rounded.push((rect, radius));
+    }
+    ClipEntry {
+        rect: clip,
+        rounded,
+    }
+}
+
+/// Everything `rect` becomes under `clip`, appended to `out` as
+/// `(piece, coverage)`.
+///
+/// The whole clipping decision lives here — rectangular intersection, the
+/// no-rounding fast path, and the rounded decomposition — for the same reason
+/// as `clip_entry_for`: a rule inside a `Renderer` method cannot be
+/// mutation-checked on a machine without a GPU, and a guard that cannot fail is
+/// not a guard.
+fn collect_clipped_pieces(clip: Option<&ClipEntry>, rect: Rect, out: &mut Vec<(Rect, f32)>) {
+    let rect = match clip {
+        Some(entry) => match rect.intersect(&entry.rect) {
+            Some(clipped) => clipped,
+            None => return, // Fully clipped
+        },
+        None => rect,
+    };
+
+    let rounded = clip.map(|entry| entry.rounded.as_slice()).unwrap_or(&[]);
+    if rounded.is_empty() {
+        out.push((rect, 1.0));
+        return;
+    }
+    out.extend(clip_quad_to_rounded(rect, rounded));
+}
+
 /// Radii clamped so opposite corners cannot overlap, matching
 /// `point_in_rounded_rect` and `draw_rounded_rect`.
 fn clamped_radii(rect: Rect, radius: rustkit_layout::BorderRadius) -> (f32, f32, f32, f32) {
@@ -5573,6 +5598,94 @@ mod tests {
         pieces
             .iter()
             .any(|(r, cov)| *cov > floor && r.contains(x, y))
+    }
+
+    fn pieces_under(clip: Option<&ClipEntry>, rect: Rect) -> Vec<(Rect, f32)> {
+        let mut out = Vec::new();
+        collect_clipped_pieces(clip, rect, &mut out);
+        out
+    }
+
+    #[test]
+    fn a_rounded_clip_reaches_the_quads_drawn_under_it() {
+        // The wiring, not the geometry. Before this, `overflow: hidden` pushed
+        // nothing and every quad under a rounded box came out square; a
+        // decomposition nobody calls fixes nothing.
+        let box_rect = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let entry = clip_entry_for(None, box_rect, radius(12.0));
+        let pieces = pieces_under(Some(&entry), box_rect);
+        assert!(
+            !painted_at(&pieces, 1.0, 1.0, 0.0),
+            "a quad drawn under a rounded clip must lose its corner"
+        );
+        assert!(
+            pieces.len() > 1,
+            "a rounded clip must decompose the quad, got {} piece(s)",
+            pieces.len()
+        );
+    }
+
+    #[test]
+    fn a_square_clip_leaves_the_quad_whole() {
+        // The fast path has to stay a fast path: one piece, full coverage, the
+        // same vertices the renderer emitted before rounded clips existed.
+        let entry = clip_entry_for(None, Rect::new(0.0, 0.0, 200.0, 200.0), radius(0.0));
+        let pieces = pieces_under(Some(&entry), Rect::new(10.0, 10.0, 50.0, 50.0));
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(pieces[0].1, 1.0);
+        assert_eq!(pieces[0].0.width, 50.0);
+    }
+
+    #[test]
+    fn a_quad_outside_the_clip_rect_emits_nothing() {
+        let entry = clip_entry_for(None, Rect::new(0.0, 0.0, 100.0, 100.0), radius(0.0));
+        assert!(pieces_under(Some(&entry), Rect::new(200.0, 200.0, 10.0, 10.0)).is_empty());
+    }
+
+    #[test]
+    fn no_clip_at_all_emits_the_quad_unchanged() {
+        let pieces = pieces_under(None, Rect::new(5.0, 6.0, 7.0, 8.0));
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(pieces[0].0.x, 5.0);
+        assert_eq!(pieces[0].1, 1.0);
+    }
+
+    #[test]
+    fn pushing_a_clip_intersects_the_rect_and_keeps_the_outer_arc() {
+        // Both halves of the stack rule at once: rects intersect, rounded
+        // constraints accumulate. Dropping the outer arc is invisible in the
+        // rect and shows up only at the corner.
+        let outer = clip_entry_for(None, Rect::new(0.0, 0.0, 200.0, 200.0), radius(20.0));
+        let inner = clip_entry_for(Some(&outer), Rect::new(0.0, 0.0, 100.0, 100.0), radius(0.0));
+
+        assert_eq!(inner.rect.width, 100.0, "rects must intersect");
+        assert_eq!(
+            inner.rounded.len(),
+            1,
+            "the outer arc must survive an inner square clip"
+        );
+
+        let pieces = pieces_under(Some(&inner), Rect::new(0.0, 0.0, 100.0, 100.0));
+        assert!(
+            !painted_at(&pieces, 1.0, 1.0, 0.0),
+            "the outer box's corner must still cut quads drawn under the inner clip"
+        );
+    }
+
+    #[test]
+    fn a_square_clip_records_no_rounded_constraint() {
+        // Control for the accumulation rule: pushing squares must not grow the
+        // rounded list, or every clip in the corpus would take the slow path.
+        let entry = clip_entry_for(None, Rect::new(0.0, 0.0, 200.0, 200.0), radius(0.0));
+        assert!(entry.rounded.is_empty());
+    }
+
+    #[test]
+    fn a_clip_that_intersects_to_nothing_clips_everything_away() {
+        let outer = clip_entry_for(None, Rect::new(0.0, 0.0, 50.0, 50.0), radius(0.0));
+        let inner = clip_entry_for(Some(&outer), Rect::new(500.0, 500.0, 50.0, 50.0), radius(0.0));
+        assert_eq!(inner.rect.width, 0.0);
+        assert!(pieces_under(Some(&inner), Rect::new(0.0, 0.0, 50.0, 50.0)).is_empty());
     }
 
     #[test]
