@@ -352,7 +352,7 @@ pub struct Renderer {
     conic_gradient_queue: Vec<QueuedConicGradient>,
 
     // State stacks
-    clip_stack: Vec<Rect>,
+    clip_stack: Vec<ClipEntry>,
     stacking_contexts: Vec<StackingContext>,
     /// Stack of 2D transform matrices and their origins.
     /// Each entry is (matrix [a,b,c,d,e,f], origin (x,y)).
@@ -2028,6 +2028,10 @@ impl Renderer {
                 self.push_clip(*rect);
             }
 
+            DisplayCommand::PushClipRounded { rect, radius } => {
+                self.push_clip_rounded(*rect, *radius);
+            }
+
             DisplayCommand::PopClip => {
                 self.pop_clip();
             }
@@ -2208,48 +2212,28 @@ impl Renderer {
 
     /// Draw a solid color rectangle.
     fn draw_solid_rect(&mut self, rect: Rect, color: Color) {
-        // Apply clipping
-        let rect = if let Some(clip) = self.current_clip() {
-            if let Some(clipped) = rect.intersect(&clip) {
-                clipped
-            } else {
-                return; // Fully clipped
-            }
-        } else {
-            rect
-        };
-
         let c = [
             color.r as f32 / 255.0,
             color.g as f32 / 255.0,
             color.b as f32 / 255.0,
             color.a,
         ];
-
-        let base = self.color_vertices.len() as u32;
-
-        // Apply transform to corners
-        let (x0, y0) = self.transform_point(rect.x, rect.y);
-        let (x1, y1) = self.transform_point(rect.x + rect.width, rect.y);
-        let (x2, y2) = self.transform_point(rect.x + rect.width, rect.y + rect.height);
-        let (x3, y3) = self.transform_point(rect.x, rect.y + rect.height);
-
-        self.color_vertices.extend_from_slice(&[
-            ColorVertex { position: [x0, y0], color: c },
-            ColorVertex { position: [x1, y1], color: c },
-            ColorVertex { position: [x2, y2], color: c },
-            ColorVertex { position: [x3, y3], color: c },
-        ]);
-
-        self.color_indices.extend_from_slice(&[
-            base, base + 1, base + 2,
-            base, base + 2, base + 3,
-        ]);
+        self.draw_clipped_quad(rect, c);
     }
 
     /// Draw a solid color rectangle using high-precision color.
     /// This is the preferred internal method for gradient rendering.
     fn draw_solid_rect_f32(&mut self, rect: Rect, color: rustkit_css::ColorF32) {
+        // Color already in normalized f32 format - no conversion needed
+        self.draw_clipped_quad(rect, color.to_array());
+    }
+
+    /// Clip a quad against the current clip and emit what survives.
+    ///
+    /// The rectangular half is unchanged from before rounded clips existed. The
+    /// rounded half only runs when a rounded clip is actually on the stack, so
+    /// a page without one emits exactly the vertices it always did.
+    fn draw_clipped_quad(&mut self, rect: Rect, color: [f32; 4]) {
         // Apply clipping
         let rect = if let Some(clip) = self.current_clip() {
             if let Some(clipped) = rect.intersect(&clip) {
@@ -2261,8 +2245,24 @@ impl Renderer {
             rect
         };
 
-        // Color already in normalized f32 format - no conversion needed
-        let c = color.to_array();
+        if !self.clip_is_rounded() {
+            self.push_color_quad(rect, color);
+            return;
+        }
+
+        for (piece, coverage) in self.rounded_clip_pieces(rect) {
+            let mut faded = color;
+            faded[3] *= coverage;
+            self.push_color_quad(piece, faded);
+        }
+    }
+
+    /// Append one transformed quad to the color batch. No clipping — callers
+    /// have already done it.
+    fn push_color_quad(&mut self, rect: Rect, c: [f32; 4]) {
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
 
         let base = self.color_vertices.len() as u32;
 
@@ -4946,16 +4946,31 @@ impl Renderer {
 
     /// Push a clipping rectangle.
     fn push_clip(&mut self, rect: Rect) {
-        let clip = if let Some(current) = self.clip_stack.last() {
-            if let Some(intersected) = current.intersect(&rect) {
-                intersected
-            } else {
-                Rect::new(0.0, 0.0, 0.0, 0.0) // Empty clip
-            }
+        self.push_clip_rounded(rect, rustkit_layout::BorderRadius::default());
+    }
+
+    /// Push a clipping rectangle whose corners may be rounded.
+    ///
+    /// The rect half intersects as it always did. The rounded half accumulates:
+    /// a nested rounded clip does not replace its parent, because a point has to
+    /// be inside both.
+    fn push_clip_rounded(&mut self, rect: Rect, radius: rustkit_layout::BorderRadius) {
+        let (clip, mut rounded) = if let Some(current) = self.clip_stack.last() {
+            let intersected = current
+                .rect
+                .intersect(&rect)
+                .unwrap_or_else(|| Rect::new(0.0, 0.0, 0.0, 0.0)); // Empty clip
+            (intersected, current.rounded.clone())
         } else {
-            rect
+            (rect, Vec::new())
         };
-        self.clip_stack.push(clip);
+        if !radius.is_zero() {
+            rounded.push((rect, radius));
+        }
+        self.clip_stack.push(ClipEntry {
+            rect: clip,
+            rounded,
+        });
     }
 
     /// Pop the current clipping rectangle.
@@ -4965,7 +4980,25 @@ impl Renderer {
 
     /// Get the current clip rectangle.
     fn current_clip(&self) -> Option<Rect> {
-        self.clip_stack.last().copied()
+        self.clip_stack.last().map(|entry| entry.rect)
+    }
+
+    /// Whether the innermost clip rounds any corner. False is the whole corpus
+    /// except boxes that clip their overflow under a border radius, and it is
+    /// the fast path: no decomposition, no allocation.
+    fn clip_is_rounded(&self) -> bool {
+        self.clip_stack
+            .last()
+            .is_some_and(|entry| !entry.rounded.is_empty())
+    }
+
+    /// The pieces of `rect` that survive the current rounded clip, with the
+    /// alpha coverage each carries. Only call when `clip_is_rounded()`.
+    fn rounded_clip_pieces(&self, rect: Rect) -> Vec<(Rect, f32)> {
+        match self.clip_stack.last() {
+            Some(entry) => clip_quad_to_rounded(rect, &entry.rounded),
+            None => vec![(rect, 1.0)],
+        }
     }
 
     /// Push a 2D transform matrix onto the stack.
@@ -5291,6 +5324,201 @@ impl RectExt for Rect {
     }
 }
 
+// ==================== Rounded clipping ====================
+
+/// One entry on the clip stack.
+///
+/// `rect` is the intersection of every clip pushed so far, exactly as the old
+/// `Vec<Rect>` stack held it. `rounded` carries the clips that also round their
+/// corners, each with its OWN rect — a rounded corner is a property of the box
+/// that pushed it, so intersecting the rects would move the arc centres and
+/// round the wrong place.
+///
+/// Both are needed. `rect` alone is what shipped before this: `overflow: hidden`
+/// on a 12px-radius card clipped nothing at the corners, so a child's background
+/// painted square into the notch. Gate B named 51 of those as `missing_clip`
+/// discrete structural failures on 2026-08-08 (image-gallery 17, sticky-scroll
+/// 12, new_tab 10).
+#[derive(Debug, Clone, Default)]
+struct ClipEntry {
+    rect: Rect,
+    /// Rounded constraints still in force, outermost first. A point must be
+    /// inside every one of them.
+    rounded: Vec<(Rect, rustkit_layout::BorderRadius)>,
+}
+
+/// Radii clamped so opposite corners cannot overlap, matching
+/// `point_in_rounded_rect` and `draw_rounded_rect`.
+fn clamped_radii(rect: Rect, radius: rustkit_layout::BorderRadius) -> (f32, f32, f32, f32) {
+    let max_r = (rect.width / 2.0).min(rect.height / 2.0).max(0.0);
+    (
+        radius.top_left.min(max_r).max(0.0),
+        radius.top_right.min(max_r).max(0.0),
+        radius.bottom_right.min(max_r).max(0.0),
+        radius.bottom_left.min(max_r).max(0.0),
+    )
+}
+
+/// The horizontal span of a rounded rect at height `y`, or `None` when the row
+/// is outside it entirely.
+///
+/// Analytic rather than sampled: for a row crossing a corner, the arc gives
+/// `dx = sqrt(r^2 - dy^2)` and the span shrinks by exactly that much. The left
+/// bound takes the tighter of the two left corners and the right bound the
+/// tighter of the two right ones, so a row crossing both a top-left and a
+/// bottom-left arc is handled without special-casing.
+fn rounded_row_span(rect: Rect, radius: rustkit_layout::BorderRadius, y: f32) -> Option<(f32, f32)> {
+    if y < rect.y || y > rect.bottom() {
+        return None;
+    }
+    let (tl, tr, br, bl) = clamped_radii(rect, radius);
+    let mut left = rect.x;
+    let mut right = rect.right();
+
+    if tl > 0.0 && y < rect.y + tl {
+        let dy = (rect.y + tl) - y;
+        let dx = (tl * tl - dy * dy).max(0.0).sqrt();
+        left = left.max(rect.x + tl - dx);
+    }
+    if bl > 0.0 && y > rect.bottom() - bl {
+        let dy = y - (rect.bottom() - bl);
+        let dx = (bl * bl - dy * dy).max(0.0).sqrt();
+        left = left.max(rect.x + bl - dx);
+    }
+    if tr > 0.0 && y < rect.y + tr {
+        let dy = (rect.y + tr) - y;
+        let dx = (tr * tr - dy * dy).max(0.0).sqrt();
+        right = right.min(rect.right() - tr + dx);
+    }
+    if br > 0.0 && y > rect.bottom() - br {
+        let dy = y - (rect.bottom() - br);
+        let dx = (br * br - dy * dy).max(0.0).sqrt();
+        right = right.min(rect.right() - br + dx);
+    }
+
+    if right > left {
+        Some((left, right))
+    } else {
+        None
+    }
+}
+
+/// Push one row's span as up to three pieces: a fully covered interior and an
+/// antialiased cell at each fractional end.
+///
+/// The partial cells are what keep a clipped corner from reading as a hard
+/// staircase. They use the same "coverage multiplies alpha" convention as
+/// `draw_rounded_corner`, so a clipped corner and a painted rounded corner
+/// antialias the same way.
+fn push_row_pieces(out: &mut Vec<(Rect, f32)>, left: f32, right: f32, y: f32, height: f32) {
+    if height <= 0.0 || right <= left {
+        return;
+    }
+    let inner_left = left.ceil();
+    let inner_right = right.floor();
+
+    if inner_right <= inner_left {
+        // Span narrower than one pixel column: one cell carrying its coverage.
+        out.push((Rect::new(left, y, right - left, height), (right - left).min(1.0)));
+        return;
+    }
+    if inner_left > left {
+        out.push((
+            Rect::new(left.floor(), y, 1.0, height),
+            (inner_left - left).min(1.0),
+        ));
+    }
+    out.push((
+        Rect::new(inner_left, y, inner_right - inner_left, height),
+        1.0,
+    ));
+    if right > inner_right {
+        out.push((
+            Rect::new(inner_right, y, 1.0, height),
+            (right - inner_right).min(1.0),
+        ));
+    }
+}
+
+/// Decompose `quad` into the pieces of it that survive every rounded clip.
+///
+/// Returns `(piece, coverage)` pairs; coverage multiplies the quad's alpha.
+/// `quad` must already be intersected with the clip stack's rectangle — this
+/// function only removes the corner notches.
+///
+/// Pure on purpose. Every other clipping path in this renderer lives on
+/// `Renderer`, which needs a wgpu device, so it can only be exercised on a
+/// machine with an adapter. This one is a free function over plain geometry and
+/// its tests run anywhere.
+fn clip_quad_to_rounded(
+    quad: Rect,
+    rounded: &[(Rect, rustkit_layout::BorderRadius)],
+) -> Vec<(Rect, f32)> {
+    if quad.width <= 0.0 || quad.height <= 0.0 {
+        return Vec::new();
+    }
+    if rounded.is_empty() {
+        return vec![(quad, 1.0)];
+    }
+
+    // Below `top_limit` and above `bottom_limit` no corner of any constraint is
+    // active, so that band passes through whole. Without this a full-page
+    // rounded container would emit one quad per scanline for its entire height.
+    let mut top_limit = f32::NEG_INFINITY;
+    let mut bottom_limit = f32::INFINITY;
+    for (rect, radius) in rounded {
+        let (tl, tr, br, bl) = clamped_radii(*rect, *radius);
+        top_limit = top_limit.max(rect.y + tl.max(tr));
+        bottom_limit = bottom_limit.min(rect.bottom() - bl.max(br));
+    }
+    if quad.y >= top_limit && quad.bottom() <= bottom_limit {
+        return vec![(quad, 1.0)];
+    }
+
+    let mut out = Vec::new();
+    let mut emit_rows = |out: &mut Vec<(Rect, f32)>, from: f32, to: f32| {
+        let mut y = from;
+        while y < to {
+            let height = 1.0_f32.min(to - y);
+            let centre = y + height * 0.5;
+            let mut left = quad.x;
+            let mut right = quad.right();
+            let mut inside = true;
+            for (rect, radius) in rounded {
+                match rounded_row_span(*rect, *radius, centre) {
+                    Some((l, r)) => {
+                        left = left.max(l);
+                        right = right.min(r);
+                    }
+                    None => {
+                        inside = false;
+                        break;
+                    }
+                }
+            }
+            if inside {
+                push_row_pieces(out, left, right, y, height);
+            }
+            y += height;
+        }
+    };
+
+    let top_end = quad.bottom().min(top_limit.max(quad.y));
+    emit_rows(&mut out, quad.y, top_end);
+
+    let middle_start = top_end.max(quad.y);
+    let middle_end = quad.bottom().min(bottom_limit.max(middle_start));
+    if middle_end > middle_start {
+        out.push((
+            Rect::new(quad.x, middle_start, quad.width, middle_end - middle_start),
+            1.0,
+        ));
+    }
+
+    emit_rows(&mut out, middle_end.max(quad.y), quad.bottom());
+    out
+}
+
 // ==================== Transform Helpers ====================
 
 /// Multiply two 2D affine matrices.
@@ -5346,6 +5574,185 @@ mod tests {
         let b = Rect::new(100.0, 100.0, 50.0, 50.0);
 
         assert!(a.intersect(&b).is_none());
+    }
+
+    // ==================== Rounded clip ====================
+    //
+    // These exercise `clip_quad_to_rounded` directly. It is a free function
+    // over geometry precisely so these run without a wgpu adapter — every
+    // other clipping path needs a `Renderer`, which needs a device, which this
+    // runner does not have.
+
+    fn radius(r: f32) -> rustkit_layout::BorderRadius {
+        rustkit_layout::BorderRadius::uniform(r)
+    }
+
+    /// Total area the pieces cover, weighted by coverage.
+    fn covered_area(pieces: &[(Rect, f32)]) -> f32 {
+        pieces
+            .iter()
+            .map(|(r, cov)| r.width * r.height * cov)
+            .sum()
+    }
+
+    /// Does any piece put paint at (x, y) with coverage above `floor`?
+    fn painted_at(pieces: &[(Rect, f32)], x: f32, y: f32, floor: f32) -> bool {
+        pieces
+            .iter()
+            .any(|(r, cov)| *cov > floor && r.contains(x, y))
+    }
+
+    #[test]
+    fn no_rounded_constraint_passes_the_quad_through_untouched() {
+        let quad = Rect::new(10.0, 10.0, 100.0, 50.0);
+        let pieces = clip_quad_to_rounded(quad, &[]);
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(pieces[0].1, 1.0);
+        assert_eq!(pieces[0].0.width, 100.0);
+        assert_eq!(pieces[0].0.height, 50.0);
+    }
+
+    #[test]
+    fn the_corner_notch_is_not_painted() {
+        // image-gallery's shape: a 12px-radius box whose child fills it exactly.
+        // Before rounded clipping the child painted the full square and the
+        // notch carried the child's fill — Gate B's `missing_clip`.
+        let clip = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let pieces = clip_quad_to_rounded(clip, &[(clip, radius(12.0))]);
+
+        // (1,1) is deep inside the top-left arc: 12 - sqrt(12^2 - 11^2) ~= 7.2,
+        // so x must be >= ~7.2 at that row. Nothing may paint there.
+        assert!(
+            !painted_at(&pieces, 1.0, 1.0, 0.0),
+            "top-left notch was painted"
+        );
+        assert!(
+            !painted_at(&pieces, 198.5, 1.0, 0.0),
+            "top-right notch was painted"
+        );
+        assert!(
+            !painted_at(&pieces, 1.0, 198.5, 0.0),
+            "bottom-left notch was painted"
+        );
+        assert!(
+            !painted_at(&pieces, 198.5, 198.5, 0.0),
+            "bottom-right notch was painted"
+        );
+    }
+
+    #[test]
+    fn the_interior_is_still_fully_painted() {
+        // The other half of the failure mode: a clip that eats paint it should
+        // have kept is worse than no clip at all.
+        let clip = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let pieces = clip_quad_to_rounded(clip, &[(clip, radius(12.0))]);
+
+        for (x, y) in [
+            (100.0, 100.0), // centre
+            (0.5, 100.0),   // left edge, no corner active
+            (199.5, 100.0), // right edge
+            (100.0, 0.5),   // top edge between the corners
+            (100.0, 199.5), // bottom edge
+            (12.5, 12.5),   // just inside the top-left arc
+        ] {
+            assert!(
+                painted_at(&pieces, x, y, 0.999),
+                "({x}, {y}) should be fully painted"
+            );
+        }
+    }
+
+    #[test]
+    fn the_clipped_area_matches_the_rounded_rect_area() {
+        // A rounded rect loses (4 - pi) * r^2 to its corners. If the
+        // decomposition drifts from that, it is either eating paint or leaking
+        // it, and the notch tests alone would not say which.
+        let clip = Rect::new(0.0, 0.0, 200.0, 120.0);
+        let r = 20.0_f32;
+        let pieces = clip_quad_to_rounded(clip, &[(clip, radius(r))]);
+
+        let expected = 200.0 * 120.0 - (4.0 - std::f32::consts::PI) * r * r;
+        let actual = covered_area(&pieces);
+        assert!(
+            (actual - expected).abs() < 2.0,
+            "area {actual} should be within 2px^2 of the rounded-rect area {expected}"
+        );
+    }
+
+    #[test]
+    fn a_quad_clear_of_every_corner_is_not_split_into_rows() {
+        // The band optimisation. Without it a full-page rounded container emits
+        // one quad per scanline for its whole height.
+        let clip = Rect::new(0.0, 0.0, 200.0, 600.0);
+        let quad = Rect::new(0.0, 100.0, 200.0, 400.0);
+        let pieces = clip_quad_to_rounded(quad, &[(clip, radius(12.0))]);
+        assert_eq!(
+            pieces.len(),
+            1,
+            "a quad between the corner bands must stay one quad, got {}",
+            pieces.len()
+        );
+    }
+
+    #[test]
+    fn nested_rounded_clips_both_apply() {
+        // A rounded clip inside another does not replace it — a point has to be
+        // inside both. The inner box's own top-left is square here, so if the
+        // outer constraint were dropped the notch would come back.
+        let outer = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let inner = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let pieces = clip_quad_to_rounded(
+            inner,
+            &[(outer, radius(20.0)), (inner, radius(0.0))],
+        );
+        assert!(
+            !painted_at(&pieces, 1.0, 1.0, 0.0),
+            "the outer clip's corner must still cut the inner box"
+        );
+    }
+
+    #[test]
+    fn a_quad_outside_the_rounded_shape_entirely_yields_nothing() {
+        // A row that clears no span must emit no pieces, not a zero-width one.
+        let clip = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let quad = Rect::new(0.0, 0.0, 2.0, 2.0);
+        let pieces = clip_quad_to_rounded(quad, &[(clip, radius(20.0))]);
+        assert!(
+            covered_area(&pieces) < 0.5,
+            "the corner of a pill should be empty, covered {}",
+            covered_area(&pieces)
+        );
+    }
+
+    #[test]
+    fn radii_are_clamped_so_opposite_corners_cannot_overlap() {
+        // 100px radius on a 40px-tall box is a pill, not a negative span.
+        let clip = Rect::new(0.0, 0.0, 200.0, 40.0);
+        let pieces = clip_quad_to_rounded(clip, &[(clip, radius(100.0))]);
+        assert!(
+            painted_at(&pieces, 100.0, 20.0, 0.999),
+            "the middle of a pill must still be painted"
+        );
+        let expected = 200.0 * 40.0 - (4.0 - std::f32::consts::PI) * 20.0 * 20.0;
+        assert!(
+            (covered_area(&pieces) - expected).abs() < 2.0,
+            "clamped radius should give a 20px pill, covered {}",
+            covered_area(&pieces)
+        );
+    }
+
+    #[test]
+    fn the_corner_edge_is_antialiased_rather_than_a_staircase() {
+        // Partial coverage at the arc boundary. Without it the clipped corner
+        // is a hard staircase while a painted rounded corner next to it is
+        // smooth, and the two disagree along every shared edge.
+        let clip = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let pieces = clip_quad_to_rounded(clip, &[(clip, radius(12.0))]);
+        let partial = pieces.iter().filter(|(_, c)| *c > 0.0 && *c < 1.0).count();
+        assert!(
+            partial >= 8,
+            "expected antialiased cells along the arcs, found {partial}"
+        );
     }
 
     // ==================== Gradient Coordinate Tests ====================
