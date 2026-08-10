@@ -5614,6 +5614,11 @@ impl Engine {
                 Cmd::PushClip(r) => serde_json::json!({
                     "op": "push_clip", "rect": rect(r)
                 }),
+                Cmd::PushClipRounded { rect: r, radius: rad } => serde_json::json!({
+                    "op": "push_clip_rounded",
+                    "rect": rect(r),
+                    "border_radius": radius(rad)
+                }),
                 Cmd::PopClip => serde_json::json!({ "op": "pop_clip" }),
                 Cmd::PushStackingContext { z_index, rect: r } => serde_json::json!({
                     "op": "push_stacking_context", "z_index": z_index, "rect": rect(r)

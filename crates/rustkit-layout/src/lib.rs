@@ -3632,6 +3632,13 @@ pub enum DisplayCommand {
     },
     /// Push a clip rect (for overflow handling).
     PushClip(Rect),
+    /// Push a clip rect whose corners are rounded.
+    ///
+    /// `overflow` other than `visible` clips descendants to the padding box,
+    /// and when the box has a border radius that clip is round. Emitting
+    /// `PushClip` here instead loses the corner notches: a child painting its
+    /// own background fills the square corner the parent's radius cut away.
+    PushClipRounded { rect: Rect, radius: BorderRadius },
     /// Pop clip rect.
     PopClip,
     /// Start stacking context.
@@ -4103,6 +4110,17 @@ impl DisplayList {
         // Render this box
         self.render_box_content(layout_box);
 
+        // A box that clips its overflow under a border radius rounds its
+        // DESCENDANTS too. Pushed after the box's own content — the background
+        // rounds itself via BorderRadius on its own commands and must not be
+        // clipped twice — and popped after every child, including positioned
+        // ones, because `overflow` clips them all.
+        let overflow_clip = self.overflow_clip(layout_box);
+        if let Some((rect, radius)) = overflow_clip {
+            self.commands
+                .push(DisplayCommand::PushClipRounded { rect, radius });
+        }
+
         // Collect children grouped by paint order
         let mut negative_z: Vec<(&LayoutBox, u32)> = Vec::new();
         let mut normal_flow: Vec<(&LayoutBox, u32)> = Vec::new();
@@ -4158,6 +4176,10 @@ impl DisplayList {
         // 3. Floats and positive/zero z-index positioned descendants
         for (child, _) in positive_z {
             self.render_stacking_context(child, z_index, layer);
+        }
+
+        if overflow_clip.is_some() {
+            self.commands.push(DisplayCommand::PopClip);
         }
 
         // Pop transform if we pushed one
@@ -4249,6 +4271,97 @@ impl DisplayList {
     /// Render background.
     /// Supports multiple background layers painted bottom-to-top.
     /// Respects background-clip property (border-box, padding-box, content-box).
+    /// The box's border-box corner radii, resolved to pixels.
+    ///
+    /// Percentages resolve against the border box WIDTH for every corner. That
+    /// is not what CSS says (the vertical radius resolves against height), but
+    /// it is what the background painter has always done, and the overflow clip
+    /// has to round exactly where the background rounds or the two disagree by
+    /// a pixel and the clip cuts into the paint it is supposed to contain.
+    fn border_radius_px(&self, layout_box: &LayoutBox) -> BorderRadius {
+        let s = &layout_box.style;
+        let border_rect = layout_box.dimensions.border_box();
+        let font_size = match s.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let root_font_size = self.root_font_size;
+        BorderRadius {
+            top_left: s
+                .border_top_left_radius
+                .to_px(font_size, root_font_size, border_rect.width),
+            top_right: s
+                .border_top_right_radius
+                .to_px(font_size, root_font_size, border_rect.width),
+            bottom_right: s.border_bottom_right_radius.to_px(
+                font_size,
+                root_font_size,
+                border_rect.width,
+            ),
+            bottom_left: s.border_bottom_left_radius.to_px(
+                font_size,
+                root_font_size,
+                border_rect.width,
+            ),
+        }
+    }
+
+    /// The rounded clip a box imposes on its descendants, if any.
+    ///
+    /// `None` unless the box both clips its overflow AND has a corner radius.
+    /// The square half of overflow clipping is deliberately NOT implemented
+    /// here: RustKit has never clipped overflow at all, so turning it on for
+    /// every `overflow: hidden` box is a separate change with its own blast
+    /// radius, and mixing the two would make neither attributable. What this
+    /// closes is the discrete `missing_clip` class Gate B reports — a child
+    /// painting square into a rounded parent's corner notch.
+    fn overflow_clip(&self, layout_box: &LayoutBox) -> Option<(Rect, BorderRadius)> {
+        let s = &layout_box.style;
+        let clips = s.overflow_x != rustkit_css::Overflow::Visible
+            || s.overflow_y != rustkit_css::Overflow::Visible;
+        if !clips {
+            return None;
+        }
+
+        let radius = self.border_radius_px(layout_box);
+        if radius.is_zero() {
+            return None;
+        }
+
+        // Overflow clips to the PADDING box, and the clip's radius is the
+        // border radius shrunk inward by the border it sits inside.
+        let d = &layout_box.dimensions;
+        let border_rect = d.border_box();
+        let padding_rect = Rect::new(
+            border_rect.x + d.border.left,
+            border_rect.y + d.border.top,
+            border_rect.width - d.border.left - d.border.right,
+            border_rect.height - d.border.top - d.border.bottom,
+        );
+        if padding_rect.width <= 0.0 || padding_rect.height <= 0.0 {
+            return None;
+        }
+
+        // Each corner shrinks by the THICKER of its two borders. BorderRadius
+        // is one scalar per corner, so an elliptical inner radius cannot be
+        // expressed; taking the thicker border rounds less than Chrome would,
+        // which errs toward clipping too little rather than eating paint that
+        // belongs on screen. With no border — every case this currently fires
+        // on — it is exact.
+        let inset = |r: f32, a: f32, b: f32| (r - a.max(b)).max(0.0);
+        let inner = BorderRadius {
+            top_left: inset(radius.top_left, d.border.left, d.border.top),
+            top_right: inset(radius.top_right, d.border.right, d.border.top),
+            bottom_right: inset(radius.bottom_right, d.border.right, d.border.bottom),
+            bottom_left: inset(radius.bottom_left, d.border.left, d.border.bottom),
+        };
+        if inner.is_zero() {
+            return None;
+        }
+
+        Some((padding_rect, inner))
+    }
+
     fn render_background(&mut self, layout_box: &LayoutBox) {
         let d = &layout_box.dimensions;
         let border_rect = d.border_box();
@@ -4263,26 +4376,7 @@ impl DisplayList {
         let root_font_size = self.root_font_size;
 
         // Calculate border radius once (used for both solid color and gradient clipping)
-        let radius = BorderRadius {
-            top_left: s
-                .border_top_left_radius
-                .to_px(font_size, root_font_size, border_rect.width),
-            top_right: s.border_top_right_radius.to_px(
-                font_size,
-                root_font_size,
-                border_rect.width,
-            ),
-            bottom_right: s.border_bottom_right_radius.to_px(
-                font_size,
-                root_font_size,
-                border_rect.width,
-            ),
-            bottom_left: s.border_bottom_left_radius.to_px(
-                font_size,
-                root_font_size,
-                border_rect.width,
-            ),
-        };
+        let radius = self.border_radius_px(layout_box);
 
         // Calculate the clipped rect based on background-clip property
         let clip_rect = match s.background_clip {
@@ -5428,6 +5522,149 @@ mod tests {
             !list.commands.iter().any(|c| matches!(c, DisplayCommand::PushClip(_))),
             "a gradient that fits its box must not push a clip"
         );
+    }
+
+    // ==================== Overflow rounded clip ====================
+    //
+    // image-gallery's shape, which Gate B reported 17 times on 2026-08-08 as
+    // `missing_clip`: `.gallery-item { border-radius: 12px; overflow: hidden }`
+    // wrapping a child that fills it exactly and paints its own background.
+    // The child's paint has to be cut at the parent's arc.
+
+    fn rounded_overflow_parent(radius_px: f32, hidden: bool) -> LayoutBox {
+        let mut style = ComputedStyle::new();
+        style.border_top_left_radius = Length::Px(radius_px);
+        style.border_top_right_radius = Length::Px(radius_px);
+        style.border_bottom_right_radius = Length::Px(radius_px);
+        style.border_bottom_left_radius = Length::Px(radius_px);
+        if hidden {
+            style.overflow_x = rustkit_css::Overflow::Hidden;
+            style.overflow_y = rustkit_css::Overflow::Hidden;
+        }
+
+        let mut child_style = ComputedStyle::new();
+        child_style.background_color = Color { r: 102, g: 126, b: 234, a: 1.0 };
+        let mut child = LayoutBox::new(BoxType::Block, child_style);
+        child.dimensions.content = Rect::new(0.0, 0.0, 227.0, 180.0);
+
+        let mut parent = LayoutBox::new(BoxType::Block, style);
+        parent.dimensions.content = Rect::new(0.0, 0.0, 227.0, 180.0);
+        parent.children.push(child);
+        parent
+    }
+
+    fn rounded_clip(list: &DisplayList) -> Option<(Rect, BorderRadius)> {
+        list.commands.iter().find_map(|c| match c {
+            DisplayCommand::PushClipRounded { rect, radius } => Some((*rect, *radius)),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn overflow_hidden_under_a_radius_pushes_a_rounded_clip_around_its_children() {
+        let list = DisplayList::build(&rounded_overflow_parent(12.0, true));
+        let (rect, radius) = rounded_clip(&list).expect(
+            "a rounded box that clips its overflow must push a rounded clip for its children",
+        );
+        assert_eq!(radius.top_left, 12.0);
+        assert_eq!(rect.width, 227.0);
+
+        let push = list
+            .commands
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::PushClipRounded { .. }))
+            .unwrap();
+        let child_bg = list
+            .commands
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::SolidColor(color, _) if color.b == 234))
+            .expect("the child's background must be in the list");
+        let pop = list
+            .commands
+            .iter()
+            .rposition(|c| matches!(c, DisplayCommand::PopClip))
+            .expect("the clip must be popped");
+        assert!(
+            push < child_bg && child_bg < pop,
+            "the child must paint INSIDE the clip, got push={push} child={child_bg} pop={pop}"
+        );
+    }
+
+    #[test]
+    fn overflow_visible_pushes_no_clip_however_round_the_box_is() {
+        // A radius alone does not clip descendants — `overflow: visible` lets a
+        // child paint past the arc, and Chrome agrees.
+        let list = DisplayList::build(&rounded_overflow_parent(12.0, false));
+        assert!(
+            rounded_clip(&list).is_none(),
+            "overflow: visible must not clip children"
+        );
+    }
+
+    #[test]
+    fn overflow_hidden_with_square_corners_pushes_no_clip() {
+        // Deliberate scope line, not an oversight: RustKit has never clipped
+        // overflow at all, and turning that on for every `overflow: hidden` box
+        // is a separate change with its own blast radius. This unit closes the
+        // rounded-corner half only. If square overflow clipping is added later
+        // this test is the one that should change.
+        let list = DisplayList::build(&rounded_overflow_parent(0.0, true));
+        assert!(
+            rounded_clip(&list).is_none(),
+            "square overflow clipping is out of scope for this unit"
+        );
+        assert!(
+            !list.commands.iter().any(|c| matches!(c, DisplayCommand::PushClip(_))),
+            "and it must not fall back to a square PushClip either"
+        );
+    }
+
+    #[test]
+    fn the_overflow_clip_is_the_padding_box_with_the_radius_shrunk_by_the_border() {
+        // Overflow clips to the PADDING box. Clipping at the border box would
+        // leave a child's paint sitting on top of the border it should be
+        // behind, and the arc would be the outer one, a border-width off.
+        let mut parent = rounded_overflow_parent(12.0, true);
+        parent.dimensions.border = EdgeSizes { top: 4.0, right: 4.0, bottom: 4.0, left: 4.0 };
+
+        let list = DisplayList::build(&parent);
+        let (rect, radius) = rounded_clip(&list).expect("must still clip");
+        let border_box = parent.dimensions.border_box();
+        assert_eq!(rect.x, border_box.x + 4.0);
+        assert_eq!(rect.width, border_box.width - 8.0);
+        assert_eq!(radius.top_left, 8.0, "12px radius inside a 4px border is 8px");
+    }
+
+    #[test]
+    fn a_radius_swallowed_entirely_by_its_border_pushes_no_clip() {
+        // Inner radius floors at zero rather than going negative, and a clip
+        // with no rounding left is a square clip — out of scope above, so it
+        // must not be emitted here by the back door.
+        let mut parent = rounded_overflow_parent(4.0, true);
+        parent.dimensions.border = EdgeSizes { top: 6.0, right: 6.0, bottom: 6.0, left: 6.0 };
+
+        let list = DisplayList::build(&parent);
+        assert!(rounded_clip(&list).is_none());
+    }
+
+    #[test]
+    fn the_box_own_background_is_not_inside_its_own_overflow_clip() {
+        // The background already rounds itself (RoundedRect / the gradient's
+        // own border_radius). Clipping it again would double the antialiasing
+        // at every corner and darken the arc by a visible amount.
+        let list = DisplayList::build(&rounded_overflow_parent(12.0, true));
+        let push = list
+            .commands
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::PushClipRounded { .. }))
+            .unwrap();
+        let own_bg = list
+            .commands
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::RoundedRect { .. }));
+        if let Some(own_bg) = own_bg {
+            assert!(own_bg < push, "the box's own background paints before its clip");
+        }
     }
 
     #[test]
