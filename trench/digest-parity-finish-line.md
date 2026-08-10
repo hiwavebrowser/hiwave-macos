@@ -1133,12 +1133,11 @@ have quietly restored the exact failure the night had just fixed.
 
 ## 2026-08-10
 
-**Metric: 1/26 → not re-measured.** No local `N/26` exists tonight and I am not
-going to invent one: the metric is taken on macOS CI, and the local sweep I ran
-used 1 iteration, so the receipt correctly reads `0/26, 26 not fully measured`
-with `stability_unmeasured` on every row. What I *can* report as measured, on
-this seat, is the pair the change targets — geometry unchanged and discrete
-structural failures down. The macOS number comes from the PR lane.
+**Metric: 1/26 → 1/26, measured on macOS.** The conjunction did not move: no
+case crossed the line, and none fell off it. What moved is inside the columns.
+The local sweep on this seat could not produce an `N/26` at all — I ran 1
+iteration, so the receipt correctly read `0/26, 26 not fully measured` — and I
+did not invent one. The number below is the PR lane's, on `macos-14`.
 
 **P-item: P1 (gradient/clip family). First root landed; the item is NOT
 complete.**
@@ -1195,6 +1194,42 @@ Same corpus, same seat, only the binary differs.
 all; the other 22 are bit-identical. No case gained a discrete failure. Gate A
 reading identical is the check that the change is display-list-only as claimed,
 rather than my word for it.
+
+### The macOS receipt
+
+Run [31360195234](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/31360195234),
+`macos-14`, all jobs green.
+
+```
+metric:     1/26 cases pass all four conditions
+measured:   26/26 scored on all four  (0 not fully measured)
+  geometry   4/26 green, 26/26 measured
+  paint      1/26 green, 26/26 measured
+  stability 26/26 green, 26/26 measured
+  discrete  18/26 green, 26/26 measured
+```
+
+Against night 6's P0b receipt, taken on the same lane before this change:
+
+| | P0b (2026-08-09) | tonight |
+|---|---|---|
+| metric | 1/26 | 1/26 |
+| geometry | 4/26 green, 1691 geometry + 115 join | **4/26, 1691 + 115 — identical** |
+| paint | 1/26 green | 1/26 green |
+| stability | 26/26 green | 26/26 green |
+| discrete column | 18/26 green | 18/26 green |
+| discrete auto-fails | **51** | **35** |
+
+Geometry identical to the failure count on the platform that matters, not just
+on mine. The discrete column staying at exactly 18/26 is the regression check
+that matters here: had any case gained a structural failure from zero, that
+number would have fallen.
+
+macOS counts 51 → 35 where this seat counted 79 → 62. The absolute counts
+differ by rasterizer — SwiftShader's corners trip the detector more often — but
+the delta is −16 against −17 and the direction is the same. Worth having said
+once, because it is the first time the two seats have been compared on a
+number that moved.
 
 ### The stop rule fired, and I did not revert. Reasoning, for Pete to overrule
 
