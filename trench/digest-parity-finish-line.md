@@ -1285,9 +1285,12 @@ case. `M11b` removes both and goes red. The count is 16, not 17.
   already correct.
 - **62 discrete failures remain and they are not one root.** Of `new_tab`'s 5
   distinct failing selectors, **5 of 5 carry a border**, and its own background
-  is within tolerance 5 of its border colour — consistent with `render_borders`
-  emitting four square `SolidColor` rects across the full border box and
-  ignoring the radius. But `css-selectors` (5 selectors), `flex-positioning`
+  is within tolerance 5 of its border colour. That `render_borders` ignores
+  `border-radius` entirely is verified rather than inferred: it emits four
+  `SolidColor` rects spanning the full border box, and the word `radius` does
+  not appear in the function. Whether those rects are what paints these
+  particular notches is still inference.
+  But `css-selectors` (5 selectors), `flex-positioning`
   (4) and `sticky-scroll` (6) have **no border at all**, so at least one more
   root is unidentified. Stating that rather than claiming the border theory
   covers the rest.
