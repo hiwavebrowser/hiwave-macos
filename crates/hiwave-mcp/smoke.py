@@ -68,7 +68,7 @@ pre { margin: 0 }
 .unclipped { width: 240px }
 .kid       { margin-top: 10px; height: 5px; margin-bottom: 20px }
 .faded     { width: 100px; height: 10px; background: #f00; opacity: 0.5 }
-div { box-sizing: content-box; position: static }
+div { box-sizing: content-box; position: static; white-space: normal }
 </style></head><body><div class="hero"><h1>Attribution</h1></div>\
 <div class="copy"><span id="inherits">inherited</span></div>\
 <div class="plain"><span>spacing</span></div>\
@@ -472,18 +472,58 @@ def main():
     print(f"ok  letter-spacing    .spaced 0.1em x 20px = 2px (authored '0.1em'); "
           f"every advance is exactly +2.0 over .plain — {deltas}")
 
-    # ---- white-space: implemented, asserted, and NOT counted ------------------
-    # A TRIPWIRE, the same shape as line-height above. `white-space` inherits in
-    # CSS, but this cascade never seeds it onto an ELEMENT — only onto text
-    # nodes, from their immediate parent (build_layout_box). So a span inside a
-    # `pre` div computes `normal`, and `inherited_properties` deliberately
-    # refuses to label it `inherited`, because the parent did not supply it.
+    # ---- white-space: COUNTED, on the standard night 9 set for keywords ------
+    # `white-space` is a keyword, so no unit conversion or shorthand expansion
+    # can show the value was computed rather than echoed — exactly the position
+    # `box-sizing` and `position` were in on night 9, and `overflow-x` on night
+    # 11. That night fixed the standard for keyword properties, and it is the
+    # standard applied here:
+    #
+    #   (a) a LATER, LOWER-specificity rule matching the same element declares
+    #       the other value and loses. So "echo the last matching declaration"
+    #       and "report what the cascade decided" give DIFFERENT answers, and
+    #       only the cascade's is right. `div { white-space: normal }` is last
+    #       in the fixture's sheet and is load-bearing for precisely this.
+    #   (b) the reported value is cross-checked against a consequence the engine
+    #       produced, which differs observably between the two settings.
+    #
+    # Night 12 marked this property uncountable on a different and stricter
+    # test — that the value must arrive by shorthand, inheritance or a UA
+    # default — and all three of those are genuinely absent (both gaps are
+    # still pinned as tripwires below). But that test is not the one under
+    # which two keyword properties were already counted: `.floater`'s
+    # `position: absolute` is just as much an echo of its own declaration text.
+    # Applied consistently, (a)+(b) hold here, and they hold with a STRONGER
+    # (b) than either prior keyword had — the consequence is read out of the
+    # display list, an export path independent of the cascade the value came
+    # from, rather than out of geometry.
     pre_style, error = client.tool("hiwave_style", selector=".pre")
     assert error is None, error
     pre = pre_style["elements"][0]
-    # On the element that declares it, the value is an ECHO of the declaration
-    # text — which is exactly why this property is not counted for the metric.
     assert pre["computed"]["white-space"] == "pre", pre["computed"]
+    # (a) the cascade decided it, and the rule it beat is named rather than
+    # dropped. Echoing the final matching declaration would say `normal` here.
+    pre_ws = next(x for x in pre["declared"] if x["property"] == "white-space")
+    assert pre_ws["winner"]["selector"] == ".pre", pre_ws["winner"]
+    assert pre_ws["winner"]["specificity"] == [0, 1, 0], pre_ws["winner"]
+    assert pre_ws["winner"]["value"] == "pre", pre_ws["winner"]
+    assert pre_ws["origin"] == "author", pre_ws
+    assert len(pre_ws["overridden"]) == 1, pre_ws["overridden"]
+    pre_loser = pre_ws["overridden"][0]
+    assert pre_loser["selector"] == "div", pre_loser
+    assert pre_loser["specificity"] == [0, 0, 1], pre_loser
+    assert pre_loser["value"] == "normal", pre_loser
+    # (b) and layout/paint really used `pre`: the div's own text keeps BOTH of
+    # its spaces. The control is on the same page in the same run — two
+    # elements whose text collapses to one space — so this is not an engine
+    # that always keeps whitespace.
+    texts = {c["text"]: c for c in commands if c["op"] == "text"}
+    assert "a  b" in texts and "a b" not in texts, sorted(texts)
+    assert len(texts["a  b"]["advances"]) == 4, texts["a  b"]
+    assert len(texts["c d"]["advances"]) == 3, texts["c d"]   # collapsed control
+    print(f"ok  white-space      .pre computed=pre won by .pre [0, 1, 0] over a LATER "
+          f"div [0, 0, 1] normal; paint kept both spaces — 'a  b' has "
+          f"{len(texts['a  b']['advances'])} advances against 3 for the collapsed control")
     nested_style, error = client.tool("hiwave_style", selector="span.nested")
     assert error is None, error
     assert nested_style["count"] == 1, nested_style["count"]
@@ -501,7 +541,6 @@ def main():
     # ...and the consequence is visible in paint, which is what makes this a bug
     # report rather than a reporting quirk: the div's OWN text keeps both of its
     # spaces (4 advances for "a  b"), the nested element's collapses to one.
-    texts = {c["text"]: c for c in commands if c["op"] == "text"}
     assert "a  b" in texts, sorted(texts)
     assert len(texts["a  b"]["advances"]) == 4, texts["a  b"]
     assert "c d" in texts and "c  d" not in texts, sorted(texts)
@@ -519,12 +558,16 @@ def main():
     # ELEMENT inheritance; that is real but it is not the whole gap, and it is
     # not the half a page hits without stylesheets.
     #
-    # This is also why white-space still cannot be COUNTED. The three routes to a
-    # value that is not an echo of declaration text are a shorthand (nothing sets
-    # white-space — `shorthands_setting` maps only the `font` family), inheritance
-    # (absent for elements, above), and a UA default (absent, here). `normal` on a
-    # bare <pre> is the INITIAL value, so asserting it proves the engine defaulted
-    # rather than computed. Clause 3 holds; clause 2 has nowhere to come from.
+    # This assertion is NOT the one that counts the property — the counted one is
+    # above, on `.pre`, where the cascade had a real decision to make. Here the
+    # engine defaulted rather than computed: `normal` on a bare <pre> is the
+    # INITIAL value, and asserting an initial value proves nothing about the
+    # cascade. Keep the two straight. All three routes to a white-space value
+    # that does not depend on an author rule are still absent — a shorthand
+    # (nothing sets white-space; `shorthands_setting` maps only the `font`
+    # family), inheritance (absent for elements, above), and a UA default
+    # (absent, here) — which is why an UNSTYLED page still gets the wrong
+    # answer from the engine, and why both tripwires stay.
     bare_pre, error = client.tool("hiwave_style", selector="pre")
     assert error is None, error
     assert bare_pre["count"] == 1, bare_pre["count"]
