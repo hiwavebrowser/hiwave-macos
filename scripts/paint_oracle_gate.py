@@ -63,6 +63,38 @@ reporting a gradient-vs-solid mismatch as a wrong colour — that difference is
 real, and the percentage half already owns it. A discrete failure is an
 auto-fail, so a misattributed one costs more than a missed one.
 
+GEOMETRY IS A PRECONDITION OF BOTH DETECTORS
+--------------------------------------------
+Both detectors read RustKit's pixels at CHROME's rect. That is only a statement
+about paint when RustKit put the box where Chrome put it. If the element is
+displaced, every pixel read belongs to something else, and whatever the
+detector concludes is a fact about the layout delta Gate A is already
+reporting — laundered into an auto-fail on the paint gate.
+
+This is not hypothetical. Measured on the 26-case corpus 2026-08-11, **62 of
+62** `missing_clip` auto-fails fired on elements Gate A fails, displaced by 8px
+to 384px; **zero** fired on a geometrically exact element. `css-selectors`
+`div.section:nth-of-type(3)` was reported as an unclipped corner while RustKit
+rounds that corner correctly — 21px higher up the page, where the box actually
+is. The detector was reading the middle of the white card and calling it a
+notch.
+
+So `attributable_selectors` joins RustKit's layout dump and admits an element
+to the discrete detectors only when its border box matches Chrome's rect within
+Gate A's tolerance, on every axis. The constant is IMPORTED from
+`layout_oracle_gate` rather than restated: two tolerances that must agree and
+are written down twice will disagree.
+
+The precondition is necessary, not sufficient, and the limit is worth stating:
+an exactly-placed element can still have a displaced SIBLING painting into its
+corner, which would read as its own missing clip. Closing that needs
+overlap analysis this gate does not do. What it does close is the case where
+the element under test is itself somewhere else.
+
+An element that is missing from the layout dump, or duplicated in it, is also
+excluded — no evidence is not the same as evidence of correctness, and Gate A
+already reports both as join failures.
+
 WHY PAINT_OUTSIDE_BOX IS NOT HERE
 ---------------------------------
 The obvious implementation — "differing pixels that fall outside every Chrome
@@ -102,6 +134,17 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from parity_image import Image, UnsupportedImage, read_png, read_ppm  # noqa: E402
+
+# Gate A owns the geometry join and its tolerance. Imported, never restated:
+# the discrete detectors are only sound where Gate A would call the box exact,
+# so the two must use one number and one join.
+from layout_oracle_gate import (  # noqa: E402
+    AXES,
+    GEOMETRY_TOLERANCE_PX,
+    border_box,
+    find_layout_json,
+    index_rustkit,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -577,6 +620,49 @@ def detect_missing_clip(
 
 
 # ---------------------------------------------------------------------------
+# Attribution: which elements the discrete detectors may speak about
+# ---------------------------------------------------------------------------
+
+
+def attributable_selectors(
+    elements: Sequence[Dict[str, Any]],
+    rustkit_layout: Dict[str, Any],
+) -> set:
+    """Selectors whose RustKit border box is where Chrome's rect is.
+
+    Only these may reach a discrete detector — see GEOMETRY IS A PRECONDITION
+    OF BOTH DETECTORS in the module docstring. An element that is absent from
+    the layout dump, or claimed by more than one box, is excluded: Gate A
+    reports both as join failures, and neither is evidence that the paint at
+    Chrome's rect belongs to this element.
+    """
+    root = rustkit_layout.get("root", rustkit_layout)
+    index, _identified, _total = index_rustkit(root)
+
+    admitted = set()
+    for element in elements:
+        selector = element.get("selector")
+        if not selector:
+            continue
+        candidates = index.get(selector, [])
+        if len(candidates) != 1:
+            continue
+        actual = border_box(candidates[0][1])
+        expected = element.get("rect") or {}
+        if actual is None:
+            continue
+        if all(
+            expected.get(axis) is not None
+            and actual.get(axis) is not None
+            and abs(float(actual[axis]) - float(expected[axis]))
+            <= GEOMETRY_TOLERANCE_PX
+            for axis in AXES
+        ):
+            admitted.add(selector)
+    return admitted
+
+
+# ---------------------------------------------------------------------------
 # Case scoring
 # ---------------------------------------------------------------------------
 
@@ -588,6 +674,7 @@ def compare_case(
     elements: Sequence[Dict[str, Any]],
     styles: Dict[str, Dict[str, str]],
     tolerance: int,
+    attributable: set,
     pass_fraction: float = PAINT_PASS_FRACTION,
 ) -> Dict[str, Any]:
     if chrome.size != rustkit.size:
@@ -609,6 +696,8 @@ def compare_case(
             "total_px": chrome.width * chrome.height,
             "outside_tolerance_px": None,
             "within_fraction": None,
+            "discrete_examined": 0,
+            "discrete_unattributable": 0,
             "discrete_failures": 1,
             "failures": [failure.to_json()],
             "receipts": [failure.receipt()],
@@ -631,11 +720,20 @@ def compare_case(
             )
         )
 
+    # Only geometrically exact elements reach the discrete detectors. Anything
+    # else and the detector is reading pixels that belong to another box.
+    scoped = [e for e in elements if e.get("selector") in attributable]
+    withheld = sum(
+        1
+        for e in elements
+        if e.get("selector") and e.get("selector") not in attributable
+    )
+
     failures.extend(
-        detect_wrong_solid_color(case_id, chrome, rustkit, elements, tolerance)
+        detect_wrong_solid_color(case_id, chrome, rustkit, scoped, tolerance)
     )
     failures.extend(
-        detect_missing_clip(case_id, chrome, rustkit, elements, styles, tolerance)
+        detect_missing_clip(case_id, chrome, rustkit, scoped, styles, tolerance)
     )
 
     return {
@@ -645,6 +743,8 @@ def compare_case(
         "total_px": total,
         "outside_tolerance_px": bad,
         "within_fraction": within,
+        "discrete_examined": len(scoped),
+        "discrete_unattributable": withheld,
         "discrete_failures": sum(1 for f in failures if f.discrete),
         "failures": [f.to_json() for f in failures],
         "receipts": [f.receipt() for f in failures],
@@ -665,6 +765,8 @@ def unmeasured_case(case_id: str, reason: str) -> Dict[str, Any]:
         "total_px": 0,
         "outside_tolerance_px": None,
         "within_fraction": None,
+        "discrete_examined": 0,
+        "discrete_unattributable": 0,
         "discrete_failures": 0,
         "failures": [],
         "receipts": [],
@@ -750,11 +852,31 @@ def run_gate(
             cases.append(unmeasured_case(case_id, "no_chrome_baseline"))
             continue
 
-        frame_path, refusal = find_frame(
-            capture_root, case_id, f"{case['width']}x{case['height']}"
-        )
+        viewport = f"{case['width']}x{case['height']}"
+        frame_path, refusal = find_frame(capture_root, case_id, viewport)
         if frame_path is None:
             cases.append(unmeasured_case(case_id, refusal or "no_rustkit_capture"))
+            continue
+
+        # The layout dump is not optional. Without it the discrete detectors
+        # cannot tell "RustKit failed to clip this corner" from "RustKit put
+        # this box 384px away", and every capture that writes a frame writes a
+        # layout.json beside it. A case that has one but not the other is a
+        # broken capture, and reporting it UNMEASURED is the same refusal Gate
+        # A makes — not a pass by omission.
+        layout_path, layout_refusal = find_layout_json(capture_root, case_id, viewport)
+        if layout_path is None:
+            # Gate A's refusal names the frame it was looking for; here the
+            # frame was found and the layout beside it was not, so say that.
+            if layout_refusal == "no_rustkit_capture":
+                layout_refusal = "no_rustkit_layout"
+            cases.append(unmeasured_case(case_id, layout_refusal or "no_rustkit_layout"))
+            continue
+        try:
+            with open(layout_path) as handle:
+                rustkit_layout = json.load(handle)
+        except (OSError, ValueError) as exc:
+            cases.append(unmeasured_case(case_id, f"unreadable_rustkit_layout: {exc}"))
             continue
 
         try:
@@ -771,7 +893,14 @@ def run_gate(
         styles = load_styles(base / "computed-styles.json")
 
         record = compare_case(
-            case_id, chrome, rustkit, elements, styles, tolerance, pass_fraction
+            case_id,
+            chrome,
+            rustkit,
+            elements,
+            styles,
+            tolerance,
+            attributable_selectors(elements, rustkit_layout),
+            pass_fraction,
         )
         record["scope"] = case["scope"]
         cases.append(record)
@@ -792,6 +921,10 @@ def run_gate(
             "green": len(green),
             "red": len(cases) - len(green),
             "discrete_failures": sum(c["discrete_failures"] for c in cases),
+            "discrete_examined": sum(c["discrete_examined"] for c in cases),
+            "discrete_unattributable": sum(
+                c["discrete_unattributable"] for c in cases
+            ),
         },
     }
 
@@ -826,6 +959,11 @@ def print_report(report: Dict[str, Any], verbose: bool = False) -> None:
         f"  ({summary['unmeasured']} unmeasured)"
     )
     print(f"  discrete:   {summary['discrete_failures']} structural auto-fails")
+    print(
+        f"  attributed: {summary['discrete_examined']} elements examined,"
+        f" {summary['discrete_unattributable']} withheld"
+        f" (geometry not within {GEOMETRY_TOLERANCE_PX}px — Gate A owns those)"
+    )
     print()
 
     for case in report["cases"]:

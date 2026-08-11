@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from parity_image import Image, read_png  # noqa: E402
 from paint_oracle_gate import (  # noqa: E402
     MIN_NOTCH_PX,
+    attributable_selectors,
     PAINT_PASS_FRACTION,
     PolicyError,
     compare_case,
@@ -86,8 +87,57 @@ def write_ppm(path, image):
     )
 
 
-def score(case_id, chrome, rustkit, elements, styles):
-    return compare_case(case_id, chrome, rustkit, elements, styles, TOLERANCE)
+def layout_tree(elements, offset=(0.0, 0.0), drop=()):
+    """A RustKit-shaped layout dump whose boxes sit where Chrome's rects do.
+
+    `offset` displaces every box, which is what a real layout defect looks like
+    to the join. `drop` omits selectors entirely, which is what a missing box
+    looks like.
+    """
+    dx, dy = offset
+    children = [
+        {
+            "selector": e["selector"],
+            "tag": e.get("tag"),
+            "border_box": {
+                "x": e["rect"]["x"] + dx,
+                "y": e["rect"]["y"] + dy,
+                "width": e["rect"]["width"],
+                "height": e["rect"]["height"],
+            },
+            "children": [],
+        }
+        for e in elements
+        if e.get("selector") and e["selector"] not in drop
+    ]
+    return {"root": {"selector": None, "children": children}}
+
+
+def write_layout(path, elements, offset=(0.0, 0.0), drop=()):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(layout_tree(elements, offset, drop)))
+
+
+def write_capture(directory, image, elements, offset=(0.0, 0.0), drop=()):
+    """The pair every real capture writes: a frame and the layout beside it."""
+    write_ppm(directory / "frame.ppm", image)
+    write_layout(directory / "layout.json", elements, offset, drop)
+
+
+def score(case_id, chrome, rustkit, elements, styles, attributable=None):
+    """Score a case, admitting every element to the discrete detectors by default.
+
+    `compare_case` has NO default for `attributable` on purpose — a production
+    caller that forgets the geometry join must get a TypeError, not the silent
+    misattribution this parameter exists to stop. The permissive default lives
+    here, in test scaffolding, where the elements are hand-built and their
+    geometry is whatever the test says it is.
+    """
+    if attributable is None:
+        attributable = {e.get("selector") for e in elements if e.get("selector")}
+    return compare_case(
+        case_id, chrome, rustkit, elements, styles, TOLERANCE, attributable
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -421,8 +471,12 @@ def test_chrome_against_itself_is_green_on_every_gate_case():
         for case_id, case in load_case_registry().items():
             if case["scope"] == "holdout":
                 continue
-            image = read_png(BASELINES / case["scope"] / case_id / "baseline.png")
-            write_ppm(root / case_id / "frame.ppm", image)
+            base = BASELINES / case["scope"] / case_id
+            image = read_png(base / "baseline.png")
+            elements = json.loads((base / "layout-rects.json").read_text())["elements"]
+            # Layout dump placed exactly where Chrome's rects are, so every
+            # element is admitted and the detectors run over the whole corpus.
+            write_capture(root / case_id, image, elements)
         report = run_gate(root)
 
     assert report["summary"]["measured"] == 26, report["summary"]
@@ -430,7 +484,115 @@ def test_chrome_against_itself_is_green_on_every_gate_case():
         c["case_id"] for c in report["cases"] if not c["green"]
     ]
     assert report["summary"]["discrete_failures"] == 0
+    # Without this the test passes just as well when the join withholds
+    # everything, which is the shape of a guard satisfied by something other
+    # than the thing it guards.
+    assert report["summary"]["discrete_unattributable"] == 0, report["summary"]
+    assert report["summary"]["discrete_examined"] > 1000, report["summary"]
     assert gate_passes(report)
+
+
+# ---------------------------------------------------------------------------
+# Geometry is a precondition of the discrete detectors
+#
+# Measured on the corpus 2026-08-11: 62 of 62 missing_clip auto-fails fired on
+# elements Gate A already fails, displaced 8px to 384px. Not one fired on a
+# geometrically exact element. The detectors read RustKit's pixels at CHROME's
+# rect, so a displaced box means every pixel read belongs to something else.
+# ---------------------------------------------------------------------------
+
+
+def test_attributable_admits_a_box_where_chrome_put_it_and_withholds_one_that_moved():
+    chrome, elements, _styles = load_case("card-grid")
+    selectors = {e["selector"] for e in elements if e.get("selector")}
+
+    exact = attributable_selectors(elements, layout_tree(elements))
+    assert exact == selectors, "an exact dump must admit every joined element"
+
+    # Gate A's bar is 0.5px per axis. At it, in; past it, out.
+    at_bar = attributable_selectors(elements, layout_tree(elements, offset=(0.5, 0.0)))
+    assert at_bar == selectors
+    past_bar = attributable_selectors(
+        elements, layout_tree(elements, offset=(0.51, 0.0))
+    )
+    assert past_bar == set()
+
+
+def test_attributable_withholds_an_element_the_layout_dump_never_reported():
+    """No evidence is not evidence of correctness — Gate A calls this a join
+    failure, and a detector must not speak about a box it cannot find."""
+    chrome, elements, _styles = load_case("card-grid")
+    victim = next(e["selector"] for e in elements if e.get("selector"))
+    admitted = attributable_selectors(elements, layout_tree(elements, drop={victim}))
+    assert victim not in admitted
+    assert len(admitted) == len([e for e in elements if e.get("selector")]) - 1
+
+
+def test_attributable_withholds_a_selector_two_boxes_both_claim():
+    """An ambiguous join is not a join.
+
+    Gate A reports a duplicated selector rather than first-matching it, for the
+    reason that first-matching would score one of two boxes and call the case
+    green. The same ambiguity here would pin a discrete auto-fail on whichever
+    box happened to be walked first.
+    """
+    chrome, elements, _styles = load_case("card-grid")
+    victim = next(e["selector"] for e in elements if e.get("selector"))
+    dump = layout_tree(elements)
+    twin = copy.deepcopy(
+        next(c for c in dump["root"]["children"] if c["selector"] == victim)
+    )
+    dump["root"]["children"].append(twin)
+
+    admitted = attributable_selectors(elements, dump)
+    assert victim not in admitted, "a selector two boxes claim must be withheld"
+    assert len(admitted) == len([e for e in elements if e.get("selector")]) - 1
+
+
+def test_a_displaced_element_cannot_be_reported_as_a_missing_clip():
+    """The exact lie found on the corpus, reproduced on committed data.
+
+    Same injected notch as the detector's own positive test. With the element
+    where Chrome put it the case is RED, as it should be. Move the box past
+    Gate A's tolerance and the failure must disappear — not because the paint
+    changed, but because the gate can no longer attribute it to this element.
+    """
+    chrome, elements, styles = load_case("card-grid")
+    selector, corner, fill = first_testable_corner(chrome, elements, styles)
+    rustkit = with_pixels(chrome, corner.notch, fill)
+
+    exact = score("card-grid", chrome, rustkit, elements, styles,
+                  attributable=attributable_selectors(elements, layout_tree(elements)))
+    assert [f for f in exact["failures"] if f["kind"] == "missing_clip"]
+    assert exact["discrete_unattributable"] == 0
+
+    displaced = score(
+        "card-grid", chrome, rustkit, elements, styles,
+        attributable=attributable_selectors(
+            elements, layout_tree(elements, offset=(0.0, 21.0))
+        ),
+    )
+    assert not [f for f in displaced["failures"] if f["kind"] == "missing_clip"]
+    assert displaced["discrete_failures"] == 0
+    assert displaced["discrete_examined"] == 0
+    assert displaced["discrete_unattributable"] == len(
+        [e for e in elements if e.get("selector")]
+    )
+
+
+def test_withholding_is_counted_rather_than_silent():
+    """A withheld element must show up as a number.
+
+    A gate that quietly stops examining most of the page reads identically to
+    one that examined it and found nothing — which is the failure mode this
+    campaign keeps rediscovering.
+    """
+    chrome, elements, styles = load_case("card-grid")
+    victim = next(e["selector"] for e in elements if e.get("selector"))
+    partial = attributable_selectors(elements, layout_tree(elements, drop={victim}))
+    result = score("card-grid", chrome, chrome, elements, styles, attributable=partial)
+    assert result["discrete_unattributable"] == 1
+    assert result["discrete_examined"] == len(partial)
 
 
 # ---------------------------------------------------------------------------
@@ -457,8 +619,10 @@ def test_a_single_missing_capture_does_not_pass_by_omission():
             if skipped is None:
                 skipped = case_id
                 continue
-            image = read_png(BASELINES / case["scope"] / case_id / "baseline.png")
-            write_ppm(root / case_id / "frame.ppm", image)
+            base = BASELINES / case["scope"] / case_id
+            image = read_png(base / "baseline.png")
+            elements = json.loads((base / "layout-rects.json").read_text())["elements"]
+            write_capture(root / case_id, image, elements)
         report = run_gate(root, case_ids=[skipped, "bg-solid"])
 
     missing = [c for c in report["cases"] if c["case_id"] == skipped][0]
@@ -478,17 +642,22 @@ def test_only_the_registry_viewport_capture_is_scored():
     case_id = "bg-solid"
     case = load_case_registry()[case_id]
     native = f"{case['width']}x{case['height']}"
-    chrome = read_png(BASELINES / case["scope"] / case_id / "baseline.png")
+    base = BASELINES / case["scope"] / case_id
+    chrome = read_png(base / "baseline.png")
+    elements = json.loads((base / "layout-rects.json").read_text())["elements"]
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        write_ppm(root / "run" / case_id / "1920x1080" / "iter-1" / "frame.ppm",
-                  solid(1920, 1080, (255, 0, 255)))
+        write_capture(
+            root / "run" / case_id / "1920x1080" / "iter-1",
+            solid(1920, 1080, (255, 0, 255)),
+            elements,
+        )
         report = run_gate(root, case_ids=[case_id])
         assert report["cases"][0]["measured"] is False
         assert report["cases"][0]["reason"] == "no_native_viewport_capture"
 
-        write_ppm(root / "run" / case_id / native / "iter-1" / "frame.ppm", chrome)
+        write_capture(root / "run" / case_id / native / "iter-1", chrome, elements)
         report = run_gate(root, case_ids=[case_id])
         assert report["cases"][0]["measured"] is True
         assert report["cases"][0]["green"] is True
@@ -496,14 +665,37 @@ def test_only_the_registry_viewport_capture_is_scored():
 
 def test_an_unreadable_frame_is_unmeasured_rather_than_skipped():
     case_id = "bg-solid"
+    base = BASELINES / load_case_registry()[case_id]["scope"] / case_id
+    elements = json.loads((base / "layout-rects.json").read_text())["elements"]
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         path = root / case_id / "frame.ppm"
         path.parent.mkdir(parents=True)
         path.write_bytes(b"P6\n800 600\n255\n" + bytes(12))
+        write_layout(root / case_id / "layout.json", elements)
         report = run_gate(root, case_ids=[case_id])
     assert report["cases"][0]["measured"] is False
     assert report["cases"][0]["reason"].startswith("unreadable_capture")
+    assert not gate_passes(report)
+
+
+def test_a_frame_with_no_layout_dump_is_unmeasured_rather_than_scored_blind():
+    """A capture writes a frame and a layout.json together, or it is broken.
+
+    Without the layout dump the discrete detectors have no way to tell a
+    missing clip from a box that is somewhere else, so scoring the frame anyway
+    would be exactly the misattribution the join exists to stop. UNMEASURED
+    fails; it does not pass by omission.
+    """
+    case_id = "bg-solid"
+    base = BASELINES / load_case_registry()[case_id]["scope"] / case_id
+    chrome = read_png(base / "baseline.png")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        write_ppm(root / case_id / "frame.ppm", chrome)
+        report = run_gate(root, case_ids=[case_id])
+    assert report["cases"][0]["measured"] is False
+    assert report["cases"][0]["reason"] == "no_rustkit_layout"
     assert not gate_passes(report)
 
 
