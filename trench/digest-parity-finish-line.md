@@ -1362,3 +1362,147 @@ here. Three ways out, cheapest first:
 Recommending (2) if the attributability of the first receipt matters more than
 the extra step, which I think it does — that receipt is the campaign's new
 ground truth and it should be readable without archaeology.
+
+## 2026-08-11
+
+**Metric: 1/26 → 1/26 on macOS, and this is a proof rather than a re-run.**
+Tonight's change can only remove discrete failures, and removing them can only
+flip a case red→green. A case flips only if it was geometry-green ∧ paint-green
+∧ stable ∧ discrete-red. The P0b receipt records macOS paint-green as 1/26, and
+that one case (`bg-pure`) is already the green one — so no case can flip, and
+`N/26` is unchanged. What moved is inside a column: **discrete 18/26 → 26/26
+green**. No macOS run tonight; the PR lane will confirm.
+
+**P-item: P1 (gradient/clip family). NOT complete. I did not work an engine
+defect — I found the signal driving P1 was measuring something else and fixed
+that instead.**
+
+### Commits
+
+- `eb12d55` — Gate B's discrete detectors require the element's geometry to be
+  correct before they may report on it.
+- `9679857` — the guard the mutation sweep found missing on the second detector.
+
+### What the defect was
+
+Both discrete detectors read RustKit's pixels at **Chrome's** rect. That is a
+statement about paint only when RustKit put the box where Chrome put it. On
+this corpus it usually did not:
+
+```
+missing_clip auto-fails on elements Gate A already fails:  62 of 62
+missing_clip auto-fails on geometrically exact elements:    0 of 62
+displacement of the offending elements:              8px to 384px
+```
+
+`css-selectors div.section:nth-of-type(3)` is the clean example, and I checked
+it pixel by pixel before believing it. Gate B reported an unclipped rounded
+corner. RustKit rounds that corner correctly — 21px higher up the page, where
+the box actually is. At Chrome's y the detector was reading the middle of the
+white card, finding white, and calling it an unclipped notch.
+
+The reasoning that closes this is already in the file, applied to
+`paint_outside_box` and stopped there:
+
+> *"only sound when the element's geometry is already known correct ... Gate B
+> would auto-fail a case for a paint bug that is really the layout delta Gate A
+> is already reporting. That precondition needs the RustKit layout dump joined
+> in, which is the next unit of work on this gate"*
+
+Night 3 wrote that, declined to ship the third detector on it, and did not
+notice the two it was shipping had the same precondition. `attributable_selectors`
+now joins the layout dump and admits an element only where its border box
+matches Chrome's rect within Gate A's tolerance on every axis — importing the
+constant and the join from `layout_oracle_gate` rather than restating either,
+because two tolerances that must agree and are written down twice will disagree.
+A capture with a frame but no `layout.json` is UNMEASURED, not scored blind.
+
+Stated as a limit rather than left implicit: the precondition is necessary, not
+sufficient. An exactly-placed element can still have a displaced *sibling*
+painting into its corner, which would read as its own missing clip. Closing that
+needs overlap analysis this gate does not do.
+
+### Measured, same captures, only the gate differs
+
+Linux/SwiftShader, 26 gating cases, 1 iteration. **Mechanics, not a receipt.**
+
+| | before | after |
+|---|---|---|
+| percentage half | — | **bit-identical on all 26 cases** |
+| paint-green | 1/26 (`bg-pure`) | 1/26 (`bg-pure`) |
+| measured | 26/26 | 26/26 |
+| discrete auto-fails | **62** | **0** |
+| Gate A | untouched | untouched |
+| elements admitted to the detectors | — | **172 of 1593; 1421 withheld** |
+
+The 1421 is the uncomfortable half and it is not a regression — those elements
+were never being measured, only reported on. It is a SwiftShader number and will
+be smaller on macOS, where geometry is better (1691 geometry failures against
+this seat's 2631), but it will not be small.
+
+### Mutation-check results
+
+**9 probes, 9 RED, control green before and after.**
+
+| Mutation | Test that caught it |
+|---|---|
+| join ignores geometry, admits every selector | `a_displaced_element_cannot_be_reported_as_a_missing_clip` |
+| tolerance `<=` → `<` (0.5px exactly rejected) | `attributable_admits_a_box_where_chrome_put_it…` |
+| tolerance hardcoded 5.0 instead of Gate A's constant | `attributable_admits_a_box_where_chrome_put_it…` |
+| ambiguous/missing join admitted (`!=1` → `<1`) | `attributable_withholds_a_selector_two_boxes_both_claim` |
+| detectors run over every element, not the scoped set | `a_displaced_element_cannot_be_reported_as_a_missing_clip` |
+| `wrong_solid_color` loses the same filter | `a_displaced_element_cannot_be_reported_as_a_wrong_solid_color` |
+| withheld count reported as zero | `a_displaced_element_cannot_be_reported_as_a_missing_clip` |
+| `run_gate` scores blind when the layout dump is absent | `a_frame_with_no_layout_dump_is_unmeasured_rather_than_scored_blind` |
+| only axis `x` checked, not all four | `a_displaced_element_cannot_be_reported_as_a_missing_clip` |
+
+**The first sweep was 8/9.** `wrong_solid_color` losing the filter stayed green:
+every guard I wrote pointed at the clip detector, because that is the one the
+corpus caught lying, so a general fix had a guard specific to the instance that
+motivated it. That is the same survivor shape as 08-08 and 08-10, three sweeps
+running. The pattern is worth naming: *the guard gets written against the
+example, not against the rule.*
+
+I also lost the fix for it once. The sweep harness restores files with
+`git checkout --`, my new test was uncommitted, and probe M1 deleted it — so the
+re-run reported M6 surviving again with the guard gone. Night 1's digest says
+"commit before mutation-checking" and I read it tonight and still did not.
+
+### Decisions needed from Pete
+
+1. **The §4 queue order was set from the old mean-diff board, and the honest
+   instrument disagrees with it** — with 89% of elements outside Gate A's
+   tolerance on this seat, most per-element paint work in P1 cannot be measured
+   until geometry improves; should the queue go geometry-first (P2/P3/P4) and
+   P1's paint residuals follow?
+2. Still open from 2026-08-10, unanswered: keep or literally revert the
+   overflow-clip change that cost `sticky-scroll` 36 pixels on a card RustKit
+   lays out 38px too low?
+3. Still open from 2026-08-10, unanswered: how to land #130 so P0b's receipt
+   stays attributable now that engine commits sit on the same branch?
+
+### Surprises
+
+- **The instrument was wrong in the direction that flatters the work.** I
+  expected to spend tonight on a real corner-notch defect and found 62 confident
+  auto-fails that were Gate A's defects wearing Gate B's badge. Night 7's dig was
+  aimed by this column; its overflow-clip fix was real, but the "62 remain and
+  they are not one root" that closed that digest was largely not a root at all.
+- **The column that looked healthiest was the emptiest.** Discrete read 18/26
+  green. The correct reading was never "18 cases have no structural defect", it
+  was "8 cases have failures we cannot attribute and 18 have nothing we can see"
+  — and after the fix, 26/26 green means almost nothing, because only 172
+  elements were eligible to fail.
+- **This reorders what is measurable, not just what is reported.** A paint fix
+  on a geometrically wrong element now produces no movement in any oracle: the
+  percentage half will shift a few hundred pixels and the discrete half will stay
+  silent because the element is withheld. `render_borders` is a concrete example
+  I found and did **not** fix tonight for exactly this reason — it emits four
+  full-span `SolidColor` rects and the word `radius` does not appear in it, so
+  every bordered rounded box paints square corner overhang. The elements it
+  affects on `new_tab` are 240–384px out of place, so I could not have shown the
+  fix worked. Recorded here rather than half-landed.
+- Gate A on this seat: `y` 1164 and `height` 738 against `x` 306 and `width` 423,
+  and 1019 of 2631 failures exceed 20px. The vertical lean is consistent with the
+  Linux font stack rather than a defect, which is why nothing here is a receipt —
+  but 20px+ on a thousand boxes is not text metrics alone.
