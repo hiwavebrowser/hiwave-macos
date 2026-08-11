@@ -1506,3 +1506,29 @@ re-run reported M6 surviving again with the guard gone. Night 1's digest says
   and 1019 of 2631 failures exceed 20px. The vertical lean is consistent with the
   Linux font stack rather than a defect, which is why nothing here is a receipt —
   but 20px+ on a thousand boxes is not text metrics alone.
+
+### Correction to 2026-08-10's receipt
+
+Night 7 landed the overflow rounded-clip fix and headlined it `79 → 62` discrete
+auto-fails, with `image-gallery 18 → 2` as the strongest single case. Under the
+corrected detector that evidence does not exist: **`image-gallery` now examines
+0 of its 87 elements**, and both elements night 7 cited are withheld —
+`.gallery-item wide:nth-of-type(7)` is 100px out of place and
+`.article-card:nth-of-type(3)` is 38px out. Every failure in that 79 → 62 was on
+a box the detector should never have spoken about.
+
+Three things that are NOT retracted, stated separately so this reads as a
+correction and not a reversal:
+
+- **The defect was real and the finding stands on its own.** `overflow` emitted
+  no clip at all — `PushClip` had two call sites and neither was `overflow`.
+  That was read out of the display list, not inferred from a column.
+- **The percentage-half evidence stands**, because tonight's change does not
+  touch it: three cases improved with zero worsened pixels, and `sticky-scroll`
+  net −25px of 1,024,000.
+- **The fix is still the right change.** What it lost is its headline number.
+
+This matters for decision 2 above. Night 7 kept the change against a literal
+reading of the stop rule, and its argument leaned on the discrete column
+improving. That prop is gone; the code-level argument and the three clean cases
+are what is left, and they are what Pete should weigh.
