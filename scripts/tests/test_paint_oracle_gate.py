@@ -580,6 +580,38 @@ def test_a_displaced_element_cannot_be_reported_as_a_missing_clip():
     )
 
 
+def test_a_displaced_element_cannot_be_reported_as_a_wrong_solid_color():
+    """The precondition binds BOTH detectors, not just the clip one.
+
+    Added because the mutation sweep found it did not: dropping the geometry
+    filter from `detect_wrong_solid_color` alone left the whole suite green.
+    Sampling an element's interior at Chrome's rect reads another box's pixels
+    exactly as surely here as it does at a corner.
+    """
+    chrome, elements, styles = load_case("form-controls")
+    _area, selector, box = find_flat_element(chrome, elements)
+    want = chrome.pixel(box[0], box[1])
+    rustkit = with_pixels(
+        chrome,
+        [(x, y) for y in range(box[1], box[3]) for x in range(box[0], box[2])],
+        shift(want, TOLERANCE + 1),
+    )
+
+    exact = score("form-controls", chrome, rustkit, elements, styles,
+                  attributable=attributable_selectors(elements, layout_tree(elements)))
+    hits = [f for f in exact["failures"] if f["kind"] == "wrong_solid_color"]
+    assert [h["selector"] for h in hits] == [selector]
+
+    displaced = score(
+        "form-controls", chrome, rustkit, elements, styles,
+        attributable=attributable_selectors(
+            elements, layout_tree(elements, offset=(0.0, 21.0))
+        ),
+    )
+    assert not [f for f in displaced["failures"] if f["kind"] == "wrong_solid_color"]
+    assert displaced["discrete_failures"] == 0
+
+
 def test_withholding_is_counted_rather_than_silent():
     """A withheld element must show up as a number.
 
