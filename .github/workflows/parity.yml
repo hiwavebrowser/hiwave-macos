@@ -17,12 +17,111 @@ env:
 
 jobs:
   # ===========================================================================
+  # Join-key contract (~1m). Cheap, corpus-wide, no Rust and no swarm.
+  # ===========================================================================
+  selector-key:
+    # Gates A, B and C all join RustKit boxes to Chrome rects on the selector
+    # produced by capture_baseline.mjs. A change to it does not fail loudly —
+    # unmatched elements drop out of comparison and score as "no geometry
+    # error" because they are never compared. This asserts all 1757 committed
+    # selectors are still reproducible before any gate is believed.
+    #
+    # Blocking from its first run, unlike Gates A/B which enter advisory-first:
+    # this one is already measured green on the committed corpus (1757/1757)
+    # and its output is DOM structure — tag, class, id, nth-of-type — with no
+    # dependence on font stack or rasterizer, so it cannot red-lock on a
+    # platform difference. If it does go red on macOS that is a real finding.
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install oracle deps
+        working-directory: tools/parity_oracle
+        run: npm ci
+
+      - name: Install Chromium
+        working-directory: tools/parity_oracle
+        # `npm ci` installs the playwright PACKAGE but not its browsers, and
+        # this is the first job in the repo to need one — every other lane uses
+        # the oracle only for pngjs/pixelmatch diffing against the committed
+        # baselines, so nothing has ever launched a browser in CI. Without this
+        # the job dies on a missing chrome-headless-shell before it checks a
+        # single selector, which is a did-not-run wearing a red X.
+        run: npx playwright install --with-deps chromium
+
+      - name: Verify the join key still reproduces every committed selector
+        run: node tools/parity_oracle/verify_selector_key.mjs
+
+  # ===========================================================================
+  # Instrument guards (~1m). No Rust, no swarm, no captures.
+  # ===========================================================================
+  script-guards:
+    # Every gate in this campaign is held up by a mutation-checked guard in
+    # scripts/tests/, and until now not one of them ran in CI — the suite was
+    # executed by hand on the night it was written and never again. A guard
+    # that no longer runs is worse than the decoration this campaign keeps
+    # warning about: it reads as protection on a file nobody is checking.
+    #
+    # Blocking, and cheap enough to be: the whole suite is pure Python over
+    # committed fixtures and finishes in about a minute.
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install guard deps
+        # pyyaml, and only pyyaml: the lane guards parse parity.yml to assert
+        # that the steps they protect actually run. It is not in the runner
+        # image. Night 4's `test_both_gating_lanes_wire_the_scout_to_the_
+        # stability_minimum` has therefore never been runnable on a clean
+        # machine — it passed on the trench seat, where pyyaml happens to be
+        # installed, and died on ModuleNotFoundError the first time CI ran it.
+        run: python3 -m pip install --disable-pip-version-check pyyaml
+
+      - name: Run every instrument guard
+        run: |
+          set -euo pipefail
+          # Globbed rather than listed: a new guard file joins CI by existing,
+          # so a night that adds one cannot forget to register it here.
+          shopt -s nullglob
+          files=(scripts/tests/test_*.py)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No guard files matched. This is not a pass — the suite moved."
+            exit 1
+          fi
+          failed=0
+          for t in "${files[@]}"; do
+            echo "::group::$t"
+            if python3 "$t"; then echo "PASS $t"; else echo "FAIL $t"; failed=1; fi
+            echo "::endgroup::"
+          done
+          exit $failed
+
+  # ===========================================================================
   # PR Gate: Sharded swarm (~30m total)
   # ===========================================================================
   pr-swarm:
     if: github.event_name == 'pull_request'
     runs-on: macos-14
-    timeout-minutes: 20
+    # 20 -> 35 alongside the scout going 1 -> 3 iterations. Per shard that is
+    # ~7 scout units -> ~21, against a fixed 12 exploit units: roughly 1.7x
+    # the work. A shard killed by the timeout is a red PR with no receipt at
+    # all, which reads the same as a real failure, so the headroom is
+    # deliberate and generous. Wall-clock has NOT been measured on macos-14
+    # from this seat (no macOS runner available) — the first PR run after this
+    # lands is the measurement.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -47,12 +146,19 @@ jobs:
 
       - name: Run swarm shard ${{ matrix.shard }}
         run: |
+          # --iterations 3, not 1 (P0a, 2026-08-07). The pr_merge gate has
+          # required stability since it was written, but a one-iteration scout
+          # cannot produce a stability verdict, so parity_gate waived the
+          # check for every registry-viewport row and finish-line condition 3
+          # was enforced on nothing. The gate now fails a row it cannot judge;
+          # this is where the evidence to judge it comes from. The count is
+          # parity_lib.STABILITY_MIN_RUNS — keep the two in step.
           python3 scripts/parity_swarm.py \
             --jobs 2 \
             --shard-index ${{ matrix.shard }} \
             --shard-count 4 \
             --scope all \
-            --iterations 1 \
+            --iterations 3 \
             --exploit-top 3 \
             --exploit-iterations 2 \
             --exploit-viewports 800x600,1280x800 \
@@ -138,6 +244,139 @@ jobs:
             --per-case-thresholds \
             --primary-viewport-only \
             --max-diff 25
+
+      # -----------------------------------------------------------------
+      # Dual oracle (plan §2). ADVISORY for one cycle, per Pete's ratified
+      # decision 2 — receipts printed, nothing blocked — then flipped to
+      # blocking for A and B in a follow-up that changes only these flags.
+      #
+      # Advisory means VISIBLE, not ignored: every receipt goes to the job
+      # summary, so an advisory gate that silently stopped running is
+      # readable on the PR rather than inferred from a green check. That
+      # distinction is the whole reason this campaign exists.
+      #
+      # The shard artifacts carry the captures — parity_lib writes
+      # parity-results/<run>/<case>/<viewport>/iter-N/capture/{frame.ppm,
+      # layout.json} and the re-homing step above restores that layout — so
+      # the gates read real frames here, not a re-render.
+      # -----------------------------------------------------------------
+      - name: Gate A — geometry (advisory)
+        id: gate_a
+        if: always()
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 scripts/layout_oracle_gate.py \
+            --layout-root parity-results \
+            --json parity-results/gate-a.json | tee parity-results/gate-a.txt
+
+      - name: Gate B — paint (advisory)
+        id: gate_b
+        if: always()
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 scripts/paint_oracle_gate.py \
+            --capture-root parity-results \
+            --json parity-results/gate-b.json | tee parity-results/gate-b.txt
+
+      - name: Gate C — forensic board (non-gating)
+        id: gate_c
+        if: always()
+        continue-on-error: true
+        run: |
+          python3 scripts/forensic_board.py \
+            --capture-root parity-results \
+            --out parity-results/forensic
+
+      # -----------------------------------------------------------------
+      # The metric itself. Gates A and B publish independent verdicts and
+      # the stability bar lives in parity_gate; until this step existed
+      # `N/26` was only ever stated in prose by a human reading three
+      # numbers and ANDing them by eye. This computes the conjunction.
+      #
+      # Non-gating on Gate C's precedent and for its reason: it is a
+      # measurement, not a fifth gate. The NUMBERS never fail a run — but a
+      # receipt that measured nothing exits 1, because "0/26" and "the
+      # receipt did not run" are different facts that must not print the
+      # same.
+      # -----------------------------------------------------------------
+      - name: Finish line — N/26 (receipt, non-gating)
+        id: finish_line
+        if: always()
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 scripts/finish_line_receipt.py \
+            --gate-a parity-results/gate-a.json \
+            --gate-b parity-results/gate-b.json \
+            --aggregate parity-results/aggregate_report.json \
+            --json parity-results/finish-line.json \
+            --markdown parity-results/finish-line.md \
+            | tee parity-results/finish-line.txt
+
+      - name: Publish the finish-line receipt
+        if: always()
+        run: |
+          {
+            if [ -f parity-results/finish-line.md ]; then
+              cat parity-results/finish-line.md
+            else
+              echo "## Finish line — N/26"
+              echo
+              echo "**No receipt was produced.** This is not \`0/26\`. The"
+              echo "metric was not computed on this run, and a missing number"
+              echo "must never be read as a bad one."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish oracle receipts
+        if: always()
+        run: |
+          {
+            echo "## Dual oracle — advisory cycle"
+            echo
+            echo "Gates A and B are **advisory** for one cycle (ratified"
+            echo "2026-08-07): they print receipts and block nothing. Gate C is"
+            echo "non-gating by design and always will be."
+            echo
+            emit_receipt() {
+              echo "<details><summary>Gate $1 — outcome: $2</summary>"
+              echo
+              echo '```'
+              cat "$3" 2>/dev/null \
+                || echo "Gate $1 produced no receipt — it did not run. This is not a pass."
+              echo '```'
+              echo
+              echo "</details>"
+              echo
+            }
+            emit_receipt A "${{ steps.gate_a.outcome }}" parity-results/gate-a.txt
+            emit_receipt B "${{ steps.gate_b.outcome }}" parity-results/gate-b.txt
+            if [ -f parity-results/forensic/board.md ]; then
+              cat parity-results/forensic/board.md
+            else
+              echo "## Gate C — forensic board"
+              echo
+              echo "**No board was published.** Gate C is non-gating, which means"
+              echo "its numbers never fail a PR — it does not mean a board that"
+              echo "was never produced reads clean. Something stopped it running."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload oracle artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-oracle
+          path: |
+            parity-results/gate-a.json
+            parity-results/gate-b.json
+            parity-results/finish-line.json
+            parity-results/finish-line.md
+            parity-results/forensic/
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: Upload aggregate report
         if: always()
@@ -283,12 +522,20 @@ jobs:
 
       - name: Run nightly swarm shard ${{ matrix.shard }}
         run: |
+          # --iterations 3: same reason as the PR lane. Nightly did reach the
+          # stability bar on a handful of rows, but only by accident — the
+          # exploit phase re-ran the top-10 worst at three viewports, so a
+          # case whose REGISTRY viewport happened to be one of them landed in
+          # the same group and cleared 2 runs. Cases 11..26, and any case
+          # registered at a viewport outside the exploit list, were never
+          # checked. Stability is now judged from the scout phase, on every
+          # case, by design rather than by coincidence.
           python3 scripts/parity_swarm.py \
             --jobs 2 \
             --shard-index ${{ matrix.shard }} \
             --shard-count 4 \
             --scope all \
-            --iterations 1 \
+            --iterations 3 \
             --exploit-top 10 \
             --exploit-iterations 3 \
             --exploit-viewports 800x600,1280x800,1920x1080 \
@@ -375,6 +622,113 @@ jobs:
             --require-stable \
             --max-variance 0.10 \
             --max-diff 25
+
+      # -----------------------------------------------------------------
+      # Dual oracle, nightly lane. Same advisory-for-one-cycle posture as
+      # the PR lane; plan §2 requires both lanes to carry the oracle, so
+      # they are flipped to blocking together rather than drifting apart.
+      # -----------------------------------------------------------------
+      - name: Gate A — geometry (advisory)
+        id: nightly_gate_a
+        if: always()
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 scripts/layout_oracle_gate.py \
+            --layout-root parity-results \
+            --json parity-results/gate-a.json | tee parity-results/gate-a.txt
+
+      - name: Gate B — paint (advisory)
+        id: nightly_gate_b
+        if: always()
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 scripts/paint_oracle_gate.py \
+            --capture-root parity-results \
+            --json parity-results/gate-b.json | tee parity-results/gate-b.txt
+
+      - name: Gate C — forensic board (non-gating)
+        if: always()
+        continue-on-error: true
+        run: |
+          python3 scripts/forensic_board.py \
+            --capture-root parity-results \
+            --out parity-results/forensic
+
+      # Same receipt as the PR lane, same non-gating contract. Nightly is
+      # where the number is tracked over time, so it must be computed here
+      # rather than inferred from whenever the PR lane last ran.
+      - name: Finish line — N/26 (receipt, non-gating)
+        if: always()
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 scripts/finish_line_receipt.py \
+            --gate-a parity-results/gate-a.json \
+            --gate-b parity-results/gate-b.json \
+            --aggregate parity-results/aggregate_report.json \
+            --json parity-results/finish-line.json \
+            --markdown parity-results/finish-line.md \
+            | tee parity-results/finish-line.txt
+
+      - name: Publish the finish-line receipt
+        if: always()
+        run: |
+          {
+            if [ -f parity-results/finish-line.md ]; then
+              cat parity-results/finish-line.md
+            else
+              echo "## Finish line — N/26"
+              echo
+              echo "**No receipt was produced.** This is not \`0/26\`. The"
+              echo "metric was not computed on this run, and a missing number"
+              echo "must never be read as a bad one."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish oracle receipts
+        if: always()
+        run: |
+          {
+            echo "## Dual oracle — nightly, advisory cycle"
+            echo
+            emit_receipt() {
+              echo "<details><summary>Gate $1 — outcome: $2</summary>"
+              echo
+              echo '```'
+              cat "$3" 2>/dev/null \
+                || echo "Gate $1 produced no receipt — it did not run. This is not a pass."
+              echo '```'
+              echo
+              echo "</details>"
+              echo
+            }
+            emit_receipt A "${{ steps.nightly_gate_a.outcome }}" parity-results/gate-a.txt
+            emit_receipt B "${{ steps.nightly_gate_b.outcome }}" parity-results/gate-b.txt
+            if [ -f parity-results/forensic/board.md ]; then
+              cat parity-results/forensic/board.md
+            else
+              echo "## Gate C — forensic board"
+              echo
+              echo "**No board was published.** Non-gating means its numbers"
+              echo "never fail a run — not that a board nobody produced reads clean."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload oracle artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-oracle
+          path: |
+            parity-results/gate-a.json
+            parity-results/gate-b.json
+            parity-results/finish-line.json
+            parity-results/finish-line.md
+            parity-results/forensic/
+          retention-days: 14
+          if-no-files-found: warn
 
       # Compare against previous nightly if available
       - name: Download previous nightly

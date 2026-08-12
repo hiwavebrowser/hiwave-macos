@@ -128,6 +128,49 @@ def load_case_gates() -> Dict[str, Dict[str, Any]]:
     return gates
 
 
+def stability_min_runs() -> int:
+    """Finish-line condition 3's iteration count, cited from parity_lib.
+
+    Read, not copied — same rule as gate B's `aa_tolerance`. One bar, one
+    place, so the producer and the gate cannot drift into disagreeing about
+    what "stable across 3 iterations" means.
+    """
+    import sys as _sys
+
+    _sys.path.insert(0, str(Path(__file__).parent))
+    from parity_lib import STABILITY_MIN_RUNS  # noqa: E402
+
+    return int(STABILITY_MIN_RUNS)
+
+
+def measured_runs(r: Dict[str, Any]) -> int:
+    """Iterations of this row that produced a MEASUREMENT. 0 when unknown.
+
+    Three schemas reach this gate and they disagree about the field:
+    parity_aggregate emits `measured_runs` (int); the swarm emits
+    `iteration_diffs` (list of the diffs that scored); parity_test.py emits
+    `pixel_runs` as a LIST of per-run diffs, where the aggregate emits the
+    same key as an INT attempt count. The old
+    `int(r.get("pixel_runs") or r.get("iterations") or 1)` raised TypeError on
+    the list form, so pointing the gate straight at a parity_test report
+    crashed instead of grading it.
+
+    `iterations` is the ATTEMPT count and is never consulted: three attempts
+    of which two errored is one measurement, and a stability verdict drawn
+    from one measurement is exactly the blank row this campaign refuses to
+    read as green. Unknown returns 0 — absence of evidence is not evidence of
+    stability.
+    """
+    v = r.get("measured_runs")
+    if isinstance(v, int) and not isinstance(v, bool):
+        return v
+    for key in ("iteration_diffs", "pixel_runs"):
+        v = r.get(key)
+        if isinstance(v, list):
+            return len(v)
+    return 0
+
+
 def primary_viewport_filter(results: list) -> list:
     """Keep only each case's REGISTRY viewport row (CI-1 §C2, 2026-07-11).
 
@@ -175,6 +218,10 @@ def gate_test_results(
                 "diff_pct": c.get("diff_pct"),
                 "passed": c.get("passed"),
                 "stable": c.get("stable"),
+                # Carried through, or this fallback would report every row as
+                # stability_unmeasured no matter how many iterations ran.
+                "measured_runs": c.get("measured_runs"),
+                "iteration_diffs": c.get("iteration_diffs"),
                 "error": None,
             }
             for c in report["cases"]
@@ -229,20 +276,45 @@ def gate_test_results(
             continue
 
         if require_stable:
-            # Stability is only ENFORCEABLE where evidence exists: the PR
-            # scout phase runs each native case ONCE (iterations 1), which
-            # the swarm reports as stable=False — failing on that would
-            # permanently red-lock every PR the moment data flows (a trap
-            # nobody hit while the aggregate ran empty). Rows with >= 2 runs
-            # are held to the stability bar; single-run rows are gated on
-            # diff only.
-            runs = int(r.get("pixel_runs") or r.get("iterations") or 1)
-            if runs >= 2:
-                if stable is not True:
-                    failures.append({"case_id": case_id, "reason": "unstable", "variance": variance, "max_variance": max_variance})
-                    continue
-                if variance is not None and float(variance) > max_variance:
-                    failures.append({"case_id": case_id, "reason": "variance", "variance": float(variance), "max_variance": max_variance})
+            # P0a (2026-08-07): stability had never gated anything at
+            # pr_merge. The old rule held only rows with >= 2 runs to the bar
+            # and waived the rest — and the PR/nightly scout phase runs each
+            # native case ONCE, so after --primary-viewport-only every
+            # surviving row was a single-run row and every one was waived.
+            # The waiver was written to avoid red-locking PRs, and it worked:
+            # it made the check unreachable instead.
+            #
+            # The bar is now evidence, not exemption. A row that cannot show
+            # STABILITY_MIN_RUNS measurements FAILS as `stability_unmeasured`
+            # — a distinct reason from `unstable`, because "we looked three
+            # times and it moved" and "we looked once" are different facts and
+            # a gate that reports them identically teaches nobody anything.
+            # This is the baseline file's rule for blank instrument rows
+            # applied to the gate's own output: a row with no instrument
+            # reads NOT MEASURED, never green.
+            #
+            # The producers were changed in the same commit to supply the
+            # evidence (`--iterations 3` on the PR and nightly scout phases in
+            # .github/workflows/parity.yml). Tightening the gate without that
+            # would red-lock every PR, which is the trap the original waiver
+            # was dodging; the fix is to run the iterations, not to stop
+            # asking for them. `commit` level does not require stability and
+            # its lane still runs once.
+            min_runs = stability_min_runs()
+            runs = measured_runs(r)
+            if runs < min_runs:
+                failures.append({
+                    "case_id": case_id,
+                    "reason": "stability_unmeasured",
+                    "measured_runs": runs,
+                    "required_runs": min_runs,
+                })
+                continue
+            if stable is not True:
+                failures.append({"case_id": case_id, "reason": "unstable", "variance": variance, "max_variance": max_variance})
+                continue
+            if variance is not None and float(variance) > max_variance:
+                failures.append({"case_id": case_id, "reason": "variance", "variance": float(variance), "max_variance": max_variance})
 
     return {"failures": failures, "total": len(results)}
 

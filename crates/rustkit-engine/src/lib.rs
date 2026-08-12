@@ -2967,6 +2967,18 @@ impl Engine {
                 style.display = rustkit_css::Display::Inline;
                 style.text_decoration_line = rustkit_css::TextDecorationLine::LINE_THROUGH;
             }
+            // Ruby: Chrome's UA sheet computes display:ruby (inline-level).
+            // RustKit has no ruby layout, and css-ruby-1 §2.1 requires
+            // engines without it to treat the ruby display values as inline
+            // — falling through to the Block default laid a bare <ruby> out
+            // full-width (WPT css-inline/empty-span-size-002).
+            "ruby" | "rb" | "rt" | "rtc" => {
+                style.display = rustkit_css::Display::Inline;
+            }
+            // Chrome hides rp (the fallback parentheses) entirely.
+            "rp" => {
+                style.display = rustkit_css::Display::None;
+            }
             // Form controls do NOT inherit the document font in Chrome's UA
             // sheet — they get the system control font at 13.333px unless
             // the author sets one (css-selectors buttons: Chrome labels
@@ -9312,6 +9324,86 @@ mod tests {
             controls[0].0 < controls[1].0 && controls[1].0 < controls[2].0,
             "buttons must advance horizontally: xs {:?}",
             controls.iter().map(|c| c.0).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_ruby_ua_display_inline() {
+        // css-ruby-1 §2.1: an engine without ruby layout must treat the ruby
+        // display values as inline. The UA match had no ruby arm, so <ruby>
+        // fell to the Block default and filled its container's width — WPT
+        // css-inline/empty-span-size-002 rendered its bordered <ruby> as a
+        // full-width 2px bar instead of a narrow inline box on a line with
+        // height. Drive the real engine: the bordered ruby must be an
+        // inline-level box that does not fill the containing block.
+        let html = r#"<!DOCTYPE html>
+            <html><body>
+              <div><ruby style="border: 3px solid"></ruby></div>
+            </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+        };
+
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        let containing_block = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        layout.layout(&containing_block);
+
+        // The ruby is the only box with a 3px border; find it by that.
+        fn find_ruby(b: &LayoutBox, out: &mut Vec<(rustkit_css::Display, BoxType, f32)>) {
+            if (b.dimensions.border.left - 3.0).abs() < 0.01 {
+                out.push((
+                    b.style.display,
+                    b.box_type.clone(),
+                    b.dimensions.border_box().width,
+                ));
+            }
+            for c in &b.children {
+                find_ruby(c, out);
+            }
+        }
+        let mut rubies = Vec::new();
+        find_ruby(&layout, &mut rubies);
+
+        assert_eq!(rubies.len(), 1, "expected exactly one 3px-bordered box (the ruby)");
+        let (display, box_type, border_width) = &rubies[0];
+        assert_eq!(
+            *display,
+            rustkit_css::Display::Inline,
+            "ruby UA display must compute to inline (css-ruby-1 §2.1 fallback)"
+        );
+        assert!(
+            matches!(box_type, BoxType::Inline),
+            "ruby must build an inline-level box, got {:?}",
+            box_type
+        );
+        assert!(
+            *border_width < 100.0,
+            "inline ruby must not fill the containing block: width {}",
+            border_width
         );
     }
 

@@ -50,6 +50,7 @@ ALLOWED = {
     ("parity_lib.py", "aggregate_iterations"): "all uses sit inside `if diffs:`",
     ("parity_swarm.py", "run_exploit_phase"): "guarded by `is not None` in the filter",
     ("parity_test.py", "run_test"): "guarded by `is not None` before compare",
+    ("wpt_tier1.py", "run_pair"): "explicit `is None` -> ERROR row before the comparison",
 }
 
 

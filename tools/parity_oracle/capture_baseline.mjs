@@ -100,6 +100,18 @@ export async function captureBaseline(htmlPath, outputDir, width, height) {
     const { styles, rects } = await page.evaluate((properties) => {
       const results = { styles: [], rects: [] };
       
+      // THE JOIN KEY. Gates A, B and C all match RustKit boxes to Chrome rects
+      // on this string, and the engine mirrors it (P0a-0). Changing its output
+      // by one character does not fail loudly — unmatched elements silently
+      // drop out of comparison and score as "no geometry error" because they
+      // were never compared. `verify_selector_key.mjs` extracts this function
+      // and asserts it still reproduces all 1757 committed baseline selectors.
+      //
+      // In particular `/\\s+/` below matches a literal backslash followed by
+      // `s`, NOT whitespace, so the split is a no-op and the raw className
+      // survives: `div.card featured`, space intact. It reads as a typo and it
+      // is what 305 committed selectors say. Do not tidy it without
+      // regenerating every baseline and re-mirroring the engine side.
       function getSelector(el) {
         if (el.id) return `#${el.id}`;
         
