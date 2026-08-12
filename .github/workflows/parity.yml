@@ -315,6 +315,23 @@ jobs:
       # receipt did not run" are different facts that must not print the
       # same.
       # -----------------------------------------------------------------
+      - name: Ratchet — regression gate (blocking on regression only)
+        if: always()
+        run: |
+          # pipefail is load-bearing: without it `rc=$?` reads TEE's exit
+          # code and a crashed ratchet passes the step — observed on run
+          # 31624496939, where a Traceback concluded "success".
+          set +e -o pipefail
+          python3 scripts/ratchet_gate.py --gate-a parity-results/gate-a.json --gate-b parity-results/gate-b.json | tee parity-results/ratchet.txt
+          rc=$?
+          set -e +o pipefail
+          echo "ratchet exit code: $rc"
+          if [ "$rc" = "1" ]; then
+            echo "::error::Ratchet REGRESSION — a case is worse than the committed floor"
+            exit 1
+          elif [ "$rc" = "2" ]; then
+            echo "::warning::Ratchet holds — absolute red exists but nothing regressed"
+          fi
       - name: Finish line — N/26 (receipt, non-gating)
         id: finish_line
         if: always()
@@ -673,6 +690,23 @@ jobs:
       # Same receipt as the PR lane, same non-gating contract. Nightly is
       # where the number is tracked over time, so it must be computed here
       # rather than inferred from whenever the PR lane last ran.
+      - name: Ratchet — regression gate (blocking on regression only)
+        if: always()
+        run: |
+          # pipefail is load-bearing: without it `rc=$?` reads TEE's exit
+          # code and a crashed ratchet passes the step — observed on run
+          # 31624496939, where a Traceback concluded "success".
+          set +e -o pipefail
+          python3 scripts/ratchet_gate.py --gate-a parity-results/gate-a.json --gate-b parity-results/gate-b.json | tee parity-results/ratchet.txt
+          rc=$?
+          set -e +o pipefail
+          echo "ratchet exit code: $rc"
+          if [ "$rc" = "1" ]; then
+            echo "::error::Ratchet REGRESSION — a case is worse than the committed floor"
+            exit 1
+          elif [ "$rc" = "2" ]; then
+            echo "::warning::Ratchet holds — absolute red exists but nothing regressed"
+          fi
       - name: Finish line — N/26 (receipt, non-gating)
         if: always()
         continue-on-error: true
