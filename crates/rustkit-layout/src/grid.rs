@@ -5365,6 +5365,20 @@ mod tests {
             "the border box starts after the left margin, got x={}",
             b.x
         );
+
+        // §6.5 stated as the invariant it is: the item's MARGIN box is the
+        // grid area. This is what makes the resolved margins worth recording
+        // on the item's dimensions at all — `margin_box()` is read by the
+        // float, inline and scroll-extent paths, and a grid item that reports
+        // a margin box equal to its border box lies to every one of them.
+        let m = container.children[0].dimensions.margin_box();
+        assert!(
+            (m.x).abs() < 0.01
+                && (m.y).abs() < 0.01
+                && (m.width - 400.0).abs() < 0.01
+                && (m.height - 100.0).abs() < 0.01,
+            "the item's margin box should BE the grid area (0,0 400x100), got {m:?}"
+        );
     }
 
     /// The explicit-size early returns are a separate path through
