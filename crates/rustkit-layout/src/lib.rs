@@ -2428,7 +2428,19 @@ impl LayoutBox {
                 cursor_x += child_width;
                 line_width += child_width;
                 line_height = line_height.max(child_height);
-                if child.baseline_is_bottom_edge() {
+                // vertical-align: top|bottom boxes do not anchor to the
+                // baseline at all (CSS2 §10.8): a top-aligned box hangs from
+                // the line-box top, so a tall one SWALLOWS the strut instead
+                // of stacking above its descent. Extending the strut under
+                // them made every nowrap card row strut_descent too tall —
+                // sticky-scroll's .horizontal-scroll read 156.8 where Chrome
+                // reads 150 (+6.8 = descent + half-leading at line-height
+                // 1.6), and the error cascaded into every later sibling's y.
+                let anchored_to_baseline = !matches!(
+                    child.style.vertical_align,
+                    rustkit_css::VerticalAlign::Top | rustkit_css::VerticalAlign::Bottom
+                );
+                if anchored_to_baseline && child.baseline_is_bottom_edge() {
                     // Box bottom sits ON the baseline; the strut extends the
                     // line box below it (CSS2 §10.8.1).
                     line_below_baseline = line_below_baseline.max(child_height + strut_descent);
@@ -2941,7 +2953,19 @@ impl LayoutBox {
                 cursor_x += child_width;
                 line_width += child_width;
                 line_height = line_height.max(child_height);
-                if child.baseline_is_bottom_edge() {
+                // vertical-align: top|bottom boxes do not anchor to the
+                // baseline at all (CSS2 §10.8): a top-aligned box hangs from
+                // the line-box top, so a tall one SWALLOWS the strut instead
+                // of stacking above its descent. Extending the strut under
+                // them made every nowrap card row strut_descent too tall —
+                // sticky-scroll's .horizontal-scroll read 156.8 where Chrome
+                // reads 150 (+6.8 = descent + half-leading at line-height
+                // 1.6), and the error cascaded into every later sibling's y.
+                let anchored_to_baseline = !matches!(
+                    child.style.vertical_align,
+                    rustkit_css::VerticalAlign::Top | rustkit_css::VerticalAlign::Bottom
+                );
+                if anchored_to_baseline && child.baseline_is_bottom_edge() {
                     // Box bottom sits ON the baseline; the strut extends the
                     // line box below it (CSS2 §10.8.1).
                     line_below_baseline = line_below_baseline.max(child_height + strut_descent);
@@ -6567,6 +6591,73 @@ mod tests {
         layout_box.calculate_block_width(&containing_1000());
         assert_eq!(layout_box.dimensions.margin.left, 0.0);
         assert_eq!(layout_box.dimensions.margin.right, 0.0);
+    }
+
+    /// A vertical-align:top atomic inline taller than the strut SWALLOWS
+    /// it (CSS2 §10.8): the line box is exactly the box's height. The old
+    /// accounting extended strut_descent below every bottom-edge-baseline
+    /// box regardless of alignment — sticky-scroll's nowrap card row read
+    /// +6.8px tall and shifted every later sibling. Driven through BOTH
+    /// children paths (the collapse twin the engine uses, and the plain
+    /// twin flex item re-layout uses).
+    #[test]
+    fn vertical_align_top_atomic_swallows_the_strut() {
+        for use_collapse in [true, false] {
+            let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+            let mut ib = ComputedStyle::new();
+            ib.display = rustkit_css::Display::InlineBlock;
+            ib.width = Length::Px(200.0);
+            ib.height = Length::Px(120.0);
+            ib.vertical_align = rustkit_css::VerticalAlign::Top;
+            parent.children.push(LayoutBox::new(BoxType::Block, ib));
+
+            let cb = Dimensions {
+                content: Rect::new(0.0, 0.0, 800.0, 600.0),
+                ..Default::default()
+            };
+            if use_collapse {
+                let mut mc = MarginCollapseContext::new();
+                let mut fc = FloatContext::new();
+                parent.layout_with_collapse(&cb, &mut mc, &mut fc);
+            } else {
+                parent.layout(&cb);
+            }
+            let h = parent.dimensions.content.height;
+            assert!(
+                (h - 120.0).abs() < 0.1,
+                "top-aligned 120px inline-block must make a 120px line \
+                 (collapse={use_collapse}), got {h} — 123.7 means the strut \
+                 descent was stacked under a box that swallows it"
+            );
+        }
+    }
+
+    /// NEGATIVE CONTROL: the BASELINE-aligned case keeps the strut descent
+    /// under the box — the behaviour Chrome shows and the settings-toggle
+    /// pin depends on. The vertical-align gate must not leak into it.
+    #[test]
+    fn baseline_aligned_atomic_still_extends_strut() {
+        let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut ib = ComputedStyle::new();
+        ib.display = rustkit_css::Display::InlineBlock;
+        ib.width = Length::Px(200.0);
+        ib.height = Length::Px(120.0);
+        parent.children.push(LayoutBox::new(BoxType::Block, ib));
+        let strut = parent.inline_strut_descent();
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        let mut mc = MarginCollapseContext::new();
+        let mut fc = FloatContext::new();
+        parent.layout_with_collapse(&cb, &mut mc, &mut fc);
+        let h = parent.dimensions.content.height;
+        assert!(
+            (h - (120.0 + strut)).abs() < 0.1,
+            "baseline-aligned box must keep strut descent below it: \
+             expected {}, got {h}",
+            120.0 + strut
+        );
     }
 
     /// Sibling margins inside a FLEX ITEM must collapse (CSS 2.1 §8.3.1):
