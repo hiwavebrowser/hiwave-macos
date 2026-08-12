@@ -16,20 +16,31 @@ RATCHET = Path(__file__).resolve().parents[1] / "ratchet_gate.py"
 
 
 def gate_a(cases):
+    # Production schema: geometry_failures / join_failures are COUNTS
+    # (pinned against a verbatim excerpt of real gate output below).
     return {"gate": "A", "cases": [
         {"case_id": cid, "measured": m.get("measured", True),
          "green": m.get("green", not m.get("geo", [])),
-         "geometry_failures": [{"selector": s} for s in m.get("geo", [])],
-         "join_failures": [{"selector": s} for s in m.get("join", [])]}
+         "geometry_failures": len(m.get("geo", [])),
+         "join_failures": len(m.get("join", []))}
         for cid, m in cases.items()]}
 
 
 def gate_b(cases):
+    # Production schema: per-case fraction is within_fraction; discrete
+    # failures live in failures[] flagged "discrete": true, alongside a
+    # non-discrete paint_below_bar row this builder includes so tests
+    # cannot pass by treating every failures[] entry as an id.
     return {"gate": "B", "cases": [
         {"case_id": cid, "measured": m.get("measured", True),
          "green": m.get("green", not m.get("disc", []) and m.get("pct", 1.0) >= 0.99),
-         "pass_fraction": m.get("pct", 1.0),
-         "discrete": [{"kind": k, "selector": s} for k, s in m.get("disc", [])]}
+         "within_fraction": m.get("pct", 1.0),
+         "discrete_failures": len(m.get("disc", [])),
+         "failures": (
+             [{"kind": "paint_below_bar", "selector": None, "discrete": False}]
+             if m.get("pct", 1.0) < 0.99 else []
+         ) + [{"kind": k, "selector": s, "discrete": True}
+              for k, s in m.get("disc", [])]}
         for cid, m in cases.items()]}
 
 
@@ -149,6 +160,40 @@ class RatchetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             rc, out = run(t, gate_a(BASE_A), gate_b(BASE_B), self._seeded(t))
             self.assertIn(rc, (0, 2), out)
+            self.assertNotIn("REGRESSION", out)
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+class ProductionSchemaTests(unittest.TestCase):
+    """Verbatim excerpts of REAL gate output (master run 31624231006).
+
+    The first version of the ratchet crashed on its first contact with
+    production data because every synthetic fixture encoded the author's
+    misreading of the schema (lists where production emits counts). These
+    excerpts pin the real shape; if a gate's schema changes, this fails
+    before CI does.
+    """
+
+    def test_production_schema_excerpt(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = json.loads((FIXTURES / "gate-a-excerpt.json").read_text())
+            b = json.loads((FIXTURES / "gate-b-excerpt.json").read_text())
+            # seed from the excerpt, then hold against itself: exercises
+            # snapshot() + compare() on the real shape end to end
+            rc, out = run(t, a, b, baseline=None,
+                          extra=["--write-seed", str(Path(t) / "ratchet.json")])
+            self.assertEqual(rc, 0, out)
+            seed = json.loads((Path(t) / "ratchet.json").read_text())
+            about = seed["cases"]["about"]
+            self.assertGreater(about["geometry_fail_count"], 0)
+            self.assertIsInstance(about["geometry_fail_count"], int)
+            self.assertGreater(about["join_fail_count"], 0)
+            self.assertLess(about["paint_pct"], 0.99)
+            self.assertTrue(seed["cases"]["bg-pure"]["paint_green"])
+            rc, out = run(t, a, b, baseline=seed)
+            self.assertEqual(rc, 2, out)
             self.assertNotIn("REGRESSION", out)
 
 

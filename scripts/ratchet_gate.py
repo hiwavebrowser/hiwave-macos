@@ -35,13 +35,15 @@ def _case_map(report: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
 def discrete_ids(case: Dict[str, Any]) -> List[str]:
     """Stable identity for a discrete failure: kind::selector.
 
-    Only ATTRIBUTABLE failures exist in Gate B's `discrete` list (the
-    geometry precondition already ran inside the gate); this function does
-    not re-filter, it only names.
+    Production Gate B rows carry discrete failures inside `failures[]`,
+    flagged `"discrete": true` (only attributable ones — the geometry
+    precondition already ran inside the gate). The percentage-bar entry in
+    the same list carries `"discrete": false` and is not an id.
     """
     out = []
-    for d in case.get("discrete", []) or []:
-        out.append(f"{d.get('kind', '?')}::{d.get('selector', '?')}")
+    for f in case.get("failures", []) or []:
+        if f.get("discrete"):
+            out.append(f"{f.get('kind', '?')}::{f.get('selector', '?')}")
     return sorted(out)
 
 
@@ -55,14 +57,17 @@ def snapshot(
     rows: Dict[str, Any] = {}
     for cid in sorted(set(amap) | set(bmap)):
         a, b = amap.get(cid), bmap.get(cid)
+        # Production schema (pinned by test_production_schema_excerpt):
+        # geometry_failures / join_failures are COUNTS, not lists; the
+        # per-case paint fraction is `within_fraction`.
         rows[cid] = {
             "geometry_measured": bool(a and a.get("measured")),
             "geometry_green": bool(a and a.get("green")),
-            "geometry_fail_count": len((a or {}).get("geometry_failures") or []),
-            "join_fail_count": len((a or {}).get("join_failures") or []),
+            "geometry_fail_count": int((a or {}).get("geometry_failures") or 0),
+            "join_fail_count": int((a or {}).get("join_failures") or 0),
             "paint_measured": bool(b and b.get("measured")),
             "paint_green": bool(b and b.get("green")),
-            "paint_pct": float((b or {}).get("pass_fraction") or 0.0),
+            "paint_pct": float((b or {}).get("within_fraction") or 0.0),
             "discrete_fail_ids": discrete_ids(b or {}),
         }
     return {"schema": SCHEMA, "max_variance": max_variance, "cases": rows}
