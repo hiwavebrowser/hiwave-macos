@@ -22,7 +22,14 @@ mkdir -p "$OUT"
 
 PROFILE_FLAG=""
 PROFILE="debug"
-if [ "${1:-}" = "--release" ]; then PROFILE_FLAG="--release"; PROFILE="release"; fi
+VERBOSE=0
+for arg in "$@"; do
+  case "$arg" in
+    --release) PROFILE_FLAG="--release"; PROFILE="release" ;;
+    --verbose) VERBOSE=1 ;;
+    *) echo "unknown flag: $arg (want --release and/or --verbose)" >&2; exit 2 ;;
+  esac
+done
 
 STATE="$HOME/Library/Application Support/hiwave/workspace_state.json"
 [ -f "$STATE" ] && cp "$STATE" "$OUT/workspace_before.json"
@@ -37,8 +44,25 @@ echo "── HiWave session $TS ──"
 echo "   log: $OUT/run.log   (Atlas can tail this live)"
 START=$(date +%s)
 
-# info-level for the crates that matter, warn elsewhere; no secrets in logs.
-RUST_LOG="warn,rustkit_engine=info,rustkit_renderer=info,hiwave_app=info" \
+# Log filter. The binary's target is `hiwave` (bin name), NOT `hiwave_app`
+# (crate name) — filtering on the crate name silently drops every shell line,
+# which is how a whole layer goes missing from a session log.
+#
+# `--verbose` drops every RustKit crate to debug and turns on the input trace
+# lines (wheel/scroll/key). Those are trace-level on purpose: they fire per
+# event and would drown a normal session. But when the question IS input, a
+# session without them cannot answer it — 2026-08-06, where "no wheel events
+# in the log" could not be told apart from "the log does not carry wheel
+# events."
+if [ "$VERBOSE" -eq 1 ]; then
+  RUST_LOG_SPEC="warn,hiwave=trace,rustkit_engine=debug,rustkit_renderer=debug,rustkit_layout=debug,rustkit_css=debug,rustkit_net=debug,rustkit_viewhost=debug,rustkit_compositor=debug,rustkit_text=debug"
+  echo "   verbose: RustKit crates at debug, shell input trace ON"
+else
+  RUST_LOG_SPEC="warn,hiwave=info,rustkit_engine=info,rustkit_renderer=info,rustkit_core=info"
+fi
+echo "   RUST_LOG=$RUST_LOG_SPEC" >> "$OUT/meta.txt"
+
+RUST_LOG="$RUST_LOG_SPEC" \
   cargo run -p hiwave-app --features rustkit $PROFILE_FLAG 2>&1 | tee "$OUT/run.log"
 APP_EXIT=${PIPESTATUS[0]}
 

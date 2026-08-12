@@ -819,6 +819,20 @@ pub struct LayoutBox {
     /// an image inside it) navigates, without the hit path needing DOM
     /// access.
     pub link_href: Option<String>,
+    /// Caret offset when this box is the FOCUSED text control, else `None`.
+    /// Set by the engine at layout-build time from live edit state; the
+    /// painter uses it to draw the caret and the focus ring. This was
+    /// previously impossible ("focus tracking requires DOM node ID in
+    /// LayoutBox") and is unblocked by `node_id` below.
+    pub focused_caret: Option<usize>,
+    /// Raw `NodeId` of the originating DOM node, when there is one.
+    ///
+    /// Carried as a plain `usize` so `rustkit-layout` keeps no dependency on
+    /// `rustkit-dom`; the engine converts back at the boundary. This is the
+    /// long-standing "requires node_id tracking in LayoutBox" TODO that
+    /// blocked click-to-focus and keyboard dispatch — without it a hit test
+    /// can locate a box but not the element it came from.
+    pub node_id: Option<usize>,
     /// Wrapped lines for text boxes (`None` = single-run text, no wrap).
     pub text_lines: Option<Vec<TextLine>>,
     /// FLOW offset of visual line 0 when this text box was laid out
@@ -851,6 +865,8 @@ impl LayoutBox {
             element_id: None,
             identity: None,
             link_href: None,
+            focused_caret: None,
+            node_id: None,
             text_lines: None,
             text_flow_first_offset: None,
         }
@@ -1777,11 +1793,6 @@ impl LayoutBox {
 
         // Apply positioning offsets after normal layout
         self.apply_position_offsets(containing_block);
-    }
-
-    /// Layout a block-level box.
-    fn layout_block(&mut self, containing_block: &Dimensions) {
-        self.layout_block_with_definite_height(containing_block, containing_block.content.height);
     }
 
     /// Layout a block-level box with an explicit definite height for percentage resolution.
@@ -3285,6 +3296,7 @@ impl LayoutBox {
             position: self.position,
             is_scrollable,
             link_href: self.link_href.clone(),
+            node_id: self.node_id,
         })
     }
 
@@ -3350,6 +3362,7 @@ impl LayoutBox {
             position: self.position,
             is_scrollable: false,
             link_href: self.link_href.clone(),
+            node_id: self.node_id,
         });
 
         // Check all children
@@ -3389,6 +3402,10 @@ pub struct HitTestResult {
     /// to the same link — which is what makes a hit test navigable without
     /// walking back into the DOM.
     pub link_href: Option<String>,
+    /// Raw `NodeId` of the hit box's DOM node, if it had one. Unlike
+    /// `link_href` this is NOT inherited from ancestors: the caller wants
+    /// the element actually under the cursor.
+    pub node_id: Option<usize>,
 }
 
 impl HitTestResult {
@@ -3736,9 +3753,9 @@ pub enum TextDecorationStyleValue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ObjectFit {
     /// Fill the box, possibly distorting the image
+    #[default]
     Fill,
     /// Scale to fit inside the box, preserving aspect ratio
-    #[default]
     Contain,
     /// Scale to cover the box, preserving aspect ratio
     Cover,
@@ -5006,7 +5023,11 @@ impl DisplayList {
                     "cover" => ObjectFit::Cover,
                     "none" => ObjectFit::None,
                     "scale-down" => ObjectFit::ScaleDown,
-                    _ => ObjectFit::Contain,
+                    // Unknown keyword falls back to the INITIAL value (fill,
+                    // CSS Images 3 §5.5), not to a different behaviour. The
+                    // old `contain` fallback silently letterboxed anything
+                    // whose object-fit failed to parse.
+                    _ => ObjectFit::Fill,
                 };
 
                 let (pos_x, pos_y) = layout_box.style.object_position;
@@ -5071,10 +5092,11 @@ impl DisplayList {
                         Color::new(200, 200, 200, 1.0)
                     },
                     border_width: 1.0,
-                    // Focus tracking requires DOM node ID in LayoutBox (architectural change)
-                    // For now, focus state is managed at the Engine level via focus_element()
-                    focused: false,
-                    caret_position: None,
+                    // Focus and caret come from the engine's live edit state,
+                    // carried on the box via `focused_caret` (unblocked by
+                    // LayoutBox::node_id).
+                    focused: layout_box.focused_caret.is_some(),
+                    caret_position: layout_box.focused_caret,
                 });
             }
             FormControlType::TextArea {
@@ -5097,8 +5119,8 @@ impl DisplayList {
                         Color::new(200, 200, 200, 1.0)
                     },
                     border_width: 1.0,
-                    focused: false,
-                    caret_position: None,
+                    focused: layout_box.focused_caret.is_some(),
+                    caret_position: layout_box.focused_caret,
                 });
             }
             FormControlType::Button { label, .. } => {
@@ -6725,4 +6747,22 @@ mod tests {
 fn paint0_probe() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RUSTKIT_PAINT_PROBE").as_deref() == Ok("1"))
+}
+
+#[cfg(test)]
+mod object_fit_default_tests {
+    use super::*;
+
+    /// CSS Images 3 §5.5: the initial value of `object-fit` is `fill`.
+    ///
+    /// #125 fixed the ComputedStyle initial value and the layout keyword
+    /// fallback but MISSED the `#[default]` on the enum itself, in two
+    /// crates (Prometheus caught it in the #110 tip R1). Same bug, four
+    /// sites, and a partial fix is the more dangerous state: the visible
+    /// path looks right while any code that goes through `Default` still
+    /// letterboxes. This pins the enum default so the two can never drift.
+    #[test]
+    fn object_fit_derived_default_is_fill_not_contain() {
+        assert_eq!(ObjectFit::default(), ObjectFit::Fill);
+    }
 }
