@@ -88,3 +88,42 @@ def test_anchor_targets_are_left_alone(tmp_path):
                   html='<a href="https://example.org/deep">go</a>')
     code, out = run(tmp_path)
     assert code == 0, out
+
+
+# ---------------------------------------------------------------------------
+# Standalone runner. The six tests above are pytest-style (tmp_path fixture),
+# and the CI guard job invokes each file as `python3 <file>` — which, for a
+# module that never calls its functions, executes ZERO assertions and exits 0.
+# Both Argos and Prometheus measured exactly that: "PASS" printed over an
+# empty run, for every run since the guard job landed. This shim runs every
+# module-level test_* function with a real temporary directory standing in
+# for tmp_path, and fails loud if it collected nothing — the guard suite's
+# own empty-run tripwire, applied to this file.
+# ---------------------------------------------------------------------------
+import tempfile
+import unittest
+
+
+def _collected():
+    return [
+        (name, fn)
+        for name, fn in sorted(globals().items())
+        if name.startswith("test_") and callable(fn)
+    ]
+
+
+class LivesuiteVerifyTests(unittest.TestCase):
+    def test_all_module_tests_run(self):
+        tests = _collected()
+        self.assertGreaterEqual(
+            len(tests), 6,
+            "collected fewer module tests than exist — the shim went stale"
+        )
+        for name, fn in tests:
+            with self.subTest(name):
+                with tempfile.TemporaryDirectory() as td:
+                    fn(Path(td))
+
+
+if __name__ == "__main__":
+    unittest.main()

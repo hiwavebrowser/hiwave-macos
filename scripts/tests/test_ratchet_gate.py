@@ -58,9 +58,13 @@ def run(tmp, a, b, baseline=None, extra=None):
     return p.returncode, p.stdout + p.stderr
 
 
+SEED_PROV = ["--engine-sha", "deadbeef", "--receipt-run", "12345",
+             "--stability-runs", "3"]
+
+
 def seed_from(tmp, a, b):
     rc, _ = run(tmp, a, b, baseline=None,
-                extra=["--write-seed", str(Path(tmp) / "ratchet.json")])
+                extra=["--write-seed", str(Path(tmp) / "ratchet.json")] + SEED_PROV)
     assert rc == 0
     return json.loads((Path(tmp) / "ratchet.json").read_text())
 
@@ -163,6 +167,31 @@ class RatchetTests(unittest.TestCase):
             self.assertNotIn("REGRESSION", out)
 
 
+class SeedLawTests(unittest.TestCase):
+    def test_seed_without_provenance_refused(self):
+        with tempfile.TemporaryDirectory() as t:
+            rc, out = run(t, gate_a(BASE_A), gate_b(BASE_B), baseline=None,
+                          extra=["--write-seed", str(Path(t) / "s.json")])
+            self.assertEqual(rc, 1, out)
+            self.assertIn("provenance missing", out)
+            self.assertFalse((Path(t) / "s.json").exists())
+
+    def test_seed_below_three_runs_refused(self):
+        with tempfile.TemporaryDirectory() as t:
+            rc, out = run(t, gate_a(BASE_A), gate_b(BASE_B), baseline=None,
+                          extra=["--write-seed", str(Path(t) / "s.json"),
+                                 "--engine-sha", "x", "--receipt-run", "y",
+                                 "--stability-runs", "1"])
+            self.assertEqual(rc, 1, out)
+            self.assertIn("< 3", out)
+
+    def test_seed_carries_provenance(self):
+        with tempfile.TemporaryDirectory() as t:
+            seed = seed_from(t, gate_a(BASE_A), gate_b(BASE_B))
+            self.assertEqual(seed["provenance"]["engine_sha"], "deadbeef")
+            self.assertEqual(seed["provenance"]["stability_runs"], 3)
+
+
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
@@ -183,7 +212,8 @@ class ProductionSchemaTests(unittest.TestCase):
             # seed from the excerpt, then hold against itself: exercises
             # snapshot() + compare() on the real shape end to end
             rc, out = run(t, a, b, baseline=None,
-                          extra=["--write-seed", str(Path(t) / "ratchet.json")])
+                          extra=["--write-seed", str(Path(t) / "ratchet.json")]
+                          + SEED_PROV)
             self.assertEqual(rc, 0, out)
             seed = json.loads((Path(t) / "ratchet.json").read_text())
             about = seed["cases"]["about"]
