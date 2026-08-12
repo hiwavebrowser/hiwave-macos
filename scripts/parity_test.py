@@ -46,6 +46,10 @@ from parity_lib import BUILTINS, WEBSUITE, MICRO_TESTS  # noqa: E402
 # this file carried a divergence-prone copy until the T6 collapse.
 from parity_lib import THRESHOLDS, get_threshold  # noqa: E402, F401
 
+# Finish-line condition 3's iteration count. Cited, not copied — see the
+# constant's note in parity_lib.
+from parity_lib import STABILITY_MIN_RUNS  # noqa: E402
+
 
 
 def _fmt(diff_pct) -> str:
@@ -336,7 +340,13 @@ def run_test(
         result["diff_pct_min"] = float(min(run_diffs))
         result["diff_pct_max"] = float(max(run_diffs))
         result["diff_pct_variance"] = float(max(run_diffs) - min(run_diffs))
-        result["stable"] = (iterations >= 3) and (result["diff_pct_variance"] <= max_variance)
+        # `len(run_diffs)`, not `iterations`: three attempts of which two
+        # errored is ONE measurement, and a stability verdict drawn from one
+        # measurement is the blank row this campaign refuses to read as green.
+        result["measured_runs"] = len(run_diffs)
+        result["stable"] = (len(run_diffs) >= STABILITY_MIN_RUNS) and (
+            result["diff_pct_variance"] <= max_variance
+        )
 
     # Attach last-run artifacts (diff/heatmap/overlay/attribution) for inspection
     result["pixel"] = last_pixel_result
@@ -401,7 +411,7 @@ def main():
     print(f"Baselines: {BASELINES_DIR}")
     print(f"Scope: {scope}")
     print(f"Iterations: {iterations}")
-    if iterations >= 3:
+    if iterations >= STABILITY_MIN_RUNS:
         print(f"Stability max variance: {max_variance}%")
     print(f"Timestamp: {datetime.now().isoformat()}")
     print()
@@ -472,14 +482,14 @@ def main():
         elif result["passed"]:
             stable = result.get("stable")
             stable_str = ""
-            if iterations >= 3:
+            if iterations >= STABILITY_MIN_RUNS:
                 stable_str = " stable" if stable else " UNSTABLE"
             print(f"✓ {_fmt(result.get('diff_pct'))} (threshold: {result['threshold']}%){stable_str}")
             passed += 1
         else:
             stable = result.get("stable")
             stable_str = ""
-            if iterations >= 3:
+            if iterations >= STABILITY_MIN_RUNS:
                 stable_str = " stable" if stable else " UNSTABLE"
             print(f"✗ {_fmt(result.get('diff_pct'))} (threshold: {result['threshold']}%){stable_str}")
             failed += 1

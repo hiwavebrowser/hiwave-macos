@@ -144,12 +144,46 @@ def shard_work_units(
     shard_count: int,
 ) -> List[WorkUnit]:
     """
-    Deterministically shard work units by modulo.
-    
-    shard 0/4 gets units 0, 4, 8, ...
-    shard 1/4 gets units 1, 5, 9, ...
+    Deterministically shard work units, keeping every iteration of a
+    (case, viewport) cell in ONE shard.
+
+    shard 0/4 gets cells 0, 4, 8, ...
+    shard 1/4 gets cells 1, 5, 9, ...
+
+    WHY CELLS AND NOT UNITS. This sharded by raw unit index until 2026-08-08,
+    which silently destroyed stability measurement the moment the scout started
+    running more than one iteration. Units are generated as consecutive
+    iterations of the same cell:
+
+        [c0-iter1, c0-iter2, c0-iter3, c1-iter1, c1-iter2, c1-iter3, ...]
+
+    so `i % 4` scattered a cell's three iterations across three different
+    shards. Each shard then aggregated one run per cell, `iteration_diffs`
+    came out length 1 everywhere, and `parity_aggregate` does not recombine
+    runs across shards — so no cell in a sharded run could ever show the
+    STABILITY_MIN_RUNS measured iterations the pr_merge gate requires.
+
+    The observed cost: the first PR after the stability bar tightened went red
+    with 22 of 26 cases `stability_unmeasured`. The four that passed were the
+    exploit phase's top cases, which happened to pick up 2 extra runs at their
+    own viewport and reach 3 by a route the scout was supposed to provide.
+    Tripling the scout bought exactly zero evidence and three times the wall
+    clock.
+
+    Balance is unchanged in practice: cells are still dealt round-robin, and
+    every cell carries the same iteration count, so shards differ by at most
+    one cell's worth of work.
     """
-    return [u for i, u in enumerate(units) if i % shard_count == shard_index]
+    cell_order: Dict[Tuple[str, str], int] = {}
+    for unit in units:
+        key = (unit.case_id, unit.viewport_name)
+        if key not in cell_order:
+            cell_order[key] = len(cell_order)
+    return [
+        u
+        for u in units
+        if cell_order[(u.case_id, u.viewport_name)] % shard_count == shard_index
+    ]
 
 
 # ============================================================================

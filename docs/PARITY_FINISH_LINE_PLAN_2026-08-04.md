@@ -101,3 +101,20 @@ No README or PR prose may drift past that line.
 ## 8. Appendix — full board (master 962efc1)
 
 gradient-backgrounds 14.44 · gradient-no-radius 13.96 · about 13.14 · css-selectors 12.09 · sticky-scroll 11.71 · flex-positioning 10.80 · gradient-radius-only 10.77 · article-typography 9.62 · images-intrinsic 9.35 · card-grid 7.25 · image-gallery 6.89 · form-controls 6.42 · specificity 5.45 · gpu-gradient-regression 5.24 · form-elements 5.13 · combinators 4.67 · settings 4.05 · shelf 3.62 · pseudo-classes 3.51 · backgrounds 3.41 · rounded-corners 3.33 · new_tab 2.80 · chrome_rustkit 2.37 · bg-solid 1.61 · gradients 1.06 · bg-pure 0.00
+
+
+## Amendment (2026-08-12, ratified by Pete): geometry-first
+
+The §4 queue order was set from the old mean-diff board. Night 8's corrected
+instrument showed why it cannot stand: Gate B's discrete detectors may only
+report on elements whose geometry already matches Chrome, and on the current
+tree that withholds the large majority of elements (1421 of 1593 on the
+SwiftShader seat). Per-element paint work is therefore unmeasurable until
+geometry improves.
+
+**Ratified order: geometry P-items (P2/P3/P4 class — positioning, grid,
+containing blocks) come first; P1's paint residuals follow as geometry fixes
+unlock measurement.** Night 9's grid margin-box fix (37 newly measurable
+elements) is the pattern: each geometry fix both moves Gate A and enlarges
+Gate B's jurisdiction. A paint fix that cannot be measured is recorded as a
+finding (as `render_borders` was on night 8) and deferred, not half-landed.
