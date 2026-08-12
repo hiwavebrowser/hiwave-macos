@@ -304,10 +304,14 @@ jobs:
       - name: Ratchet — regression gate (blocking on regression only)
         if: always()
         run: |
-          set +e
-          python3 scripts/ratchet_gate.py             --gate-a parity-results/gate-a.json             --gate-b parity-results/gate-b.json | tee parity-results/ratchet.txt
+          # pipefail is load-bearing: without it `rc=$?` reads TEE's exit
+          # code and a crashed ratchet passes the step — observed on run
+          # 31624496939, where a Traceback concluded "success".
+          set +e -o pipefail
+          python3 scripts/ratchet_gate.py --gate-a parity-results/gate-a.json --gate-b parity-results/gate-b.json | tee parity-results/ratchet.txt
           rc=$?
-          set -e
+          set -e +o pipefail
+          echo "ratchet exit code: $rc"
           if [ "$rc" = "1" ]; then
             echo "::error::Ratchet REGRESSION — a case is worse than the committed floor"
             exit 1
@@ -675,10 +679,14 @@ jobs:
       - name: Ratchet — regression gate (blocking on regression only)
         if: always()
         run: |
-          set +e
-          python3 scripts/ratchet_gate.py             --gate-a parity-results/gate-a.json             --gate-b parity-results/gate-b.json | tee parity-results/ratchet.txt
+          # pipefail is load-bearing: without it `rc=$?` reads TEE's exit
+          # code and a crashed ratchet passes the step — observed on run
+          # 31624496939, where a Traceback concluded "success".
+          set +e -o pipefail
+          python3 scripts/ratchet_gate.py --gate-a parity-results/gate-a.json --gate-b parity-results/gate-b.json | tee parity-results/ratchet.txt
           rc=$?
-          set -e
+          set -e +o pipefail
+          echo "ratchet exit code: $rc"
           if [ "$rc" = "1" ]; then
             echo "::error::Ratchet REGRESSION — a case is worse than the committed floor"
             exit 1
