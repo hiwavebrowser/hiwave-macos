@@ -149,6 +149,10 @@ def main() -> int:
         default=0.1,
         help="paint %% band reused from the stability bar — do not invent a second",
     )
+    ap.add_argument("--engine-sha", help="engine commit the captures were produced from")
+    ap.add_argument("--receipt-run", help="CI run id/url the gate reports came from")
+    ap.add_argument("--stability-runs", type=int,
+                    help="iterations behind the captures (seed law: >= 3)")
     ap.add_argument(
         "--write-seed",
         type=Path,
@@ -170,6 +174,26 @@ def main() -> int:
     current = snapshot(gate_a, gate_b, args.max_variance)
 
     if args.write_seed:
+        # Provenance travels WITH the floor (configs are receipts): a reader
+        # of the committed baseline must not need archaeology to learn which
+        # engine, which run, and how many iterations stand behind it.
+        import datetime
+        current["provenance"] = {
+            "engine_sha": args.engine_sha,
+            "receipt_run": args.receipt_run,
+            "stability_runs": args.stability_runs,
+            "captured_at": datetime.datetime.now(datetime.timezone.utc)
+            .isoformat(timespec="seconds"),
+        }
+        missing = [k for k, v in current["provenance"].items() if v in (None, "")]
+        if missing:
+            print(f"RATCHET seed REFUSED — provenance missing: {', '.join(missing)}. "
+                  "A floor without provenance is a number without a receipt.")
+            return 1
+        if args.stability_runs is not None and args.stability_runs < 3:
+            print(f"RATCHET seed REFUSED — stability_runs={args.stability_runs} < 3 "
+                  "(seed law: honest macOS receipt, N>=3).")
+            return 1
         args.write_seed.parent.mkdir(parents=True, exist_ok=True)
         with open(args.write_seed, "w") as fh:
             json.dump(current, fh, indent=2, sort_keys=True)
