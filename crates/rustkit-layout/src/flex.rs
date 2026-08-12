@@ -446,7 +446,21 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
                     // treats containing_block.content.height as the flow cursor), i.e.
                     // stacked at the item's bottom edge. layout_block_children advances
                     // a real cursor from the item's content top instead.
-                    item.layout_box.layout_block_children();
+                    //
+                    // WITH sibling margin collapse: a flex item establishes an
+                    // independent formatting context, so its own margins never
+                    // collapse with its children's (fresh context), but the
+                    // children still collapse among themselves (CSS 2.1
+                    // §8.3.1). The plain layout_block_children here re-summed
+                    // every sibling seam (mb+mt instead of max), un-doing the
+                    // collapsed pre-pass — measured as the +20/+10 staircase
+                    // on sticky-scroll's main column.
+                    let mut item_margin_context = crate::MarginCollapseContext::new();
+                    let mut item_float_context = crate::FloatContext::new();
+                    item.layout_box.layout_block_children_with_collapse(
+                        &mut item_margin_context,
+                        &mut item_float_context,
+                    );
                 }
             }
         }
