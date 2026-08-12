@@ -1768,13 +1768,86 @@ pub enum FontDisplay {
 }
 
 /// Font loader for @font-face rules.
+/// The cache partition a font load belongs to.
+///
+/// PRIVACY PIN (Prometheus, 2026-08-08): the font cache is partitioned by
+/// top-level site FROM DAY ONE. A shared font cache is a known cross-site
+/// timing side channel -- site B can detect that site A loaded a font by
+/// timing its own load -- and Chromium, Safari and Firefox all partition for
+/// this reason. For a browser whose pitch is privacy-first, an unpartitioned
+/// cache would be a privacy regression sold as a performance win.
+///
+/// DEVIATION FROM THE PIN, STATED: the pin says eTLD+1. Deriving eTLD+1
+/// correctly needs the Public Suffix List, which is not a dependency of this
+/// workspace, and adding one was not authorized by the pin. This type keys on
+/// the HOST instead, which is STRICTLY MORE RESTRICTIVE: `a.example.com` and
+/// `b.example.com` get separate partitions where eTLD+1 would share one. That
+/// direction is the safe one to be wrong in -- loosening later is a
+/// deliberate, reviewable change, whereas tightening later would mean shipping
+/// a leak in the interim. Upgrade path: swap the body of `from_host` for a PSL
+/// lookup; every call site already passes the context.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TopLevelSite(String);
+
+impl TopLevelSite {
+    /// Build a partition key from the top-level document's host.
+    ///
+    /// Hosts are compared case-insensitively (DNS is case-insensitive, and
+    /// `EXAMPLE.com` must not get its own partition -- that would be a cache
+    /// miss, not a security boundary).
+    pub fn from_host(host: &str) -> Self {
+        Self(host.trim().to_ascii_lowercase())
+    }
+
+    /// The partition used when no top-level document is available (about:
+    /// pages, the built-in UI). Deliberately its own bucket rather than a
+    /// shared default, so built-in pages can never be used as a cross-site
+    /// oracle.
+    pub fn opaque() -> Self {
+        Self(String::from("\u{0}opaque"))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Identity of a cached font face WITHIN a partition.
+///
+/// Face identity is the full (family, weight, style, stretch, src) tuple, not
+/// just the family: one family routinely ships as many files, and keying on
+/// family alone would serve the regular weight where bold was asked for.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FontCacheKey {
+    pub partition: TopLevelSite,
+    pub family: String,
+    pub weight: u16,
+    /// Style/stretch stored as their debug discriminant strings: the CSS enums
+    /// are not `Hash` in their own crate, and widening a shared type to satisfy
+    /// one struct's derive is the wrong direction of change.
+    pub style: String,
+    pub stretch: String,
+    pub src: String,
+}
+
+impl FontCacheKey {
+    pub fn new(partition: TopLevelSite, rule: &FontFaceRule) -> Self {
+        Self {
+            partition,
+            family: rule.family.clone(),
+            weight: rule.weight.0,
+            style: format!("{:?}", rule.style),
+            stretch: format!("{:?}", rule.stretch),
+            src: rule.src.clone(),
+        }
+    }
+}
+
 pub struct FontLoader {
-    /// Loaded font faces.
-    #[allow(dead_code)]
-    loaded: RwLock<HashMap<String, LoadedFont>>,
-    /// Pending font loads.
-    #[allow(dead_code)]
-    pending: RwLock<Vec<FontFaceRule>>,
+    /// Loaded font faces, keyed by (partition, face identity).
+    loaded: RwLock<HashMap<FontCacheKey, LoadedFont>>,
+    /// Queued loads, each carrying the partition it was requested in.
+    pending: RwLock<Vec<(FontCacheKey, FontFaceRule)>>,
 }
 
 #[allow(dead_code)]
@@ -1792,10 +1865,21 @@ impl FontLoader {
         }
     }
 
-    /// Queue a @font-face rule for loading.
-    pub fn queue_font_face(&self, rule: FontFaceRule) {
+    /// Queue a `@font-face` rule for loading in a given partition.
+    ///
+    /// The partition is taken HERE, at queue time, rather than being resolved
+    /// later: the pin requires partition context on every queue/load/lookup
+    /// from day one, precisely so that no call site can be written without it
+    /// and then need retrofitting once callers exist.
+    pub fn queue_font_face(&self, partition: TopLevelSite, rule: FontFaceRule) {
+        let key = FontCacheKey::new(partition, &rule);
         let mut pending = self.pending.write().unwrap();
-        pending.push(rule);
+        pending.push((key, rule));
+    }
+
+    /// Number of queued loads. Test/observability surface.
+    pub fn pending_count(&self) -> usize {
+        self.pending.read().unwrap().len()
     }
 
     /// Load all pending fonts (call from network thread).
@@ -1807,14 +1891,18 @@ impl FontLoader {
         };
 
         let mut results = Vec::with_capacity(rules.len());
-        for rule in rules {
-            results.push(self.load_font(rule).await);
+        for (key, rule) in rules {
+            results.push(self.load_font(key, rule).await);
         }
         results
     }
 
     /// Load a single font.
-    async fn load_font(&self, rule: FontFaceRule) -> Result<String, TextError> {
+    async fn load_font(
+        &self,
+        key: FontCacheKey,
+        rule: FontFaceRule,
+    ) -> Result<String, TextError> {
         // In a full implementation, this would:
         // 1. Fetch the font file from rule.src
         // 2. Parse the font data
@@ -1824,7 +1912,7 @@ impl FontLoader {
         let family = rule.family.clone();
         let mut loaded = self.loaded.write().unwrap();
         loaded.insert(
-            family.clone(),
+            key,
             LoadedFont {
                 family: rule.family,
                 data: Vec::new(),
@@ -1834,10 +1922,17 @@ impl FontLoader {
         Ok(family)
     }
 
-    /// Check if a font family is loaded (or loading).
-    pub fn is_loaded(&self, family: &str) -> bool {
+    /// Is this face loaded IN THIS PARTITION?
+    ///
+    /// The partition parameter is not optional and there is no unpartitioned
+    /// variant, deliberately: a lookup that omits the partition IS the
+    /// cross-site oracle this design exists to prevent, so the type system
+    /// refuses to express one.
+    pub fn is_loaded(&self, partition: &TopLevelSite, family: &str) -> bool {
         let loaded = self.loaded.read().unwrap();
-        loaded.contains_key(family)
+        loaded
+            .keys()
+            .any(|k| k.partition == *partition && k.family == family)
     }
 }
 
@@ -1988,20 +2083,86 @@ mod tests {
         assert!(!run.glyphs.is_empty());
     }
 
-    #[test]
-    fn test_font_loader() {
-        let loader = FontLoader::new();
-        assert!(!loader.is_loaded("TestFont"));
-
-        loader.queue_font_face(FontFaceRule {
-            family: "TestFont".to_string(),
-            src: "url(test.woff2)".to_string(),
+    fn face(family: &str, src: &str) -> FontFaceRule {
+        FontFaceRule {
+            family: family.to_string(),
+            src: src.to_string(),
             weight: FontWeight::NORMAL,
             style: FontStyle::Normal,
             stretch: FontStretch::Normal,
             unicode_range: None,
             display: FontDisplay::Swap,
-        });
+        }
+    }
+
+    #[test]
+    fn test_font_loader() {
+        let loader = FontLoader::new();
+        let site = TopLevelSite::from_host("example.com");
+        assert!(!loader.is_loaded(&site, "TestFont"));
+        loader.queue_font_face(site, face("TestFont", "url(test.woff2)"));
+        assert_eq!(loader.pending_count(), 1);
+    }
+
+    #[test]
+    fn the_same_face_queued_from_two_sites_is_two_entries() {
+        // THE PRIVACY PROPERTY. If these collapsed to one entry, site B could
+        // time its own load to learn that site A had already fetched the font
+        // -- the cross-site oracle this partitioning exists to prevent.
+        let loader = FontLoader::new();
+        loader.queue_font_face(TopLevelSite::from_host("a.test"), face("Inter", "/i.woff2"));
+        loader.queue_font_face(TopLevelSite::from_host("b.test"), face("Inter", "/i.woff2"));
+        assert_eq!(
+            loader.pending_count(),
+            2,
+            "identical faces from different sites must not share a cache slot"
+        );
+    }
+
+    #[test]
+    fn a_partition_key_is_host_case_insensitive() {
+        // DNS is case-insensitive, so EXAMPLE.com is the SAME site. Treating
+        // it as a separate partition would be a cache miss wearing the costume
+        // of a security boundary.
+        assert_eq!(
+            TopLevelSite::from_host("EXAMPLE.com"),
+            TopLevelSite::from_host("example.com")
+        );
+    }
+
+    #[test]
+    fn subdomains_get_separate_partitions() {
+        // Documents the DEVIATION from the eTLD+1 pin: host-keying is STRICTLY
+        // TIGHTER. When this upgrades to a Public Suffix List lookup, THIS test
+        // is the one that must change, and changing it is a deliberate
+        // loosening rather than an accident.
+        assert_ne!(
+            TopLevelSite::from_host("a.example.com"),
+            TopLevelSite::from_host("b.example.com")
+        );
+    }
+
+    #[test]
+    fn the_opaque_partition_is_nobody_elses() {
+        // Built-in pages must never be usable as a cross-site oracle, so they
+        // get their own bucket rather than a shared default.
+        let opaque = TopLevelSite::opaque();
+        assert_ne!(opaque, TopLevelSite::from_host(""));
+        assert_ne!(opaque, TopLevelSite::from_host("opaque"));
+    }
+
+    #[test]
+    fn face_identity_includes_more_than_the_family() {
+        // One family ships as many files. Keying on family alone would serve
+        // the regular weight where bold was asked for.
+        let site = TopLevelSite::from_host("example.com");
+        let regular = face("Inter", "/inter-regular.woff2");
+        let mut bold = face("Inter", "/inter-bold.woff2");
+        bold.weight = FontWeight::BOLD;
+        assert_ne!(
+            FontCacheKey::new(site.clone(), &regular),
+            FontCacheKey::new(site, &bold)
+        );
     }
 
     #[test]

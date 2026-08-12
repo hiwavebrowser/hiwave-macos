@@ -5,7 +5,6 @@
 //!
 //! Note: Currently feature-flagged for gradual rollout.
 
-#![allow(dead_code)]
 
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
 use hiwave_core::{HiWaveError, HiWaveResult};

@@ -33,6 +33,164 @@ pub struct MacOSViewHost {
     views: RwLock<HashMap<ViewId, Arc<Mutex<MacOSViewState>>>>,
 }
 
+/// A content-view click, in VIEW-LOCAL TOP-LEFT coordinates — exactly the
+/// viewport space the engine's hit testing speaks, no chrome/sidebar math.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy)]
+pub struct PendingClick {
+    pub x: f64,
+    pub y: f64,
+    pub down: bool,
+}
+
+/// Clicks captured by the RustKit NSView, drained by the app each loop turn.
+///
+/// A queue, not a callback: the handlers run inside AppKit's event dispatch,
+/// and calling back into app/engine state from there is the re-entrancy trap
+/// #108 exists to prevent. Push under a short lock, drain on the main loop.
+#[cfg(target_os = "macos")]
+static PENDING_CLICKS: Mutex<Vec<PendingClick>> = Mutex::new(Vec::new());
+
+#[cfg(target_os = "macos")]
+pub fn drain_pending_clicks() -> Vec<PendingClick> {
+    PENDING_CLICKS.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+}
+
+/// A key event captured by the content view while it is first responder.
+///
+/// `text` carries the typed characters (empty for pure control keys);
+/// `mac_keycode` is the hardware-independent macOS keyCode for specials.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone)]
+pub struct PendingKey {
+    pub text: String,
+    pub mac_keycode: u16,
+    pub ctrl: bool,
+    pub cmd: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
+
+#[cfg(target_os = "macos")]
+static PENDING_KEYS: Mutex<Vec<PendingKey>> = Mutex::new(Vec::new());
+
+#[cfg(target_os = "macos")]
+pub fn drain_pending_keys() -> Vec<PendingKey> {
+    PENDING_KEYS.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+}
+
+/// The NSView subclass that hosts RustKit content.
+///
+/// A stock NSView was measured to be a dead end for input: hitTest correctly
+/// routes clicks to it, but events delivered to it NEVER surface as tao
+/// window events — a synthetic mouseDown through `window sendEvent:` produced
+/// nothing at the event loop (2026-08-07 probe). So the view records clicks
+/// itself. Wheel is left alone: scroll DOES reach the window loop (verified
+/// live 2026-08-05) via a different AppKit forwarding path.
+#[cfg(target_os = "macos")]
+pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
+    use objc::declare::ClassDecl;
+    use objc::runtime::{Class, Object, Sel};
+    static REGISTER: std::sync::Once = std::sync::Once::new();
+    REGISTER.call_once(|| {
+        let superclass = Class::get("NSView").expect("NSView class");
+        let mut decl =
+            ClassDecl::new("RustKitContentView", superclass).expect("register RustKitContentView");
+
+        extern "C" fn record(this: &Object, event: id, down: bool) {
+            tracing::info!(down, "RustKitContentView mouse event handler entered");
+            unsafe {
+                // locationInWindow is window coords (bottom-left origin);
+                // convertPoint gives view-local, then flip to top-left.
+                let wpt: cocoa::foundation::NSPoint = msg_send![event, locationInWindow];
+                let lpt: cocoa::foundation::NSPoint =
+                    msg_send![this, convertPoint: wpt fromView: nil];
+                let frame: cocoa::foundation::NSRect = msg_send![this, frame];
+                let click = PendingClick {
+                    x: lpt.x,
+                    y: frame.size.height - lpt.y,
+                    down,
+                };
+                if let Ok(mut q) = PENDING_CLICKS.lock() {
+                    q.push(click);
+                }
+            }
+        }
+        extern "C" fn mouse_down(this: &Object, _sel: Sel, event: id) {
+            record(this, event, true);
+        }
+        extern "C" fn mouse_up(this: &Object, _sel: Sel, event: id) {
+            record(this, event, false);
+        }
+        extern "C" fn accepts_first_responder(_this: &Object, _sel: Sel) -> bool {
+            // Without this, makeFirstResponder: refuses the view and macOS
+            // keeps routing keys to whoever held focus before — observed
+            // live 2026-08-07: click focused a page textarea (engine-side)
+            // while typed characters went to the chrome URL bar, because
+            // ENGINE focus and APPKIT first-responder are different systems
+            // and only one was wired.
+            true
+        }
+        extern "C" fn key_down(this: &Object, _sel: Sel, event: id) {
+            unsafe {
+                let chars: id = msg_send![event, characters];
+                let text = if chars != nil {
+                    let utf8: *const std::os::raw::c_char = msg_send![chars, UTF8String];
+                    if utf8.is_null() {
+                        String::new()
+                    } else {
+                        std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()
+                    }
+                } else {
+                    String::new()
+                };
+                let keycode: u16 = msg_send![event, keyCode];
+                let flags: u64 = msg_send![event, modifierFlags];
+                let key = PendingKey {
+                    text,
+                    mac_keycode: keycode,
+                    ctrl: flags & (1 << 18) != 0,   // NSEventModifierFlagControl
+                    cmd: flags & (1 << 20) != 0,    // NSEventModifierFlagCommand
+                    shift: flags & (1 << 17) != 0,  // NSEventModifierFlagShift
+                    alt: flags & (1 << 19) != 0,    // NSEventModifierFlagOption
+                };
+                if let Ok(mut q) = PENDING_KEYS.lock() {
+                    q.push(key);
+                }
+            }
+            let _ = this;
+            // Deliberately NOT calling super: consuming here is what keeps a
+            // keystroke from ALSO reaching whatever else might interpret it.
+            // Cmd-shortcuts still work: the menu system sees key equivalents
+            // before the responder chain does.
+        }
+        extern "C" fn accepts_first_mouse(_this: &Object, _sel: Sel, _event: id) -> bool {
+            // A click on an inactive window should reach the page (this is
+            // what browsers do for links), and the synthetic probe runs
+            // before the window is ever key.
+            true
+        }
+        unsafe {
+            decl.add_method(
+                sel!(acceptsFirstMouse:),
+                accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> bool,
+            );
+            decl.add_method(
+                sel!(acceptsFirstResponder),
+                accepts_first_responder as extern "C" fn(&Object, Sel) -> bool,
+            );
+            decl.add_method(sel!(keyDown:), key_down as extern "C" fn(&Object, Sel, id));
+            decl.add_method(
+                sel!(mouseDown:),
+                mouse_down as extern "C" fn(&Object, Sel, id),
+            );
+            decl.add_method(sel!(mouseUp:), mouse_up as extern "C" fn(&Object, Sel, id));
+        }
+        decl.register();
+    });
+    Class::get("RustKitContentView").expect("RustKitContentView registered")
+}
+
 #[cfg(target_os = "macos")]
 impl MacOSViewHost {
     pub fn new() -> Self {
@@ -107,8 +265,7 @@ impl MacOSViewHost {
         debug!(?bounds, cocoa_y = frame.origin.y, "Converted bounds to Cocoa coordinates");
 
         let view: id = unsafe {
-            use objc::runtime::Class;
-            let view_class = Class::get("NSView").expect("NSView class not found");
+            let view_class = rustkit_content_view_class();
             let view: id = msg_send![view_class, alloc];
             msg_send![view, initWithFrame: frame]
         };
@@ -242,21 +399,27 @@ impl MacOSViewHost {
             .get(&view_id)
             .ok_or(ViewHostError::ViewNotFound(view_id))?;
 
-        let mut state = state.lock().map_err(|e| {
-            tracing::error!("ViewState lock poisoned in set_bounds: {}", e);
-            ViewHostError::LockPoisoned
-        })?;
-        state.bounds = bounds;
+        // Record the new bounds under the lock, then release it before any
+        // AppKit call: `setFrame:` runs layout callbacks synchronously on a
+        // subclassed view. See `focus` for the full rationale.
+        let view: id = {
+            let mut guard = state.lock().map_err(|e| {
+                tracing::error!("ViewState lock poisoned in set_bounds: {}", e);
+                ViewHostError::LockPoisoned
+            })?;
+            guard.bounds = bounds;
+            guard.view
+        };
 
         unsafe {
             // Get the superview to determine parent height for coordinate conversion
-            let superview: id = msg_send![state.view, superview];
+            let superview: id = msg_send![view, superview];
             let parent_height = if superview != nil {
                 let parent_frame: cocoa::foundation::NSRect = msg_send![superview, frame];
                 parent_frame.size.height
             } else {
                 // Fallback: try to get window content view height
-                let window: id = msg_send![state.view, window];
+                let window: id = msg_send![view, window];
                 if window != nil {
                     let content_view: id = msg_send![window, contentView];
                     if content_view != nil {
@@ -272,7 +435,7 @@ impl MacOSViewHost {
 
             // Convert from top-left origin to Cocoa's bottom-left origin
             let frame = Self::convert_to_cocoa_frame(bounds, parent_height);
-            let _: () = msg_send![state.view, setFrame: frame];
+            let _: () = msg_send![view, setFrame: frame];
         }
 
         debug!(?view_id, ?bounds, "View bounds updated");
@@ -308,15 +471,21 @@ impl MacOSViewHost {
             .get(&view_id)
             .ok_or(ViewHostError::ViewNotFound(view_id))?;
 
-        let mut state = state.lock().map_err(|e| {
-            tracing::error!("ViewState lock poisoned in set_visible: {}", e);
-            ViewHostError::LockPoisoned
-        })?;
-        state.visible = visible;
+        // Mutate state under the lock, then release before AppKit:
+        // `setHidden:` runs viewDidHide/viewDidUnhide synchronously on a
+        // subclassed view. See `focus` for the full rationale.
+        let view: id = {
+            let mut guard = state.lock().map_err(|e| {
+                tracing::error!("ViewState lock poisoned in set_visible: {}", e);
+                ViewHostError::LockPoisoned
+            })?;
+            guard.visible = visible;
+            guard.view
+        };
 
         unsafe {
             let hidden: bool = !visible;
-            let _: () = msg_send![state.view, setHidden: hidden];
+            let _: () = msg_send![view, setHidden: hidden];
         }
 
         debug!(?view_id, visible, "View visibility changed");
@@ -324,24 +493,42 @@ impl MacOSViewHost {
     }
 
     /// Focus a view
+    ///
+    /// COPY THE VIEW POINTER, DROP EVERY LOCK, *THEN* CALL APPKIT.
+    ///
+    /// `makeFirstResponder:` is synchronous and re-enters the responder
+    /// chain — `resignFirstResponder` / `becomeFirstResponder` and any focus
+    /// notification run before it returns. The moment this NSView gains
+    /// responder overrides that call back into the ViewHost (the next unit:
+    /// content keyboard input), holding the per-view `Mutex` across that call
+    /// would deadlock the process forever on a non-reentrant lock, with no
+    /// error and no log past this line.
+    ///
+    /// Athena hit exactly this on Windows (`SetFocus` dispatching
+    /// `WM_SETFOCUS` into our own wnd_proc, hiwave-windows#85): every focus
+    /// call hung the process from the day it was written, and nothing found
+    /// it because nothing ever called it. An unused API is not a working API,
+    /// it is an untested one — this method has zero callers here too.
     pub fn focus(&self, view_id: ViewId) -> Result<(), ViewHostError> {
-        let views = self.views.read().map_err(|e| {
-            tracing::error!("Views RwLock poisoned in focus: {}", e);
-            ViewHostError::LockPoisoned
-        })?;
-        let state = views
-            .get(&view_id)
-            .ok_or(ViewHostError::ViewNotFound(view_id))?;
-
-        let state = state.lock().map_err(|e| {
-            tracing::error!("ViewState lock poisoned in focus: {}", e);
-            ViewHostError::LockPoisoned
-        })?;
+        let view: id = {
+            let views = self.views.read().map_err(|e| {
+                tracing::error!("Views RwLock poisoned in focus: {}", e);
+                ViewHostError::LockPoisoned
+            })?;
+            let state = views
+                .get(&view_id)
+                .ok_or(ViewHostError::ViewNotFound(view_id))?;
+            let guard = state.lock().map_err(|e| {
+                tracing::error!("ViewState lock poisoned in focus: {}", e);
+                ViewHostError::LockPoisoned
+            })?;
+            guard.view
+        }; // both guards released here, before any AppKit call
 
         unsafe {
-            let window: id = msg_send![state.view, window];
+            let window: id = msg_send![view, window];
             if window != nil {
-                let _: () = msg_send![window, makeFirstResponder: state.view];
+                let _: () = msg_send![window, makeFirstResponder: view];
             }
         }
 
