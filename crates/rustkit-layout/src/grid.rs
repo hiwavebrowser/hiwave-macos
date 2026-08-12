@@ -225,19 +225,27 @@ impl<'a> GridItem<'a> {
 
     /// Get the item's contribution to row sizing.
     /// This considers explicit heights, min-heights, and intrinsic content.
+    ///
+    /// css-grid-1 §12.4 sizes tracks from each item's OUTER size, so the
+    /// block-axis margins are part of the contribution on every path. Without
+    /// them a row is short by exactly the item's vertical margins, and because
+    /// rows stack, the error accumulates down the grid: `gradient-no-radius`
+    /// has four `margin-bottom: 10px` section headers and every row below the
+    /// first was 10px too high, 40px by the last.
     pub fn get_height_contribution(&self, container_height: f32) -> f32 {
         let style = &self.layout_box.style;
+        let margins = vertical_margins(style);
 
         // Check for explicit height
         match &style.height {
             Length::Px(h) => {
                 trace!("get_height_contribution: explicit Px height = {}", h);
-                return *h;
+                return *h + margins;
             }
             Length::Percent(p) if container_height > 0.0 => {
                 let result = container_height * p / 100.0;
                 trace!("get_height_contribution: Percent {}% of {} = {}", p, container_height, result);
-                return result;
+                return result + margins;
             }
             _ => {}
         }
@@ -258,7 +266,7 @@ impl<'a> GridItem<'a> {
             "get_height_contribution: min_height={}, content_height={}, returning={}",
             min_height, content_height, min_height.max(content_height)
         );
-        min_height.max(content_height)
+        min_height.max(content_height) + margins
     }
 
     /// Estimate content height (simplified).
@@ -379,18 +387,21 @@ impl<'a> GridItem<'a> {
     }
 
     /// Get the item's contribution to column sizing.
+    ///
+    /// Outer size, for the same §12.4 reason as `get_height_contribution`.
     pub fn get_width_contribution(&self, container_width: f32) -> f32 {
         let style = &self.layout_box.style;
-        
+        let margins = horizontal_margins(style);
+
         // Check for explicit width
         match &style.width {
-            Length::Px(w) => return *w,
+            Length::Px(w) => return *w + margins,
             Length::Percent(p) if container_width > 0.0 => {
-                return container_width * p / 100.0;
+                return container_width * p / 100.0 + margins;
             }
             _ => {}
         }
-        
+
         // Check for min-width
         let min_width = match &style.min_width {
             Length::Px(w) => *w,
@@ -409,7 +420,7 @@ impl<'a> GridItem<'a> {
             0.0
         };
 
-        min_width.max(auto_min)
+        min_width.max(auto_min) + margins
     }
 
     /// Set explicit placement from style.
@@ -1835,20 +1846,38 @@ pub fn layout_grid_container(
         }
 
         if let Some(rect) = positions.get(position_idx) {
+            // css-grid-1 §6.5: the grid area is filled by the item's MARGIN
+            // box. Alignment — including `stretch`, which is what makes this
+            // load-bearing — runs on the area shrunk by the margins, so a
+            // stretched item ends up `area - margins` tall rather than
+            // swallowing its own margin back into its border box.
+            let (margin_left, margin_right, margin_top, margin_bottom) =
+                item_margins(&child.style);
+            let area = Rect::new(
+                rect.x + margin_left,
+                rect.y + margin_top,
+                (rect.width - margin_left - margin_right).max(0.0),
+                (rect.height - margin_top - margin_bottom).max(0.0),
+            );
+            child.dimensions.margin.left = margin_left;
+            child.dimensions.margin.right = margin_right;
+            child.dimensions.margin.top = margin_top;
+            child.dimensions.margin.bottom = margin_bottom;
+
             // Apply alignment - returns border-box dimensions
             let (x, border_box_width) = apply_justify_self(
                 &child.style.justify_self,
                 &style.justify_items,
-                rect.x,
-                rect.width,
+                area.x,
+                area.width,
                 child,
             );
 
             let (y, border_box_height) = apply_align_self(
                 &child.style.align_self,
                 &style.align_items,
-                rect.y,
-                rect.height,
+                area.y,
+                area.height,
                 child,
             );
 
@@ -2096,7 +2125,12 @@ pub fn layout_grid_container(
                             + child.dimensions.padding.bottom
                             + child.dimensions.border.top
                             + child.dimensions.border.bottom;
-                        let grow = (real_h + pb) - grid.rows[r0].size;
+                        // `real_h + pb` is a BORDER box; the row is a margin
+                        // box. Comparing them directly makes an item with
+                        // margins look like it already fits, so this pass
+                        // stops repairing it.
+                        let vm = vertical_margins(&child.style);
+                        let grow = (real_h + pb) - (grid.rows[r0].size - vm);
                         if grow > 0.5 {
                             row_growth[r0] = row_growth[r0].max(grow);
                         }
@@ -2133,15 +2167,17 @@ pub fn layout_grid_container(
                         if dy.abs() > 0.01 {
                             crate::flex::translate_subtree(child, 0.0, dy);
                         }
-                        // Default align stretch: the item's border box fills
-                        // the (grown) row. Grow-only; explicit heights and
+                        // Default align stretch: the item's MARGIN box fills
+                        // the (grown) row, so its border box gets the row less
+                        // its own margins. Grow-only; explicit heights and
                         // taller-than-row content are left alone.
                         if matches!(child.style.height, Length::Auto) {
                             let pb = child.dimensions.padding.top
                                 + child.dimensions.padding.bottom
                                 + child.dimensions.border.top
                                 + child.dimensions.border.bottom;
-                            let target = grid.rows[r0].size - pb;
+                            let target =
+                                grid.rows[r0].size - vertical_margins(&child.style) - pb;
                             if child.dimensions.content.height < target {
                                 child.dimensions.content.height = target;
                             }
@@ -2403,6 +2439,29 @@ fn style_font_size_px(style: &ComputedStyle) -> f32 {
 fn horizontal_margins(style: &ComputedStyle) -> f32 {
     let fs = style_font_size_px(style);
     intrinsic_len_px(&style.margin_left, fs) + intrinsic_len_px(&style.margin_right, fs)
+}
+
+/// The item's block-axis margins, in the same convention `horizontal_margins`
+/// uses on the inline axis: percentages resolve to 0 because the containing
+/// block's size is not yet known during track sizing.
+pub(crate) fn vertical_margins(style: &ComputedStyle) -> f32 {
+    let fs = style_font_size_px(style);
+    intrinsic_len_px(&style.margin_top, fs) + intrinsic_len_px(&style.margin_bottom, fs)
+}
+
+/// The four resolved margins of a grid item, used to inset its grid area.
+///
+/// css-grid-1 §6.5: a grid item's MARGIN box fills its grid area — the area is
+/// not the item's border box. Alignment therefore runs on the area shrunk by
+/// the margins, and the border box lands inside that.
+pub(crate) fn item_margins(style: &ComputedStyle) -> (f32, f32, f32, f32) {
+    let fs = style_font_size_px(style);
+    (
+        intrinsic_len_px(&style.margin_left, fs),
+        intrinsic_len_px(&style.margin_right, fs),
+        intrinsic_len_px(&style.margin_top, fs),
+        intrinsic_len_px(&style.margin_bottom, fs),
+    )
 }
 
 fn horizontal_padding_border(style: &ComputedStyle) -> f32 {
@@ -5200,4 +5259,216 @@ mod tests {
         assert_eq!(item.column_span, 1);
         assert_eq!(item.row_span, 1);
     }
+
+    // ---------------------------------------------------------------
+    // Grid items size and place from their MARGIN box (css-grid-1 §6.5,
+    // §12.4).
+    //
+    // The corpus shape these come from: `gradient-no-radius` and
+    // `gradient-radius-only` have four `.section-header { margin-bottom:
+    // 10px }` rows. Each row was short by exactly that margin, and because
+    // rows stack the error accumulated -- row 2 was 10px high, row 4 was
+    // 30px, the last 40px. Gate A read 47 and 46 geometry failures on those
+    // two cases with every box's x, width and height already exact: the
+    // whole defect was one missing term, repeated.
+    // ---------------------------------------------------------------
+
+    /// A row is sized from the item's outer height, so the row below starts
+    /// below the margin as well as the border box.
+    #[test]
+    fn a_grid_row_is_sized_from_the_item_margin_box_not_its_border_box() {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Fr(1.0)]);
+        container_style.row_gap = Length::Px(20.0);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        // Row 1: a 40px header carrying a 10px bottom margin.
+        let mut header_style = ComputedStyle::new();
+        header_style.height = Length::Px(40.0);
+        header_style.margin_bottom = Length::Px(10.0);
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, header_style));
+
+        // Row 2: a plain 100px box.
+        let mut body_style = ComputedStyle::new();
+        body_style.height = Length::Px(100.0);
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, body_style));
+
+        layout_grid_container(&mut container, 400.0, 600.0);
+
+        let header = container.children[0].dimensions.border_box();
+        let body = container.children[1].dimensions.border_box();
+
+        // The header's own border box is unchanged by its margin.
+        assert!(
+            (header.height - 40.0).abs() < 0.01,
+            "header border box should stay 40, got {}",
+            header.height
+        );
+        // 40 border box + 10 margin + 20 gap.
+        let expected_y = header.y + 40.0 + 10.0 + 20.0;
+        assert!(
+            (body.y - expected_y).abs() < 0.01,
+            "row 2 should start below the header's MARGIN box: expected {expected_y}, \
+             got {} (a {}px shortfall is the margin being dropped)",
+            body.y,
+            expected_y - body.y
+        );
+    }
+
+    /// Stretch fills the grid area with the item's margin box, so the border
+    /// box gets the area less its own margins -- it must not swallow the
+    /// margin back and paint over the gap.
+    #[test]
+    fn a_stretched_grid_item_does_not_swallow_its_own_margin() {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Fr(1.0)]);
+        container_style.grid_template_rows = GridTemplate::from_sizes(vec![TrackSize::Px(100.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        let mut item_style = ComputedStyle::new();
+        item_style.margin_top = Length::Px(15.0);
+        item_style.margin_bottom = Length::Px(25.0);
+        item_style.margin_left = Length::Px(5.0);
+        item_style.margin_right = Length::Px(35.0);
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, item_style));
+
+        layout_grid_container(&mut container, 400.0, 600.0);
+
+        let b = container.children[0].dimensions.border_box();
+        assert!(
+            (b.height - 60.0).abs() < 0.01,
+            "stretched item in a 100px row with 15+25 margins should be 60 tall, got {}",
+            b.height
+        );
+        assert!(
+            (b.width - 360.0).abs() < 0.01,
+            "stretched item in a 400px column with 5+35 margins should be 360 wide, got {}",
+            b.width
+        );
+        assert!(
+            (b.y - 15.0).abs() < 0.01,
+            "the border box starts after the top margin, got y={}",
+            b.y
+        );
+        assert!(
+            (b.x - 5.0).abs() < 0.01,
+            "the border box starts after the left margin, got x={}",
+            b.x
+        );
+    }
+
+    /// The explicit-size early returns are a separate path through
+    /// `get_height_contribution` and carry the margins too.
+    #[test]
+    fn an_explicitly_sized_item_contributes_its_outer_height() {
+        let mut style = ComputedStyle::new();
+        style.height = Length::Px(180.0);
+        style.margin_top = Length::Px(4.0);
+        style.margin_bottom = Length::Px(6.0);
+        let b = LayoutBox::new(BoxType::Block, style);
+        let item = GridItem::new(&b);
+        assert!(
+            (item.get_height_contribution(0.0) - 190.0).abs() < 0.01,
+            "explicit 180px height + 4 + 6 margins = 190, got {}",
+            item.get_height_contribution(0.0)
+        );
+    }
+
+    /// The auto/min-height path carries them as well.
+    #[test]
+    fn an_auto_height_item_contributes_its_outer_height() {
+        let mut style = ComputedStyle::new();
+        style.min_height = Length::Px(50.0);
+        style.margin_top = Length::Px(7.0);
+        style.margin_bottom = Length::Px(3.0);
+        let b = LayoutBox::new(BoxType::Block, style);
+        let item = GridItem::new(&b);
+        assert!(
+            (item.get_height_contribution(0.0) - 60.0).abs() < 0.01,
+            "min-height 50 + 7 + 3 margins = 60, got {}",
+            item.get_height_contribution(0.0)
+        );
+    }
+
+    /// Columns size from the outer width for the same reason.
+    #[test]
+    fn a_column_contribution_includes_the_inline_margins() {
+        let mut explicit = ComputedStyle::new();
+        explicit.width = Length::Px(200.0);
+        explicit.margin_left = Length::Px(8.0);
+        explicit.margin_right = Length::Px(12.0);
+        let eb = LayoutBox::new(BoxType::Block, explicit);
+        assert!(
+            (GridItem::new(&eb).get_width_contribution(0.0) - 220.0).abs() < 0.01,
+            "explicit 200px width + 8 + 12 margins = 220"
+        );
+
+        let mut auto = ComputedStyle::new();
+        auto.min_width = Length::Px(90.0);
+        auto.margin_left = Length::Px(10.0);
+        auto.margin_right = Length::Px(10.0);
+        let ab = LayoutBox::new(BoxType::Block, auto);
+        assert!(
+            (GridItem::new(&ab).get_width_contribution(0.0) - 110.0).abs() < 0.01,
+            "min-width 90 + 10 + 10 margins = 110"
+        );
+    }
+
+    /// Phase 9.5 repairs a row whose track-sizing estimate was short -- the
+    /// estimate omits the item's BORDER. Its shortfall test compares a border
+    /// box against the row, so once the row carries margins the comparison has
+    /// to subtract them again or the repair silently stops firing.
+    ///
+    /// This is not hypothetical: it is what the first half of this change did.
+    /// `.section-header` has `border-bottom: 1px`, and with only the sizing
+    /// and placement halves landed its height went 57.4 -> 56.4 on both
+    /// gradient cases while the 10px-per-row error was being fixed.
+    #[test]
+    fn the_row_repair_pass_measures_against_the_row_less_the_margins() {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Fr(1.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        // The section-header shape: padding, a bottom border the estimate
+        // cannot see, a bottom margin, and a fixed-height child standing in
+        // for the text line. `box-sizing: border-box` because every case in
+        // the corpus sets it in a `*` rule, and the two sizing modes take
+        // different arithmetic through this pass.
+        let mut header_style = ComputedStyle::new();
+        header_style.box_sizing = BoxSizing::BorderBox;
+        header_style.padding_top = Length::Px(20.0);
+        header_style.padding_bottom = Length::Px(10.0);
+        header_style.border_bottom_width = Length::Px(1.0);
+        header_style.margin_bottom = Length::Px(10.0);
+        let mut header = LayoutBox::new(BoxType::Block, header_style);
+
+        let mut line_style = ComputedStyle::new();
+        line_style.height = Length::Px(26.0);
+        header
+            .children
+            .push(LayoutBox::new(BoxType::Block, line_style));
+        container.children.push(header);
+
+        layout_grid_container(&mut container, 400.0, 600.0);
+
+        let h = container.children[0].dimensions.border_box().height;
+        assert!(
+            (h - 57.0).abs() < 0.51,
+            "header should be 26 content + 30 padding + 1 border = 57, got {h} \
+             (56 means the repair pass compared a border box against a margin box)"
+        );
+    }
 }
+
