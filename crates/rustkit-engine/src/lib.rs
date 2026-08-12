@@ -9348,6 +9348,9 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
             viewhost: ViewHost::new(),
             compositor,
             renderer: None,
