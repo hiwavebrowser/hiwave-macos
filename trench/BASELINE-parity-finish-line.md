@@ -176,3 +176,15 @@ Appended to `trench/digest-parity-finish-line.md`:
 5. At most three decisions needed from Pete, one sentence each
 6. Anything that surprised you, especially a measurement that disagreed with an
    assumption
+
+
+## Branch law (added 2026-08-12, after nights 7–9)
+
+**Engine behavior changes never land on this branch.** This branch is the
+instrument lane; its PRs must keep `crates/` byte-identical to master so every
+`N/26` receipt stays attributable to master's engine. When a night's P-item
+requires an engine change, make it on a fresh branch off **develop** and open
+its own PR — then continue instrument work here. Nights 7 and 9 put engine
+commits here; the split cost a manual cherry-pick rebuild (atlas/p0-instrument)
+and three seats' review time. The night-1 "work on this branch" instruction is
+superseded by this rule wherever the two conflict.
