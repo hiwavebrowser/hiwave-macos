@@ -1532,3 +1532,170 @@ This matters for decision 2 above. Night 7 kept the change against a literal
 reading of the stop rule, and its argument leaned on the discrete column
 improving. That prop is gone; the code-level argument and the three clean cases
 are what is left, and they are what Pete should weigh.
+
+## 2026-08-12
+
+**Metric: 1/26 → 1/26.** No case crossed the conjunction and none fell off it.
+This is the first night this seat could compute the metric at all rather than
+infer it: a 3-iteration sweep makes the stability column measurable, so the
+receipt reads `1/26, 26/26 scored on all four` instead of `0/26, 26 not fully
+measured`. It agrees with the macOS lane's 1/26, and the green case is the same
+one (`bg-pure`). What moved is inside Gate A, and it moved on the cases P1 is
+about.
+
+**P-item: P1 (gradient/clip family). NOT complete.** I did not work a
+gradient defect. I measured why I could not, and fixed that instead — the same
+shape as night 8, one layer down.
+
+### Commits
+
+- `c9c9464` — grid items size and place from their margin box (three sites:
+  track contribution, area inset at placement, and the Phase 9.5 row repair).
+- `cfd4951` — close the one survivor the mutation sweep found.
+
+### What the defect was
+
+P1's four cases are all `display: grid`. Before touching anything I read Gate A
+on them, and the failures were not what the plan's P1 description predicts:
+
+```
+gradient-no-radius   47 geometry failures — x, width, height ALL EXACT on every box
+gradient-radius-only 46 geometry failures — same
+```
+
+Every single failure was `y`, and the drift was a staircase: −9.99, −19.98,
+−29.97, −39.96. Both pages have four `.section-header { margin-bottom: 10px }`
+rows. Chrome leaves 30px after a header row (20px `gap` + the 10px margin);
+RustKit left 20px. css-grid-1 §12.4 sizes tracks from each item's **outer**
+size and §6.5 fills the grid area with the item's **margin box**; RustKit did
+neither, so every row carrying a margin was short by exactly that margin, and
+because rows stack the error accumulated down the page.
+
+Three sites, and they are not independent — which I learned the expensive way.
+Landing the first two alone made `.section-header` go 57.4 → 56.4 and Gate A
+got **worse** on both target cases (47 → 51, 46 → 49) even as the 10px-per-row
+error disappeared. Phase 9.5's row-repair pass had been quietly compensating for
+a *different* bug — `estimate_content_height` omits the element's border — and
+its shortfall test compares a border box against the row. Once the row became a
+margin box, the repair stopped firing and gave the 1px border back. So the pass
+subtracts the margins on both its shortfall test and its stretch target.
+
+The intermediate red is the useful part of this and it is why I am recording it
+rather than the clean final diff: a partial application of a correct rule made
+the number worse, and if I had stopped at "the 10px staircase is gone" I would
+have shipped a regression with a good story attached.
+
+### Measured — Linux/SwiftShader, 26 cases. MECHANICS, NOT A RECEIPT
+
+This seat is not CoreText and not Metal. Nothing here is the campaign's number;
+the PR lane on `macos-14` produces that.
+
+| Oracle | Before | After |
+|---|---|---|
+| Gate A geometry | 2631 failures, 2/26 green | **2566**, 2/26 green |
+| Gate A join | 115 | 115 |
+| Gate B paint-green | 1/26 | 1/26 |
+| Gate B discrete failures | 0 | 0 |
+| Gate B elements **admitted** | 172 of 1593 | **209** of 1593 |
+| N/26 | 1/26 | 1/26 |
+
+Per case, the only three that moved:
+
+| case | geometry | paint % within tolerance |
+|---|---|---|
+| gradient-no-radius | 47 → **14** | 77.72271 → **93.70667** |
+| gradient-radius-only | 46 → **14** | 86.90396 → **94.30312** |
+| gradient-backgrounds | 82 → 82 | 61.34437 → **83.86417** |
+
+The other 23 cases are **bit-identical on both oracles**.
+
+`gradient-backgrounds` is the row worth reading twice. Its geometry failure
+*count* did not move at all, while its paint gained 22.5 points. The count is
+the same boxes still failing; what changed is how badly — `sum|Δ|` 2008.59 →
+948.59 and worst box 70.00px → 37.03px. **A failure count is not a magnitude,
+and reporting only the count would have hidden the largest single paint
+improvement of the night.** Gate A's receipt schema carries the deltas, so this
+was readable; a count-only board would not have shown it.
+
+The residual on the two cleaned cases is 14 failures each, and all 28 are
+`span` **width** — text advance widths, i.e. P4. Both cases are now
+geometry-clean apart from text.
+
+### Stop rule
+
+Checked **per box**, not per case, because a flat case-level count can hide a
+box that got worse under one that got better. Across all 26 cases and every
+axis: **zero boxes worsened**, no case gained a discrete failure, no case lost
+its green. Gate B's percentage half regressed on nothing. The rule did not fire.
+
+### Mutation-check results
+
+**11 probes, 11 RED, control green before and after.**
+
+| Mutation | Caught by |
+|---|---|
+| M1 height contribution drops margins (auto path) | `an_auto_height_item_contributes_its_outer_height` |
+| M2 …(explicit Px path) | `an_explicitly_sized_item…`, `a_grid_row_is_sized…` |
+| M3 width contribution drops margins (auto path) | `a_column_contribution_includes_the_inline_margins` |
+| M4 …(explicit Px path) | same |
+| M5 placement stops insetting the area | `a_stretched_grid_item…`, `the_row_repair_pass…` |
+| M6 placement insets position but not size | same two |
+| M7 Phase 9.5 shortfall test drops the margin subtraction | `the_row_repair_pass…` |
+| M8 Phase 9.5 stretch target drops it | `the_row_repair_pass…` |
+| M9 `vertical_margins` counts only margin-top | three tests |
+| M10 `item_margins` swaps top/bottom for left/right | two tests |
+| M11 stop recording resolved margins on the item | `a_stretched_grid_item…` *(after the fix below)* |
+
+**M11 survived the first sweep.** Every guard I had written checked the item's
+*border* box, and nothing asserted on its margin box — so all four
+`child.dimensions.margin.* = …` assignments could be deleted with 267 tests
+still green. `margin_box()` is read by the float, inline and scroll-extent
+paths, so that is observable, not cosmetic. Closed by asserting §6.5 directly:
+the item's margin box **is** the grid area.
+
+That is the fourth sweep in a row whose survivor was the same shape — *the
+guard gets written against the example, not against the rule*. Night 8 named
+this pattern; naming it did not stop me repeating it. It is now worth treating
+as a checklist item rather than a lesson: after writing the guards, ask which
+line of the change no assertion would miss.
+
+### Decisions needed from Pete
+
+1. **Tonight's fix is grid, and grid is P2 — I worked it under P1 anyway.**
+   P1's own cases cannot be measured until their geometry is right, so the
+   choice was between fixing this and landing a gradient change I could not
+   show worked; is that the right reading of "do not skip ahead", or should the
+   queue be formally reordered geometry-first (night 8's decision 1, still
+   unanswered)?
+2. Still open from 2026-08-10 and 08-11: keep or literally revert the
+   overflow-clip change that cost `sticky-scroll` 36 pixels on a card RustKit
+   lays out 38px too low?
+3. Still open from 2026-08-10 and 08-11: how to land #130 so P0b's receipt
+   stays attributable now that engine commits sit on the same branch?
+
+### Surprises
+
+- **The plan's P1 description points at paint; P1's blocker was layout.** Three
+  of the four gradient cases had a single non-gradient root, and it was worth
+  ~22 points of paint on the headline case. The gradient painter still has not
+  been shown to be wrong about anything. The named residual — "rounded clip for
+  scaled gradients (corner notches)" — is still unlanded, and it is still not
+  measurable: the `.linear-6` card it affects is 18px out of place on
+  `gradient-backgrounds`, so the discrete detector withholds it.
+- **A correct partial fix made the metric worse.** Sites 1 and 2 without site 3
+  took Gate A from 47 → 51 on `gradient-no-radius`. Two of the three sites are
+  spec-literal and the third exists only to compensate for a *different*
+  unfixed bug (`estimate_content_height` ignores borders). Fixing half of a
+  rule in a codebase with a compensating hack is worse than fixing none of it.
+- **`estimate_content_height` omits the element's border.** Not fixed tonight —
+  Phase 9.5 repairs it and unpicking that is its own unit with its own blast
+  radius — but it is a latent second root under every auto-sized grid row, and
+  the repair only fires for single-row items. Recorded, not half-landed.
+- **Element admission went 172 → 209 of 1593.** Geometry work is what buys
+  Gate B's discrete detectors something to look at. 1384 elements are still
+  withheld, so the discrete column's 26/26 green still means very little.
+- The corpus's `box-sizing: border-box` is load-bearing in tests. My first
+  Phase 9.5 fixture used the `ComputedStyle::new()` default (content-box) and
+  produced 87px where the real page produces 57px — the two sizing modes take
+  different arithmetic through that pass. A fixture that does not mirror the
+  corpus's `*` rule is testing a shape the corpus does not contain.
