@@ -1968,6 +1968,15 @@ pub fn layout_grid_container(
                 let grid_item_x = child.dimensions.content.x;
                 let grid_item_width = child.dimensions.content.width;
                 let mut current_y = grid_item_y;
+                // Sibling margin collapse for the re-stack below (CSS 2.1
+                // §8.3.1). A grid item establishes an independent formatting
+                // context — the FRESH context means nothing collapses across
+                // the item boundary — but its in-flow children collapse among
+                // themselves. The old advance summed prev.margin_bottom +
+                // next.margin_top at every seam, re-implementing block flow
+                // without collapse and overwriting the collapsed pre-pass
+                // (measured: sticky-scroll main column +20/+10 staircase).
+                let mut seam_margins = crate::MarginCollapseContext::new();
                 // A positioned grid item is the containing block for its abs
                 // descendants; a static one is not.
                 // A grid item that is a positioned CONTAINING BLOCK anchors its
@@ -2038,7 +2047,9 @@ pub fn layout_grid_container(
                     let old_x = grandchild.dimensions.content.x;
                     let old_y = grandchild.dimensions.content.y;
                     grandchild.dimensions.content.x = grid_item_x + margin_left + border_left + padding_left;
-                    grandchild.dimensions.content.y = current_y + margin_top + border_top + padding_top;
+                    seam_margins.add_margin(margin_top);
+                    grandchild.dimensions.content.y =
+                        current_y + seam_margins.resolve() + border_top + padding_top;
                     let dx = grandchild.dimensions.content.x - old_x;
                     let dy = grandchild.dimensions.content.y - old_y;
                     if dx != 0.0 || dy != 0.0 {
@@ -2086,15 +2097,23 @@ pub fn layout_grid_container(
                         // For block, children were already laid out - we just fixed the container
                     }
 
-                    // Update y for next sibling
+                    // Update y for next sibling: advance to the BORDER-BOX
+                    // bottom and bank margin_bottom in the collapse context,
+                    // where the next sibling's margin_top will max against it
+                    // instead of stacking on top of it.
                     current_y = grandchild.dimensions.content.y + grandchild.dimensions.content.height
-                        + grandchild.dimensions.padding.bottom + grandchild.dimensions.border.bottom
-                        + grandchild.dimensions.margin.bottom;
+                        + grandchild.dimensions.padding.bottom + grandchild.dimensions.border.bottom;
+                    seam_margins.reset();
+                    seam_margins.add_margin(grandchild.dimensions.margin.bottom);
                 }
 
                 // Record the item's real flowed content height for Phase 9.5.
+                // current_y now stops at the last border-box bottom; the last
+                // child's bottom margin is pending in the context. Resolve it
+                // here so the recorded height keeps the pre-fix semantics
+                // (trailing margin included).
                 if let Some(slot) = real_heights.get_mut(item_idx) {
-                    *slot = Some((current_y - grid_item_y).max(0.0));
+                    *slot = Some((current_y + seam_margins.resolve() - grid_item_y).max(0.0));
                 }
             }
         }

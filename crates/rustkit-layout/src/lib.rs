@@ -6569,6 +6569,123 @@ mod tests {
         assert_eq!(layout_box.dimensions.margin.right, 0.0);
     }
 
+    /// Sibling margins inside a FLEX ITEM must collapse (CSS 2.1 §8.3.1):
+    /// the item establishes an independent formatting context, but its own
+    /// in-flow children still collapse among themselves. Driven through
+    /// layout_with_collapse — the entry the engine actually uses — so this
+    /// exercises the flex re-layout path (flex.rs) that used to re-stack
+    /// children with layout_block_children and re-sum every seam.
+    #[test]
+    fn flex_item_children_collapse_sibling_margins() {
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut flex_style = ComputedStyle::new();
+        flex_style.display = rustkit_css::Display::Flex;
+        let mut flex = LayoutBox::new(BoxType::Block, flex_style);
+        let mut item = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut a_style = ComputedStyle::new();
+        a_style.height = Length::Px(50.0);
+        a_style.margin_bottom = Length::Px(20.0);
+        let mut b_style = ComputedStyle::new();
+        b_style.height = Length::Px(50.0);
+        b_style.margin_top = Length::Px(20.0);
+        item.children.push(LayoutBox::new(BoxType::Block, a_style));
+        item.children.push(LayoutBox::new(BoxType::Block, b_style));
+        flex.children.push(item);
+        root.children.push(flex);
+
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        let mut mc = MarginCollapseContext::new();
+        let mut fc = FloatContext::new();
+        root.layout_with_collapse(&cb, &mut mc, &mut fc);
+
+        let item = &root.children[0].children[0];
+        let a = &item.children[0].dimensions;
+        let b = &item.children[1].dimensions;
+        let gap = b.content.y - (a.content.y + a.content.height);
+        assert!(
+            (gap - 20.0).abs() < 0.1,
+            "adjacent 20/20 margins inside a flex item must collapse to 20, \
+             got gap {gap} (40 = summed, the pre-fix behaviour)"
+        );
+    }
+
+    /// Same contract for a GRID ITEM. The grid re-stack loop (grid.rs
+    /// Phase 9) used to advance current_y by margin_bottom and then add the
+    /// next child's full margin_top — block flow re-implemented without
+    /// collapse, overwriting the collapsed pre-pass. Unequal margins pin
+    /// max() semantics, not just "not summed".
+    #[test]
+    fn grid_item_children_collapse_sibling_margins() {
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut grid_style = ComputedStyle::new();
+        grid_style.display = rustkit_css::Display::Grid;
+        let mut grid = LayoutBox::new(BoxType::Block, grid_style);
+        let mut item = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut a_style = ComputedStyle::new();
+        a_style.height = Length::Px(50.0);
+        a_style.margin_bottom = Length::Px(20.0);
+        let mut b_style = ComputedStyle::new();
+        b_style.height = Length::Px(50.0);
+        b_style.margin_top = Length::Px(8.0);
+        item.children.push(LayoutBox::new(BoxType::Block, a_style));
+        item.children.push(LayoutBox::new(BoxType::Block, b_style));
+        grid.children.push(item);
+        root.children.push(grid);
+
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        let mut mc = MarginCollapseContext::new();
+        let mut fc = FloatContext::new();
+        root.layout_with_collapse(&cb, &mut mc, &mut fc);
+
+        let item = &root.children[0].children[0];
+        let a = &item.children[0].dimensions;
+        let b = &item.children[1].dimensions;
+        let gap = b.content.y - (a.content.y + a.content.height);
+        assert!(
+            (gap - 20.0).abs() < 0.1,
+            "20/8 margins inside a grid item must collapse to max()=20, \
+             got gap {gap} (28 = summed, 8 = wrong side won)"
+        );
+    }
+
+    /// NEGATIVE CONTROL, both directions: plain block flow collapsed
+    /// correctly before this fix and must keep doing so — a regression here
+    /// means the fix leaked outside the flex/grid item paths it targets.
+    #[test]
+    fn plain_block_flow_still_collapses_sibling_margins() {
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut a_style = ComputedStyle::new();
+        a_style.height = Length::Px(50.0);
+        a_style.margin_bottom = Length::Px(20.0);
+        let mut b_style = ComputedStyle::new();
+        b_style.height = Length::Px(50.0);
+        b_style.margin_top = Length::Px(20.0);
+        root.children.push(LayoutBox::new(BoxType::Block, a_style));
+        root.children.push(LayoutBox::new(BoxType::Block, b_style));
+
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        let mut mc = MarginCollapseContext::new();
+        let mut fc = FloatContext::new();
+        root.layout_with_collapse(&cb, &mut mc, &mut fc);
+
+        let a = &root.children[0].dimensions;
+        let b = &root.children[1].dimensions;
+        let gap = b.content.y - (a.content.y + a.content.height);
+        assert!(
+            (gap - 20.0).abs() < 0.1,
+            "plain-flow sibling collapse regressed: got gap {gap}"
+        );
+    }
+
     #[test]
     fn test_margin_collapse_positive() {
         let mut ctx = MarginCollapseContext::new();
