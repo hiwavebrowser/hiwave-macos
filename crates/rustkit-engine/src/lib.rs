@@ -2232,6 +2232,7 @@ impl Engine {
                         // nowrap/pre parent's text still wrapped (shelf bug).
                         s.white_space = parent.white_space;
                         s.word_break = parent.word_break;
+                        s.overflow_wrap = parent.overflow_wrap;
                         s.font_stretch = parent.font_stretch;
                         // NOT CSS inheritance — feature plumbing: gradient
                         // text (background-clip:text + transparent fill) is
@@ -3718,6 +3719,46 @@ impl Engine {
                     "pre-line" => rustkit_css::WhiteSpace::PreLine,
                     _ => rustkit_css::WhiteSpace::Normal,
                 };
+            }
+            // `word-break` had a full implementation and no producer: the
+            // enum, the ComputedStyle field, the CSS->LineBreaker conversion
+            // in rustkit-layout and the break-all algorithm in rustkit-text
+            // all existed, but no declaration ever set the field, so it was
+            // permanently Normal (inherited from a root that never changed).
+            // CSS Text 3 §5.2.
+            "word-break" => {
+                style.word_break = match value.trim().to_lowercase().as_str() {
+                    "break-all" => rustkit_css::WordBreak::BreakAll,
+                    "keep-all" => rustkit_css::WordBreak::KeepAll,
+                    // Legacy alias, per §5.2's note; Chrome maps it to
+                    // overflow-wrap: break-word rather than a word-break value.
+                    "break-word" => {
+                        style.overflow_wrap = rustkit_css::OverflowWrap::BreakWord;
+                        rustkit_css::WordBreak::Normal
+                    }
+                    _ => rustkit_css::WordBreak::Normal,
+                };
+            }
+            // `overflow-wrap` (and its `word-wrap` legacy alias) had no
+            // computed-style representation at all before this. CSS Text 3
+            // §5.5.
+            "overflow-wrap" | "word-wrap" => {
+                style.overflow_wrap = match value.trim().to_lowercase().as_str() {
+                    "break-word" => rustkit_css::OverflowWrap::BreakWord,
+                    "anywhere" => rustkit_css::OverflowWrap::Anywhere,
+                    _ => rustkit_css::OverflowWrap::Normal,
+                };
+            }
+            // `line-break` is the strictness axis (CSS Text 3 §5.3). Only
+            // `anywhere` changes where opportunities exist in a way the line
+            // breaker models today, and its effect — a soft wrap opportunity
+            // around every typographic character unit — is what
+            // OverflowWrap::Anywhere already implements. loose/normal/strict
+            // are deliberately no-ops rather than fake distinctions.
+            "line-break" => {
+                if value.trim().eq_ignore_ascii_case("anywhere") {
+                    style.overflow_wrap = rustkit_css::OverflowWrap::Anywhere;
+                }
             }
             "border-top-width" => {
                 if let Some(length) = parse_length(value) {
@@ -9021,6 +9062,98 @@ mod tests {
     }
 
     #[test]
+    fn test_word_break_and_line_break_reach_the_line_breaker() {
+        // `word-break` was a consumer with no producer: the enum, the
+        // ComputedStyle field, the CSS->LineBreaker conversion in
+        // rustkit-layout and the break-all algorithm in rustkit-text all
+        // existed and were unit-tested, but no declaration ever assigned the
+        // field — so it was permanently Normal. `overflow-wrap` / `line-break`
+        // had no computed representation at all and LineBreaker's
+        // OverflowWrap was hardcoded Normal.
+        //
+        // Drive the real engine: one long unbreakable word in a narrow block.
+        // Under `normal` there is no soft wrap opportunity, so it stays on one
+        // line; under break-all / anywhere / break-word it must wrap, which
+        // shows up as a taller block. Height, not internal line counts, so the
+        // test asserts the observable rule.
+        let case = |decl: &str| -> f32 {
+            let html = format!(
+                r#"<!DOCTYPE html>
+                <html><body>
+                  <div id="probe" style="width: 40px; font-family: monospace; font-size: 16px; {decl}">Supercalifragilisticexpialidocious</div>
+                </body></html>"#
+            );
+            let document = Rc::new(Document::parse_html(&html).expect("Failed to parse HTML"));
+            let compositor = Compositor::new().expect("compositor");
+            let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let engine = Engine {
+                config: EngineConfig::default(),
+                views: HashMap::new(),
+                viewhost: ViewHost::new(),
+                compositor,
+                renderer: None,
+                loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+                image_manager: Arc::new(ImageManager::new()),
+                event_tx,
+                event_rx: Some(event_rx),
+                style_trace: std::cell::RefCell::new(None),
+                render_failing: std::collections::HashSet::new(),
+                svg_cache: std::collections::HashMap::new(),
+            };
+            let mut layout = engine.build_layout_from_document(&document, &[]);
+            let containing_block = Dimensions {
+                content: Rect::new(0.0, 0.0, 800.0, 600.0),
+                ..Default::default()
+            };
+            layout.layout(&containing_block);
+
+            fn tallest_40px_box(b: &LayoutBox, out: &mut f32) {
+                if (b.dimensions.content.width - 40.0).abs() < 0.5 {
+                    *out = out.max(b.dimensions.content.height);
+                }
+                for c in &b.children {
+                    tallest_40px_box(c, out);
+                }
+            }
+            let mut h = 0.0f32;
+            tallest_40px_box(&layout, &mut h);
+            h
+        };
+
+        if Compositor::new().is_err() {
+            eprintln!("Skipping test: GPU not available");
+            return;
+        }
+
+        let normal = case("");
+        assert!(
+            normal > 0.0,
+            "setup failed: no 40px-wide box was found, so this test cannot detect anything"
+        );
+        for decl in [
+            "word-break: break-all;",
+            "line-break: anywhere;",
+            "overflow-wrap: anywhere;",
+            "overflow-wrap: break-word;",
+            "word-wrap: break-word;",
+        ] {
+            let wrapped = case(decl);
+            assert!(
+                wrapped > normal,
+                "`{decl}` did not wrap the word: height {wrapped} vs normal {normal} — \
+                 the property never reached the line breaker"
+            );
+        }
+
+        // keep-all must NOT introduce opportunities in a word that has none.
+        assert_eq!(
+            case("word-break: keep-all;"),
+            normal,
+            "word-break: keep-all changed wrapping of an unbreakable word"
+        );
+    }
+
+    #[test]
     fn test_ch_width_resolves_against_the_zero_glyph() {
         // CSS Values 3 §5.1.1. parse_length has no font context and returns
         // None for "1ch", so `if let Some(length)` dropped the declaration
@@ -9071,7 +9204,7 @@ mod tests {
         // the test states the RULE and not a font-specific pixel count.
         let expected = rustkit_layout::measure_text_advanced(
             "0",
-            &["monospace".to_string()],
+            "monospace",
             16.0,
             rustkit_css::FontWeight::NORMAL,
             rustkit_css::FontStyle::Normal,

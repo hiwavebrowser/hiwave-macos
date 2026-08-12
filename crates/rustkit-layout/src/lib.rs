@@ -1278,6 +1278,7 @@ impl LayoutBox {
                 font_size,
                 container_width,
                 self.style.word_break,
+                self.style.overflow_wrap,
             ) {
                 if lines.len() > 1 {
                     // Known phase-1 gap: wrap_text shapes without letter/word-
@@ -1382,6 +1383,7 @@ impl LayoutBox {
             first_line_width,
             container_width,
             self.style.word_break,
+            self.style.overflow_wrap,
         ) {
             Ok(lines) if !lines.is_empty() => lines,
             _ => {

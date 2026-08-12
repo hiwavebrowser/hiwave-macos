@@ -16,7 +16,8 @@
 
 use rustkit_css::{
     Color, Direction as CssDirection, FontStretch, FontStyle, FontWeight, Length,
-    TextDecorationLine, TextDecorationStyle, TextTransform, WhiteSpace, WordBreak as CssWordBreak,
+    OverflowWrap as CssOverflowWrap, TextDecorationLine, TextDecorationStyle, TextTransform,
+    WhiteSpace, WordBreak as CssWordBreak,
 };
 use rustkit_text::bidi::{BidiInfo, Direction as BidiDirection};
 use rustkit_text::line_break::{LineBreaker, OverflowWrap, WordBreak as LineBreakWordBreak};
@@ -1386,9 +1387,12 @@ impl TextShaper {
     /// * `size` - Font size in pixels
     /// * `max_width` - Maximum line width in pixels
     /// * `word_break` - CSS word-break property value
+    /// * `overflow_wrap` - CSS overflow-wrap value (`line-break: anywhere`
+    ///   also arrives here; see `rustkit_css::OverflowWrap`)
     ///
     /// # Returns
     /// A vector of `WrappedLine` structs, each containing shaped runs for one line.
+    #[allow(clippy::too_many_arguments)]
     pub fn wrap_text(
         &self,
         text: &str,
@@ -1399,9 +1403,19 @@ impl TextShaper {
         size: f32,
         max_width: f32,
         word_break: CssWordBreak,
+        overflow_wrap: CssOverflowWrap,
     ) -> Result<Vec<WrappedLine>, TextError> {
         self.wrap_text_with_first_line(
-            text, font_chain, weight, style, stretch, size, max_width, max_width, word_break,
+            text,
+            font_chain,
+            weight,
+            style,
+            stretch,
+            size,
+            max_width,
+            max_width,
+            word_break,
+            overflow_wrap,
         )
     }
 
@@ -1426,6 +1440,7 @@ impl TextShaper {
         first_line_max_width: f32,
         max_width: f32,
         word_break: CssWordBreak,
+        overflow_wrap: CssOverflowWrap,
     ) -> Result<Vec<WrappedLine>, TextError> {
         if text.is_empty() {
             return Ok(vec![]);
@@ -1438,8 +1453,15 @@ impl TextShaper {
             CssWordBreak::KeepAll => LineBreakWordBreak::KeepAll,
             CssWordBreak::BreakWord => LineBreakWordBreak::BreakWord,
         };
+        // Was hardcoded to Normal: the breaker's break-word/anywhere arms
+        // could never be reached from CSS.
+        let lb_overflow_wrap = match overflow_wrap {
+            CssOverflowWrap::Normal => OverflowWrap::Normal,
+            CssOverflowWrap::BreakWord => OverflowWrap::BreakWord,
+            CssOverflowWrap::Anywhere => OverflowWrap::Anywhere,
+        };
 
-        let breaker = LineBreaker::new(lb_word_break, OverflowWrap::Normal);
+        let breaker = LineBreaker::new(lb_word_break, lb_overflow_wrap);
         let mut lines = Vec::new();
 
         // First, handle mandatory line breaks
@@ -2193,6 +2215,7 @@ mod tests {
             16.0,
             200.0,
             CssWordBreak::Normal,
+            CssOverflowWrap::Normal,
         );
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
@@ -2211,6 +2234,7 @@ mod tests {
             16.0,
             1000.0, // Very wide, should fit on one line
             CssWordBreak::Normal,
+            CssOverflowWrap::Normal,
         );
         assert!(result.is_ok());
         let lines = result.unwrap();
@@ -2231,6 +2255,7 @@ mod tests {
             16.0,
             80.0, // Narrow width to force wrapping
             CssWordBreak::Normal,
+            CssOverflowWrap::Normal,
         );
         assert!(result.is_ok());
         let lines = result.unwrap();
@@ -2255,6 +2280,7 @@ mod tests {
             16.0,
             1000.0,
             CssWordBreak::Normal,
+            CssOverflowWrap::Normal,
         );
         assert!(result.is_ok());
         let lines = result.unwrap();
@@ -2279,6 +2305,7 @@ mod tests {
             16.0,
             50.0, // Very narrow
             CssWordBreak::BreakAll,
+            CssOverflowWrap::Normal,
         );
         assert!(result.is_ok());
         let lines = result.unwrap();
@@ -2299,6 +2326,7 @@ mod tests {
             16.0,
             1000.0,
             CssWordBreak::Normal,
+            CssOverflowWrap::Normal,
         );
         assert!(result.is_ok());
         let lines = result.unwrap();
