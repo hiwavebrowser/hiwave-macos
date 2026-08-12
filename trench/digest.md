@@ -2988,3 +2988,164 @@ night 13's advice, which no longer works.
    where the digest ends at night 3 and corroborates the stale prompt, so an
    agent that trusts its instructions over the repo files closes the wrong
    trench. Repointing the routine or landing this branch to master both fix it.
+
+---
+
+## 2026-08-12 — night 15 (NONE — clause 2 has now literally fired)
+
+**Metric: 11 of 12 → 11 of 12**
+
+**Moved no → yes: NONE.**
+
+Trench 2 was buried last night. This entry exists to record one thing the
+funeral could not claim for itself, and to leave the state checkable rather
+than inherited. It is deliberately short; re-arguing the funeral would be the
+padding night 14 warned about.
+
+### What last night could not claim, and tonight can
+
+Night 14 was scrupulous that the **literal** stop condition had not fired:
+clause 2 is two *consecutive* nights with no property moving, and night 12
+(NONE) → night 13 (`white-space`) → night 14 (NONE) is one, not two. It buried
+the trench on a scope argument instead — the remaining property is blocked by a
+rule, and rules do not yield to another night's work.
+
+Tonight is the second consecutive NONE. **Clause 2 has now fired on its own
+terms.** The funeral stands unchanged and unamended; it simply no longer rests
+only on the scope argument. Nothing about the conclusion moved — 11 of 12,
+`opacity` uncounted — and no part of it was restated to fit the outcome.
+
+### What I ran, so tonight is checkable
+
+Cold runner, empty `target/`, fresh build on this branch. All 11 counted
+properties re-assert and pass; nothing rotted in the day since night 14:
+
+```
+$ cargo build -p hiwave-mcp && python3 crates/hiwave-mcp/smoke.py
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 31s
+ok  initialize        {'name': 'hiwave-mcp', 'version': '0.1.0'}
+ok  tools/list        ['hiwave_open', 'hiwave_layout', 'hiwave_display_list', 'hiwave_style', 'hiwave_diff', 'hiwave_screenshot', 'hiwave_status']
+ok  hiwave_layout     .hero border_box = 432.0x152.0 (content-box: 400+2*16 x 120+2*16)
+ok  hiwave_display_list  .hero painted rgb(0,136,204) over 432.0x152.0 at (0.0,0.0) — same rect layout computed
+ok  paint order       canvas[0] < hero[1] < text[2]
+ok  advance contract  11 advances for 11 chars, font_size=32.0 weight=700 x=16.0
+ok  hiwave_style      width=400px won by .hero [0, 1, 0] over div [0, 0, 1] (later in source, lower specificity)
+ok  computed expansion padding-left=16px, cited to `padding: 16px` on .hero (via_shorthand) — no rule spells the longhand
+ok  origin split      h1 font-weight=700 winner=None (UA, no rule to cite); font-size=32px winner=h1 (author)
+ok  line-height       .copy 20px x 1.5 = 30px — authored '1.5', computed 30px (resolved, not echoed)
+ok  normal not faked  .hero line-height=normal (keyword, not px — resolving it needs font metrics)
+ok  inherited origin  span font-family='Georgia, serif' text-align=center both origin=inherited; display still UA-or-initial
+ok  line-height inherited  span declares nothing, reports 30px origin=inherited (.copy 20px x 1.5) and its line box IS 30.0 — `normal` control measures 20.0
+ok  font-style        span computed=italic origin=inherited (declares nothing); paint drew it font_style=1, h1 still 0
+ok  letter-spacing    .spaced 0.1em x 20px = 2px (authored '0.1em'); every advance is exactly +2.0 over .plain — [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+ok  white-space      .pre computed=pre won by .pre [0, 1, 0] over a LATER div [0, 0, 1] normal; paint kept both spaces — 'a  b' has 4 advances against 3 for the collapsed control
+ok  KNOWN DIVERGENCE  .pre keeps 'a  b' (4 advances) but its nested span collapsed 'c  d' to 'c d' — white-space is not inherited onto elements
+ok  KNOWN GAP        a BARE <pre> computes white-space=normal (winner=None) and collapses 'x  y' to 'x y' — the UA sheet reached it (display=block, monospace) but has no white-space declaration to give
+ok  border shorthand  .framed border-top-width=5px (0.25em x 20px) and border-top-color=rgba(204, 102, 0, 1), both cited to `border` on .framed; layout reserved 5.0 and paint drew a 210.0x5.0 band
+ok  no false citation `border: 2px solid` cites the width and NOT border-top-color (the declaration carried no colour)
+ok  longhand wins     .overruled border-top-width=9px beats `border: 3px solid #093`, which is reported in overridden; layout reserved {'bottom': 3.0, 'left': 3.0, 'right': 3.0, 'top': 9.0} and a 52.0-tall box
+ok  box-sizing        .bordered border-box: declared 200px IS the border box, content 170.0x10.0; .content content-box, same declarations, border box 230.0x70.0
+ok  position          .floater absolute (beat `div{position:static}`, last in sheet); .host is 0.0 tall around a 40.0-tall child and the next block starts at the same y — out of flow
+ok  overflow-x       .clipped overflow-x=hidden cited to `overflow`; it establishes a BFC so the kid's 20px bottom margin lands INSIDE — 35.0 tall against 15.0 for .unclipped, same child, one keyword apart
+ok  KNOWN GAP        ...but paint pushes no clip for it — overflow-x is answered for what LAYOUT did, not for whether anything was clipped
+ok  KNOWN GAP        .faded opacity=0.5 computed, but paint filled it at a=1.0 — opacity never reaches the solid-colour path, so it is reported, not counted
+ok  selector guard    refused 'div p'
+ok  hiwave_diff       hero/layout agrees with the spec reference on 12/12 hand-derived values (incl. border_box 432x152)
+ok  hiwave_diff       hero/display_list agrees on 17 values (paint order, #08c over 432x152, 32px/700 text at x=16)
+ok  hiwave_diff       important-width DISAGREES: border_box.width expected 100.0 (spec: !important wins), engine computed 400.0 — 2 of 4, height and x still agree
+ok  session isolation open page still 432x152 after three diffs
+ok  diff guards       unknown stage, unknown case, unknown reference, path escape and missing argument all refused
+ok  hiwave_screenshot 1440015 bytes at ppm
+ok  argument guard    pass either `html` or `path`, not both
+
+PASS: hiwave-mcp serves the engine's computed layout, its paint commands, the cascade behind them, AND whether any of it agrees with a committed reference
+```
+
+(Elided from the paste: the three `-before-open` refusals and `hiwave_status`,
+unchanged. Full output is reproducible with the command above.)
+
+### `opacity` — night 14's three sites re-checked from source, not taken on trust
+
+Three greps, because "the previous night said so" is how a stalled loop starts
+reporting motion — and because night 14's sharpest claim is the one that decides
+whether the blocker is one line or a shape change:
+
+```
+$ grep -n "SolidColor(" crates/rustkit-layout/src/lib.rs
+3401:    SolidColor(Color, Rect),                       ← two fields. No opacity channel.
+$ grep -c "opacity" crates/rustkit-compositor/src/lib.rs
+0                                                       ← compositor never sees it.
+$ sed -n '1890,1898p' crates/rustkit-renderer/src/lib.rs
+            DisplayCommand::Image { url, src_rect: _, dest_rect,
+                                    object_fit: _, opacity: _ } => {
+                self.draw_image(url, *dest_rect);       ← destructured away.
+            }
+```
+
+Verdict holds exactly as night 14 wrote it. `.faded` filling at `a=1.0` is not a
+missed read — `SolidColor` has no field to carry the value, so making it
+observable changes the display-list **shape**. Still forbidden by trench 2's
+scope limit ("Do not fix the engine to make a property answerable"), and no
+authorisation to lift it has arrived.
+
+### What the engine still cannot answer
+
+Unchanged from night 14, and not restated in full there or here: `opacity` (no
+consumer anywhere in the engine); `white-space` counted but with two live engine
+gaps (no element inheritance, no UA default on a bare `<pre>` — the second a
+one-line fix); `overflow-x` answered for what layout did, not for whether
+anything was clipped; `!important` still dead in the cascade, still pinned by the
+`important-width` diff case; UA origin still indistinguishable from "nobody set
+it"; computed values still a fixed longhand set; `hiwave_style` still simple
+selectors only; the display list's unmodelled ops still carry `"modelled": false`
+with no contract; capture-kind references still refused; `style` still not a
+diffable stage; and the diff corpus is still two fixtures, so **no real page is
+covered by any of the four tools**.
+
+### Tests
+
+**Nothing compiled changed tonight** — the committed diff is `trench/digest.md`
+only. The smoke suite passed as pasted, on a cold build. Nights 7–14's standing
+workspace result (914 passed, 1 pre-existing
+`rustkit-layout::probe_normal_line_height_vs_chrome` failure) is untouched by a
+markdown edit.
+
+Scope stayed inside `trench/`. No parity harness, no `.github/`, no Windows or
+Linux port work, no engine behaviour changed, no export altered.
+
+Runner notes: `target/` empty again (cold build ~1m31s for `-p hiwave-mcp`), and
+`mesa-vulkan-drivers` missing again — night 14's advice is the one that works
+(`apt-get update` first, ignore the `deadsnakes` / `ondrej/php` PPA errors, then
+install; `lvp_icd.json` is the one that matters).
+
+### Decisions needed from Pete
+
+Same two that have been open since night 13, plus the one that is now costing
+runs. Nothing new — listing them again only because none has been answered and
+the loop cannot proceed past any of them on its own.
+
+1. **The routine is now firing into a closed trench.** This is the ninth
+   consecutive night the stored prompt has described trench 1 and instructed the
+   session to stop at 4 of 4; tonight it fired at a trench that was buried
+   yesterday. `BASELINE.md`'s warning block caught it again — the scheduler
+   checks out **master**, where the digest ends at night 3 and corroborates the
+   stale prompt, so an agent trusting its instructions over the repo closes the
+   wrong trench and reports the wrong number. **Until the routine is repointed or
+   this branch lands on master, every further firing is a wasted run** that
+   produces an entry like this one. Disabling the routine is a complete fix and
+   costs nothing, since the trench is closed.
+2. **`opacity`: authorise the rendering change, or leave trench 2 closed at 11 of
+   12?** Scoped in night 14 to three sites (give `SolidColor` an alpha channel or
+   wrap painted subtrees in a layer; honour it in the renderer's `Image` arm; let
+   the compositor see it), roughly one night if authorised. My read is unchanged:
+   close at 11 and hand `opacity` plus the one-line bare-`<pre>` UA gap to the
+   parity trench, which owns rendering changes and has the corpus to see them.
+3. **Night 13's keyword ruling still sets the number.** (a)+(b) as night 9 wrote
+   it → **11 of 12**, as reported. A stricter test requiring a shorthand,
+   inheritance or a UA default → `white-space`, `box-sizing`, `position` and
+   `overflow-x` all fall and the honest number is **7 of 12**. Night 13's reading
+   is carried forward; say the word and I will restate it.
+
+**If this routine fires again unchanged**, the correct action is to verify the
+smoke suite still passes, append nothing, and stop — the funeral is written, the
+stop condition has fired, and there is no in-scope work left to do.
