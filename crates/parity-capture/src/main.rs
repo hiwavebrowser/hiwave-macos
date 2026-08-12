@@ -262,7 +262,17 @@ fn preprocess_html(html: &str, html_path: &Path) -> String {
 }
 
 fn is_micro_suite_path(html_path: &Path) -> bool {
-    let p = html_path.to_string_lossy();
+    // Canonicalize first: the separator-delimited patterns below require a
+    // LEADING separator, so a repo-relative invocation ("websuite/micro/x")
+    // never matched and the reset was silently skipped — while CI passes
+    // absolute paths and always matched. Local captures therefore rendered
+    // micro cases WITHOUT the reset Chrome's oracle applies (line-height
+    // 1.5 vs metrics-normal, ~5px per line), an invisible capture-
+    // environment asymmetry between every local board and CI.
+    let canon = html_path
+        .canonicalize()
+        .unwrap_or_else(|_| html_path.to_path_buf());
+    let p = canon.to_string_lossy();
     p.contains("/websuite/micro/") || p.contains("\\websuite\\micro\\")
 }
 
@@ -514,6 +524,21 @@ mod tests {
         let reset = out.find("data-parity-reset").unwrap();
         let fixture = out.find("<style>b{}").unwrap();
         assert!(reset < fixture);
+    }
+
+    #[test]
+    fn micro_suite_detection_accepts_relative_paths() {
+        // The predicate must not depend on how the caller spelled the path:
+        // CI passes absolute, humans pass relative, and the reset injection
+        // silently diverging between them is a capture-environment asymmetry
+        // (see the canonicalize comment on is_micro_suite_path).
+        // Canonicalization needs a real file, so use one from the tree.
+        let real = Path::new("websuite/micro/gradients/index.html");
+        if real.exists() {
+            assert!(is_micro_suite_path(real),
+                "relative micro path must be detected");
+        }
+        assert!(!is_micro_suite_path(Path::new("websuite/cases/x/index.html")));
     }
 
     #[test]
