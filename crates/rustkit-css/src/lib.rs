@@ -9,9 +9,9 @@
 //! 3. **Inheritance**: Propagate inherited properties to children
 //! 4. **Computed values**: Resolve relative units and keywords
 
+use rustkit_cssparser::parse_stylesheet;
 use thiserror::Error;
 use tracing::debug;
-use rustkit_cssparser::parse_stylesheet;
 
 /// Errors that can occur in CSS operations.
 #[derive(Error, Debug)]
@@ -90,9 +90,24 @@ pub struct ColorF32 {
 }
 
 impl ColorF32 {
-    pub const TRANSPARENT: ColorF32 = ColorF32 { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
-    pub const BLACK: ColorF32 = ColorF32 { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
-    pub const WHITE: ColorF32 = ColorF32 { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+    pub const TRANSPARENT: ColorF32 = ColorF32 {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 0.0,
+    };
+    pub const BLACK: ColorF32 = ColorF32 {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+    pub const WHITE: ColorF32 = ColorF32 {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    };
 
     #[inline]
     pub fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
@@ -133,10 +148,10 @@ impl ColorF32 {
     pub fn to_color_dithered(&self, pixel_x: u32, pixel_y: u32) -> Color {
         // 4x4 Bayer ordered dithering matrix (normalized to 0.0-1.0 range)
         const BAYER_4X4: [[f32; 4]; 4] = [
-            [0.0/16.0, 8.0/16.0, 2.0/16.0, 10.0/16.0],
-            [12.0/16.0, 4.0/16.0, 14.0/16.0, 6.0/16.0],
-            [3.0/16.0, 11.0/16.0, 1.0/16.0, 9.0/16.0],
-            [15.0/16.0, 7.0/16.0, 13.0/16.0, 5.0/16.0],
+            [0.0 / 16.0, 8.0 / 16.0, 2.0 / 16.0, 10.0 / 16.0],
+            [12.0 / 16.0, 4.0 / 16.0, 14.0 / 16.0, 6.0 / 16.0],
+            [3.0 / 16.0, 11.0 / 16.0, 1.0 / 16.0, 9.0 / 16.0],
+            [15.0 / 16.0, 7.0 / 16.0, 13.0 / 16.0, 5.0 / 16.0],
         ];
 
         let dither = BAYER_4X4[(pixel_y & 3) as usize][(pixel_x & 3) as usize];
@@ -180,7 +195,12 @@ impl ColorF32 {
             }
         } else {
             // Fully transparent - color doesn't matter
-            ColorF32 { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
+            ColorF32 {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            }
         }
     }
 
@@ -234,7 +254,12 @@ impl ColorF32 {
                 a,
             }
         } else {
-            ColorF32 { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
+            ColorF32 {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            }
         }
     }
 
@@ -317,12 +342,12 @@ pub enum Length {
 
 impl Length {
     /// Compute the absolute pixel value.
-    /// 
+    ///
     /// For viewport units, pass viewport dimensions via `viewport_width` and `viewport_height`.
     pub fn to_px(&self, font_size: f32, root_font_size: f32, container_size: f32) -> f32 {
         self.to_px_with_viewport(font_size, root_font_size, container_size, 0.0, 0.0)
     }
-    
+
     /// Compute the absolute pixel value with viewport dimensions for vh/vw units.
     pub fn to_px_with_viewport(
         &self,
@@ -344,19 +369,61 @@ impl Length {
             Length::Auto => 0.0, // Context-dependent
             Length::Zero => 0.0,
             Length::Min(pair) => {
-                let a = pair.0.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
-                let b = pair.1.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                let a = pair.0.to_px_with_viewport(
+                    font_size,
+                    root_font_size,
+                    container_size,
+                    viewport_width,
+                    viewport_height,
+                );
+                let b = pair.1.to_px_with_viewport(
+                    font_size,
+                    root_font_size,
+                    container_size,
+                    viewport_width,
+                    viewport_height,
+                );
                 a.min(b)
             }
             Length::Max(pair) => {
-                let a = pair.0.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
-                let b = pair.1.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                let a = pair.0.to_px_with_viewport(
+                    font_size,
+                    root_font_size,
+                    container_size,
+                    viewport_width,
+                    viewport_height,
+                );
+                let b = pair.1.to_px_with_viewport(
+                    font_size,
+                    root_font_size,
+                    container_size,
+                    viewport_width,
+                    viewport_height,
+                );
                 a.max(b)
             }
             Length::Clamp(triple) => {
-                let min_val = triple.0.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
-                let pref = triple.1.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
-                let max_val = triple.2.to_px_with_viewport(font_size, root_font_size, container_size, viewport_width, viewport_height);
+                let min_val = triple.0.to_px_with_viewport(
+                    font_size,
+                    root_font_size,
+                    container_size,
+                    viewport_width,
+                    viewport_height,
+                );
+                let pref = triple.1.to_px_with_viewport(
+                    font_size,
+                    root_font_size,
+                    container_size,
+                    viewport_width,
+                    viewport_height,
+                );
+                let max_val = triple.2.to_px_with_viewport(
+                    font_size,
+                    root_font_size,
+                    container_size,
+                    viewport_width,
+                    viewport_height,
+                );
                 pref.clamp(min_val, max_val)
             }
         }
@@ -385,7 +452,7 @@ impl BoxShadow {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Create a simple drop shadow.
     pub fn drop_shadow(offset_x: f32, offset_y: f32, blur: f32, color: Color) -> Self {
         Self {
@@ -397,11 +464,14 @@ impl BoxShadow {
             inset: false,
         }
     }
-    
+
     /// Check if this shadow is visible (non-zero offset, blur, or spread with non-transparent color).
     pub fn is_visible(&self) -> bool {
-        self.color.a > 0.0 && 
-        (self.offset_x != 0.0 || self.offset_y != 0.0 || self.blur_radius > 0.0 || self.spread_radius != 0.0)
+        self.color.a > 0.0
+            && (self.offset_x != 0.0
+                || self.offset_y != 0.0
+                || self.blur_radius > 0.0
+                || self.spread_radius != 0.0)
     }
 }
 
@@ -565,11 +635,19 @@ pub struct LinearGradient {
 
 impl LinearGradient {
     pub fn new(direction: GradientDirection, stops: Vec<ColorStop>) -> Self {
-        Self { direction, stops, repeating: false }
+        Self {
+            direction,
+            stops,
+            repeating: false,
+        }
     }
 
     pub fn new_repeating(direction: GradientDirection, stops: Vec<ColorStop>) -> Self {
-        Self { direction, stops, repeating: true }
+        Self {
+            direction,
+            stops,
+            repeating: true,
+        }
     }
 }
 
@@ -589,12 +667,34 @@ pub struct RadialGradient {
 }
 
 impl RadialGradient {
-    pub fn new(shape: RadialShape, size: RadialSize, center: (f32, f32), stops: Vec<ColorStop>) -> Self {
-        Self { shape, size, center, stops, repeating: false }
+    pub fn new(
+        shape: RadialShape,
+        size: RadialSize,
+        center: (f32, f32),
+        stops: Vec<ColorStop>,
+    ) -> Self {
+        Self {
+            shape,
+            size,
+            center,
+            stops,
+            repeating: false,
+        }
     }
 
-    pub fn new_repeating(shape: RadialShape, size: RadialSize, center: (f32, f32), stops: Vec<ColorStop>) -> Self {
-        Self { shape, size, center, stops, repeating: true }
+    pub fn new_repeating(
+        shape: RadialShape,
+        size: RadialSize,
+        center: (f32, f32),
+        stops: Vec<ColorStop>,
+    ) -> Self {
+        Self {
+            shape,
+            size,
+            center,
+            stops,
+            repeating: true,
+        }
     }
 }
 
@@ -613,11 +713,21 @@ pub struct ConicGradient {
 
 impl ConicGradient {
     pub fn new(from_angle: f32, center: (f32, f32), stops: Vec<ColorStop>) -> Self {
-        Self { from_angle, center, stops, repeating: false }
+        Self {
+            from_angle,
+            center,
+            stops,
+            repeating: false,
+        }
     }
 
     pub fn new_repeating(from_angle: f32, center: (f32, f32), stops: Vec<ColorStop>) -> Self {
-        Self { from_angle, center, stops, repeating: true }
+        Self {
+            from_angle,
+            center,
+            stops,
+            repeating: true,
+        }
     }
 }
 
@@ -682,7 +792,10 @@ pub enum BackgroundSize {
     /// Scale to fit within the area.
     Contain,
     /// Explicit width and height (None = auto for that dimension).
-    Explicit { width: Option<f32>, height: Option<f32> },
+    Explicit {
+        width: Option<f32>,
+        height: Option<f32>,
+    },
     /// Auto sizing (use intrinsic dimensions).
     Auto,
 }
@@ -842,7 +955,6 @@ pub enum Display {
     None,
 }
 
-
 impl Display {
     /// Check if this is a flex container.
     pub fn is_flex(self) -> bool {
@@ -856,7 +968,10 @@ impl Display {
 
     /// Check if this is an inline-level display (inline, inline-block, inline-flex, inline-grid).
     pub fn is_inline_level(self) -> bool {
-        matches!(self, Display::Inline | Display::InlineBlock | Display::InlineFlex | Display::InlineGrid)
+        matches!(
+            self,
+            Display::Inline | Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
+        )
     }
 
     /// Check if this is inline-block.
@@ -869,7 +984,10 @@ impl Display {
     /// laying out its own contents with its inner display type (CSS Display 3
     /// §2.4).
     pub fn is_atomic_inline(self) -> bool {
-        matches!(self, Display::InlineBlock | Display::InlineFlex | Display::InlineGrid)
+        matches!(
+            self,
+            Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
+        )
     }
 }
 
@@ -888,7 +1006,10 @@ pub enum FlexDirection {
 impl FlexDirection {
     /// Check if this direction is reversed.
     pub fn is_reverse(self) -> bool {
-        matches!(self, FlexDirection::RowReverse | FlexDirection::ColumnReverse)
+        matches!(
+            self,
+            FlexDirection::RowReverse | FlexDirection::ColumnReverse
+        )
     }
 
     /// Check if this is a row direction.
@@ -1194,7 +1315,7 @@ impl GridTemplateAreas {
     /// Parse grid-template-areas value.
     pub fn parse(value: &str) -> Option<Self> {
         let mut rows = Vec::new();
-        
+
         for line in value.lines() {
             let line = line.trim();
             if line.is_empty() {
@@ -1202,18 +1323,12 @@ impl GridTemplateAreas {
             }
             // Remove quotes if present
             let line = line.trim_matches('"').trim_matches('\'');
-            
+
             let cells: Vec<Option<String>> = line
                 .split_whitespace()
-                .map(|s| {
-                    if s == "." {
-                        None
-                    } else {
-                        Some(s.to_string())
-                    }
-                })
+                .map(|s| if s == "." { None } else { Some(s.to_string()) })
                 .collect();
-            
+
             rows.push(cells);
         }
 
@@ -1224,13 +1339,14 @@ impl GridTemplateAreas {
         // Extract named areas
         let mut areas = Vec::new();
         let mut area_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-        
+
         for (row_idx, row) in rows.iter().enumerate() {
             for (col_idx, cell) in row.iter().enumerate() {
                 if let Some(name) = cell {
                     if !area_names.contains(name) {
                         // Find extent of this area
-                        let (row_end, col_end) = Self::find_area_extent(&rows, row_idx, col_idx, name);
+                        let (row_end, col_end) =
+                            Self::find_area_extent(&rows, row_idx, col_idx, name);
                         areas.push(GridArea {
                             name: name.clone(),
                             row_start: row_idx as i32 + 1,
@@ -1247,7 +1363,12 @@ impl GridTemplateAreas {
         Some(Self { rows, areas })
     }
 
-    fn find_area_extent(rows: &[Vec<Option<String>>], start_row: usize, start_col: usize, name: &str) -> (usize, usize) {
+    fn find_area_extent(
+        rows: &[Vec<Option<String>>],
+        start_row: usize,
+        start_col: usize,
+        name: &str,
+    ) -> (usize, usize) {
         let mut row_end = start_row;
         let mut col_end = start_col;
 
@@ -1924,7 +2045,7 @@ pub struct ComputedStyle {
     pub min_height: Length,
     pub max_width: Length,
     pub max_height: Length,
-    pub aspect_ratio: Option<f32>,  // width / height ratio
+    pub aspect_ratio: Option<f32>, // width / height ratio
 
     // Margin
     pub margin_top: Length,
@@ -2023,7 +2144,7 @@ pub struct ComputedStyle {
     pub opacity: f32,
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
-    
+
     // Box shadows (multiple shadows supported)
     pub box_shadows: Vec<BoxShadow>,
 
@@ -2032,7 +2153,7 @@ pub struct ComputedStyle {
 
     // Image/replaced element
     pub image_url: Option<String>,
-    pub object_fit: String,  // "fill", "contain", "cover", "none", "scale-down"
+    pub object_fit: String, // "fill", "contain", "cover", "none", "scale-down"
     pub object_position: (f32, f32),
 
     // Flexbox Container
@@ -2122,7 +2243,12 @@ impl ComputedStyle {
             max_height: Length::Auto,
             // Image/replaced element defaults
             image_url: None,
-            object_fit: "contain".to_string(),
+            // CSS Images 3 §5.5: the initial value of object-fit is FILL.
+            // We defaulted to `contain`, which letterboxes every image that
+            // does not set the property — i.e. almost all of them — and is
+            // why sized images rendered smaller than their box with visible
+            // gaps (Wikipedia globe, live session 2026-08-07).
+            object_fit: "fill".to_string(),
             object_position: (0.5, 0.5), // center center
             ..Default::default()
         }
@@ -2231,6 +2357,9 @@ impl Stylesheet {
         self.rules.len()
     }
 }
+
+pub mod font_face;
+pub use font_face::{parse_font_face, FontDisplayValue, FontFaceRule};
 
 /// Parse a color value.
 pub fn parse_color(value: &str) -> Option<Color> {
@@ -2376,7 +2505,7 @@ pub fn parse_color(value: &str) -> Option<Color> {
         "burlywood" => return Some(Color::from_rgb(222, 184, 135)),
         "lavenderblush" => return Some(Color::from_rgb(255, 240, 245)),
         "currentcolor" => return None, // Special case - needs context
-        "inherit" => return None, // Special case - needs context
+        "inherit" => return None,      // Special case - needs context
         _ => {}
     }
 
@@ -2436,7 +2565,11 @@ pub fn parse_color(value: &str) -> Option<Color> {
             .trim_end_matches(')');
         let parts: Vec<&str> = inner.split(',').collect();
         if parts.len() >= 3 {
-            let h = parts[0].trim().trim_end_matches("deg").parse::<f32>().ok()?;
+            let h = parts[0]
+                .trim()
+                .trim_end_matches("deg")
+                .parse::<f32>()
+                .ok()?;
             let s = parts[1].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
             let l = parts[2].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
             let a = if parts.len() >= 4 {
@@ -2444,7 +2577,7 @@ pub fn parse_color(value: &str) -> Option<Color> {
             } else {
                 1.0
             };
-            
+
             // HSL to RGB conversion
             let (r, g, b) = hsl_to_rgb(h, s, l);
             return Some(Color::new(r, g, b, a));
@@ -2486,9 +2619,13 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
 }
 
 fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
-    if t < 0.0 { t += 1.0; }
-    if t > 1.0 { t -= 1.0; }
-    
+    if t < 0.0 {
+        t += 1.0;
+    }
+    if t > 1.0 {
+        t -= 1.0;
+    }
+
     if t < 1.0 / 6.0 {
         return p + (q - p) * 6.0 * t;
     }
@@ -2670,8 +2807,14 @@ mod tests {
     #[test]
     fn test_parse_color_hsl_hue_wraps() {
         // hsl(-120) ≡ hsl(240), hsl(480) ≡ hsl(120) — hue is a circle
-        assert_eq!(parse_color("hsl(-120, 50%, 50%)"), parse_color("hsl(240, 50%, 50%)"));
-        assert_eq!(parse_color("hsl(480, 100%, 50%)"), parse_color("hsl(120, 100%, 50%)"));
+        assert_eq!(
+            parse_color("hsl(-120, 50%, 50%)"),
+            parse_color("hsl(240, 50%, 50%)")
+        );
+        assert_eq!(
+            parse_color("hsl(480, 100%, 50%)"),
+            parse_color("hsl(120, 100%, 50%)")
+        );
     }
 
     #[test]
@@ -2928,5 +3071,23 @@ mod tests {
         assert_eq!(expanded.len(), 2);
         assert_eq!(expanded[0].line_names, vec!["col-start".to_string()]);
         assert_eq!(expanded[1].line_names, vec!["col-start".to_string()]);
+    }
+}
+
+
+#[cfg(test)]
+mod object_fit_initial_value_tests {
+    use super::*;
+
+    /// CSS Images 3 §5.5 pins the initial value of `object-fit` to `fill`.
+    ///
+    /// We shipped `contain`, which letterboxes every image that does not set
+    /// the property — nearly all of them — so sized images rendered smaller
+    /// than their box with gaps (live session 2026-08-07). A default that is
+    /// "reasonable looking" but not the spec value is the shape that makes a
+    /// whole class of pages subtly wrong while every test passes.
+    #[test]
+    fn object_fit_initial_value_is_fill() {
+        assert_eq!(ComputedStyle::new().object_fit, "fill");
     }
 }

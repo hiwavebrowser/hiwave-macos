@@ -396,6 +396,15 @@ impl ImageManager {
         Ok(Arc::new(loaded))
     }
 
+    /// Decode bytes through the real engine path. Test-only surface so a
+    /// codec fix can be proven to REACH the engine rather than merely
+    /// existing in its own crate — the orphan shape this codebase keeps
+    /// producing. Calls the same private decoder production uses.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn decode_bytes_for_test(&self, url: &Url, bytes: &[u8]) -> ImageResult<LoadedImage> {
+        self.decode_bytes(url, bytes)
+    }
+
     /// Decode image from bytes
     fn decode_bytes(&self, url: &Url, bytes: &[u8]) -> ImageResult<LoadedImage> {
         // Guess format from bytes
@@ -651,10 +660,10 @@ impl Default for ImageManager {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ObjectFit {
     /// Fill the box, possibly distorting the image
+    #[default]
     Fill,
 
     /// Scale to fit inside the box, preserving aspect ratio
-    #[default]
     Contain,
 
     /// Scale to cover the box, preserving aspect ratio

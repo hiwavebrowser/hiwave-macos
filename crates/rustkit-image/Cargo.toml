@@ -5,6 +5,9 @@ edition = "2021"
 description = "Image loading, decoding, and caching for RustKit browser engine"
 license = "MIT"
 
+[features]
+test-hooks = []
+
 [dependencies]
 # Image decoding (RustKit-owned)
 rustkit-codecs = { path = "../rustkit-codecs" }

@@ -76,7 +76,14 @@ class CaseSummary:
     passed: bool
     stable: bool
     threshold: float
+    # ATTEMPTED iterations.
     pixel_runs: int = 1
+    # MEASURED iterations — the ones that produced a diff. Distinct from
+    # pixel_runs on purpose: three attempts of which two errored is one
+    # measurement, and only measurements can support a stability verdict.
+    # None means the producer did not say, which parity_gate treats as no
+    # evidence rather than as enough.
+    measured_runs: Optional[int] = None
     overlay_path: Optional[str] = None
     attribution_path: Optional[str] = None
     top_contributors: List[Dict] = field(default_factory=list)
@@ -95,6 +102,26 @@ def _mean_or_none(values):
     Returning 0.0 for an empty set claims perfect parity from zero evidence.
     """
     return (sum(values) / len(values)) if values else None
+
+
+def _measured_runs(r: Dict) -> Optional[int]:
+    """How many iterations of this row produced a MEASUREMENT.
+
+    The swarm publishes `iteration_diffs` (one entry per iteration that
+    actually scored); parity_test.py publishes `measured_runs` directly, and
+    older rows put the per-run diff list in `pixel_runs`. `iterations` is the
+    ATTEMPT count and is deliberately not consulted here — it is what let a
+    row with two errored captures claim three runs' worth of stability
+    evidence. None when nothing in the row says.
+    """
+    v = r.get("measured_runs")
+    if isinstance(v, int) and not isinstance(v, bool):
+        return v
+    for key in ("iteration_diffs", "pixel_runs"):
+        v = r.get(key)
+        if isinstance(v, list):
+            return len(v)
+    return None
 
 
 def _worst_first(c: "CaseSummary"):
@@ -209,6 +236,7 @@ def aggregate_from_results(results: List[Dict]) -> Dict[str, Any]:
             threshold=r.get("threshold", 15),
             error=r.get("error"),
             pixel_runs=int(r.get("iterations") or r.get("pixel_runs") or 1),
+            measured_runs=_measured_runs(r),
             overlay_path=r.get("best_overlay_path"),
             attribution_path=r.get("best_attribution_path"),
         )
@@ -349,6 +377,7 @@ def aggregate_from_results(results: List[Dict]) -> Dict[str, Any]:
                 "passed": c.passed,
                 "stable": c.stable,
                 "threshold": c.threshold,
+                "measured_runs": c.measured_runs,
                 "overlay_path": c.overlay_path,
                 "attribution_path": c.attribution_path,
                 "top_contributors": c.top_contributors[:3],
@@ -370,6 +399,9 @@ def aggregate_from_results(results: List[Dict]) -> Dict[str, Any]:
                 "stable": c.stable,
                 "threshold": c.threshold,
                 "pixel_runs": c.pixel_runs,
+                # Carried so parity_gate can hold a row to the stability bar
+                # on the evidence that exists, not on the attempt count.
+                "measured_runs": c.measured_runs,
                 # Was hardcoded None. The aggregate was ERASING shard errors
                 # before parity_gate could see them, so a gate that correctly
                 # fails on `error` never got one to fail on.

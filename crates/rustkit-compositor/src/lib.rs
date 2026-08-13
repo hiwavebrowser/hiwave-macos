@@ -71,8 +71,11 @@ pub struct SurfaceState {
 }
 
 /// Headless texture state for offscreen rendering (used in testing/headless mode).
+///
+/// No `view_id` field: these live in `HashMap<ViewId, HeadlessState>`, so the
+/// key already carries it. `SurfaceState` keeps its own copy because that one
+/// is genuinely read.
 pub struct HeadlessState {
-    view_id: ViewId,
     texture: wgpu::Texture,
     width: u32,
     height: u32,
@@ -377,7 +380,6 @@ impl Compositor {
         });
 
         let state = HeadlessState {
-            view_id,
             texture,
             width,
             height,

@@ -25,6 +25,7 @@ use rustkit_dom::{Document, Node, NodeType};
 use rustkit_image::ImageManager;
 use rustkit_js::JsRuntime;
 use rustkit_layout::{
+    FontLoader,
     BoxType, Dimensions, DisplayList, ElementIdentity, LayoutBox, Position, Rect,
 };
 use std::cell::Cell;
@@ -152,6 +153,20 @@ struct ViewState {
     nav_event_rx: mpsc::UnboundedReceiver<LoadEvent>,
     /// Currently focused DOM node.
     focused_node: Option<rustkit_dom::NodeId>,
+    /// Live text-editing state for this view's form controls, keyed by raw
+    /// `NodeId`.
+    ///
+    /// Per-VIEW, not engine-global: `NodeId` is per-DOCUMENT (every
+    /// `Document` restarts its counter at 1), so a global map lets one
+    /// document's node 4 collide with another's. Living on the view also
+    /// makes the lifetime obvious — drop the view, drop the map — and gives
+    /// document replacement one clear place to clear.
+    ///
+    /// This is the IDL-value side table browsers keep separate from the
+    /// content attribute: `getAttribute("value")` is the authored default,
+    /// this is the live value. Mutating the DOM instead would conflate the
+    /// two and break form-reset semantics.
+    edit_states: std::collections::HashMap<usize, rustkit_dom::forms::TextEditState>,
     /// Whether the view itself has focus.
     view_focused: bool,
     /// Current scroll offset (x, y) in pixels.
@@ -210,6 +225,14 @@ pub struct Engine {
     renderer: Option<Renderer>,
     loader: Arc<ResourceLoader>,
     image_manager: Arc<ImageManager>,
+    /// Webfont loader. PER-ENGINE AND Arc-SHARED per the 2026-08-08 design
+    /// pin: one loader for the whole engine, with cross-site isolation
+    /// provided by the partition key on every operation rather than by
+    /// handing each view its own object. Per-view loaders would refetch the
+    /// same face for every tab; an unpartitioned shared one would be a
+    /// cross-site timing oracle. The partitioned shared loader is the only
+    /// shape that is both.
+    font_loader: Arc<FontLoader>,
     views: HashMap<EngineViewId, ViewState>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
     event_rx: Option<mpsc::UnboundedReceiver<EngineEvent>>,
@@ -224,6 +247,16 @@ pub struct Engine {
     /// persistently failing render (e.g. a wedged surface) freezes the
     /// screen while the log stays silent.
     render_failing: std::collections::HashSet<EngineViewId>,
+    /// View currently being laid out, so the view-agnostic recursive builder
+    /// can read that view's edit states (and only that view's).
+    building_view: std::cell::Cell<Option<EngineViewId>>,
+    /// Focused node of the view currently being laid out.
+    ///
+    /// Focus is per-VIEW but the recursive layout builder is view-agnostic,
+    /// so the alternative was checking "is this node focused in ANY view",
+    /// which would mark a node focused in one view while building another.
+    /// Set by `relayout` around the build; `None` outside one.
+    building_focus: std::cell::Cell<Option<rustkit_dom::NodeId>>,
     /// Parsed SVG documents keyed by URL. SVGs referenced from <img> are
     /// vector content — they bypass ImageManager's raster decode (which
     /// rejects them as "Unknown image format") and are spliced into the
@@ -392,11 +425,14 @@ impl Engine {
             loader,
             image_manager,
             views: HashMap::new(),
-            event_tx,
+            
+            font_loader: Arc::new(FontLoader::new()),event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         })
     }
 
@@ -467,6 +503,7 @@ impl Engine {
             navigation,
             nav_event_rx: nav_rx,
             focused_node: None,
+            edit_states: std::collections::HashMap::new(),
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -521,6 +558,7 @@ impl Engine {
             navigation,
             nav_event_rx: nav_rx,
             focused_node: None,
+            edit_states: std::collections::HashMap::new(),
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -584,6 +622,7 @@ impl Engine {
             navigation,
             nav_event_rx: nav_rx,
             focused_node: None,
+            edit_states: std::collections::HashMap::new(),
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -738,6 +777,305 @@ impl Engine {
         }
     }
 
+    /// Hit-test a click in VIEWPORT coordinates and focus the element under
+    /// it if that element is focusable (a form control today).
+    ///
+    /// Returns the tag name of the newly focused element, or `None` when the
+    /// click landed on nothing focusable — in which case focus is CLEARED,
+    /// matching the behavior of clicking a page's background.
+    pub fn focus_at_point(
+        &mut self,
+        id: EngineViewId,
+        viewport_x: f32,
+        viewport_y: f32,
+    ) -> Option<String> {
+        let (doc_x, doc_y) = {
+            let view = self.views.get(&id)?;
+            (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1)
+        };
+
+        let hit_node = self
+            .views
+            .get(&id)
+            .and_then(|v| v.layout.as_ref())
+            .and_then(|l| l.hit_test(doc_x, doc_y))
+            .and_then(|h| h.node_id);
+
+        // Resolve focusability against the DOM, not the layout box: a
+        // FormControl box type would miss `contenteditable` and tabindex
+        // later, and the tag name is what callers want reported.
+        let focusable = hit_node.and_then(|raw| {
+            let view = self.views.get(&id)?;
+            let doc = view.document.as_ref()?;
+            let node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
+            match &node.node_type {
+                NodeType::Element { tag_name, .. } => {
+                    let tag = tag_name.to_lowercase();
+                    matches!(tag.as_str(), "input" | "textarea" | "select")
+                        .then_some((raw, tag))
+                }
+                _ => None,
+            }
+        });
+
+        // Seed edit state from the element's authored value the FIRST time it
+        // is focused. Re-focusing must not reset what the user has typed, so
+        // the seed is guarded by the entry being absent.
+        if let Some((raw, ref tag)) = focusable {
+            let already_seeded = self
+                .views
+                .get(&id)
+                .map(|v| v.edit_states.contains_key(&raw))
+                .unwrap_or(false);
+            if matches!(tag.as_str(), "input" | "textarea") && !already_seeded {
+                let seed = self
+                    .views
+                    .get(&id)
+                    .and_then(|v| v.document.as_ref())
+                    .and_then(|d| d.get_node(rustkit_dom::NodeId::new(raw)))
+                    .map(|node| match &node.node_type {
+                        NodeType::Element { attributes, .. } => {
+                            if tag == "textarea" {
+                                node.text_content()
+                            } else {
+                                attributes.get("value").cloned().unwrap_or_default()
+                            }
+                        }
+                        _ => String::new(),
+                    })
+                    .unwrap_or_default();
+                let state = rustkit_dom::forms::TextEditState::with_value(seed);
+                state.move_to_end(false);
+                if let Some(v) = self.views.get_mut(&id) {
+                    v.edit_states.insert(raw, state);
+                }
+            }
+        }
+
+        let view = self.views.get_mut(&id)?;
+        match focusable {
+            Some((raw, tag)) => {
+                view.focused_node = Some(rustkit_dom::NodeId::new(raw));
+                debug!(?id, %tag, "Focused element");
+                Some(tag)
+            }
+            None => {
+                view.focused_node = None;
+                None
+            }
+        }
+    }
+
+    /// Deliver a key to the focused form control.
+    ///
+    /// `key_code` uses the Win32 virtual-key numbering that
+    /// `rustkit_dom::forms::keyboard` already speaks (the model predates any
+    /// platform wiring); `key` carries the typed character for insertions.
+    /// Returns true when the control's value or caret changed, i.e. when the
+    /// caller must relayout.
+    pub fn handle_text_key(
+        &mut self,
+        id: EngineViewId,
+        key_code: u32,
+        key: &str,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) -> bool {
+        use rustkit_dom::forms::{keyboard, KeyHandleResult};
+
+        let Some(focused) = self.views.get(&id).and_then(|v| v.focused_node) else {
+            return false;
+        };
+        let Some(state) = self
+            .views
+            .get(&id)
+            .and_then(|v| v.edit_states.get(&focused.raw()))
+        else {
+            return false;
+        };
+
+        let result = keyboard::handle_input_key(state, key_code, key, ctrl, shift, alt);
+        matches!(
+            result,
+            KeyHandleResult::ValueChanged | KeyHandleResult::SelectionChanged
+        )
+    }
+
+    /// Build the submission for the form containing the focused control.
+    ///
+    /// Returns `None` when nothing is focused, the focused control has no
+    /// enclosing `<form>`, or the form has no submittable fields. Values come
+    /// from live edit state where it exists, so a submit carries what the
+    /// user actually typed rather than the authored attribute.
+    ///
+    /// GET only for now: the loader's public surface takes a URL, so a POST
+    /// body has nowhere to go until `load_url` grows a request variant. That
+    /// is a named follow-up, not a silent omission — a POST form returns
+    /// `None` rather than being submitted as a GET, because quietly changing
+    /// a form's method is worse than not submitting it.
+    pub fn form_submission_for_focus(
+        &self,
+        id: EngineViewId,
+    ) -> Option<rustkit_dom::forms::FormSubmission> {
+        use rustkit_dom::forms::{FormDataEntry, FormDataValue, FormState};
+
+        let view = self.views.get(&id)?;
+        let focused = view.focused_node?;
+        let document = view.document.as_ref()?;
+        let base = view.url.as_ref()?.to_string();
+
+        // Walk up to the enclosing <form>.
+        let form = {
+            let mut cur = document.get_node(focused)?;
+            loop {
+                match &cur.node_type {
+                    NodeType::Element { tag_name, .. } if tag_name.eq_ignore_ascii_case("form") => {
+                        break cur
+                    }
+                    _ => cur = cur.parent()?,
+                }
+            }
+        };
+
+        let NodeType::Element {
+            attributes: form_attrs,
+            ..
+        } = &form.node_type
+        else {
+            return None;
+        };
+
+        let state = FormState::new();
+        state.set_action(form_attrs.get("action").cloned().unwrap_or_default());
+        if let Some(m) = form_attrs.get("method") {
+            state.set_method(rustkit_dom::forms::FormMethod::from_str(m));
+        }
+
+        // Only GET is wired; see the doc comment.
+        if state.method() != rustkit_dom::forms::FormMethod::Get {
+            debug!(?id, "Form submit skipped: only GET is wired");
+            return None;
+        }
+
+        // Collect successful controls in document order.
+        let mut entries = Vec::new();
+        fn collect(
+            node: &std::rc::Rc<Node>,
+            engine: &Engine,
+            view_id: EngineViewId,
+            out: &mut Vec<FormDataEntry>,
+        ) {
+            if let NodeType::Element {
+                tag_name,
+                attributes,
+                ..
+            } = &node.node_type
+            {
+                let tag = tag_name.to_lowercase();
+                if matches!(tag.as_str(), "input" | "textarea") {
+                    // A control without a name is not successful (HTML §4.10),
+                    // and disabled controls never submit.
+                    let name = attributes.get("name").cloned().unwrap_or_default();
+                    let disabled = attributes.contains_key("disabled");
+                    let kind = attributes
+                        .get("type")
+                        .map(|t| t.to_lowercase())
+                        .unwrap_or_else(|| "text".into());
+                    let skip = matches!(kind.as_str(), "submit" | "button" | "reset" | "file")
+                        || (matches!(kind.as_str(), "checkbox" | "radio")
+                            && !attributes.contains_key("checked"));
+                    if !name.is_empty() && !disabled && !skip {
+                        let value = engine
+                            .edit_value_in(view_id, node.id.raw())
+                            .map(|(v, _)| v)
+                            .unwrap_or_else(|| {
+                                if tag == "textarea" {
+                                    node.text_content()
+                                } else {
+                                    attributes.get("value").cloned().unwrap_or_default()
+                                }
+                            });
+                        out.push(FormDataEntry {
+                            name,
+                            value: FormDataValue::String(value),
+                        });
+                    }
+                }
+            }
+            for child in node.children() {
+                collect(&child, engine, view_id, out);
+            }
+        }
+        collect(&form, self, id, &mut entries);
+
+        if entries.is_empty() {
+            return None;
+        }
+        Some(state.create_submission(&base, &entries))
+    }
+
+    /// Current value of a control's live edit state, if it has one.
+    ///
+    /// Layout reads through this so an edited field renders its typed text
+    /// while the DOM attribute stays untouched.
+    pub fn edit_value(&self, node_raw: usize) -> Option<(String, usize)> {
+        // Resolves against the view currently being laid out; outside a
+        // build there is no unambiguous answer, so it declines rather than
+        // guessing across views.
+        let view_id = self.building_view.get()?;
+        self.edit_value_in(view_id, node_raw)
+    }
+
+    /// Resolve a possibly-relative resource URL against the document being
+    /// laid out.
+    ///
+    /// The load path already resolves and caches under the ABSOLUTE url
+    /// (`discover_images`), while layout and paint used the raw attribute —
+    /// so `src="portal/img/logo.png"` was cached under
+    /// `https://.../portal/img/logo.png` and then looked up under
+    /// `portal/img/logo.png`, matching nothing. Paint additionally re-parsed
+    /// it and logged `Invalid URL for image` once per image PER FRAME (1120
+    /// warnings in one live session). One resolution point, at build, fixes
+    /// the cache key, the natural size, and the paint lookup together.
+    fn resolve_resource_url(&self, raw: &str) -> Option<Url> {
+        let id = self.building_view.get()?;
+        self.resolve_resource_url_in(id, raw)
+    }
+
+    /// Same, against a named view. Used where the build scope has already
+    /// been cleared (display-list assembly runs after the layout build).
+    fn resolve_resource_url_in(&self, id: EngineViewId, raw: &str) -> Option<Url> {
+        match self.views.get(&id).and_then(|v| v.url.as_ref()) {
+            Some(base) => base.join(raw).ok(),
+            None => Url::parse(raw).ok(),
+        }
+    }
+
+    /// Live value + caret for a control in a SPECIFIC view.
+    pub fn edit_value_in(&self, id: EngineViewId, node_raw: usize) -> Option<(String, usize)> {
+        self.views
+            .get(&id)?
+            .edit_states
+            .get(&node_raw)
+            .map(|s| (s.value(), s.caret_position()))
+    }
+
+    /// Make a view's NATIVE view the window's first responder so the OS
+    /// routes keyboard events to it. Engine-side focus (focused_node) decides
+    /// which element gets the keys; this decides whether the keys arrive at
+    /// all. Two systems, both required.
+    pub fn grab_keyboard(&self, id: EngineViewId) {
+        if let Some(view) = self.views.get(&id) {
+            let _ = <ViewHost as ViewHostTrait>::focus_view(&self.viewhost, view.viewhost_id);
+        }
+    }
+
+    /// The DOM node currently holding focus in a view, if any.
+    pub fn focused_node(&self, id: EngineViewId) -> Option<rustkit_dom::NodeId> {
+        self.views.get(&id).and_then(|v| v.focused_node)
+    }
+
     /// Get the current scroll offset of a view.
     pub fn get_scroll_offset(&self, id: EngineViewId) -> Result<(f32, f32), EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
@@ -868,6 +1206,17 @@ impl Engine {
         view.url = Some(url.clone());
         view.document = Some(document.clone());
         view.title = title.clone();
+        // A new document invalidates every per-node side table. NodeId is
+        // PER-DOCUMENT (each Document restarts its counter at 1), so a
+        // surviving entry keyed by raw id 4 would be read as the NEW page's
+        // node 4: the previous page's typed text painted into a fresh
+        // control, with first-focus seeding skipped because the key already
+        // exists. The old doc comment claimed reload dropped this map; it
+        // did not, and asserting a lifetime the code does not implement is
+        // how a silent correctness bug hides in plain sight.
+        // (Prometheus, #110 R1 must-fix.)
+        view.edit_states.clear();
+        view.focused_node = None;
 
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
@@ -1003,6 +1352,17 @@ impl Engine {
         view.url = Some(url.clone());
         view.document = Some(document.clone());
         view.title = title.clone();
+        // A new document invalidates every per-node side table. NodeId is
+        // PER-DOCUMENT (each Document restarts its counter at 1), so a
+        // surviving entry keyed by raw id 4 would be read as the NEW page's
+        // node 4: the previous page's typed text painted into a fresh
+        // control, with first-focus seeding skipped because the key already
+        // exists. The old doc comment claimed reload dropped this map; it
+        // did not, and asserting a lifetime the code does not implement is
+        // how a silent correctness bug hides in plain sight.
+        // (Prometheus, #110 R1 must-fix.)
+        view.edit_states.clear();
+        view.focused_node = None;
 
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
@@ -1057,7 +1417,12 @@ impl Engine {
 
     /// Re-layout a view.
     #[tracing::instrument(skip(self), fields(view_id = ?id))]
-    fn relayout(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+    /// Rebuild layout and repaint a view.
+    ///
+    /// Public so the shell can refresh after an edit changes a form
+    /// control's value — the value lives in engine-side edit state, so
+    /// nothing else would trigger a rebuild.
+    pub fn relayout(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         let _span = tracing::info_span!("relayout", ?id).entered();
 
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
@@ -1108,7 +1473,9 @@ impl Engine {
         // Build layout tree from DOM with tracing
         let root_box = {
             let _build_span = tracing::info_span!("build_layout_tree").entered();
-            self.build_layout_from_document(&document, &external_stylesheets)
+            // Scope the focused node to THIS view for the duration of the
+            // build; cleared immediately after so no later build inherits it.
+            self.build_layout_for_view(id, &document, &external_stylesheets)
         };
 
         // Layout computation
@@ -1192,27 +1559,43 @@ impl Engine {
             // Done once per layout (not per frame): the renderer only speaks
             // raster textures, so vector images become their own command
             // runs positioned in the image's dest_rect.
-            if !self.svg_cache.is_empty() {
-                let mut expanded = Vec::with_capacity(dl.commands.len());
-                for cmd in dl.commands.drain(..) {
-                    match &cmd {
-                        rustkit_layout::DisplayCommand::Image { url, dest_rect, .. } => {
-                            if let Some(svg) = self.svg_cache.get(url) {
-                                expanded.extend(svg.render(
-                                    dest_rect.x,
-                                    dest_rect.y,
-                                    dest_rect.width,
-                                    dest_rect.height,
-                                ));
-                            } else {
-                                expanded.push(cmd);
-                            }
+            // Normalize resource URLs to absolute, then splice SVGs.
+            //
+            // CSS `url(...)` is parsed without a base (the parser is a free
+            // function with no document in scope), and `<img>` boxes carry
+            // whatever the build produced. The loader caches under ABSOLUTE
+            // urls, so any relative key here misses the cache and then fails
+            // to parse in the paint path — `Invalid URL for image`, once per
+            // image per frame. Rewriting here means the renderer only ever
+            // sees keys that match what the loader stored.
+            let mut expanded = Vec::with_capacity(dl.commands.len());
+            for mut cmd in dl.commands.drain(..) {
+                match &mut cmd {
+                    rustkit_layout::DisplayCommand::Image { url, .. }
+                    | rustkit_layout::DisplayCommand::BackgroundImage { url, .. } => {
+                        if let Some(abs) = self.resolve_resource_url_in(id, url) {
+                            *url = abs.to_string();
                         }
-                        _ => expanded.push(cmd),
                     }
+                    _ => {}
                 }
-                dl.commands = expanded;
+                match &cmd {
+                    rustkit_layout::DisplayCommand::Image { url, dest_rect, .. } => {
+                        if let Some(svg) = self.svg_cache.get(url) {
+                            expanded.extend(svg.render(
+                                dest_rect.x,
+                                dest_rect.y,
+                                dest_rect.width,
+                                dest_rect.height,
+                            ));
+                            continue;
+                        }
+                    }
+                    _ => {}
+                }
+                expanded.push(cmd);
             }
+            dl.commands = expanded;
             dl
         };
 
@@ -1380,6 +1763,28 @@ impl Engine {
             };
             layout_box.set_offsets(px(&style.top), px(&style.right), px(&style.bottom), px(&style.left));
         }
+    }
+
+    /// Build a layout tree FOR A SPECIFIC VIEW.
+    ///
+    /// Owns the `building_view`/`building_focus` scoping so no caller can
+    /// forget it: without them the view-agnostic recursive builder cannot
+    /// find live edit state and SILENTLY falls back to the frozen DOM
+    /// attribute — typed text vanishes with no error. Every layout build
+    /// goes through here.
+    fn build_layout_for_view(
+        &self,
+        id: EngineViewId,
+        document: &Document,
+        external_stylesheets: &[Stylesheet],
+    ) -> LayoutBox {
+        self.building_view.set(Some(id));
+        self.building_focus
+            .set(self.views.get(&id).and_then(|v| v.focused_node));
+        let built = self.build_layout_from_document(document, external_stylesheets);
+        self.building_focus.set(None);
+        self.building_view.set(None);
+        built
     }
 
     fn build_layout_from_document(
@@ -1782,7 +2187,14 @@ impl Engine {
 
                 // Handle replaced elements (images)
                 if tag_lower == "img" {
-                    let src = attributes.get("src").cloned().unwrap_or_default();
+                    // SAME selection rule as discover_images, or the loader
+                    // caches under one key and layout looks up another — the
+                    // exact cache-miss shape #113 fixed for relative URLs.
+                    let src = attributes
+                        .get("srcset")
+                        .and_then(|ss| Self::pick_from_srcset(ss))
+                        .or_else(|| attributes.get("src").cloned())
+                        .unwrap_or_default();
 
                     // Parse explicit dimensions from attributes
                     let explicit_width: Option<f32> =
@@ -1810,6 +2222,13 @@ impl Engine {
                     // Layout previously never consulted ImageManager and gave every
                     // CSS-sized <img> a 150x150 placeholder, so pages sized by
                     // stylesheet rules (not width=/height= attributes) drifted.
+                    // Absolute from here on: the box, the cache lookup and
+                    // the display command must all use the same key.
+                    let src = self
+                        .resolve_resource_url(&src)
+                        .map(|u| u.to_string())
+                        .unwrap_or(src);
+
                     let loaded = Url::parse(&src).ok().and_then(|parsed_url| {
                         if let Some(cached) = self.image_manager.get_cached(&parsed_url) {
                             Some(cached)
@@ -1862,7 +2281,25 @@ impl Engine {
                         .get("type")
                         .cloned()
                         .unwrap_or_else(|| "text".to_string());
-                    let value = attributes.get("value").cloned().unwrap_or_default();
+                    // type=hidden generates NO box (HTML §4.10.5.1.1). We were
+                    // rendering Google's hidden CSRF/state fields as a row of
+                    // visible hash-string boxes (live, 2026-08-07).
+                    if input_type.eq_ignore_ascii_case("hidden") {
+                        return LayoutBox::new(BoxType::Block, {
+                            let mut st = ComputedStyle::new();
+                            st.display = rustkit_css::Display::None;
+                            st
+                        });
+                    }
+                    // Read through live edit state when the user has typed
+                    // into this field; fall back to the authored value.
+                    // The DOM attribute is never rewritten (there is no
+                    // set_attribute), so this override is what makes typed
+                    // text visible.
+                    let value = self
+                        .edit_value(node.id.raw())
+                        .map(|(v, _)| v)
+                        .unwrap_or_else(|| attributes.get("value").cloned().unwrap_or_default());
                     let placeholder = attributes.get("placeholder").cloned().unwrap_or_default();
 
                     let control = match input_type.as_str() {
@@ -1880,7 +2317,18 @@ impl Engine {
                         },
                     };
 
-                    return LayoutBox::new(BoxType::FormControl(control), style);
+                    // Stamp identity BEFORE returning. Form controls return
+                    // early, so they never reach the general element path's
+                    // node_id assignment — which meant a hit test on an input
+                    // reported no node and focus could never resolve. The
+                    // unit tests missed it by hand-building boxes; only the
+                    // production path exercises this.
+                    let mut b = LayoutBox::new(BoxType::FormControl(control), style);
+                    b.node_id = Some(node.id.raw());
+                    if self.building_focus.get() == Some(node.id) {
+                        b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                    }
+                    return b;
                 }
 
                 if tag_lower == "button" {
@@ -1923,7 +2371,12 @@ impl Engine {
                 }
 
                 if tag_lower == "textarea" {
-                    let value = node.text_content();
+                    // Same read-through as <input>; a textarea's authored
+                    // value is its text content rather than an attribute.
+                    let value = self
+                        .edit_value(node.id.raw())
+                        .map(|(v, _)| v)
+                        .unwrap_or_else(|| node.text_content());
                     let placeholder = attributes.get("placeholder").cloned().unwrap_or_default();
                     let rows = attributes
                         .get("rows")
@@ -1934,7 +2387,7 @@ impl Engine {
                         .and_then(|c| c.parse().ok())
                         .unwrap_or(20);
 
-                    return LayoutBox::new(
+                    let mut b = LayoutBox::new(
                         BoxType::FormControl(rustkit_layout::FormControlType::TextArea {
                             value,
                             placeholder,
@@ -1943,6 +2396,11 @@ impl Engine {
                         }),
                         style,
                     );
+                    b.node_id = Some(node.id.raw());
+                    if self.building_focus.get() == Some(node.id) {
+                        b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                    }
+                    return b;
                 }
 
                 if tag_lower == "select" {
@@ -1974,7 +2432,7 @@ impl Engine {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(if attributes.contains_key("multiple") { 4 } else { 0 });
 
-                    return LayoutBox::new(
+                    let mut b = LayoutBox::new(
                         BoxType::FormControl(rustkit_layout::FormControlType::Select {
                             options,
                             selected_index,
@@ -1982,6 +2440,11 @@ impl Engine {
                         }),
                         style,
                     );
+                    b.node_id = Some(node.id.raw());
+                    if self.building_focus.get() == Some(node.id) {
+                        b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                    }
+                    return b;
                 }
 
                 // Box type follows the COMPUTED display, not the tag:
@@ -2018,6 +2481,18 @@ impl Engine {
                         tag: tag_lower.clone(),
                         selector: reported,
                     });
+                }
+
+                // Every element box remembers which DOM node it came from.
+                // This is what lets a click resolve to an element (focus,
+                // form editing, event dispatch) instead of just a rectangle.
+                layout_box.node_id = Some(node.id.raw());
+
+                // Carry caret position onto the box when this element is the
+                // focused text control, so the painter can draw the caret and
+                // focus ring without reaching back into engine state.
+                if self.building_focus.get() == Some(node.id) {
+                    layout_box.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                 }
 
                 // Links carry their RAW href so a hit test can navigate
@@ -4180,6 +4655,73 @@ impl Engine {
     }
 
     /// Discover images from <img> elements.
+    /// Choose one candidate from an `srcset` attribute.
+    ///
+    /// HTML §4.8.4.2. Deliberately a SUBSET: candidates are parsed and the
+    /// widest `w` (or highest `x`) wins, which is the right answer on a
+    /// retina display and a defensible one everywhere. Full selection needs
+    /// the `sizes` attribute and viewport/DPR math — that is a separate unit
+    /// and is NOT claimed here.
+    ///
+    /// Why it exists at all: `srcset` had ZERO support, so a page serving
+    /// images only via srcset (increasingly common; the `src` is often a
+    /// 1x1 placeholder or absent) rendered NO IMAGE AT ALL. A wrong-density
+    /// image is a rendering difference; no image is a hole.
+    fn pick_from_srcset(srcset: &str) -> Option<String> {
+        // `w` and `x` descriptors are NOT comparable — one is a pixel width,
+        // the other a device ratio. The first version scaled x by 1000 to
+        // rank them together; a test then showed 2x and 2000w colliding
+        // exactly, with the tie decided by document order. Inventing a
+        // common scale for incomparable units is the bug, not the tie.
+        //
+        // So: partition. If ANY width candidate exists, width decides
+        // (that is the descriptor authors reach for when the rendered size
+        // varies); otherwise density decides. Mixed srcsets are invalid per
+        // HTML §4.8.4.2 anyway.
+        let mut widest: Option<(f32, String)> = None;
+        let mut densest: Option<(f32, String)> = None;
+        let mut bare: Option<String> = None;
+
+        for cand in srcset.split(',') {
+            let mut parts = cand.split_whitespace();
+            let url = match parts.next() {
+                Some(u) if !u.is_empty() => u,
+                _ => continue,
+            };
+            match parts.next() {
+                // No descriptor means 1x (HTML §4.8.4.2).
+                None => {
+                    if bare.is_none() {
+                        bare = Some(url.to_string());
+                    }
+                    if densest.as_ref().map(|(d, _)| 1.0 > *d).unwrap_or(true) {
+                        densest = Some((1.0, url.to_string()));
+                    }
+                }
+                Some(d) if d.ends_with('w') => {
+                    if let Ok(w) = d[..d.len() - 1].parse::<f32>() {
+                        if widest.as_ref().map(|(b, _)| w > *b).unwrap_or(true) {
+                            widest = Some((w, url.to_string()));
+                        }
+                    }
+                }
+                Some(d) if d.ends_with('x') => {
+                    if let Ok(x) = d[..d.len() - 1].parse::<f32>() {
+                        if densest.as_ref().map(|(b, _)| x > *b).unwrap_or(true) {
+                            densest = Some((x, url.to_string()));
+                        }
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+
+        widest
+            .map(|(_, u)| u)
+            .or_else(|| densest.map(|(_, u)| u))
+            .or(bare)
+    }
+
     fn discover_images(&self, document: &Document, base_url: Option<&Url>) -> Vec<(String, Url)> {
         let mut images = Vec::new();
 
@@ -4188,12 +4730,19 @@ impl Engine {
 
         for img_el in img_elements {
             if let NodeType::Element { attributes, .. } = &img_el.node_type {
-                if let Some(src) = attributes.get("src") {
+                // srcset wins when present (that is the point of it); src is
+                // the fallback and is often a placeholder on srcset pages.
+                let chosen = attributes
+                    .get("srcset")
+                    .and_then(|ss| Self::pick_from_srcset(ss))
+                    .or_else(|| attributes.get("src").cloned());
+
+                if let Some(src) = chosen {
                     // Resolve relative URL
                     let resolved = if let Some(base) = base_url {
-                        base.join(src).ok()
+                        base.join(&src).ok()
                     } else {
-                        Url::parse(src).ok()
+                        Url::parse(&src).ok()
                     };
 
                     if let Some(url) = resolved {
@@ -4312,23 +4861,50 @@ impl Engine {
             }
         }
 
-        for url in svg_urls {
-            info!(%url, "Loading SVG image");
-            match self.loader.fetch(Request::get(url.clone())).await {
-                Ok(response) if response.ok() => match response.text().await {
-                    Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
-                        Ok(doc) => {
-                            self.svg_cache.insert(url.to_string(), doc);
-                            loaded += 1;
+        // Concurrent like the raster lane (Prometheus, #104 R1: SVG was left
+        // serial while images were parallelized). Parsing happens inside the
+        // futures; only the cache insert is serialized afterwards, because
+        // &mut self cannot be held across them.
+        {
+            use futures::stream::StreamExt;
+            let loader = self.loader.clone();
+            let parsed: Vec<Option<(String, rustkit_svg::SvgDocument)>> =
+                futures::stream::iter(svg_urls.into_iter().map(|url| {
+                    let loader = loader.clone();
+                    async move {
+                        info!(%url, "Loading SVG image");
+                        match loader.fetch(Request::get(url.clone())).await {
+                            Ok(response) if response.ok() => match response.text().await {
+                                Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
+                                    Ok(doc) => Some((url.to_string(), doc)),
+                                    Err(e) => {
+                                        warn!(?e, %url, "Failed to parse SVG image");
+                                        None
+                                    }
+                                },
+                                Err(e) => {
+                                    warn!(?e, %url, "Failed to read SVG body");
+                                    None
+                                }
+                            },
+                            Ok(response) => {
+                                warn!(status = %response.status, %url, "Failed to fetch SVG image");
+                                None
+                            }
+                            Err(e) => {
+                                warn!(?e, %url, "Failed to fetch SVG image");
+                                None
+                            }
                         }
-                        Err(e) => warn!(?e, %url, "Failed to parse SVG image"),
-                    },
-                    Err(e) => warn!(?e, %url, "Failed to read SVG body"),
-                },
-                Ok(response) => {
-                    warn!(status = %response.status, %url, "Failed to fetch SVG image")
-                }
-                Err(e) => warn!(?e, %url, "Failed to fetch SVG image"),
+                    }
+                }))
+                .buffer_unordered(MAX_CONCURRENT_IMAGE_LOADS)
+                .collect()
+                .await;
+
+            for (url, doc) in parsed.into_iter().flatten() {
+                self.svg_cache.insert(url, doc);
+                loaded += 1;
             }
         }
 
@@ -7494,32 +8070,6 @@ fn ch_advance_px(style: &ComputedStyle) -> f32 {
 }
 
 
-/// Split CSS function arguments, respecting nested parentheses.
-fn split_css_args(s: &str) -> Vec<&str> {
-    let mut result = Vec::new();
-    let mut depth = 0;
-    let mut start = 0;
-
-    for (i, c) in s.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => depth -= 1,
-            ',' if depth == 0 => {
-                result.push(&s[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-
-    // Don't forget the last argument
-    if start < s.len() {
-        result.push(&s[start..]);
-    }
-
-    result
-}
-
 /// Parse a shorthand value with 1-4 parts (like margin, padding).
 /// Returns (top, right, bottom, left).
 /// Parse a `border` / `border-<side>` shorthand: `<width> || <style> || <color>`.
@@ -8457,7 +9007,8 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
+            
+            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(
@@ -8469,6 +9020,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         };
 
         // Build layout tree from document
@@ -8550,7 +9103,8 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
+            
+            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(
@@ -8562,6 +9116,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8643,7 +9199,8 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
+            
+            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(
@@ -8655,6 +9212,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -8756,7 +9315,8 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
+            
+            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(
@@ -8768,6 +9328,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8833,7 +9395,8 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
+            
+            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(
@@ -8845,6 +9408,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -8904,7 +9469,8 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
+            
+            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
@@ -8914,6 +9480,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -8989,6 +9557,9 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
             viewhost: ViewHost::new(),
             compositor,
             renderer: None,
@@ -9260,7 +9831,8 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
+            
+            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
@@ -9270,6 +9842,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -9334,7 +9908,8 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
+            
+            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
@@ -9344,6 +9919,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -9716,7 +10293,8 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            viewhost: ViewHost::new(),
+            
+            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(
@@ -9728,6 +10306,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         };
 
         // Test type selector: (0, 0, 1)
@@ -10468,5 +11048,616 @@ mod link_click_tests {
             Some("https://example.com/target")
         );
         assert_eq!(engine.link_at_point(id, 10.0, 505.0), None);
+    }
+}
+
+#[cfg(test)]
+mod node_identity_tests {
+    use super::*;
+
+    // ---- click-to-focus: closing the "requires node_id tracking" TODO ----
+    //
+    // Layout boxes carried no DOM identity, so a hit test could locate a
+    // rectangle but never the element it came from. That single gap is what
+    // the mouse/keyboard handlers cite as the reason focus and event
+    // dispatch were left unimplemented. These pin the plumbing.
+
+    #[test]
+    fn hit_test_reports_the_node_of_the_box_actually_under_the_cursor() {
+        // node_id must NOT inherit from ancestors the way link_href does:
+        // the caller wants the element under the cursor, not the nearest
+        // interesting one above it.
+        let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        parent.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 200.0, 100.0);
+        parent.node_id = Some(1);
+
+        let mut child = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        child.dimensions.content = rustkit_layout::Rect::new(10.0, 10.0, 50.0, 50.0);
+        child.node_id = Some(2);
+        parent.children.push(child);
+
+        assert_eq!(parent.hit_test(20.0, 20.0).unwrap().node_id, Some(2), "child wins");
+        assert_eq!(parent.hit_test(150.0, 80.0).unwrap().node_id, Some(1), "parent when child missed");
+    }
+
+    #[test]
+    fn an_anonymous_box_reports_no_node() {
+        // Text and anonymous boxes have no element; they must stay None
+        // rather than borrowing a neighbour's identity.
+        let mut b = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        b.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 50.0, 50.0);
+        assert_eq!(b.hit_test(10.0, 10.0).unwrap().node_id, None);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn clicking_a_form_control_focuses_it_and_clicking_away_clears_focus() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+
+        let html = r#"<html><body><input type="text" id="a"><div id="plain">x</div></body></html>"#;
+        let doc = std::rc::Rc::new(
+            rustkit_dom::Document::parse_html(html).expect("parse"),
+        );
+        // Find the input's real NodeId by walking the parsed document, so the
+        // test cannot pass against a hand-invented id.
+        fn find<'a>(n: &std::rc::Rc<Node>, tag: &str) -> Option<std::rc::Rc<Node>> {
+            if let NodeType::Element { tag_name, .. } = &n.node_type {
+                if tag_name.eq_ignore_ascii_case(tag) {
+                    return Some(n.clone());
+                }
+            }
+            n.children().iter().find_map(|c| find(c, tag))
+        }
+        let root = doc.root();
+        let input = find(&root, "input").expect("input node");
+        let div = find(&root, "div").expect("div node");
+
+        let mut layout = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        layout.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut input_box = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        input_box.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 100.0, 20.0);
+        input_box.node_id = Some(input.id.raw());
+        let mut div_box = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        div_box.dimensions.content = rustkit_layout::Rect::new(0.0, 100.0, 100.0, 20.0);
+        div_box.node_id = Some(div.id.raw());
+        layout.children.push(input_box);
+        layout.children.push(div_box);
+
+        {
+            let view = engine.views.get_mut(&id).expect("view");
+            view.document = Some(doc);
+            view.layout = Some(layout);
+        }
+
+        assert_eq!(engine.focus_at_point(id, 10.0, 10.0).as_deref(), Some("input"));
+        assert_eq!(engine.focused_node(id), Some(input.id));
+
+        // Clicking a non-focusable element clears focus, like clicking page
+        // background — NOT "keeps the previous focus", which would leave keys
+        // going to an element the user visibly clicked away from.
+        assert_eq!(engine.focus_at_point(id, 10.0, 110.0), None);
+        assert_eq!(engine.focused_node(id), None);
+    }
+}
+
+#[cfg(test)]
+mod form_typing_tests {
+    use super::*;
+
+    // ---- typing into web forms: routing keys to the orphaned text model ----
+    //
+    // rustkit-dom's TextEditState (insert/delete/caret/selection, ~2000
+    // lines) had only test callers, and the engine's key handler was
+    // cfg(windows). These tests go through the PRODUCTION layout path on
+    // purpose: an earlier version of this change stamped node_id only on the
+    // general element branch, and form controls return before reaching it —
+    // so hit testing an <input> reported no node and focus silently could
+    // never work. Hand-built layout boxes passed anyway. Only building from
+    // real HTML catches it.
+
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn engine_with_html(html: &str) -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        let doc = std::rc::Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_for_view(id, &doc, &[]);
+        let view = engine.views.get_mut(&id).expect("view");
+        view.document = Some(doc);
+        view.layout = Some(layout);
+        (engine, id)
+    }
+
+    /// Walk a layout tree collecting every box that carries a node id.
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn boxes_with_nodes(b: &LayoutBox, out: &mut Vec<(usize, BoxType)>) {
+        if let Some(n) = b.node_id {
+            out.push((n, b.box_type.clone()));
+        }
+        for c in &b.children {
+            boxes_with_nodes(c, out);
+        }
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_form_control_box_built_from_real_html_carries_its_node_id() {
+        // THE REGRESSION TEST for the bug above: form controls take an early
+        // return, so they need their own identity stamp.
+        let (engine, id) = engine_with_html(r#"<html><body><input type="text"></body></html>"#);
+        let layout = engine.views.get(&id).unwrap().layout.as_ref().unwrap();
+        let mut found = Vec::new();
+        boxes_with_nodes(layout, &mut found);
+        assert!(
+            found
+                .iter()
+                .any(|(_, bt)| matches!(bt, BoxType::FormControl(_))),
+            "the <input>'s FormControl box must carry a node_id; without it a \
+             hit test finds a rectangle with no element and focus cannot resolve"
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn typing_into_a_focused_input_changes_what_layout_renders() {
+        let (mut engine, id) =
+            engine_with_html(r#"<html><body><input type="text" value="ab"></body></html>"#);
+
+        // Focus the input by NodeId taken from the built layout, not invented.
+        let node_raw = {
+            let layout = engine.views.get(&id).unwrap().layout.as_ref().unwrap();
+            let mut found = Vec::new();
+            boxes_with_nodes(layout, &mut found);
+            found
+                .iter()
+                .find(|(_, bt)| matches!(bt, BoxType::FormControl(_)))
+                .expect("form control box")
+                .0
+        };
+        engine.views.get_mut(&id).unwrap().focused_node =
+            Some(rustkit_dom::NodeId::new(node_raw));
+        let view = engine.views.get_mut(&id).unwrap();
+        view.edit_states.insert(
+            node_raw,
+            rustkit_dom::forms::TextEditState::with_value("ab"),
+        );
+        view.edit_states.get(&node_raw).unwrap().move_to_end(false);
+
+        // 'c' (no modifiers) must insert.
+        assert!(engine.handle_text_key(id, 0, "c", false, false, false));
+        assert_eq!(engine.edit_value_in(id, node_raw).unwrap().0, "abc");
+
+        // Backspace (VK 0x08) must delete.
+        assert!(engine.handle_text_key(id, 0x08, "", false, false, false));
+        assert_eq!(engine.edit_value_in(id, node_raw).unwrap().0, "ab");
+
+        // And the change must reach LAYOUT — the DOM attribute still says
+        // "ab" forever (there is no set_attribute), so if layout did not read
+        // through edit state the typed text would be invisible.
+        engine
+            .views
+            .get(&id)
+            .unwrap()
+            .edit_states
+            .get(&node_raw)
+            .unwrap()
+            .insert_text("XY");
+        let doc = engine.views.get(&id).unwrap().document.clone().unwrap();
+        let relaid = engine.build_layout_for_view(id, &doc, &[]);
+
+        fn find_input_value(b: &LayoutBox) -> Option<String> {
+            if let BoxType::FormControl(rustkit_layout::FormControlType::TextInput {
+                value, ..
+            }) = &b.box_type
+            {
+                return Some(value.clone());
+            }
+            b.children.iter().find_map(find_input_value)
+        }
+        assert_eq!(
+            find_input_value(&relaid).as_deref(),
+            Some("abXY"),
+            "layout must read through live edit state, not the frozen DOM attribute"
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn keys_go_nowhere_when_nothing_is_focused() {
+        // The property that makes it safe to route window-level keys here:
+        // with no focus, handle_text_key must decline so the caller can fall
+        // back to scrolling.
+        let (mut engine, id) =
+            engine_with_html(r#"<html><body><input type="text"></body></html>"#);
+        assert!(!engine.handle_text_key(id, 0, "c", false, false, false));
+    }
+}
+
+#[cfg(test)]
+mod form_submit_tests {
+    use super::*;
+
+    // ---- Enter in a form field submits it ----
+    //
+    // Typing is only useful if something happens on Enter. All fixtures are
+    // built from real HTML through the production layout/DOM path, per the
+    // node_id lesson: hand-built structures pass while the real path is
+    // broken.
+
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn engine_with(html: &str, url: &str) -> (Engine, EngineViewId, std::rc::Rc<Document>) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("view");
+        let doc = std::rc::Rc::new(Document::parse_html(html).expect("parse"));
+        let view = engine.views.get_mut(&id).expect("view");
+        view.document = Some(doc.clone());
+        view.url = Some(Url::parse(url).unwrap());
+        (engine, id, doc)
+    }
+
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn find_by_tag(n: &std::rc::Rc<Node>, tag: &str) -> Option<std::rc::Rc<Node>> {
+        if let NodeType::Element { tag_name, .. } = &n.node_type {
+            if tag_name.eq_ignore_ascii_case(tag) {
+                return Some(n.clone());
+            }
+        }
+        n.children().iter().find_map(|c| find_by_tag(c, tag))
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn submitting_carries_what_the_user_typed_not_the_authored_value() {
+        let (mut engine, id, doc) = engine_with(
+            r#"<html><body><form action="/search"><input name="q" value="old"></form></body></html>"#,
+            "https://example.com/page",
+        );
+        let input = find_by_tag(&doc.root(), "input").expect("input");
+        engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
+        engine.views.get_mut(&id).unwrap().edit_states.insert(
+            input.id.raw(),
+            rustkit_dom::forms::TextEditState::with_value("typed"),
+        );
+
+        let sub = engine.form_submission_for_focus(id).expect("submission");
+        assert!(
+            sub.url.contains("q=typed"),
+            "submission must carry live edit state, got {}",
+            sub.url
+        );
+        assert!(!sub.url.contains("old"), "authored value must not win");
+        assert!(sub.url.starts_with("https://example.com/search"),
+            "action must resolve against the document URL, got {}", sub.url);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn unnamed_disabled_and_unchecked_controls_do_not_submit() {
+        // HTML §4.10 successful-controls rules. Each of these silently
+        // corrupts a query string if it leaks in.
+        let (mut engine, id, doc) = engine_with(
+            r#"<html><body><form action="/s">
+                 <input name="kept" value="1">
+                 <input value="no-name">
+                 <input name="off" value="2" disabled>
+                 <input type="checkbox" name="box" value="3">
+                 <input type="submit" name="btn" value="Go">
+               </form></body></html>"#,
+            "https://example.com/",
+        );
+        let input = find_by_tag(&doc.root(), "input").expect("input");
+        engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
+
+        let sub = engine.form_submission_for_focus(id).expect("submission");
+        assert!(sub.url.contains("kept=1"));
+        for forbidden in ["no-name", "off=", "box=", "btn="] {
+            assert!(
+                !sub.url.contains(forbidden),
+                "{forbidden} must not be submitted; got {}",
+                sub.url
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_post_form_is_declined_rather_than_downgraded_to_get() {
+        // Quietly turning a POST into a GET would send form data in a URL —
+        // worse than not submitting. Declining is the honest behavior until
+        // the loader accepts a body.
+        let (mut engine, id, doc) = engine_with(
+            r#"<html><body><form action="/s" method="post"><input name="q" value="x"></form></body></html>"#,
+            "https://example.com/",
+        );
+        let input = find_by_tag(&doc.root(), "input").expect("input");
+        engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
+        assert!(engine.form_submission_for_focus(id).is_none());
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_field_outside_any_form_submits_nothing() {
+        let (mut engine, id, doc) = engine_with(
+            r#"<html><body><input name="loose" value="x"></body></html>"#,
+            "https://example.com/",
+        );
+        let input = find_by_tag(&doc.root(), "input").expect("input");
+        engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
+        assert!(engine.form_submission_for_focus(id).is_none());
+    }
+}
+
+#[cfg(test)]
+mod edit_state_lifecycle_tests {
+    use super::*;
+
+    // ---- the side table's lifetime is part of the side table ----
+    //
+    // Prometheus's #110 R1 must-fix. NodeId is PER-DOCUMENT: every Document
+    // restarts its counter at 1. An edit_states entry surviving a navigation
+    // is therefore read as the NEW page's node with the same raw id — the
+    // previous page's typed text painted into a fresh control, with
+    // first-focus seeding skipped because the key already exists. The
+    // original code carried a doc comment claiming reload dropped the map;
+    // it did not.
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn typed_text_does_not_survive_a_navigation_into_the_next_page() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("view");
+
+        // Page one: type into a field.
+        let doc1 = std::rc::Rc::new(
+            Document::parse_html(r#"<html><body><input name="q"></body></html>"#).expect("parse"),
+        );
+        fn first_input(n: &std::rc::Rc<Node>) -> Option<std::rc::Rc<Node>> {
+            if let NodeType::Element { tag_name, .. } = &n.node_type {
+                if tag_name.eq_ignore_ascii_case("input") {
+                    return Some(n.clone());
+                }
+            }
+            n.children().iter().find_map(first_input)
+        }
+        let input1 = first_input(&doc1.root()).expect("input");
+        {
+            let view = engine.views.get_mut(&id).expect("view");
+            view.document = Some(doc1.clone());
+            view.focused_node = Some(input1.id);
+            view.edit_states.insert(
+                input1.id.raw(),
+                rustkit_dom::forms::TextEditState::with_value("secret"),
+            );
+        }
+        assert_eq!(
+            engine.edit_value_in(id, input1.id.raw()).unwrap().0,
+            "secret"
+        );
+
+        // Navigate through the REAL path. load_html shares the document
+        // replacement code with load_url and needs no network, so this
+        // exercises production rather than re-implementing it in the test —
+        // the distinction that let the node_id bug pass a green suite.
+        engine
+            .load_html(id, r#"<html><body><input name="other"></body></html>"#)
+            .expect("load_html");
+
+        // The next document's first input reuses the same raw NodeId. If the
+        // map survived, this reads back "secret" — the previous page's typed
+        // text, in a control the user has never touched.
+        let doc2 = engine.views.get(&id).unwrap().document.clone().unwrap();
+        let input2 = first_input(&doc2.root()).expect("input");
+        assert_eq!(
+            input2.id.raw(),
+            input1.id.raw(),
+            "precondition: NodeId is per-document, so the ids DO collide — \
+             that collision is exactly why the map must be cleared"
+        );
+        assert_eq!(
+            engine.edit_value_in(id, input2.id.raw()),
+            None,
+            "the new page's control must have no inherited value"
+        );
+        assert_eq!(engine.focused_node(id), None, "focus must not survive either");
+    }
+}
+
+#[cfg(test)]
+mod relative_url_tests {
+    use super::*;
+
+    // ---- relative resource URLs (live session, 2026-08-06) ----
+    //
+    // Wikipedia painted no images and emitted 1120 `Invalid URL for image`
+    // warnings in one session. The loader resolves and caches under the
+    // ABSOLUTE url; layout and paint used the raw attribute. Cached under
+    // https://www.wikipedia.org/portal/img/logo.png, looked up under
+    // portal/img/logo.png — a miss every time, plus a parse failure per
+    // image PER FRAME.
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_relative_image_src_reaches_the_display_list_absolute() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("view");
+
+        // Exactly Wikipedia's shape, including the CSS background that takes
+        // a separate path through the parser (which has no base in scope).
+        engine
+            .load_html(
+                id,
+                r#"<html><body>
+                     <img src="portal/wikipedia.org/assets/img/Wikipedia-logo-v2.png">
+                     <div style="background-image: url(portal/wikipedia.org/assets/img/sprite.svg); width:10px; height:10px"></div>
+                   </body></html>"#,
+            )
+            .expect("load_html");
+
+        // load_html sets the base to about:blank, which is correct for inline
+        // content and useless here. Put the view in the state a real
+        // navigation leaves it in — document plus document URL — then rebuild.
+        {
+            let view = engine.views.get_mut(&id).expect("view");
+            view.url = Some(Url::parse("https://www.wikipedia.org/").unwrap());
+        }
+        engine.relayout(id).expect("relayout");
+
+        let dl = engine
+            .views
+            .get(&id)
+            .unwrap()
+            .display_list
+            .as_ref()
+            .expect("display list");
+
+        let urls: Vec<&str> = dl
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                rustkit_layout::DisplayCommand::Image { url, .. }
+                | rustkit_layout::DisplayCommand::BackgroundImage { url, .. } => {
+                    Some(url.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert!(!urls.is_empty(), "precondition: the page must emit image commands");
+        for u in &urls {
+            assert!(
+                Url::parse(u).is_ok(),
+                "every image URL reaching paint must parse; got {u:?} — a relative \
+                 key here is both a cache miss and a per-frame warning"
+            );
+            assert!(
+                u.starts_with("https://www.wikipedia.org/portal/"),
+                "must resolve against the document base, got {u:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn an_absolute_src_is_left_alone() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("view");
+        {
+            let view = engine.views.get_mut(&id).expect("view");
+            view.url = Some(Url::parse("https://example.com/a/b").unwrap());
+        }
+        assert_eq!(
+            engine
+                .resolve_resource_url_in(id, "https://cdn.example.net/x.png")
+                .map(|u| u.to_string())
+                .as_deref(),
+            Some("https://cdn.example.net/x.png")
+        );
+        // Root-relative resolves against the ORIGIN, not the directory.
+        assert_eq!(
+            engine
+                .resolve_resource_url_in(id, "/x.png")
+                .map(|u| u.to_string())
+                .as_deref(),
+            Some("https://example.com/x.png")
+        );
+    }
+}
+
+#[cfg(test)]
+mod srcset_tests {
+    use super::*;
+
+    // ---- srcset had ZERO support (live finding, 2026-08-08) ----
+    //
+    // A page serving images only via srcset rendered NO IMAGE AT ALL — the
+    // src is often a placeholder or absent on such pages. A wrong-density
+    // pick is a rendering difference; no pick is a hole.
+
+    #[test]
+    fn widest_w_candidate_wins() {
+        let picked = Engine::pick_from_srcset(
+            "small.jpg 400w, medium.jpg 800w, large.jpg 1600w",
+        );
+        assert_eq!(picked.as_deref(), Some("large.jpg"));
+    }
+
+    #[test]
+    fn density_candidates_are_ranked_among_themselves() {
+        let picked = Engine::pick_from_srcset("a.png, b.png 2x, c.png 3x");
+        assert_eq!(picked.as_deref(), Some("c.png"));
+    }
+
+    #[test]
+    fn a_bare_candidate_is_one_x_not_zero() {
+        // A no-descriptor candidate means 1x. Treating it as weight 0 would
+        // make a single-candidate srcset resolve to nothing, which is the
+        // no-image hole this whole change exists to close.
+        assert_eq!(
+            Engine::pick_from_srcset("only.png").as_deref(),
+            Some("only.png")
+        );
+    }
+
+    #[test]
+    fn density_never_outranks_width_by_scale_accident() {
+        // 2x and 2000w are on different scales. Without normalisation a
+        // naive max() picks the 2x candidate over a far larger w one.
+        let picked = Engine::pick_from_srcset("dense.png 2x, wide.png 2000w");
+        assert_eq!(picked.as_deref(), Some("wide.png"));
+    }
+
+    #[test]
+    fn malformed_input_yields_none_rather_than_a_bogus_url() {
+        assert_eq!(Engine::pick_from_srcset(""), None);
+        assert_eq!(Engine::pick_from_srcset("   "), None);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn an_img_with_only_srcset_still_gets_a_layout_box_with_that_url() {
+        // The end-to-end property: BOTH the loader's discovery and the
+        // layout box must choose the SAME candidate, or the loader caches
+        // under one key while layout looks up another — the cache-miss
+        // shape #113 fixed for relative URLs, one attribute over.
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("view");
+        engine
+            .load_html(
+                id,
+                r#"<html><body><img srcset="a.png 400w, b.png 1200w"></body></html>"#,
+            )
+            .expect("load_html");
+        {
+            let view = engine.views.get_mut(&id).expect("view");
+            view.url = Some(Url::parse("https://example.com/page").unwrap());
+        }
+        engine.relayout(id).expect("relayout");
+
+        fn find_image_url(b: &LayoutBox) -> Option<String> {
+            if let BoxType::Image { url, .. } = &b.box_type {
+                return Some(url.clone());
+            }
+            b.children.iter().find_map(find_image_url)
+        }
+        let layout = engine.views.get(&id).unwrap().layout.as_ref().unwrap();
+        let url = find_image_url(layout).expect("img must produce an Image box");
+        assert_eq!(
+            url, "https://example.com/b.png",
+            "layout must resolve the WIDEST srcset candidate, absolutely"
+        );
     }
 }

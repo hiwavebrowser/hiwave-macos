@@ -6,8 +6,14 @@
 ## Start (Pete, one command)
 
 ```bash
-cd ~/Repos/hiwave-macos && git pull && ./scripts/pete-session.sh --release
+cd ~/Repos/hiwave-macos && git checkout develop && git pull && ./scripts/pete-session.sh --release
 ```
+
+**`develop`, not master, unless promote PR #110 has merged.** Everything worth
+testing tonight — typing into fields, Enter-to-search, the click gate, the
+lock-across-AppKit fix — landed after the last promotion. Master would run a
+build without them and the session would test nothing new. `git branch
+--show-current` before you start if unsure.
 
 `--release` must be the FIRST argument. Session #1 silently ran a debug
 build for its first 40 minutes, which cost an hour to a phantom "it's
@@ -28,6 +34,19 @@ frozen" that was really 100% CPU laying out eBay.
 | End key inserted a tofu box | Fixed — caret moves instead | #100 |
 | URL bar snapped back to old URL | Fixed — tab model updates before load | #101 |
 
+## Landed after this runbook was first written (least verified — test first)
+
+| Capability | Verified how far |
+|---|---|
+| **Typing into web forms** | Model + plumbing tested; **no human has seen a character appear.** Click a text field on a real page, type, watch for characters and caret. |
+| **Enter submits a form** | Query-building tested against real HTML; **never seen to load a page.** Type in a site's search box, press Enter, expect results. GET forms only — a POST form deliberately does nothing rather than leak form data into a URL. |
+| **Click-to-focus** | Focus resolves in tests through the production layout path; clearing-on-background-click is pinned. |
+| Click gate bounds, concurrent SVG | Compile + suite only; behavioral change is invisible when correct. |
+
+The form-typing path is the single biggest unknown in the build. Everything
+else tonight was fixing something Pete had already seen fail; this one is new
+capability that has never met a human.
+
 ## The checklist (each step answers a named question)
 
 1. **Launch.** Sidebar open and readable? Tab strip populated? URL bar showing
@@ -38,6 +57,13 @@ frozen" that was really 100% CPU laying out eBay.
    refactor; that's data, not a surprise.)
 3. **Click a link.** Expected: navigates. Try one whose click target is an
    image or a nested span — those exercise the nearest-link resolution.
+3b. **Click a text field and type** (a search box on any page). Expected:
+   characters appear, caret advances, Backspace deletes, arrows move the
+   caret. Then **click away and type again** — the page should scroll, not
+   the field, because clicking a non-focusable element clears focus.
+   If nothing appears: say so and try clicking dead-centre of the field —
+   the hit test uses the border box, and a mis-measured control would be the
+   first suspect.
 4. **Type a URL, press Enter.** Then check the bar still shows it after the
    page lands (that was the snap-back bug).
 5. **Walk the saved tabs.** One verdict each: *looks right / wrong (describe
