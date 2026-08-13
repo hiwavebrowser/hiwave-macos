@@ -1179,20 +1179,26 @@ impl LayoutBox {
         };
         self.dimensions.content.width = computed_width;
 
-        // Height: use explicit height, or line-height as minimum for inline boxes
+        // Height: explicit height, else the CONTENT AREA (font ascent +
+        // descent, §10.6.1) — not line-height. The line box still advances
+        // by line-height in the parent loops; only the reported rect
+        // changes. See inline_content_area.
         let min_height = self.dimensions.padding.vertical() + self.dimensions.border.vertical();
-        let line_height = self.get_line_height();
+        let (content_area_height, _) = self.inline_content_area();
+        let line_height = content_area_height;
 
         // Height calculation for inline boxes:
         // Inline boxes should always have at least line-height to maintain proper vertical rhythm.
         // This is critical for flex containers where inline items need proper sizing.
+        // A non-replaced inline's rect height is its CONTENT AREA even when
+        // children are taller (a 50px <img> inside an <a> overflows the
+        // anchor's box in Chrome; the anchor stays font-tall). Children
+        // still drive WIDTH via the cursor above. `line_height` here is the
+        // content-area height — see the assignment at the declaration.
+        let _ = max_height; // width path consumed it; height deliberately does not
         let computed_height = if let Some(h) = explicit_height {
             h
-        } else if !self.children.is_empty() {
-            // Has children: use max of children height and line height
-            max_height.max(line_height).max(min_height)
         } else {
-            // No children: use line height as minimum (ensures proper flex item sizing)
             line_height.max(min_height)
         };
         self.dimensions.content.height = computed_height;
@@ -1716,6 +1722,39 @@ impl LayoutBox {
         };
         let half_leading = ((line_height - (ascent + descent)) / 2.0).max(0.0);
         descent + half_leading + self.dimensions.padding.bottom + self.dimensions.border.bottom
+    }
+
+    /// Content area of a NON-REPLACED inline box and the half-leading that
+    /// centers it in its own line box.
+    ///
+    /// CSS2 §10.6.1: an inline's height is its content area — font ascent +
+    /// descent — NOT its line-height; §10.8.1 distributes the leading half
+    /// above and half below. Chrome's element rects agree (an <a> at
+    /// font-size 16 / line-height 1.5 reads ~18px tall at a ~3.8px offset,
+    /// never 24). Reporting the line box as the element rect put every
+    /// inline element's border box a half-leading high and a leading tall —
+    /// 24.9% of all Gate A failure rows on the honest local board.
+    fn inline_content_area(&self) -> (f32, f32) {
+        let font_size = match self.style.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let line_height = resolve_line_height(&self.style, font_size);
+        let metrics = measure_text_advanced(
+            "x",
+            &self.style.font_family,
+            font_size,
+            self.style.font_weight,
+            self.style.font_style,
+        );
+        let (ascent, descent) = if metrics.ascent > 0.0 {
+            (metrics.ascent, metrics.descent)
+        } else {
+            (font_size * 0.8, font_size * 0.2)
+        };
+        let content = ascent + descent;
+        let half_leading = ((line_height - content) / 2.0).max(0.0);
+        (content, half_leading)
     }
 
     fn inline_strut_descent(&self) -> f32 {
@@ -2424,10 +2463,28 @@ impl LayoutBox {
                     + child.dimensions.border.top
                     + child.dimensions.padding.top;
 
+                // NON-REPLACED inline (§10.6.1/§10.8.1): the rect is the
+                // content area, but the LINE still advances by the child's
+                // line-height, and the content box sits a half-leading below
+                // the line top. Replaced/atomic inlines keep border-box line
+                // sizing. Without the decoupling, shrinking the rect would
+                // collapse every line to font height — the advance and the
+                // report are different quantities.
+                if matches!(child.box_type, BoxType::Inline) {
+                    let (_, half_leading) = child.inline_content_area();
+                    if half_leading > 0.0 {
+                        child.dimensions.content.y += half_leading;
+                        for sub in &mut child.children {
+                            crate::flex::translate_subtree(sub, 0.0, half_leading);
+                        }
+                    }
+                    line_height = line_height.max(child.get_line_height());
+                } else {
+                    line_height = line_height.max(child_height);
+                }
                 // Advance cursor
                 cursor_x += child_width;
                 line_width += child_width;
-                line_height = line_height.max(child_height);
                 // vertical-align: top|bottom boxes do not anchor to the
                 // baseline at all (CSS2 §10.8): a top-aligned box hangs from
                 // the line-box top, so a tall one SWALLOWS the strut instead
@@ -2949,10 +3006,28 @@ impl LayoutBox {
                     + child.dimensions.border.top
                     + child.dimensions.padding.top;
 
+                // NON-REPLACED inline (§10.6.1/§10.8.1): the rect is the
+                // content area, but the LINE still advances by the child's
+                // line-height, and the content box sits a half-leading below
+                // the line top. Replaced/atomic inlines keep border-box line
+                // sizing. Without the decoupling, shrinking the rect would
+                // collapse every line to font height — the advance and the
+                // report are different quantities.
+                if matches!(child.box_type, BoxType::Inline) {
+                    let (_, half_leading) = child.inline_content_area();
+                    if half_leading > 0.0 {
+                        child.dimensions.content.y += half_leading;
+                        for sub in &mut child.children {
+                            crate::flex::translate_subtree(sub, 0.0, half_leading);
+                        }
+                    }
+                    line_height = line_height.max(child.get_line_height());
+                } else {
+                    line_height = line_height.max(child_height);
+                }
                 // Advance cursor
                 cursor_x += child_width;
                 line_width += child_width;
-                line_height = line_height.max(child_height);
                 // vertical-align: top|bottom boxes do not anchor to the
                 // baseline at all (CSS2 §10.8): a top-aligned box hangs from
                 // the line-box top, so a tall one SWALLOWS the strut instead
@@ -6657,6 +6732,54 @@ mod tests {
             "baseline-aligned box must keep strut descent below it: \
              expected {}, got {h}",
             120.0 + strut
+        );
+    }
+
+    /// A non-replaced inline's rect is its CONTENT AREA centered by
+    /// half-leading (§10.6.1/§10.8.1) while the LINE still advances by
+    /// line-height. Chrome's rects agree; reporting the line box instead
+    /// put 24.9% of all Gate A rows on inline elements.
+    #[test]
+    fn inline_rect_is_content_area_centered_in_its_line() {
+        let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut a_style = ComputedStyle::new();
+        a_style.display = rustkit_css::Display::Inline;
+        a_style.line_height = rustkit_css::LineHeight::Number(1.5);
+        a_style.font_size = Length::Px(16.0);
+        // Width so the line has content and flushes; inline width is not
+        // spec-honored but the advance mechanism under test does not care.
+        a_style.width = Length::Px(50.0);
+        let mut a = LayoutBox::new(BoxType::Inline, a_style);
+        let (content, half) = a.inline_content_area();
+        assert!(content < 24.0 * 0.9, "content area must be font-based, got {content}");
+        parent.children.push(a);
+
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        let mut mc = MarginCollapseContext::new();
+        let mut fc = FloatContext::new();
+        parent.layout_with_collapse(&cb, &mut mc, &mut fc);
+
+        let parent_top = parent.dimensions.content.y;
+        let child = &parent.children[0].dimensions;
+        assert!(
+            (child.content.height - content).abs() < 0.1,
+            "inline rect height must be the content area {content}, got {}",
+            child.content.height
+        );
+        assert!(
+            (child.content.y - parent_top - half).abs() < 0.1,
+            "inline rect must sit a half-leading ({half}) below the line top, \
+             got relative y {}",
+            child.content.y - parent_top
+        );
+        assert!(
+            (parent.dimensions.content.height - 24.0).abs() < 0.1,
+            "the LINE must still advance by line-height 24, got {} — \
+             16-ish means the advance was coupled to the shrunken rect",
+            parent.dimensions.content.height
         );
     }
 
