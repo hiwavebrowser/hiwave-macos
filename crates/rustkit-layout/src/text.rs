@@ -1595,11 +1595,33 @@ impl TextShaper {
                     );
                 let line_end = if may_break_mid_word {
                     // overflow-wrap: anywhere/break-word or word-break:
-                    // break-all — force break at the first grapheme boundary.
-                    rustkit_text::segmentation::grapheme_boundaries(remaining)
-                        .get(1)
-                        .copied()
-                        .unwrap_or(remaining.len())
+                    // break-all — emergency-break the word, taking as many
+                    // graphemes as FIT the line (Chrome fills the line; it
+                    // does not break after the first character). Minimum one
+                    // grapheme so the loop always advances.
+                    let boundaries =
+                        rustkit_text::segmentation::grapheme_boundaries(remaining);
+                    let mut fitted = 0usize;
+                    for &offset in boundaries.iter().skip(1) {
+                        let shaped_prefix = self.shape(
+                            &remaining[..offset],
+                            font_chain,
+                            weight,
+                            style,
+                            stretch,
+                            size,
+                        )?;
+                        if shaped_prefix.metrics.width <= cur_max {
+                            fitted = offset;
+                        } else {
+                            break;
+                        }
+                    }
+                    if fitted > 0 {
+                        fitted
+                    } else {
+                        boundaries.get(1).copied().unwrap_or(remaining.len())
+                    }
                 } else {
                     // css-text-3 §5.2: when no break opportunity exists on the
                     // line, the unbreakable unit stays on it and OVERFLOWS —
