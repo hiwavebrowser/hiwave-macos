@@ -1699,3 +1699,184 @@ line of the change no assertion would miss.
   produced 87px where the real page produces 57px — the two sizing modes take
   different arithmetic through that pass. A fixture that does not mirror the
   corpus's `*` rule is testing a shape the corpus does not contain.
+
+## 2026-08-14
+
+**Metric: 1/26 → 1/26, and this is a proof rather than a re-run.** A case flips
+only by crossing all four conditions at once. Tonight's change moves geometry on
+one case, `sticky-scroll`, from 149 failing boxes to 114 — nowhere near
+geometry-green — and leaves the other 25 bit-identical on both oracles. No case
+can have crossed, and none fell off. The macOS lane confirms; nothing measured
+on this seat is a receipt.
+
+**No night ran on 2026-08-13.** This digest follows 08-12.
+
+**P-item: P2 (grid/sticky family). NOT complete.** One root landed. `sticky-scroll`
+still has 114 geometry failures and `card-grid` is untouched at 150.
+
+### Commits
+
+Both on `atlas/grid-item-subtree-width`, cut from `develop` per the branch law —
+this is an engine change and does not belong on the instrument branch.
+
+- `2e325e2` — a grid item's grandchildren size against the item, not against the
+  grid container the block pre-pass measured them with.
+- `6a26e96` — label the flex/grid exclusion a cost guard rather than a
+  correctness one, after a guard written for it turned out to be decoration.
+
+### What the defect was
+
+Phase 9 re-lays out a grid item's children once track sizing has given the item
+a real width. It repaired the child's own box and stopped, and the code said so
+out loud:
+
+```rust
+// For block, children were already laid out - we just fixed the container
+```
+
+They were laid out — against the grid container's content width, because grid
+item widths do not exist when the block pre-pass runs. Everything below the
+item's child kept that stale width. On `sticky-scroll`:
+
+```
+aside.sidebar-left            250   correct
+  div.sidebar-card            250   correct
+    h3 / ul / li             1120   the container's 1160 content box
+                                    less the card's 2x20 padding
+```
+
+Thirty boxes, +910px each, hanging off a card that was itself exactly right.
+The same shape one column over: `main > .article-card` correct at 1275, its
+`.article-image` at 1160.
+
+The fix re-flows the block subtree against the corrected box, and does it
+**before** the height resolution rather than after. With the right width the
+text wraps to a different line count, so the stale auto height is wrong too;
+running the re-flow first lets the collapse pass write the reflowed height back
+where Phase 9's auto branch picks it up.
+
+### Measured — Linux/SwiftShader, 26 cases. MECHANICS, NOT A RECEIPT
+
+This seat is not CoreText and not Metal.
+
+| Oracle | Before | After |
+|---|---|---|
+| Gate A geometry failures | 2521 | **2486** |
+| Gate A green | 2/26 | 2/26 |
+| Gate A join failures | 115 | 115 |
+| Gate B paint-green | 1/26 | 1/26 |
+| Gate B discrete failures | 0 | 0 |
+| Gate B elements **admitted** | 218 of 1593 | **231** of 1593 |
+| N/26 | 1/26 | 1/26 |
+
+The only case that moved, on either oracle:
+
+| case | geometry | paint % within tolerance |
+|---|---|---|
+| sticky-scroll | 149 → **114** | 92.72920 → **94.28369** |
+
+The other 25 are bit-identical on both. 35 boxes stopped failing; **zero boxes
+started**.
+
+### Stop rule — it did not fire, and the two boxes that got worse are named
+
+Per case, per oracle: no case regressed on Gate A, none on Gate B's percentage
+half, none gained a discrete failure, none lost its green.
+
+Night 9 held itself to the stricter per-box bar, so this reports against that
+bar too, and against that bar it is **not** clean: two boxes worsened, both
+`main > .overflow-demo > .overflow-content`.
+
+- `y`: 75.053955 → 75.054077. Float noise, 1.2e-4.
+- `x`: 82.03 → **139.53**, and this one is arithmetic, not noise.
+
+That element is `position:absolute; left:50%; transform:translate(-50%,-50%)`.
+**RustKit does not apply the transform in layout**, and Chrome's rect does —
+`getBoundingClientRect` is post-transform. So RustKit was always missing 150px
+on that box. It used also to resolve `left:50%` against a containing block
+57.5px too narrow, and the two errors pointed opposite ways. Fixing the
+containing block removed the accidental cancellation and left the whole
+pre-existing gap visible.
+
+I kept the change. The correctness of the box improved — `left:50%` now resolves
+against the right containing block — and what remains is a feature RustKit has
+never implemented, measured for the first time. Reverting would restore a
+smaller number produced by two errors cancelling, which is the substitution this
+campaign exists to end, pointed the other way. It is decision 1 below because
+the literal rule is per-case and the stricter reading is per-box, and I do not
+want to be the one who quietly picks the reading that suits the night.
+
+### Mutation-check results
+
+**4 probes, 4 RED, control green before and after.** Committed before mutating
+this time.
+
+| Mutation | Caught by |
+|---|---|
+| M1 re-flow call deleted | `a_grid_items_grandchildren_resize_with_the_item_not_the_container` |
+| M2 `width_changed` inverted | same |
+| M3 `stale_width` read after the correction (so it never fires) | same |
+| M4 re-flow moved before the width correction | same |
+
+**M5 survived, and unlike the last four sweeps I could not close it.** Removing
+the `!is_flex && !is_grid` exclusion leaves the whole suite green. I predicted
+why it should break — the block pass writes `content.height` from its stacked
+children on the way out, and Phase 9's auto-height branch adopts it, so a
+row-flex grandchild should take the SUM of its children where flex gives the MAX
+— and built the fixture for exactly that shape. **It stayed green.**
+`layout_flex_container` re-derives the box afterwards, so the block pass is
+throwaway work rather than a wrong answer. Removing the exclusion is also
+bit-identical on all 26 corpus cases.
+
+So the guard was decoration and is not in the tree. I had already committed it
+with `MUTATION-CHECKED: RED` in the message; that claim was false, the commit
+was never pushed, and I dropped it rather than leave a false receipt in history.
+What ships is the measurement and a comment that says the branch is a cost guard
+and that no test holds it.
+
+Four sweeps in a row the survivor was *the guard gets written against the
+example, not the rule*. This one is a different failure: the guard was written
+against the rule, and the rule turned out not to bite.
+
+### Decisions needed from Pete
+
+1. **Does the stop rule read per-case or per-box** when a box gets worse only
+   because a real fix stopped cancelling an unimplemented feature (here
+   `transform: translate`), as above?
+2. Still open from 08-10, 08-11 and 08-12: keep or literally revert the
+   overflow-clip change that cost `sticky-scroll` 36 pixels on a card RustKit
+   lays out 38px too low?
+3. **The nightly on master has been red since at least 08-13** on the legacy
+   mean-pixel ratchet (`shelf` 3.62% → 5.68%), and because the ratchet only
+   downloads the last *successful* nightly it is now comparing against
+   **2026-08-03** — ten days of drift in one step; fix the comparison anchor,
+   the shelf regression, or both?
+
+### Surprises
+
+- **This seat cannot see most of its own board, and I nearly worked a font
+  difference as if it were a defect.** The obvious targets were wrong. The
+  `pseudo-classes` x-staircase (+3.8125, +7.625, +11.4375 — 32 failures, all x)
+  looks exactly like a broken inline-block gap, and `pseudo-classes` is
+  **geometry-green on macOS**: it is the width of a space in a different font.
+  `gpu-gradient-regression`'s 132 failures are a uniform +1.12px that resolves to
+  the below-baseline extent of a 16px strut. The filter that worked was mining
+  the board for failures whose expected *and* actual are whole pixels, which is
+  where `+910` surfaced. Recording the filter because a seat with the wrong font
+  stack will need it again.
+- **A fix worth 35 boxes was sitting under a comment that described it.** "For
+  block, children were already laid out - we just fixed the container" is an
+  accurate statement of the bug, written by someone who read it as a reassurance.
+- **The one case that moved on geometry is also the one that moved on paint**,
+  +1.55 points, and it bought 13 more elements into the discrete detectors'
+  jurisdiction (218 → 231 of 1593). Night 9's pattern holds: geometry work is
+  what buys Gate B something to look at. 1362 elements are still withheld.
+- **`transform` is absent from layout entirely.** Found by accident, via the one
+  box that got worse. Every `getBoundingClientRect` in the baselines is
+  post-transform, so any corpus element with a transform is being scored against
+  a rect RustKit structurally cannot produce. One element in the gating corpus
+  hits it today. Recorded, not fixed — it is not P2 and it is not small.
+- **The digests are accumulating on a branch that has not merged.**
+  `atlas/trench-parity-finish-line` is 15 commits ahead of master and behind
+  `develop`, and its engine commits already landed elsewhere by cherry-pick
+  (#134, #136). Tonight's digest is on it, and tonight's fix is not.
