@@ -2084,6 +2084,18 @@ pub fn layout_grid_container(
                     // means the pre-pass geometry is already right, and
                     // re-flowing it would be a no-op that still costs a walk of
                     // the subtree on every grid item on the page.
+                    //
+                    // The flex/grid exclusions below are a COST guard and not a
+                    // correctness one, stated that way because a mutation sweep
+                    // asked and the answer was measured: removing them is
+                    // bit-identical on all 26 corpus cases, and it is also
+                    // bit-identical on a hand-built auto-height row-flex
+                    // grandchild, which is the shape that should have broken.
+                    // The flex/grid repair further down re-derives the box the
+                    // block pass touched, so the block pass is throwaway work
+                    // rather than a wrong answer. Nothing here is guarded by a
+                    // test, because every test written for it stayed green
+                    // without it.
                     let width_changed =
                         (grandchild.dimensions.content.width - stale_width).abs() > 0.01;
                     if width_changed
