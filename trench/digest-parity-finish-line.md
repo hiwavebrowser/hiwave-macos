@@ -1880,3 +1880,190 @@ against the rule, and the rule turned out not to bite.
   `atlas/trench-parity-finish-line` is 15 commits ahead of master and behind
   `develop`, and its engine commits already landed elsewhere by cherry-pick
   (#134, #136). Tonight's digest is on it, and tonight's fix is not.
+
+## 2026-08-15
+
+**Metric: 1/26 → 1/26, and this is a proof rather than a re-run.** A case flips
+only by crossing all four conditions at once. Of the 32 registry captures, 29
+are **byte-identical** on both frame and layout before/after — including
+`bg-pure` and `specificity`, the only geometry-green cases and the only
+paint-green one. Nothing that could flip was touched. The three that moved
+(`card-grid`, `gpu-gradient-regression`, `holdout-sticky-nav`) are nowhere near
+green. No macOS run tonight; the lane will confirm.
+
+**P-item: P2 (grid/sticky family). NOT complete.** One root landed on
+`card-grid`, which night 10 left untouched at 150 geometry failures. It is
+still at 150. What moved is magnitude, not count — see below, because that
+distinction is the whole receipt tonight.
+
+### Commits
+
+Both on `atlas/grid-item-subtree-width`, continuing night 10's P2 engine line
+(cut from `develop`, per the branch law — these are engine changes and do not
+belong on the instrument branch).
+
+- `313494f` — flex items stretch to their line, not to a pre-layout estimate.
+- `471fd50` — close the survivor the mutation sweep found; label two non-guards.
+
+### What the defect was
+
+css-flexbox-1 §9.4 sizes a line from its items' hypothetical (content) cross
+sizes at step 8, then gives every stretchable item that line's cross size at
+step 11. RustKit ran the stretch exactly once, at step 5, **before any item's
+children existed** — so it stretched to a line derived from line-height
+estimates. Step 11b then replaced each item's cross size with its measured
+children height, and nothing re-applied the rule afterwards.
+
+`card-grid` is the visible half. Its second row rendered three cards
+278.58 / 274.58 / 251.78 tall where Chrome gives all three the row's 283.39:
+each card simply kept its own content height. Row 1 looked correct and was not
+— its three cards agree at 274.58 because all three paragraphs happen to wrap
+to the same line count on this seat, not because anything stretched them.
+
+Chasing that turned up a second, larger shape of the same root. With a
+**definite-height** row (`height: 300px`) step 5 does know the target, but
+step 11's block child pass writes the stacked children height over the box
+while `item.cross_size` keeps the stale 300 — so the late pass sees an
+already-stretched item and returns. A 300px row left its items at their 80px
+content height. I found this because a test I wrote to pin ORDERING failed
+with everything unstretched, which was not the failure I had predicted.
+
+Two sites, and they are coupled: resetting stretchable items to their
+hypothetical size before the line is measured (§9.4 step 8) is what stops
+step 5's container-sized stretch from poisoning the line, and only then does
+re-applying stretch after `align-content` has grown the lines (§9.4 step 11)
+give the right target. Landing either alone gives the wrong answer.
+
+**Scope: the vertical cross axis only.** On the horizontal cross axis a late
+width change would leave every line break inside the item's subtree sized
+against the old width, and step 5 already stretches to the container's definite
+width while re-flowing is still possible. A multi-line COLUMN container is the
+one shape neither pass serves; it is deliberately left unstretched, pinned by a
+test whose docstring says it is a scope limit and not a correctness claim.
+
+### Measured — Linux/SwiftShader, 26 gating cases. MECHANICS, NOT A RECEIPT
+
+This seat is not CoreText and not Metal.
+
+| Oracle | Before | After |
+|---|---|---|
+| Gate A geometry failures | 2486 | **2486** |
+| Gate A green | 2/26 | 2/26 |
+| Gate A join failures | 115 | 115 |
+| Gate B paint-green | 1/26 | 1/26 |
+| Gate B discrete failures | 0 | 0 |
+| Gate B elements admitted | 231 of 1593 | **231** of 1593 |
+| N/26 | 1/26 | 1/26 |
+
+The two cases that moved:
+
+| case | geometry count | Gate A sum·|Δ| | paint % within tolerance |
+|---|---|---|---|
+| card-grid | 150 → 150 | 1504.21 → **1473.41** | 67.45264 → **68.47490** |
+| gpu-gradient-regression | 132 → 132 | 542.48 → **537.60** | unchanged |
+
+**The failure count did not move and that is the honest headline.** Six boxes
+improved; the two that matter went from 8.81px and 31.61px out to 4.81px, and
+`gpu-gradient-regression`'s row-5 div from 6.00px to 1.12px — which lands it
+exactly on night 10's known +1.12px strut residual, i.e. its stretch is now
+right and what is left is a different, already-identified defect. Night 9's
+lesson holds and I am restating it because tonight is a cleaner instance: a
+count-only board would have shown this night as producing nothing at all.
+
+### Stop rule
+
+Checked per box, per axis, across all 26 cases, on both oracles. No case lost
+its green, no case gained a discrete failure, Gate B's percentage half
+regressed on nothing.
+
+Against the stricter per-box bar it is not clean, and the number is small
+enough to state exactly: **18 boxes worsened by 6.1e-5 px each** — all row-2 y
+positions on `card-grid`, total 1.1e-3 px. That is f32 accumulation in the line
+cross size, not a layout change; it is four orders of magnitude below the 0.5px
+bar and cannot be rendered. Same class as night 10's 1.2e-4. Named rather than
+rounded to zero. I did not revert.
+
+### Mutation-check results
+
+**11 probes, 8 RED, control green before and after.** Committed before mutating.
+
+| Mutation | Result |
+|---|---|
+| M1 late stretch call deleted | RED |
+| M2 stretch ignores align-items | RED |
+| M3 an explicit cross size is stretched too | RED |
+| M4 floor read off stale `cross_size` | **equivalent — see below** |
+| M5 §9.4 step 8 hypothetical reset removed | RED |
+| M6 the reset ignores align-items | RED *(the survivor; see below)* |
+| M7 never-shrink floor dropped | **equivalent** |
+| M8 vertical-axis guard removed | RED |
+| M9 align-self override dropped from `resolved_align` | RED |
+| M10 `cross_size` not kept in sync when nothing grows | **equivalent** |
+| M11 late pass moved before `distribute_lines` | RED |
+
+**M4, M7 and M10 are equivalent mutants, not decorative guards, and I checked
+that rather than claiming it.** Applied all three together, the suite stays
+green **and all 32 corpus captures come out byte-identical**. Given the step 8
+reset, `item.cross_size` already equals the measured content size for exactly
+the items the late pass touches, so the three expressions are the same
+operation. They are defensive; the file now says so at the one place a reader
+would otherwise count them. Night 3's Paeth `pa <= pb` is the precedent for
+recording this instead of deleting three "failing" guards.
+
+**M6 was a real survivor and my first fix for it was also decoration.** The
+align filter on the reset had no test. It is load-bearing: removing it moves 5
+of the 32 captures and takes Gate A from 2486 to **2488** — i.e. the obvious
+simplification measures worse. My first guard used an *empty* flex item, and
+an item with no children never reaches step 11b, so its box still agrees with
+its cross size and the reset is a no-op on it. The test passed under the
+mutation. The fixture needs a **short child** (5px), where the box becomes 5
+while `cross_size` stays at the 16px estimate. Fifth sweep running where the
+survivor is the same shape, and the second time this week the unit test was
+green while the corpus disagreed.
+
+I also lost that guard once to a `git checkout --` used to restore a mutant,
+because I had not committed it. Nights 1 and 8 both wrote that lesson down.
+Third time.
+
+### Decisions needed from Pete
+
+1. **Night 10's P2 fix (`2e325e2`, `6a26e96`) has been sitting on a branch
+   with no PR since 08-14 because the night order says PRs wait for a complete
+   P-item — P2 is now 4 commits deep and `develop` has moved 4 PRs in the
+   meantime; open a P2 PR now, or keep holding to the rule?
+2. Still open from 08-14: does the stop rule read per-case or per-box, given
+   tonight is the second consecutive night whose only per-box regressions are
+   f32 noise at 1e-4 or below?
+3. Still open from 08-10, 08-11, 08-12 and 08-14: keep or literally revert the
+   overflow-clip change that cost `sticky-scroll` 36 pixels on a card RustKit
+   lays out 38px too low?
+
+### Surprises
+
+- **Row 1 of `card-grid` was correct by coincidence and I nearly used it as
+  the control.** Its three cards agree because three paragraphs wrap to the
+  same line count on this font stack, not because stretch worked. On macOS
+  they wrap differently and that row would be ragged too. A "before" reading
+  that treats an agreeing row as evidence the code path works is the same
+  error class as scoring an unjoined element as "no geometry error".
+- **The bug I set out to test turned out not to be the bug.** The test written
+  to pin ordering (`align-content` grows lines before items stretch) failed
+  with *nothing stretched at all*, which is how the definite-height shape —
+  the larger and far more common one — surfaced. I would not have found it
+  from the corpus: no gating case has a definite-height flex row with children.
+- **card-grid is not a grid.** P2 is "grid/sticky" and `.grid` here is
+  `display: flex; flex-wrap: wrap`. Worth saying because the plan's family
+  names are from the old mean-diff board and do not reliably name the
+  mechanism.
+- **This seat can barely see `card-grid` or `sticky-scroll`.** Applying night
+  10's whole-pixel filter, `sticky-scroll` has **3** whole-pixel failures out
+  of 115 and the rest are fractional font metrics; `card-grid`'s residual is
+  dominated by `line-height: normal` resolving to ~1.02x font-size here against
+  Chrome's ~1.17x, which is P4's lane and unreadable from Linux. P2's remaining
+  work may be substantially smaller than 114 + 150 suggests, and I cannot tell
+  from here which part is real.
+- **A non-stretch item's `cross_size` is never synced down to its measured
+  content** — a 5px-tall item centres as if it were 16px tall. Chrome would put
+  it at 37.5, RustKit puts it at 32. Syncing it makes Gate A *worse* (2486 →
+  2488), so it is entangled with something else and is recorded here rather
+  than half-fixed.
