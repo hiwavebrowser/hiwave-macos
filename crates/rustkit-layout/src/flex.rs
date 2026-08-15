@@ -2652,10 +2652,74 @@ mod tests {
     }
 
     #[test]
+    fn the_hypothetical_reset_leaves_non_stretch_items_alone() {
+        // The §9.4 step 8 reset applies to STRETCHABLE items only. For those,
+        // `cross_size` at that point is a placeholder — step 5's stretch to a
+        // target it could only estimate — and replacing it with the measured
+        // content size is the whole point. For a non-stretch item it is the
+        // item's own used cross size, and rewriting it moves the item inside
+        // its line.
+        //
+        // The fixture needs a SHORT CHILD, not an empty item: an item with no
+        // children never reaches step 11b, so its box still agrees with its
+        // cross size and the reset is a no-op on it. With a 5px child the box
+        // becomes 5 while `cross_size` stays at the 16px line-height estimate,
+        // and only then do the two disagree.
+        //
+        // Dropping the filter is not hypothetical: it moves 5 of the 32 corpus
+        // captures and takes Gate A from 2486 geometry failures to 2488.
+        //
+        // Whether a non-stretch item's cross_size SHOULD be re-synced down to
+        // its measured content is a separate open question — Chrome would
+        // centre a 5px item at 37.5, not 32 — and the corpus says doing it
+        // today makes geometry worse. This pins the boundary of the stretch
+        // change, not an opinion about that.
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Row;
+        style.height = Length::Auto;
+        style.align_items = AlignItems::Center;
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        for child_h in [80.0_f32, 5.0] {
+            let mut item_style = ComputedStyle::new();
+            item_style.width = Length::Px(100.0);
+            item_style.height = Length::Auto;
+            let mut item = LayoutBox::new(BoxType::Block, item_style);
+            let mut child_style = ComputedStyle::new();
+            child_style.width = Length::Px(100.0);
+            child_style.height = Length::Px(child_h);
+            item.children
+                .push(LayoutBox::new(BoxType::Block, child_style));
+            container.children.push(item);
+        }
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 400.0, 500.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        assert_eq!(
+            container.children[1].dimensions.content.y, 32.0,
+            "the short item centres against its own 16px measured cross size; \
+             a y of 37.5 means the reset was applied to a non-stretch item"
+        );
+    }
+
+    #[test]
     fn a_stretched_item_never_shrinks_below_its_own_content() {
         // The other half of §9.4 step 11: stretch raises an item to the line,
         // it never squashes one. Here the line IS the tall item, so the tall
         // item must be left exactly as its content made it.
+        //
+        // NOTE this asserts less than its name suggests, and the mutation
+        // sweep is what said so: with the step 8 reset in place a line is the
+        // max of its items' content sizes, so no item can exceed its own line
+        // and the `.max(content_floor)` clamp is unreachable. Dropping that
+        // clamp leaves the suite green and all 32 corpus captures
+        // byte-identical. It is defensive, it is not a guard, and it is not
+        // counted as one.
         let mut container = row_with_child_heights(&[80.0, 30.0]);
         let containing = Dimensions {
             content: Rect::new(0.0, 0.0, 400.0, 500.0),
