@@ -522,6 +522,26 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
             }
         }
 
+        // §9.4 step 8: a line is sized from its items' HYPOTHETICAL cross
+        // sizes — their content sizes, taken BEFORE stretch. Step 5 may have
+        // written a container-sized stretch into `cross_size`, and leaving it
+        // there makes every line in a wrapped, definite-cross-size container
+        // as tall as the whole container, so align-content sees no free space
+        // to distribute and two lines both claim the full height.
+        //
+        // Vertical cross axis only, matching the late stretch pass in 11c.
+        if cross_axis == Axis::Vertical {
+            for item in &mut line.items {
+                if item.has_explicit_cross_size {
+                    continue;
+                }
+                if resolved_align(item.align_self, style.align_items) != AlignItems::Stretch {
+                    continue;
+                }
+                item.cross_size = item.layout_box.dimensions.content.height + item.cross_pb();
+            }
+        }
+
         // Recompute line cross size based on updated item cross sizes
         line.cross_size = line
             .items
@@ -556,6 +576,25 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
         style.align_content,
     );
     for line in &mut lines {
+        // 11c-i. §9.4 step 11, now that the line cross size is measured
+        // rather than estimated. Ordered after distribute_lines because
+        // `align-content: stretch` grows the LINES first (§9.4 step 9) and
+        // items stretch to the grown line, not to the pre-growth one.
+        //
+        // VERTICAL cross axis only. On the horizontal cross axis (a column
+        // container) the stretch target is the container's width, which is
+        // definite before children are laid out, so step 5 already applies it
+        // at the point where a width change can still re-flow the subtree.
+        // Growing an item's width HERE would leave its children — and every
+        // line break inside them — sized against the old width. No case in
+        // the corpus needs it; this is a deliberate scope limit, not a
+        // statement that column stretch is complete.
+        if cross_axis == Axis::Vertical {
+            for item in &mut line.items {
+                stretch_item_to_line(item, line.cross_size, style.align_items);
+            }
+        }
+
         align_cross_axis(line, style.align_items);
         for item in &mut line.items {
             // New absolute border-box cross position, converted to a content
@@ -1043,6 +1082,78 @@ fn shrink_items(line: &mut FlexLine, overflow: f32) {
 /// has a definite (non-auto) cross size. This affects stretch behavior:
 /// - With definite cross size: stretch items to fill the container
 /// - With auto cross size: stretch items to match the tallest item in the line
+/// Resolve an item's effective `align-items` value, honouring `align-self`.
+///
+/// One definition, three call sites (cross sizing, the late stretch pass, and
+/// cross-axis alignment). They must agree: an item stretched under one mapping
+/// and positioned under another lands at the wrong offset inside its line.
+fn resolved_align(align_self: AlignSelf, align_items: AlignItems) -> AlignItems {
+    match align_self {
+        AlignSelf::Auto => align_items,
+        AlignSelf::FlexStart => AlignItems::FlexStart,
+        AlignSelf::FlexEnd => AlignItems::FlexEnd,
+        AlignSelf::Center => AlignItems::Center,
+        AlignSelf::Baseline => AlignItems::Baseline,
+        AlignSelf::Stretch => AlignItems::Stretch,
+    }
+}
+
+/// css-flexbox-1 §9.4 step 11 — re-applied once the line's cross size is real.
+///
+/// Step 5 already runs the stretch rule, but it runs BEFORE the items' children
+/// are laid out, so the line cross size it stretches to is derived from
+/// line-height estimates. Step 11b then replaces every item's cross size with
+/// its measured children height and re-derives the line from those. At that
+/// point the step 5 stretch has been overwritten and nothing re-applies it: a
+/// line whose items have different content heights stays ragged, where Chrome
+/// gives every item the line's cross size.
+///
+/// Returns true if the item grew.
+///
+/// Scope: the caller applies this on the VERTICAL cross axis only — see the
+/// call site for why, and `column_flex_items_are_not_stretched_by_the_late_pass`
+/// for the pin.
+fn stretch_item_to_line(item: &mut FlexItem, line_cross_size: f32, align_items: AlignItems) -> bool {
+    // A definite cross size never stretches (css-flexbox-1 §9.4): the item
+    // keeps its specified size and the line's free space stays free.
+    if item.has_explicit_cross_size {
+        return false;
+    }
+    if resolved_align(item.align_self, align_items) != AlignItems::Stretch {
+        return false;
+    }
+
+    // The floor is the item's MEASURED content size, read back off the box
+    // after step 11 laid its children out — deliberately not `item.cross_size`.
+    // Those two disagree whenever step 5 stretched: step 5 targets the
+    // container's cross size before any child exists, and the block child pass
+    // in step 11 then writes the real stacked height over the box. Reading the
+    // stale `cross_size` as the floor makes the item look already-stretched and
+    // the pass a no-op, which is how a `height: 300px` row left its items at
+    // their 80px content height.
+    let content_floor = item.layout_box.dimensions.content.height + item.cross_pb();
+
+    // "Never shrink below content": an item taller than its line overflows the
+    // line rather than being squashed into it.
+    let target = (line_cross_size - item.cross_margin_start - item.cross_margin_end)
+        .max(content_floor)
+        .max(item.min_cross_size)
+        .min(item.max_cross_size);
+
+    // Keep cross_size and the box in agreement even when nothing grows —
+    // align_cross_axis computes the line's free space from cross_size, so a
+    // stale value there offsets every non-stretch sibling.
+    item.cross_size = target;
+
+    // cross_size is border-box; dimensions.content is the content rect.
+    let target_content = (target - item.cross_pb()).max(0.0);
+    if target_content <= item.layout_box.dimensions.content.height {
+        return false;
+    }
+    item.layout_box.dimensions.content.height = target_content;
+    true
+}
+
 fn calculate_cross_sizes(
     line: &mut FlexLine,
     container_cross: f32,
@@ -1083,18 +1194,7 @@ fn calculate_cross_sizes(
 
     // PASS 2: Apply stretch behavior based on container sizing
     for (i, item) in line.items.iter_mut().enumerate() {
-        let align = if item.align_self == AlignSelf::Auto {
-            align_items
-        } else {
-            match item.align_self {
-                AlignSelf::Auto => align_items,
-                AlignSelf::FlexStart => AlignItems::FlexStart,
-                AlignSelf::FlexEnd => AlignItems::FlexEnd,
-                AlignSelf::Center => AlignItems::Center,
-                AlignSelf::Baseline => AlignItems::Baseline,
-                AlignSelf::Stretch => AlignItems::Stretch,
-            }
-        };
+        let align = resolved_align(item.align_self, align_items);
 
         // Per CSS spec: stretch only applies if cross size is "auto"
         // Items with explicit height/width should NOT be stretched
@@ -1389,18 +1489,7 @@ fn distribute_main_axis(
 /// Align items on cross axis within line.
 fn align_cross_axis(line: &mut FlexLine, align_items: AlignItems) {
     for item in &mut line.items {
-        let align = if item.align_self == AlignSelf::Auto {
-            align_items
-        } else {
-            match item.align_self {
-                AlignSelf::Auto => align_items,
-                AlignSelf::FlexStart => AlignItems::FlexStart,
-                AlignSelf::FlexEnd => AlignItems::FlexEnd,
-                AlignSelf::Center => AlignItems::Center,
-                AlignSelf::Baseline => AlignItems::Baseline,
-                AlignSelf::Stretch => AlignItems::Stretch,
-            }
-        };
+        let align = resolved_align(item.align_self, align_items);
 
         let outer_cross = item.cross_size + item.cross_margin_start + item.cross_margin_end;
         let free_space = (line.cross_size - outer_cross).max(0.0);
@@ -2476,4 +2565,237 @@ mod tests {
             child_width
         );
     }
+
+    /// Build a flex row whose items are sized by ONE explicitly-sized child.
+    ///
+    /// The child matters: it is what sends each item down step 11b's
+    /// "recompute cross size from children" path, which is where the stretch
+    /// computed in step 5 gets overwritten. An item with no children never
+    /// reaches that path and cannot reproduce the defect.
+    fn row_with_child_heights(heights: &[f32]) -> LayoutBox {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Row;
+        style.height = Length::Auto;
+
+        let mut container = LayoutBox::new(BoxType::Block, style);
+        for h in heights {
+            let mut item_style = ComputedStyle::new();
+            item_style.width = Length::Px(100.0);
+            item_style.height = Length::Auto;
+            let mut item = LayoutBox::new(BoxType::Block, item_style);
+
+            let mut child_style = ComputedStyle::new();
+            child_style.width = Length::Px(100.0);
+            child_style.height = Length::Px(*h);
+            item.children
+                .push(LayoutBox::new(BoxType::Block, child_style));
+
+            container.children.push(item);
+        }
+        container
+    }
+
+    fn heights_of(container: &LayoutBox) -> Vec<f32> {
+        container
+            .children
+            .iter()
+            .map(|c| c.dimensions.content.height)
+            .collect()
+    }
+
+    #[test]
+    fn ragged_flex_items_stretch_to_the_line_not_to_their_own_content() {
+        // card-grid, reduced. Chrome gives every card in a wrapped row the
+        // row's height (283.39); RustKit gave each card its own content
+        // height — 278.58 / 274.58 / 251.78 in one row — because step 5's
+        // stretch runs on line-height ESTIMATES and step 11b then replaces
+        // every item's cross size with its measured children height, with
+        // nothing re-applying the stretch afterwards.
+        let mut container = row_with_child_heights(&[80.0, 30.0]);
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 400.0, 500.0),
+            ..Default::default()
+        };
+
+        layout_flex_container(&mut container, &containing);
+
+        assert_eq!(
+            heights_of(&container),
+            vec![80.0, 80.0],
+            "align-items:stretch gives both items the LINE's cross size (80); \
+             the short item keeping its own 30px content height is the defect"
+        );
+    }
+
+    #[test]
+    fn items_in_a_definite_height_row_stretch_to_the_container() {
+        // The same root one layer over, and the more common shape of it.
+        // With `height: 300px` the stretch target is known in step 5 — but
+        // step 11's block child pass then writes each item's stacked children
+        // height (80 / 30) over the box, and nothing re-applies the stretch,
+        // so a 300px-tall row rendered two items 80 and 30 tall.
+        let mut container = row_with_child_heights(&[80.0, 30.0]);
+        container.style.height = Length::Px(300.0);
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 400.0, 300.0),
+            ..Default::default()
+        };
+
+        layout_flex_container(&mut container, &containing);
+
+        assert_eq!(
+            heights_of(&container),
+            vec![300.0, 300.0],
+            "a definite-height row stretches both items to its 300px inner height"
+        );
+    }
+
+    #[test]
+    fn a_stretched_item_never_shrinks_below_its_own_content() {
+        // The other half of §9.4 step 11: stretch raises an item to the line,
+        // it never squashes one. Here the line IS the tall item, so the tall
+        // item must be left exactly as its content made it.
+        let mut container = row_with_child_heights(&[80.0, 30.0]);
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 400.0, 500.0),
+            ..Default::default()
+        };
+
+        layout_flex_container(&mut container, &containing);
+
+        assert_eq!(
+            container.children[0].dimensions.content.height, 80.0,
+            "the tallest item defines the line and must not be resized by the stretch pass"
+        );
+    }
+
+    #[test]
+    fn an_item_with_an_explicit_height_is_not_stretched_to_the_line() {
+        // css-flexbox-1 §9.4: a definite cross size is never stretched. The
+        // line's free space stays free instead.
+        let mut container = row_with_child_heights(&[80.0, 30.0]);
+        container.children[1].style.height = Length::Px(30.0);
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 400.0, 500.0),
+            ..Default::default()
+        };
+
+        layout_flex_container(&mut container, &containing);
+
+        assert_eq!(
+            container.children[1].dimensions.content.height, 30.0,
+            "height:30px is definite; the stretch pass must leave it at 30, not raise it to the line's 80"
+        );
+    }
+
+    #[test]
+    fn align_items_center_leaves_a_short_item_at_its_content_height() {
+        // The stretch pass must read align-items rather than run
+        // unconditionally: under `center` the short item stays short and is
+        // centered in the line's free space.
+        let mut container = row_with_child_heights(&[80.0, 30.0]);
+        container.style.align_items = AlignItems::Center;
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 400.0, 500.0),
+            ..Default::default()
+        };
+
+        layout_flex_container(&mut container, &containing);
+
+        assert_eq!(
+            container.children[1].dimensions.content.height, 30.0,
+            "align-items:center does not stretch; raising this to 80 means the pass ignored align-items"
+        );
+    }
+
+    #[test]
+    fn align_self_stretch_overrides_a_non_stretch_container() {
+        // The per-item override, and the reason `resolved_align` is one
+        // function: an item stretched under one mapping and positioned under
+        // another lands at the wrong offset inside its line.
+        let mut container = row_with_child_heights(&[80.0, 30.0]);
+        container.style.align_items = AlignItems::Center;
+        container.children[1].style.align_self = rustkit_css::AlignSelf::Stretch;
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 400.0, 500.0),
+            ..Default::default()
+        };
+
+        layout_flex_container(&mut container, &containing);
+
+        assert_eq!(
+            container.children[1].dimensions.content.height, 80.0,
+            "align-self:stretch on the item overrides align-items:center on the container"
+        );
+    }
+
+    #[test]
+    fn items_stretch_to_the_line_grown_by_align_content_not_the_pre_growth_line() {
+        // Ordering pin. css-flexbox-1 §9.4 grows the LINES for
+        // `align-content: stretch` (step 9) BEFORE items stretch to their
+        // line (step 11). Two lines inside a definite 300px container get
+        // 150 each, so every item is 150 tall — running the item pass first
+        // would leave them at their content-derived 80.
+        let mut container = row_with_child_heights(&[80.0, 30.0, 80.0, 30.0]);
+        container.style.height = Length::Px(300.0);
+        container.style.flex_wrap = rustkit_css::FlexWrap::Wrap;
+        // 4 items x 100px in a 250px row => two lines of two.
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 250.0, 300.0),
+            ..Default::default()
+        };
+
+        layout_flex_container(&mut container, &containing);
+
+        assert_eq!(
+            heights_of(&container),
+            vec![150.0, 150.0, 150.0, 150.0],
+            "align-content:stretch grows each line to 150 first; items then stretch to the grown line"
+        );
+    }
+
+    #[test]
+    fn column_flex_items_are_not_stretched_by_the_late_pass() {
+        // SCOPE PIN, not a correctness claim. The late pass is vertical-only.
+        // On the horizontal cross axis a width change here would leave every
+        // line break inside the item's subtree sized against the old width,
+        // and step 5 already stretches to the container's (definite) width at
+        // a point where re-flowing is still possible. A multi-line COLUMN
+        // container is the one shape step 5 cannot serve — its lines are
+        // content-sized — and it is deliberately left unstretched.
+        //
+        // If this test goes red because a later change made column items
+        // stretch to their line, that is very possibly an improvement; the
+        // pin exists so the boundary moves on purpose rather than by
+        // accident, and moving it needs a subtree re-flow.
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.flex_wrap = rustkit_css::FlexWrap::Wrap;
+        style.height = Length::Px(100.0);
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        // Two lines of one: each item is 60 tall in a 100px column.
+        for w in [200.0_f32, 50.0] {
+            let mut item_style = ComputedStyle::new();
+            item_style.width = Length::Px(w);
+            item_style.height = Length::Px(60.0);
+            container
+                .children
+                .push(LayoutBox::new(BoxType::Block, item_style));
+        }
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 400.0, 100.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        assert_eq!(
+            container.children[1].dimensions.content.width, 50.0,
+            "the late stretch pass must not touch the horizontal cross axis"
+        );
+    }
+
 }
