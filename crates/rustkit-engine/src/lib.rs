@@ -3974,17 +3974,7 @@ impl Engine {
                 }
             }
             "height" => {
-                // `fit-content` is handled here and not in parse_length
-                // because parse_length backs ~50 properties, and a keyword
-                // that silently became a definite 0 on `max-height` or
-                // `padding` would be a far larger change than the one this
-                // fixes. `width: fit-content` is deliberately still ignored:
-                // it means shrink-to-fit, which block layout does not
-                // implement, so accepting it would claim a behavior the
-                // engine does not have.
-                if value.trim() == "fit-content" {
-                    style.height = rustkit_css::Length::FitContent;
-                } else if let Some(length) = parse_length(value) {
+                if let Some(length) = parse_height_value(value) {
                     style.height = length;
                 }
             }
@@ -7992,6 +7982,28 @@ fn is_inherited_property(property: &str) -> bool {
     )
 }
 
+/// Parse a `height` value, which accepts the `fit-content` keyword.
+///
+/// The keyword is handled here rather than in `parse_length` because
+/// `parse_length` backs ~50 properties. A keyword that silently resolved to a
+/// definite 0 on `max-height` or `padding` would be a far larger change than
+/// the one `fit-content` exists to fix, so `parse_length` still rejects it and
+/// only this property opts in.
+///
+/// `width: fit-content` is deliberately NOT accepted anywhere: it means
+/// shrink-to-fit, which block layout does not implement, so parsing it would
+/// claim a behavior the engine does not have. `min-content` / `max-content`
+/// are likewise still rejected.
+///
+/// A free function so it is testable without an `Engine`, which needs a GPU
+/// compositor this trench seat has to skip.
+pub(crate) fn parse_height_value(value: &str) -> Option<rustkit_css::Length> {
+    if value.trim() == "fit-content" {
+        return Some(rustkit_css::Length::FitContent);
+    }
+    parse_length(value)
+}
+
 /// Parse a box-shadow value from CSS.
 /// Supports: offset-x offset-y [blur [spread]] color [inset]
 fn parse_box_shadow(value: &str) -> Option<rustkit_css::BoxShadow> {
@@ -11277,5 +11289,42 @@ mod srcset_tests {
             url, "https://example.com/b.png",
             "layout must resolve the WIDEST srcset candidate, absolutely"
         );
+    }
+}
+
+#[cfg(test)]
+mod fit_content_property_tests {
+    use super::*;
+
+    // `height: fit-content` reached layout as `auto` because parse_length
+    // rejects the keyword and the dispatch dropped the declaration. On
+    // sticky-scroll that put both sticky sidebars at the full 1972.70px grid
+    // row against Chrome's 577.44 / 566.14.
+
+    #[test]
+    fn height_accepts_the_fit_content_keyword() {
+        assert_eq!(
+            parse_height_value("fit-content"),
+            Some(rustkit_css::Length::FitContent)
+        );
+        assert_eq!(parse_height_value("  fit-content "), Some(rustkit_css::Length::FitContent));
+    }
+
+    #[test]
+    fn height_still_parses_ordinary_lengths() {
+        assert_eq!(parse_height_value("120px"), Some(rustkit_css::Length::Px(120.0)));
+        assert_eq!(parse_height_value("auto"), Some(rustkit_css::Length::Auto));
+    }
+
+    /// The scope limit, pinned as a test rather than left to a comment.
+    /// `parse_length` backs ~50 properties; `fit-content` becoming a definite
+    /// 0 on `max-height` or `padding` would be a far bigger change than the
+    /// one being made, and `width: fit-content` is shrink-to-fit, which block
+    /// layout does not implement.
+    #[test]
+    fn parse_length_still_rejects_fit_content_for_every_other_property() {
+        assert_eq!(rustkit_css::parse_length("fit-content"), None);
+        assert_eq!(rustkit_css::parse_length("min-content"), None);
+        assert_eq!(rustkit_css::parse_length("max-content"), None);
     }
 }

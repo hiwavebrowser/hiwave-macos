@@ -2454,6 +2454,65 @@ mod tests {
         );
     }
 
+    /// A fit-content item contributes its CONTENT size to the line, so it can
+    /// be the item that sizes the line.
+    ///
+    /// Separate from the test above because that one only proves the item is
+    /// left alone. If fit-content is resolved as an ordinary length it becomes
+    /// a definite 0 in the hypothetical-cross-size pass, and an item reporting
+    /// 0 to the line still comes out 25 tall via the block child pass — so the
+    /// line, not the item, is where that failure is visible.
+    ///
+    /// The rail's `dimensions` are seeded because the engine always runs a
+    /// block pre-pass before flex layout, and the hypothetical-size pass reads
+    /// that measurement. A bare fixture leaves it 0, where the two behaviours
+    /// coincide and the test would be decoration.
+    #[test]
+    fn a_fit_content_flex_item_sizes_the_line_it_is_tallest_in() {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Row;
+        style.align_items = AlignItems::Stretch;
+        style.height = Length::Auto;
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        let mut short_style = ComputedStyle::new();
+        short_style.width = Length::Px(100.0);
+        short_style.height = Length::Auto;
+        let mut short = LayoutBox::new(BoxType::Block, short_style);
+        let mut small_style = ComputedStyle::new();
+        small_style.height = Length::Px(20.0);
+        short
+            .children
+            .push(LayoutBox::new(BoxType::Block, small_style));
+        container.children.push(short);
+
+        let mut rail_style = ComputedStyle::new();
+        rail_style.width = Length::Px(100.0);
+        rail_style.height = Length::FitContent;
+        let mut rail = LayoutBox::new(BoxType::Block, rail_style);
+        let mut card_style = ComputedStyle::new();
+        card_style.height = Length::Px(70.0);
+        rail.children
+            .push(LayoutBox::new(BoxType::Block, card_style));
+        rail.dimensions.content.height = 70.0; // as the block pre-pass leaves it
+        container.children.push(rail);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 400.0, 500.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        let stretched = container.children[0].dimensions.border_box().height;
+        assert!(
+            (stretched - 70.0).abs() < 0.01,
+            "the auto sibling stretches to the line the 70px fit-content item \
+             set, got {stretched} (20 means the fit-content item reported a \
+             definite 0 to the line)"
+        );
+    }
+
     /// The other half of the fit-content rule: as a CONTAINER's cross size it
     /// is indefinite, exactly like `auto`, so its line is sized by the tallest
     /// item and not by the containing block. This is what
