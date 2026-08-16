@@ -9644,9 +9644,12 @@ mod tests {
         //
         // Drive the real engine: one long unbreakable word in a narrow block.
         // Under `normal` there is no soft wrap opportunity, so it stays on one
-        // line; under break-all / anywhere / break-word it must wrap, which
-        // shows up as a taller block. Height, not internal line counts, so the
-        // test asserts the observable rule.
+        // line; under break-all / anywhere / break-word it must wrap. Chrome
+        // FILLS each line before breaking, so the 34-char word in a 40px box
+        // at a ~8-10px monospace advance yields roughly 7-9 lines. Asserting
+        // only "taller" cannot fail for the right reason — one-char-per-line
+        // (34 lines) is maximally taller — so the test also asserts a line-
+        // count ceiling via the height ratio (normal == exactly one line).
         let case = |decl: &str| -> f32 {
             let html = format!(
                 r#"<!DOCTYPE html>
@@ -9716,6 +9719,18 @@ mod tests {
                 wrapped > normal,
                 "`{decl}` did not wrap the word: height {wrapped} vs normal {normal} — \
                  the property never reached the line breaker"
+            );
+            // normal is exactly one line, so wrapped/normal is the line count.
+            // 34 chars / 40px: filling the line gives <= 12 lines even at a
+            // 12px advance; one-grapheme-per-line gives 34. The ceiling is
+            // what distinguishes "wraps like Chrome" from "wraps maximally".
+            let lines = wrapped / normal;
+            assert!(
+                (4.0..=12.0).contains(&lines),
+                "`{decl}` wrapped to {lines:.1} lines (height {wrapped} vs line \
+                 height {normal}) — expected ~7-9: >12 means the emergency arm \
+                 is breaking after one grapheme instead of filling the line, \
+                 <4 means the 40px width is not being respected"
             );
         }
 
