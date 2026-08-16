@@ -4205,12 +4205,13 @@ impl Engine {
                 style.word_break = match value.trim().to_lowercase().as_str() {
                     "break-all" => rustkit_css::WordBreak::BreakAll,
                     "keep-all" => rustkit_css::WordBreak::KeepAll,
-                    // Legacy alias, per §5.2's note; Chrome maps it to
-                    // overflow-wrap: break-word rather than a word-break value.
-                    "break-word" => {
-                        style.overflow_wrap = rustkit_css::OverflowWrap::BreakWord;
-                        rustkit_css::WordBreak::Normal
-                    }
+                    // Legacy alias, per §5.2's note: behaves like
+                    // overflow-wrap: anywhere for line breaking, but must
+                    // survive a later `overflow-wrap` declaration (WPT
+                    // word-break-break-word-overflow-wrap-interactions), so
+                    // it computes as its own word-break value instead of
+                    // writing overflow_wrap.
+                    "break-word" => rustkit_css::WordBreak::BreakWord,
                     _ => rustkit_css::WordBreak::Normal,
                 };
             }
