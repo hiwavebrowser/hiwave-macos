@@ -9660,6 +9660,7 @@ mod tests {
             let engine = Engine {
                 config: EngineConfig::default(),
                 views: HashMap::new(),
+                font_loader: Arc::new(FontLoader::new()),
                 viewhost: ViewHost::new(),
                 compositor,
                 renderer: None,
@@ -9670,6 +9671,8 @@ mod tests {
                 style_trace: std::cell::RefCell::new(None),
                 render_failing: std::collections::HashSet::new(),
                 svg_cache: std::collections::HashMap::new(),
+                building_focus: std::cell::Cell::new(None),
+                building_view: std::cell::Cell::new(None),
             };
             let mut layout = engine.build_layout_from_document(&document, &[]);
             let containing_block = Dimensions {
@@ -9751,6 +9754,7 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
             viewhost: ViewHost::new(),
             compositor,
             renderer: None,
@@ -9761,6 +9765,8 @@ mod tests {
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
             svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);

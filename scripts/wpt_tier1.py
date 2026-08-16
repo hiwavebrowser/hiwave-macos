@@ -294,6 +294,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--case", help="run a single manifest id")
     parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument("--allow-stale", action="store_true",
+                        help="skip the binary-freshness guard (records the run as suspect)")
     args = parser.parse_args()
 
     manifest = json.loads(MANIFEST_PATH.read_text())
@@ -309,6 +311,25 @@ def main():
         print(f"parity-capture not built: {CAPTURE_BIN}\n"
               f"run: cargo build --release -p parity-capture", file=sys.stderr)
         return 1
+
+    # n24 lesson (2026-08-12): this runner once scored a stale binary as a
+    # confirmed null result. The artifact it consumes must be newer than the
+    # sources it was built from, or the run is not a measurement.
+    if not args.allow_stale:
+        newest_src, newest_path = 0.0, None
+        roots = [REPO_ROOT / "crates", REPO_ROOT / "Cargo.lock"]
+        for root in roots:
+            candidates = root.rglob("*.rs") if root.is_dir() else [root]
+            for f in candidates:
+                m = f.stat().st_mtime
+                if m > newest_src:
+                    newest_src, newest_path = m, f
+        if CAPTURE_BIN.stat().st_mtime < newest_src:
+            print(f"parity-capture is STALE: {newest_path} is newer than the binary.\n"
+                  f"run: cargo build --release -p parity-capture\n"
+                  f"(or pass --allow-stale to record a knowingly-suspect run)",
+                  file=sys.stderr)
+            return 1
 
     check = subprocess.run(
         [str(REPO_ROOT / "scripts" / "wpt_sync.sh"), "--check"],
