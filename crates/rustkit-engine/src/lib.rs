@@ -10101,6 +10101,37 @@ mod element_identity_tests {
         assert_ne!(style_of("button").background_color, rustkit_css::Color::WHITE);
     }
 
+    /// The WIRING, not the function. `parse_height_value` has its own unit
+    /// tests in `fit_content_property_tests`, and all of them stayed green
+    /// under a mutation that pointed the `height` dispatch back at
+    /// `parse_length` — the function was correct and nothing called it.
+    ///
+    /// Gated to macOS for the same reason as the test above: it needs a real
+    /// Engine, so it runs on the macos-latest CI leg and NOT on the Linux
+    /// trench seat. Type-checked there with the gate lifted; recorded as
+    /// UNVERIFIED rather than counted as a mutation-checked guard.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_height_dispatch_routes_through_parse_height_value() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let mut style = rustkit_css::ComputedStyle::new();
+        engine.apply_style_property(&mut style, "height", "fit-content");
+        assert_eq!(
+            style.height,
+            rustkit_css::Length::FitContent,
+            "height: fit-content must reach the computed style; Auto means the \
+             dispatch is back on parse_length, which rejects the keyword"
+        );
+
+        // The scope limit, at the dispatch rather than at the parser: width
+        // does not opt in, so the declaration is dropped and the initial
+        // value stands.
+        let mut w = rustkit_css::ComputedStyle::new();
+        let before = w.width.clone();
+        engine.apply_style_property(&mut w, "width", "fit-content");
+        assert_eq!(w.width, before, "width: fit-content is deliberately ignored");
+    }
+
     #[test]
     fn selector_segments_match_committed_chrome_baseline() {
         // `body > div.header:nth-of-type(1)` — two sibling divs, so indexed.
