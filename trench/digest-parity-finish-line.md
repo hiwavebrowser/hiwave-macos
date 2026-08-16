@@ -2067,3 +2067,208 @@ Third time.
   it at 37.5, RustKit puts it at 32. Syncing it makes Gate A *worse* (2486 →
   2488), so it is entangled with something else and is recorded here rather
   than half-fixed.
+
+## 2026-08-16
+
+**Metric: 1/26 → 1/26, and this is a proof rather than a re-run.** All 32
+registry captures are **byte-identical on `frame.ppm`** before and after, so
+Gate B's percentage half cannot have moved and no case can have gained or lost
+paint-green. Gate A's green set is the same two cases (`bg-pure`,
+`specificity`) and Gate B's is the same one (`bg-pure`). The only case that
+moved on any oracle is `sticky-scroll`, which is red on both before and after.
+Nothing could have crossed. No macOS run tonight; the lane will confirm.
+
+**P-item: P2 (grid/sticky family). NOT complete.** `sticky-scroll` goes 114 →
+113 geometry failures and `card-grid` is untouched at 150. What moved is
+magnitude: `sticky-scroll`'s `sum|Δ|` fell 63%.
+
+### Commits
+
+All three on `atlas/grid-item-subtree-width`, continuing nights 10 and 11's P2
+engine line (cut from `develop`, per the branch law — these are engine changes
+and do not belong on the instrument branch).
+
+- `d3ac419` — a `height: fit-content` grid item keeps its content height.
+- `da74447` — close the two survivors the first mutation sweep found.
+- `d11ea6e` — pin the `height` dispatch to its parser; macOS-gated, so
+  UNVERIFIED on this seat.
+
+### What the defect was
+
+`Length` had no `fit-content`. `parse_length` returns `None` for the keyword,
+so `height: fit-content` was dropped on the floor and the box kept the initial
+`auto` — which grid's and flex's stretch paths then filled to the row.
+
+`sticky-scroll`'s two sticky sidebars are `height: fit-content`. Both came out
+**1972.70** tall — the full grid row, driven by `main { min-height: 1500px }` —
+against Chrome's 577.44 and 566.14. Two boxes at +1395 and +1406, which is
+**63% of that case's entire geometry error by magnitude** on a case whose other
+112 failures are mostly sub-pixel font metrics.
+
+`Length::FitContent` is a new variant rather than an alias for `Auto` because
+the two differ in exactly one place: `fit-content` is a *specified* size, so
+css-align-3 §4.2's stretch does not apply to it. Everywhere else it is
+content-based like `auto`. That split is the whole design, and it is named:
+`Length::is_content_based()` is used by the definite-container checks in flex
+and grid and by the margin-collapse condition, while the stretch gates keep
+matching `Length::Auto` directly. There is a control test on each side, because
+a change that stopped stretching *everything* would satisfy the fit-content
+tests on its own.
+
+Scope, held deliberately narrow and pinned by a test rather than a comment:
+
+- the keyword is accepted in the **`height` property dispatch**, not in
+  `parse_length`, which backs ~50 properties — a keyword silently resolving to
+  a definite 0 on `max-height` or `padding` is a much larger change than the
+  one being made;
+- **`width: fit-content` is still ignored.** It means shrink-to-fit, which
+  block layout does not implement, so parsing it would claim a behavior the
+  engine does not have;
+- `min-content` / `max-content` untouched.
+
+A new Phase 9.4 is needed because Phase 8 can only see the block pre-pass
+measurement, taken at the grid *container's* width — a 250px sidebar measured
+at 1160px wraps its text differently and comes out the wrong height. Phase 9
+has re-flowed the item's children by then and recorded the result.
+
+### Measured — Linux/SwiftShader, 26 gating cases. MECHANICS, NOT A RECEIPT
+
+This seat is not CoreText and not Metal.
+
+| Oracle | Before | After |
+|---|---|---|
+| Gate A geometry failures | 2486 | **2485** |
+| Gate A green | 2/26 | 2/26 |
+| Gate A join failures | 115 | 115 |
+| Gate B paint-green | 1/26 | 1/26 |
+| Gate B discrete failures | 0 | 0 |
+| Gate B elements admitted | 231 of 1593 | **232** of 1593 |
+| N/26 | 1/26 | 1/26 |
+
+The only case that moved, on either oracle:
+
+| case | geometry count | Gate A sum·\|Δ\| | paint % within tolerance |
+|---|---|---|---|
+| sticky-scroll | 114 → **113** | 4443.276 → **1648.678** | 94.283691 → 94.283691 (bit-identical) |
+
+`sidebar-left` is now geometry-exact. `sidebar-right` went 1972.70 → 573.37
+against Chrome's 566.14 — still failing, by 7.2px of font metrics inside its
+cards rather than by 1406px of stretch. **The count moved by one and the error
+fell by two thirds**, which is night 9's lesson for the third time: a
+count-only board would have shown this night as noise.
+
+The paint half not moving at all is not a disappointment, it is the check: the
+sidebars paint no background of their own, so a layout-only change *must* leave
+the frames identical. It did, on all 32.
+
+### Stop rule
+
+Checked per box, per axis, across all 26 cases on both oracles.
+
+```
+boxes fixed (no longer failing): 1
+boxes improved (still failing):  1
+boxes newly failing:             0
+boxes WORSENED:                  0
+```
+
+No case lost its green, none gained a discrete failure, Gate B's percentage
+half regressed on nothing. The rule did not fire — the first night in four
+where there is not even an f32-noise regression to name.
+
+### Mutation-check results
+
+**11 probes, 10 RED, control green before and after.** Committed before
+mutating. Two bad probes on the first pass (wrong indentation in the anchor,
+caught by the harness's `count(old) != 1` check rather than by reading the
+result as a survivor).
+
+| Mutation | Result |
+|---|---|
+| M1 Phase 9.4 deleted | RED |
+| M2 `apply_align_self` loses its `FitContent` arm | RED |
+| M3 grid stretch gate treats fit-content as auto | RED |
+| M4 `is_content_based` drops `FitContent` | RED |
+| M5 flex resolves fit-content as a definite length | RED *(survivor, closed)* |
+| M6 flex stretch gate treats fit-content as auto | RED |
+| M7 the `height` parser stops accepting the keyword | RED *(survivor, closed)* |
+| M8 Phase 9.4 only shrinks, never grows | RED |
+| M9 flex container definite-cross check drops fit-content | RED |
+| M10 the dispatch calls `parse_length`, not `parse_height_value` | **GREEN — see below** |
+| M11 `parse_length` starts accepting fit-content everywhere | RED |
+
+**M5's first fixture was decoration for a reason worth recording.** It left the
+item's `dimensions` at zero, and at zero "no explicit cross size" and "an
+explicit cross size of 0" produce the same answer. The engine always runs a
+block pre-pass before flex layout and the hypothetical-size pass reads that
+measurement, so the fixture now seeds it — and the failure is visible on the
+**line** the item sizes, not on the item, which comes out right either way via
+the block child pass. A fixture that does not mirror what the engine actually
+hands the function is testing a shape the engine never produces.
+
+**M7 survived because nothing could reach it.** `apply_style_property` is a
+method on `Engine`, which needs a GPU compositor this seat does not have, so
+any test routed through it is skipped rather than run. Extracting
+`parse_height_value` as a free function made it testable, and its test also
+turned the scope limit from a comment into an assertion.
+
+**M10 is an open survivor and I could not close it here.** Pointing the
+`height` arm back at `parse_length` leaves every `parse_height_value` test
+green — the function is right and nothing checks that the dispatch calls it.
+This is night 7's survivor shape exactly: thorough tests on a helper, nothing
+on the wiring. `d11ea6e` adds the wiring guard, but it needs a real `Engine`,
+so it is `#[cfg(target_os = "macos")]` and **runs on the macos-latest CI leg,
+not here**. I type-checked it with the gate lifted. It is reported as
+UNVERIFIED and is not counted in the 10.
+
+The end-to-end capture is the wiring's real evidence tonight: the sidebars
+could not have moved unless the dispatch routed the keyword through.
+
+### Decisions needed from Pete
+
+1. P2 is now **7 commits on `atlas/grid-item-subtree-width` with no PR** and
+   `develop` has moved several PRs since 08-14 — open the P2 PR now, or keep
+   holding to "PRs wait for a complete P-item"? (Carried from 08-15.)
+2. `sticky-scroll`'s largest remaining cluster is **46 boxes at exactly
+   −20.938px**, the `1fr` min-content floor named in plan §4's P2 — and its two
+   roots are (a) the intrinsic pass dropping inter-element whitespace, which is
+   fixable and would make **this seat's number worse**, and (b) a space advance
+   of 8.0px against Chrome's 4.1875px, which is P4 and unreadable from Linux;
+   land (a) anyway and accept the worse Linux reading, or hold the `1fr` unit
+   until it can be read on macOS?
+3. Still open from 08-10, 08-11, 08-12 and 08-14: keep or literally revert the
+   overflow-clip change that cost `sticky-scroll` 36 pixels on a card RustKit
+   lays out 38px too low?
+
+### Surprises
+
+- **The `1fr` min-content floor is not a grid bug.** Plan §4 names it as P2's
+  work ("gets *finished*, not re-theorized"), and I went in expecting track
+  sizing. RustKit resolves the `1fr` column to **1275.000** and Chrome to
+  **1295.938**, and the two numbers decode exactly: `main`'s min-content comes
+  from a `white-space: nowrap` row of six 200px inline-blocks with 15px
+  margins. 6×200 + 5×15 = 1275 — RustKit's intrinsic pass **drops the five
+  inter-element spaces entirely**. Chrome's 1295.938 is that plus 5×4.1875, one
+  space each. Meanwhile RustKit's *layout* pass does lay the spaces out, at
+  **8.0px** each: its item pitch is 223.000 against Chrome's 219.188. So one
+  cluster of 46 identical failures is two coupled defects — an intrinsic pass
+  that disagrees with the layout pass it is supposed to predict, and a space
+  advance that is 0.5em (the no-font-metrics fallback) against Chrome's
+  0.2617em. The first is real, font-independent and fixable; fixing it alone on
+  this seat moves `main` to 1315 and **further from Chrome**. That is decision 2
+  and it is not a comfortable one.
+- **`fit-content` did not exist anywhere in `Length`.** It exists as a grid
+  *track* keyword (`TrackSize::FitContent`), which is what made me assume the
+  sizing keyword was there too. The declaration had been silently discarded
+  since the property was written.
+- **46 of `sticky-scroll`'s 114 delta failures are the same number.** Bucketing
+  the deltas took thirty seconds and reordered the whole night: the next four
+  clusters are 9, 4, 2 and 2 boxes. A failure list read top-to-bottom looks like
+  114 problems; bucketed, it is about six.
+- **I lost a test to `git checkout --` again.** Fourth time this campaign
+  (nights 1, 8, 11, tonight). This one was a one-line variant: I lifted a
+  `#[cfg]` to type-check a macOS-gated test, then restored the file with
+  `git checkout --` and took the uncommitted test with it. The lesson written on
+  night 1 is "commit before mutating"; the version that would have saved tonight
+  is narrower — *never use `git checkout --` on a file that has uncommitted work
+  in it, for any reason, including a two-second experiment.*
