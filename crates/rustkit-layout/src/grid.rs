@@ -1609,7 +1609,7 @@ pub fn layout_grid_container(
     // This prevents percentage heights from resolving against the incorrect block-flow
     // computed height (which stacks children vertically). Items with percentage heights
     // will contribute based on their intrinsic content height instead.
-    let has_definite_height = !matches!(style.height, Length::Auto);
+    let has_definite_height = !style.height.is_content_based();
     let height_for_contributions = if has_definite_height { container_height } else { 0.0 };
 
     let item_sizings: Vec<ItemSizing> = items
@@ -2166,6 +2166,31 @@ pub fn layout_grid_container(
                     *slot = Some((current_y + seam_margins.resolve() - grid_item_y).max(0.0));
                 }
             }
+        }
+    }
+
+    // Phase 9.4: a `height: fit-content` item takes the height its own
+    // content flowed to, not the row's.
+    //
+    // Phase 8 could only use the block pre-pass measurement, which ran at the
+    // grid CONTAINER's width — a 250px sidebar measured at 1160px wraps its
+    // text differently and comes out the wrong height. Phase 9 has since
+    // re-flowed the item's children at the item's real width and recorded the
+    // result, so this is the first point where the content size is known.
+    //
+    // Grow as well as shrink: the recorded height is the answer, not a cap.
+    {
+        let mut idx = 0usize;
+        for child in container.children.iter_mut() {
+            if child.style.display == Display::None {
+                continue;
+            }
+            if matches!(child.style.height, Length::FitContent) {
+                if let Some(Some(real_h)) = real_heights.get(idx) {
+                    child.dimensions.content.height = real_h.max(0.0);
+                }
+            }
+            idx += 1;
         }
     }
 
@@ -2930,6 +2955,18 @@ fn apply_justify_self(
     }
 }
 
+/// A box's currently measured border-box height.
+///
+/// Free function rather than a closure inside the caller so the `fit-content`
+/// arm can be exercised without a grid container around it.
+pub(crate) fn measured_border_box_height(child: &LayoutBox) -> f32 {
+    child.dimensions.content.height
+        + child.dimensions.padding.top
+        + child.dimensions.padding.bottom
+        + child.dimensions.border.top
+        + child.dimensions.border.bottom
+}
+
 /// Apply align-self alignment.
 fn apply_align_self(
     self_align: &AlignSelf,
@@ -2949,12 +2986,19 @@ fn apply_align_self(
         other => *other,
     };
 
-    // Check if height is explicitly set (not auto)
+    // Check if height is explicitly set (not auto). `fit-content` counts as
+    // specified here — css-align-3 §4.2 stretches only an `auto` size — which
+    // is the one place the two must NOT be treated alike.
     let has_explicit_height = !matches!(child.style.height, Length::Auto);
     let child_height = match child.style.height {
         Length::Auto => cell_height,
         Length::Px(h) => h,
         Length::Percent(p) => cell_height * p / 100.0,
+        // Provisional: the block pre-pass measured this box at the container's
+        // width, so its height can be wrong until Phase 9 re-flows the item's
+        // children at the item's real width. The post-Phase-9 pass below
+        // replaces it with the flowed height.
+        Length::FitContent => measured_border_box_height(child),
         _ => cell_height,
     };
 
@@ -5387,6 +5431,118 @@ mod tests {
              got {} (a {}px shortfall is the margin being dropped)",
             body.y,
             expected_y - body.y
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // `height: fit-content` on a grid item.
+    //
+    // css-align-3 4.2 stretches an item only where its size in that axis is
+    // `auto`. `fit-content` is a specified size, so a fit-content item keeps
+    // its content height inside a stretch row.
+    //
+    // Measured on sticky-scroll before the fix: both sticky sidebars, which
+    // are `height: fit-content`, came out 1972.70 tall -- the full grid row,
+    // driven by the 1500px-min-height main column -- against Chrome's 577.44
+    // and 566.14. Two boxes, +1395 and +1406, which was 63% of that case's
+    // whole geometry error by magnitude.
+    // ---------------------------------------------------------------
+
+    /// An item with children: the height comes from what its content FLOWED
+    /// to, which is only known after Phase 9 has re-laid the children out at
+    /// the item's real column width.
+    #[test]
+    fn a_fit_content_grid_item_takes_its_flowed_content_height() {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Px(250.0)]);
+        container_style.grid_template_rows = GridTemplate::from_sizes(vec![TrackSize::Px(300.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        let mut item_style = ComputedStyle::new();
+        item_style.box_sizing = BoxSizing::BorderBox;
+        item_style.height = Length::FitContent;
+        let mut item = LayoutBox::new(BoxType::Block, item_style);
+
+        for h in [60.0_f32, 40.0] {
+            let mut card_style = ComputedStyle::new();
+            card_style.box_sizing = BoxSizing::BorderBox;
+            card_style.height = Length::Px(h);
+            item.children
+                .push(LayoutBox::new(BoxType::Block, card_style));
+        }
+        container.children.push(item);
+
+        layout_grid_container(&mut container, 400.0, 600.0);
+
+        let h = container.children[0].dimensions.border_box().height;
+        assert!(
+            (h - 100.0).abs() < 0.01,
+            "a fit-content item holding 60+40 of content should be 100 tall in a \
+             300px row, got {h} (300 means it was stretched; 0 means the flowed \
+             height was never written back)"
+        );
+    }
+
+    /// An item with NO children never reaches Phase 9, so the alignment pass
+    /// is the only thing standing between it and the row's height.
+    #[test]
+    fn a_childless_fit_content_grid_item_is_not_stretched_to_the_row() {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Px(250.0)]);
+        container_style.grid_template_rows = GridTemplate::from_sizes(vec![TrackSize::Px(300.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        let mut item_style = ComputedStyle::new();
+        item_style.box_sizing = BoxSizing::BorderBox;
+        item_style.height = Length::FitContent;
+        item_style.padding_top = Length::Px(10.0);
+        item_style.padding_bottom = Length::Px(10.0);
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, item_style));
+
+        layout_grid_container(&mut container, 400.0, 600.0);
+
+        let h = container.children[0].dimensions.border_box().height;
+        assert!(
+            (h - 20.0).abs() < 0.01,
+            "an empty fit-content item is its padding, 20 tall, got {h} \
+             (300 means the stretch gate treated fit-content as auto)"
+        );
+    }
+
+    /// The control. Without this the two tests above are satisfied by a grid
+    /// that has simply stopped stretching anything.
+    #[test]
+    fn an_auto_height_grid_item_still_stretches_to_the_row() {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Px(250.0)]);
+        container_style.grid_template_rows = GridTemplate::from_sizes(vec![TrackSize::Px(300.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        let mut item_style = ComputedStyle::new();
+        item_style.box_sizing = BoxSizing::BorderBox;
+        item_style.height = Length::Auto;
+        let mut item = LayoutBox::new(BoxType::Block, item_style);
+        let mut card_style = ComputedStyle::new();
+        card_style.box_sizing = BoxSizing::BorderBox;
+        card_style.height = Length::Px(60.0);
+        item.children
+            .push(LayoutBox::new(BoxType::Block, card_style));
+        container.children.push(item);
+
+        layout_grid_container(&mut container, 400.0, 600.0);
+
+        let h = container.children[0].dimensions.border_box().height;
+        assert!(
+            (h - 300.0).abs() < 0.01,
+            "an auto-height item still fills its 300px row, got {h}"
         );
     }
 

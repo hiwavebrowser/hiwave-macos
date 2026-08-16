@@ -158,10 +158,14 @@ pub fn establishes_bfc(style: &ComputedStyle, float: Float) -> bool {
     false
 }
 
-/// Check if a length value is auto.
+/// Check if a length is sized by its content (`auto` or `fit-content`).
+///
+/// Every caller asks "does this box's height come from its children" — the
+/// CSS 2.1 §8.3.1 condition for margins collapsing through — so
+/// `fit-content` answers yes alongside `auto`.
 #[inline]
 fn is_length_auto(length: &Length) -> bool {
-    matches!(length, Length::Auto)
+    length.is_content_based()
 }
 
 /// Get the pixel value of a length, treating auto as 0.

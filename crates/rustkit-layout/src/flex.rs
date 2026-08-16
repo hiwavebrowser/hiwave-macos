@@ -224,7 +224,7 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
     // For row direction, cross axis is vertical (height)
     // For column direction, cross axis is horizontal (width)
     let has_definite_cross_size = match cross_axis {
-        Axis::Vertical => !matches!(container.style.height, Length::Auto),
+        Axis::Vertical => !container.style.height.is_content_based(),
         // A block-level flex container with `width: auto` still has a
         // DEFINITE used width — it resolves against its containing block.
         // Treating auto as indefinite sent the stretch path down the
@@ -663,7 +663,7 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
             Axis::Horizontal => total_cross,
             Axis::Vertical => total_main,
         };
-        if matches!(container.style.height, rustkit_css::Length::Auto) {
+        if container.style.height.is_content_based() {
             container.dimensions.content.height = content_size;
         } else if container.dimensions.content.height == 0.0 {
             let explicit = match container.style.height {
@@ -862,11 +862,17 @@ fn create_flex_item<'a>(
     };
     let explicit_cross_size = match explicit_cross_length {
         rustkit_css::Length::Auto => None,
+        // `fit-content` has no resolvable value either — it is the content
+        // measure. Falling through to resolve_length would hand back a
+        // DEFINITE 0 and collapse the item.
+        rustkit_css::Length::FitContent => None,
         // A percentage cross size may not be resolvable against an
         // indefinite container; keep it on the content-measure path.
         rustkit_css::Length::Percent(_) => None,
         l => Some(spec_cross_to_border_box(resolve_length(l, container_cross))),
     };
+    // Stretch gate — matches `Auto` and not `is_content_based`, on purpose:
+    // a `fit-content` cross size is specified, so the item is not stretched.
     let has_explicit_cross_size = !matches!(explicit_cross_length, rustkit_css::Length::Auto);
 
     let min_cross = if css_min_cross > 0.0 {
@@ -2397,6 +2403,96 @@ mod tests {
             "Expected child2_y ({}) >= child1_y ({})",
             child2_y,
             child1_y
+        );
+    }
+
+    /// `height: fit-content` is a specified cross size, so `align-items:
+    /// stretch` leaves the item at its content height (css-align-3 4.2).
+    ///
+    /// Two ways to fail, and they land on different numbers, which is what
+    /// makes this one assertion enough: treating fit-content as `auto`
+    /// stretches the item to the line (60), and resolving it as an ordinary
+    /// length gives it a DEFINITE zero.
+    #[test]
+    fn a_fit_content_flex_item_keeps_its_content_cross_size() {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Row;
+        style.align_items = AlignItems::Stretch;
+        style.height = Length::Px(300.0);
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        let mut tall_style = ComputedStyle::new();
+        tall_style.width = Length::Px(100.0);
+        tall_style.height = Length::Px(60.0);
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, tall_style));
+
+        let mut rail_style = ComputedStyle::new();
+        rail_style.width = Length::Px(100.0);
+        rail_style.height = Length::FitContent;
+        let mut rail = LayoutBox::new(BoxType::Block, rail_style);
+        let mut card_style = ComputedStyle::new();
+        card_style.height = Length::Px(25.0);
+        rail.children
+            .push(LayoutBox::new(BoxType::Block, card_style));
+        container.children.push(rail);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 400.0, 300.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        let h = container.children[1].dimensions.border_box().height;
+        assert!(
+            (h - 25.0).abs() < 0.01,
+            "a fit-content flex item holding a 25px card should be 25 tall, got {h} \
+             (60 means it stretched to the line; 0 means fit-content was resolved \
+             as a definite length)"
+        );
+    }
+
+    /// The other half of the fit-content rule: as a CONTAINER's cross size it
+    /// is indefinite, exactly like `auto`, so its line is sized by the tallest
+    /// item and not by the containing block. This is what
+    /// `Length::is_content_based` is for, and it is a different predicate from
+    /// the stretch gate above -- one test each, because collapsing them is how
+    /// fit-content came to be treated as auto everywhere in the first place.
+    #[test]
+    fn a_fit_content_flex_container_has_an_indefinite_cross_size() {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Row;
+        style.height = Length::FitContent;
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        let mut tall_style = ComputedStyle::new();
+        tall_style.width = Length::Px(100.0);
+        tall_style.height = Length::Px(50.0);
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, tall_style));
+
+        let mut auto_style = ComputedStyle::new();
+        auto_style.width = Length::Px(100.0);
+        auto_style.height = Length::Auto;
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, auto_style));
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 400.0, 500.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        let stretched = container.children[1].dimensions.content.height;
+        assert!(
+            stretched < 100.0,
+            "the auto item stretches to the tallest item (50), got {stretched} \
+             (500 means a fit-content container was read as a definite cross size)"
         );
     }
 

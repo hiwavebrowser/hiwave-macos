@@ -329,6 +329,19 @@ pub enum Length {
     Vmax(f32),
     /// Auto.
     Auto,
+    /// `fit-content` — a content-based size (css-sizing-3 §5.2).
+    ///
+    /// Like `auto` it carries no definite value and is resolved from the
+    /// box's own content. Unlike `auto` it is a SPECIFIED size, so the
+    /// `stretch` alignment of flex and grid does not apply to it
+    /// (css-align-3 §4.2 stretches an item only where its size in that axis
+    /// is `auto`). That single difference is the whole reason the variant
+    /// exists rather than being folded into `Auto`.
+    ///
+    /// Only ever produced for `height`. `width: fit-content` is shrink-to-fit,
+    /// which block layout does not implement, so it is still ignored — see
+    /// the property dispatch in rustkit-engine.
+    FitContent,
     /// Zero.
     #[default]
     Zero,
@@ -367,6 +380,10 @@ impl Length {
             Length::Vmin(vmin) => vmin / 100.0 * viewport_width.min(viewport_height),
             Length::Vmax(vmax) => vmax / 100.0 * viewport_width.max(viewport_height),
             Length::Auto => 0.0, // Context-dependent
+            // Content-dependent, exactly as Auto is: the layout pass that
+            // knows the content resolves it. Returning anything else here
+            // would hand callers a definite 0 for a box that has a size.
+            Length::FitContent => 0.0,
             Length::Zero => 0.0,
             Length::Min(pair) => {
                 let a = pair.0.to_px_with_viewport(
@@ -427,6 +444,21 @@ impl Length {
                 pref.clamp(min_val, max_val)
             }
         }
+    }
+
+    /// True when the value carries no definite size and must be resolved
+    /// from the box's content: `auto` and `fit-content`.
+    ///
+    /// This is the predicate for "is this box sized BY its content" —
+    /// definite-container checks, percentage resolution, margin collapse.
+    ///
+    /// It is deliberately NOT the predicate for `stretch`. css-align-3 §4.2
+    /// stretches an item only where its size in that axis is `auto`, so a
+    /// `fit-content` item keeps its content size inside a stretch container.
+    /// Sites that gate stretching match `Length::Auto` directly, and must
+    /// keep doing so.
+    pub fn is_content_based(&self) -> bool {
+        matches!(self, Length::Auto | Length::FitContent)
     }
 }
 

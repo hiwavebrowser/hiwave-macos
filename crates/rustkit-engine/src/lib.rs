@@ -3974,7 +3974,17 @@ impl Engine {
                 }
             }
             "height" => {
-                if let Some(length) = parse_length(value) {
+                // `fit-content` is handled here and not in parse_length
+                // because parse_length backs ~50 properties, and a keyword
+                // that silently became a definite 0 on `max-height` or
+                // `padding` would be a far larger change than the one this
+                // fixes. `width: fit-content` is deliberately still ignored:
+                // it means shrink-to-fit, which block layout does not
+                // implement, so accepting it would claim a behavior the
+                // engine does not have.
+                if value.trim() == "fit-content" {
+                    style.height = rustkit_css::Length::FitContent;
+                } else if let Some(length) = parse_length(value) {
                     style.height = length;
                 }
             }
