@@ -5975,6 +5975,12 @@ mod tests {
     /// A block-level child interrupts the inline run, so a whitespace run left
     /// pending in front of it must be dropped rather than carried across the
     /// break onto the next run's first item.
+    ///
+    /// The interrupting block is deliberately NARROWER than the runs either
+    /// side of it. A wide block is the natural fixture to reach for and it is
+    /// useless here: it wins the `max` outright and hides whatever the
+    /// trailing run measures. That is how the first version of this test
+    /// passed under the mutation it exists to catch.
     #[test]
     fn a_block_child_drops_the_pending_space() {
         let mut style = ComputedStyle::new();
@@ -5991,7 +5997,7 @@ mod tests {
             style.clone(),
         ));
         let mut block = ComputedStyle::new();
-        block.width = Length::Px(300.0);
+        block.width = Length::Px(50.0);
         row.children.push(LayoutBox::new(BoxType::Block, block));
         row.children.push(LayoutBox::new(
             BoxType::Text("\n   ".to_string()),
@@ -5999,11 +6005,18 @@ mod tests {
         ));
         row.children.push(LayoutBox::new(BoxType::Block, inline));
 
+        let space = {
+            let mut s = ComputedStyle::new();
+            s.font_size = Length::Px(16.0);
+            collapsed_space_width(&s)
+        };
         let width = estimate_min_content_width(&row);
         assert!(
-            (width - 300.0).abs() < 0.01,
-            "the widest of three interrupted runs is the 300px block: got \
-             {width}"
+            (width - 200.0).abs() < 0.01,
+            "the trailing run is one 200px inline-block with nothing before it \
+             on its own line: expected 200, got {width} (a space carried across \
+             the block would read {})",
+            200.0 + space
         );
     }
 }
