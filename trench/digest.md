@@ -3149,3 +3149,138 @@ the loop cannot proceed past any of them on its own.
 **If this routine fires again unchanged**, the correct action is to verify the
 smoke suite still passes, append nothing, and stop — the funeral is written, the
 stop condition has fired, and there is no in-scope work left to do.
+
+---
+
+## 2026-08-17 — night 16 (NONE — closed trench, firing verified only)
+
+**Metric: 11 of 12 → 11 of 12**
+
+**Moved no → yes: NONE.**
+
+Trench 2 was buried on night 14 and clause 2 fired on its own terms on night 15.
+There is no in-scope work left, so nothing could move and nothing did. Night 15
+left standing orders for exactly this case — *"verify the smoke suite still
+passes, append nothing, and stop"* — and I have followed the first and third.
+This entry exists because four things are **new since 2026-08-12** and would
+otherwise go unrecorded; the funeral itself is not restated or re-argued.
+
+### What I ran, so the state is checkable rather than inherited
+
+Cold runner, empty `target/`, fresh build on this branch tonight. Every counted
+property re-asserts and passes — nothing rotted in the five days since night 15:
+
+```
+$ cargo build -p hiwave-mcp && python3 crates/hiwave-mcp/smoke.py
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 17s
+ok  initialize        {'name': 'hiwave-mcp', 'version': '0.1.0'}
+ok  tools/list        ['hiwave_open', 'hiwave_layout', 'hiwave_display_list', 'hiwave_style', 'hiwave_diff', 'hiwave_screenshot', 'hiwave_status']
+ok  hiwave_layout-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_display_list-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_style-before-open  refused: no page loaded — call hiwave_open first
+ok  hiwave_open       {'height': 600, 'loaded': '<inline>', 'width': 800}
+ok  hiwave_status     session survives between calls
+ok  hiwave_layout     .hero border_box = 432.0x152.0 (content-box: 400+2*16 x 120+2*16)
+ok  hiwave_display_list  .hero painted rgb(0,136,204) over 432.0x152.0 at (0.0,0.0) — same rect layout computed
+ok  paint order       canvas[0] < hero[1] < text[2]
+ok  advance contract  11 advances for 11 chars, font_size=32.0 weight=700 x=16.0
+ok  hiwave_style      width=400px won by .hero [0, 1, 0] over div [0, 0, 1] (later in source, lower specificity)
+ok  computed expansion padding-left=16px, cited to `padding: 16px` on .hero (via_shorthand) — no rule spells the longhand
+ok  origin split      h1 font-weight=700 winner=None (UA, no rule to cite); font-size=32px winner=h1 (author)
+ok  line-height       .copy 20px x 1.5 = 30px — authored '1.5', computed 30px (resolved, not echoed)
+ok  normal not faked  .hero line-height=normal (keyword, not px — resolving it needs font metrics)
+ok  inherited origin  span font-family='Georgia, serif' text-align=center both origin=inherited; display still UA-or-initial
+ok  line-height inherited  span declares nothing, reports 30px origin=inherited (.copy 20px x 1.5) and its line box IS 30.0 — `normal` control measures 20.0
+ok  font-style        span computed=italic origin=inherited (declares nothing); paint drew it font_style=1, h1 still 0
+ok  letter-spacing    .spaced 0.1em x 20px = 2px (authored '0.1em'); every advance is exactly +2.0 over .plain — [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+ok  white-space      .pre computed=pre won by .pre [0, 1, 0] over a LATER div [0, 0, 1] normal; paint kept both spaces — 'a  b' has 4 advances against 3 for the collapsed control
+ok  KNOWN DIVERGENCE  .pre keeps 'a  b' (4 advances) but its nested span collapsed 'c  d' to 'c d' — white-space is not inherited onto elements
+ok  KNOWN GAP        a BARE <pre> computes white-space=normal (winner=None) and collapses 'x  y' to 'x y' — the UA sheet reached it (display=block, monospace) but has no white-space declaration to give
+ok  border shorthand  .framed border-top-width=5px (0.25em x 20px) and border-top-color=rgba(204, 102, 0, 1), both cited to `border` on .framed; layout reserved 5.0 and paint drew a 210.0x5.0 band
+ok  no false citation `border: 2px solid` cites the width and NOT border-top-color (the declaration carried no colour)
+ok  longhand wins     .overruled border-top-width=9px beats `border: 3px solid #093`, which is reported in overridden; layout reserved {'bottom': 3.0, 'left': 3.0, 'right': 3.0, 'top': 9.0} and a 52.0-tall box
+ok  box-sizing        .bordered border-box: declared 200px IS the border box, content 170.0x10.0; .content content-box, same declarations, border box 230.0x70.0
+ok  position          .floater absolute (beat `div{position:static}`, last in sheet); .host is 0.0 tall around a 40.0-tall child and the next block starts at the same y — out of flow
+ok  overflow-x       .clipped overflow-x=hidden cited to `overflow`; it establishes a BFC so the kid's 20px bottom margin lands INSIDE — 35.0 tall against 15.0 for .unclipped, same child, one keyword apart
+ok  KNOWN GAP        ...but paint pushes no clip for it — overflow-x is answered for what LAYOUT did, not for whether anything was clipped
+ok  KNOWN GAP        .faded opacity=0.5 computed, but paint filled it at a=1.0 — opacity never reaches the solid-colour path, so it is reported, not counted
+ok  selector guard    refused 'div p'
+ok  hiwave_diff       hero/layout agrees with the spec reference on 12/12 hand-derived values (incl. border_box 432x152)
+ok  hiwave_diff       hero/display_list agrees on 17 values (paint order, #08c over 432x152, 32px/700 text at x=16)
+ok  hiwave_diff       important-width DISAGREES: border_box.width expected 100.0 (spec: !important wins), engine computed 400.0 — 2 of 4, height and x still agree
+ok  session isolation open page still 432x152 after three diffs
+ok  diff guards       unknown stage, unknown case, unknown reference, path escape and missing argument all refused
+ok  hiwave_screenshot 1440015 bytes at ppm
+ok  argument guard    pass either `html` or `path`, not both
+
+PASS: hiwave-mcp serves the engine's computed layout, its paint commands, the cascade behind them, AND whether any of it agrees with a committed reference
+```
+
+### The four things that are new, and nothing else is
+
+1. **A five-day gap, cause unknown from inside a session.** The previous entry is
+   2026-08-12 (night 15); tonight is 2026-08-17. There is no entry and no commit
+   on this branch for 08-13, 08-14, 08-15 or 08-16, and this branch's tip is
+   still night 15. I cannot tell from here whether the routine fired on those
+   nights and committed nothing, or did not fire at all. Recording the gap rather
+   than explaining it, because both readings are consistent with what I can see.
+2. **The scheduler itself is healthy — this is specific to this routine.** The
+   sibling parity/WPT trench committed on 08-13, 08-14, 08-15, 08-16 and 08-17
+   (`atlas/trench-parity-finish-line`, `atlas/softwrap-slice0`), so nightly firing
+   works. Whatever happened to nights 16–19 here is not a dead scheduler.
+3. **Master has moved 152 commits ahead of this branch's merge base, and nothing
+   rotted.** Cold build clean in 1m17s, all assertions above passing. Worth one
+   line because it is the thing a five-day gap would most plausibly have broken.
+4. **Nights 3–15 are still unmerged.** PR #79 merged on 2026-08-01 and carried
+   nights 1–2 only; there has been no PR since, so 19 commits — `hiwave-mcp`,
+   `rustkit-engine`, `BASELINE.md` and this digest — sit only on this branch.
+   That is also *why* decision #1 keeps recurring: the scheduler checks out
+   **master**, whose digest still ends at night 3 and therefore corroborates the
+   stale prompt. Atlas opens PRs, not this loop, so I have not opened one.
+
+### What the engine still cannot answer
+
+Unchanged from nights 14 and 15, and deliberately not restated in full: `opacity`
+(no consumer anywhere in the engine — `SolidColor` has no field to carry it);
+`white-space` counted but with two live engine gaps (no element inheritance, no UA
+default on a bare `<pre>`); `overflow-x` answered for what layout did, not for
+whether anything was clipped; `!important` still dead in the cascade, still pinned
+by the `important-width` diff case; UA origin still indistinguishable from "nobody
+set it"; computed values still a fixed longhand set; `hiwave_style` still simple
+selectors only; unmodelled display ops still `"modelled": false` with no contract;
+capture-kind references still refused; `style` still not a diffable stage; and the
+diff corpus is still two fixtures, so **no real page is covered by any of the four
+tools**.
+
+### Tests
+
+**Nothing compiled changed tonight** — the committed diff is `trench/digest.md`
+only, so nothing can have regressed. The smoke suite passed as pasted, on a cold
+build. Nights 7–15's standing workspace result (914 passed, 1 pre-existing
+`rustkit-layout::probe_normal_line_height_vs_chrome` failure) is untouched by a
+markdown edit.
+
+Scope stayed inside `trench/`. No parity harness, no `.github/`, no Windows or
+Linux port work, no engine behaviour changed, no export altered, no force-push, no
+merge, no PR.
+
+Runner notes: `target/` empty again; `mesa-vulkan-drivers` missing again and
+night 14's advice is still the one that works (`apt-get update` first, ignore the
+`deadsnakes` / `ondrej/php` PPA 403s, then install — `lvp_icd.json` is the one
+that matters).
+
+### Decisions needed from Pete
+
+One, and it is the only one that has ever been able to stop these entries.
+
+1. **Repoint or disable this routine.** The stored prompt has described trench 1
+   and instructed the session to stop at 4 of 4 for fourteen nights; trench 1
+   closed on 2026-08-02 and trench 2 was buried on 08-11. Disabling it is a
+   complete fix and costs nothing, since the trench is closed. Landing nights
+   3–15 to master is the other fix and is worth doing regardless — it is where
+   the code lives, and it removes the stale corroboration that makes a fresh
+   agent close the wrong trench.
+
+The two carried decisions (`opacity`'s renderer change; night 13's keyword
+ruling) are unchanged and are not re-listed — see night 15. Neither blocks
+anything while the trench is closed.
