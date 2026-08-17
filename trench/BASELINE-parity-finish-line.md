@@ -85,13 +85,44 @@ gate — it measures nothing itself and refuses to fill in a blank.
 | Nothing computed the four-way conjunction — three gates, three separate numbers, the metric ANDed by eye in prose | **CLEARED** night 6, 26/26 mutation-checked. `scripts/finish_line_receipt.py`, run on both the PR and nightly lanes. Unmeasured is never green; paint and discrete stay separate columns; a receipt that measured nothing exits 1. |
 | RustKit `layout.json` had no join key — only `type`/`text`/`control_type`, while Chrome's rects are keyed by selector | **CLEARED** night 1 (P0a-0). 1593/1593 baseline selectors reproducible across all 26 cases. |
 | Gate A (geometry) not implemented — `scripts/layout_oracle_gate.py` is a stub whose `extract_layout_from_rustkit` returns `None` | **CLEARED** night 2. Gate built, joined on the P0a-0 key, 14/14 mutation-checked. It has never seen a real RustKit capture — see below. |
-| Gate A has no real RustKit input yet — every capture path needs a GPU adapter, and this trench seat is Linux with none | **Half cleared** night 4. The seat *does* render: SwiftShader ships with the bundled Playwright Chromium and wgpu takes it via `VK_ICD_FILENAMES`. 32/32 registry cases captured, and Gate A ran end-to-end on real engine output for the first time (26 measured, 2 green, 24 red, 2703 geometry failures, 115 join failures). Its **code path** is now observed; its **numbers** are still not macOS numbers — Linux font stack, not CoreText; SwiftShader, not Metal. Nothing from this seat can be the receipt. |
+| Gate A has no real RustKit input yet — every capture path needs a GPU adapter, and this trench seat is Linux with none | **Half cleared** night 4. The seat *does* render: SwiftShader ships with the bundled Playwright Chromium and wgpu takes it via `VK_ICD_FILENAMES`. 32/32 registry cases captured, and Gate A ran end-to-end on real engine output for the first time (26 measured, 2 green, 24 red, 2703 geometry failures, 115 join failures). Its **code path** is now observed; its **numbers** are still not macOS numbers — **no text backend at all** (see below), not CoreText; SwiftShader, not Metal. Nothing from this seat can be the receipt. |
 | Gate B (paint tolerance + discrete-structural auto-fail) not implemented | **CLEARED** night 3, with one gap: 2 of 3 discrete kinds. `paint_outside_box` is unbuilt because the obvious form was measured to be decoration (0.00% of the viewport lies outside Chrome's rects on all 26 cases) and the attributable form needs Gate A's per-element verdict as a precondition. |
 | Gate B's two SHIPPED discrete detectors had that same precondition and did not enforce it — both read RustKit's pixels at **Chrome's** rect, so a displaced box makes every pixel they read belong to something else | **CLEARED** night 8, 9/9 mutation-checked. Measured: **62 of 62** `missing_clip` auto-fails were firing on elements Gate A already fails, displaced 8px–384px; **zero** fired on a geometrically exact element. `attributable_selectors` now joins the layout dump and admits an element only where its border box matches Chrome's rect within Gate A's tolerance (constant and join imported from `layout_oracle_gate`, not restated). A capture with no `layout.json` is UNMEASURED. Discrete 62 → 0 on this seat; the percentage half is bit-identical on all 26 cases. |
 | Gate C (non-gating forensic board) not published | **CLEARED** night 5, 17/17 mutation-checked. `scripts/forensic_board.py`: raw heatmap, a tolerance sweep at 0/1x/2x/4x the pinned constant, 32px tiles ranked by above-tolerance pixels and attributed to the most specific Chrome element. Non-gating is enforced as *the numbers never fail a PR*, not *always exits 0* — a board that measured nothing exits 1. Validated end to end on real SwiftShader frames (26/26 measured, 21s); those numbers are mechanics, never a receipt. |
 | Gates A, B and C never wired into `parity.yml` at all | **CLEARED** night 5. All three run on the PR and nightly lanes against the shard artifacts' own captures. A and B are **advisory for one cycle** per ratified decision 2; C is non-gating forever. Advisory means visible, not ignored: every receipt, including did-not-run text, goes to the job summary. Flipping A and B to blocking is a follow-up that changes only `continue-on-error`. |
 | The join key was never guarded, only assumed | **CLEARED** night 5, 5/6 mutation-checked. `tools/parity_oracle/verify_selector_key.mjs` extracts `getSelector` from `capture_baseline.mjs` and asserts it reproduces all 1757 committed selectors. Blocking in CI from its first run. |
 | Stability never enforced at `pr_merge` (`stable:false` does not gate in `parity_gate.py`) | **CLEARED** night 4, 19/19 mutation-checked. The ≥2-run waiver is gone: a row that cannot show 3 **measured** iterations now fails as `stability_unmeasured`, a reason distinct from `unstable`, and unknown counts as zero. Measured ≠ attempted — three captures of which two errored is one measurement. The PR and nightly scout phases run `--iterations 3` in the same commit, because tightening the gate without producing the evidence is a permanent red lock rather than a stricter check. Like Gates A and B, it has never run against a real macOS capture. |
+
+---
+
+## What the trench seat can and cannot read (measured 2026-08-17)
+
+Nights 4 through 13 labelled this seat's divergence "the Linux font stack, not
+CoreText". **That understated it by a category. There is no font stack here.**
+
+`rustkit-text` ships DirectWrite (Windows) and CoreText (macOS) and, for
+everything else, a `nowin` stub whose every method returns `NotImplemented`.
+`TextShaper::shape` under `#[cfg(all(not(windows), not(target_os = "macos")))]`
+hands back `font_size * 0.5` per ASCII character. No font file is opened; the 59
+fonts installed on the box are never consulted.
+
+Consequence, measured across all 26 gating cases:
+
+```
+Gate A failures on boxes carrying text anywhere beneath them:  2187  (88%)
+Gate A failures on boxes with no text beneath them:             298  (12%)
+card-grid:                                          150 TEXT,    0 CLEAN
+sticky-scroll:                                      104 TEXT,    9 CLEAN
+```
+
+`TEXT` is a **necessary condition for unreadability, not proof of it** — night
+13's `fit-content` sidebars were text-bearing and their defect was a 1400px
+stretch. So 2187 bounds what this seat cannot score from above, and 298 bounds
+what it can from below.
+
+**Rule for this seat, going forward: a Gate A count is not a receipt and is
+barely a signal.** Per-box magnitudes on CLEAN boxes are the readable
+instrument; anything on a TEXT box needs the macOS lane to arbitrate.
 
 ---
 

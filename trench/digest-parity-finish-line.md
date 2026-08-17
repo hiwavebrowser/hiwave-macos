@@ -2272,3 +2272,257 @@ could not have moved unless the dispatch routed the keyword through.
   night 1 is "commit before mutating"; the version that would have saved tonight
   is narrower — *never use `git checkout --` on a file that has uncommitted work
   in it, for any reason, including a two-second experiment.*
+
+## 2026-08-17
+
+**Metric: 1/26 → 1/26, and this is a proof rather than a re-run.** Gate A's
+green set is the same two cases (`bg-pure`, `specificity`), Gate B's is the same
+one (`bg-pure`), discrete stayed 0/0, and 31 of 32 captures are byte-identical
+on `frame.ppm` before and after. The conjunction is a subset of Gate B's green
+set on both sides, so nothing could cross. No macOS run tonight.
+
+**P-item: P2 (grid/sticky family). NOT complete.** One root landed on
+`sticky-scroll` and one instrument defect had to be fixed first to land it. But
+the headline of the night is a measurement, not a fix, and it is bad news for
+how the last ten nights' numbers should be read.
+
+### This seat has no text backend at all
+
+Not "the Linux font stack, not CoreText" — which is what the BASELINE file and
+every night since 4 has said. There is no font stack here. `rustkit-text` ships
+DirectWrite (Windows) and CoreText (macOS) and a `nowin` stub that returns
+`NotImplemented` from every method; `TextShaper::shape` on
+`#[cfg(all(not(windows), not(target_os = "macos")))]` is thirty lines that hand
+back `font_size * 0.5` per ASCII character and `font_size` per non-ASCII one. No
+font is opened. 59 fonts are installed on this box and none of them is consulted.
+
+It decodes the corpus exactly. `card-grid`'s `.stat-label` boxes come out
+86.4 / 43.2 / 86.4 / 50.4 px, and "Active Users" is 12 characters at
+`0.9em × 16 = 14.4px`: 12 × 7.2 = 86.4. "Uptime" is 6: 43.2. "Support" is 7:
+50.4. Night 13's unexplained 8.0px space advance is 16 × 0.5, and its reading of
+that as P4's advance-width defect was the right conclusion from the wrong
+mechanism.
+
+**So: how much of this seat's Gate A failure list is downstream of a text
+measurement?**
+
+```
+                    TEXT   CLEAN
+sticky-scroll        104       9
+card-grid            150       0
+new_tab              240       3
+about                390       0
+...
+TOTAL               2187     298     (88% / 12% of 2485)
+```
+
+`TEXT` means the box, or something beneath it, carries a non-empty text run.
+That is a **necessary condition for unreadability, not proof of it** — night
+13's `fit-content` sidebars were text-bearing and their defect was a 1400px
+stretch. So 2187 is an upper bound on what this seat cannot score, and 298 is a
+hard lower bound on what it can.
+
+**`card-grid` is 150 of 150 TEXT and 0 of 150 CLEAN.** There is no readable
+geometry failure on it from this seat. Nights 12 and 13 both said the residual
+"may be substantially smaller than 114 + 150 suggests"; the correct statement is
+that half of P2's remaining work is not measurable here at all, and the other
+half is nine boxes.
+
+### The nine readable boxes, and the two roots under them
+
+`sticky-scroll`'s CLEAN failures bucket into exactly two:
+
+```
+width  -20.938  .horizontal-scroll         (and 45 more boxes inheriting it)
+x       +3.812  .horizontal-item:nth(2)     a staircase of +3.8125 per item
+x       +7.625  .horizontal-item:nth(3)
+x      +11.438  .horizontal-item:nth(4)
+x      +15.250  .horizontal-item:nth(5)
+x      +19.062  .horizontal-item:nth(6)
+x     +139.531  .overflow-content
+y      +75.054  .overflow-content
+```
+
++3.8125 is 8.0 − 4.1875: RustKit's layout pass DOES lay one collapsed space
+between the inline-blocks, at this seat's fallback advance. Its intrinsic pass
+does not lay any, because a whitespace-only run measures 0 — so min-content came
+out 1275 for a line the same engine lays out at 1275 + 5 spaces, and the `1fr`
+track floored on the narrower number. That is an engine disagreeing with itself,
+which is font-independent even when the space's width is not.
+
+### Commits
+
+Engine, on `atlas/grid-item-subtree-width` (cut from develop, per branch law):
+
+- `758d588` — a nowrap run counts the collapsed space between its inline boxes.
+- `7b48db5` — export the visual rect for transformed boxes.
+- `199a0ff` — close the survivor the mutation sweep found.
+
+Instrument, on `atlas/trench-parity-finish-line`:
+
+- `6ec2017` — Gate A was comparing a layout rect against a post-transform baseline.
+
+### The instrument defect, which had to go first
+
+`.overflow-content` is `position: absolute; top: 50%; left: 50%;
+transform: translate(-50%, -50%)`. Chrome's committed rects are
+`getBoundingClientRect()`, which is POST-transform. RustKit exported the LAYOUT
+rect. Transforms do not change layout, so those are two different quantities and
+Gate A was scoring the renderer's own translate as a layout defect.
+
+I found it the expensive way. The whitespace fix, applied alone, **worsened that
+box by 20px** — 139.53 → 159.53 — and tripped the stop rule. The reason is that
+the fix makes `.overflow-demo` 40px wider, `left: 50%` moves the box 20px right,
+and 20px right is 20px further from a baseline the box was never comparable to.
+Getting the layout position more correct made the reported error larger. That is
+the same shape as night 8: an oracle reporting a defect that belongs to
+something else, except this time the something else was the oracle's own join.
+
+`visual_border_box` is emitted ALONGSIDE `border_box` and only where a transform
+is in effect on the box or an ancestor, because Gate B's attributable join and
+the scroll-extent readers want the layout rect and redefining it would move all
+of them. The affine mirrors the painter's — same `to_matrix`, same origin — so
+the exported rect and the painted pixels cannot disagree.
+
+**And its count improvement is mostly not a win.** 2485 → 2447, and every one of
+the 123 changed rows is on one of the corpus's 32 transformed boxes:
+
+| cause | boxes | rows | sum·\|Δ\| |
+|---|---|---|---|
+| `translate`, unconditional | 2 | 3 | **−529.17** |
+| `scale(1.05)` | 30 | 120 | −76.67 |
+
+The 30 are `new_tab`'s `kbd` chips and `.logo`, and they carry a transform they
+should not have at all: RustKit matches `.shortcut:hover kbd` in a static
+capture. 22 of their rows got WORSE, which is the leak becoming visible for the
+first time, and 98 got better — because this seat's ruler makes those boxes ~10%
+too narrow and a bogus 5% scale-up drags them toward Chrome. **37 of the 38
+fewer failures are two defects partially cancelling, not a fix.** The honest
+receipt for this change is the −529 of magnitude on two boxes, and the fact that
+the gate can now see a defect it previously could not.
+
+### Measured — Linux/SwiftShader, 26 gating cases. MECHANICS, NOT A RECEIPT
+
+| Oracle | Before | Instrument fix | + engine fix |
+|---|---|---|---|
+| Gate A geometry failures | 2485 | 2447 | **2447** |
+| Gate A green | 2/26 | 2/26 | 2/26 |
+| Gate A join | 115 | 115 | 115 |
+| Gate B paint-green | 1/26 | — | 1/26 |
+| Gate B discrete failures | 0 | — | 0 |
+| Gate B elements admitted | 232 | — | **233** |
+| N/26 | 1/26 | — | 1/26 |
+
+The engine fix, scored on the corrected instrument:
+
+| case | geometry count | Gate A sum·\|Δ\| | paint % within tolerance |
+|---|---|---|---|
+| sticky-scroll | 113 → **113** | 1519.507 → **1432.320** | 94.28369 → **94.29570** |
+
+Count flat, magnitude −87, and the case's failures at 20px or worse go
+**55 → 8**. Every one of the 47 improved boxes is still outside 0.5px, because
+the space this seat inserts is 8.0px against Chrome's 4.1875 — the residual is
+now entirely the missing font backend. On macOS the same code puts `main` at
+1275 + 5 × 4.1875 = **1295.9375**, which is Chrome's number exactly. That is a
+prediction this seat cannot test and the PR lane can.
+
+### Stop rule
+
+Checked per box, per axis, across all 26 cases, on both oracles.
+
+```
+engine fix, on the corrected instrument:
+  boxes fixed 0 · improved 47 · newly failing 0 · WORSENED 0
+```
+
+Clean. The instrument fix's 22 worsened rows are reported above rather than
+here, because they are a change to the oracle and not to the engine: they are
+all on boxes carrying a transform the renderer really applies, and the stop rule
+exists to stop an engine change flattering the metric, not to stop the
+instrument from seeing more.
+
+Stability: 3 measured iterations, all 32 captures byte-identical on both
+`frame.ppm` and `layout.json`. `finish_line_receipt.py` refuses to score without
+the swarm's aggregate — correctly, and I did not produce one, so `1/26` here is
+the three conditions I computed plus a hash-level stability check, not a receipt
+the script signed.
+
+### Mutation-check results
+
+**14 probes, 14 RED, control green before and after. Committed before mutating.**
+
+| Mutation | Result |
+|---|---|
+| M1 the pending collapsed space is never added to the run | RED |
+| M2 leading whitespace counts (between-contributors condition dropped) | RED |
+| M3 the scope limit is dropped and `pre` collapses to one space | RED |
+| M4 a block child no longer interrupts the pending space | RED *(survivor, closed)* |
+| M5 the space is measured as the empty string | RED |
+| M6 only a literally empty run collapses | RED |
+| M7 the transform is taken about the page origin, not transform-origin | RED |
+| M8 ancestor transforms stop composing into the subtree | RED |
+| M9 the bounds are taken from one corner instead of four | RED |
+| M10 every box exports a visual rect, transformed or not | RED |
+| M11 the visual rect REPLACES `border_box` | RED |
+| G1 the layout rect wins Gate A's preference again | RED |
+| G2 the visual rect becomes required rather than preferred | RED |
+| G3 the join silently falls back to the layout rect | RED |
+
+**M4 survived the first sweep** and its fixture was decoration for the usual
+reason. It put a 300px block between two 200px runs, so the block won the `max`
+outright and hid whatever the trailing run measured — the mutation moved the
+trailing run from 200 to 208 and nothing looked at it. The interrupting block is
+now 50px, narrower than the runs either side. **Sixth sweep running whose
+survivor is the same shape: the guard gets written against the example, not
+against the rule.** Night 12 proposed making it a checklist item — *after
+writing the guards, ask which line of the change no assertion would miss* — and
+I did not run that checklist tonight either.
+
+### Decisions needed from Pete
+
+1. **This seat cannot advance P2 further: `card-grid`'s readable geometry is
+   0 of 150 boxes and `sticky-scroll`'s is 9, of which 8 are now fixed or
+   magnitude-reduced** — should the trench keep grinding P2 blind and let the
+   macOS lane arbitrate, move to the P-items whose readable geometry is actually
+   here (`rounded-corners` 58, `gradients` 49, `backgrounds` 46 CLEAN failures),
+   or stop engine work on this seat and spend it on the instrument?
+2. **P2 is now 10 commits on `atlas/grid-item-subtree-width` with no PR** and
+   `develop` has moved several PRs since 08-14 — open the P2 PR now, or keep
+   holding to "PRs wait for a complete P-item"? (Carried unanswered from 08-15
+   and 08-16; the branch is no longer small.)
+3. Still open from 08-10, 08-11, 08-12, 08-14 and 08-16: keep or literally
+   revert the overflow-clip change that cost `sticky-scroll` 36 pixels on a card
+   RustKit lays out 38px too low?
+
+### Surprises
+
+- **The seat is blinder than nine nights of digests have said, and I only
+  checked because a number was suspiciously round.** `.stat-label` at exactly
+  86.400 is not a font metric. Every "Linux font stack" caveat in this file and
+  in `trench/BASELINE-parity-finish-line.md` understated the problem by a
+  category: the numbers are not from a different font, they are from no font.
+  The BASELINE file is corrected in the same commit as this entry.
+- **A correct fix tripped the stop rule, and the rule was right to fire.** The
+  20px regression was real; what was wrong was the baseline it was measured
+  against. Reverting would have discarded a spec-required fix to protect an
+  instrument artifact — which is the stop rule's own failure mode inverted. The
+  resolution was to fix the instrument first and re-measure, not to argue the
+  rule down. It came out clean on the second reading: 0 boxes worsened.
+- **RustKit paints `:hover` styles in a static capture.** `new_tab`'s `kbd`
+  chips are drawn 5% larger than they are laid out, and `.logo` too.
+  `simple_selector_matches_with_pseudo` returns `false` for `hover` correctly, so
+  the rule is reaching `kbd` through the descendant-combinator path — the
+  ancestor compound's `:hover` is being ignored rather than failing the match.
+  Not fixed tonight: it is a selector-engine root, it is not P2, and its blast
+  radius is the cascade. Recorded as its own unit, the way night 11 recorded
+  `render_borders`.
+- **Gate A had been scoring 32 boxes on the wrong quantity since it was built**,
+  and the campaign's own guard against exactly this — "boxes with no selector are
+  EXCLUDED, never paired positionally" — did not generalise to "boxes whose rect
+  means something else". Both are the same error: pairing two things that are not
+  the same measurement.
+- **`.overflow-content` also has a real defect that is now readable.** Its
+  `top: 50%` resolves to 0 against a definite 150px containing block; only
+  `left: 50%` is applied. After the transform fix that reads as a −74.95px y
+  delta instead of being tangled up in the missing translate. Not fixed tonight
+  — it is one box and it belongs to whoever takes absolute positioning.
