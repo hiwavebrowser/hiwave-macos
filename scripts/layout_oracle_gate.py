@@ -241,11 +241,23 @@ def index_rustkit(root: Dict[str, Any]) -> Tuple[
 def border_box(box: Dict[str, Any]) -> Optional[Dict[str, float]]:
     """The RustKit rect that corresponds to Chrome's getBoundingClientRect.
 
+    `getBoundingClientRect()` is POST-transform, and CSS transforms do not
+    change layout — so on a transformed box the layout `border_box` and
+    Chrome's rect are measuring two different things, and the difference
+    between them is the renderer's own translate rather than a layout defect.
+    Scored that way, sticky-scroll's `.overflow-content` (`translate(-50%,
+    -50%)`) read 139.53px out of place while its layout position was correct,
+    and getting the layout position RIGHT made the reported delta larger.
+
+    The engine emits `visual_border_box` exactly where a transform is in
+    effect on the box or an ancestor. Prefer it: it is the same quantity
+    Chrome's baseline is. Absent, the layout rect IS the visual rect.
+
     Text and image boxes emit a flat `rect` instead of the four box-model
     rects; they have no identity so the gate never reaches them through the
     join, but the fallback keeps this function total.
     """
-    rect = box.get("border_box") or box.get("rect")
+    rect = box.get("visual_border_box") or box.get("border_box") or box.get("rect")
     if not isinstance(rect, dict):
         return None
     return rect
