@@ -9279,6 +9279,70 @@ fn parse_grid_line_shorthand(
     Some((start, rustkit_css::GridLine::Auto))
 }
 
+/// Compose two page-space affines: `outer ∘ inner`.
+///
+/// Same [a, b, c, d, e, f] convention as `TransformList::to_matrix` — a point
+/// maps to `(a·x + c·y + e, b·x + d·y + f)`.
+fn compose_affine(outer: [f32; 6], inner: [f32; 6]) -> [f32; 6] {
+    [
+        outer[0] * inner[0] + outer[2] * inner[1],
+        outer[1] * inner[0] + outer[3] * inner[1],
+        outer[0] * inner[2] + outer[2] * inner[3],
+        outer[1] * inner[2] + outer[3] * inner[3],
+        outer[0] * inner[4] + outer[2] * inner[5] + outer[4],
+        outer[1] * inner[4] + outer[3] * inner[5] + outer[5],
+    ]
+}
+
+/// The page-space affine this box's own `transform` contributes, or `None`
+/// when it has none.
+///
+/// This MIRRORS the painter (`DisplayCommand::PushTransform` in
+/// rustkit-layout): the same `to_matrix(border_box.width, border_box.height)`
+/// and the same origin resolution. The exported visual rect and the painted
+/// pixels must not be able to disagree — if this drifts from the painter, the
+/// oracle starts scoring a box the renderer never drew.
+///
+/// A transform applies about its origin, so the page-space affine is
+/// `T(origin) · M · T(-origin)`.
+fn own_transform_affine(layout_box: &LayoutBox) -> Option<[f32; 6]> {
+    if layout_box.style.transform.is_identity() {
+        return None;
+    }
+    let border_box = layout_box.dimensions.border_box();
+    let m = layout_box
+        .style
+        .transform
+        .to_matrix(border_box.width, border_box.height);
+    let ox = border_box.x
+        + layout_box
+            .style
+            .transform_origin
+            .x
+            .to_px(16.0, 16.0, border_box.width);
+    let oy = border_box.y
+        + layout_box
+            .style
+            .transform_origin
+            .y
+            .to_px(16.0, 16.0, border_box.height);
+    let to_origin = [1.0, 0.0, 0.0, 1.0, -ox, -oy];
+    let from_origin = [1.0, 0.0, 0.0, 1.0, ox, oy];
+    Some(compose_affine(from_origin, compose_affine(m, to_origin)))
+}
+
+/// Axis-aligned bounding box of a rect under an affine — what
+/// `getBoundingClientRect()` returns, which is the geometry oracle's baseline.
+fn transformed_bounds(m: [f32; 6], x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
+    let map = |px: f32, py: f32| (m[0] * px + m[2] * py + m[4], m[1] * px + m[3] * py + m[5]);
+    let corners = [map(x, y), map(x + w, y), map(x, y + h), map(x + w, y + h)];
+    let min_x = corners.iter().map(|c| c.0).fold(f32::INFINITY, f32::min);
+    let max_x = corners.iter().map(|c| c.0).fold(f32::NEG_INFINITY, f32::max);
+    let min_y = corners.iter().map(|c| c.1).fold(f32::INFINITY, f32::min);
+    let max_y = corners.iter().map(|c| c.1).fold(f32::NEG_INFINITY, f32::max);
+    (min_x, min_y, max_x - min_x, max_y - min_y)
+}
+
 /// Convert one layout box to its JSON form for `export_layout_json`.
 ///
 /// Module-level rather than nested so it can be tested directly: the engine
@@ -9286,11 +9350,28 @@ fn parse_grid_line_shorthand(
 /// SKIP when none is present, which would make an identity test vacuous on any
 /// machine without a GPU adapter.
 fn layout_box_to_json(layout_box: &LayoutBox) -> serde_json::Value {
+    layout_box_to_json_under(layout_box, None)
+}
+
+/// `ancestor` is the composed transform of everything above this box, in page
+/// space. `None` means no transform is in effect and the layout rect IS the
+/// visual rect, so nothing extra is emitted.
+fn layout_box_to_json_under(
+    layout_box: &LayoutBox,
+    ancestor: Option<[f32; 6]>,
+) -> serde_json::Value {
+    let effective = match (ancestor, own_transform_affine(layout_box)) {
+        (None, None) => None,
+        (Some(a), None) => Some(a),
+        (None, Some(o)) => Some(o),
+        (Some(a), Some(o)) => Some(compose_affine(a, o)),
+    };
+
     // Element identity, when this box came from a DOM element. Absent
     // on anonymous and text boxes — the geometry oracle must SKIP
     // those rather than pair them positionally with Chrome elements.
     // Emitting a placeholder here would manufacture geometry failures.
-    let mut value = layout_box_body_to_json(layout_box);
+    let mut value = layout_box_body_to_json(layout_box, effective);
     if let (Some(identity), Some(object)) = (layout_box.identity(), value.as_object_mut()) {
         object.insert("element_id".into(), identity.element_id.into());
         object.insert("tag".into(), identity.tag.clone().into());
@@ -9299,7 +9380,10 @@ fn layout_box_to_json(layout_box: &LayoutBox) -> serde_json::Value {
     value
 }
 
-fn layout_box_body_to_json(layout_box: &LayoutBox) -> serde_json::Value {
+fn layout_box_body_to_json(
+    layout_box: &LayoutBox,
+    effective_transform: Option<[f32; 6]>,
+) -> serde_json::Value {
     let dims = &layout_box.dimensions;
     let content = &dims.content;
     let margin_box = dims.margin_box();
@@ -9354,10 +9438,13 @@ fn layout_box_body_to_json(layout_box: &LayoutBox) -> serde_json::Value {
         }
     };
 
-    let children: Vec<serde_json::Value> =
-        layout_box.children.iter().map(layout_box_to_json).collect();
+    let children: Vec<serde_json::Value> = layout_box
+        .children
+        .iter()
+        .map(|child| layout_box_to_json_under(child, effective_transform))
+        .collect();
 
-    serde_json::json!({
+    let mut json = serde_json::json!({
         "type": box_type,
         "content_rect": {
             "x": content.x,
@@ -9402,7 +9489,34 @@ fn layout_box_body_to_json(layout_box: &LayoutBox) -> serde_json::Value {
             "left": dims.border.left
         },
         "children": children
-    })
+    });
+
+    // CSS transforms do not change layout, so `border_box` above stays the
+    // LAYOUT rect — Gate B's attributable join and the scroll-extent readers
+    // want that box, and quietly redefining it would move them all.
+    //
+    // Chrome's committed baselines are `getBoundingClientRect()`, which is
+    // post-transform. Comparing a layout rect against it reports the
+    // renderer's own translate as a layout defect: sticky-scroll's
+    // `.overflow-content` (`translate(-50%, -50%)`) read 139.53px out of
+    // place while its layout position was correct. So the visual rect is
+    // emitted ALONGSIDE, and only where a transform is actually in effect —
+    // an untransformed box has no second rect to disagree about.
+    if let (Some(m), Some(object)) = (effective_transform, json.as_object_mut()) {
+        let (vx, vy, vw, vh) = transformed_bounds(
+            m,
+            border_box.x,
+            border_box.y,
+            border_box.width,
+            border_box.height,
+        );
+        object.insert(
+            "visual_border_box".into(),
+            serde_json::json!({ "x": vx, "y": vy, "width": vw, "height": vh }),
+        );
+    }
+
+    json
 }
 
 #[cfg(test)]
@@ -12820,6 +12934,135 @@ mod srcset_tests {
         assert_eq!(
             url, "https://example.com/b.png",
             "layout must resolve the WIDEST srcset candidate, absolutely"
+        );
+    }
+}
+
+#[cfg(test)]
+mod visual_rect_tests {
+    use super::*;
+
+    // ---------------------------------------------------------------
+    // The visual rect, for the geometry oracle's join.
+    //
+    // CSS transforms do not change layout, but `getBoundingClientRect()` — the
+    // whole of Chrome's committed baseline — is POST-transform. Exporting only
+    // the layout rect made the oracle report the renderer's own translate as a
+    // layout defect: sticky-scroll's `.overflow-content`
+    // (`translate(-50%, -50%)`) read 139.53px out of place while its layout
+    // position was correct, and correcting that position made the reported
+    // delta LARGER.
+    // ---------------------------------------------------------------
+
+    fn boxed(x: f32, y: f32, w: f32, h: f32, style: rustkit_css::ComputedStyle) -> LayoutBox {
+        let mut b = LayoutBox::new(BoxType::Block, style);
+        b.dimensions.content = rustkit_layout::Rect::new(x, y, w, h);
+        b
+    }
+
+    fn visual(value: &serde_json::Value) -> Option<(f32, f32, f32, f32)> {
+        let v = value.get("visual_border_box")?;
+        Some((
+            v["x"].as_f64()? as f32,
+            v["y"].as_f64()? as f32,
+            v["width"].as_f64()? as f32,
+            v["height"].as_f64()? as f32,
+        ))
+    }
+
+    /// T-RED. Without the visual rect the oracle scores 987.97 against
+    /// Chrome's 837.97 and calls a correctly-placed box 150px wrong.
+    #[test]
+    fn a_translated_box_exports_the_rect_chrome_measures() {
+        let mut style = rustkit_css::ComputedStyle::new();
+        style.transform = rustkit_css::TransformList {
+            ops: vec![rustkit_css::TransformOp::Translate(
+                rustkit_css::Length::Percent(-50.0),
+                rustkit_css::Length::Percent(-50.0),
+            )],
+        };
+        let json = layout_box_to_json(&boxed(987.96875, 1201.25, 300.0, 300.0, style));
+        let (x, y, w, h) = visual(&json).expect("a transformed box must export a visual rect");
+        assert!(
+            (x - 837.96875).abs() < 0.01 && (y - 1051.25).abs() < 0.01,
+            "translate(-50%,-50%) must move the visual rect by half the box: got ({x}, {y})"
+        );
+        assert!(
+            (w - 300.0).abs() < 0.01 && (h - 300.0).abs() < 0.01,
+            "a pure translate must not resize: got {w}x{h}"
+        );
+        let bb = &json["border_box"];
+        assert!(
+            (bb["x"].as_f64().unwrap() - 987.96875).abs() < 0.01,
+            "border_box must stay the LAYOUT rect — Gate B's attributable join \
+             and the scroll-extent readers want that box"
+        );
+    }
+
+    /// The field exists only where a transform is actually in effect. An
+    /// untransformed box has no second rect to disagree about, and emitting
+    /// one everywhere would double the size of every dump.
+    #[test]
+    fn an_untransformed_box_exports_no_visual_rect() {
+        let json = layout_box_to_json(&boxed(
+            10.0,
+            20.0,
+            30.0,
+            40.0,
+            rustkit_css::ComputedStyle::new(),
+        ));
+        assert!(
+            visual(&json).is_none(),
+            "no transform means the layout rect IS the visual rect"
+        );
+    }
+
+    /// A transform applies to the whole subtree, so a child of a transformed
+    /// box is displaced even with no transform of its own. Chrome's rect for
+    /// that child is displaced too.
+    #[test]
+    fn a_child_inherits_its_ancestors_transform() {
+        let mut style = rustkit_css::ComputedStyle::new();
+        style.transform = rustkit_css::TransformList {
+            ops: vec![rustkit_css::TransformOp::TranslateX(rustkit_css::Length::Px(100.0))],
+        };
+        let mut parent = boxed(0.0, 0.0, 200.0, 200.0, style);
+        parent.children.push(boxed(
+            10.0,
+            10.0,
+            20.0,
+            20.0,
+            rustkit_css::ComputedStyle::new(),
+        ));
+        let json = layout_box_to_json(&parent);
+        let (cx, _, _, _) = visual(&json["children"][0])
+            .expect("a child under a transform must export a visual rect");
+        assert!(
+            (cx - 110.0).abs() < 0.01,
+            "the child must carry its ancestor's +100 translate: got {cx}"
+        );
+    }
+
+    /// A scale is measured about `transform-origin`, which defaults to the
+    /// box's centre — the same origin the painter uses. Getting the origin
+    /// wrong moves the box while leaving its size right, which is exactly the
+    /// error a size-only assertion cannot see.
+    #[test]
+    fn a_scale_is_taken_about_the_transform_origin() {
+        let mut style = rustkit_css::ComputedStyle::new();
+        style.transform = rustkit_css::TransformList {
+            ops: vec![rustkit_css::TransformOp::Scale(2.0, 2.0)],
+        };
+        let json = layout_box_to_json(&boxed(100.0, 100.0, 50.0, 50.0, style));
+        let (x, y, w, h) = visual(&json).expect("a scaled box must export a visual rect");
+        assert!(
+            (w - 100.0).abs() < 0.01 && (h - 100.0).abs() < 0.01,
+            "scale(2) must double the box: got {w}x{h}"
+        );
+        assert!(
+            (x - 75.0).abs() < 0.01 && (y - 75.0).abs() < 0.01,
+            "scaling about the centre grows the box both ways: expected \
+             (75, 75), got ({x}, {y})"
         );
     }
 }
