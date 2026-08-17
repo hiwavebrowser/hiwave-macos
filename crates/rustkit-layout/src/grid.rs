@@ -2336,8 +2336,26 @@ pub(crate) fn estimate_min_content_width(layout_box: &LayoutBox) -> f32 {
     // otherwise every child stands alone (max). A block-level child always
     // interrupts an inline run.
     let nowrap = matches!(style.white_space, WhiteSpace::Nowrap | WhiteSpace::Pre);
+    // Source whitespace BETWEEN two inline-level boxes collapses to one space
+    // that is still laid out (css-text-3 §4.1.1). The layout pass lays it; this
+    // pass used to drop it, because a whitespace-only text run measures 0. On
+    // `white-space: nowrap` that made min-content narrower than the single line
+    // it is predicting, by one space per gap — six 200px inline-blocks with
+    // 15px margins measured 1275 against a laid-out line of 1275 + 5 spaces,
+    // and the `1fr` track floored on the wrong number.
+    //
+    // Held to the collapsing-but-unbreakable case only. Under `pre` the run is
+    // literal and may carry a newline, which is a line break rather than a
+    // space; under wrapping white-space the run is a break OPPORTUNITY, so
+    // min-content is right to ignore it.
+    let collapses_to_space = matches!(style.white_space, WhiteSpace::Nowrap);
     let mut max_contribution = 0.0f32;
     let mut inline_run = 0.0f32;
+    // A collapsed space only survives BETWEEN contributors: leading and
+    // trailing whitespace on a line is removed. So it is held pending until
+    // another inline contributor arrives, and dropped if none does.
+    let mut pending_space = 0.0f32;
+    let mut run_has_content = false;
     for child in &layout_box.children {
         if child.style.display == Display::None {
             continue;
@@ -2350,20 +2368,56 @@ pub(crate) fn estimate_min_content_width(layout_box: &LayoutBox) -> f32 {
         }
         let inline_level =
             child.style.display.is_inline_level() || matches!(child.box_type, BoxType::Text(_));
+        if collapses_to_space && inline_level {
+            if let BoxType::Text(t) = &child.box_type {
+                if t.trim().is_empty() {
+                    if run_has_content {
+                        pending_space = collapsed_space_width(&child.style);
+                    }
+                    continue;
+                }
+            }
+        }
         let outer = estimate_min_content_width(child) + horizontal_margins(&child.style);
         if inline_level && nowrap {
-            inline_run += outer;
+            inline_run += pending_space + outer;
+            pending_space = 0.0;
+            run_has_content = true;
         } else {
             max_contribution = max_contribution.max(outer);
             if !inline_level {
                 max_contribution = max_contribution.max(inline_run);
                 inline_run = 0.0;
+                pending_space = 0.0;
+                run_has_content = false;
             }
         }
     }
     max_contribution = max_contribution.max(inline_run);
 
     max_contribution + padding_border
+}
+
+/// Advance of the single space a collapsing whitespace run leaves behind.
+///
+/// Measured with the shaper layout uses, not assumed: the intrinsic pass is a
+/// PREDICTION of the layout pass, so any constant here would be a second
+/// opinion about the same glyph. On a seat whose shaper has no font backend
+/// both come out at the same fallback advance, which is the point — they agree
+/// with each other, and the disagreement with Chrome stays a font question.
+fn collapsed_space_width(style: &ComputedStyle) -> f32 {
+    let font_size = match style.font_size {
+        Length::Px(px) => px,
+        _ => 16.0,
+    };
+    crate::measure_text_advanced(
+        " ",
+        &style.font_family,
+        font_size,
+        style.font_weight,
+        style.font_style,
+    )
+    .width
 }
 
 /// Min-content width of a text run: the widest unbreakable unit (word).
@@ -5788,5 +5842,168 @@ mod tests {
             CONTAINER_WIDTH - 2.0 * CARD_PADDING
         );
     }
-}
 
+    // ---------------------------------------------------------------
+    // Inter-element whitespace in intrinsic sizing.
+    //
+    // The intrinsic pass is a PREDICTION of the layout pass. Source
+    // whitespace between two inline-level boxes collapses to one space that
+    // the layout pass still lays out, and this pass used to drop it, so the
+    // two disagreed by one space per gap. On `white-space: nowrap` — where
+    // min-content IS the whole line — that made the `1fr` track floor on a
+    // number narrower than the line it was floring for.
+    //
+    // sticky-scroll's `.horizontal-scroll` is the corpus instance: six 200px
+    // inline-blocks with 15px margins measured 1275 while the laid-out line
+    // was 1275 + 5 spaces, and 46 boxes inherited the error.
+    // ---------------------------------------------------------------
+
+    /// Build `<div style=white-space>` with `n` 200px inline-blocks separated
+    /// by whitespace-only text nodes, exactly as HTML source indentation
+    /// produces them — including the leading and trailing runs.
+    fn nowrap_row(white_space: WhiteSpace, n: usize) -> LayoutBox {
+        let mut style = ComputedStyle::new();
+        style.white_space = white_space;
+        style.font_size = Length::Px(16.0);
+        let mut row = LayoutBox::new(BoxType::Block, style.clone());
+
+        let ws = |parent: &mut LayoutBox, s: &ComputedStyle| {
+            parent
+                .children
+                .push(LayoutBox::new(BoxType::Text("\n            ".to_string()), s.clone()));
+        };
+
+        ws(&mut row, &style);
+        for i in 0..n {
+            let mut item = ComputedStyle::new();
+            item.display = Display::InlineBlock;
+            item.width = Length::Px(200.0);
+            item.font_size = Length::Px(16.0);
+            row.children.push(LayoutBox::new(BoxType::Block, item));
+            if i + 1 < n {
+                ws(&mut row, &style);
+            }
+        }
+        ws(&mut row, &style);
+        row
+    }
+
+    /// T-RED for the fix. Drop the pending-space accounting and this reads
+    /// `n * 200`, which is what shipped and what floored the track.
+    #[test]
+    fn a_nowrap_run_counts_the_collapsed_space_between_its_inline_boxes() {
+        let space = {
+            let mut s = ComputedStyle::new();
+            s.font_size = Length::Px(16.0);
+            collapsed_space_width(&s)
+        };
+        assert!(
+            space > 0.0,
+            "setup failed: the shaper measured a space at {space}, so this \
+             test cannot tell the fix from its absence"
+        );
+
+        let six = estimate_min_content_width(&nowrap_row(WhiteSpace::Nowrap, 6));
+        assert!(
+            (six - (6.0 * 200.0 + 5.0 * space)).abs() < 0.01,
+            "six 200px inline-blocks under nowrap must contribute five \
+             collapsed spaces: expected {}, got {six}",
+            6.0 * 200.0 + 5.0 * space
+        );
+    }
+
+    /// Leading and trailing whitespace on a line is removed (css-text-3
+    /// §4.1.1). Counting it would over-measure by two spaces, and Chrome's
+    /// 1295.9375 on `.horizontal-scroll` is 1275 + FIVE spaces, not seven.
+    #[test]
+    fn leading_and_trailing_whitespace_contribute_nothing() {
+        let space = {
+            let mut s = ComputedStyle::new();
+            s.font_size = Length::Px(16.0);
+            collapsed_space_width(&s)
+        };
+        // One item: the row still has a leading and a trailing whitespace run,
+        // and neither may survive.
+        let one = estimate_min_content_width(&nowrap_row(WhiteSpace::Nowrap, 1));
+        assert!(
+            (one - 200.0).abs() < 0.01,
+            "a single inline-block with whitespace on both sides must measure \
+             200 (leading and trailing whitespace is removed), got {one} \
+             (200 + {} spaces would be {})",
+            2,
+            200.0 + 2.0 * space
+        );
+    }
+
+    /// Control, and a scope limit stated as an assertion rather than a
+    /// comment: under WRAPPING white-space the run is a break OPPORTUNITY, so
+    /// min-content is right to ignore it. A fix that added the space
+    /// unconditionally would widen every wrapped paragraph's min-content.
+    #[test]
+    fn wrapping_white_space_still_ignores_inter_element_whitespace() {
+        let row = nowrap_row(WhiteSpace::Normal, 6);
+        let width = estimate_min_content_width(&row);
+        assert!(
+            (width - 200.0).abs() < 0.01,
+            "under wrapping white-space each inline-block stands alone at its \
+             own min-content: expected 200, got {width}"
+        );
+    }
+
+    /// Scope limit, asserted: `white-space: pre` is NOT in this fix. A pre run
+    /// is literal and may carry a newline, which is a line break rather than a
+    /// space — treating it as one collapsed space would be a different and
+    /// wrong claim. Pinned so a later "simplification" to
+    /// `Nowrap | Pre` has to argue with a test.
+    #[test]
+    fn pre_is_deliberately_left_alone() {
+        let space = {
+            let mut s = ComputedStyle::new();
+            s.font_size = Length::Px(16.0);
+            collapsed_space_width(&s)
+        };
+        let width = estimate_min_content_width(&nowrap_row(WhiteSpace::Pre, 6));
+        assert!(
+            (width - 6.0 * 200.0).abs() < 0.01,
+            "pre is out of scope for the collapsed-space rule: expected {}, \
+             got {width} (the nowrap answer would be {})",
+            6.0 * 200.0,
+            6.0 * 200.0 + 5.0 * space
+        );
+    }
+
+    /// A block-level child interrupts the inline run, so a whitespace run left
+    /// pending in front of it must be dropped rather than carried across the
+    /// break onto the next run's first item.
+    #[test]
+    fn a_block_child_drops_the_pending_space() {
+        let mut style = ComputedStyle::new();
+        style.white_space = WhiteSpace::Nowrap;
+        style.font_size = Length::Px(16.0);
+        let mut row = LayoutBox::new(BoxType::Block, style.clone());
+
+        let mut inline = ComputedStyle::new();
+        inline.display = Display::InlineBlock;
+        inline.width = Length::Px(200.0);
+        row.children.push(LayoutBox::new(BoxType::Block, inline.clone()));
+        row.children.push(LayoutBox::new(
+            BoxType::Text("\n   ".to_string()),
+            style.clone(),
+        ));
+        let mut block = ComputedStyle::new();
+        block.width = Length::Px(300.0);
+        row.children.push(LayoutBox::new(BoxType::Block, block));
+        row.children.push(LayoutBox::new(
+            BoxType::Text("\n   ".to_string()),
+            style.clone(),
+        ));
+        row.children.push(LayoutBox::new(BoxType::Block, inline));
+
+        let width = estimate_min_content_width(&row);
+        assert!(
+            (width - 300.0).abs() < 0.01,
+            "the widest of three interrupted runs is the 300px block: got \
+             {width}"
+        );
+    }
+}
