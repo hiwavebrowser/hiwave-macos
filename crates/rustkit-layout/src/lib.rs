@@ -2371,11 +2371,17 @@ impl LayoutBox {
         // + middles) need alignment after the loop: (line_start, text_index).
         let mut split_records: Vec<(usize, usize)> = Vec::new();
 
+        // CSS2 §10.1: an absolutely positioned child resolves its percentage
+        // offsets against THIS box's used height, not against how far the flow
+        // has got. Computed here because the loop below holds `&mut` on
+        // `self.children`. `None` = indefinite, and the cursor stands in.
+        let definite_abs_cb_height = self.definite_absolute_cb_height();
+
         for (i, child) in self.children.iter_mut().enumerate() {
             // Skip absolutely/fixed positioned children for flow layout
             if child.position == Position::Absolute || child.position == Position::Fixed {
                 let mut cb = self.dimensions.clone();
-                cb.content.height = cursor_y;
+                cb.content.height = definite_abs_cb_height.unwrap_or(cursor_y);
                 child.layout(&cb);
                 continue;
             }
@@ -2893,11 +2899,14 @@ impl LayoutBox {
         // + middles) need alignment after the loop: (line_start, text_index).
         let mut split_records: Vec<(usize, usize)> = Vec::new();
 
+        // See the note at the same site in `layout_block_children`.
+        let definite_abs_cb_height = self.definite_absolute_cb_height();
+
         for (i, child) in self.children.iter_mut().enumerate() {
             // Skip absolutely/fixed positioned children for flow layout
             if child.position == Position::Absolute || child.position == Position::Fixed {
                 let mut cb = self.dimensions.clone();
-                cb.content.height = cursor_y;
+                cb.content.height = definite_abs_cb_height.unwrap_or(cursor_y);
                 child.layout_with_collapse(&cb, margin_context, float_context);
                 continue;
             }
@@ -3165,54 +3174,57 @@ impl LayoutBox {
         self.dimensions.content.height = cursor_y;
     }
 
-    /// Calculate block height.
-    /// The containing_block_height parameter is used for resolving percentage heights.
-    /// Per CSS spec, percentage heights resolve against the containing block's height
-    /// when the containing block has a definite height.
-    fn calculate_block_height(&mut self, containing_block_height: f32) {
-        // Get padding and border for box-sizing calculations
-        let padding_top = self.dimensions.padding.top;
-        let padding_bottom = self.dimensions.padding.bottom;
-        let border_top = self.dimensions.border.top;
-        let border_bottom = self.dimensions.border.bottom;
-        let padding_border_height = padding_top + padding_bottom + border_top + border_bottom;
+    /// The content height this box's own `height` property specifies, when that
+    /// height is DEFINITE — resolvable without first laying out the children.
+    /// `None` means indefinite: the used height is whatever the children total.
+    ///
+    /// `containing_block_height` is the basis for a percentage. It is an
+    /// `Option` because the two callers stand at different points in the pass:
+    /// `calculate_block_height` runs after the children and knows the basis,
+    /// while `layout_block_children` — which needs this to build the containing
+    /// block for an absolutely positioned child — runs before the box's own
+    /// height is known and does not. Passing `None` there makes a percentage
+    /// height INDEFINITE rather than resolved against a wrong basis.
+    ///
+    /// Extracted rather than duplicated: two implementations of "the used
+    /// height" that must agree, written down twice, will disagree.
+    fn specified_content_height(&self, containing_block_height: Option<f32>) -> Option<f32> {
+        let padding_border_height = self.dimensions.padding.top
+            + self.dimensions.padding.bottom
+            + self.dimensions.border.top
+            + self.dimensions.border.bottom;
         let is_border_box = self.style.box_sizing == BoxSizing::BorderBox;
-
-        // If height is explicitly set, use it
-        match self.style.height {
-            Length::Px(h) => {
-                // With box-sizing: border-box, specified height includes padding and border
-                self.dimensions.content.height = if is_border_box {
-                    (h - padding_border_height).max(0.0)
-                } else {
-                    h
-                };
+        // With box-sizing: border-box, the specified height includes padding and border.
+        let content_from = |specified: f32| {
+            if is_border_box {
+                (specified - padding_border_height).max(0.0)
+            } else {
+                specified
             }
+        };
+
+        match self.style.height {
+            Length::Px(h) => Some(content_from(h)),
             Length::Percent(pct) => {
                 // Percent height resolves against containing block height when definite,
-                // otherwise falls back to viewport height
-                let reference_height = if containing_block_height > 0.0 {
-                    containing_block_height
-                } else {
-                    self.viewport.1
+                // otherwise falls back to viewport height.
+                let reference_height = match containing_block_height {
+                    Some(h) if h > 0.0 => h,
+                    Some(_) => self.viewport.1,
+                    // No basis available at this point in the pass — indefinite.
+                    None => return None,
                 };
                 if reference_height > 0.0 {
-                    let specified = pct / 100.0 * reference_height;
-                    self.dimensions.content.height = if is_border_box {
-                        (specified - padding_border_height).max(0.0)
-                    } else {
-                        specified
-                    };
+                    Some(content_from(pct / 100.0 * reference_height))
+                } else {
+                    None
                 }
             }
             Length::Vh(vh) => {
                 if self.viewport.1 > 0.0 {
-                    let specified = vh / 100.0 * self.viewport.1;
-                    self.dimensions.content.height = if is_border_box {
-                        (specified - padding_border_height).max(0.0)
-                    } else {
-                        specified
-                    };
+                    Some(content_from(vh / 100.0 * self.viewport.1))
+                } else {
+                    None
                 }
             }
             Length::Em(em) => {
@@ -3220,31 +3232,32 @@ impl LayoutBox {
                     Length::Px(px) => px,
                     _ => 16.0,
                 };
-                let specified = em * font_size;
-                self.dimensions.content.height = if is_border_box {
-                    (specified - padding_border_height).max(0.0)
-                } else {
-                    specified
-                };
+                Some(content_from(em * font_size))
             }
-            Length::Rem(rem) => {
-                let specified = rem * 16.0; // Root font size
-                self.dimensions.content.height = if is_border_box {
-                    (specified - padding_border_height).max(0.0)
-                } else {
-                    specified
-                };
-            }
+            Length::Rem(rem) => Some(content_from(rem * 16.0)), // Root font size
             _ => {
-                // Auto or Zero - content.height was set by layout_block_children
-                // But if aspect-ratio is set and we have a width, calculate height from it
-                if let Some(ratio) = self.style.aspect_ratio {
-                    if self.dimensions.content.width > 0.0 && ratio > 0.0 {
-                        self.dimensions.content.height = self.dimensions.content.width / ratio;
+                // Auto or Zero - content.height is whatever the children total.
+                // But if aspect-ratio is set and we have a width, calculate height from it.
+                // Width is resolved before children lay out, so this is definite at
+                // both call sites.
+                match self.style.aspect_ratio {
+                    Some(ratio) if self.dimensions.content.width > 0.0 && ratio > 0.0 => {
+                        Some(self.dimensions.content.width / ratio)
                     }
+                    _ => None,
                 }
             }
         }
+    }
+
+    /// Apply the `min-height`/`max-height` constraints to a content height.
+    /// Shared for the same reason as [`Self::specified_content_height`].
+    fn clamp_content_height(&self, height: f32) -> f32 {
+        let padding_border_height = self.dimensions.padding.top
+            + self.dimensions.padding.bottom
+            + self.dimensions.border.top
+            + self.dimensions.border.bottom;
+        let is_border_box = self.style.box_sizing == BoxSizing::BorderBox;
 
         // Apply min-height constraint (also respects box-sizing)
         let min_height_raw = match self.style.min_height {
@@ -3258,9 +3271,6 @@ impl LayoutBox {
         } else {
             min_height_raw
         };
-        if self.dimensions.content.height < min_height {
-            self.dimensions.content.height = min_height;
-        }
 
         // Apply max-height constraint (also respects box-sizing)
         let max_height_raw = match self.style.max_height {
@@ -3274,9 +3284,39 @@ impl LayoutBox {
         } else {
             max_height_raw
         };
-        if self.dimensions.content.height > max_height {
-            self.dimensions.content.height = max_height;
+
+        height.max(min_height).min(max_height)
+    }
+
+    /// The content height an absolutely positioned child should resolve its
+    /// percentage offsets and sizes against, per CSS2 §10.1: the used height of
+    /// this box, when this box's own height is definite.
+    ///
+    /// `None` means this box's height is indefinite mid-pass, and the caller
+    /// keeps the flow cursor it used unconditionally before — a reasonable
+    /// stand-in for an `auto`-height box, and simply wrong for a box whose
+    /// height its own style fixes. `.overflow-demo` on `sticky-scroll` is
+    /// `height: 150px` with the absolute child FIRST, so the cursor was 0 and
+    /// `top: 50%` resolved to 0.
+    ///
+    /// Returned rather than taking the fallback, because the caller holds a
+    /// `&mut` borrow on `self.children` when it needs this: it is computed once
+    /// before the loop, where `&self` is still available.
+    fn definite_absolute_cb_height(&self) -> Option<f32> {
+        self.specified_content_height(None)
+            .map(|h| self.clamp_content_height(h))
+    }
+
+    /// Calculate block height.
+    /// The containing_block_height parameter is used for resolving percentage heights.
+    /// Per CSS spec, percentage heights resolve against the containing block's height
+    /// when the containing block has a definite height.
+    fn calculate_block_height(&mut self, containing_block_height: f32) {
+        if let Some(height) = self.specified_content_height(Some(containing_block_height)) {
+            self.dimensions.content.height = height;
         }
+
+        self.dimensions.content.height = self.clamp_content_height(self.dimensions.content.height);
     }
 
     /// Convert a Length to pixels.
@@ -7352,6 +7392,242 @@ mod tests {
         // Verify sticky child is now stuck
         let sticky = layout_box.children[0].sticky_state.as_ref().unwrap();
         assert!(sticky.is_stuck);
+    }
+    // ------------------------------------------------------------------
+    // CSS2 §10.1: the containing block of an absolutely positioned box is
+    // established by its nearest positioned ancestor. Its HEIGHT is that
+    // ancestor's used height — not how far the ancestor's flow cursor had
+    // got when the absolute child was reached.
+    //
+    // `layout_block_children` used the cursor unconditionally, so an
+    // absolute child that comes FIRST saw a containing block of height 0.
+    // Both corpus instances are that shape: `sticky-scroll`'s
+    // `.overflow-demo { height: 150px }` with `top: 50%` (resolved to 0,
+    // 75px out), and `form-elements`' `.toggle-switch { height: 26px }`
+    // with an `inset: 0` slider (stretched to height 0).
+    // ------------------------------------------------------------------
+
+    /// Build `parent { height: <h> }` holding one absolutely positioned
+    /// child, laid out through the flow path. `extra` styles the child.
+    /// Build `parent { height: <h> }` holding one absolutely positioned
+    /// child, laid out through the flow path. `build_child` styles the child.
+    ///
+    /// The child is built the way the engine builds it: absolute-length
+    /// offsets are pre-resolved into `LayoutBox::offsets` at tree-build time
+    /// and only percentages survive to `resolved_offsets`. A fixture that sets
+    /// `style.top = Px(0)` and nothing else has NO offset at all, which is a
+    /// shape the corpus does not contain.
+    fn abs_child_in(parent_height: Length, build_child: impl FnOnce(&mut LayoutBox)) -> LayoutBox {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.height = parent_height;
+        let mut parent = LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
+        parent.dimensions.content = Rect::new(0.0, 0.0, 400.0, 0.0);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.width = Length::Px(100.0);
+        let mut child = LayoutBox::with_position(BoxType::Block, child_style, Position::Absolute);
+        build_child(&mut child);
+        parent.children.push(child);
+        parent.layout_block_children();
+        parent
+    }
+
+    #[test]
+    fn an_absolute_child_resolves_top_percent_against_the_ancestors_definite_height() {
+        // `.overflow-demo` on sticky-scroll, reduced: height:150px, and the
+        // absolute child is the FIRST child so the flow cursor is 0.
+        let parent = abs_child_in(Length::Px(150.0), |c| {
+            c.style.height = Length::Px(300.0);
+            c.style.top = Some(Length::Percent(50.0));
+        });
+        let y = parent.children[0].dimensions.content.y;
+        assert!(
+            (y - 75.0).abs() < 0.01,
+            "top:50% of a 150px containing block is 75px, got {y} \
+             (0 means the flow cursor was used as the containing block height)"
+        );
+    }
+
+    #[test]
+    fn an_absolute_child_with_inset_zero_stretches_to_the_ancestors_definite_height() {
+        // `.toggle-slider` on form-elements, reduced. This is the second,
+        // independent site: it exercises the both-offsets stretch rather
+        // than a percentage, so a fix that only handled percentages would
+        // leave it at height 0.
+        let parent = abs_child_in(Length::Px(26.0), |c| {
+            c.style.height = Length::Auto;
+            c.style.top = Some(Length::Px(0.0));
+            c.style.bottom = Some(Length::Px(0.0));
+            c.offsets.top = Some(0.0);
+            c.offsets.bottom = Some(0.0);
+        });
+        let h = parent.children[0].dimensions.content.height;
+        assert!(
+            (h - 26.0).abs() < 0.01,
+            "inset:0 in a 26px containing block fills it, got {h}"
+        );
+    }
+
+    #[test]
+    fn an_absolute_child_of_an_auto_height_ancestor_still_uses_the_flow_cursor() {
+        // The cursor is the right stand-in when the ancestor's height is
+        // genuinely indefinite mid-pass. Deleting the fallback would be as
+        // wrong as the bug: here there is nothing else to resolve against.
+        let mut parent_style = ComputedStyle::new();
+        parent_style.height = Length::Auto;
+        let mut parent = LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
+        parent.dimensions.content = Rect::new(0.0, 0.0, 400.0, 0.0);
+
+        let mut flow_style = ComputedStyle::new();
+        flow_style.height = Length::Px(200.0);
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, flow_style));
+
+        let mut child_style = ComputedStyle::new();
+        child_style.width = Length::Px(100.0);
+        child_style.height = Length::Px(10.0);
+        child_style.top = Some(Length::Percent(50.0));
+        parent.children.push(LayoutBox::with_position(
+            BoxType::Block,
+            child_style,
+            Position::Absolute,
+        ));
+        parent.layout_block_children();
+
+        let y = parent.children[1].dimensions.content.y;
+        assert!(
+            (y - 100.0).abs() < 0.01,
+            "with an auto-height ancestor the cursor (200px) is the basis, so \
+             top:50% is 100px, got {y}"
+        );
+    }
+
+    #[test]
+    fn the_absolute_containing_block_height_is_the_content_box_under_border_box() {
+        // box-sizing is load-bearing on this corpus (`*  { box-sizing:
+        // border-box }`). A 150px border-box ancestor with 20px padding has
+        // a 110px CONTENT height, and that is what §10.1 hands the child.
+        let mut parent_style = ComputedStyle::new();
+        parent_style.height = Length::Px(150.0);
+        parent_style.box_sizing = BoxSizing::BorderBox;
+        let mut parent = LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
+        parent.dimensions.content = Rect::new(0.0, 0.0, 400.0, 0.0);
+        parent.dimensions.padding = EdgeSizes {
+            top: 20.0,
+            bottom: 20.0,
+            left: 0.0,
+            right: 0.0,
+        };
+
+        let mut child_style = ComputedStyle::new();
+        child_style.width = Length::Px(100.0);
+        child_style.height = Length::Px(10.0);
+        child_style.top = Some(Length::Percent(100.0));
+        parent.children.push(LayoutBox::with_position(
+            BoxType::Block,
+            child_style,
+            Position::Absolute,
+        ));
+        parent.layout_block_children();
+
+        let y = parent.children[0].dimensions.content.y;
+        assert!(
+            (y - 110.0).abs() < 0.01,
+            "150px border-box minus 40px padding is a 110px content height, got {y}"
+        );
+    }
+
+    #[test]
+    fn min_height_raises_the_absolute_containing_block_height() {
+        // The basis is the USED height, so the min/max clamps apply to it.
+        // No corpus case exercises this, which is exactly why it needs a
+        // guard rather than a measurement.
+        let mut parent_style = ComputedStyle::new();
+        parent_style.height = Length::Px(100.0);
+        parent_style.min_height = Length::Px(400.0);
+        let mut parent = LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
+        parent.dimensions.content = Rect::new(0.0, 0.0, 400.0, 0.0);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.width = Length::Px(100.0);
+        child_style.height = Length::Px(10.0);
+        child_style.top = Some(Length::Percent(50.0));
+        parent.children.push(LayoutBox::with_position(
+            BoxType::Block,
+            child_style,
+            Position::Absolute,
+        ));
+        parent.layout_block_children();
+
+        let y = parent.children[0].dimensions.content.y;
+        assert!(
+            (y - 200.0).abs() < 0.01,
+            "min-height:400px wins over height:100px, so top:50% is 200px, got {y}"
+        );
+    }
+
+    #[test]
+    fn max_height_lowers_the_absolute_containing_block_height() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.height = Length::Px(400.0);
+        parent_style.max_height = Length::Px(100.0);
+        let mut parent = LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
+        parent.dimensions.content = Rect::new(0.0, 0.0, 400.0, 0.0);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.width = Length::Px(100.0);
+        child_style.height = Length::Px(10.0);
+        child_style.top = Some(Length::Percent(50.0));
+        parent.children.push(LayoutBox::with_position(
+            BoxType::Block,
+            child_style,
+            Position::Absolute,
+        ));
+        parent.layout_block_children();
+
+        let y = parent.children[0].dimensions.content.y;
+        assert!(
+            (y - 50.0).abs() < 0.01,
+            "max-height:100px wins over height:400px, so top:50% is 50px, got {y}"
+        );
+    }
+
+    #[test]
+    fn a_percentage_height_ancestor_is_indefinite_at_this_point_in_the_pass() {
+        // A STATED LIMIT, not an accident. `layout_block_children` does not
+        // receive its own containing block, so a percentage height has no
+        // basis here. `specified_content_height` returns `None` rather than
+        // silently falling back to the viewport — resolving against a wrong
+        // basis is the failure mode this whole change is about, and it
+        // would be worse than keeping the cursor. Recorded so that whoever
+        // plumbs the basis through can delete this test deliberately.
+        let mut parent_style = ComputedStyle::new();
+        parent_style.height = Length::Percent(50.0);
+        let mut parent = LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
+        parent.dimensions.content = Rect::new(0.0, 0.0, 400.0, 0.0);
+        parent.set_viewport(1000.0, 1000.0);
+
+        assert_eq!(
+            parent.definite_absolute_cb_height(),
+            None,
+            "a percentage height has no basis at this point and must read as \
+             indefinite, not as 50% of the viewport"
+        );
+    }
+
+    #[test]
+    fn an_em_height_ancestor_is_definite_without_a_containing_block() {
+        // Px is not the only height that needs no basis: em/rem/vh resolve
+        // from the box itself. Guarding one of them keeps the fix a rule
+        // rather than a special case for the two boxes the corpus caught.
+        let mut parent_style = ComputedStyle::new();
+        parent_style.font_size = Length::Px(20.0);
+        parent_style.height = Length::Em(10.0);
+        let mut parent = LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
+        parent.dimensions.content = Rect::new(0.0, 0.0, 400.0, 0.0);
+
+        assert_eq!(parent.definite_absolute_cb_height(), Some(200.0));
     }
 }
 
