@@ -2526,3 +2526,220 @@ I did not run that checklist tonight either.
   `left: 50%` is applied. After the transform fix that reads as a −74.95px y
   delta instead of being tangled up in the missing translate. Not fixed tonight
   — it is one box and it belongs to whoever takes absolute positioning.
+
+## 2026-08-18
+
+**Metric: 1/26 → 1/26, and this is a proof rather than a re-run.** Gate A's
+green set is the same two cases (`bg-pure`, `specificity`), Gate B's is the same
+one (`bg-pure`), discrete stayed 0/0, and all 32 captures are byte-identical on
+`frame.ppm` before and after. The conjunction is a subset of Gate B's green set
+on both sides, so nothing could cross. No macOS run tonight.
+
+**P-item: P2 (grid/sticky family). NOT complete.** I took the last readable
+geometry root night 14 left on the board, and it turned out to have a second
+instance on a case nobody was looking at.
+
+### What the defect was
+
+CSS2 §10.1: the containing block of an absolutely positioned box is established
+by its nearest positioned ancestor, and its height is that ancestor's **used**
+height. `layout_block_children` handed the child the **flow cursor** instead —
+how far the ancestor's own layout had got when the child was reached. For an
+absolute child that comes first, that is 0.
+
+Night 14 recorded one instance and called it "one box":
+
+```
+sticky-scroll  .overflow-demo { height: 150px }   .overflow-content
+               top: 50% resolved to 0 instead of 75px
+               Gate A y: expected 1051.25, actual 976.30, delta -74.95
+```
+
+It was two. The second is on `form-elements`, fails in a different way, and
+nothing in night 14's reading pointed at it:
+
+```
+form-elements  .toggle-switch { height: 26px }    .toggle-slider
+               position:absolute; inset:0 stretched to height 0, not 26
+               Gate A height: expected 26, actual 0, delta -26
+```
+
+One is a percentage offset, the other the both-offsets auto-size stretch. They
+share a cause and nothing else, which is the argument for writing the fix as the
+rule rather than as a percentage special case — a fix aimed at `top: 50%` would
+have left the toggle at height 0 and I would have reported one box instead of
+two.
+
+The height computation is **extracted rather than duplicated**.
+`specified_content_height` and `clamp_content_height` are now the single
+implementation, called both by `calculate_block_height` (after the children,
+with a percentage basis in hand) and by the absolute containing block (before
+them, without one). Two implementations of "the used height" that must agree,
+written down twice, will disagree — the same reasoning as night 11 importing
+Gate A's tolerance into Gate B rather than restating it.
+
+**A stated limit, not an oversight.** A *percentage* height on the ancestor
+reads as INDEFINITE at this point, because `layout_block_children` does not
+receive its own containing block and there are ten call sites to plumb. It falls
+back to the cursor rather than resolving against the viewport: resolving against
+a wrong basis is the failure this change is about, and a confident wrong number
+is worse than the old approximation. There is a test pinning that behavior so
+whoever plumbs the basis through deletes it deliberately.
+
+### Commits
+
+Engine, on `atlas/grid-item-subtree-width` (cut from develop, per branch law):
+
+- `58366bc` — an absolute child's containing block is the ancestor's height, not
+  the flow cursor.
+- `309e726` — close the three survivors the mutation sweep found.
+
+Nothing landed on `atlas/trench-parity-finish-line` tonight but this entry.
+
+### Measured — Linux/SwiftShader, 26 gating cases. MECHANICS, NOT A RECEIPT
+
+This seat has no font backend at all (2026-08-17). Nothing here is the
+campaign's number.
+
+| Oracle | Before | After |
+|---|---|---|
+| Gate A geometry failures | 2447 | **2445** |
+| Gate A green | 2/26 | 2/26 |
+| Gate A join | 115 | 115 |
+| Gate B paint-green | 1/26 | 1/26 |
+| Gate B discrete failures | 0 | 0 |
+| Gate B elements admitted | 233 | 233 |
+| N/26 | 1/26 | 1/26 |
+
+| case | geometry | Gate A sum·\|Δ\| |
+|---|---|---|
+| sticky-scroll | 113 → **112** | 1432.320 → **1357.374** |
+| form-elements | 88 → **87** | 1530.023 → **1504.023** |
+
+The other 24 cases are bit-identical on both oracles.
+
+### The part worth reading twice: Gate B could not corroborate, and not because the fix is small
+
+All 32 `frame.ppm` are byte-identical before and after — while `layout.json`
+differs on both changed cases. That is not the fix being invisible. **Both boxes
+sit below their capture viewport**: the toggle slider at y=1029.8 in a 600px
+viewport, `.overflow-content` at y=1201.3 in an 800px one. The captures are
+viewport-sized, not full-page, so a box the engine now places 75px differently
+paints nothing either way.
+
+I checked this rather than reporting "paint unchanged, geometry improved" and
+leaving the reader to assume the change was subtle. Two consequences:
+
+- **Geometry is the only oracle with jurisdiction over a large part of this
+  corpus**, and how large is not currently measured. Every case whose page is
+  taller than its viewport has a below-the-fold region where Gate A speaks and
+  Gate B is structurally silent — including the discrete detectors, whose
+  "admitted" count (233) says nothing about whether an admitted element is even
+  on screen.
+- The campaign's finish line asks for geometry ∧ paint per case. For a box below
+  the fold the paint condition is vacuously satisfied, not verified. That does
+  not make `N/26` wrong — a case is scored on the pixels that exist — but
+  "paint-green" on a tall page means less than it reads.
+
+I have not tried to fix this and I do not think tonight's change is the right
+vehicle. It is recorded the way night 11 recorded `render_borders`.
+
+### Stop rule
+
+Checked per box, per axis, across all 26 cases, on both oracles — a flat
+case-level count can hide a box that got worse under one that got better.
+
+```
+boxes fixed 2 · improved 0 · WORSENED 0 · newly failing 0
+```
+
+Clean. No case gained a discrete failure, none lost its green, Gate B's
+percentage half regressed on nothing.
+
+Stability: 3 measured iterations, all 32 captures byte-identical on both
+`frame.ppm` and `layout.json` across all three. As on night 14, that is a
+hash-level check plus the three conditions I computed, not a receipt
+`finish_line_receipt.py` signed — it refuses to score without the swarm's
+aggregate, correctly, and I did not produce one.
+
+### Mutation-check results
+
+**First sweep 8/11. Second sweep 11/11 RED, control green before and after.
+Committed before mutating** — the one procedural thing this file has told me
+twice and I finally did.
+
+| Mutation | Result |
+|---|---|
+| M1 site 1 (`layout_block_children`) reverts to the flow cursor | RED |
+| M2 site 2 (`…_with_collapse`) reverts to the flow cursor | RED *(survivor, closed)* |
+| M3 the definite height is never clamped by min/max-height | RED |
+| M4 a percentage ancestor resolves against the viewport instead of reading indefinite | RED |
+| M5 box-sizing ignored: specified height taken as the content height | RED |
+| M6 em heights are no longer definite (only Px is) | RED |
+| M7 `calculate_block_height` drops the min/max clamp | RED *(survivor, closed)* |
+| M8 `calculate_block_height` stops applying the specified height | RED |
+| M9 min-height dropped from the clamp (max only) | RED |
+| M10 max-height dropped from the clamp (min only) | RED |
+| M11 the aspect-ratio height stops being definite | RED *(survivor, closed)* |
+
+**Three survivors, and they split into two different failures.**
+
+M2 is the sixth sweep in a row with the familiar shape — *the guard gets written
+against the example, not against the rule*. All eight of my guards drove
+`layout_block_children`; the fix has two call sites, and the second one,
+`layout_block_children_with_collapse`, is the door the real page actually takes.
+Reverting it alone stayed green. Night 12 proposed the checklist — *after
+writing the guards, ask which line of the change no assertion would miss* — and
+this time I ran it, which is how the sweep had a probe per call site at all. The
+checklist found the probe; it did not stop me writing the fixture against one
+door. Running it a step earlier, while writing the guards rather than while
+listing the mutations, is the correction.
+
+**M7 and M11 are a different animal and are worth separating out: they are not
+my change's coverage holes, they are the crate's, and the extraction exposed
+them.** `calculate_block_height`'s min/max clamp could be deleted whole with 307
+tests green; so could the aspect-ratio arm. Both had been unguarded since before
+this branch. I would not have found either without a refactor that made me
+enumerate what the function does. Both are closed now, and both are now shared
+with the absolute containing block, so a future regression moves two things
+instead of one.
+
+### Decisions needed from Pete
+
+1. **P2's readable work on this seat is now done** — `sticky-scroll` is down to
+   one inherited-width row on the boxes night 14 called readable, and
+   `card-grid`'s 150 failures are 0% readable here; should the trench move to
+   the cases with real readable geometry (`rounded-corners` 67,
+   `gradients` 56, `backgrounds` 53 failures), or stop engine work on this seat
+   entirely? (Night 14's decision 1, unanswered, now sharper.)
+2. **P2 is 12 commits on `atlas/grid-item-subtree-width` with no PR** and
+   `develop` has moved further since 08-14 — open it now, or keep holding to
+   "PRs wait for a complete P-item"? (Carried from 08-15, 08-16, 08-17.)
+3. Still open from 08-10 onward: keep or literally revert the overflow-clip
+   change that cost `sticky-scroll` 36 pixels on a card RustKit lays out 38px
+   too low?
+
+### Surprises
+
+- **"One box" was two, and the second was on a case P2 is not about.** Night 14
+  read `.overflow-content` as a lone absolute-positioning straggler to hand off.
+  Writing the fix as §10.1 rather than as a percentage patch turned up an
+  identical root under `form-elements`' toggle slider — a control that has been
+  laid out at height 0 the whole time. Reading the spec rule was worth twice the
+  measurement that motivated it.
+- **The paint oracle went silent for a structural reason, not a subtle one.**
+  I expected a small pixel delta and got byte-identical frames, which looked at
+  first like the fix not reaching the renderer. It is the viewport: both boxes
+  are below the fold. Gate B's silence over the below-the-fold region of every
+  tall page is not something any digest has stated, and it bounds what
+  "paint-green" means on this corpus.
+- **Two of three mutation survivors were older than my change.** The refactor
+  paid for itself before the fix did: extracting the height computation forced
+  an enumeration of what `calculate_block_height` guarantees, and two of those
+  guarantees turned out to have no test at all.
+- **`resolved_offsets` only ever sees percentages.** Absolute-length offsets are
+  pre-resolved into `LayoutBox::offsets` at tree-build time, so my first
+  `inset: 0` fixture — which set `style.top = Px(0)` and nothing else — had no
+  offset at all and failed against the correct engine. Same trap as night 12's
+  `box-sizing` fixture: a fixture that does not mirror how the engine builds the
+  tree is testing a shape the corpus does not contain.
