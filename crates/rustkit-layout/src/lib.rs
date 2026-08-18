@@ -7629,6 +7629,90 @@ mod tests {
 
         assert_eq!(parent.definite_absolute_cb_height(), Some(200.0));
     }
+
+    #[test]
+    fn the_collapse_path_resolves_the_absolute_containing_block_the_same_way() {
+        // `layout_block_children_with_collapse` is the SECOND call site and it
+        // is the one the real page takes — `layout_block_with_collapse` is what
+        // `.overflow-demo` and `.toggle-switch` actually go through. The first
+        // mutation sweep found this uncovered: every guard above drives
+        // `layout_block_children`, so reverting the collapse site alone stayed
+        // green. Same fixture, other door.
+        let mut parent_style = ComputedStyle::new();
+        parent_style.height = Length::Px(150.0);
+        let mut parent = LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
+        parent.dimensions.content = Rect::new(0.0, 0.0, 400.0, 0.0);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.width = Length::Px(100.0);
+        child_style.height = Length::Px(300.0);
+        child_style.top = Some(Length::Percent(50.0));
+        parent.children.push(LayoutBox::with_position(
+            BoxType::Block,
+            child_style,
+            Position::Absolute,
+        ));
+
+        let mut margins = MarginCollapseContext::new();
+        let mut floats = FloatContext::new();
+        parent.layout_block_children_with_collapse(&mut margins, &mut floats);
+
+        let y = parent.children[0].dimensions.content.y;
+        assert!(
+            (y - 75.0).abs() < 0.01,
+            "the collapse path must resolve top:50% against the 150px \
+             containing block too, got {y}"
+        );
+    }
+
+    #[test]
+    fn min_and_max_height_constrain_an_ordinary_blocks_used_height() {
+        // Not about absolute positioning: `calculate_block_height`'s clamp was
+        // ALSO unguarded — the sweep deleted it and 307 tests stayed green.
+        // The clamp is now shared with the absolute containing block, so a
+        // silent regression here would move both.
+        let mut floored = ComputedStyle::new();
+        floored.height = Length::Px(10.0);
+        floored.min_height = Length::Px(90.0);
+        let mut b = LayoutBox::new(BoxType::Block, floored);
+        b.layout(&containing_1000());
+        assert!(
+            (b.dimensions.content.height - 90.0).abs() < 0.01,
+            "min-height:90px floors height:10px, got {}",
+            b.dimensions.content.height
+        );
+
+        let mut capped = ComputedStyle::new();
+        capped.height = Length::Px(500.0);
+        capped.max_height = Length::Px(120.0);
+        let mut b = LayoutBox::new(BoxType::Block, capped);
+        b.layout(&containing_1000());
+        assert!(
+            (b.dimensions.content.height - 120.0).abs() < 0.01,
+            "max-height:120px caps height:500px, got {}",
+            b.dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn an_aspect_ratio_box_takes_its_height_from_its_width() {
+        // CSS Sizing 4: with an auto height and a definite width, aspect-ratio
+        // makes the height definite. Unguarded before this change — the sweep
+        // deleted the arm and nothing noticed — and it now feeds the absolute
+        // containing block as well as the flow height.
+        let mut style = ComputedStyle::new();
+        style.width = Length::Px(320.0);
+        style.height = Length::Auto;
+        style.aspect_ratio = Some(2.0);
+        let mut b = LayoutBox::new(BoxType::Block, style);
+        b.layout(&containing_1000());
+        assert!(
+            (b.dimensions.content.height - 160.0).abs() < 0.01,
+            "aspect-ratio 2 on a 320px width is a 160px height, got {}",
+            b.dimensions.content.height
+        );
+        assert_eq!(b.definite_absolute_cb_height(), Some(160.0));
+    }
 }
 
 /// PAINT-0 seating probe gate (forensics 2026-07-16-paint0-glyph-seat).
