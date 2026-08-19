@@ -2743,3 +2743,218 @@ instead of one.
   offset at all and failed against the correct engine. Same trap as night 12's
   `box-sizing` fixture: a fixture that does not mirror how the engine builds the
   tree is testing a shape the corpus does not contain.
+
+## 2026-08-19
+
+**Metric: 1/26 → 1/26, and this is a proof rather than a re-run.** All 32
+registry captures are **byte-identical on `frame.ppm`** before and after, so
+Gate B's percentage half cannot have moved and no case can have gained or lost
+paint-green. Gate A's green set is the same two cases (`bg-pure`,
+`specificity`). The conjunction is a subset of Gate B's green set on both
+sides, so nothing could cross. No macOS run tonight.
+
+**P-item: P3 (flex residual). NOT complete — I did not fix a flex defect.**
+P3's readable geometry on this seat is **two boxes**, both on `.button-group`,
+and both are downstream of three `<button>` elements the geometry oracle
+**cannot see at all**. So the unit tonight is the thing standing between P3 and
+any measurement: element identity was never stamped on replaced elements or
+form controls, and 115 of the corpus's boxes have been reaching Gate A with no
+join key since the oracle was built.
+
+### Why P3 and not P2
+
+P2's readable work on this seat finished on 08-18 and its decision 1 has been
+open since 08-17. Rather than re-ask, I measured the whole board first:
+
+```
+                    TEXT  CLEAN            TEXT  CLEAN
+rounded-corners        9     58    form-controls  44     10
+gradients              7     49    sticky-scroll 104      8
+backgrounds            7     46    flex-positioning 154    2
+settings             301     43    card-grid      150      0
+TOTAL               2150    295
+```
+
+`TEXT` means the box, or something beneath it, carries a non-empty text run —
+a necessary condition for unreadability on a seat with no font backend, not
+proof of it. P2's two cases are 8 and 0 readable boxes. **P3's are 2.** That is
+not a reason to skip P3; it is the reason tonight's unit is the one below it.
+
+### What the defect was
+
+`build_layout_from_parent_style_and_path` stamps `ElementIdentity` — the
+selector the whole oracle joins on — at the *end* of its generic construction
+path. `img`, `input`, `button`, `textarea` and `select` all `return` above
+that point. They are elements; they never got a key.
+
+Gate A files a keyless element as a `missing_box` **join** failure, not as a
+geometry failure. So the receipt read *"26 measured, 0 unmeasured"* while
+115 boxes Chrome measures were scored on zero axes:
+
+```
+settings 31 · form-controls 30 · form-elements 17 · images-intrinsic 14
+flex-positioning 7 · about 5 · css-selectors 5 · shelf 4 · new_tab 1 · sticky-scroll 1
+```
+
+**Two of the 26 gating cases are form suites.** `form-controls`' geometry
+condition was being decided on 30 fewer boxes than the case has, and nothing in
+any receipt said so. A case can be geometry-green under that gate with every
+control in it in the wrong place.
+
+The fix puts the replaced/form-control branches in a labelled block that yields
+the finished box, with the stamp at that block's single exit. That is
+deliberate: five patched `return` sites would be the same defect waiting for a
+sixth tag. There is now no path out of the block that skips the stamp.
+
+### The irony, stated plainly because it is the transferable part
+
+Night 1 wrote a test called
+`export_emits_identity_for_image_and_form_control_boxes`, with this comment:
+
+> *Image and form-control boxes take early-return paths in the export. They are
+> still elements, so they must still be joinable — this is the case a naive
+> "add the fields at the end" change silently misses.*
+
+It hand-builds a box, calls `set_identity` on it, and checks the **exporter**
+carries the fields through. It passes whether or not anything ever stamps a
+real `<img>`. The exporter half was guarded; the builder half was not; the
+builder never did it. **Seven sweeps running the survivor has been the same
+shape — the guard gets written against the example, not against the rule — and
+this one was written against the example on the very night the rule was
+articulated.** The guard tonight drives the production builder for one of every
+affected tag.
+
+### Measured — Linux/SwiftShader, 26 gating cases. MECHANICS, NOT A RECEIPT
+
+| Oracle | Before | After |
+|---|---|---|
+| `frame.ppm` | — | **byte-identical on all 32** |
+| Gate A join failures | 115 | **20** |
+| Gate A boxes compared | 1478 | **1581** |
+| Gate A geometry failures | 2445 | **2691** |
+| Gate A green | 2/26 | 2/26 |
+| N/26 | 1/26 | 1/26 |
+
+**The geometry count went UP by 246 and that is the receipt, not a regression.**
+Per box, per axis, across all 26 cases: `fixed 0 · improved 0 · WORSENED 0 ·
+newly failing 246`. Not one previously-compared box moved on any axis. The
+whole delta is 103 boxes the gate could not previously see, and where they land:
+
+```
+settings 90 · form-controls 56 · form-elements 37 · flex-positioning 20
+images-intrinsic 20 · css-selectors 15 · shelf 4 · new_tab 2 · sticky-scroll 2
+```
+
+Night 17's transform fix had the same shape pointed the other way, and the
+honest reading is the same: an instrument that sees more is not an engine that
+got worse.
+
+### The 20 join failures that remain, named rather than left as a number
+
+- **11 are structural and not this fix's business.** `<br>` (5, `about`) and
+  `<option>` (4, `form-controls`) produce no RustKit box at all — options are
+  folded into the `Select` control — and `svg > circle` / `svg > path` (2,
+  `shelf`) are not element boxes here.
+- **1 is a real miss.** `#focusBlocklist` on `settings`.
+- **8 are phantoms my change made visible**, and they are one defect:
+  `.toggle input { opacity: 0; width: 0; height: 0 }`. Chrome sizes those
+  checkboxes 0×0 and drops them from the baseline. RustKit honors the
+  `height: 0` and **ignores the `width: 0`**, laying `#shieldEnabled` out at
+  15.9996px wide and 0 tall. An explicit width on a form control is not being
+  applied. Not fixed tonight — it is P6's family and its blast radius is form
+  control sizing — but it is now a box the oracle can name, which it could not
+  do this morning.
+
+### Stop rule
+
+Checked per box, per axis, across all 26 cases, on both oracles. Zero boxes
+worsened, no case gained a discrete failure, none lost its green, and Gate B
+cannot have moved at all because every frame is byte-identical. The rule did
+not fire.
+
+Stability: the 32 captures are the same binary run twice with identical output;
+`finish_line_receipt.py` refuses to score without the swarm's aggregate, which I
+did not produce, so `1/26` here is the frame-identity argument above and not a
+receipt the script signed.
+
+### Mutation-check results
+
+**10 probes, 10 RED, control green before and after. Committed before mutating.**
+
+The guards are `target_os = "macos"`-gated, like `button_children_tests`, because
+`Engine::new` needs a GPU adapter and the Linux CI leg has none. They were run
+**on this seat** with `VK_ICD_FILENAMES` pointing at SwiftShader, with the cfg
+patched off — so "macOS-gated" here means "gated in CI", not "unverified",
+which is what 08-16's `d11ea6e` had to say about its own guard.
+
+| Mutation | Caught by |
+|---|---|
+| M1 the single stamp point is deleted (the original bug) | `the_builder_stamps_identity…` |
+| M2 img leaves by its own return, bypassing the exit | same |
+| M3 input leaves by its own return | same |
+| M4 button leaves by its own return | same |
+| M5 textarea leaves by its own return | same |
+| M6 select leaves by its own return | same |
+| M7 the id is not reserved in document order | same |
+| M8 the stamped tag is dropped | same |
+| M9 the raw path is stamped instead of the reported selector | same |
+| M10 a hidden input builds a visible block, not `display:none` | `a_display_none_element_gets_no_join_key` |
+
+**No survivors on the first sweep**, which has not happened before on this
+branch. I do not think that is skill: the fix has one exit and ten ways to
+break it, and I wrote the probe list from the call sites before writing the
+fixture — night 12's checklist, run while writing the guards rather than while
+listing the mutations, which was 08-18's own correction to itself.
+
+Two probes did come back `BUILD-FAIL` on the first attempt (M2, M4 — the
+replacement left an unbalanced paren). A build failure is **not** a RED: it
+proves nothing about the guard. They were rewritten and both came back RED.
+
+### Commits
+
+Engine, on `atlas/p3-flex-residual` (cut from `atlas/grid-item-subtree-width`,
+itself cut from `develop` — this is an engine change and does not belong on the
+instrument branch):
+
+- `9fcfbdf` — every element box carries the oracle's join key, not just the
+  generic path. Fix and guards in one commit.
+
+Nothing landed on `atlas/trench-parity-finish-line` tonight but this entry.
+
+### Decisions needed from Pete
+
+1. **`atlas/grid-item-subtree-width` is now 12 commits of P2 with no PR and
+   `atlas/p3-flex-residual` is stacked on top of it** — the night order says
+   PRs wait for a complete P-item and P2 will not complete on this seat; open
+   the P2 PR now, or keep holding? (Carried unanswered from 08-15, 08-16,
+   08-17, 08-18 — this is the fifth night.)
+2. **Tonight's fix means every `N/26` before it was taken with 115 boxes
+   unscored, including two whole form cases** — should P0b's `1/26` receipt be
+   re-taken on macOS with the corrected join before any further P-item, or is
+   re-baselining once the macOS lane runs this branch enough?
+3. Still open from 08-10 onward: keep or literally revert the overflow-clip
+   change that cost `sticky-scroll` 36 pixels on a card RustKit lays out 38px
+   too low?
+
+### Surprises
+
+- **The oracle's foundation had the same hole its own test was written to
+  prevent, and it went fifteen nights.** Every night since 08-05 has quoted
+  "26 measured, 0 unmeasured" as evidence the board is honest. It was honest
+  about cases and silent about boxes. `measured` counting a case whose form
+  controls are all unjoined is the same error as scoring an anonymous box
+  positionally, one level up: **a case is not a unit of measurement.**
+- **P3's entire readable surface was two boxes and both were the same
+  unreadable thing.** `.button-group` is 53px tall against Chrome's 54 and 11px
+  too high — and the three buttons that decide that height were invisible to
+  the gate. I would have spent the night theorising about a 1px flex line
+  cross-size and had no way to check it.
+- **A geometry count going up was the goal, and it took a minute to accept
+  that.** My first instinct on `2445 → 2691` was that I had broken something.
+  The per-box check is what settles it: 0 worsened, 0 improved, 246 boxes that
+  were never being looked at.
+- **RustKit ignores `width: 0` on a form control but honors `height: 0`.**
+  Found only because the box got a name. Recorded, not half-landed.
+- The one thing this seat still cannot say: whether any of the 246 newly-visible
+  failures are real on macOS. They are concentrated in `settings` and the two
+  form cases, all text-bearing, and this seat has no font backend.
