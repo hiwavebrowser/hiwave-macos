@@ -25,13 +25,12 @@ use rustkit_dom::{Document, Node, NodeType};
 use rustkit_image::ImageManager;
 use rustkit_js::JsRuntime;
 use rustkit_layout::{
-    FontLoader,
-    BoxType, Dimensions, DisplayList, ElementIdentity, LayoutBox, Position, Rect,
+    BoxType, Dimensions, DisplayList, ElementIdentity, FontLoader, LayoutBox, Position, Rect,
 };
-use std::cell::Cell;
 use rustkit_net::{LoaderConfig, NetError, Request, ResourceLoader};
 use rustkit_renderer::Renderer;
 use rustkit_viewhost::{Bounds, ViewHost, ViewHostTrait, ViewId, WindowHandle};
+use std::cell::Cell;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, info, trace, warn};
@@ -323,7 +322,10 @@ impl SimpleSelector {
         let mut rest = &input[first_marker..];
         while !rest.is_empty() {
             let kind = rest.as_bytes()[0];
-            let end = rest[1..].find(['.', '#']).map(|i| i + 1).unwrap_or(rest.len());
+            let end = rest[1..]
+                .find(['.', '#'])
+                .map(|i| i + 1)
+                .unwrap_or(rest.len());
             let name = &rest[1..end];
             if name.is_empty() {
                 return None;
@@ -425,8 +427,9 @@ impl Engine {
             loader,
             image_manager,
             views: HashMap::new(),
-            
-            font_loader: Arc::new(FontLoader::new()),event_tx,
+
+            font_loader: Arc::new(FontLoader::new()),
+            event_tx,
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             render_failing: std::collections::HashSet::new(),
@@ -791,7 +794,10 @@ impl Engine {
     ) -> Option<String> {
         let (doc_x, doc_y) = {
             let view = self.views.get(&id)?;
-            (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1)
+            (
+                viewport_x + view.scroll_offset.0,
+                viewport_y + view.scroll_offset.1,
+            )
         };
 
         let hit_node = self
@@ -811,8 +817,7 @@ impl Engine {
             match &node.node_type {
                 NodeType::Element { tag_name, .. } => {
                     let tag = tag_name.to_lowercase();
-                    matches!(tag.as_str(), "input" | "textarea" | "select")
-                        .then_some((raw, tag))
+                    matches!(tag.as_str(), "input" | "textarea" | "select").then_some((raw, tag))
                 }
                 _ => None,
             }
@@ -1517,11 +1522,8 @@ impl Engine {
         // page content is shorter.
         root_box.dimensions.content.width =
             root_box.dimensions.content.width.max(bounds.width as f32);
-        root_box.dimensions.content.height = root_box
-            .dimensions
-            .content
-            .height
-            .max(bounds.height as f32);
+        root_box.dimensions.content.height =
+            root_box.dimensions.content.height.max(bounds.height as f32);
 
         // Debug: log the layout box tree AFTER layout
         fn debug_layout_box(box_: &LayoutBox, depth: usize) {
@@ -1623,9 +1625,9 @@ impl Engine {
         view.layout = Some(root_box);
         view.display_list = Some(display_list);
         view.max_scroll_offset = (0.0, max_scroll_y); // Update max scroll
-        // Re-clamp: a relayout can shrink the document (or a navigation can
-        // replace it) while the user is scrolled past the new maximum, which
-        // would render a translate into empty space.
+                                                      // Re-clamp: a relayout can shrink the document (or a navigation can
+                                                      // replace it) while the user is scrolled past the new maximum, which
+                                                      // would render a translate into empty space.
         view.scroll_offset = (
             view.scroll_offset.0.min(view.max_scroll_offset.0),
             view.scroll_offset.1.min(max_scroll_y),
@@ -1761,7 +1763,12 @@ impl Engine {
                 }
                 _ => None,
             };
-            layout_box.set_offsets(px(&style.top), px(&style.right), px(&style.bottom), px(&style.left));
+            layout_box.set_offsets(
+                px(&style.top),
+                px(&style.right),
+                px(&style.bottom),
+                px(&style.left),
+            );
         }
     }
 
@@ -2047,11 +2054,7 @@ impl Engine {
                     let total = totals.get(&tag_lower).copied().unwrap_or(1);
                     let is_foreign = parent_is_foreign || Self::enters_foreign_content(&tag_lower);
                     Some(Self::selector_segment(
-                        &tag_lower,
-                        attributes,
-                        index,
-                        total,
-                        is_foreign,
+                        &tag_lower, attributes, index, total, is_foreign,
                     ))
                 }
                 _ => None,
@@ -2185,264 +2188,322 @@ impl Engine {
                     return LayoutBox::new(BoxType::Block, ComputedStyle::new());
                 }
 
-                // Handle replaced elements (images)
-                if tag_lower == "img" {
-                    // SAME selection rule as discover_images, or the loader
-                    // caches under one key and layout looks up another — the
-                    // exact cache-miss shape #113 fixed for relative URLs.
-                    let src = attributes
-                        .get("srcset")
-                        .and_then(|ss| Self::pick_from_srcset(ss))
-                        .or_else(|| attributes.get("src").cloned())
-                        .unwrap_or_default();
+                // Element identity, computed ONCE for every element box and
+                // applied at the single exit below.
+                //
+                // It used to be stamped only on the generic construction path,
+                // physically below the `img`/`input`/`button`/`textarea`/
+                // `select` early returns. Every replaced element and every form
+                // control therefore reached the geometry oracle with no join
+                // key: 115 elements across the 26-case corpus that Chrome
+                // measures and Gate A could not compare — reported as
+                // `missing_box` join failures rather than as geometry, so the
+                // receipt read "26 measured, 0 unmeasured" while `form-controls`
+                // was scored on 30 fewer boxes than it has.
+                //
+                // The id is reserved HERE, before the subtree is built, so
+                // `element_id` stays in document order.
+                let identity = if selector_path.is_empty() {
+                    None
+                } else {
+                    let next_id = element_ids.get() + 1;
+                    element_ids.set(next_id);
+                    Some(ElementIdentity {
+                        element_id: next_id,
+                        tag: tag_lower.clone(),
+                        selector: Self::reported_selector(selector_path, attributes),
+                    })
+                };
 
-                    // Parse explicit dimensions from attributes
-                    let explicit_width: Option<f32> =
-                        attributes.get("width").and_then(|w| w.parse().ok());
-                    let explicit_height: Option<f32> =
-                        attributes.get("height").and_then(|h| h.parse().ok());
+                // Replaced elements and form controls. This block yields the
+                // finished box for the tags that build one directly, or `None`
+                // to fall through to generic element construction. It is a
+                // labelled block rather than a run of `return`s so that the
+                // identity stamp below cannot be bypassed by adding another
+                // tag: a new branch here breaks with its box and is joined
+                // like every other element.
+                let special: Option<LayoutBox> = 'special: {
+                    // Handle replaced elements (images)
+                    if tag_lower == "img" {
+                        // SAME selection rule as discover_images, or the loader
+                        // caches under one key and layout looks up another — the
+                        // exact cache-miss shape #113 fixed for relative URLs.
+                        let src = attributes
+                            .get("srcset")
+                            .and_then(|ss| Self::pick_from_srcset(ss))
+                            .or_else(|| attributes.get("src").cloned())
+                            .unwrap_or_default();
 
-                    // width=/height= attributes are presentational hints: they set
-                    // the used size like CSS width/height (lowest priority), they do
-                    // NOT describe the image's natural dimensions. Author CSS wins.
-                    if let Some(w) = explicit_width {
-                        if matches!(style.width, rustkit_css::Length::Auto) {
-                            style.width = rustkit_css::Length::Px(w);
+                        // Parse explicit dimensions from attributes
+                        let explicit_width: Option<f32> =
+                            attributes.get("width").and_then(|w| w.parse().ok());
+                        let explicit_height: Option<f32> =
+                            attributes.get("height").and_then(|h| h.parse().ok());
+
+                        // width=/height= attributes are presentational hints: they set
+                        // the used size like CSS width/height (lowest priority), they do
+                        // NOT describe the image's natural dimensions. Author CSS wins.
+                        if let Some(w) = explicit_width {
+                            if matches!(style.width, rustkit_css::Length::Auto) {
+                                style.width = rustkit_css::Length::Px(w);
+                            }
                         }
-                    }
-                    if let Some(h) = explicit_height {
-                        if matches!(style.height, rustkit_css::Length::Auto) {
-                            style.height = rustkit_css::Length::Px(h);
+                        if let Some(h) = explicit_height {
+                            if matches!(style.height, rustkit_css::Length::Auto) {
+                                style.height = rustkit_css::Length::Px(h);
+                            }
                         }
-                    }
 
-                    // Resolve the image's real natural size: cache hit, or a
-                    // synchronous decode for data: URLs (no network involved) —
-                    // the same idiom the paint path uses when uploading images.
-                    // Layout previously never consulted ImageManager and gave every
-                    // CSS-sized <img> a 150x150 placeholder, so pages sized by
-                    // stylesheet rules (not width=/height= attributes) drifted.
-                    // Absolute from here on: the box, the cache lookup and
-                    // the display command must all use the same key.
-                    let src = self
-                        .resolve_resource_url(&src)
-                        .map(|u| u.to_string())
-                        .unwrap_or(src);
+                        // Resolve the image's real natural size: cache hit, or a
+                        // synchronous decode for data: URLs (no network involved) —
+                        // the same idiom the paint path uses when uploading images.
+                        // Layout previously never consulted ImageManager and gave every
+                        // CSS-sized <img> a 150x150 placeholder, so pages sized by
+                        // stylesheet rules (not width=/height= attributes) drifted.
+                        // Absolute from here on: the box, the cache lookup and
+                        // the display command must all use the same key.
+                        let src = self
+                            .resolve_resource_url(&src)
+                            .map(|u| u.to_string())
+                            .unwrap_or(src);
 
-                    let loaded = Url::parse(&src).ok().and_then(|parsed_url| {
-                        if let Some(cached) = self.image_manager.get_cached(&parsed_url) {
-                            Some(cached)
-                        } else if parsed_url.scheme() == "data" {
-                            self.image_manager.load_blocking(parsed_url).ok()
-                        } else {
-                            None
-                        }
-                    });
-
-                    // Vector images: the SVG's own sizing (viewBox/width/height)
-                    // is the natural size the raster cache can't provide.
-                    let svg_size = Url::parse(&src).ok().and_then(|u| {
-                        self.svg_cache.get(u.as_str()).map(|svg| {
-                            svg.get_size(
-                                explicit_width.unwrap_or(300.0),
-                                explicit_height.unwrap_or(150.0),
-                            )
-                        })
-                    });
-
-                    let (natural_width, natural_height) = match (&loaded, svg_size) {
-                        (Some(image), _) => {
-                            (image.natural_width as f32, image.natural_height as f32)
-                        }
-                        (None, Some((w, h))) => (w, h),
-                        // Image unavailable at layout time: fall back to the
-                        // width=/height= attributes, then the placeholder size.
-                        (None, None) => match (explicit_width, explicit_height) {
-                            (Some(w), Some(h)) => (w, h),
-                            (Some(w), None) => (w, w), // Assume square if only width
-                            (None, Some(h)) => (h, h), // Assume square if only height
-                            (None, None) => (150.0, 150.0), // Default placeholder size
-                        },
-                    };
-
-                    return LayoutBox::new(
-                        BoxType::Image {
-                            url: src,
-                            natural_width,
-                            natural_height,
-                        },
-                        style,
-                    );
-                }
-
-                // Handle form controls
-                if tag_lower == "input" {
-                    let input_type = attributes
-                        .get("type")
-                        .cloned()
-                        .unwrap_or_else(|| "text".to_string());
-                    // type=hidden generates NO box (HTML §4.10.5.1.1). We were
-                    // rendering Google's hidden CSRF/state fields as a row of
-                    // visible hash-string boxes (live, 2026-08-07).
-                    if input_type.eq_ignore_ascii_case("hidden") {
-                        return LayoutBox::new(BoxType::Block, {
-                            let mut st = ComputedStyle::new();
-                            st.display = rustkit_css::Display::None;
-                            st
+                        let loaded = Url::parse(&src).ok().and_then(|parsed_url| {
+                            if let Some(cached) = self.image_manager.get_cached(&parsed_url) {
+                                Some(cached)
+                            } else if parsed_url.scheme() == "data" {
+                                self.image_manager.load_blocking(parsed_url).ok()
+                            } else {
+                                None
+                            }
                         });
-                    }
-                    // Read through live edit state when the user has typed
-                    // into this field; fall back to the authored value.
-                    // The DOM attribute is never rewritten (there is no
-                    // set_attribute), so this override is what makes typed
-                    // text visible.
-                    let value = self
-                        .edit_value(node.id.raw())
-                        .map(|(v, _)| v)
-                        .unwrap_or_else(|| attributes.get("value").cloned().unwrap_or_default());
-                    let placeholder = attributes.get("placeholder").cloned().unwrap_or_default();
 
-                    let control = match input_type.as_str() {
-                        "checkbox" => rustkit_layout::FormControlType::Checkbox {
-                            checked: attributes.contains_key("checked"),
-                        },
-                        "radio" => rustkit_layout::FormControlType::Radio {
-                            checked: attributes.contains_key("checked"),
-                            name: attributes.get("name").cloned().unwrap_or_default(),
-                        },
-                        _ => rustkit_layout::FormControlType::TextInput {
-                            value,
-                            placeholder,
-                            input_type,
-                        },
-                    };
+                        // Vector images: the SVG's own sizing (viewBox/width/height)
+                        // is the natural size the raster cache can't provide.
+                        let svg_size = Url::parse(&src).ok().and_then(|u| {
+                            self.svg_cache.get(u.as_str()).map(|svg| {
+                                svg.get_size(
+                                    explicit_width.unwrap_or(300.0),
+                                    explicit_height.unwrap_or(150.0),
+                                )
+                            })
+                        });
 
-                    // Stamp identity BEFORE returning. Form controls return
-                    // early, so they never reach the general element path's
-                    // node_id assignment — which meant a hit test on an input
-                    // reported no node and focus could never resolve. The
-                    // unit tests missed it by hand-building boxes; only the
-                    // production path exercises this.
-                    let mut b = LayoutBox::new(BoxType::FormControl(control), style);
-                    b.node_id = Some(node.id.raw());
-                    if self.building_focus.get() == Some(node.id) {
-                        b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
-                    }
-                    return b;
-                }
-
-                if tag_lower == "button" {
-                    // A <button> is a flow container in every real engine —
-                    // icon buttons (<button><svg/></button>, eBay-class UIs)
-                    // have element children and no text. Rendering those as
-                    // an opaque FormControl leaf discarded the children and
-                    // stamped a literal "Button" placeholder (2026-08-05
-                    // live session: whole grids of them). Only text-only
-                    // buttons keep the leaf-widget fast path.
-                    let has_element_children = node
-                        .children()
-                        .iter()
-                        .any(|c| matches!(c.node_type, NodeType::Element { .. }));
-
-                    if !has_element_children {
-                        let text = node.text_content();
-                        let label = if text.trim().is_empty() {
-                            // No text, no children: an empty button renders
-                            // empty, not a placeholder word.
-                            attributes.get("value").cloned().unwrap_or_default()
-                        } else {
-                            text
+                        let (natural_width, natural_height) = match (&loaded, svg_size) {
+                            (Some(image), _) => {
+                                (image.natural_width as f32, image.natural_height as f32)
+                            }
+                            (None, Some((w, h))) => (w, h),
+                            // Image unavailable at layout time: fall back to the
+                            // width=/height= attributes, then the placeholder size.
+                            (None, None) => match (explicit_width, explicit_height) {
+                                (Some(w), Some(h)) => (w, h),
+                                (Some(w), None) => (w, w), // Assume square if only width
+                                (None, Some(h)) => (h, h), // Assume square if only height
+                                (None, None) => (150.0, 150.0), // Default placeholder size
+                            },
                         };
-                        let button_type = attributes
+
+                        break 'special Some(LayoutBox::new(
+                            BoxType::Image {
+                                url: src,
+                                natural_width,
+                                natural_height,
+                            },
+                            style.clone(),
+                        ));
+                    }
+
+                    // Handle form controls
+                    if tag_lower == "input" {
+                        let input_type = attributes
                             .get("type")
                             .cloned()
-                            .unwrap_or_else(|| "button".to_string());
+                            .unwrap_or_else(|| "text".to_string());
+                        // type=hidden generates NO box (HTML §4.10.5.1.1). We were
+                        // rendering Google's hidden CSRF/state fields as a row of
+                        // visible hash-string boxes (live, 2026-08-07).
+                        if input_type.eq_ignore_ascii_case("hidden") {
+                            break 'special Some(LayoutBox::new(BoxType::Block, {
+                                let mut st = ComputedStyle::new();
+                                st.display = rustkit_css::Display::None;
+                                st
+                            }));
+                        }
+                        // Read through live edit state when the user has typed
+                        // into this field; fall back to the authored value.
+                        // The DOM attribute is never rewritten (there is no
+                        // set_attribute), so this override is what makes typed
+                        // text visible.
+                        let value = self
+                            .edit_value(node.id.raw())
+                            .map(|(v, _)| v)
+                            .unwrap_or_else(|| {
+                                attributes.get("value").cloned().unwrap_or_default()
+                            });
+                        let placeholder =
+                            attributes.get("placeholder").cloned().unwrap_or_default();
 
-                        return LayoutBox::new(
-                            BoxType::FormControl(rustkit_layout::FormControlType::Button {
-                                label,
-                                button_type,
+                        let control = match input_type.as_str() {
+                            "checkbox" => rustkit_layout::FormControlType::Checkbox {
+                                checked: attributes.contains_key("checked"),
+                            },
+                            "radio" => rustkit_layout::FormControlType::Radio {
+                                checked: attributes.contains_key("checked"),
+                                name: attributes.get("name").cloned().unwrap_or_default(),
+                            },
+                            _ => rustkit_layout::FormControlType::TextInput {
+                                value,
+                                placeholder,
+                                input_type,
+                            },
+                        };
+
+                        // Stamp the DOM node id before breaking out. Form controls
+                        // leave this block early, so they never reach the general
+                        // element path's node_id assignment — which meant a hit
+                        // test on an input reported no node and focus could never
+                        // resolve. The unit tests missed it by hand-building boxes;
+                        // only the production path exercises this. (The oracle's
+                        // join key is a different field, `identity`, and is stamped
+                        // at this block's single exit.)
+                        let mut b = LayoutBox::new(BoxType::FormControl(control), style.clone());
+                        b.node_id = Some(node.id.raw());
+                        if self.building_focus.get() == Some(node.id) {
+                            b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                        }
+                        break 'special Some(b);
+                    }
+
+                    if tag_lower == "button" {
+                        // A <button> is a flow container in every real engine —
+                        // icon buttons (<button><svg/></button>, eBay-class UIs)
+                        // have element children and no text. Rendering those as
+                        // an opaque FormControl leaf discarded the children and
+                        // stamped a literal "Button" placeholder (2026-08-05
+                        // live session: whole grids of them). Only text-only
+                        // buttons keep the leaf-widget fast path.
+                        let has_element_children = node
+                            .children()
+                            .iter()
+                            .any(|c| matches!(c.node_type, NodeType::Element { .. }));
+
+                        if !has_element_children {
+                            let text = node.text_content();
+                            let label = if text.trim().is_empty() {
+                                // No text, no children: an empty button renders
+                                // empty, not a placeholder word.
+                                attributes.get("value").cloned().unwrap_or_default()
+                            } else {
+                                text
+                            };
+                            let button_type = attributes
+                                .get("type")
+                                .cloned()
+                                .unwrap_or_else(|| "button".to_string());
+
+                            break 'special Some(LayoutBox::new(
+                                BoxType::FormControl(rustkit_layout::FormControlType::Button {
+                                    label,
+                                    button_type,
+                                }),
+                                style.clone(),
+                            ));
+                        }
+                        // Element children present: fall through to normal box
+                        // construction so the children lay out inside the button.
+                    }
+
+                    if tag_lower == "textarea" {
+                        // Same read-through as <input>; a textarea's authored
+                        // value is its text content rather than an attribute.
+                        let value = self
+                            .edit_value(node.id.raw())
+                            .map(|(v, _)| v)
+                            .unwrap_or_else(|| node.text_content());
+                        let placeholder =
+                            attributes.get("placeholder").cloned().unwrap_or_default();
+                        let rows = attributes
+                            .get("rows")
+                            .and_then(|r| r.parse().ok())
+                            .unwrap_or(2);
+                        let cols = attributes
+                            .get("cols")
+                            .and_then(|c| c.parse().ok())
+                            .unwrap_or(20);
+
+                        let mut b = LayoutBox::new(
+                            BoxType::FormControl(rustkit_layout::FormControlType::TextArea {
+                                value,
+                                placeholder,
+                                rows,
+                                cols,
                             }),
-                            style,
+                            style.clone(),
                         );
+                        b.node_id = Some(node.id.raw());
+                        if self.building_focus.get() == Some(node.id) {
+                            b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                        }
+                        break 'special Some(b);
                     }
-                    // Element children present: fall through to normal box
-                    // construction so the children lay out inside the button.
-                }
 
-                if tag_lower == "textarea" {
-                    // Same read-through as <input>; a textarea's authored
-                    // value is its text content rather than an attribute.
-                    let value = self
-                        .edit_value(node.id.raw())
-                        .map(|(v, _)| v)
-                        .unwrap_or_else(|| node.text_content());
-                    let placeholder = attributes.get("placeholder").cloned().unwrap_or_default();
-                    let rows = attributes
-                        .get("rows")
-                        .and_then(|r| r.parse().ok())
-                        .unwrap_or(2);
-                    let cols = attributes
-                        .get("cols")
-                        .and_then(|c| c.parse().ok())
-                        .unwrap_or(20);
-
-                    let mut b = LayoutBox::new(
-                        BoxType::FormControl(rustkit_layout::FormControlType::TextArea {
-                            value,
-                            placeholder,
-                            rows,
-                            cols,
-                        }),
-                        style,
-                    );
-                    b.node_id = Some(node.id.raw());
-                    if self.building_focus.get() == Some(node.id) {
-                        b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
-                    }
-                    return b;
-                }
-
-                if tag_lower == "select" {
-                    // Get options from children
-                    let options: Vec<String> = node
-                        .children()
-                        .into_iter()
-                        .filter_map(|child| {
-                            if let rustkit_dom::NodeType::Element { tag_name, .. } =
-                                &child.node_type
-                            {
-                                if tag_name.to_lowercase() == "option" {
-                                    let text = child.text_content();
-                                    if !text.is_empty() {
-                                        return Some(text);
+                    if tag_lower == "select" {
+                        // Get options from children
+                        let options: Vec<String> = node
+                            .children()
+                            .into_iter()
+                            .filter_map(|child| {
+                                if let rustkit_dom::NodeType::Element { tag_name, .. } =
+                                    &child.node_type
+                                {
+                                    if tag_name.to_lowercase() == "option" {
+                                        let text = child.text_content();
+                                        if !text.is_empty() {
+                                            return Some(text);
+                                        }
                                     }
                                 }
-                            }
-                            None
-                        })
-                        .collect();
+                                None
+                            })
+                            .collect();
 
-                    let selected_index = if options.is_empty() { None } else { Some(0) };
+                        let selected_index = if options.is_empty() { None } else { Some(0) };
 
-                    // size > 1 (or `multiple` without size, which Chrome
-                    // shows as a 4-row listbox) renders inline rows.
-                    let size = attributes
-                        .get("size")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(if attributes.contains_key("multiple") { 4 } else { 0 });
+                        // size > 1 (or `multiple` without size, which Chrome
+                        // shows as a 4-row listbox) renders inline rows.
+                        let size = attributes
+                            .get("size")
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(if attributes.contains_key("multiple") {
+                                4
+                            } else {
+                                0
+                            });
 
-                    let mut b = LayoutBox::new(
-                        BoxType::FormControl(rustkit_layout::FormControlType::Select {
-                            options,
-                            selected_index,
-                            size,
-                        }),
-                        style,
-                    );
-                    b.node_id = Some(node.id.raw());
-                    if self.building_focus.get() == Some(node.id) {
-                        b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                        let mut b = LayoutBox::new(
+                            BoxType::FormControl(rustkit_layout::FormControlType::Select {
+                                options,
+                                selected_index,
+                                size,
+                            }),
+                            style.clone(),
+                        );
+                        b.node_id = Some(node.id.raw());
+                        if self.building_focus.get() == Some(node.id) {
+                            b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                        }
+                        break 'special Some(b);
+                    }
+
+                    None
+                };
+
+                // The single exit. Every element box built above is joined to
+                // Chrome's selector-keyed rects here, replaced elements and
+                // form controls included.
+                if let Some(mut b) = special {
+                    if let Some(id) = identity {
+                        b.set_identity(id);
                     }
                     return b;
                 }
@@ -2469,18 +2530,12 @@ impl Engine {
                 Self::transfer_positioning(&mut layout_box, &style);
 
                 // Attach element identity so the geometry oracle can join this
-                // box to Chrome's selector-keyed rects. Only ELEMENT boxes reach
-                // here; anonymous, text and pseudo-element boxes are built
-                // elsewhere and correctly keep `identity: None`.
-                if !selector_path.is_empty() {
-                    let reported = Self::reported_selector(selector_path, attributes);
-                    let next_id = element_ids.get() + 1;
-                    element_ids.set(next_id);
-                    layout_box.set_identity(ElementIdentity {
-                        element_id: next_id,
-                        tag: tag_lower.clone(),
-                        selector: reported,
-                    });
+                // box to Chrome's selector-keyed rects. Anonymous, text and
+                // pseudo-element boxes are built elsewhere and correctly keep
+                // `identity: None`; every ELEMENT box gets it, on this path or
+                // at the replaced/form-control exit above.
+                if let Some(id) = identity {
+                    layout_box.set_identity(id);
                 }
 
                 // Every element box remembers which DOM node it came from.
@@ -3281,9 +3336,7 @@ impl Engine {
             // than a hole because no rule spelled that longhand.
             let computed = Self::COMPUTED_PROPERTIES
                 .iter()
-                .filter_map(|p| {
-                    Self::computed_value_of(&style, p).map(|v| (p.to_string(), v))
-                })
+                .filter_map(|p| Self::computed_value_of(&style, p).map(|v| (p.to_string(), v)))
                 .collect();
             if let Some(trace) = self.style_trace.borrow_mut().as_mut() {
                 trace.push(StyleRecord {
@@ -3565,9 +3618,10 @@ impl Engine {
                         550..=749 => 400,
                         _ => 700,
                     }),
-                    _ => value.parse::<f32>().ok().and_then(|n| {
-                        (1.0..=1000.0).contains(&n).then_some(n.round() as u16)
-                    }),
+                    _ => value
+                        .parse::<f32>()
+                        .ok()
+                        .and_then(|n| (1.0..=1000.0).contains(&n).then_some(n.round() as u16)),
                 };
                 if let Some(w) = resolved {
                     style.font_weight = rustkit_css::FontWeight(w);
@@ -5979,9 +6033,10 @@ impl Engine {
 
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
-        let display_list = view.display_list.as_ref().ok_or_else(|| {
-            EngineError::RenderError("No display list available".into())
-        })?;
+        let display_list = view
+            .display_list
+            .as_ref()
+            .ok_or_else(|| EngineError::RenderError("No display list available".into()))?;
 
         fn color(c: &rustkit_css::Color) -> serde_json::Value {
             serde_json::json!({ "r": c.r, "g": c.g, "b": c.b, "a": c.a })
@@ -6190,7 +6245,10 @@ impl Engine {
                 Cmd::PushClip(r) => serde_json::json!({
                     "op": "push_clip", "rect": rect(r)
                 }),
-                Cmd::PushClipRounded { rect: r, radius: rad } => serde_json::json!({
+                Cmd::PushClipRounded {
+                    rect: r,
+                    radius: rad,
+                } => serde_json::json!({
                     "op": "push_clip_rounded",
                     "rect": rect(r),
                     "border_radius": radius(rad)
@@ -6266,15 +6324,19 @@ impl Engine {
             "commands": commands
         });
 
-        let json_str = serde_json::to_string_pretty(&wrapper).map_err(|e| {
-            EngineError::RenderError(format!("JSON serialization failed: {}", e))
-        })?;
+        let json_str = serde_json::to_string_pretty(&wrapper)
+            .map_err(|e| EngineError::RenderError(format!("JSON serialization failed: {}", e)))?;
 
         std::fs::write(path, json_str).map_err(|e| {
             EngineError::RenderError(format!("Failed to write display list file: {}", e))
         })?;
 
-        info!(?id, path, count = display_list.commands.len(), "Display list exported");
+        info!(
+            ?id,
+            path,
+            count = display_list.commands.len(),
+            "Display list exported"
+        );
         Ok(())
     }
 
@@ -6337,7 +6399,10 @@ impl Engine {
                 let mut properties: std::collections::BTreeMap<&str, Vec<&DeclarationRecord>> =
                     std::collections::BTreeMap::new();
                 for decl in &record.declarations {
-                    properties.entry(decl.property.as_str()).or_default().push(decl);
+                    properties
+                        .entry(decl.property.as_str())
+                        .or_default()
+                        .push(decl);
                 }
 
                 let mut declared: Vec<serde_json::Value> = properties
@@ -6420,14 +6485,18 @@ impl Engine {
             }
         });
 
-        let json_str = serde_json::to_string_pretty(&wrapper).map_err(|e| {
-            EngineError::RenderError(format!("JSON serialization failed: {}", e))
-        })?;
-        std::fs::write(path, json_str).map_err(|e| {
-            EngineError::RenderError(format!("Failed to write style file: {}", e))
-        })?;
+        let json_str = serde_json::to_string_pretty(&wrapper)
+            .map_err(|e| EngineError::RenderError(format!("JSON serialization failed: {}", e)))?;
+        std::fs::write(path, json_str)
+            .map_err(|e| EngineError::RenderError(format!("Failed to write style file: {}", e)))?;
 
-        info!(?id, path, selector, count = elements.len(), "Style cascade exported");
+        info!(
+            ?id,
+            path,
+            selector,
+            count = elements.len(),
+            "Style cascade exported"
+        );
         Ok(())
     }
 
@@ -7865,7 +7934,6 @@ fn parse_length(value: &str) -> Option<rustkit_css::Length> {
     rustkit_css::parse_length(value)
 }
 
-
 /// Parse a shorthand value with 1-4 parts (like margin, padding).
 /// Returns (top, right, bottom, left).
 /// Parse a `border` / `border-<side>` shorthand: `<width> || <style> || <color>`.
@@ -8595,9 +8663,15 @@ fn transformed_bounds(m: [f32; 6], x: f32, y: f32, w: f32, h: f32) -> (f32, f32,
     let map = |px: f32, py: f32| (m[0] * px + m[2] * py + m[4], m[1] * px + m[3] * py + m[5]);
     let corners = [map(x, y), map(x + w, y), map(x, y + h), map(x + w, y + h)];
     let min_x = corners.iter().map(|c| c.0).fold(f32::INFINITY, f32::min);
-    let max_x = corners.iter().map(|c| c.0).fold(f32::NEG_INFINITY, f32::max);
+    let max_x = corners
+        .iter()
+        .map(|c| c.0)
+        .fold(f32::NEG_INFINITY, f32::max);
     let min_y = corners.iter().map(|c| c.1).fold(f32::INFINITY, f32::min);
-    let max_y = corners.iter().map(|c| c.1).fold(f32::NEG_INFINITY, f32::max);
+    let max_y = corners
+        .iter()
+        .map(|c| c.1)
+        .fold(f32::NEG_INFINITY, f32::max);
     (min_x, min_y, max_x - min_x, max_y - min_y)
 }
 
@@ -8801,7 +8875,9 @@ mod tests {
         assert!(SimpleSelector::parse("div.hero").unwrap().matches(&hero));
         // Every class in the query must be present, not just one.
         assert!(SimpleSelector::parse(".hero.wide").unwrap().matches(&hero));
-        assert!(!SimpleSelector::parse(".hero.narrow").unwrap().matches(&hero));
+        assert!(!SimpleSelector::parse(".hero.narrow")
+            .unwrap()
+            .matches(&hero));
         assert!(!SimpleSelector::parse("span.hero").unwrap().matches(&hero));
         assert!(!SimpleSelector::parse("#other").unwrap().matches(&hero));
     }
@@ -8812,8 +8888,18 @@ mod tests {
         // the style trace does not keep. Refusing them is the contract: an
         // approximate match would answer a different question invisibly.
         for unsupported in [
-            "div p", "div > p", "div + p", "div ~ p", "a, b", "[type=text]",
-            "a:hover", "*", "", "   ", ".", "#",
+            "div p",
+            "div > p",
+            "div + p",
+            "div ~ p",
+            "a, b",
+            "[type=text]",
+            "a:hover",
+            "*",
+            "",
+            "   ",
+            ".",
+            "#",
         ] {
             assert!(
                 SimpleSelector::parse(unsupported).is_none(),
@@ -8939,8 +9025,9 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            
-            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
+
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(
@@ -9035,8 +9122,9 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            
-            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
+
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(
@@ -9131,8 +9219,9 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            
-            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
+
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(
@@ -9247,8 +9336,9 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            
-            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
+
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(
@@ -9327,8 +9417,9 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            
-            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
+
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(
@@ -9369,7 +9460,11 @@ mod tests {
         assert_eq!(get("W600"), 600, "numeric 600 must compute, not drop");
         assert_eq!(get("Lighter"), 400, "lighter against inherited 700");
         assert_eq!(get("Bolder"), 700, "bolder against inherited 400");
-        assert_eq!(get("Clamp"), 400, "out-of-range weight is invalid, keeps inherited");
+        assert_eq!(
+            get("Clamp"),
+            400,
+            "out-of-range weight is invalid, keeps inherited"
+        );
     }
 
     #[test]
@@ -9401,8 +9496,9 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            
-            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
+
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
@@ -9527,7 +9623,11 @@ mod tests {
         let mut rubies = Vec::new();
         find_ruby(&layout, &mut rubies);
 
-        assert_eq!(rubies.len(), 1, "expected exactly one 3px-bordered box (the ruby)");
+        assert_eq!(
+            rubies.len(),
+            1,
+            "expected exactly one 3px-bordered box (the ruby)"
+        );
         let (display, box_type, border_width) = &rubies[0];
         assert_eq!(
             *display,
@@ -9575,8 +9675,9 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            
-            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
+
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
@@ -9607,7 +9708,12 @@ mod tests {
         }
         let mut heights = Vec::new();
         collect_control_heights(&layout, &mut heights);
-        assert_eq!(heights.len(), 5, "five control boxes expected: {:?}", heights);
+        assert_eq!(
+            heights.len(),
+            5,
+            "five control boxes expected: {:?}",
+            heights
+        );
 
         let expect = [
             ("bare text input", 19.0, 1.0),
@@ -9652,8 +9758,9 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            
-            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
+
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
@@ -10037,8 +10144,9 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            
-            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
+
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
             compositor,
             renderer: None,
             loader: Arc::new(
@@ -10150,8 +10258,7 @@ mod grad_suffix_tests {
         // exactly one of these disagrees — which is the property a per-unit
         // test cannot see.
         for input in ["90deg", "100grad", "0.25turn", "1.5708rad", "90"] {
-            let got = parse_angle(input)
-                .unwrap_or_else(|| panic!("{input} did not parse at all"));
+            let got = parse_angle(input).unwrap_or_else(|| panic!("{input} did not parse at all"));
             assert!(
                 (got - 90.0).abs() < 0.01,
                 "{input} parsed to {got}, expected ~90"
@@ -10201,10 +10308,16 @@ mod element_identity_tests {
         };
 
         let input = style_of("input");
-        assert_eq!(input.background_color, rustkit_css::Color::WHITE,
-            "input must carry the UA white field background");
+        assert_eq!(
+            input.background_color,
+            rustkit_css::Color::WHITE,
+            "input must carry the UA white field background"
+        );
         assert_eq!(input.display, rustkit_css::Display::InlineBlock);
-        assert_eq!(style_of("select").background_color, rustkit_css::Color::WHITE);
+        assert_eq!(
+            style_of("select").background_color,
+            rustkit_css::Color::WHITE
+        );
         let textarea = style_of("textarea");
         assert_eq!(textarea.background_color, rustkit_css::Color::WHITE);
         assert_eq!(textarea.font_family, "monospace");
@@ -10212,7 +10325,10 @@ mod element_identity_tests {
         // input=WHITE ∧ button≠WHITE kills BOTH ancestors of this code:
         // the grouped-arm-only version had no backgrounds anywhere, and the
         // dead-arm version can never fire. Buttons are ButtonFace-themed.
-        assert_ne!(style_of("button").background_color, rustkit_css::Color::WHITE);
+        assert_ne!(
+            style_of("button").background_color,
+            rustkit_css::Color::WHITE
+        );
     }
 
     /// The WIRING, not the function. `parse_height_value` has its own unit
@@ -10243,7 +10359,10 @@ mod element_identity_tests {
         let mut w = rustkit_css::ComputedStyle::new();
         let before = w.width.clone();
         engine.apply_style_property(&mut w, "width", "fit-content");
-        assert_eq!(w.width, before, "width: fit-content is deliberately ignored");
+        assert_eq!(
+            w.width, before,
+            "width: fit-content is deliberately ignored"
+        );
     }
 
     #[test]
@@ -10254,7 +10373,10 @@ mod element_identity_tests {
             "div.header:nth-of-type(1)"
         );
         // `... > h1` — the only h1 among its siblings, so NO nth-of-type.
-        assert_eq!(Engine::selector_segment("h1", &attrs(&[]), 1, 1, false), "h1");
+        assert_eq!(
+            Engine::selector_segment("h1", &attrs(&[]), 1, 1, false),
+            "h1"
+        );
         // A unique tag that nonetheless carries a class.
         assert_eq!(
             Engine::selector_segment("div", &attrs(&[("class", "grid")]), 2, 2, false),
@@ -10351,6 +10473,105 @@ mod element_identity_tests {
         assert_eq!(json["selector"], "body > div.header:nth-of-type(1)");
     }
 
+    /// The BUILDER half of the join key, and the hole the test below it left
+    /// open for fifteen nights.
+    ///
+    /// `export_emits_identity_for_image_and_form_control_boxes` hand-builds a
+    /// box, calls `set_identity` on it and checks the exporter carries the
+    /// fields through. It passes whether or not anything ever stamps a real
+    /// img or input — and nothing did: `build_layout_from_parent_style_and_path`
+    /// stamped identity only on its generic path, below the
+    /// `img`/`input`/`button`/`textarea`/`select` early returns. 115 elements
+    /// across the 26-case corpus reached Gate A with no join key.
+    ///
+    /// So this test drives the production builder for one of every affected
+    /// tag. It is `target_os = "macos"`-gated for the same reason
+    /// `button_children_tests` is — `Engine::new` needs a GPU adapter, which
+    /// the Linux CI leg has none of.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_builder_stamps_identity_on_replaced_and_form_control_boxes() {
+        for (tag, attributes) in [
+            ("img", vec![("src", "x.png")]),
+            ("input", vec![("type", "text")]),
+            ("button", vec![]),
+            ("textarea", vec![]),
+            ("select", vec![]),
+        ] {
+            let engine = Engine::new(EngineConfig::default()).expect("engine");
+            let node = Node::new(
+                rustkit_dom::NodeId::new(1),
+                NodeType::Element {
+                    tag_name: tag.into(),
+                    namespace: String::new(),
+                    attributes: attributes
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect(),
+                },
+            );
+            let path = format!("body > {tag}");
+            let built = engine.build_layout_from_parent_style_and_path(
+                &node,
+                &[],
+                &HashMap::new(),
+                &[],
+                None,
+                &[],
+                1,
+                1,
+                &path,
+                &Cell::new(0),
+                false,
+            );
+            let identity = built.identity().unwrap_or_else(|| {
+                panic!("<{tag}> built with no join key — Gate A cannot compare it")
+            });
+            assert_eq!(identity.selector, path, "<{tag}> reported the wrong selector");
+            assert_eq!(identity.tag, tag, "<{tag}> reported the wrong tag");
+            assert_eq!(
+                built.element_id(),
+                Some(1),
+                "<{tag}> did not take a document-order element id"
+            );
+        }
+    }
+
+    /// A `display: none` element has no rect at all, and Chrome's capture drops
+    /// it — so it must NOT get a join key. Giving one to a box Chrome never
+    /// measured is how a phantom failure is manufactured. Pinned rather than
+    /// left to the reader, because the single stamp point above is one
+    /// `if` away from covering it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_display_none_element_gets_no_join_key() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let node = Node::new(
+            rustkit_dom::NodeId::new(1),
+            NodeType::Element {
+                tag_name: "input".into(),
+                namespace: String::new(),
+                attributes: [("type".to_string(), "hidden".to_string())]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+        let built = engine.build_layout_from_parent_style_and_path(
+            &node,
+            &[],
+            &HashMap::new(),
+            &[],
+            None,
+            &[],
+            1,
+            1,
+            "body > input",
+            &Cell::new(0),
+            false,
+        );
+        assert_eq!(built.style.display, rustkit_css::Display::None);
+    }
+
     /// Image and form-control boxes take early-return paths in the export. They
     /// are still elements, so they must still be joinable — this is the case a
     /// naive "add the fields at the end" change silently misses.
@@ -10440,32 +10661,110 @@ mod element_identity_tests {
 
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let cases = [
-            ("websuite/cases/card-grid", "baselines/chrome-148/websuite/card-grid"),
-            ("websuite/cases/article-typography", "baselines/chrome-148/websuite/article-typography"),
-            ("websuite/cases/flex-positioning", "baselines/chrome-148/websuite/flex-positioning"),
-            ("websuite/cases/css-selectors", "baselines/chrome-148/websuite/css-selectors"),
-            ("websuite/cases/sticky-scroll", "baselines/chrome-148/websuite/sticky-scroll"),
-            ("websuite/cases/image-gallery", "baselines/chrome-148/websuite/image-gallery"),
-            ("websuite/cases/form-elements", "baselines/chrome-148/websuite/form-elements"),
-            ("websuite/cases/gradient-backgrounds", "baselines/chrome-148/websuite/gradient-backgrounds"),
-            ("websuite/micro/backgrounds", "baselines/chrome-148/micro/backgrounds"),
-            ("websuite/micro/bg-pure", "baselines/chrome-148/micro/bg-pure"),
-            ("websuite/micro/bg-solid", "baselines/chrome-148/micro/bg-solid"),
-            ("websuite/micro/combinators", "baselines/chrome-148/micro/combinators"),
-            ("websuite/micro/form-controls", "baselines/chrome-148/micro/form-controls"),
-            ("websuite/micro/gpu-gradient-regression", "baselines/chrome-148/micro/gpu-gradient-regression"),
-            ("websuite/micro/gradient-no-radius", "baselines/chrome-148/micro/gradient-no-radius"),
-            ("websuite/micro/gradient-radius-only", "baselines/chrome-148/micro/gradient-radius-only"),
-            ("websuite/micro/gradients", "baselines/chrome-148/micro/gradients"),
-            ("websuite/micro/images-intrinsic", "baselines/chrome-148/micro/images-intrinsic"),
-            ("websuite/micro/pseudo-classes", "baselines/chrome-148/micro/pseudo-classes"),
-            ("websuite/micro/rounded-corners", "baselines/chrome-148/micro/rounded-corners"),
-            ("websuite/micro/specificity", "baselines/chrome-148/micro/specificity"),
-            ("crates/hiwave-app/src/ui|about.html", "baselines/chrome-148/builtins/about"),
-            ("crates/hiwave-app/src/ui|new_tab.html", "baselines/chrome-148/builtins/new_tab"),
-            ("crates/hiwave-app/src/ui|settings.html", "baselines/chrome-148/builtins/settings"),
-            ("crates/hiwave-app/src/ui|shelf.html", "baselines/chrome-148/builtins/shelf"),
-            ("crates/hiwave-app/src/ui|chrome_rustkit.html", "baselines/chrome-148/builtins/chrome_rustkit"),
+            (
+                "websuite/cases/card-grid",
+                "baselines/chrome-148/websuite/card-grid",
+            ),
+            (
+                "websuite/cases/article-typography",
+                "baselines/chrome-148/websuite/article-typography",
+            ),
+            (
+                "websuite/cases/flex-positioning",
+                "baselines/chrome-148/websuite/flex-positioning",
+            ),
+            (
+                "websuite/cases/css-selectors",
+                "baselines/chrome-148/websuite/css-selectors",
+            ),
+            (
+                "websuite/cases/sticky-scroll",
+                "baselines/chrome-148/websuite/sticky-scroll",
+            ),
+            (
+                "websuite/cases/image-gallery",
+                "baselines/chrome-148/websuite/image-gallery",
+            ),
+            (
+                "websuite/cases/form-elements",
+                "baselines/chrome-148/websuite/form-elements",
+            ),
+            (
+                "websuite/cases/gradient-backgrounds",
+                "baselines/chrome-148/websuite/gradient-backgrounds",
+            ),
+            (
+                "websuite/micro/backgrounds",
+                "baselines/chrome-148/micro/backgrounds",
+            ),
+            (
+                "websuite/micro/bg-pure",
+                "baselines/chrome-148/micro/bg-pure",
+            ),
+            (
+                "websuite/micro/bg-solid",
+                "baselines/chrome-148/micro/bg-solid",
+            ),
+            (
+                "websuite/micro/combinators",
+                "baselines/chrome-148/micro/combinators",
+            ),
+            (
+                "websuite/micro/form-controls",
+                "baselines/chrome-148/micro/form-controls",
+            ),
+            (
+                "websuite/micro/gpu-gradient-regression",
+                "baselines/chrome-148/micro/gpu-gradient-regression",
+            ),
+            (
+                "websuite/micro/gradient-no-radius",
+                "baselines/chrome-148/micro/gradient-no-radius",
+            ),
+            (
+                "websuite/micro/gradient-radius-only",
+                "baselines/chrome-148/micro/gradient-radius-only",
+            ),
+            (
+                "websuite/micro/gradients",
+                "baselines/chrome-148/micro/gradients",
+            ),
+            (
+                "websuite/micro/images-intrinsic",
+                "baselines/chrome-148/micro/images-intrinsic",
+            ),
+            (
+                "websuite/micro/pseudo-classes",
+                "baselines/chrome-148/micro/pseudo-classes",
+            ),
+            (
+                "websuite/micro/rounded-corners",
+                "baselines/chrome-148/micro/rounded-corners",
+            ),
+            (
+                "websuite/micro/specificity",
+                "baselines/chrome-148/micro/specificity",
+            ),
+            (
+                "crates/hiwave-app/src/ui|about.html",
+                "baselines/chrome-148/builtins/about",
+            ),
+            (
+                "crates/hiwave-app/src/ui|new_tab.html",
+                "baselines/chrome-148/builtins/new_tab",
+            ),
+            (
+                "crates/hiwave-app/src/ui|settings.html",
+                "baselines/chrome-148/builtins/settings",
+            ),
+            (
+                "crates/hiwave-app/src/ui|shelf.html",
+                "baselines/chrome-148/builtins/shelf",
+            ),
+            (
+                "crates/hiwave-app/src/ui|chrome_rustkit.html",
+                "baselines/chrome-148/builtins/chrome_rustkit",
+            ),
         ];
 
         let mut checked = 0usize;
@@ -10493,7 +10792,8 @@ mod element_identity_tests {
             let produced: std::collections::HashSet<&str> =
                 produced.iter().map(|s| s.as_str()).collect();
 
-            let baseline: serde_json::Value = serde_json::from_str(&rects).expect("baseline parses");
+            let baseline: serde_json::Value =
+                serde_json::from_str(&rects).expect("baseline parses");
             let elements = baseline["elements"].as_array().expect("elements array");
             assert!(!elements.is_empty(), "{case_dir}: empty baseline");
 
@@ -10507,7 +10807,10 @@ mod element_identity_tests {
             checked += 1;
         }
 
-        assert!(checked > 0, "no corpus cases were readable; test would be vacuous");
+        assert!(
+            checked > 0,
+            "no corpus cases were readable; test would be vacuous"
+        );
         assert!(
             missing.is_empty(),
             "{} of {} Chrome baseline selectors across {} cases could not be reproduced \
@@ -10522,7 +10825,9 @@ mod element_identity_tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         );
-        eprintln!("join check: {total_expected} baseline selectors reproduced across {checked} cases");
+        eprintln!(
+            "join check: {total_expected} baseline selectors reproduced across {checked} cases"
+        );
     }
 }
 
@@ -10563,12 +10868,18 @@ mod scroll_wiring_tests {
         // while there is distance to travel.
         assert!(engine.scroll_view(id, 0.0, 100.0).unwrap());
         assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 0.0));
-        assert!(!engine.scroll_view(id, 0.0, 100.0).unwrap(), "at top: no change");
+        assert!(
+            !engine.scroll_view(id, 0.0, 100.0).unwrap(),
+            "at top: no change"
+        );
 
         // Scrolling past the bottom clamps to max.
         assert!(engine.scroll_view(id, 0.0, -99999.0).unwrap());
         assert_eq!(engine.get_scroll_offset(id).unwrap(), (0.0, 1000.0));
-        assert!(!engine.scroll_view(id, 0.0, -1.0).unwrap(), "at bottom: no change");
+        assert!(
+            !engine.scroll_view(id, 0.0, -1.0).unwrap(),
+            "at bottom: no change"
+        );
     }
 
     #[test]
@@ -10652,7 +10963,10 @@ mod button_children_tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn text_button_stays_a_widget_with_its_text() {
-        let text = Node::new(rustkit_dom::NodeId::new(2), NodeType::Text("Buy It Now".into()));
+        let text = Node::new(
+            rustkit_dom::NodeId::new(2),
+            NodeType::Text("Buy It Now".into()),
+        );
         let layout = build_button(vec![text]);
         match layout.box_type {
             BoxType::FormControl(rustkit_layout::FormControlType::Button { ref label, .. }) => {
@@ -10668,7 +10982,10 @@ mod button_children_tests {
         let layout = build_button(vec![]);
         match layout.box_type {
             BoxType::FormControl(rustkit_layout::FormControlType::Button { ref label, .. }) => {
-                assert_eq!(label, "", "empty button must not be stamped with a literal 'Button'");
+                assert_eq!(
+                    label, "",
+                    "empty button must not be stamped with a literal 'Button'"
+                );
             }
             ref other => panic!("empty button should stay a FormControl leaf, got {other:?}"),
         }
@@ -10691,14 +11008,19 @@ mod svg_image_tests {
     #[cfg(target_os = "macos")]
     fn cached_svg_supplies_natural_size_to_img_layout() {
         let mut engine = Engine::new(EngineConfig::default()).expect("engine");
-        let svg = rustkit_svg::SvgDocument::parse(r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"></svg>"#)
-            .expect("parse svg");
+        let svg = rustkit_svg::SvgDocument::parse(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"></svg>"#,
+        )
+        .expect("parse svg");
         engine
             .svg_cache
             .insert("https://example.com/logo.svg".to_string(), svg);
 
         let mut attrs = HashMap::new();
-        attrs.insert("src".to_string(), "https://example.com/logo.svg".to_string());
+        attrs.insert(
+            "src".to_string(),
+            "https://example.com/logo.svg".to_string(),
+        );
         let img = Node::new(
             rustkit_dom::NodeId::new(1),
             NodeType::Element {
@@ -10763,8 +11085,11 @@ mod link_click_tests {
         anchor.children.push(img);
 
         let hit = anchor.hit_test(20.0, 20.0).expect("hit");
-        assert_eq!(hit.link_href.as_deref(), Some("/deep"),
-            "content nested in a link must resolve to the link's href");
+        assert_eq!(
+            hit.link_href.as_deref(),
+            Some("/deep"),
+            "content nested in a link must resolve to the link's href"
+        );
     }
 
     #[test]
@@ -10781,7 +11106,8 @@ mod link_click_tests {
     fn a_click_outside_any_link_resolves_to_nothing() {
         let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
         root.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 200.0, 100.0);
-        root.children.push(link_box("/somewhere", 0.0, 0.0, 20.0, 20.0));
+        root.children
+            .push(link_box("/somewhere", 0.0, 0.0, 20.0, 20.0));
 
         let hit = root.hit_test(100.0, 80.0).expect("hit");
         assert_eq!(hit.link_href, None);
@@ -10798,7 +11124,8 @@ mod link_click_tests {
         // A link 500px down the document.
         let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
         root.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 800.0, 2000.0);
-        root.children.push(link_box("/target", 0.0, 500.0, 100.0, 20.0));
+        root.children
+            .push(link_box("/target", 0.0, 500.0, 100.0, 20.0));
 
         {
             let view = engine.views.get_mut(&id).expect("view");
@@ -10851,8 +11178,16 @@ mod node_identity_tests {
         child.node_id = Some(2);
         parent.children.push(child);
 
-        assert_eq!(parent.hit_test(20.0, 20.0).unwrap().node_id, Some(2), "child wins");
-        assert_eq!(parent.hit_test(150.0, 80.0).unwrap().node_id, Some(1), "parent when child missed");
+        assert_eq!(
+            parent.hit_test(20.0, 20.0).unwrap().node_id,
+            Some(2),
+            "child wins"
+        );
+        assert_eq!(
+            parent.hit_test(150.0, 80.0).unwrap().node_id,
+            Some(1),
+            "parent when child missed"
+        );
     }
 
     #[test]
@@ -10873,9 +11208,7 @@ mod node_identity_tests {
             .expect("headless view");
 
         let html = r#"<html><body><input type="text" id="a"><div id="plain">x</div></body></html>"#;
-        let doc = std::rc::Rc::new(
-            rustkit_dom::Document::parse_html(html).expect("parse"),
-        );
+        let doc = std::rc::Rc::new(rustkit_dom::Document::parse_html(html).expect("parse"));
         // Find the input's real NodeId by walking the parsed document, so the
         // test cannot pass against a hand-invented id.
         fn find<'a>(n: &std::rc::Rc<Node>, tag: &str) -> Option<std::rc::Rc<Node>> {
@@ -10907,7 +11240,10 @@ mod node_identity_tests {
             view.layout = Some(layout);
         }
 
-        assert_eq!(engine.focus_at_point(id, 10.0, 10.0).as_deref(), Some("input"));
+        assert_eq!(
+            engine.focus_at_point(id, 10.0, 10.0).as_deref(),
+            Some("input")
+        );
         assert_eq!(engine.focused_node(id), Some(input.id));
 
         // Clicking a non-focusable element clears focus, like clicking page
@@ -10993,8 +11329,7 @@ mod form_typing_tests {
                 .expect("form control box")
                 .0
         };
-        engine.views.get_mut(&id).unwrap().focused_node =
-            Some(rustkit_dom::NodeId::new(node_raw));
+        engine.views.get_mut(&id).unwrap().focused_node = Some(rustkit_dom::NodeId::new(node_raw));
         let view = engine.views.get_mut(&id).unwrap();
         view.edit_states.insert(
             node_raw,
@@ -11046,8 +11381,7 @@ mod form_typing_tests {
         // The property that makes it safe to route window-level keys here:
         // with no focus, handle_text_key must decline so the caller can fall
         // back to scrolling.
-        let (mut engine, id) =
-            engine_with_html(r#"<html><body><input type="text"></body></html>"#);
+        let (mut engine, id) = engine_with_html(r#"<html><body><input type="text"></body></html>"#);
         assert!(!engine.handle_text_key(id, 0, "c", false, false, false));
     }
 }
@@ -11107,8 +11441,11 @@ mod form_submit_tests {
             sub.url
         );
         assert!(!sub.url.contains("old"), "authored value must not win");
-        assert!(sub.url.starts_with("https://example.com/search"),
-            "action must resolve against the document URL, got {}", sub.url);
+        assert!(
+            sub.url.starts_with("https://example.com/search"),
+            "action must resolve against the document URL, got {}",
+            sub.url
+        );
     }
 
     #[test]
@@ -11241,7 +11578,11 @@ mod edit_state_lifecycle_tests {
             None,
             "the new page's control must have no inherited value"
         );
-        assert_eq!(engine.focused_node(id), None, "focus must not survive either");
+        assert_eq!(
+            engine.focused_node(id),
+            None,
+            "focus must not survive either"
+        );
     }
 }
 
@@ -11300,14 +11641,15 @@ mod relative_url_tests {
             .iter()
             .filter_map(|c| match c {
                 rustkit_layout::DisplayCommand::Image { url, .. }
-                | rustkit_layout::DisplayCommand::BackgroundImage { url, .. } => {
-                    Some(url.as_str())
-                }
+                | rustkit_layout::DisplayCommand::BackgroundImage { url, .. } => Some(url.as_str()),
                 _ => None,
             })
             .collect();
 
-        assert!(!urls.is_empty(), "precondition: the page must emit image commands");
+        assert!(
+            !urls.is_empty(),
+            "precondition: the page must emit image commands"
+        );
         for u in &urls {
             assert!(
                 Url::parse(u).is_ok(),
@@ -11362,9 +11704,7 @@ mod srcset_tests {
 
     #[test]
     fn widest_w_candidate_wins() {
-        let picked = Engine::pick_from_srcset(
-            "small.jpg 400w, medium.jpg 800w, large.jpg 1600w",
-        );
+        let picked = Engine::pick_from_srcset("small.jpg 400w, medium.jpg 800w, large.jpg 1600w");
         assert_eq!(picked.as_deref(), Some("large.jpg"));
     }
 
@@ -11452,12 +11792,18 @@ mod fit_content_property_tests {
             parse_height_value("fit-content"),
             Some(rustkit_css::Length::FitContent)
         );
-        assert_eq!(parse_height_value("  fit-content "), Some(rustkit_css::Length::FitContent));
+        assert_eq!(
+            parse_height_value("  fit-content "),
+            Some(rustkit_css::Length::FitContent)
+        );
     }
 
     #[test]
     fn height_still_parses_ordinary_lengths() {
-        assert_eq!(parse_height_value("120px"), Some(rustkit_css::Length::Px(120.0)));
+        assert_eq!(
+            parse_height_value("120px"),
+            Some(rustkit_css::Length::Px(120.0))
+        );
         assert_eq!(parse_height_value("auto"), Some(rustkit_css::Length::Auto));
     }
 
@@ -11555,7 +11901,9 @@ mod fit_content_property_tests {
     fn a_child_inherits_its_ancestors_transform() {
         let mut style = rustkit_css::ComputedStyle::new();
         style.transform = rustkit_css::TransformList {
-            ops: vec![rustkit_css::TransformOp::TranslateX(rustkit_css::Length::Px(100.0))],
+            ops: vec![rustkit_css::TransformOp::TranslateX(
+                rustkit_css::Length::Px(100.0),
+            )],
         };
         let mut parent = boxed(0.0, 0.0, 200.0, 200.0, style);
         parent.children.push(boxed(
