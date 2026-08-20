@@ -2958,3 +2958,209 @@ Nothing landed on `atlas/trench-parity-finish-line` tonight but this entry.
 - The one thing this seat still cannot say: whether any of the 246 newly-visible
   failures are real on macOS. They are concentrated in `settings` and the two
   form cases, all text-bearing, and this seat has no font backend.
+
+## 2026-08-20
+
+**Metric: 1/26 → 1/26, and this is a proof rather than a re-run.** Gate B's
+paint-green set is `{bg-pure}` before and after; the conjunction is a subset of
+it; `bg-pure`'s frame and layout dump are byte-identical across the change, so
+no case could cross in either direction. Gate A's green set is the same two
+(`bg-pure`, `specificity`). 3 measured iterations, all 26 cases byte-identical
+on both `frame.ppm` and `layout.json`. No macOS run tonight.
+
+**P-item: P3 (flex residual). NOT complete, and not for want of trying — I
+measured that P3 has no font-independent geometry defect this seat can score,
+then worked the geometry-first queue's largest readable root instead.** The
+measurement is the more useful half of the night and it also corrected a number
+last night's digest implied.
+
+### P3 has zero readable surface, and the first classifier that said otherwise was wrong
+
+Night 16's join fix nearly doubled the naive readable count — 295 → 561 boxes
+whose Gate A failure carries no text in its own subtree — and `flex-positioning`
+went from 2 to 22. That looked like P3 becoming workable. It is not, and the
+two corrections between those numbers are worth more than the fix below.
+
+**First: most of those 561 are inherited.** `#check1` on `flex-positioning` is
+8px too high and is laid out *exactly* right inside its own row; the 8px is two
+text-sized boxes above it. Subtracting the parent's delta on the same axis
+splits the board 2691 failing axes = 1995 root + 696 carried.
+
+**Second, and this is the one that would have cost a night: "no text inside the
+box" is not "font-independent".** `rounded-corners` lays six empty
+inline-blocks in a row with nothing but source newlines between them, and the
+whole row staircases by +3.8125 per gap — which is 8.0 − 4.1875, this seat's
+stub advance for a collapsed space against Chrome's real one. I had the list
+open and was reading it as an inline-block positioning defect. Counting a text
+run ANYWHERE among a box's siblings takes the board from **170** font-independent
+roots to **13**.
+
+```
+                    fail   root  carried  font-free
+rounded-corners       67     44       23          7
+images-intrinsic      57     40       17          3
+backgrounds           53     37       16          2
+sticky-scroll        114     67       47          1
+flex-positioning     176    115       61          0      <- P3
+card-grid            150     89       61          0
+settings             434    281      153          0
+TOTAL (26 cases)    2691   1995      696         13
+```
+
+**P3's two cases are 0 and 0.** Every one of `flex-positioning`'s 115 root
+failures is downstream of a text measurement, and the three buttons that decide
+`.button-group`'s height are 52/66/59px wide here against Chrome's
+63.92/75.59/70.58 — measured label text, on a seat with no font backend. There
+is no version of P3 I can show working from here.
+
+### What I worked instead, and why I think it was the right call
+
+The largest font-independent root on the board:
+
+```
+rounded-corners  .test7 { width: 150px; height: 100px; overflow: hidden }
+                 .test7 .inner { width: 100%; height: 100% }
+                 Gate A height: expected 100, actual 1000, delta +900
+```
+
+`layout_block_children` hands each child `cb.content.height`, which on that path
+is the **flow cursor** — 0 for a first child — and `specified_content_height`
+reads a zero basis as "no basis" and answers with the **viewport**. Ten times
+too tall. It is the same conflation night 15 fixed for absolutely positioned
+children, one category over: `cb.content.height` positions the child *and* was
+being read as the percentage basis. The basis now travels in its own argument;
+`layout_with_definite_height` already existed for grid, and its collapse-path
+counterpart is added.
+
+`definite_absolute_cb_height` is renamed `definite_content_height` — it is the
+same "used height when definite" both callers need, and night 15's reason for
+extracting it applies again.
+
+This is grid/positioning-class work under the ratified geometry-first amendment,
+worked while the P-item in flight is P3. Same judgement call as nights 9 and 12,
+and it is decision 1 below.
+
+### Commits
+
+Engine, on `atlas/percent-height-basis` (cut from `atlas/p3-flex-residual`, so
+the stack is now four branches deep — see decision 2):
+
+- `c4c9328` — an in-flow percentage height resolves against the parent's
+  definite height, not the flow cursor.
+- `d711e89` — close the two survivors the mutation sweep found.
+
+Instrument, on `atlas/trench-parity-finish-line`:
+
+- `7b0612f` — `scripts/geometry_attribution.py`: the root/carried and
+  text-reachable/font-independent splits above, non-gating, 15 tests.
+- `24dddf8` — close the survivor its sweep found.
+- `a812a85` — publish the board on both gating lanes.
+
+### Measured — Linux/SwiftShader, 26 gating cases. MECHANICS, NOT A RECEIPT
+
+| Oracle | Before | After |
+|---|---|---|
+| Gate A geometry failures | 2691 | **2689** |
+| Gate A green | 2/26 | 2/26 |
+| Gate A join failures | 20 | 20 |
+| Gate B paint-green | 1/26 | 1/26 |
+| Gate B discrete failures | 0 | 0 |
+| Gate B elements admitted | 234 | **235** |
+| `chrome_rustkit` paint within tolerance | 94.8070% | **95.0047%** |
+| N/26 | 1/26 | 1/26 |
+
+25 of the 26 frames are byte-identical; `chrome_rustkit` is the one that moved,
+and it moved the right way (253 fewer pixels outside tolerance).
+
+### Stop rule
+
+Checked per box, per axis, across all 26 cases, on both oracles:
+
+```
+boxes fixed 2 · improved 1 · WORSENED 0 · newly failing 0
+```
+
+The second fixed box was not the one I was aiming at: `chrome_rustkit`'s
+`.sidebar-toggle` height, with its `span.workspace-name` child improving 29.5px
+→ 1.0px. Same root, a case P1–P6 does not name.
+
+Stability: 3 measured iterations, 26/26 byte-identical on both `frame.ppm` and
+`layout.json`. As on nights 14–16 that is a hash-level check plus the three
+conditions I computed by hand, not a receipt `finish_line_receipt.py` signed —
+it refuses to score without the swarm's aggregate, correctly, and I did not
+produce one.
+
+### Mutation-check results
+
+**Engine: 10 probes, 8/10 RED, then 10/10 after closing both survivors.
+Instrument: 12 probes, 11/12, then 12/12. Controls green before and after,
+committed before mutating.**
+
+| Mutation | Result |
+|---|---|
+| M1–M3 the three non-collapse sites revert to the flow cursor | RED |
+| M4, M6 the collapse loop's inline and block sites revert | RED |
+| M5 the collapse loop's WRAP re-layout reverts | RED *(survivor, closed)* |
+| M7 `layout_block_with_collapse` reads the cursor, not the basis | RED |
+| M8 `layout_with_collapse` delegates a zero basis | RED *(survivor, closed)* |
+| M9 the definite height is never clamped by min/max | RED |
+| M10 the basis is the border box, not the content box | RED |
+| A1 every failing axis is a root (the split removed) | RED |
+| A2 the residual ignores the parent's delta | RED |
+| A3 the anchor stops at an ancestor Chrome never captured | RED |
+| A5 whitespace-only text runs stop counting | RED |
+| A6 the sibling clause dropped (look only inside the box) | RED |
+| A9 a board that measured nothing exits 0 | RED |
+| A12 the tolerance hardcoded in the default argument | RED *(survivor, closed)* |
+
+**All three survivors are the same shape as the last six sweeps.** M5: the wrap
+guard drove one of two doors. M8: no test drove the public entry point. A12 is
+the sharper one — my guard asserted that the module-level constant followed
+Gate A's, which the *import line* satisfies on its own, while the function
+deciding what counts as a failure carried its own `0.5`. That is the
+`--iterations`-satisfied-by-the-comment defect from 08-08 wearing different
+clothes: **assert on the behaviour, never on the line that declares it.**
+
+### Decisions needed from Pete
+
+1. **Two nights running the trench has found the queued P-item unworkable on
+   this seat and worked a geometry root instead** — P2 on 08-18 by exhaustion,
+   P3 tonight by measurement (0 of 115 readable); should the queue be restated
+   as "the largest font-independent root on the attribution board" while this
+   seat is the one doing the work, or should the trench stop engine work here?
+2. **The engine stack is now four branches deep with no PR** —
+   `atlas/grid-item-subtree-width` (12 commits) → `atlas/p3-flex-residual` (1)
+   → `atlas/percent-height-basis` (2), all unmerged, `develop` moving; open the
+   P2 PR now? (Carried unanswered from 08-15, 08-16, 08-17, 08-18, 08-19 — this
+   is the sixth night, and it is the one thing on this list that gets worse
+   rather than staying the same.)
+3. Still open from 08-10 onward: keep or literally revert the overflow-clip
+   change that cost `sticky-scroll` 36 pixels on a card RustKit lays out 38px
+   too low?
+
+### Surprises
+
+- **The readable-work number has been wrong in the flattering direction all
+  along, and by 13×.** Night 14 published TEXT/CLEAN at 2187/298 and every night
+  since has aimed with it. The correct figure — roots only, and counting
+  whitespace between siblings as the font-dependent thing it is — is **13 boxes
+  on the whole board**. Not 298, not last night's 561. I do not think any
+  previous night's fix is invalidated by this; what is invalidated is the sense
+  that there was a queue of readable work here.
+- **Two of my six first guards were RED for the wrong reason.** My fixture
+  called `set_viewport` before pushing the child, so the child's viewport stayed
+  (0, 0) and the fallback I was testing read zero. A fixture that does not mirror
+  how the engine builds the tree is testing a shape the corpus does not contain
+  — the same trap as 08-16's `resolved_offsets` and 08-12's `box-sizing`, third
+  time on this branch.
+- **The fix does not reach a percentage CHAIN, and I found that by writing a
+  test that expected 25px and got 500.** A parent whose own height is a
+  percentage still reads indefinite to its children, so `50%` of a resolved 50px
+  box still takes the viewport. That is night 15's deferred plumbing one level
+  down; it is pinned in a test to be deleted deliberately rather than passed by
+  accident, and it is the next unit on this root.
+- **`html > body` is 63px short on `flex-positioning` and that is a root with
+  no anchor above it** — the attribution board's most obviously correct output
+  is also the one that says the least, because a page-height error is the sum of
+  everything above it. Worth stating so nobody reads the root count as a list of
+  independent defects.
