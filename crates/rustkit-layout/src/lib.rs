@@ -7908,6 +7908,63 @@ mod tests {
     }
 
     #[test]
+    fn a_wrapped_inline_block_keeps_its_basis_on_the_collapse_path_too() {
+        // The sweep's survivor: the wrap guard above drives the non-collapse
+        // loop, and reverting the collapse loop's re-layout stayed green.
+        // Seventh sweep running with the same shape — the guard gets written
+        // against the example (one door), not against the rule (both doors).
+        let mut parent = percent_height_child(Length::Px(100.0));
+        parent.children[0].style.display = rustkit_css::Display::InlineBlock;
+        parent.children[0].style.width = Length::Px(120.0);
+        let mut second_style = ComputedStyle::new();
+        second_style.box_sizing = BoxSizing::BorderBox;
+        second_style.display = rustkit_css::Display::InlineBlock;
+        second_style.width = Length::Px(120.0);
+        second_style.height = Length::Percent(100.0);
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, second_style));
+        parent.set_viewport(900.0, 1000.0);
+
+        let mut margins = MarginCollapseContext::new();
+        let mut floats = FloatContext::new();
+        parent.layout_block_children_with_collapse(&mut margins, &mut floats);
+
+        let h = parent.children[1].dimensions.content.height;
+        assert!(
+            (h - 100.0).abs() < 0.01,
+            "the wrapped child's height:100% is still 100px on the collapse \
+             path, got {h}"
+        );
+    }
+
+    #[test]
+    fn the_public_collapse_entry_point_passes_its_containing_blocks_height() {
+        // The other survivor: `layout_with_collapse` is the PUBLIC door and it
+        // now delegates, so the basis it forwards is a line of the change with
+        // its own way of being wrong. Delegating 0.0 kept every test above
+        // green, because they all call the child loops directly.
+        let mut style = ComputedStyle::new();
+        style.box_sizing = BoxSizing::BorderBox;
+        style.height = Length::Percent(50.0);
+        let mut b = LayoutBox::new(BoxType::Block, style);
+        b.set_viewport(900.0, 1000.0);
+
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let mut margins = MarginCollapseContext::new();
+        let mut floats = FloatContext::new();
+        b.layout_with_collapse(&cb, &mut margins, &mut floats);
+
+        assert!(
+            (b.dimensions.content.height - 150.0).abs() < 0.01,
+            "50% of the containing block's 300px is 150px, not the viewport's \
+             500px, got {}",
+            b.dimensions.content.height
+        );
+    }
+
+    #[test]
     fn a_percentage_height_under_an_auto_height_parent_keeps_its_old_behavior() {
         // A STATED LIMIT, not an oversight. With an auto-height parent there is
         // no definite basis, `definite_content_height` reads None, and the
