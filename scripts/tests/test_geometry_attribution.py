@@ -140,21 +140,33 @@ def test_the_anchor_skips_an_ancestor_chrome_never_captured():
 
 
 def test_the_tolerance_is_gate_as_not_a_second_number():
-    """Two tolerances that must agree, written down twice, will disagree."""
+    """Two tolerances that must agree, written down twice, will disagree.
+
+    Asserted on the BEHAVIOUR, not on the name: the first version of this test
+    checked that the module-level constant followed Gate A's and stayed green
+    when the default argument was hardcoded to 0.5 — a guard satisfied by the
+    import line while the code that uses it had its own number. Moving Gate A's
+    constant must move what this board calls a failure.
+    """
+    import importlib
+
     original = layout_oracle_gate.GEOMETRY_TOLERANCE_PX
+    chrome = chrome_doc(("div.a", rect(y=100.0)))
+    rustkit = box("div.a", rect(y=110.0))
     try:
         layout_oracle_gate.GEOMETRY_TOLERANCE_PX = 50.0
-        import importlib
-
         importlib.reload(geometry_attribution)
-        assert geometry_attribution.GEOMETRY_TOLERANCE_PX == 50.0, (
-            "the board must take Gate A's constant, not carry its own"
+        widened = geometry_attribution.attribute_case("c", chrome, rustkit)
+        assert widened["failing_axes"] == 0, (
+            "a 10px delta is inside a 50px tolerance — the board must take "
+            "Gate A's constant, not carry its own"
         )
     finally:
         layout_oracle_gate.GEOMETRY_TOLERANCE_PX = original
-        import importlib
-
         importlib.reload(geometry_attribution)
+
+    restored = geometry_attribution.attribute_case("c", chrome, rustkit)
+    assert restored["failing_axes"] == 1
     assert geometry_attribution.GEOMETRY_TOLERANCE_PX == original
 
 
