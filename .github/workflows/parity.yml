@@ -289,6 +289,20 @@ jobs:
             --capture-root parity-results \
             --out parity-results/forensic
 
+      # Aiming, not scoring. Gate A's count is dominated by boxes carried by a
+      # displaced ancestor; this says which ones fail at their own edge. Never
+      # gates — the numbers cannot fail a PR, and only a board that measured
+      # nothing exits non-zero.
+      - name: Geometry attribution — roots vs carried (non-gating)
+        if: always()
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 scripts/geometry_attribution.py \
+            --layout-root parity-results \
+            --json parity-results/geometry-attribution.json \
+            | tee parity-results/geometry-attribution.txt
+
       # -----------------------------------------------------------------
       # The metric itself. Gates A and B publish independent verdicts and
       # the stability bar lives in parity_gate; until this step existed
@@ -655,6 +669,17 @@ jobs:
           python3 scripts/forensic_board.py \
             --capture-root parity-results \
             --out parity-results/forensic
+
+      # See the PR lane: aiming, not scoring, and non-gating both ways.
+      - name: Geometry attribution — roots vs carried (non-gating)
+        if: always()
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 scripts/geometry_attribution.py \
+            --layout-root parity-results \
+            --json parity-results/geometry-attribution.json \
+            | tee parity-results/geometry-attribution.txt
 
       # Same receipt as the PR lane, same non-gating contract. Nightly is
       # where the number is tracked over time, so it must be computed here
