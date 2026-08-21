@@ -3164,3 +3164,226 @@ clothes: **assert on the behaviour, never on the line that declares it.**
   is also the one that says the least, because a page-height error is the sum of
   everything above it. Worth stating so nobody reads the root count as a list of
   independent defects.
+
+## 2026-08-21
+
+**Metric: 1/26 → 1/26, and this is a proof rather than a re-run.** Nothing in
+`crates/` changed tonight — all four commits are `scripts/` — so Gate A is
+byte-identical before and after (2689 geometry failures, 2/26 green, 20 join)
+and no case can have crossed the conjunction in either direction. No macOS run
+tonight. The engine captures I measured against are the stack tip
+(`atlas/percent-height-basis`), and Gate A on them reproduces night 17's
+closing numbers exactly, which is the check that this seat is still the seat
+night 17 left.
+
+**P-item: the geometry-first queue (ratified 2026-08-12). NOT complete. I did
+not work night 17's named next unit — I measured that it has no corpus reach,
+and then found that the board aiming the whole queue was wrong by 3x.**
+
+### First: the percentage chain has nothing to fix on this corpus
+
+Night 17 closed by naming the next unit on its root — the percentage *chain*,
+where a parent whose own height is a percentage still reads indefinite to its
+children, so `50%` of a resolved 50px box takes the viewport. It left a test
+pinned to be deleted deliberately when the plumbing lands.
+
+The plumbing should not land yet. There are three percentage-height sites in
+`websuite/` and none of them is a chain — `.test7 .inner` has a `100px` parent,
+`.object-fit-box .placeholder` has a `150px` parent, `.image-placeholder` has a
+grid-stretched auto parent. The builtins *do* chain, and that is the half I got
+wrong first: I grepped `websuite/` only, concluded "zero occurrences", and had
+to correct myself when `chrome_rustkit`, `about` and `shelf` all turned out to
+carry `html, body { height: 100% }`.
+
+But the correction lands in the same place, for a better reason:
+
+```
+chrome_rustkit  viewport 1280x100    html > body  height 100
+about           viewport  800x600    html > body  height 600
+shelf           viewport 1280x120    html > body  height 120
+new_tab         viewport 1280x800    html > body  height 800
+```
+
+`html, body { height: 100% }` makes body's height **equal to the viewport**, so
+the viewport fallback returns exactly the right answer for the one chain the
+corpus actually contains. `.chrome-container { height: 100% }` inside it is the
+same identity one level down. Every other percentage height in the builtins is
+on an absolutely-positioned `::before` whose parent is auto — and pseudo-elements
+are not in Chrome's selector-keyed rects at all, so no oracle can see them.
+
+So the chain fix is correctness with no measurable consequence, which the
+geometry-first amendment says to record and defer rather than half-land. The
+pinned test stays pinned.
+
+### Then: the board that aims the queue was wrong on 9 of its 12 roots
+
+Night 17 published 13 font-independent roots (12 on tonight's capture) and
+called them "the work a text-less seat can aim at". I checked one before
+starting on it and the arithmetic looked like a line box, so I stopped
+deriving and ran the experiment instead: perturb one font metric, re-capture,
+see which boxes move.
+
+```
+descent 0.21 -> 0.31   1077 of 2742 boxes moved
+advance 0.50 -> 0.53    601 of 2742 boxes moved
+union                  1288 of 2742 (47%)
+```
+
+**Nine of the twelve published roots are in that union.** They are not
+readable and never were:
+
+```
+FONT-SENSITIVE  backgrounds       body > div:nth-of-type(4)          height, y
+FONT-SENSITIVE  rounded-corners   body > div:nth-of-type(6,7,9)      height, y
+FONT-SENSITIVE  sticky-scroll     div.overflow-content               x
+font-independent images-intrinsic img.test-img (test1)               width, height
+font-independent images-intrinsic img.test-img (test11)              height
+```
+
+The mechanism the classifier cannot see is the **line box**. `backgrounds
+body > div:nth-of-type(4)` holds one `inline-block` child, has no text node in
+its subtree or among its siblings — and its height still moves with the font,
+because an element with inline-level children sits on a line whose height
+includes the strut, and `inline_strut_descent` is
+`measure_text_advanced("x", ...)`. Its in-flow following siblings move with it.
+
+That clause cannot be added from the instrument side: `layout.json` exports
+`type` (block/inline/text/…) and no `display`, so an inline-block child is
+indistinguishable from a block one in the dump. And it would only cover the
+mechanism I happened to find. This is the third correction to the same
+classifier — 170, then 13, then 12 — so I stopped adding clauses and made the
+board measure the thing the clauses are a proxy for.
+
+`--font-probe-root` (repeatable) takes captures of the same corpus made with
+perturbed font metrics; an **axis** is font-sensitive iff it differs between
+the base and any probe. Blind to mechanism, so a fourth mechanism needs no
+fourth clause.
+
+### Three things I got wrong before I got them right, each caught by measuring
+
+**Letting the measurement override the heuristic made the board worse, not
+better — 12 roots to 322.** It reads as the more rigorous choice and it is the
+less conservative one. `line-height: normal` resolves to a fixed multiple of
+font-size rather than to measured metrics, so a text-bearing `h2` sits
+perfectly still through every metrics probe and is still text-driven. Both
+signals are lower bounds on font-sensitivity and each misses what the other
+catches, so **either disqualifies and neither rehabilitates**.
+
+**Per-box sensitivity hid a real defect.** `images-intrinsic` test11's image:
+its `y` moves with the font because everything above it is text, while its
+`height` — 160 against Chrome's 90, an unapplied `aspect-ratio` — does not move
+under any probe. Scoring the box as a whole dropped a readable height off the
+board behind an unreadable y. Sensitivity is per axis.
+
+**One probe is weak evidence.** The descent probe alone left 322 roots
+standing. Probes are unioned, and the board refuses to call itself measured
+unless every case resolved every probe root.
+
+```
+                                        roots called font-independent
+heuristic alone                          12   (9 provably wrong)
+two probes alone                        322
+either disqualifies (shipped)             4
+```
+
+### The readable board is 4 axes on 2 cases, and it is two defects
+
+```
+rounded-corners  body > div:nth-of-type(7)   height  126 vs 120   -6.00
+images-intrinsic img.test-img (test1)        width   102 vs 100   -2.00
+images-intrinsic img.test-img (test1)        height  102 vs 100   -2.00
+images-intrinsic img.test-img (test11)       height   90 vs 160  +70.00
+```
+
+`.test-img` is `border: 1px solid red` on a 100x100 natural image, so Chrome's
+border box is 102 and RustKit's is 100: **an image at its natural size does not
+gain its border.** Only test1 shows it — test2 through test12 have explicit CSS
+dimensions and match, which is why a 2px error on one box survived twelve
+nights of a board that could not see it. test11 is `aspect-ratio: 16/9`
+unapplied. `rounded-corners` div7 is stated as observed and not diagnosed: it
+takes no font input at all where Chrome adds ~6px below the baseline.
+
+### Commits (all `scripts/` — `crates/` untouched, branch law held)
+
+- `ac4bfe8` — the board measures font-sensitivity instead of guessing it.
+- `c89156c` — close the three survivors the sweep found.
+- `bae4eea` — order the duplicate-selector fixture so it can actually fail.
+- `5f8141d` — correct a sweep count `ac4bfe8`'s message claimed before it ran.
+
+### Mutation-check results
+
+**12 probes: 9/12 RED, then 11/12, then 12/12. Control green before and after
+every sweep, committed before mutating.**
+
+| Mutation | Result |
+|---|---|
+| M1 the measurement OVERRIDES the heuristic (the 322 board) | RED |
+| M2 the measurement is ignored entirely | RED |
+| M3 sensitivity collapses to per-box | RED |
+| M4 an unjoinable axis is admitted rather than withheld | RED |
+| M5 probes replace rather than union | RED |
+| M6 an unjoinable axis is marked comparable instead of left absent | RED *(survivor, closed)* |
+| M7 an empty board reports MEASURED | RED |
+| M8 any measured case makes the whole board measured | RED |
+| M9 a partial probe set is used anyway | RED *(survivor, closed)* |
+| M10 every finding claims basis "measured" | RED |
+| M11 `complete_probe_set` returns the partial set | RED |
+| M12 the OR-accumulator in `mark()` is dropped | RED *(survivor twice, closed)* |
+
+**M6 was a design smell, not a missing test.** "Unknown is not green" was
+written down twice — once as `mark(selector, axis, True)` for an unjoinable box
+and once as the consumer's `.get(..., True)` default — so deleting either left
+the other holding the rule and no guard could tell the difference. The
+unjoinable branch now leaves the axis absent and the default is the only place
+the rule lives. Same reasoning that put Gate A's tolerance on an import.
+
+**M12 survived twice, and the second time is the more useful failure.** I wrote
+the guard, it went red, I believed it. It was red for the wrong reason: with
+the moving box walked *last*, a plain last-write-wins assignment still ends on
+`True`. Reordering the fixture so the moving box comes first is what made the
+guard drive the accumulation. Eighth sweep running with a survivor of the
+"guard written against the example, not the rule" shape — and this one says the
+checklist item night 17 proposed is not enough on its own: a guard can be red
+and still not be testing what its name says.
+
+### Stop rule
+
+Did not fire, and could not have: no `crates/` change, Gate A byte-identical on
+all 26 cases, Gate B untouched. The only thing that moved is which roots the
+non-gating board prints, and it prints fewer.
+
+### Decisions needed from Pete
+
+1. **The engine stack is now 15 commits across four unmerged branches and this
+   is the seventh night of asking — but it is measurably still cheap: as of
+   today it merges into `develop` with no conflict and both suites pass
+   (321 layout, 56 engine), while `develop` has taken five PRs including two
+   layout changes (#143, #146); open the P2 PR now?**
+2. Should the trench get a dev-only engine knob (an env var scaling the stub
+   font metrics) so the font probe runs in CI instead of by hand-patching
+   `text.rs` and rebuilding, which is how tonight's numbers were produced?
+3. Still open from 08-10 onward: keep or literally revert the overflow-clip
+   change that cost `sticky-scroll` 36 pixels on a card RustKit lays out 38px
+   too low?
+
+### Surprises
+
+- **The aiming board has been wrong in the flattering direction every single
+  time it has been checked, and this is the third check.** 170 to 13 on night
+  17, 13 to 12 on tonight's capture, 12 to 4 tonight. Each correction was found
+  by looking at one entry closely rather than by anything systematic, which
+  means the honest reading is not "the board is now right" but "nobody has yet
+  found the fourth thing wrong with it". The probe is the first version whose
+  correctness does not depend on having enumerated the mechanisms.
+- **A 2px error survived twelve nights because it was too small to look at and
+  the board that should have surfaced it was full of noise.** The natural-size
+  image border is about as clean a defect as this corpus contains — one rule,
+  one box, no font anywhere near it — and it sat under nine louder entries that
+  were not real.
+- **My first instinct on the percentage chain was right and my first evidence
+  for it was wrong.** I grepped `websuite/` and concluded zero occurrences; the
+  builtins have four. The conclusion survived, but only because
+  `html, body { height: 100% }` happens to make the viewport fallback correct —
+  which I would not have found if I had trusted the grep.
+- **Measuring cost two rebuilds and about twenty minutes.** Every night since 14
+  has aimed with a number that could have been checked this cheaply.
