@@ -295,6 +295,140 @@ def test_an_unmeasured_case_reports_a_reason_rather_than_a_zero():
     assert case["reason"], "a case that could not be scored must say why"
 
 
+# ---------------------------------------------------------------------------
+# measured font-sensitivity (--font-probe-root)
+#
+# The heuristic above is a guess about which boxes a font can move, and on
+# 2026-08-21 it was measured wrong on 9 of the 12 roots it published as
+# readable. The mechanism it cannot see is the line box: an element with
+# inline-level children carries the font-derived strut in its height, and
+# `layout.json` exports no `display` for the classifier to notice that.
+# These guards hold the measured path and — more importantly — hold the rule
+# that the measurement DISQUALIFIES and never rehabilitates.
+# ---------------------------------------------------------------------------
+
+
+def test_a_box_the_probe_moves_is_font_dependent_even_with_no_text_anywhere():
+    """The defect that forced this path: `backgrounds body > div:nth-of-type(4)`
+    has one inline-block child, no text node in its subtree or among its
+    siblings, and its height still moves when the font metrics move."""
+    chrome = chrome_doc(("div.row", rect(height=126.0)))
+    rustkit = box("div.row", rect(height=127.12))
+    probe = box("div.row", rect(height=127.92))
+
+    heuristic = attribute_case("c", chrome, rustkit)
+    assert heuristic["font_independent_roots"] == 1, "the heuristic sees no text"
+
+    measured = attribute_case("c", chrome, rustkit, probe_docs=[probe])
+    assert measured["roots"] == 1
+    assert measured["font_independent_roots"] == 0, (
+        "the probe moved it, so it is not work a text-less seat can aim at"
+    )
+    assert measured["font_basis"] == "measured"
+
+
+def test_a_box_no_probe_moves_stays_font_independent():
+    """`images-intrinsic` test1's image: 102 against 100, a border the natural
+    size never gained, and it does not move under any font perturbation."""
+    chrome = chrome_doc(("img.test-img", rect(width=102.0)))
+    rustkit = box("img.test-img", rect(width=100.0))
+    probe = box("img.test-img", rect(width=100.0))
+
+    result = attribute_case("c", chrome, rustkit, probe_docs=[probe])
+    assert result["font_independent_roots"] == 1
+    finding = result["findings"][0]
+    assert finding["font_sensitive"] is False
+    assert finding["font_basis"] == "measured"
+
+
+def test_the_probe_cannot_rehabilitate_a_text_reachable_box():
+    """EITHER signal disqualifies. Letting the measurement override the
+    heuristic took the board from 12 roots to 322 — `line-height: normal`
+    resolves to a fixed multiple of font-size, so a text-bearing box can sit
+    perfectly still through every metrics probe and still be text-driven."""
+    chrome = chrome_doc(("h2.title", rect(y=100.0)))
+    rustkit = box("h2.title", rect(y=140.0), [text("Heading")])
+    probe = box("h2.title", rect(y=140.0), [text("Heading")])
+
+    result = attribute_case("c", chrome, rustkit, probe_docs=[probe])
+    finding = result["findings"][0]
+    assert finding["text_reachable"] is True
+    assert finding["font_sensitive"] is False, "no probe moved it"
+    assert result["font_independent_roots"] == 0, (
+        "a text-bearing box is never rehabilitated by a probe that missed it"
+    )
+
+
+def test_sensitivity_is_per_axis_not_per_box():
+    """`images-intrinsic` test11: its `y` moves with the font because
+    everything above it is text, while its `height` — 160 against Chrome's 90,
+    an unapplied aspect-ratio — does not. Scoring the box as a whole hides a
+    readable height behind an unreadable y."""
+    chrome = chrome_doc(("img.test-img", rect(y=1971.0, height=90.0)))
+    rustkit = box("img.test-img", rect(y=2004.2, height=160.0))
+    probe = box("img.test-img", rect(y=2010.0, height=160.0))
+
+    result = attribute_case("c", chrome, rustkit, probe_docs=[probe])
+    by_axis = {f["axis"]: f for f in result["findings"]}
+    assert by_axis["y"]["font_sensitive"] is True
+    assert by_axis["height"]["font_sensitive"] is False
+    assert result["font_independent_roots"] == 1, "the height survives, the y does not"
+
+
+def test_probes_are_unioned_not_replaced():
+    """One perturbation is a weak lower bound. The descent probe alone left 322
+    roots on the board; the advance probe catches a different set, and a box is
+    sensitive if ANY probe moves it."""
+    chrome = chrome_doc(("div.a", rect(y=100.0)))
+    rustkit = box("div.a", rect(y=140.0))
+    still = box("div.a", rect(y=140.0))
+    moves = box("div.a", rect(y=143.0))
+
+    assert attribute_case("c", chrome, rustkit, probe_docs=[still])[
+        "font_independent_roots"
+    ] == 1
+    assert attribute_case("c", chrome, rustkit, probe_docs=[still, moves])[
+        "font_independent_roots"
+    ] == 0, "the second probe moved it; the union decides"
+    assert attribute_case("c", chrome, rustkit, probe_docs=[moves, still])[
+        "font_independent_roots"
+    ] == 0, "probe order cannot change the verdict"
+
+
+def test_a_box_the_probe_never_saw_is_sensitive_not_readable():
+    """Unknown is not green — the rule the receipt and Gate B already use."""
+    chrome = chrome_doc(("div.a", rect(y=100.0)), ("div.b", rect(y=200.0)))
+    rustkit = box("div.a", rect(y=140.0), [box("div.b", rect(y=260.0))])
+    truncated = box("div.a", rect(y=140.0))  # div.b's path is absent
+
+    result = attribute_case("c", chrome, rustkit, probe_docs=[truncated])
+    by_sel = {f["selector"]: f for f in result["findings"]}
+    assert by_sel["div.b"]["font_sensitive"] is True, (
+        "a box the probe could not join is withheld, never admitted"
+    )
+
+
+def test_the_basis_is_reported_and_a_missing_probe_says_heuristic():
+    """A board read later must not be able to mistake a guess for a measurement."""
+    chrome = chrome_doc(("div.a", rect(y=100.0)))
+    rustkit = box("div.a", rect(y=140.0))
+
+    guessed = attribute_case("c", chrome, rustkit)
+    assert guessed["font_basis"] == "heuristic"
+    assert guessed["findings"][0]["font_sensitive"] is None
+    assert guessed["findings"][0]["font_basis"] == "heuristic"
+
+
+def test_a_mixed_board_is_not_reported_as_measured():
+    """One case falling back to the heuristic makes the headline a mix of two
+    strengths of evidence, and a mix must not be published as measured."""
+    measured = {"case_id": "a", "measured": True, "font_basis": "measured"}
+    guessed = {"case_id": "b", "measured": True, "font_basis": "heuristic"}
+    assert geometry_attribution.board_font_basis([measured, measured]) == "measured"
+    assert geometry_attribution.board_font_basis([measured, guessed]) == "heuristic"
+    assert geometry_attribution.board_font_basis([]) == "heuristic"
+
+
 def test_the_report_is_json_serialisable():
     """It is published as an artifact; a report that cannot be written is not
     a report."""

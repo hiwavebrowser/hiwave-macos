@@ -59,10 +59,47 @@ A text-bearing box can still have a font-independent defect — night 13's
 So the font-independent count is a lower bound on what a text-less seat can
 score, never an upper bound on what is real.
 
+MEASURED FONT-SENSITIVITY (--font-probe-root), and why the heuristic needed it
+-----------------------------------------------------------------------------
+The three clauses above are a guess about which boxes a font can move, and on
+2026-08-21 the guess was measured and found wrong on 9 of the 12 roots it was
+publishing as readable. The mechanism it cannot see is the LINE BOX: an element
+with inline-level children sits on a line whose height includes the strut, and
+`inline_strut_descent` is `measure_text_advanced("x", ...)` — a font call. So
+`backgrounds body > div:nth-of-type(4)` holds one `inline-block` child, no text
+node anywhere in its subtree or among its siblings, and its height still moves
+when the font metrics move. Its in-flow following siblings move with it.
+
+That clause cannot be added from this side: RustKit's `layout.json` exports
+`type` (block/inline/text/...) and no `display`, so an `inline-block` child is
+indistinguishable from a block one in the dump. A fourth heuristic would need an
+engine export change and would still only cover the mechanism we happened to
+find — this is the third correction to the same classifier (170 -> 13 -> 12 -> 4).
+
+So the board can MEASURE it instead. Give `--font-probe-root` a second capture
+of the same corpus taken with perturbed font metrics, and a box is font-sensitive
+iff its border box differs between the two captures. That asks the question the
+classifier is a proxy for — *can a font measurement move this box* — and it is
+blind to mechanism, so a fourth mechanism does not need a fourth clause.
+
+Stated limits, because this is evidence and not proof:
+  * It is a LOWER bound too. A perturbation the corpus happens not to be
+    sensitive to leaves a real dependency unseen. Perturb more than one metric
+    (advance AND ascent/descent) and take the union; one probe is weaker.
+  * A box the probe capture does not contain is font-sensitive, never readable.
+    Unknown is not green, the same rule the receipt and Gate B already use.
+  * It says a font CAN move the box, not that the font is why it fails.
+
+Without the flag the heuristic still runs and the report says which basis it
+used. The heuristic OVER-REPORTS readable work; it must never be read as
+measured.
+
 Usage:
     python3 scripts/geometry_attribution.py --layout-root parity-baseline/captures
     python3 scripts/geometry_attribution.py --layout-root <dir> --case rounded-corners
     python3 scripts/geometry_attribution.py --layout-root <dir> --json out.json
+    python3 scripts/geometry_attribution.py --layout-root <dir> \\
+        --font-probe-root <dir-captured-with-perturbed-font-metrics>
 """
 
 import argparse
@@ -145,6 +182,70 @@ def annotate(root: Dict[str, Any]) -> Tuple[
     return boxes, parent, text_reachable
 
 
+def measure_font_sensitivity(
+    root: Dict[str, Any], probe_root: Dict[str, Any]
+) -> Dict[Tuple[str, str], bool]:
+    """(selector, axis) -> did THAT AXIS move when the font metrics moved?
+
+    Per axis, not per box, because the board aims work at an axis. `test11`'s
+    image on `images-intrinsic` is the case that forced it: its `y` shifts with
+    the font (everything above it is text) while its `height` — 160 against
+    Chrome's 90, an unapplied `aspect-ratio` — does not move under any probe.
+    Scoring the box as a whole would hide a readable height behind an
+    unreadable y and drop a real defect off the board.
+
+    Joined on the STRUCTURAL PATH (root-relative child indices), not on the
+    selector, because the probe capture is the same tree laid out again: the
+    path is stable under a metrics change while a selector can be absent from
+    one side if identity stamping ever differs. A selector whose path is missing
+    from the probe, or whose box carries no border box on either side, is
+    reported SENSITIVE — the conservative direction, and the same rule as
+    "unmeasured is never green".
+    """
+    def by_path(node: Dict[str, Any]) -> Dict[Tuple[int, ...], Dict[str, Any]]:
+        out: Dict[Tuple[int, ...], Dict[str, Any]] = {}
+
+        def walk(n: Dict[str, Any], path: Tuple[int, ...]) -> None:
+            out[path] = n
+            for index, child in enumerate(n.get("children") or []):
+                walk(child, path + (index,))
+
+        walk(node, ())
+        return out
+
+    base = by_path(root)
+    probe = by_path(probe_root)
+
+    sensitive: Dict[Tuple[str, str], bool] = {}
+
+    def mark(selector: str, axis: str, moved: bool) -> None:
+        # OR-accumulate: one selector can key several boxes (the walk in
+        # `annotate` keeps the first). If ANY of them moves on this axis, the
+        # axis moves.
+        key = (selector, axis)
+        sensitive[key] = sensitive.get(key, False) or moved
+
+    for path, node in base.items():
+        selector = node.get("selector")
+        if not selector:
+            continue
+        counterpart = probe.get(path)
+        here = border_box(node)
+        there = border_box(counterpart) if counterpart is not None else None
+        if here is None or there is None:
+            # Unjoinable is sensitive on EVERY axis — unknown is not green.
+            for axis in AXES:
+                mark(selector, axis, True)
+            continue
+        for axis in AXES:
+            mark(
+                selector,
+                axis,
+                float(here.get(axis, 0.0)) != float(there.get(axis, 0.0)),
+            )
+    return sensitive
+
+
 def nearest_comparable(
     selector: str,
     parent: Dict[str, Optional[str]],
@@ -164,15 +265,60 @@ def nearest_comparable(
     return current
 
 
+def font_dependent(finding: Dict[str, Any]) -> bool:
+    """Can a font measurement move this box? The ONE place that decides.
+
+    EITHER signal is enough to disqualify a box, because each is a lower bound
+    on font-sensitivity and each misses what the other catches:
+
+      * the heuristic misses the LINE BOX — no text node anywhere near
+        `backgrounds body > div:nth-of-type(4)`, and the strut still moves it;
+      * the probe misses any metric the run did not perturb. Perturbing advance
+        and ascent/descent leaves `line-height: normal` alone, because it
+        resolves to a fixed multiple of font-size rather than to measured
+        metrics — so a text-bearing `h2` can sit perfectly still through both
+        probes and still be text-driven.
+
+    Measured on 2026-08-21 against the 26-case corpus, 1993 roots, two probes
+    (advance, and ascent/descent):
+
+        heuristic alone                     12   (9 of them provably wrong)
+        two probes alone                   322   (text-bearing h2s called clean)
+        either disqualifies (this rule)      4
+
+    Taking the measurement as authoritative and letting it OVERRIDE the
+    heuristic is what produced the 322, and it was the first thing tried. It
+    reads as the more rigorous choice and it is the less conservative one:
+    "no probe moved it" is not "no font can move it". Unknown is not green.
+    """
+    if bool(finding.get("text_reachable", False)):
+        return True
+    return bool(finding.get("font_sensitive") or False)
+
+
 def attribute_case(
     case_id: str,
     chrome_doc: Dict[str, Any],
     rustkit_doc: Dict[str, Any],
     tolerance: float = GEOMETRY_TOLERANCE_PX,
+    probe_docs: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Split one case's failing axes into root/carried and reachable/independent."""
     root_node = rustkit_doc.get("root", rustkit_doc)
     boxes, parent, text_reachable = annotate(root_node)
+
+    # When a probe capture is present the sensitivity is MEASURED and replaces
+    # the heuristic outright. Both are kept on every finding so a board can be
+    # re-read later without re-running, and so the gap between them stays
+    # visible — it was 9 of 12 the night the probe was built.
+    font_sensitive: Optional[Dict[Tuple[str, str], bool]] = None
+    if probe_docs:
+        font_sensitive = {}
+        for probe in probe_docs:
+            for key, moved in measure_font_sensitivity(
+                root_node, probe.get("root", probe)
+            ).items():
+                font_sensitive[key] = font_sensitive.get(key, False) or moved
 
     chrome: Dict[str, Dict[str, float]] = {}
     for element in chrome_doc.get("elements", []):
@@ -199,6 +345,13 @@ def attribute_case(
                 else 0.0
             )
             residual = delta - inherited
+            heuristic = bool(text_reachable.get(selector, False))
+            # A selector the probe never saw counts as sensitive, not readable.
+            measured = (
+                bool(font_sensitive.get((selector, axis), True))
+                if font_sensitive is not None
+                else None
+            )
             findings.append(
                 {
                     "case_id": case_id,
@@ -210,7 +363,9 @@ def attribute_case(
                     "delta": delta,
                     "residual": residual,
                     "root": abs(residual) > tolerance,
-                    "text_reachable": bool(text_reachable.get(selector, False)),
+                    "text_reachable": heuristic,
+                    "font_sensitive": measured,
+                    "font_basis": "measured" if measured is not None else "heuristic",
                 }
             )
 
@@ -222,7 +377,8 @@ def attribute_case(
         "failing_axes": len(findings),
         "roots": len(roots),
         "carried": len(findings) - len(roots),
-        "font_independent_roots": sum(1 for f in roots if not f["text_reachable"]),
+        "font_independent_roots": sum(1 for f in roots if not font_dependent(f)),
+        "font_basis": "measured" if font_sensitive is not None else "heuristic",
         "findings": findings,
     }
 
@@ -242,11 +398,27 @@ def unmeasured_case(case_id: str, reason: str) -> Dict[str, Any]:
     }
 
 
+def board_font_basis(measured_cases: List[Dict[str, Any]]) -> str:
+    """"measured" only where EVERY measured case had its full probe set.
+
+    One case falling back to the heuristic makes the board's headline a mix of
+    two strengths of evidence, and a mix must not be published as measured. An
+    empty board is "heuristic": it measured nothing, so it certainly did not
+    measure this.
+    """
+    if not measured_cases:
+        return "heuristic"
+    if all(case.get("font_basis") == "measured" for case in measured_cases):
+        return "measured"
+    return "heuristic"
+
+
 def run_attribution(
     layout_root: Path,
     case_ids: Optional[List[str]] = None,
     include_non_gating: bool = False,
     tolerance: float = GEOMETRY_TOLERANCE_PX,
+    font_probe_roots: Optional[List[Path]] = None,
 ) -> Dict[str, Any]:
     registry = load_case_registry()
     cases: List[Dict[str, Any]] = []
@@ -271,7 +443,29 @@ def run_attribution(
         if rustkit_doc is None:
             cases.append(unmeasured_case(case_id, "unreadable_rustkit_capture"))
             continue
-        cases.append(attribute_case(case_id, chrome_doc, rustkit_doc, tolerance))
+
+        # The probe is discovered with Gate A's own capture-layout rules and at
+        # the case's REGISTRY viewport, so a probe captured off-viewport cannot
+        # be silently joined against an on-viewport base. A case with no probe
+        # falls back to the heuristic for that case alone, and says so.
+        probe_docs: List[Dict[str, Any]] = []
+        for probe_root in font_probe_roots or []:
+            probe_path, _ = find_layout_json(
+                probe_root, case_id, f"{case['width']}x{case['height']}"
+            )
+            probe_doc = load_json(probe_path) if probe_path is not None else None
+            if probe_doc is not None:
+                probe_docs.append(probe_doc)
+
+        # ALL of them or none. A case that resolved only some of the probe roots
+        # would be scored against a weaker union than its neighbours, and the
+        # board's headline would mix two strengths of evidence under one number.
+        if font_probe_roots and len(probe_docs) != len(font_probe_roots):
+            probe_docs = []
+
+        cases.append(
+            attribute_case(case_id, chrome_doc, rustkit_doc, tolerance, probe_docs)
+        )
 
     measured = [c for c in cases if c["measured"]]
     return {
@@ -279,6 +473,7 @@ def run_attribution(
         "gating": False,
         "tolerance_px": tolerance,
         "layout_root": str(layout_root),
+        "font_probe_roots": [str(p) for p in (font_probe_roots or [])],
         "cases": cases,
         "summary": {
             "total_cases": len(cases),
@@ -288,6 +483,7 @@ def run_attribution(
             "roots": sum(c["roots"] for c in cases),
             "carried": sum(c["carried"] for c in cases),
             "font_independent_roots": sum(c["font_independent_roots"] for c in cases),
+            "font_basis": board_font_basis(measured),
         },
     }
 
@@ -315,10 +511,20 @@ def print_report(report: Dict[str, Any], verbose: bool = False) -> None:
         f"  failing:    {summary['failing_axes']} axes ="
         f" {summary['roots']} root + {summary['carried']} carried"
     )
-    print(
-        f"  of the roots, {summary['font_independent_roots']} are font-independent"
-        " (a lower bound on what a seat with no text backend can score)"
-    )
+    if summary.get("font_basis") == "measured":
+        print(
+            f"  of the roots, {summary['font_independent_roots']} are font-independent"
+            f" — MEASURED against {len(report.get('font_probe_roots') or [])} font probe(s)"
+        )
+    else:
+        print(
+            f"  of the roots, {summary['font_independent_roots']} are font-independent"
+            " — HEURISTIC, and it OVER-REPORTS: measured 2026-08-21, 9 of the 12"
+        )
+        print(
+            "    roots it called readable moved when the font metrics moved."
+            " Pass --font-probe-root to measure instead of guessing."
+        )
     print()
     print(f"  {'case':24s} {'fail':>6s} {'root':>6s} {'carried':>8s} {'font-free':>10s}")
     for case in sorted(
@@ -338,7 +544,7 @@ def print_report(report: Dict[str, Any], verbose: bool = False) -> None:
         f
         for case in report["cases"]
         for f in case["findings"]
-        if f["root"] and not f["text_reachable"]
+        if f["root"] and not font_dependent(f)
     ]
     aimable.sort(key=lambda f: -abs(f["residual"]))
     shown = aimable if verbose else aimable[:20]
@@ -373,6 +579,17 @@ def main() -> int:
         help="Also attribute the holdout scope",
     )
     parser.add_argument("--tolerance", type=float, default=GEOMETRY_TOLERANCE_PX)
+    parser.add_argument(
+        "--font-probe-root",
+        type=Path,
+        action="append",
+        dest="font_probe_roots",
+        help=(
+            "A second capture of the same corpus taken with PERTURBED font "
+            "metrics. Font-sensitivity is then measured (a box that moves "
+            "between the two captures is font-dependent) instead of guessed."
+        ),
+    )
     parser.add_argument("--json", type=Path, help="Write the full report here")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
@@ -382,6 +599,7 @@ def main() -> int:
         case_ids=args.cases,
         include_non_gating=args.include_non_gating,
         tolerance=args.tolerance,
+        font_probe_roots=args.font_probe_roots,
     )
     print_report(report, verbose=args.verbose)
 
