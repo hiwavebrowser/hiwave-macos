@@ -419,6 +419,34 @@ def test_the_basis_is_reported_and_a_missing_probe_says_heuristic():
     assert guessed["findings"][0]["font_basis"] == "heuristic"
 
 
+def test_two_boxes_under_one_selector_taint_it_if_either_moves():
+    """`annotate` keys boxes by selector and keeps the FIRST. If a later box
+    under the same selector moves, the selector moves — dropping the
+    OR-accumulation would let the first box's stillness speak for both."""
+    chrome = chrome_doc(("div.dup", rect(y=100.0)))
+    rustkit = box(
+        "div.dup", rect(y=140.0), [box("div.dup", rect(y=140.0))]
+    )
+    # the nested duplicate moves in the probe; the outer one does not
+    probe = box("div.dup", rect(y=140.0), [box("div.dup", rect(y=147.0))])
+
+    result = attribute_case("c", chrome, rustkit, probe_docs=[probe])
+    assert result["findings"][0]["font_sensitive"] is True, (
+        "one box under this selector moved, so the selector is font-sensitive"
+    )
+
+
+def test_a_case_missing_one_of_its_probes_falls_back_rather_than_half_measuring():
+    """All the probe roots or none. Half a union is weaker evidence wearing the
+    same label as a full one."""
+    both = [{"root": "p1"}, {"root": "p2"}]
+    assert geometry_attribution.complete_probe_set(both, 2) == both
+    assert geometry_attribution.complete_probe_set(both[:1], 2) == [], (
+        "one probe of two is not the union the other cases were scored against"
+    )
+    assert geometry_attribution.complete_probe_set([], 0) == []
+
+
 def test_a_mixed_board_is_not_reported_as_measured():
     """One case falling back to the heuristic makes the headline a mix of two
     strengths of evidence, and a mix must not be published as measured."""

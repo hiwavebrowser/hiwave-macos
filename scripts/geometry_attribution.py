@@ -233,9 +233,10 @@ def measure_font_sensitivity(
         here = border_box(node)
         there = border_box(counterpart) if counterpart is not None else None
         if here is None or there is None:
-            # Unjoinable is sensitive on EVERY axis — unknown is not green.
-            for axis in AXES:
-                mark(selector, axis, True)
+            # An axis this probe could not compare is left ABSENT, not marked.
+            # "Unknown is not green" is then expressed exactly once, at the
+            # consumer's `.get(..., True)` default — a rule written down twice
+            # is a rule that eventually disagrees with itself.
             continue
         for axis in AXES:
             mark(
@@ -398,6 +399,21 @@ def unmeasured_case(case_id: str, reason: str) -> Dict[str, Any]:
     }
 
 
+def complete_probe_set(
+    found: List[Dict[str, Any]], expected: int
+) -> List[Dict[str, Any]]:
+    """ALL of the probe roots resolved for this case, or none of them.
+
+    A case that resolved only some would be scored against a weaker union than
+    its neighbours, and the board's headline would mix two strengths of
+    evidence under one number. Falling back to the heuristic for that case is
+    the honest outcome, and `font_basis` then says so.
+    """
+    if expected and len(found) != expected:
+        return []
+    return found
+
+
 def board_font_basis(measured_cases: List[Dict[str, Any]]) -> str:
     """"measured" only where EVERY measured case had its full probe set.
 
@@ -457,11 +473,7 @@ def run_attribution(
             if probe_doc is not None:
                 probe_docs.append(probe_doc)
 
-        # ALL of them or none. A case that resolved only some of the probe roots
-        # would be scored against a weaker union than its neighbours, and the
-        # board's headline would mix two strengths of evidence under one number.
-        if font_probe_roots and len(probe_docs) != len(font_probe_roots):
-            probe_docs = []
+        probe_docs = complete_probe_set(probe_docs, len(font_probe_roots or []))
 
         cases.append(
             attribute_case(case_id, chrome_doc, rustkit_doc, tolerance, probe_docs)
