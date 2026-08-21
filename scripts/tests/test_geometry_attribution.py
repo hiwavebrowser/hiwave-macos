@@ -427,8 +427,10 @@ def test_two_boxes_under_one_selector_taint_it_if_either_moves():
     rustkit = box(
         "div.dup", rect(y=140.0), [box("div.dup", rect(y=140.0))]
     )
-    # the nested duplicate moves in the probe; the outer one does not
-    probe = box("div.dup", rect(y=140.0), [box("div.dup", rect(y=147.0))])
+    # The box that MOVES is walked FIRST and the still one second, so a plain
+    # last-write-wins assignment would end on False. Ordering it the other way
+    # round lets the bug pass, which is how this guard first stayed green.
+    probe = box("div.dup", rect(y=147.0), [box("div.dup", rect(y=140.0))])
 
     result = attribute_case("c", chrome, rustkit, probe_docs=[probe])
     assert result["findings"][0]["font_sensitive"] is True, (
