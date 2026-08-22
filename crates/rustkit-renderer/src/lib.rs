@@ -720,6 +720,7 @@ impl Renderer {
         if self.color_vertices.is_empty()
             && self.texture_vertices.is_empty()
             && self.image_vertices.is_empty()
+            && self.color_glyph_vertices.is_empty()
         {
             return Ok(());
         }
@@ -1243,14 +1244,66 @@ impl Renderer {
             // Use GPU gradient path - flush batches before each gradient for correct z-order
             self.execute_with_gpu_gradients(commands, target)?;
         } else {
-            // Fast path - no backdrop blur or GPU gradients, process normally
+            // Fast path - no backdrop blur or GPU gradients, process normally.
+            // One z-order hazard remains: the batch flush draws ALL color
+            // quads before ALL glyph quads, so a solid fill that arrives
+            // AFTER glyphs are batched — e.g. a positioned box's background
+            // painting above in-flow text per CSS 2.1 Appendix E — would be
+            // drawn UNDER that text. Flush first so paint follows command
+            // order (same discipline as the GPU-gradient path).
+            let mut flushed_mid_stream = false;
             for cmd in commands {
+                if self.solid_fill_occludes_batched_glyphs(cmd) {
+                    self.flush_batches_to(target, !flushed_mid_stream)?;
+                    flushed_mid_stream = true;
+                }
                 self.process_command(cmd);
             }
-            self.flush_to(target)?;
+            if flushed_mid_stream {
+                self.flush_batches_to(target, false)?;
+            } else {
+                self.flush_to(target)?;
+            }
         }
 
         Ok(())
+    }
+
+    /// True when `cmd` is a solid fill whose rect overlaps a glyph quad
+    /// already sitting in the batch — the case where flush order (colors
+    /// before glyphs) would contradict command order. Batched glyph
+    /// positions are already transformed, so the rect's corners get the
+    /// same transform before the overlap test.
+    fn solid_fill_occludes_batched_glyphs(&self, cmd: &DisplayCommand) -> bool {
+        if self.texture_vertices.is_empty() && self.color_glyph_vertices.is_empty() {
+            return false;
+        }
+        let rect = match cmd {
+            DisplayCommand::SolidColor(color, rect) if color.a > 0.0 => rect,
+            DisplayCommand::RoundedRect { color, rect, .. } if color.a > 0.0 => rect,
+            _ => return false,
+        };
+        let (ax, ay) = self.transform_point(rect.x, rect.y);
+        let (bx, by) = self.transform_point(rect.x + rect.width, rect.y + rect.height);
+        let (rx0, rx1) = (ax.min(bx), ax.max(bx));
+        let (ry0, ry1) = (ay.min(by), ay.max(by));
+
+        let overlaps = |verts: &[TextureVertex]| {
+            verts.chunks_exact(4).any(|quad| {
+                let mut qx0 = f32::MAX;
+                let mut qy0 = f32::MAX;
+                let mut qx1 = f32::MIN;
+                let mut qy1 = f32::MIN;
+                for v in quad {
+                    qx0 = qx0.min(v.position[0]);
+                    qy0 = qy0.min(v.position[1]);
+                    qx1 = qx1.max(v.position[0]);
+                    qy1 = qy1.max(v.position[1]);
+                }
+                rx0 < qx1 && rx1 > qx0 && ry0 < qy1 && ry1 > qy0
+            })
+        };
+        overlaps(&self.texture_vertices) || overlaps(&self.color_glyph_vertices)
     }
 
     /// Execute commands with GPU blur support for backdrop filters.
