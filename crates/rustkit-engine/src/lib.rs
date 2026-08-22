@@ -10393,6 +10393,57 @@ mod element_identity_tests {
         assert_eq!(json["element_id"], 3);
     }
 
+    /// Chrome's baseline is `getBoundingClientRect` — the BORDER box — and the
+    /// geometry gate falls back to a node's flat `rect` when `border_box` is
+    /// absent. A replaced element that exports only its CONTENT rect is
+    /// therefore compared against the wrong box, and reports its own border as
+    /// a layout defect. Both rects must be present and must differ when the
+    /// element has a border.
+    #[test]
+    fn a_replaced_element_exports_its_border_box_and_not_only_its_content_rect() {
+        use rustkit_css::ComputedStyle;
+
+        let mut image = LayoutBox::new(
+            BoxType::Image {
+                url: String::new(),
+                natural_width: 100.0,
+                natural_height: 100.0,
+            },
+            ComputedStyle::new(),
+        );
+        image.dimensions.content = Rect::new(11.0, 21.0, 100.0, 100.0);
+        image.dimensions.border.left = 1.0;
+        image.dimensions.border.right = 1.0;
+        image.dimensions.border.top = 1.0;
+        image.dimensions.border.bottom = 1.0;
+
+        let json = layout_box_to_json(&image);
+        assert_eq!(json["rect"]["width"], 100.0, "rect stays the content rect");
+        assert_eq!(json["content_rect"]["width"], 100.0);
+        assert_eq!(
+            json["border_box"]["width"], 102.0,
+            "image exported no border box, so the oracle would compare its \
+             content rect against Chrome's border box"
+        );
+        assert_eq!(json["border_box"]["x"], 10.0);
+        assert_eq!(json["border_box"]["y"], 20.0);
+        assert_eq!(json["margin_box"]["width"], 102.0);
+
+        let mut control = LayoutBox::new(
+            BoxType::FormControl(rustkit_layout::FormControlType::Button {
+                label: "Go".into(),
+                button_type: "button".into(),
+            }),
+            ComputedStyle::new(),
+        );
+        control.dimensions.content = Rect::new(5.0, 5.0, 40.0, 20.0);
+        control.dimensions.border.left = 2.0;
+        control.dimensions.border.right = 2.0;
+        let json = layout_box_to_json(&control);
+        assert_eq!(json["border_box"]["width"], 44.0);
+        assert_eq!(json["rect"]["width"], 40.0);
+    }
+
     /// `set_identity` is the only way in, so `element_id` and `identity` can
     /// never disagree — a box either joins or is excluded, never half of each.
     #[test]
