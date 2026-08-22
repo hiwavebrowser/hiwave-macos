@@ -8935,6 +8935,23 @@ mod tests {
         }
         collect(&layout, &mut found);
 
+        // An identity with an EMPTY selector is worse than none: it joins
+        // nothing, and the box is then reported as a phantom Chrome collapsed
+        // rather than excluded. Boxes above `body` have no Chrome-side path.
+        fn assert_no_empty_key(b: &LayoutBox) {
+            if let Some(identity) = b.identity() {
+                assert!(
+                    !identity.selector.is_empty(),
+                    "a box was stamped with an empty join key (tag {:?})",
+                    identity.tag
+                );
+            }
+            for c in &b.children {
+                assert_no_empty_key(c);
+            }
+        }
+        assert_no_empty_key(&layout);
+
         let tags: Vec<&str> = found.iter().map(|(t, _)| t.as_str()).collect();
         for expected in ["img", "input", "button", "select", "textarea"] {
             assert!(
@@ -10442,6 +10459,29 @@ mod element_identity_tests {
         let json = layout_box_to_json(&control);
         assert_eq!(json["border_box"]["width"], 44.0);
         assert_eq!(json["rect"]["width"], 40.0);
+    }
+
+    /// An empty selector path means "identity not tracked" — the box is above
+    /// or outside what Chrome's capture keys (html, head, foreign content).
+    /// Stamping it anyway produces an identity whose join key is the empty
+    /// string, which joins nothing and turns the box into a reported phantom
+    /// instead of an excluded one. It must also not consume an element id.
+    #[test]
+    fn an_untracked_path_stamps_no_identity_and_burns_no_id() {
+        use rustkit_css::ComputedStyle;
+
+        let ids = Cell::new(7);
+        let mut b = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        Engine::attach_identity(&mut b, "", &HashMap::new(), "html", &ids);
+        assert!(
+            b.identity().is_none(),
+            "a box with no Chrome-side path was stamped with a join key"
+        );
+        assert_eq!(ids.get(), 7, "an untracked box consumed an element id");
+
+        Engine::attach_identity(&mut b, "body > div", &HashMap::new(), "div", &ids);
+        assert_eq!(b.identity().map(|i| i.selector.clone()), Some("body > div".into()));
+        assert_eq!(ids.get(), 8);
     }
 
     /// `set_identity` is the only way in, so `element_id` and `identity` can
