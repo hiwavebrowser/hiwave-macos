@@ -628,9 +628,13 @@ jobs:
           fi
           RUNS=$(IFS=,; echo "${RUN_IDS[*]}")
           echo "Merging runs: $RUNS"
+          # E0a: stamp which engine produced this report, so a regression
+          # compare against an older artifact is visibly cross-engine.
           python3 scripts/parity_aggregate.py \
             --runs "$RUNS" \
             --results-root parity-results \
+            --engine-sha "${{ github.sha }}" \
+            --receipt-run "${{ github.run_id }}" \
             --output parity-results/nightly_aggregate.json
 
       - name: Gate check (nightly)
@@ -787,10 +791,20 @@ jobs:
           name: nightly-aggregate
           path: parity-results/previous/
           search_artifacts: true
-          workflow_conclusion: success
+          # E0 (2026-08-15): "success" self-locked the lane. Once one nightly
+          # failed its own regression check, every later nightly compared
+          # against the last green artifact (Aug-3 fossil, pre-#110 engine),
+          # failed the cross-engine compare, and so never became the new
+          # baseline. "completed" picks up the newest artifact regardless of
+          # that run's conclusion, so the comparison window moves again.
+          workflow_conclusion: completed
           if_no_artifact_found: ignore
 
       - name: Regression check
+        # E0: advisory — the ratchet gate is the only blocking layer. A red
+        # regression report must not red the workflow, or its artifact upload
+        # becomes the next fossil.
+        continue-on-error: true
         if: hashFiles('parity-results/previous/nightly_aggregate.json') != ''
         run: |
           python3 scripts/parity_aggregate.py \
