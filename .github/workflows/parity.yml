@@ -597,9 +597,13 @@ jobs:
           fi
           RUNS=$(IFS=,; echo "${RUN_IDS[*]}")
           echo "Merging runs: $RUNS"
+          # E0a: stamp which engine produced this report, so a regression
+          # compare against an older artifact is visibly cross-engine.
           python3 scripts/parity_aggregate.py \
             --runs "$RUNS" \
             --results-root parity-results \
+            --engine-sha "${{ github.sha }}" \
+            --receipt-run "${{ github.run_id }}" \
             --output parity-results/nightly_aggregate.json
 
       - name: Gate check (nightly)
