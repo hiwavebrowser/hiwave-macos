@@ -7460,6 +7460,32 @@ mod tests {
     }
 
     #[test]
+    fn the_horizontal_and_vertical_decorations_are_not_interchangeable() {
+        // Every other fixture here is symmetric, so a version of this code
+        // that took the border out of the wrong axis would pass all of them.
+        // 4px of horizontal border, 6px of vertical: `width: 150px` leaves a
+        // 146px content box and `height: 75px` a 69px one.
+        let mut style = ComputedStyle::new();
+        style.box_sizing = BoxSizing::BorderBox;
+        style.border_left_width = Length::Px(1.0);
+        style.border_right_width = Length::Px(3.0);
+        style.border_top_width = Length::Px(2.0);
+        style.border_bottom_width = Length::Px(4.0);
+        style.width = Length::Px(150.0);
+        style.height = Length::Px(75.0);
+        let mut layout_box = image_box(style);
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 146.0);
+        assert_eq!(layout_box.dimensions.content.height, 69.0);
+        assert_eq!(layout_box.dimensions.border_box().width, 150.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 75.0);
+        // …and the content box sits inside the LEFT/TOP border, not the mean.
+        // `containing_1000()` carries a 600px flow cursor, so y is 600 + 2.
+        assert_eq!(layout_box.dimensions.content.x, 1.0);
+        assert_eq!(layout_box.dimensions.content.y, 602.0);
+    }
+
+    #[test]
     fn a_content_box_image_keeps_its_border_outside_a_specified_size() {
         // The other half of the same rule: under the initial `content-box`,
         // `width: 150px` IS the content box and the border box is 152.
