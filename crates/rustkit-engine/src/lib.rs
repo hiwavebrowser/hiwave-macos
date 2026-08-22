@@ -1980,6 +1980,39 @@ impl Engine {
         segment
     }
 
+    /// Attach element identity so the geometry oracle can join this box to
+    /// Chrome's selector-keyed rects.
+    ///
+    /// One implementation for every box built from an element, because the
+    /// branches that build REPLACED and FORM-CONTROL boxes return before the
+    /// generic path and so carried no identity at all: every `<img>` and every
+    /// `<input>`/`<select>`/`<textarea>`/leaf `<button>` in the corpus reached
+    /// Gate A as a `missing_box` join failure and was never compared (measured
+    /// 2026-08-22 — all 14 of images-intrinsic's join failures are its images).
+    ///
+    /// Anonymous, text and pseudo-element boxes are built elsewhere and
+    /// correctly keep `identity: None`; the `Option` is what stops the oracle
+    /// pairing them positionally with real Chrome elements.
+    fn attach_identity(
+        layout_box: &mut LayoutBox,
+        selector_path: &str,
+        attributes: &HashMap<String, String>,
+        tag_lower: &str,
+        element_ids: &Cell<usize>,
+    ) {
+        if selector_path.is_empty() {
+            return;
+        }
+        let reported = Self::reported_selector(selector_path, attributes);
+        let next_id = element_ids.get() + 1;
+        element_ids.set(next_id);
+        layout_box.set_identity(ElementIdentity {
+            element_id: next_id,
+            tag: tag_lower.to_string(),
+            selector: reported,
+        });
+    }
+
     /// The selector Chrome REPORTS for an element, given its structural path.
     ///
     /// Chrome's `getSelector()` short-circuits to `#id` before walking the tree,
@@ -2265,7 +2298,7 @@ impl Engine {
                         },
                     };
 
-                    return LayoutBox::new(
+                    let mut b = LayoutBox::new(
                         BoxType::Image {
                             url: src,
                             natural_width,
@@ -2273,6 +2306,14 @@ impl Engine {
                         },
                         style,
                     );
+                    Self::attach_identity(
+                        &mut b,
+                        selector_path,
+                        attributes,
+                        &tag_lower,
+                        element_ids,
+                    );
+                    return b;
                 }
 
                 // Handle form controls
@@ -2324,6 +2365,13 @@ impl Engine {
                     // unit tests missed it by hand-building boxes; only the
                     // production path exercises this.
                     let mut b = LayoutBox::new(BoxType::FormControl(control), style);
+                    Self::attach_identity(
+                        &mut b,
+                        selector_path,
+                        attributes,
+                        &tag_lower,
+                        element_ids,
+                    );
                     b.node_id = Some(node.id.raw());
                     if self.building_focus.get() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
@@ -2358,13 +2406,21 @@ impl Engine {
                             .cloned()
                             .unwrap_or_else(|| "button".to_string());
 
-                        return LayoutBox::new(
+                        let mut b = LayoutBox::new(
                             BoxType::FormControl(rustkit_layout::FormControlType::Button {
                                 label,
                                 button_type,
                             }),
                             style,
                         );
+                        Self::attach_identity(
+                            &mut b,
+                            selector_path,
+                            attributes,
+                            &tag_lower,
+                            element_ids,
+                        );
+                        return b;
                     }
                     // Element children present: fall through to normal box
                     // construction so the children lay out inside the button.
@@ -2395,6 +2451,13 @@ impl Engine {
                             cols,
                         }),
                         style,
+                    );
+                    Self::attach_identity(
+                        &mut b,
+                        selector_path,
+                        attributes,
+                        &tag_lower,
+                        element_ids,
                     );
                     b.node_id = Some(node.id.raw());
                     if self.building_focus.get() == Some(node.id) {
@@ -2440,6 +2503,13 @@ impl Engine {
                         }),
                         style,
                     );
+                    Self::attach_identity(
+                        &mut b,
+                        selector_path,
+                        attributes,
+                        &tag_lower,
+                        element_ids,
+                    );
                     b.node_id = Some(node.id.raw());
                     if self.building_focus.get() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
@@ -2468,20 +2538,13 @@ impl Engine {
 
                 Self::transfer_positioning(&mut layout_box, &style);
 
-                // Attach element identity so the geometry oracle can join this
-                // box to Chrome's selector-keyed rects. Only ELEMENT boxes reach
-                // here; anonymous, text and pseudo-element boxes are built
-                // elsewhere and correctly keep `identity: None`.
-                if !selector_path.is_empty() {
-                    let reported = Self::reported_selector(selector_path, attributes);
-                    let next_id = element_ids.get() + 1;
-                    element_ids.set(next_id);
-                    layout_box.set_identity(ElementIdentity {
-                        element_id: next_id,
-                        tag: tag_lower.clone(),
-                        selector: reported,
-                    });
-                }
+                Self::attach_identity(
+                    &mut layout_box,
+                    selector_path,
+                    attributes,
+                    &tag_lower,
+                    element_ids,
+                );
 
                 // Every element box remembers which DOM node it came from.
                 // This is what lets a click resolve to an element (focus,
@@ -8529,6 +8592,15 @@ fn layout_box_to_json(layout_box: &LayoutBox) -> serde_json::Value {
     value
 }
 
+fn rect_to_json(rect: &rustkit_layout::Rect) -> serde_json::Value {
+    serde_json::json!({
+        "x": rect.x,
+        "y": rect.y,
+        "width": rect.width,
+        "height": rect.height,
+    })
+}
+
 fn layout_box_body_to_json(layout_box: &LayoutBox) -> serde_json::Value {
     let dims = &layout_box.dimensions;
     let content = &dims.content;
@@ -8552,6 +8624,13 @@ fn layout_box_body_to_json(layout_box: &LayoutBox) -> serde_json::Value {
                 }
             })
         }
+        // Replaced elements and form controls carry the four box-model rects
+        // like any other element box. `rect` (the CONTENT rect) stays for
+        // existing consumers, but it must not be the only rect: Chrome's
+        // baseline is `getBoundingClientRect`, i.e. the BORDER box, and the
+        // geometry oracle falls back to `rect` when `border_box` is absent —
+        // so a bordered image was set up to be compared content-box against
+        // border-box and to read a constant deficit as a layout defect.
         BoxType::Image {
             natural_width,
             natural_height,
@@ -8561,24 +8640,22 @@ fn layout_box_body_to_json(layout_box: &LayoutBox) -> serde_json::Value {
                 "type": "image",
                 "natural_width": natural_width,
                 "natural_height": natural_height,
-                "rect": {
-                    "x": content.x,
-                    "y": content.y,
-                    "width": content.width,
-                    "height": content.height
-                }
+                "rect": rect_to_json(content),
+                "content_rect": rect_to_json(content),
+                "padding_box": rect_to_json(&padding_box),
+                "border_box": rect_to_json(&border_box),
+                "margin_box": rect_to_json(&margin_box),
             })
         }
         BoxType::FormControl(ctrl) => {
             return serde_json::json!({
                 "type": "form_control",
                 "control_type": format!("{:?}", ctrl),
-                "rect": {
-                    "x": content.x,
-                    "y": content.y,
-                    "width": content.width,
-                    "height": content.height
-                }
+                "rect": rect_to_json(content),
+                "content_rect": rect_to_json(content),
+                "padding_box": rect_to_json(&padding_box),
+                "border_box": rect_to_json(&border_box),
+                "margin_box": rect_to_json(&margin_box),
             })
         }
     };
@@ -8769,6 +8846,109 @@ mod tests {
             "load_html left {} stylesheet(s) from the previous document on the view — \
              cross-document style leak",
             engine.views[&id].external_stylesheets.len()
+        );
+    }
+
+    /// An engine with nothing but what layout needs.
+    ///
+    /// `None` means this machine has no GPU adapter. Callers must NOT treat
+    /// that as a pass on a platform where an adapter is guaranteed — see
+    /// `a_replaced_element_is_built_with_its_element_identity`.
+    fn layout_only_engine() -> Option<Engine> {
+        let compositor = Compositor::new().ok()?;
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        Some(Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(
+                ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
+            ),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        })
+    }
+
+    /// Replaced elements and form controls are built by branches that return
+    /// BEFORE the general element path, so they carried no identity: every
+    /// `<img>` and `<input>` in the corpus reached the geometry oracle as a
+    /// `missing_box` join failure and was never compared at all.
+    ///
+    /// The export-side tests above did not catch it — they hand-set an
+    /// identity and asserted the JSON carries it, which it always did. Only
+    /// the production build path can say whether one is ever set.
+    ///
+    /// A GPU-less machine cannot build a layout tree, so this returns early
+    /// there rather than pretending. On macOS — the platform this campaign
+    /// measures, and the one the parity swarm runs on in CI — a missing
+    /// adapter FAILS: a guard that skips itself is not a pass.
+    #[test]
+    fn a_replaced_element_is_built_with_its_element_identity() {
+        let engine = match layout_only_engine() {
+            Some(engine) => engine,
+            None => {
+                if cfg!(target_os = "macos") {
+                    panic!(
+                        "no GPU adapter on a macOS runner — this guard cannot \
+                         report a pass without building a layout tree"
+                    );
+                }
+                return;
+            }
+        };
+
+        let html = r#"<!DOCTYPE html><html><body>
+            <div class="container">
+              <img class="test-img" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">
+            </div>
+            <input type="text" name="q">
+            <button>Go</button>
+            <select><option>a</option></select>
+            <textarea>t</textarea>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        let mut found: Vec<(String, String)> = Vec::new();
+        fn collect(b: &LayoutBox, out: &mut Vec<(String, String)>) {
+            if matches!(
+                b.box_type,
+                BoxType::Image { .. } | BoxType::FormControl(_)
+            ) {
+                let identity = b
+                    .identity()
+                    .unwrap_or_else(|| panic!("replaced/form-control box built with no identity — the geometry oracle cannot join it"));
+                out.push((identity.tag.clone(), identity.selector.clone()));
+            }
+            for c in &b.children {
+                collect(c, out);
+            }
+        }
+        collect(&layout, &mut found);
+
+        let tags: Vec<&str> = found.iter().map(|(t, _)| t.as_str()).collect();
+        for expected in ["img", "input", "button", "select", "textarea"] {
+            assert!(
+                tags.contains(&expected),
+                "<{expected}> produced no identified box; found {found:?}"
+            );
+        }
+        let img = found
+            .iter()
+            .find(|(t, _)| t == "img")
+            .expect("img identity");
+        assert_eq!(
+            img.1, "body > div.container > img.test-img",
+            "the image's join key must be the selector Chrome's capture reports"
         );
     }
 
