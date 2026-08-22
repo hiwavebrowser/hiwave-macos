@@ -1772,6 +1772,22 @@ pub enum WordBreak {
     BreakWord,
 }
 
+/// Overflow-wrap behavior (CSS Text 3 §5.5).
+///
+/// Distinct from [`WordBreak`]: `word-break` changes where soft wrap
+/// opportunities exist in normal text, while `overflow-wrap` only adds
+/// last-resort opportunities for words that would otherwise overflow.
+/// `line-break: anywhere` also lands here — it is the strictness axis, but
+/// `anywhere` has the same "break between any two characters" effect that
+/// the line breaker already implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OverflowWrap {
+    #[default]
+    Normal,
+    BreakWord,
+    Anywhere,
+}
+
 /// Vertical alignment.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum VerticalAlign {
@@ -2089,6 +2105,7 @@ pub struct ComputedStyle {
     pub text_transform: TextTransform,
     pub white_space: WhiteSpace,
     pub word_break: WordBreak,
+    pub overflow_wrap: OverflowWrap,
     pub vertical_align: VerticalAlign,
     pub writing_mode: WritingMode,
     pub direction: Direction,
@@ -2255,6 +2272,7 @@ impl ComputedStyle {
             text_transform: parent.text_transform,
             white_space: parent.white_space,
             word_break: parent.word_break,
+            overflow_wrap: parent.overflow_wrap,
             direction: parent.direction,
             writing_mode: parent.writing_mode,
 

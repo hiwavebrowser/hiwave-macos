@@ -2707,6 +2707,7 @@ impl Engine {
                         // nowrap/pre parent's text still wrapped (shelf bug).
                         s.white_space = parent.white_space;
                         s.word_break = parent.word_break;
+                        s.overflow_wrap = parent.overflow_wrap;
                         s.font_stretch = parent.font_stretch;
                         // NOT CSS inheritance — feature plumbing: gradient
                         // text (background-clip:text + transparent fill) is
@@ -3226,6 +3227,9 @@ impl Engine {
         let recording = self.style_trace.borrow().is_some();
         let mut records: Vec<DeclarationRecord> = Vec::new();
         let mut order = 0usize;
+        // `ch` resolves against this element's own font, which is not final
+        // until the whole cascade has run — collect, then replay below.
+        let mut ch_pending = ChPending::default();
 
         // Apply matching rules in order
         for (rule, specificity, _) in matching_rules {
@@ -3245,6 +3249,7 @@ impl Engine {
                         "Resolved CSS variable"
                     );
                 }
+                ch_pending.note(&decl.property, &resolved_value);
                 self.apply_style_property(&mut style, &decl.property, &resolved_value);
                 if recording {
                     records.push(DeclarationRecord {
@@ -3263,11 +3268,15 @@ impl Engine {
 
         // Parse inline style attribute if present (highest specificity)
         if let Some(style_attr) = attributes.get("style") {
-            self.apply_inline_style(&mut style, style_attr, css_vars);
+            self.apply_inline_style(&mut style, style_attr, css_vars, &mut ch_pending);
             if recording {
                 self.record_inline_style(style_attr, css_vars, &mut records, &mut order);
             }
         }
+
+        // The font is final now; `ch` lengths that the cascade dropped for
+        // want of a font can finally be applied.
+        self.resolve_ch_lengths(&mut style, &ch_pending);
 
         if recording {
             let id = attributes.get("id").cloned();
@@ -3393,6 +3402,7 @@ impl Engine {
         style: &mut ComputedStyle,
         style_attr: &str,
         css_vars: &HashMap<String, String>,
+        ch_pending: &mut ChPending,
     ) {
         for declaration in style_attr.split(';') {
             let declaration = declaration.trim();
@@ -3404,8 +3414,38 @@ impl Engine {
                 let value = value.trim();
                 // Resolve CSS variables in the value
                 let resolved_value = self.resolve_css_variables(value, css_vars);
+                ch_pending.note(&property, &resolved_value);
                 self.apply_style_property(style, &property, &resolved_value);
             }
+        }
+    }
+
+    /// Re-apply the cascade's `ch`-bearing winners now that the font is known.
+    ///
+    /// CSS Values 3 §5.1.1: `1ch` is the advance of the "0" glyph in the
+    /// ELEMENT'S OWN font, so it cannot be resolved while declarations are
+    /// still being applied — font-family and font-size may not have landed
+    /// yet. `parse_length` has no font context, returns None for "1ch", and
+    /// the caller's `if let Some(length)` then drops the ENTIRE declaration
+    /// on the floor: `width: 1ch` silently computed to `auto`.
+    ///
+    /// So resolve it in a second pass over the winners only, substituting
+    /// `<n>ch` -> `<n * advance>px` and re-applying through the same funnel,
+    /// which makes every length property support `ch` at once rather than
+    /// one arm at a time.
+    ///
+    /// Ledgered limitation: the winner is tracked per property NAME, so a
+    /// `margin: 1ch` followed by a later `margin-left: 2px` re-applies the
+    /// shorthand and clobbers the longhand. Both are dropped entirely today,
+    /// so this is strictly less wrong — but it is not the cascade.
+    fn resolve_ch_lengths(&self, style: &mut ComputedStyle, ch_pending: &ChPending) {
+        if ch_pending.is_empty() {
+            return;
+        }
+        let advance = ch_advance_px(style);
+        for (property, value) in ch_pending.winners() {
+            let substituted = substitute_ch_units(value, advance);
+            self.apply_style_property(style, property, &substituted);
         }
     }
 
@@ -4154,6 +4194,47 @@ impl Engine {
                     "pre-line" => rustkit_css::WhiteSpace::PreLine,
                     _ => rustkit_css::WhiteSpace::Normal,
                 };
+            }
+            // `word-break` had a full implementation and no producer: the
+            // enum, the ComputedStyle field, the CSS->LineBreaker conversion
+            // in rustkit-layout and the break-all algorithm in rustkit-text
+            // all existed, but no declaration ever set the field, so it was
+            // permanently Normal (inherited from a root that never changed).
+            // CSS Text 3 §5.2.
+            "word-break" => {
+                style.word_break = match value.trim().to_lowercase().as_str() {
+                    "break-all" => rustkit_css::WordBreak::BreakAll,
+                    "keep-all" => rustkit_css::WordBreak::KeepAll,
+                    // Legacy alias, per §5.2's note: behaves like
+                    // overflow-wrap: anywhere for line breaking, but must
+                    // survive a later `overflow-wrap` declaration (WPT
+                    // word-break-break-word-overflow-wrap-interactions), so
+                    // it computes as its own word-break value instead of
+                    // writing overflow_wrap.
+                    "break-word" => rustkit_css::WordBreak::BreakWord,
+                    _ => rustkit_css::WordBreak::Normal,
+                };
+            }
+            // `overflow-wrap` (and its `word-wrap` legacy alias) had no
+            // computed-style representation at all before this. CSS Text 3
+            // §5.5.
+            "overflow-wrap" | "word-wrap" => {
+                style.overflow_wrap = match value.trim().to_lowercase().as_str() {
+                    "break-word" => rustkit_css::OverflowWrap::BreakWord,
+                    "anywhere" => rustkit_css::OverflowWrap::Anywhere,
+                    _ => rustkit_css::OverflowWrap::Normal,
+                };
+            }
+            // `line-break` is the strictness axis (CSS Text 3 §5.3). Only
+            // `anywhere` changes where opportunities exist in a way the line
+            // breaker models today, and its effect — a soft wrap opportunity
+            // around every typographic character unit — is what
+            // OverflowWrap::Anywhere already implements. loose/normal/strict
+            // are deliberately no-ops rather than fake distinctions.
+            "line-break" => {
+                if value.trim().eq_ignore_ascii_case("anywhere") {
+                    style.overflow_wrap = rustkit_css::OverflowWrap::Anywhere;
+                }
             }
             "border-top-width" => {
                 if let Some(length) = parse_length(value) {
@@ -7865,6 +7946,135 @@ fn parse_length(value: &str) -> Option<rustkit_css::Length> {
     rustkit_css::parse_length(value)
 }
 
+/// The `ch`-bearing declarations that won their property in the cascade.
+///
+/// Recorded during style application and replayed by `resolve_ch_lengths`
+/// once the element's font is final. A later non-`ch` declaration for the
+/// same property REMOVES the entry — otherwise `width: 5ch; width: 100px`
+/// would replay the loser and undo the winner.
+#[derive(Default)]
+pub(crate) struct ChPending {
+    /// (property, value) in application order; at most one entry per property.
+    entries: Vec<(String, String)>,
+}
+
+impl ChPending {
+    fn note(&mut self, property: &str, value: &str) {
+        self.entries.retain(|(p, _)| p != property);
+        if has_ch_unit(value) {
+            self.entries.push((property.to_string(), value.to_string()));
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn winners(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.entries.iter().map(|(p, v)| (p.as_str(), v.as_str()))
+    }
+}
+
+/// Does this value contain a `<number>ch` token?
+///
+/// Deliberately narrow: only a `ch` immediately after a digit-ish run and not
+/// glued to more letters, so identifiers and functions that merely contain the
+/// letters (`inch`, `search`, a font named "Chalkboard") never trip it.
+fn has_ch_unit(value: &str) -> bool {
+    ch_unit_spans(value).next().is_some()
+}
+
+/// Byte spans of `<number>ch` tokens, as (start, end, numeric value).
+fn ch_unit_spans(value: &str) -> impl Iterator<Item = (usize, usize, f32)> + '_ {
+    let bytes = value.as_bytes();
+    let mut i = 0usize;
+    std::iter::from_fn(move || {
+        while i < bytes.len() {
+            let start = i;
+            // A number: optional sign, digits with at most one dot.
+            let mut j = i;
+            if bytes[j] == b'-' || bytes[j] == b'+' {
+                j += 1;
+            }
+            let digits_start = j;
+            let mut saw_dot = false;
+            while j < bytes.len()
+                && (bytes[j].is_ascii_digit() || (bytes[j] == b'.' && !saw_dot))
+            {
+                saw_dot |= bytes[j] == b'.';
+                j += 1;
+            }
+            if j == digits_start {
+                i += 1;
+                continue;
+            }
+            // Preceded by an identifier character? Then this is not a length.
+            if start > 0 {
+                let prev = bytes[start - 1];
+                if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'-' {
+                    i = j.max(start + 1);
+                    continue;
+                }
+            }
+            let unit_start = j;
+            if bytes[j..].starts_with(b"ch") || bytes[j..].starts_with(b"CH") {
+                let after = unit_start + 2;
+                let glued = after < bytes.len()
+                    && (bytes[after].is_ascii_alphanumeric()
+                        || bytes[after] == b'_'
+                        || bytes[after] == b'-'
+                        || bytes[after] == b'%');
+                if !glued {
+                    if let Ok(num) = value[start..unit_start].parse::<f32>() {
+                        i = after;
+                        return Some((start, after, num));
+                    }
+                }
+            }
+            i = j.max(start + 1);
+        }
+        None
+    })
+}
+
+/// Rewrite every `<n>ch` token in `value` as the equivalent px length.
+fn substitute_ch_units(value: &str, advance: f32) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut last = 0usize;
+    for (start, end, num) in ch_unit_spans(value) {
+        out.push_str(&value[last..start]);
+        out.push_str(&format!("{}px", num * advance));
+        last = end;
+    }
+    out.push_str(&value[last..]);
+    out
+}
+
+/// The advance width of "0" in this style's font (CSS Values 3 §5.1.1).
+///
+/// The spec's fallback when the font has no "0" glyph is 0.5em; we use the
+/// same fallback if measurement returns nothing, so a missing font degrades
+/// to a defined value instead of collapsing the length to zero.
+fn ch_advance_px(style: &ComputedStyle) -> f32 {
+    let font_size = match style.font_size {
+        rustkit_css::Length::Px(px) => px,
+        _ => 16.0,
+    };
+    let measured = rustkit_layout::measure_text_advanced(
+        "0",
+        &style.font_family,
+        font_size,
+        style.font_weight,
+        style.font_style,
+    )
+    .width;
+    if measured > 0.0 {
+        measured
+    } else {
+        font_size * 0.5
+    }
+}
+
 
 /// Parse a shorthand value with 1-4 parts (like margin, padding).
 /// Returns (top, right, bottom, left).
@@ -9407,6 +9617,215 @@ mod tests {
             *border_width < 100.0,
             "inline ruby must not fill the containing block: width {}",
             border_width
+        );
+    }
+
+    #[test]
+    fn test_ch_unit_tokenizer_is_narrow() {
+        // The substitution must fire on lengths and nothing else — a font
+        // name or an identifier that merely contains "ch" is not a length.
+        assert!(has_ch_unit("1ch"));
+        assert!(has_ch_unit("margin-right: 5ch"));
+        assert!(has_ch_unit("calc(2.5ch + 1px)"));
+        assert!(!has_ch_unit("1em"));
+        assert!(!has_ch_unit("Chalkboard"));
+        assert!(!has_ch_unit("2chx"));
+        assert!(!has_ch_unit("var(--x1ch)"));
+
+        // 1ch at an 8px advance.
+        assert_eq!(substitute_ch_units("1ch", 8.0), "8px");
+        assert_eq!(substitute_ch_units("0 5ch", 9.6), "0 48px");
+        assert_eq!(substitute_ch_units("10px", 8.0), "10px");
+    }
+
+    #[test]
+    fn test_word_break_and_line_break_reach_the_line_breaker() {
+        // `word-break` was a consumer with no producer: the enum, the
+        // ComputedStyle field, the CSS->LineBreaker conversion in
+        // rustkit-layout and the break-all algorithm in rustkit-text all
+        // existed and were unit-tested, but no declaration ever assigned the
+        // field — so it was permanently Normal. `overflow-wrap` / `line-break`
+        // had no computed representation at all and LineBreaker's
+        // OverflowWrap was hardcoded Normal.
+        //
+        // Drive the real engine: one long unbreakable word in a narrow block.
+        // Under `normal` there is no soft wrap opportunity, so it stays on one
+        // line; under break-all / anywhere / break-word it must wrap. Chrome
+        // FILLS each line before breaking, so the 34-char word in a 40px box
+        // at a ~8-10px monospace advance yields roughly 7-9 lines. Asserting
+        // only "taller" cannot fail for the right reason — one-char-per-line
+        // (34 lines) is maximally taller — so the test also asserts a line-
+        // count ceiling via the height ratio (normal == exactly one line).
+        let case = |decl: &str| -> f32 {
+            let html = format!(
+                r#"<!DOCTYPE html>
+                <html><body>
+                  <div id="probe" style="width: 40px; font-family: monospace; font-size: 16px; {decl}">Supercalifragilisticexpialidocious</div>
+                </body></html>"#
+            );
+            let document = Rc::new(Document::parse_html(&html).expect("Failed to parse HTML"));
+            let compositor = Compositor::new().expect("compositor");
+            let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let engine = Engine {
+                config: EngineConfig::default(),
+                views: HashMap::new(),
+                font_loader: Arc::new(FontLoader::new()),
+                viewhost: ViewHost::new(),
+                compositor,
+                renderer: None,
+                loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+                image_manager: Arc::new(ImageManager::new()),
+                event_tx,
+                event_rx: Some(event_rx),
+                style_trace: std::cell::RefCell::new(None),
+                render_failing: std::collections::HashSet::new(),
+                svg_cache: std::collections::HashMap::new(),
+                building_focus: std::cell::Cell::new(None),
+                building_view: std::cell::Cell::new(None),
+            };
+            let mut layout = engine.build_layout_from_document(&document, &[]);
+            let containing_block = Dimensions {
+                content: Rect::new(0.0, 0.0, 800.0, 600.0),
+                ..Default::default()
+            };
+            layout.layout(&containing_block);
+
+            fn tallest_40px_box(b: &LayoutBox, out: &mut f32) {
+                if (b.dimensions.content.width - 40.0).abs() < 0.5 {
+                    *out = out.max(b.dimensions.content.height);
+                }
+                for c in &b.children {
+                    tallest_40px_box(c, out);
+                }
+            }
+            let mut h = 0.0f32;
+            tallest_40px_box(&layout, &mut h);
+            h
+        };
+
+        if Compositor::new().is_err() {
+            eprintln!("Skipping test: GPU not available");
+            return;
+        }
+
+        let normal = case("");
+        assert!(
+            normal > 0.0,
+            "setup failed: no 40px-wide box was found, so this test cannot detect anything"
+        );
+        for decl in [
+            "word-break: break-all;",
+            "line-break: anywhere;",
+            "overflow-wrap: anywhere;",
+            "overflow-wrap: break-word;",
+            "word-wrap: break-word;",
+        ] {
+            let wrapped = case(decl);
+            assert!(
+                wrapped > normal,
+                "`{decl}` did not wrap the word: height {wrapped} vs normal {normal} — \
+                 the property never reached the line breaker"
+            );
+            // normal is exactly one line, so wrapped/normal is the line count.
+            // 34 chars / 40px: filling the line gives <= 12 lines even at a
+            // 12px advance; one-grapheme-per-line gives 34. The ceiling is
+            // what distinguishes "wraps like Chrome" from "wraps maximally".
+            let lines = wrapped / normal;
+            assert!(
+                (4.0..=12.0).contains(&lines),
+                "`{decl}` wrapped to {lines:.1} lines (height {wrapped} vs line \
+                 height {normal}) — expected ~7-9: >12 means the emergency arm \
+                 is breaking after one grapheme instead of filling the line, \
+                 <4 means the 40px width is not being respected"
+            );
+        }
+
+        // keep-all must NOT introduce opportunities in a word that has none.
+        assert_eq!(
+            case("word-break: keep-all;"),
+            normal,
+            "word-break: keep-all changed wrapping of an unbreakable word"
+        );
+    }
+
+    #[test]
+    fn test_ch_width_resolves_against_the_zero_glyph() {
+        // CSS Values 3 §5.1.1. parse_length has no font context and returns
+        // None for "1ch", so `if let Some(length)` dropped the declaration
+        // whole: `width: 1ch` computed to auto and the box filled its
+        // container. WPT css-text/line-break/line-break-anywhere-001 styles
+        // #test `width: 1ch` and hides it under a 1ch green box — with the
+        // width dropped, the text ran on one full-width line and the red
+        // showed. Drive the real engine: the box must be about one "0" wide,
+        // not the containing block.
+        let html = r#"<!DOCTYPE html>
+            <html><body>
+              <div id="probe" style="width: 1ch; font-family: monospace; font-size: 16px;">x</div>
+            </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        };
+
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        let containing_block = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        layout.layout(&containing_block);
+
+        // The expected width is whatever this platform's monospace "0"
+        // advances — assert against the same measurement the engine uses, so
+        // the test states the RULE and not a font-specific pixel count.
+        let expected = rustkit_layout::measure_text_advanced(
+            "0",
+            "monospace",
+            16.0,
+            rustkit_css::FontWeight::NORMAL,
+            rustkit_css::FontStyle::Normal,
+        )
+        .width;
+        assert!(
+            expected > 0.0,
+            "setup failed: monospace \"0\" measured 0px, so this test cannot detect anything"
+        );
+
+        fn widths(b: &LayoutBox, out: &mut Vec<f32>) {
+            if matches!(b.style.width, rustkit_css::Length::Px(_)) {
+                out.push(b.dimensions.content.width);
+            }
+            for c in &b.children {
+                widths(c, out);
+            }
+        }
+        let mut found = Vec::new();
+        widths(&layout, &mut found);
+        assert!(
+            found.iter().any(|w| (w - expected).abs() < 0.5),
+            "no box is one ch ({expected}px) wide — ch was dropped again; widths {found:?}"
         );
     }
 
