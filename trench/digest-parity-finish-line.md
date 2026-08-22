@@ -3387,3 +3387,238 @@ non-gating board prints, and it prints fewer.
   which I would not have found if I had trusted the grep.
 - **Measuring cost two rebuilds and about twenty minutes.** Every night since 14
   has aimed with a number that could have been checked this cheaply.
+
+## 2026-08-22
+
+**Metric: 1/26 → 1/26.** `bg-pure` is the green case before and after, and no
+case moved in either direction. What changed is how much of the corpus the
+geometry oracle can see at all: **join failures 115 → 20, boxes compared 1478 →
+1581**. No macOS run tonight; the numbers below are Linux/SwiftShader and are
+mechanics, not a receipt.
+
+**P-item: the geometry-first queue (ratified 2026-08-12), aimed at night 18's
+readable board. NOT complete.** I took its cleanest entry — the natural-size
+image border — landed it, and then found the reason it had survived twelve
+nights: **the geometry oracle has never compared a single `<img>`, `<input>`,
+`<select>`, `<textarea>` or leaf `<button>` in the corpus.** They carried no
+join key, so all of them arrived as `missing_box` and were counted as join
+failures rather than as geometry.
+
+### The first fix, and why it measured nothing
+
+`layout_image` left margin/border/padding at zero, so an image's `border_box()`
+WAS its content box. images-intrinsic test1 — 100x100 natural, `border: 1px
+solid red`, no specified size — measures 100 where Chrome builds 102.
+
+The eleven sized tests on that page are why nobody caught it. Under the
+corpus's `* { box-sizing: border-box }` a specified size IS the border box, so
+a renderer that ignores the border entirely and one that subtracts it agree on
+every box except the `auto` one. Both halves of css-sizing-3 §3.1 land
+together: a specified `width`/`height`/`max-*` converts to a content size, and
+an absent one stays absent and takes the intrinsic size with the decoration
+outside it.
+
+I built it, captured all 26 cases, ran Gate A — and **every oracle was
+byte-identical**. The image boxes are not in the comparison.
+
+### What the join actually was
+
+```
+images-intrinsic:  40 Chrome boxes, 26 compared, 14 join failures
+                   — all 14 are its own twelve tests' images
+whole board:      115 join failures before, 20 after
+                   compared 1478 → 1581 (+103 boxes)
+```
+
+The box-building branches for replaced elements and form controls `return`
+before the general element path, so `set_identity` was never called on them.
+P0a-0's tests could not have caught this and did not:
+`export_emits_identity_for_image_and_form_control_boxes` hand-sets an identity
+and asserts the export carries it — which it always did — and
+`every_chrome_baseline_selector_is_reproduced_on_the_real_corpus` walks the DOM
+with the selector helpers, which proves the key is COMPUTABLE, not that the
+builder ever attaches one. Between them they read as full coverage of "images
+join", and neither touches the production path.
+
+The export half was set up the same way. Image and form-control nodes emitted
+only `rect` — the CONTENT rect — while Chrome's baseline is
+`getBoundingClientRect` and Gate A falls back to `rect` when `border_box` is
+absent. A bordered image was arranged to be compared content-box against
+border-box and to read its own border as a layout defect. They now emit all
+four box-model rects; `rect` stays for existing consumers.
+
+### Measured — Linux/SwiftShader, 26 gating cases, 3 iterations. NOT A RECEIPT
+
+Three builds, so the two changes are separately attributable:
+
+| Oracle | develop | +join key | +border box |
+|---|---|---|---|
+| Gate A geometry failures | 2521 | 2768 | **2766** |
+| Gate A join failures | 115 | 20 | 20 |
+| Gate A boxes compared | 1478 | 1581 | 1581 |
+| Gate A green | 2/26 | 2/26 | 2/26 |
+| Gate B paint-green | 1/26 | 1/26 | 1/26 |
+| Gate B discrete failures | 0 | 0 | 0 |
+| Gate B mean within tolerance | 83.59899% | 83.59899% | **83.54594%** |
+| N/26 | 1/26 | 1/26 | 1/26 |
+
+**The join key moved no box that was already being compared.** All 2521
+pre-existing failing axes are identical to the digit; the 247 new failures are
+exactly the newly-joinable tags (`img`, `input`, `button`, `select`,
+`textarea`, and id'd controls). It is a jurisdiction change, not a layout one,
+and the geometry count rising by 247 is 247 defects becoming visible rather
+than 247 defects being introduced.
+
+Per case, join failures: form-controls 30→4, settings 31→8, form-elements
+17→1, images-intrinsic 14→0, flex-positioning 7→0, css-selectors 5→0,
+shelf 4→2, sticky-scroll 1→0, new_tab 1→0.
+
+### The stop rule, and my reading of it
+
+The border-box fix is the half that has to be argued for, because it makes
+numbers worse:
+
+```
+images-intrinsic  axes fixed          2   (test1 width and height, exactly 102)
+                  axes newly failing  0
+                  axes worsened      41
+                  paint within tolerance  71.27259% -> 69.89321%
+every other case  bit-identical on both oracles
+```
+
+The rule as written fires on *"a change that improves the metric while any
+oracle regresses"*. The metric did not improve — `N/26` is 1/26 either way —
+and the trade here runs the other way: correctness up, two numbers down. So I
+did not auto-revert, and here is the evidence rather than the argument:
+
+- **The 41 are one mechanism.** With the fix in, all twelve `.container` boxes
+  on that page carry the *same* residual height error, `+1.1199951171875`, to
+  the digit. Before it they carried `-0.88`. The container is 24px decoration +
+  102px image + the line strut; Chrome's strut is 6.00 and this seat's is 7.12.
+  The fix replaced a pair of cancelling errors with a single one.
+- **That residual is font, and it is measured, not assumed.** Perturbing the
+  stub descent 0.21 → 0.31 and re-capturing moves the container 133.12 →
+  133.92. It is P4's quantity, on a seat with no CoreText.
+- **Chrome agrees with the new number on the box the rule is about**, and the
+  eleven sized tests still match exactly.
+- **The `y` cascade below test1 is +2 per box on a staircase that already
+  reads +23 to +35** — the pre-existing part is the font error the probe just
+  demonstrated.
+
+So this is plan §1 in miniature: an accidental match removed, and the
+percentage preferring the broken version. It is also the third night in a row
+(08-10, 08-11, tonight) where that call has been made by an agent rather than
+by Pete, which is decision 1.
+
+Two facts that argue against me, stated because the rule exists so I cannot
+quietly not state them: the paint half of one case really is worse, and
+reverting is cheap — one commit on an unmerged branch.
+
+### Two defects this exposed, both left alone deliberately
+
+- **`aspect-ratio` never reaches a replaced element.** `style.aspect_ratio` is
+  parsed and is consulted only on the block-height path, so images-intrinsic
+  test11 (`width: 160px; aspect-ratio: 16/9`) builds 160x160 where Chrome
+  builds 160x90.
+- **A flex item's image ignores its own aspect ratio.** test12's three
+  `width: 80px` images build 80x102 where Chrome builds 80x80 — the width
+  applies, the height stays natural. 3 of tonight's 41 worsened axes are this,
+  and they are +2 rather than a new failure.
+
+Both are inside the same function I touched and both are one more unit of
+work; neither is landed, because landing three replaced-element rules in one
+night makes none of them attributable.
+
+### And a class the oracle could not see until tonight
+
+8 `phantom_box` failures appeared — RustKit sizing a box Chrome collapsed to
+zero. All 8 are hidden checkbox inputs behind styled toggles (`#shieldEnabled`,
+`#analyticsEnabled` and six more on settings; one on form-elements). Nothing
+about them changed tonight; they became visible.
+
+### Commits
+
+Engine, on `atlas/replaced-border-box` (cut from `develop`, per branch law —
+NOT stacked on the four-deep P2 stack, since this defect is independent of it):
+
+- `e95f24b` — a replaced element carries its own box decoration.
+- `b2ad86e` — replaced elements and form controls carry a join key, and export
+  their border box.
+- `00fcefb` — guard the axis and the exported border box.
+- `8671ada` — close the sweep's survivor.
+
+Nothing landed on `atlas/trench-parity-finish-line` except this digest.
+
+### Mutation-check results
+
+**12 probes: 11/12 RED, then 12/12 after closing the survivor. Control green
+before and after, committed before mutating.**
+
+| Mutation | Result |
+|---|---|
+| M1 box-sizing ignored: a specified size is always the content box | RED |
+| M2 an auto (absent) size is reduced by the decoration too | RED |
+| M3 the negative content box is not floored at zero | RED |
+| M4 `layout_image` resolves no border at all (the original defect) | RED |
+| M5 the vertical decoration is taken out of the width | RED |
+| M6 max-width keeps naming the content box under border-box | RED |
+| M7 the content box is not offset by its own decoration | RED |
+| M8 the image branch stops attaching identity | RED |
+| M9 the `<input>` branch stops attaching identity | RED |
+| M10 image nodes export only their content rect | RED |
+| M11 `border_box` is exported as the content rect | RED |
+| M12 `attach_identity` stamps boxes with no selector path | RED *(survivor, closed)* |
+
+**M5 would have survived on the fixtures I wrote first.** Every replaced-element
+fixture in the file is symmetric — 1px borders all round — so taking the border
+out of the wrong axis passes all of them. One asymmetric fixture (4px
+horizontal, 6px vertical) is what drives it. Ninth sweep running whose gap is
+the same shape.
+
+**M12 survived, and my first fix for it was decoration.** I added a tree-walk
+asserting no box carries an empty join key; it stayed green, because every
+fixture reaches the builder through `body` and no box in them has an empty path
+at all. The guard now asserts the rule on `attach_identity` directly — no
+stamp, and no element id consumed.
+
+**My harness called all twelve DID-NOT-COMPILE on the first run**, because it
+looked for `error: ` in cargo's output and `cargo test` prints `error: test
+failed` for a *failing test*. It failed safe — nothing was counted as caught —
+but it is the fourth distinct way a mutation harness on this branch has lied,
+after the false RED, the SyntaxError sweep and the stale `__pycache__`.
+
+### Decisions needed from Pete
+
+1. **The stop rule needs its wording settled**: tonight's change improves
+   correctness while one case's paint drops 1.4 points and 41 axes' magnitudes
+   grow, with the residual measured to be a single font quantity — keep it (my
+   reading, since the rule guards the opposite trade), or is any oracle
+   regression a revert regardless of direction? This also settles 08-10's
+   `sticky-scroll` question, open for twelve nights.
+2. **The engine stack is now five branches with no PR** — the four-deep P2
+   stack plus tonight's independent `atlas/replaced-border-box`; open the P2 PR
+   now? (Eighth night of asking.)
+3. None beyond those two.
+
+### Surprises
+
+- **Twelve nights of "images-intrinsic geometry" numbers never contained an
+  image.** Its board read 37 geometry failures and 14 join failures; the 14
+  were every image on the page, and `img` never appeared in a geometry receipt
+  because a `missing_box` prints no axis and no delta. Night 18's readable
+  board listed `img.test-img · width · 102 · 100 · -2.00` as one of four
+  findings — that line describes a box the gate had refused to compare, and the
+  actual value in it did not come from the join.
+- **The 115 join failures have been the same number on every platform since
+  night 5, and they were mostly this.** Two nights recorded that a figure
+  identical across SwiftShader and macOS "is not noise". It was not noise, and
+  the mechanism was one `return` too early, five times.
+- **Making the instrument honest made every headline number worse**, which is
+  the second time this campaign has had to write that sentence (night 8's
+  discrete column, 18/26 green meaning almost nothing). Geometry failures
+  +245 and not one of them is new.
+- **A guard can be green because its fixture cannot reach the code.** Both of
+  tonight's survivors are that, one on the empty-path branch and one on the
+  axis. The checklist item from night 17 — *ask which line of the change no
+  assertion would miss* — would have caught M5 and would NOT have caught M12,
+  because I did write an assertion for it and the assertion could not run.
