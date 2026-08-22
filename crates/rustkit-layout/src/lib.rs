@@ -130,6 +130,34 @@ pub fn resolve_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
     }
 }
 
+/// Convert a specified size on a replaced element to a CONTENT size.
+///
+/// css-sizing-3 §3.1: under `box-sizing: border-box` a specified `width`,
+/// `height`, `max-width` or `max-height` names the BORDER box, so the
+/// element's own border and padding come out of it; under `content-box` (the
+/// initial value) it names the content box already. `None` — an `auto` size —
+/// stays `None`: the intrinsic size is a content size in both modes, and the
+/// decoration adds OUTSIDE it. That asymmetry is the whole defect this
+/// function exists for; a border-box image at its natural size is 102px wide
+/// where a border-box image at `width: 102px` has a 100px content box.
+///
+/// A free function rather than a method so the arithmetic is testable without
+/// a `LayoutBox`, and so that `layout_image` calling it is the only wiring a
+/// mutation has to break.
+pub fn replaced_content_size(
+    specified: Option<f32>,
+    decoration: f32,
+    border_box_sizing: bool,
+) -> Option<f32> {
+    specified.map(|size| {
+        if border_box_sizing {
+            (size - decoration).max(0.0)
+        } else {
+            size
+        }
+    })
+}
+
 /// CSS position property values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Position {
@@ -1440,18 +1468,64 @@ impl LayoutBox {
         natural_height: f32,
         containing_block: &Dimensions,
     ) {
-        // Calculate explicit dimensions from style
-        let explicit_width = match self.style.width {
-            Length::Px(px) => Some(px),
-            Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.width),
-            _ => None,
-        };
+        // A replaced element carries its own box decoration. Until 2026-08-22
+        // this function left margin/border/padding at zero, so `border_box()`
+        // WAS the content box and an image at its natural size never gained
+        // its border: images-intrinsic test1 (100x100 natural,
+        // `border: 1px solid red`) measured 100 where Chrome builds 102.
+        // The eleven sized tests on that page hid it — under the corpus's
+        // `box-sizing: border-box` a specified size IS the border box, so a
+        // renderer that ignores the border and one that subtracts it agree
+        // on every box except the `auto` one.
+        let cb_width = containing_block.content.width;
+        {
+            let d = &mut self.dimensions;
+            d.margin.left = self.style.margin_left.to_px(16.0, 16.0, cb_width);
+            d.margin.right = self.style.margin_right.to_px(16.0, 16.0, cb_width);
+            d.margin.top = self.style.margin_top.to_px(16.0, 16.0, cb_width);
+            d.margin.bottom = self.style.margin_bottom.to_px(16.0, 16.0, cb_width);
+            d.border.left = self.style.border_left_width.to_px(16.0, 16.0, cb_width);
+            d.border.right = self.style.border_right_width.to_px(16.0, 16.0, cb_width);
+            d.border.top = self.style.border_top_width.to_px(16.0, 16.0, cb_width);
+            d.border.bottom = self.style.border_bottom_width.to_px(16.0, 16.0, cb_width);
+            d.padding.left = self.style.padding_left.to_px(16.0, 16.0, cb_width);
+            d.padding.right = self.style.padding_right.to_px(16.0, 16.0, cb_width);
+            d.padding.top = self.style.padding_top.to_px(16.0, 16.0, cb_width);
+            d.padding.bottom = self.style.padding_bottom.to_px(16.0, 16.0, cb_width);
+        }
+        let horizontal_decoration = self.dimensions.border.left
+            + self.dimensions.border.right
+            + self.dimensions.padding.left
+            + self.dimensions.padding.right;
+        let vertical_decoration = self.dimensions.border.top
+            + self.dimensions.border.bottom
+            + self.dimensions.padding.top
+            + self.dimensions.padding.bottom;
+        let border_box_sizing = self.style.box_sizing == BoxSizing::BorderBox;
 
-        let explicit_height = match self.style.height {
-            Length::Px(px) => Some(px),
-            Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.height),
-            _ => None,
-        };
+        // Calculate explicit dimensions from style. Every specified size below
+        // (width/height and the maxima) is converted to a CONTENT size, since
+        // that is what the intrinsic-sizing rules and `dimensions.content` are
+        // expressed in; `auto` stays absent and takes the natural size.
+        let explicit_width = replaced_content_size(
+            match self.style.width {
+                Length::Px(px) => Some(px),
+                Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.width),
+                _ => None,
+            },
+            horizontal_decoration,
+            border_box_sizing,
+        );
+
+        let explicit_height = replaced_content_size(
+            match self.style.height {
+                Length::Px(px) => Some(px),
+                Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.height),
+                _ => None,
+            },
+            vertical_decoration,
+            border_box_sizing,
+        );
 
         // Determine final dimensions using intrinsic size calculation
         let (mut width, mut height) = crate::images::calculate_intrinsic_size(
@@ -1473,16 +1547,24 @@ impl LayoutBox {
         // CSS 2.1 §10.4: max-width/max-height constrain replaced elements while
         // preserving the aspect ratio (max-width applied first, then max-height,
         // matching the constraint-violation table for the common cases).
-        let max_width = match self.style.max_width {
-            Length::Px(px) => Some(px),
-            Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.width),
-            _ => None,
-        };
-        let max_height = match self.style.max_height {
-            Length::Px(px) => Some(px),
-            Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.height),
-            _ => None,
-        };
+        let max_width = replaced_content_size(
+            match self.style.max_width {
+                Length::Px(px) => Some(px),
+                Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.width),
+                _ => None,
+            },
+            horizontal_decoration,
+            border_box_sizing,
+        );
+        let max_height = replaced_content_size(
+            match self.style.max_height {
+                Length::Px(px) => Some(px),
+                Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.height),
+                _ => None,
+            },
+            vertical_decoration,
+            border_box_sizing,
+        );
         if let Some(mw) = max_width {
             if width > mw && width > 0.0 {
                 height = if height > 0.0 {
@@ -1504,9 +1586,19 @@ impl LayoutBox {
             }
         }
 
-        // Position within containing block
-        self.dimensions.content.x = containing_block.content.x;
-        self.dimensions.content.y = containing_block.content.y + containing_block.content.height;
+        // Position within containing block. The CONTENT box sits inside this
+        // element's own margin/border/padding, so the BORDER box starts at the
+        // containing block's content edge — the same offsets
+        // `calculate_block_position` applies to a block box.
+        self.dimensions.content.x = containing_block.content.x
+            + self.dimensions.margin.left
+            + self.dimensions.border.left
+            + self.dimensions.padding.left;
+        self.dimensions.content.y = containing_block.content.y
+            + containing_block.content.height
+            + self.dimensions.margin.top
+            + self.dimensions.border.top
+            + self.dimensions.padding.top;
         self.dimensions.content.width = width;
         self.dimensions.content.height = height;
     }
@@ -6381,6 +6473,138 @@ mod tests {
         layout_box.layout_image(100.0, 100.0, &containing_1000());
         assert_eq!(layout_box.dimensions.content.width, 100.0);
         assert_eq!(layout_box.dimensions.content.height, 100.0);
+    }
+
+    /// A `.test-img` from `websuite/micro/images-intrinsic`: 1px border, and
+    /// the page's `* { box-sizing: border-box }`.
+    fn bordered_image_style(box_sizing: BoxSizing) -> ComputedStyle {
+        let mut style = ComputedStyle::new();
+        style.box_sizing = box_sizing;
+        style.border_top_width = Length::Px(1.0);
+        style.border_right_width = Length::Px(1.0);
+        style.border_bottom_width = Length::Px(1.0);
+        style.border_left_width = Length::Px(1.0);
+        style
+    }
+
+    fn image_box(style: ComputedStyle) -> LayoutBox {
+        LayoutBox::new(
+            BoxType::Image {
+                url: String::new(),
+                natural_width: 100.0,
+                natural_height: 100.0,
+            },
+            style,
+        )
+    }
+
+    #[test]
+    fn an_image_at_its_natural_size_gains_its_border() {
+        // images-intrinsic test1: 100x100 natural, `border: 1px solid red`,
+        // no specified size. Chrome's border box is 102x102 — an `auto` size
+        // is the intrinsic CONTENT size and the border adds outside it, in
+        // border-box mode too.
+        let mut layout_box = image_box(bordered_image_style(BoxSizing::BorderBox));
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 100.0);
+        assert_eq!(layout_box.dimensions.content.height, 100.0);
+        assert_eq!(layout_box.dimensions.border_box().width, 102.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 102.0);
+    }
+
+    #[test]
+    fn a_border_box_image_takes_its_border_out_of_a_specified_size() {
+        // images-intrinsic test4: `width: 150px; height: 75px` under
+        // border-box. Chrome's border box is 150x75, content 148x73.
+        let mut style = bordered_image_style(BoxSizing::BorderBox);
+        style.width = Length::Px(150.0);
+        style.height = Length::Px(75.0);
+        let mut layout_box = image_box(style);
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 148.0);
+        assert_eq!(layout_box.dimensions.content.height, 73.0);
+        assert_eq!(layout_box.dimensions.border_box().width, 150.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 75.0);
+    }
+
+    #[test]
+    fn a_content_box_image_keeps_its_border_outside_a_specified_size() {
+        // The other half of the same rule: under the initial `content-box`,
+        // `width: 150px` IS the content box and the border box is 152.
+        let mut style = bordered_image_style(BoxSizing::ContentBox);
+        style.width = Length::Px(150.0);
+        style.height = Length::Px(75.0);
+        let mut layout_box = image_box(style);
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 150.0);
+        assert_eq!(layout_box.dimensions.content.height, 75.0);
+        assert_eq!(layout_box.dimensions.border_box().width, 152.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 77.0);
+    }
+
+    #[test]
+    fn a_border_box_image_max_width_names_the_border_box() {
+        // images-intrinsic test5: `max-width: 80px` on a 100x100 natural
+        // image under border-box. Chrome clamps the BORDER box to 80, so the
+        // content box is 78 and the aspect ratio holds on 78, not 80.
+        let mut style = bordered_image_style(BoxSizing::BorderBox);
+        style.max_width = Length::Px(80.0);
+        let mut layout_box = image_box(style);
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 78.0);
+        assert_eq!(layout_box.dimensions.content.height, 78.0);
+        assert_eq!(layout_box.dimensions.border_box().width, 80.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 80.0);
+    }
+
+    #[test]
+    fn an_images_border_box_starts_at_the_containing_blocks_content_edge() {
+        // The border box is what Chrome's rects are keyed on, so the offsets
+        // matter as much as the sizes: with 1px border and 4px padding the
+        // content box sits 5px in, and the BORDER box still starts where the
+        // containing block's content does.
+        let mut style = bordered_image_style(BoxSizing::BorderBox);
+        style.padding_left = Length::Px(4.0);
+        style.padding_top = Length::Px(4.0);
+        style.padding_right = Length::Px(4.0);
+        style.padding_bottom = Length::Px(4.0);
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(32.0, 40.0, 1000.0, 0.0);
+        let mut layout_box = image_box(style);
+        layout_box.layout_image(100.0, 100.0, &cb);
+        assert_eq!(layout_box.dimensions.content.x, 37.0);
+        assert_eq!(layout_box.dimensions.content.y, 45.0);
+        assert_eq!(layout_box.dimensions.border_box().x, 32.0);
+        assert_eq!(layout_box.dimensions.border_box().y, 40.0);
+        assert_eq!(layout_box.dimensions.border_box().width, 110.0);
+    }
+
+    #[test]
+    fn an_undecorated_image_is_unchanged_by_the_border_box_rule() {
+        // The overwhelming majority of images in the corpus carry no border
+        // or padding at all; for them content box and border box coincide and
+        // nothing about this path may move.
+        let mut style = ComputedStyle::new();
+        style.box_sizing = BoxSizing::BorderBox;
+        style.width = Length::Px(200.0);
+        let mut layout_box = image_box(style);
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 200.0);
+        assert_eq!(layout_box.dimensions.border_box().width, 200.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 200.0);
+    }
+
+    #[test]
+    fn an_auto_size_is_never_reduced_by_the_decoration() {
+        // `replaced_content_size` must leave `None` alone: an absent size is
+        // the intrinsic one, and subtracting the border from it is exactly
+        // the mirror-image bug (an image at natural size measuring 98).
+        assert_eq!(replaced_content_size(None, 2.0, true), None);
+        assert_eq!(replaced_content_size(Some(200.0), 2.0, true), Some(198.0));
+        assert_eq!(replaced_content_size(Some(200.0), 2.0, false), Some(200.0));
+        // Decoration wider than the specified border box floors at zero
+        // rather than producing a negative content box.
+        assert_eq!(replaced_content_size(Some(1.0), 4.0, true), Some(0.0));
     }
 
     #[test]
