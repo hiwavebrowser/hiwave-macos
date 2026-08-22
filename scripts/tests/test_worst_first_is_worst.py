@@ -52,3 +52,22 @@ def test_top_three_of_a_full_green_board_are_the_real_worst():
         "gradient-no-radius",
         "about",
     ]
+
+
+if __name__ == "__main__":
+    # CI's guard loop runs `python3 <file>`. Without a runner this file
+    # defined its tests, executed none of them, and exited 0 — a PASS line
+    # over zero assertions (the #144 livesuite class). Run every module-level
+    # test_* function and fail loudly.
+    failed = 0
+    for _name, _fn in sorted(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            try:
+                _fn()
+                print(f"ok {_name}")
+            except AssertionError:
+                import traceback
+                traceback.print_exc()
+                print(f"FAIL {_name}")
+                failed = 1
+    raise SystemExit(failed)
