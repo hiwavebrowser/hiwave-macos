@@ -3622,3 +3622,234 @@ after the false RED, the SyntaxError sweep and the stale `__pycache__`.
   axis. The checklist item from night 17 — *ask which line of the change no
   assertion would miss* — would have caught M5 and would NOT have caught M12,
   because I did write an assertion for it and the assertion could not run.
+
+## 2026-08-23
+
+**Metric: 1/26 → 1/26.** `bg-pure` is the green case before and after; no case
+crossed the conjunction in either direction. Geometry moved on one case:
+`images-intrinsic` 55 → 54 failing axes, with six more axes' magnitudes cut by
+exactly 70px each. Paint is **bit-identical on all 26 cases**, and the reason is
+worth stating rather than glossing — the boxes this fix moves sit at y≈1971 and
+y≈2142 in an 800x1400 viewport, i.e. entirely below the fold, so Gate B cannot
+see them at all. No macOS run tonight; every number below is Linux/SwiftShader
+and is mechanics, not a receipt.
+
+**P-item: the geometry-first queue (ratified 2026-08-12), on night 19's named
+next unit. That unit is complete.** `aspect-ratio` now reaches replaced
+elements. What the night mostly bought, though, is not the fix — it is the
+discovery that **night 19's other commit re-implemented a fix that had been
+sitting on an unmerged branch since 08-19**, and the two now conflict.
+
+### The fix
+
+`style.aspect_ratio` was parsed by the engine and consulted on exactly one
+path — the block-height fallback at `lib.rs:3333` — so it never reached a
+replaced element. `images-intrinsic` test11 (`width: 160px; aspect-ratio: 16/9`)
+built 160x160 where Chrome builds 160x90: +70.00px, the largest single entry on
+night 18/21's font-independent board.
+
+I did not derive the rule, I measured it. Bundled chromium-1194, a 100x100
+natural image with `border: 1px solid red` and `aspect-ratio: 16/9`:
+
+```
+box-sizing: border-box ; width: 160px   ->  160.0000 x  90.0000
+box-sizing: content-box; width: 160px   ->  162.0000 x  92.0000
+box-sizing: border-box ; height: 90px   ->  160.0000 x  90.0000
+box-sizing: border-box ; both specified ->  160.0000 x 200.0000   (ratio ignored)
+box-sizing: border-box ; both auto      ->  102.0000 x  57.3750
+box-sizing: content-box; both auto      ->  102.0000 x  58.2500
+```
+
+The second row is the one that pays for itself. **The ratio spans the box named
+by `box-sizing`**, not the content box — a content-box-always implementation
+builds row 1 at 90.875 tall and passes every symmetric fixture I would have
+written from the spec text. A second probe with 3px horizontal and 5px vertical
+borders pinned the axis asymmetry (Chrome: content 154x70 / 160x80 / 154x70 /
+100x43 across the four combinations), because night 19's M5 survived every
+symmetric fixture in that file and I did not want the tenth sweep in a row to
+find the same shape.
+
+Twenty minutes and two Chrome runs. Night 21 closed by saying every night since
+14 had aimed with a number that could have been checked this cheaply; this is
+the first night that check happened before the code rather than after it.
+
+### Measured — Linux/SwiftShader, 26 gating cases, 3 iterations. NOT A RECEIPT
+
+Same seat, same corpus, only the binary differs.
+
+| Oracle | before | after |
+|---|---|---|
+| Gate A geometry failures | 2766 | **2765** |
+| Gate A join failures | 20 | 20 |
+| Gate A green | 2/26 | 2/26 |
+| Gate B % within tolerance (mean) | 83.54594% | **83.54594% — bit-identical** |
+| Gate B paint-green | 1/26 | 1/26 |
+| Gate B discrete | 0 | 0 |
+| Gate B elements admitted | 219 of 1593 | 219 |
+| N/26 | 1/26 | 1/26 |
+
+Every changed axis, and there are only eight, all on `images-intrinsic`:
+
+```
+test11 > img.test-img          height   +70.00  ->  within tolerance (removed)
+test11 (.container)            height   +71.12  ->   +1.12
+test12 (.container)            y       +106.32  ->  +36.32
+test12 > img.test-img  x3      y       +106.32  ->  +36.32
+h2:nth-of-type(12)             y       +106.32  ->  +36.32
+html > body                    height  +128.32  ->  +58.32
+```
+
+The other 25 cases are bit-identical on both oracles. The residual `+1.12` on
+test11's container is the quantity night 19 measured and named: this seat's line
+strut is 7.12 where Chrome's is 6.00, i.e. P4's problem, not this one.
+
+### Stop rule
+
+Checked per box and per axis across all 26 cases: **zero axes worsened**, one
+removed, six magnitudes reduced by exactly 70. No case gained a discrete
+failure, none lost its green, Gate B's percentage half did not move on a single
+pixel. The rule did not fire, and unlike 08-10, 08-11 and 08-22 there is no
+judgement call here to hand to Pete.
+
+### Mutation-check results
+
+**12 probes, 12/12 RED, control green before and after, committed before
+mutating.**
+
+| Mutation | Result |
+|---|---|
+| M1 wiring removed — `preferred_ratio_sizes` never called | RED |
+| M2 ratio direction inverted (multiply where it must divide) | RED |
+| M3 box-sizing ignored — the ratio always spans the content box | RED |
+| M4 the derived axis never gives its decoration back | RED |
+| M5 the two axes' decoration swapped on the width-known branch | RED |
+| M6 the ratio overrides two specified sizes | RED |
+| M7 the both-auto branch dropped (ratio only fires on a specified size) | RED |
+| M8 the degenerate-ratio guard removed (0, negative, NaN, inf) | RED |
+| M9 `known_is_width` hardcoded true on the height-known branch | RED |
+| M10 the negative-content-box floor removed | RED |
+| M11 the returned pair swapped at the call site | RED |
+| M12 the both-auto branch uses twice the natural width | RED |
+
+**A clean sweep on this branch is itself suspicious, so I probed the harness.**
+Nine sweeps running have found a survivor; this one did not. A null probe —
+`max(0.0)` → `max(-1.0)` on the content-box return, unobservable by
+construction because no test produces a negative derived box — compiled and
+came back **GREEN**. So the harness can distinguish, and 12/12 is a real count
+rather than a harness that reds everything. This is the fifth distinct way a
+mutation harness on this branch could have lied and the first night one was
+checked in the direction of false confidence rather than false alarm.
+
+### The thing that actually matters tonight: night 19 duplicated an unmerged fix
+
+Night 19 landed `b2ad86e — replaced elements and form controls carry a join
+key`, headlined it *"the geometry oracle has never compared a single `<img>`,
+`<input>`, `<select>`, `<textarea>` or leaf `<button>`"*, and measured join
+failures 115 → 20, boxes compared 1478 → 1581.
+
+`9fcfbdf — every element box carries the oracle's join key, not just the
+generic path` has been on `atlas/p3-flex-residual` (and through it on
+`atlas/percent-height-basis`) since **2026-08-19**. Its commit message states
+the same defect in the same terms — identity stamped below the `img`/`input`/
+`button`/`textarea`/`select` early returns — and its measured numbers are
+identical to the digit:
+
+```
+9fcfbdf (08-19, unmerged)   join 115 -> 20   compared 1478 -> 1581
+b2ad86e (08-22, night 19)   join 115 -> 20   compared 1478 -> 1581
+```
+
+Night 21's own digest records the stack tip reading "20 join" on 08-21 — the
+day *before* night 19 "fixed" the 115. I read that line and did not connect it,
+and neither did night 19.
+
+The two implementations differ (9fcfbdf restructures the branches into a
+labelled block with one exit; b2ad86e patches the return sites), so they do not
+merge: `origin/atlas/replaced-border-box` against
+`origin/atlas/percent-height-basis` conflicts in **8 hunks**, all in
+`crates/rustkit-engine/src/lib.rs`, all this one duplicated fix. As of 08-21 the
+stack merged into `develop` with no conflict at all.
+
+This is the eighth night of asking to open the P2 PR, and it is the first night
+the cost of not opening it is a measured number rather than an argument: one
+night's engine work re-done, and a merge that was clean four days ago is now
+eight hunks of hand-resolution.
+
+### A second consequence, which is why I did not publish a board tonight
+
+I ran night 21's `geometry_attribution.py` against tonight's captures and it
+produced a five-root font-independent board topped by
+`rounded-corners .test7 .inner · height · 100 vs 1000 · +900`. That entry is
+almost certainly already fixed: `c4c9328 — an in-flow percentage height
+resolves against the parent, not the flow cursor` is on the same unmerged
+stack. My captures are `develop` + night 19's branch; night 21's were the stack
+tip. **So it is not the same board, its top entries are stale, and nobody
+should aim at it** — I am recording that it exists rather than publishing its
+rows, because a board that looks like the aiming board and is measured on a
+different tree is worse than no board. Producing the real one needs the 8-hunk
+conflict resolved first, which is decision 1's job and not something I will do
+silently on a branch I do not own.
+
+### Commits
+
+Engine, on `atlas/replaced-aspect-ratio` (cut from
+`atlas/replaced-border-box`, because the fix is inside `layout_image` and its
+every expected number assumes night 19's border decoration):
+
+- `e0c8503` — a specified `aspect-ratio` reaches replaced elements.
+
+Nothing landed on `atlas/trench-parity-finish-line` except this digest.
+
+### Not in scope, recorded rather than half-landed
+
+- **`max-width` plus a specified ratio clamps in the wrong space.** Chrome
+  clamps in the ratio box and re-derives; this clamps in content space.
+  Measured on `width:160px; aspect-ratio:16/9; max-width:80px`: Chrome builds
+  border box 80x45, this builds 80x45.44. That is 0.44px — *under* Gate A's
+  0.5px bar, so no oracle will ever report it — and fixing it means reworking
+  the max-constraint block rather than adding a branch.
+- **A flex item's image still ignores its own natural ratio.** test12's three
+  `width: 80px` images build 80x102 where Chrome builds 80x80. Named by night
+  19, untouched tonight, and now the largest remaining defect on that page.
+  Note it is *not* an `aspect-ratio` bug — there is no `aspect-ratio` in
+  `.test12` — so tonight's change could not and did not touch it.
+
+### Decisions needed from Pete
+
+1. **Open the P2 PR now.** Eighth night of asking, and the cost is no longer
+   hypothetical: night 19 re-implemented `9fcfbdf` three nights after it
+   landed, and the two branches now conflict in 8 hunks where the stack merged
+   cleanly on 08-21. Every further night measured off `develop` risks the same.
+2. When the duplicate is resolved, which implementation survives — `9fcfbdf`'s
+   single-exit block (my recommendation; it is the one that cannot regrow the
+   defect) or night 19's patched return sites?
+3. Still open from 08-10 onward: keep or literally revert the overflow-clip
+   change that cost `sticky-scroll` 36 pixels on a card RustKit lays out 38px
+   too low?
+
+### Surprises
+
+- **The duplicate was findable in one command and nobody ran it for four
+  days.** `git log origin/develop..origin/<branch> -S<symbol>` over the five
+  unmerged branches is how I checked whether *my* fix already existed — and it
+  is how night 19's would have been caught before it was written. I only ran it
+  because the merge conflict made me suspicious, not as a matter of course.
+  It should be the first thing a night does before touching `crates/`.
+- **Paint could not see a 70px layout error, and that is correct behaviour.**
+  My first reading of "Gate B bit-identical on all 26" was that I had broken
+  something or measured the wrong build. The boxes are below an 800x1400
+  viewport's fold. Night 15 recorded "the paint oracle is blind below the
+  fold"; this is the first time that blindness explained an entire null result,
+  and it means `images-intrinsic`'s paint number can never move for anything
+  in its bottom two thirds.
+- **The clean mutation sweep needed defending, not celebrating.** Nine sweeps
+  with a survivor made 12/12 read as a harness fault. It was not — but the only
+  reason I can say so is the null probe, and no previous night on this branch
+  ran one. A harness that has only ever been asked to produce RED has never
+  been shown able to produce GREEN.
+- **`aspect-ratio` was already tested — on the block path.** `309e726` on the
+  unmerged stack adds `an_aspect_ratio_box_takes_its_height_from_its_width`,
+  and its comment says the arm was "unguarded before this change — the sweep
+  deleted the arm and nothing noticed". So the property had a guard for blocks
+  and no implementation for replaced elements, which is the shape that makes a
+  reader assume the feature works.
