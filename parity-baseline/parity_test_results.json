@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-22T14:31:13.925594",
+  "timestamp": "2026-08-23T09:19:37.461031",
   "scope": "all",
   "iterations": 1,
   "max_variance": 0.1,
@@ -11,9 +11,9 @@
       "type": "builtins",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 26098,
+        "diffPixels": 29522,
         "totalPixels": 1024000,
-        "diffPercent": 2.5486328124999997,
+        "diffPercent": 2.8830078125,
         "width": 1280,
         "height": 800,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/new_tab/run-1/diff.png",
@@ -1128,24 +1128,24 @@
       },
       "passed": true,
       "pixel_runs": [
-        2.5486328124999997
+        2.8830078125
       ],
-      "diff_pct_median": 2.5486328124999997,
-      "diff_pct_min": 2.5486328124999997,
-      "diff_pct_max": 2.5486328124999997,
+      "diff_pct_median": 2.8830078125,
+      "diff_pct_min": 2.8830078125,
+      "diff_pct_max": 2.8830078125,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 2.5486328124999997
+      "diff_pct": 2.8830078125
     },
     {
       "case_id": "about",
       "type": "builtins",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 62907,
+        "diffPixels": 62208,
         "totalPixels": 480000,
-        "diffPercent": 13.105625000000002,
+        "diffPercent": 12.959999999999999,
         "width": 800,
         "height": 600,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/about/run-1/diff.png",
@@ -1518,24 +1518,24 @@
       },
       "passed": true,
       "pixel_runs": [
-        13.105625000000002
+        12.959999999999999
       ],
-      "diff_pct_median": 13.105625000000002,
-      "diff_pct_min": 13.105625000000002,
-      "diff_pct_max": 13.105625000000002,
+      "diff_pct_median": 12.959999999999999,
+      "diff_pct_min": 12.959999999999999,
+      "diff_pct_max": 12.959999999999999,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 13.105625000000002
+      "diff_pct": 12.959999999999999
     },
     {
       "case_id": "settings",
       "type": "builtins",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 31833,
+        "diffPixels": 32757,
         "totalPixels": 786432,
-        "diffPercent": 4.0477752685546875,
+        "diffPercent": 4.1652679443359375,
         "width": 1024,
         "height": 768,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/settings/run-1/diff.png",
@@ -2454,24 +2454,24 @@
       },
       "passed": true,
       "pixel_runs": [
-        4.0477752685546875
+        4.1652679443359375
       ],
-      "diff_pct_median": 4.0477752685546875,
-      "diff_pct_min": 4.0477752685546875,
-      "diff_pct_max": 4.0477752685546875,
+      "diff_pct_median": 4.1652679443359375,
+      "diff_pct_min": 4.1652679443359375,
+      "diff_pct_max": 4.1652679443359375,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 4.0477752685546875
+      "diff_pct": 4.1652679443359375
     },
     {
       "case_id": "chrome_rustkit",
       "type": "builtins",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 2618,
+        "diffPixels": 2972,
         "totalPixels": 128000,
-        "diffPercent": 2.0453125,
+        "diffPercent": 2.321875,
         "width": 1280,
         "height": 100,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/chrome_rustkit/run-1/diff.png",
@@ -2942,15 +2942,15 @@
       },
       "passed": true,
       "pixel_runs": [
-        2.0453125
+        2.321875
       ],
-      "diff_pct_median": 2.0453125,
-      "diff_pct_min": 2.0453125,
-      "diff_pct_max": 2.0453125,
+      "diff_pct_median": 2.321875,
+      "diff_pct_min": 2.321875,
+      "diff_pct_max": 2.321875,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 2.0453125
+      "diff_pct": 2.321875
     },
     {
       "case_id": "shelf",
@@ -3306,9 +3306,9 @@
       "type": "websuite",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 98460,
+        "diffPixels": 98972,
         "totalPixels": 1024000,
-        "diffPercent": 9.615234375,
+        "diffPercent": 9.665234374999999,
         "width": 1280,
         "height": 800,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/article-typography/run-1/diff.png",
@@ -3764,24 +3764,24 @@
       },
       "passed": true,
       "pixel_runs": [
-        9.615234375
+        9.665234374999999
       ],
-      "diff_pct_median": 9.615234375,
-      "diff_pct_min": 9.615234375,
-      "diff_pct_max": 9.615234375,
+      "diff_pct_median": 9.665234374999999,
+      "diff_pct_min": 9.665234374999999,
+      "diff_pct_max": 9.665234374999999,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 9.615234375
+      "diff_pct": 9.665234374999999
     },
     {
       "case_id": "card-grid",
       "type": "websuite",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 74464,
+        "diffPixels": 74554,
         "totalPixels": 1024000,
-        "diffPercent": 7.271875,
+        "diffPercent": 7.2806640625000005,
         "width": 1280,
         "height": 800,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/card-grid/run-1/diff.png",
@@ -4644,24 +4644,24 @@
       },
       "passed": true,
       "pixel_runs": [
-        7.271875
+        7.2806640625000005
       ],
-      "diff_pct_median": 7.271875,
-      "diff_pct_min": 7.271875,
-      "diff_pct_max": 7.271875,
+      "diff_pct_median": 7.2806640625000005,
+      "diff_pct_min": 7.2806640625000005,
+      "diff_pct_max": 7.2806640625000005,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 7.271875
+      "diff_pct": 7.2806640625000005
     },
     {
       "case_id": "css-selectors",
       "type": "websuite",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 115899,
+        "diffPixels": 115828,
         "totalPixels": 960000,
-        "diffPercent": 12.072812500000001,
+        "diffPercent": 12.065416666666668,
         "width": 800,
         "height": 1200,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/css-selectors/run-1/diff.png",
@@ -5523,15 +5523,15 @@
       },
       "passed": true,
       "pixel_runs": [
-        12.072812500000001
+        12.065416666666668
       ],
-      "diff_pct_median": 12.072812500000001,
-      "diff_pct_min": 12.072812500000001,
-      "diff_pct_max": 12.072812500000001,
+      "diff_pct_median": 12.065416666666668,
+      "diff_pct_min": 12.065416666666668,
+      "diff_pct_max": 12.065416666666668,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 12.072812500000001
+      "diff_pct": 12.065416666666668
     },
     {
       "case_id": "flex-positioning",
@@ -6989,9 +6989,9 @@
       "type": "websuite",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 58248,
+        "diffPixels": 15884,
         "totalPixels": 480000,
-        "diffPercent": 12.135,
+        "diffPercent": 3.3091666666666666,
         "width": 800,
         "height": 600,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/gradient-backgrounds/run-1/diff.png",
@@ -7406,24 +7406,24 @@
       },
       "passed": true,
       "pixel_runs": [
-        12.135
+        3.3091666666666666
       ],
-      "diff_pct_median": 12.135,
-      "diff_pct_min": 12.135,
-      "diff_pct_max": 12.135,
+      "diff_pct_median": 3.3091666666666666,
+      "diff_pct_min": 3.3091666666666666,
+      "diff_pct_max": 3.3091666666666666,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 12.135
+      "diff_pct": 3.3091666666666666
     },
     {
       "case_id": "image-gallery",
       "type": "websuite",
       "threshold": 10,
       "pixel": {
-        "diffPixels": 70535,
+        "diffPixels": 69838,
         "totalPixels": 1024000,
-        "diffPercent": 6.88818359375,
+        "diffPercent": 6.820117187499999,
         "width": 1280,
         "height": 800,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/image-gallery/run-1/diff.png",
@@ -8075,24 +8075,24 @@
       },
       "passed": true,
       "pixel_runs": [
-        6.88818359375
+        6.820117187499999
       ],
-      "diff_pct_median": 6.88818359375,
-      "diff_pct_min": 6.88818359375,
-      "diff_pct_max": 6.88818359375,
+      "diff_pct_median": 6.820117187499999,
+      "diff_pct_min": 6.820117187499999,
+      "diff_pct_max": 6.820117187499999,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 6.88818359375
+      "diff_pct": 6.820117187499999
     },
     {
       "case_id": "sticky-scroll",
       "type": "websuite",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 119653,
+        "diffPixels": 34110,
         "totalPixels": 1024000,
-        "diffPercent": 11.684863281250001,
+        "diffPercent": 3.3310546875,
         "width": 1280,
         "height": 800,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/sticky-scroll/run-1/diff.png",
@@ -8997,15 +8997,15 @@
       },
       "passed": true,
       "pixel_runs": [
-        11.684863281250001
+        3.3310546875
       ],
-      "diff_pct_median": 11.684863281250001,
-      "diff_pct_min": 11.684863281250001,
-      "diff_pct_max": 11.684863281250001,
+      "diff_pct_median": 3.3310546875,
+      "diff_pct_min": 3.3310546875,
+      "diff_pct_max": 3.3310546875,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 11.684863281250001
+      "diff_pct": 3.3310546875
     },
     {
       "case_id": "backgrounds",
@@ -12496,9 +12496,9 @@
       "type": "micro",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 60232,
+        "diffPixels": 18434,
         "totalPixels": 480000,
-        "diffPercent": 12.548333333333334,
+        "diffPercent": 3.840416666666667,
         "width": 800,
         "height": 600,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/gradient-no-radius/run-1/diff.png",
@@ -12913,24 +12913,24 @@
       },
       "passed": true,
       "pixel_runs": [
-        12.548333333333334
+        3.840416666666667
       ],
-      "diff_pct_median": 12.548333333333334,
-      "diff_pct_min": 12.548333333333334,
-      "diff_pct_max": 12.548333333333334,
+      "diff_pct_median": 3.840416666666667,
+      "diff_pct_min": 3.840416666666667,
+      "diff_pct_max": 3.840416666666667,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 12.548333333333334
+      "diff_pct": 3.840416666666667
     },
     {
       "case_id": "gradient-radius-only",
       "type": "micro",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 51672,
+        "diffPixels": 16184,
         "totalPixels": 480000,
-        "diffPercent": 10.764999999999999,
+        "diffPercent": 3.3716666666666666,
         "width": 800,
         "height": 600,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/gradient-radius-only/run-1/diff.png",
@@ -13344,15 +13344,15 @@
       },
       "passed": true,
       "pixel_runs": [
-        10.764999999999999
+        3.3716666666666666
       ],
-      "diff_pct_median": 10.764999999999999,
-      "diff_pct_min": 10.764999999999999,
-      "diff_pct_max": 10.764999999999999,
+      "diff_pct_median": 3.3716666666666666,
+      "diff_pct_min": 3.3716666666666666,
+      "diff_pct_max": 3.3716666666666666,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 10.764999999999999
+      "diff_pct": 3.3716666666666666
     },
     {
       "case_id": "gpu-gradient-regression",
