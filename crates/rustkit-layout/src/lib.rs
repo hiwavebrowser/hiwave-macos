@@ -180,6 +180,128 @@ pub fn replaced_content_size(
     })
 }
 
+/// Cross a known CONTENT size to the other axis through a preferred aspect
+/// ratio, honouring the box the ratio spans.
+///
+/// css-sizing-4 §4: `aspect-ratio` applies to the box named by `box-sizing`,
+/// so under `border-box` the ratio spans the element's own decoration and the
+/// derived axis has to give its decoration back. MEASURED against Chrome 148
+/// on a 1px-bordered 100x100 image with `aspect-ratio: 16/9`:
+///
+/// ```text
+/// box-sizing: border-box ; width: 160px  ->  border box 160.0000 x 90.0000
+/// box-sizing: content-box; width: 160px  ->  border box 162.0000 x 92.0000
+/// ```
+///
+/// If the ratio spanned the content box in both modes the border-box case
+/// would build 90.875 tall, which is what makes this branch load-bearing
+/// rather than cosmetic.
+pub fn ratio_cross_content_size(
+    known_content: f32,
+    known_decoration: f32,
+    derived_decoration: f32,
+    ratio: f32,
+    known_is_width: bool,
+    border_box_sizing: bool,
+) -> f32 {
+    let known_ratio_box = if border_box_sizing {
+        known_content + known_decoration
+    } else {
+        known_content
+    };
+    let derived_ratio_box = if known_is_width {
+        known_ratio_box / ratio
+    } else {
+        known_ratio_box * ratio
+    };
+    if border_box_sizing {
+        (derived_ratio_box - derived_decoration).max(0.0)
+    } else {
+        derived_ratio_box.max(0.0)
+    }
+}
+
+/// Resolve a replaced element's specified sizes against a preferred aspect
+/// ratio, returning CONTENT sizes.
+///
+/// css-sizing-4 §4/§5.1: a specified `aspect-ratio` REPLACES the element's
+/// natural ratio. Until 2026-08-23 `style.aspect_ratio` was consulted only on
+/// the block-height path, so it never reached a replaced element at all and
+/// images-intrinsic test11 (`width: 160px; aspect-ratio: 16/9`) built 160x160
+/// where Chrome builds 160x90.
+///
+/// The four cases, each MEASURED against Chrome 148 rather than derived
+/// (100x100 natural image, `border: 1px solid red`, `aspect-ratio: 16/9`):
+///
+/// ```text
+/// width and height both set   border-box   160x200   ratio ignored
+/// width set, height auto      border-box   160x90    height from the ratio
+/// height set, width auto      border-box   160x90    width from the ratio
+/// both auto                   border-box   102x57.375
+///                             content-box  102x58.25 natural width, then ratio
+/// ```
+///
+/// A free function for the same reason as `replaced_content_size`: the case
+/// analysis is the part that can be wrong, and `layout_image` calling it is
+/// the only wiring a mutation has to break.
+pub fn preferred_ratio_sizes(
+    explicit_width: Option<f32>,
+    explicit_height: Option<f32>,
+    natural_width: Option<f32>,
+    ratio: Option<f32>,
+    horizontal_decoration: f32,
+    vertical_decoration: f32,
+    border_box_sizing: bool,
+) -> (Option<f32>, Option<f32>) {
+    let ratio = match ratio {
+        Some(r) if r > 0.0 && r.is_finite() => r,
+        _ => return (explicit_width, explicit_height),
+    };
+    match (explicit_width, explicit_height) {
+        // Both specified: the ratio does not get a vote.
+        (Some(_), Some(_)) => (explicit_width, explicit_height),
+        (Some(w), None) => (
+            Some(w),
+            Some(ratio_cross_content_size(
+                w,
+                horizontal_decoration,
+                vertical_decoration,
+                ratio,
+                true,
+                border_box_sizing,
+            )),
+        ),
+        (None, Some(h)) => (
+            Some(ratio_cross_content_size(
+                h,
+                vertical_decoration,
+                horizontal_decoration,
+                ratio,
+                false,
+                border_box_sizing,
+            )),
+            Some(h),
+        ),
+        // Both auto: the natural width is the used width and the ratio names
+        // the height. The natural HEIGHT is discarded — that is what "replaces
+        // the natural ratio" means.
+        (None, None) => match natural_width {
+            Some(nw) if nw > 0.0 => (
+                Some(nw),
+                Some(ratio_cross_content_size(
+                    nw,
+                    horizontal_decoration,
+                    vertical_decoration,
+                    ratio,
+                    true,
+                    border_box_sizing,
+                )),
+            ),
+            _ => (None, None),
+        },
+    }
+}
+
 /// CSS position property values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Position {
@@ -1587,6 +1709,23 @@ impl LayoutBox {
                 Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.height),
                 _ => None,
             },
+            vertical_decoration,
+            border_box_sizing,
+        );
+
+        // A specified `aspect-ratio` replaces the natural ratio before the
+        // intrinsic-sizing rules run, so a missing axis is derived from the
+        // ratio rather than from the image's own proportions.
+        let (explicit_width, explicit_height) = preferred_ratio_sizes(
+            explicit_width,
+            explicit_height,
+            if natural_width > 0.0 {
+                Some(natural_width)
+            } else {
+                None
+            },
+            self.style.aspect_ratio,
+            horizontal_decoration,
             vertical_decoration,
             border_box_sizing,
         );
@@ -7550,6 +7689,183 @@ mod tests {
         assert_eq!(layout_box.dimensions.content.width, 200.0);
         assert_eq!(layout_box.dimensions.border_box().width, 200.0);
         assert_eq!(layout_box.dimensions.border_box().height, 200.0);
+    }
+
+    /// Every expected number in the `aspect_ratio` tests below was MEASURED
+    /// against Chrome 148 on this seat (bundled chromium-1194), not derived:
+    /// a 100x100 natural image with `border: 1px solid red` unless the test
+    /// says otherwise. Chrome's rows are quoted in each test.
+    fn ratio_image_box(box_sizing: BoxSizing, ratio: f32) -> LayoutBox {
+        let mut style = bordered_image_style(box_sizing);
+        style.aspect_ratio = Some(ratio);
+        image_box(style)
+    }
+
+    /// 3px left/right and 5px top/bottom borders. Night 19's M5 survived every
+    /// symmetric fixture in this file, so at least one aspect-ratio fixture
+    /// has to be able to tell the two axes' decoration apart.
+    fn asymmetric_ratio_style(box_sizing: BoxSizing, ratio: f32) -> ComputedStyle {
+        let mut style = ComputedStyle::new();
+        style.box_sizing = box_sizing;
+        style.aspect_ratio = Some(ratio);
+        style.border_left_width = Length::Px(3.0);
+        style.border_right_width = Length::Px(3.0);
+        style.border_top_width = Length::Px(5.0);
+        style.border_bottom_width = Length::Px(5.0);
+        style
+    }
+
+    #[test]
+    fn a_specified_aspect_ratio_replaces_the_natural_one() {
+        // images-intrinsic test11: `width: 160px; aspect-ratio: 16/9` on a
+        // square image. Chrome: border box 160.0000 x 90.0000.
+        // Before 2026-08-23 this built 160x160 — `style.aspect_ratio` was
+        // parsed and never reached a replaced element.
+        let mut layout_box = ratio_image_box(BoxSizing::BorderBox, 16.0 / 9.0);
+        layout_box.style.width = Length::Px(160.0);
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.border_box().width, 160.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 90.0);
+        assert_eq!(layout_box.dimensions.content.width, 158.0);
+        assert_eq!(layout_box.dimensions.content.height, 88.0);
+    }
+
+    #[test]
+    fn the_ratio_spans_the_box_named_by_box_sizing() {
+        // Same declaration under `content-box`. Chrome: border box
+        // 162.0000 x 92.0000 — the ratio spans the CONTENT box here, so the
+        // border adds outside it. A ratio that always spanned the content box
+        // would build the border-box case above 90.875 tall instead of 90.
+        let mut layout_box = ratio_image_box(BoxSizing::ContentBox, 16.0 / 9.0);
+        layout_box.style.width = Length::Px(160.0);
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 160.0);
+        assert_eq!(layout_box.dimensions.content.height, 90.0);
+        assert_eq!(layout_box.dimensions.border_box().width, 162.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 92.0);
+    }
+
+    #[test]
+    fn a_specified_height_derives_the_width_across_the_ratio() {
+        // `height: 90px; aspect-ratio: 16/9`, border-box. Chrome: 160 x 90.
+        // The ratio has to work in both directions, not just width -> height.
+        let mut layout_box = ratio_image_box(BoxSizing::BorderBox, 16.0 / 9.0);
+        layout_box.style.height = Length::Px(90.0);
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.border_box().width, 160.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 90.0);
+    }
+
+    #[test]
+    fn two_specified_sizes_outrank_the_aspect_ratio() {
+        // `width: 160px; height: 200px; aspect-ratio: 16/9`, border-box.
+        // Chrome: 160 x 200 — the ratio does not get a vote.
+        let mut layout_box = ratio_image_box(BoxSizing::BorderBox, 16.0 / 9.0);
+        layout_box.style.width = Length::Px(160.0);
+        layout_box.style.height = Length::Px(200.0);
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.border_box().width, 160.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 200.0);
+    }
+
+    #[test]
+    fn an_auto_sized_image_keeps_its_natural_width_and_takes_the_ratio_height() {
+        // `aspect-ratio: 16/9` with no specified size at all. Chrome:
+        // border-box  102.0000 x 57.3750   (ratio spans the border box)
+        // content-box 102.0000 x 58.2500   (ratio spans the content box)
+        // The natural HEIGHT is discarded in both — that is what "replaces the
+        // natural ratio" means, and it is the branch that separates this from
+        // a rule that only fires when a size is specified.
+        let mut bb = ratio_image_box(BoxSizing::BorderBox, 16.0 / 9.0);
+        bb.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(bb.dimensions.border_box().width, 102.0);
+        assert_eq!(bb.dimensions.border_box().height, 57.375);
+
+        let mut cb = ratio_image_box(BoxSizing::ContentBox, 16.0 / 9.0);
+        cb.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(cb.dimensions.border_box().width, 102.0);
+        assert_eq!(cb.dimensions.border_box().height, 58.25);
+    }
+
+    #[test]
+    fn the_ratio_takes_each_axis_own_decoration() {
+        // 3px horizontal and 5px vertical borders, `aspect-ratio: 2/1`.
+        // Chrome, all three specified/auto combinations:
+        //   border-box  width:160px  -> 160 x 80   (content 154 x 70)
+        //   content-box width:160px  -> 166 x 90   (content 160 x 80)
+        //   border-box  height:80px  -> 160 x 80   (content 154 x 70)
+        //   border-box  auto         -> 106 x 53   (content 100 x 43)
+        // Swapping the two decorations passes every symmetric fixture above
+        // and fails all four of these.
+        let mut w_bb = image_box(asymmetric_ratio_style(BoxSizing::BorderBox, 2.0));
+        w_bb.style.width = Length::Px(160.0);
+        w_bb.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(w_bb.dimensions.content.width, 154.0);
+        assert_eq!(w_bb.dimensions.content.height, 70.0);
+
+        let mut w_cb = image_box(asymmetric_ratio_style(BoxSizing::ContentBox, 2.0));
+        w_cb.style.width = Length::Px(160.0);
+        w_cb.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(w_cb.dimensions.content.width, 160.0);
+        assert_eq!(w_cb.dimensions.content.height, 80.0);
+
+        let mut h_bb = image_box(asymmetric_ratio_style(BoxSizing::BorderBox, 2.0));
+        h_bb.style.height = Length::Px(80.0);
+        h_bb.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(h_bb.dimensions.content.width, 154.0);
+        assert_eq!(h_bb.dimensions.content.height, 70.0);
+
+        let mut auto_bb = image_box(asymmetric_ratio_style(BoxSizing::BorderBox, 2.0));
+        auto_bb.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(auto_bb.dimensions.content.width, 100.0);
+        assert_eq!(auto_bb.dimensions.content.height, 43.0);
+    }
+
+    #[test]
+    fn an_absent_or_degenerate_ratio_leaves_the_natural_one_alone() {
+        // The eleven sized tests on images-intrinsic and every other image in
+        // the corpus have no `aspect-ratio` at all; none of them may move.
+        assert_eq!(
+            preferred_ratio_sizes(Some(158.0), None, Some(100.0), None, 2.0, 2.0, true),
+            (Some(158.0), None)
+        );
+        // A ratio that cannot be divided by is not a ratio. `auto` already
+        // parses to `None`; these are the values a bad declaration can reach.
+        for bad in [0.0, -2.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                preferred_ratio_sizes(Some(158.0), None, Some(100.0), Some(bad), 2.0, 2.0, true),
+                (Some(158.0), None),
+                "ratio {bad} must be ignored, not divided by"
+            );
+        }
+        // No specified size and no natural width: nothing to cross the ratio
+        // from, so both stay absent rather than becoming zero.
+        assert_eq!(
+            preferred_ratio_sizes(None, None, None, Some(2.0), 2.0, 2.0, true),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn a_ratio_narrower_than_its_own_decoration_floors_at_zero() {
+        // 6px border box, 20px of vertical decoration, ratio 1: the derived
+        // border box is 6px and giving 20px back is -14. `replaced_content_size`
+        // floors the same way for the same reason — a negative content box is
+        // read as a size by everything downstream.
+        assert_eq!(
+            ratio_cross_content_size(2.0, 4.0, 20.0, 1.0, true, true),
+            0.0
+        );
+        // Nothing to floor in the ordinary case, and content-box never
+        // subtracts at all.
+        assert_eq!(
+            ratio_cross_content_size(158.0, 2.0, 2.0, 16.0 / 9.0, true, true),
+            88.0
+        );
+        assert_eq!(
+            ratio_cross_content_size(160.0, 2.0, 2.0, 16.0 / 9.0, true, false),
+            90.0
+        );
     }
 
     #[test]
