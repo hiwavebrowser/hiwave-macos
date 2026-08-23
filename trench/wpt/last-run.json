@@ -1,14 +1,14 @@
 {
   "schema": 1,
   "wpt_pin": "a6f29b0bedaf3f1edba7b6739127fe8e713bfcb3",
-  "hiwave_git_sha": "4fdc96f16625b9b45179530e20c9a5bfb27404c9",
+  "hiwave_git_sha": "a23f8c23e11189e2bfa2d8c083afcfd26c5af267",
   "runner": "scripts/wpt_tier1.py",
   "viewport": {
     "width": 800,
     "height": 600
   },
   "wpt_max_diff_pct": 0.0,
-  "ts": "2026-08-16T13:19:58.928611+00:00",
+  "ts": "2026-08-23T12:38:19.038669+00:00",
   "n": 30,
   "pass": 9,
   "fail": 16,
@@ -149,8 +149,8 @@
       "id": "css-inline/empty-span-size-002",
       "status": "FAIL",
       "reason": null,
-      "diff_pct": 0.0108,
-      "diff_pixels": 52,
+      "diff_pct": 0.0102,
+      "diff_pixels": 49,
       "rel_match": "ok",
       "blocked_by": null,
       "maps_to": "B"
