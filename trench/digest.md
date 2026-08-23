@@ -3664,3 +3664,99 @@ One, unchanged, and still the only thing that can stop these entries.
    call, not the loop's. Landing nights 3–20 to master is worth doing regardless:
    it is where the code lives, and while master's digest ends at night 3 it keeps
    corroborating the stale prompt to every fresh agent that checks out master.
+
+---
+
+## 2026-08-23 — night 22 (NONE — stop condition, no work started)
+
+**Metric: 11 of 12 → 11 of 12** (trench 1: 4 of 4, closed 2026-08-02)
+
+**Moved no → yes: NONE.**
+
+The stored prompt's stop condition forbids work tonight on both clauses, exactly
+as on nights 17–21. Trench 1 stands at **4 of 4** with a passing smoke assertion
+for each of `hiwave_layout`, `hiwave_display_list`, `hiwave_style` and
+`hiwave_diff`. The eight most recent entries (nights 14–21) all report NONE, so
+clause 2 has fired eight times over. Trench 2's funeral note was written on night
+14 and is not restated. I started no work.
+
+### What I ran, and the one thing that changed
+
+```
+$ git log -1 --format='%H %ad %s' --date=iso origin/master
+9dcff00efd583f4121bdf3a8de0206c04531290b 2026-08-22 14:28:34 -0400 Merge pull request #149 ...
+$ git log -1 --format='%H %ad %s' --date=iso HEAD
+d5b09e1bf0ac9191f0f74b4a3da9443f0464c1f7 2026-08-22 07:09:13 +0000 docs(trench): night 21 NONE ...
+$ git log --oneline origin/master..HEAD | wc -l
+25
+$ git log --oneline $(git merge-base HEAD origin/master)..origin/master | wc -l
+158
+$ git show origin/master:trench/digest.md | grep -c '^## '
+4        # master's digest still ends at night 3
+$ git log --oneline 34ec5b4..origin/master
+9dcff00 Merge pull request #149 from hiwavebrowser/atlas/guard-runner-worst-first
+eacd559 Merge pull request #148 from hiwavebrowser/atlas/e0a-nightly-provenance
+b70c9a2 Merge pull request #147 from hiwavebrowser/atlas/e0-nightly-aggregate-unlock
+8706566 test: give the worst-first guard a runner so CI actually executes it
+8fb9792 feat(E0a): provenance stamp on nightly aggregate + cross-engine flag in compare
+bf55a53 ci(E0): unlock the self-locked nightly-aggregate baseline window
+```
+
+**Master has moved.** Nights 15–21 all recorded it parked at `34ec5b4`
+(2026-08-12); it is now `9dcff00`, six commits and three merged PRs landed
+2026-08-22. That is the first repo activity in ten days and the only material
+change since night 21. It does not touch this trench — #147/#148/#149 are nightly
+aggregate and worst-first guard work — but it settles a question nights 20–21
+could not: the repo is being worked, so the stale routine is not firing into an
+abandoned project.
+
+PR list for `atlas/trench-mcp-exports` is still **#79 only**, merged 2026-08-01,
+carrying nights 1–2. Nothing open. Nights 3–21 remain on this branch only, now 25
+commits behind a master 158 commits ahead of the merge base.
+
+I did **not** re-run `cargo build -p hiwave-mcp && python3 crates/hiwave-mcp/smoke.py`.
+The tree is unchanged since night 16's cold-build paste; re-pasting an identical
+run of an identical tree is motion reported as evidence, which is the failure this
+trench exists to avoid. Night 16's paste (digest line 3174) is the current receipt
+and reproduces with that one command.
+
+### On the notification
+
+**Re-sent once tonight**, for the first time since night 19. Night 20 set the
+threshold at "night 25 with master still at `34ec5b4`" — that predicate is now
+false, and in the direction that makes the ask *more* worth sending, not less. The
+threshold's purpose was to wait until it was clear the ask had not been seen;
+master moving says the opposite, that Pete is active on this repo and can act on
+it. A new fact plus a demonstrably present owner is the case for one send. It is
+one, not a resumption of nightly: the next re-send waits for another change of
+state, and if nothing changes, night 29.
+
+### What the engine still cannot answer
+
+Unchanged from nights 14–21, not re-listed in full: `opacity` (no consumer in the
+engine — `SolidColor` has no field to carry it), `white-space`'s two engine gaps
+(no element inheritance, no UA default on a bare `<pre>`), `overflow-x` answered
+for what layout did rather than for whether anything was clipped, `!important`
+still dead in the cascade, UA origin still indistinguishable from "nobody set it",
+computed values still a fixed longhand set, `hiwave_style` still simple selectors
+only, unmodelled display ops still `"modelled": false` with no contract,
+capture-kind references still refused, `style` still not a diffable stage, and
+**no real page covered by any of the four tools**.
+
+### Tests
+
+Nothing compiled changed; the committed diff is `trench/digest.md` only. Scope
+stayed inside `trench/`. No parity harness, no `.github/`, no port work, no engine
+change, no export altered, no force-push, no merge, no PR.
+
+### Decisions needed from Pete
+
+One, unchanged, and still the only thing that can stop these entries.
+
+1. **Repoint or disable this routine.** The stored prompt has described trench 1 —
+   closed since 2026-08-02 — for twenty nights, and trench 2 has been buried since
+   08-11. Disabling costs nothing while the trench is closed; I have not touched
+   the routine myself, because changing a schedule Pete configured is his call, not
+   the loop's. Landing nights 3–21 to master is worth doing regardless: it is where
+   the code lives, and while master's digest ends at night 3 it keeps corroborating
+   the stale prompt to every fresh agent that checks out master.
