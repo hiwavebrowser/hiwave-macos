@@ -432,7 +432,11 @@ impl GlyphRasterizer {
     
     /// Rasterize a character to an alpha bitmap using Core Graphics
     ///
-    /// Returns (bitmap, width, height, advance, bearing_x, bearing_y)
+    /// Returns (bitmap, width, height, advance, bearing_x, bearing_y).
+    /// BITMAP-EDGE CONTRACT: `bearing_x`/`bearing_y` position the returned
+    /// bitmap's top-left corner relative to (pen, baseline) — the bitmap's
+    /// 2px AA padding is already folded in, so a caller places the bitmap at
+    /// `(pen + bearing_x, baseline - bearing_y)` with no further adjustment.
     /// Rasterize `ch` with its ink shifted right by `subpixel_x` of a pixel.
     ///
     /// FRACTION OWNERSHIP (load-bearing — see PR body): the horizontal
@@ -611,15 +615,21 @@ impl GlyphRasterizer {
             // Extract bitmap data
             let data = context.data();
             let bitmap: Vec<u8> = data.to_vec();
-            
+
             let advance = advance_size.width as f32;
-            let bearing_x = bounds.origin.x as f32;
-            let bearing_y = (bounds.origin.y + bounds.size.height) as f32;
-            
+            // BITMAP-EDGE CONTRACT: the returned bearings position the padded
+            // bitmap's top-left corner relative to (pen, baseline) — the ink
+            // sits `padding` inside the bitmap, so the padding must be folded
+            // in HERE. Returning the outline's bounds while shipping a padded
+            // bitmap seated every glyph on every page (+2,+2)px (n30: 'a' ink
+            // at x=11 for pen x=8, poking past lba001's 1ch cover).
+            let bearing_x = (bounds.origin.x - padding) as f32;
+            let bearing_y = (bounds.origin.y + bounds.size.height + padding) as f32;
+
             Some((bitmap, width, height, advance, bearing_x, bearing_y))
         }
     }
-    
+
     /// Fallback rasterization for characters without glyphs
     fn rasterize_fallback(&self, ch: char) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
         // Try fallback fonts for the character
@@ -796,13 +806,15 @@ impl GlyphRasterizer {
             ).to_vec();
             
             let advance = advance_size.width as f32;
-            let bearing_x = bounds.origin.x as f32;
-            let bearing_y = (bounds.origin.y + bounds.size.height) as f32;
-            
+            // BITMAP-EDGE CONTRACT (see rasterize_char): bearings place the
+            // padded bitmap, not the outline.
+            let bearing_x = (bounds.origin.x - padding) as f32;
+            let bearing_y = (bounds.origin.y + bounds.size.height + padding) as f32;
+
             Some((bitmap, width, height, advance, bearing_x, bearing_y))
         }
     }
-    
+
     /// Rasterize a color glyph (emoji) to a premultiplied **RGBA** bitmap.
     ///
     /// The grayscale path (`rasterize_char`) draws into a device-gray context
@@ -923,8 +935,10 @@ impl GlyphRasterizer {
             .to_vec();
 
             let advance = advance_size.width as f32;
-            let bearing_x = bounds.origin.x as f32;
-            let bearing_y = (bounds.origin.y + bounds.size.height) as f32;
+            // BITMAP-EDGE CONTRACT (see rasterize_char): bearings place the
+            // padded bitmap, not the outline.
+            let bearing_x = (bounds.origin.x - padding) as f32;
+            let bearing_y = (bounds.origin.y + bounds.size.height + padding) as f32;
 
             Some((rgba, width, height, advance, bearing_x, bearing_y))
         }
@@ -1196,6 +1210,53 @@ mod tests {
         assert!(has_content, "Bitmap should have visible content");
     }
     
+    #[test]
+    fn test_bearing_places_padded_bitmap_ink_at_metrics() {
+        // BITMAP-EDGE CONTRACT: a caller places the returned bitmap at
+        // (pen + bearing_x, baseline - bearing_y). The ink inside must then
+        // land where the font's metrics say — LSB right of the pen, bottom on
+        // the baseline. The old code returned OUTLINE bounds for a PADDED
+        // bitmap, seating every glyph (+2,+2)px: 'H' ink began ~2.8px right
+        // of the pen (true Menlo LSB ~0.8) and ended ~2px below the baseline.
+        let rasterizer = GlyphRasterizer::with_style("Menlo", 16.0, 400, false);
+        let (bitmap, width, height, advance, bearing_x, bearing_y) =
+            rasterizer.rasterize_char('H', 0.0).expect("rasterizes");
+
+        // Ink extents in the bitmap (threshold cuts the AA fringe).
+        let mut first_col = None;
+        let mut last_row = None;
+        for y in 0..height {
+            for x in 0..width {
+                if bitmap[(y * width + x) as usize] >= 64 {
+                    first_col = Some(first_col.map_or(x, |c: u32| c.min(x)));
+                    last_row = Some(last_row.map_or(y, |r: u32| r.max(y)));
+                }
+            }
+        }
+        let first_col = first_col.expect("H has ink") as f32;
+        let last_row = last_row.expect("H has ink") as f32;
+
+        // Placed ink left edge = pen + bearing_x + first_col; Menlo 'H' has a
+        // small positive LSB, so this must sit in [-1, 2] px of the pen.
+        let ink_left = bearing_x + first_col;
+        assert!(
+            (-1.0..=2.0).contains(&ink_left),
+            "ink left edge {ink_left} px from pen — glyph is mis-seated \
+             horizontally (padding not folded into bearing_x?)"
+        );
+
+        // 'H' sits ON the baseline: bitmap row `bearing_y` below the bitmap
+        // top IS the baseline, so the last ink row must be just above it.
+        let baseline_residual = bearing_y - (last_row + 1.0);
+        assert!(
+            baseline_residual.abs() <= 1.0,
+            "ink bottom is {baseline_residual} px from the baseline — glyph \
+             is mis-seated vertically (padding not folded into bearing_y?)"
+        );
+
+        assert!(advance > 0.0);
+    }
+
     #[test]
     fn test_whitespace_transparent() {
         let rasterizer = GlyphRasterizer::with_size(16.0);
