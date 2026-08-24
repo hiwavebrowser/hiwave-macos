@@ -2900,7 +2900,15 @@ impl LayoutBox {
             if child.position == Position::Absolute || child.position == Position::Fixed {
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y;
-                child.layout_with_collapse(&cb, margin_context, float_context);
+                // Out-of-flow boxes do not participate in margin collapsing
+                // (CSS 2.1 §8.3.1). The static position must still land where
+                // the box would have been in flow — including the pending
+                // sibling margin — so the child gets a CLONE of the context to
+                // resolve against; the live context stays intact for the next
+                // in-flow sibling (an abspos box between two blocks must not
+                // swallow the margin between them).
+                let mut oof_margin_context = margin_context.clone();
+                child.layout_with_collapse(&cb, &mut oof_margin_context, float_context);
                 continue;
             }
 
@@ -6924,6 +6932,49 @@ mod tests {
         ctx.add_margin(20.0);
         ctx.add_margin(-10.0);
         assert_eq!(ctx.resolve(), 10.0); // Sum of max positive and min negative
+    }
+
+    #[test]
+    fn test_abspos_sibling_does_not_swallow_block_margin() {
+        // <div A height:30 margin-bottom:16> <div B position:absolute> <div C>
+        // C must sit at A.bottom + 16, and B's static position must land at
+        // the same y (CSS 2.1 §8.3.1: out-of-flow boxes do not participate in
+        // margin collapsing). The regression: B resolved the pending margin
+        // through the parent's live context for its own static position, then
+        // reset it — so C landed at A.bottom + 0 (lba001: red line above the
+        // green rect).
+        let mut a_style = ComputedStyle::new();
+        a_style.height = Length::Px(30.0);
+        a_style.margin_bottom = Length::Px(16.0);
+        let a = LayoutBox::new(BoxType::Block, a_style);
+
+        let mut b_style = ComputedStyle::new();
+        b_style.width = Length::Px(100.0);
+        b_style.height = Length::Px(60.0);
+        let b = LayoutBox::with_position(BoxType::Block, b_style, Position::Absolute);
+
+        let mut c_style = ComputedStyle::new();
+        c_style.height = Length::Px(10.0);
+        let c = LayoutBox::new(BoxType::Block, c_style);
+
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.children = vec![a, b, c];
+
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 1000.0, 0.0);
+        let mut margin_context = MarginCollapseContext::new();
+        let mut float_context = FloatContext::new();
+        root.layout_with_collapse(&cb, &mut margin_context, &mut float_context);
+
+        assert_eq!(root.children[0].dimensions.content.y, 0.0);
+        assert_eq!(
+            root.children[2].dimensions.content.y, 46.0,
+            "in-flow C must still get A's 16px bottom margin with an abspos sibling between"
+        );
+        assert_eq!(
+            root.children[1].dimensions.content.y, 46.0,
+            "abspos B's static position includes the pending margin it would have had in flow"
+        );
     }
 
     #[test]
