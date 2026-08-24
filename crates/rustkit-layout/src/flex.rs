@@ -751,8 +751,7 @@ fn create_flex_item<'a>(
 
     // For replaced elements (form controls, images), use intrinsic size as minimum
     // This ensures flex items have proper sizing even without explicit min-width/height
-    let intrinsic_cross =
-        get_intrinsic_cross_size(&layout_box.box_type, main_axis, &layout_box.style);
+    let intrinsic_cross = get_intrinsic_cross_size(layout_box, main_axis);
     // CSS Flexbox §4.5 — automatic minimum size.
     //
     // `min-width: auto` is the DEFAULT for a flex item, and the spec resolves
@@ -1623,11 +1622,9 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f3
 
 /// Get the intrinsic cross size for replaced elements (form controls, images).
 /// This returns the height for horizontal main axis, width for vertical main axis.
-fn get_intrinsic_cross_size(
-    box_type: &crate::BoxType,
-    main_axis: Axis,
-    style: &rustkit_css::ComputedStyle,
-) -> f32 {
+fn get_intrinsic_cross_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f32 {
+    let box_type = &layout_box.box_type;
+    let style = &layout_box.style;
     let font_size = match style.font_size {
         Length::Px(px) => px,
         _ => 16.0,
@@ -1663,10 +1660,31 @@ fn get_intrinsic_cross_size(
             natural_width,
             natural_height,
             ..
-        } => match cross_axis {
-            Axis::Horizontal => *natural_width,
-            Axis::Vertical => *natural_height,
-        },
+        } => {
+            // Prefer the cross extent the block pre-pass already resolved for
+            // this replaced element. `layout_image` sizes an image that has a
+            // specified main size and an `auto` cross from its natural ratio,
+            // so a `width: 80px` image with a 1:1 natural ratio is already 80
+            // tall in `dimensions` by the time flex runs. Using the raw
+            // `natural_height` (100) as the flex item's cross MINIMUM floored
+            // that computed 80 back up to 100 — the 80x102 (vs Chrome 80x80)
+            // defect on images-intrinsic test12, where the width applied but
+            // the height stayed natural. Fall back to the natural dimension
+            // only when nothing has been laid out yet (e.g. a bare item with
+            // no pre-pass), which keeps the auto/auto image unchanged.
+            let laid_out = match cross_axis {
+                Axis::Vertical => layout_box.dimensions.content.height,
+                Axis::Horizontal => layout_box.dimensions.content.width,
+            };
+            if laid_out > 0.0 {
+                laid_out
+            } else {
+                match cross_axis {
+                    Axis::Horizontal => *natural_width,
+                    Axis::Vertical => *natural_height,
+                }
+            }
+        }
         crate::BoxType::Text(_) => {
             // Text boxes have intrinsic height based on line height
             let line_height = crate::resolve_line_height(style, font_size);
@@ -2421,6 +2439,71 @@ mod tests {
         assert!(
             (39.0..=42.0).contains(&hdr_h),
             "header height should be ~40-41 once the button is 24, got {}", hdr_h
+        );
+    }
+
+    #[test]
+    fn test_image_flex_item_cross_size_follows_its_ratio_not_natural_height() {
+        // images-intrinsic test12: a flex row of `width: 80px` images with a
+        // 100x100 natural size and a 1px border (box-sizing: border-box).
+        // Chrome builds each image 80x80 — the specified width applies and the
+        // height follows the 1:1 ratio. RustKit built 80x102: the width
+        // applied but the height stayed the natural 100 (+2 border).
+        //
+        // The block pre-pass (layout_block_children_with_collapse, which runs
+        // before flex in the real dispatch) already resolves the image to
+        // 78x78 content / 80x80 border-box via layout_image's ratio handling.
+        // The defect was purely in the flex CROSS MINIMUM: it read the raw
+        // natural_height (100) rather than that laid-out 78, and floored the
+        // correct 80 back up to 102. This test reproduces the pre-pass by
+        // seeding the child's dimensions, then asserts the flex pass does not
+        // re-inflate the height.
+        let mut row_style = ComputedStyle::new();
+        row_style.display = rustkit_css::Display::Flex;
+        row_style.flex_direction = FlexDirection::Row;
+        // flex-start, not the default stretch, so this isolates the cross
+        // MINIMUM floor: with stretch a single item's stretch target equals
+        // its own content size and would mask which term is wrong.
+        row_style.align_items = AlignItems::FlexStart;
+        row_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+
+        let mut row = LayoutBox::new(BoxType::Block, row_style);
+        row.dimensions.content = Rect::new(0.0, 0.0, 400.0, 0.0);
+
+        let mut img_style = ComputedStyle::new();
+        img_style.width = Length::Px(80.0);
+        img_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        let mut img = LayoutBox::new(
+            BoxType::Image {
+                url: String::new(),
+                natural_width: 100.0,
+                natural_height: 100.0,
+            },
+            img_style,
+        );
+        // What the block pre-pass leaves behind: border-box 80x80, i.e. 78x78
+        // content inside a 1px border on every side.
+        img.dimensions.border = EdgeSizes { top: 1.0, bottom: 1.0, left: 1.0, right: 1.0 };
+        img.dimensions.content = Rect::new(0.0, 0.0, 78.0, 78.0);
+        row.children.push(img);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 400.0, 600.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut row, &containing);
+
+        let bb = row.children[0].dimensions.border_box();
+        assert!(
+            (bb.height - 80.0).abs() < 0.5,
+            "a width-constrained image should keep its 1:1 ratio height (border-box 80), \
+             got {} — the natural_height floored the cross minimum",
+            bb.height
+        );
+        assert!(
+            (bb.width - 80.0).abs() < 0.5,
+            "the specified width (border-box 80) must be unchanged, got {}",
+            bb.width
         );
     }
 
