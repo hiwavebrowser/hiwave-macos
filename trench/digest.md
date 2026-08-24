@@ -3760,3 +3760,66 @@ One, unchanged, and still the only thing that can stop these entries.
    the loop's. Landing nights 3–21 to master is worth doing regardless: it is where
    the code lives, and while master's digest ends at night 3 it keeps corroborating
    the stale prompt to every fresh agent that checks out master.
+
+---
+
+## 2026-08-24 — night 23 (NONE — stop condition, no work started)
+
+**Metric: 11 of 12 → 11 of 12** (trench 1: 4 of 4, closed 2026-08-02)
+
+**Moved no → yes: NONE.** Trench 1's 4-of-4 stop condition holds; clause 2's
+dry-night threshold has fired nine consecutive times now (nights 14–22). I
+started no work tonight, per the stored prompt's own instruction.
+
+### What I ran, and what changed
+
+```
+$ git log -1 --format='%H %ad %s' --date=iso origin/master
+9dcff00efd583f4121bdf3a8de0206c04531290b 2026-08-22 14:28:34 -0400 Merge pull request #149 ...
+$ git log -1 --format='%H %ad %s' --date=iso HEAD
+c798c3edb3bcf2bc09318730bb5a4e9609b5a153 2026-08-23 07:09:50 +0000 docs(trench): night 22 NONE ...
+$ git log --oneline origin/master..HEAD | wc -l
+26
+$ git show origin/master:trench/digest.md | grep -c '^## '
+4        # master's digest still ends at night 3
+```
+
+**Nothing material has changed since night 22.** Master is still at `9dcff00`
+(2026-08-22 14:28:34 -0400) — the same tip night 22 recorded when it noted
+master had moved off `34ec5b4` for the first time in ten days. PR list for
+`atlas/trench-mcp-exports` is still **#79 only**, merged 2026-08-01, carrying
+nights 1–2. Nights 3–22 remain on this branch only; nights 3–23 after tonight's
+commit.
+
+I did **not** re-run `cargo build -p hiwave-mcp && python3 crates/hiwave-mcp/smoke.py`.
+The tree is unchanged since night 16's cold-build paste (digest line 3174);
+re-pasting an identical run of an identical tree is motion reported as evidence,
+which is the failure this trench exists to avoid.
+
+### On the notification
+
+Not re-sent tonight. Night 22 sent the repoint ask once when master moved (the
+first material change in ten days) and set the next send's gate at "another
+change of state". None has occurred, so I am holding — a re-send on a night
+where literally nothing changed would be exactly the noise nights 17–21 already
+chose against.
+
+### What the engine still cannot answer
+
+Unchanged from nights 14–22, not re-listed.
+
+### Tests
+
+Nothing compiled changed; the committed diff is `trench/digest.md` only. Scope
+stayed inside `trench/`. No parity harness, no `.github/`, no port work, no
+engine change, no export altered, no force-push, no merge, no PR.
+
+### Decisions needed from Pete
+
+One, unchanged, and still the only thing that can stop these entries.
+
+1. **Repoint or disable this routine.** Trench 1 has been closed for twenty-one
+   nights. Disabling costs nothing while the trench is closed. Landing nights
+   3–22 to master is worth doing regardless: master's digest ends at night 3, so
+   every fresh agent that checks out master sees the stale prompt corroborated
+   by a digest with no NONE entries.
