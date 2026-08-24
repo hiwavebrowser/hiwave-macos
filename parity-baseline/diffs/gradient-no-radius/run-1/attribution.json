@@ -1,12 +1,12 @@
 {
   "width": 800,
   "height": 600,
-  "diffPercent": 24.287916666666668,
+  "diffPercent": 2.513333333333333,
   "totalDiffPixels": 480000,
   "unattributedDiffPixels": 0,
   "taxonomy": {
     "text_metrics": 49,
-    "gradient_interpolation": 46.77083333333333
+    "gradient_interpolation": 46.166666666666664
   },
   "topContributors": [
     {
@@ -16,11 +16,11 @@
         "x": 0,
         "y": 0,
         "width": 800,
-        "height": 1546
+        "height": 1577.5625
       },
       "diff_pixels": 105600,
       "contribution_percent": 22,
-      "element_diff_percent": 8.538163001293661,
+      "element_diff_percent": 8.367338853452717,
       "corner_ratio": 0.0027272727272727275,
       "likely_cause": "text_metrics"
     },
@@ -29,14 +29,29 @@
       "tag": "div",
       "rect": {
         "x": 40,
-        "y": 118,
+        "y": 128,
         "width": 720,
-        "height": 1388
+        "height": 1409.5625
       },
-      "diff_pixels": 64800,
-      "contribution_percent": 13.5,
-      "element_diff_percent": 6.484149855907781,
+      "diff_pixels": 54000,
+      "contribution_percent": 11.25,
+      "element_diff_percent": 5.320799893584002,
       "corner_ratio": 0,
+      "likely_cause": "text_metrics"
+    },
+    {
+      "selector": "body > div.grid > h3.section-header:nth-of-type(1)",
+      "tag": "h3",
+      "rect": {
+        "x": 40,
+        "y": 128,
+        "width": 720,
+        "height": 57.390625
+      },
+      "diff_pixels": 41040,
+      "contribution_percent": 8.55,
+      "element_diff_percent": 99.31935747345494,
+      "corner_ratio": 0.014035087719298246,
       "likely_cause": "text_metrics"
     },
     {
@@ -44,14 +59,14 @@
       "tag": "div",
       "rect": {
         "x": 286.65625,
-        "y": 400,
+        "y": 415.390625,
         "width": 226.671875,
         "height": 180
       },
-      "diff_pixels": 37880,
-      "contribution_percent": 7.891666666666667,
-      "element_diff_percent": 92.8410039597742,
-      "corner_ratio": 0.015205913410770855,
+      "diff_pixels": 37480,
+      "contribution_percent": 7.808333333333334,
+      "element_diff_percent": 91.86063432978715,
+      "corner_ratio": 0.01536819637139808,
       "likely_cause": "gradient_interpolation"
     },
     {
@@ -59,14 +74,14 @@
       "tag": "div",
       "rect": {
         "x": 40,
-        "y": 200,
+        "y": 215.390625,
         "width": 226.65625,
         "height": 180
       },
-      "diff_pixels": 37640,
-      "contribution_percent": 7.841666666666666,
-      "element_diff_percent": 92.25914181105136,
-      "corner_ratio": 0.015302869287991499,
+      "diff_pixels": 37180,
+      "contribution_percent": 7.745833333333334,
+      "element_diff_percent": 91.13163901527336,
+      "corner_ratio": 0.015492200107584723,
       "likely_cause": "gradient_interpolation"
     },
     {
@@ -74,67 +89,7 @@
       "tag": "div",
       "rect": {
         "x": 533.328125,
-        "y": 200,
-        "width": 226.671875,
-        "height": 180
-      },
-      "diff_pixels": 37444,
-      "contribution_percent": 7.800833333333333,
-      "element_diff_percent": 91.77240106308831,
-      "corner_ratio": 0.015382971904711036,
-      "likely_cause": "gradient_interpolation"
-    },
-    {
-      "selector": "body > div.grid > h3.section-header:nth-of-type(1)",
-      "tag": "h3",
-      "rect": {
-        "x": 40,
-        "y": 118,
-        "width": 720,
-        "height": 52
-      },
-      "diff_pixels": 37440,
-      "contribution_percent": 7.8,
-      "element_diff_percent": 100,
-      "corner_ratio": 0.015384615384615385,
-      "likely_cause": "text_metrics"
-    },
-    {
-      "selector": "body > div.grid > div.gradient-box linear-4:nth-of-type(4)",
-      "tag": "div",
-      "rect": {
-        "x": 40,
-        "y": 400,
-        "width": 226.65625,
-        "height": 180
-      },
-      "diff_pixels": 37332,
-      "contribution_percent": 7.7775,
-      "element_diff_percent": 91.50420515648698,
-      "corner_ratio": 0.015429122468659595,
-      "likely_cause": "gradient_interpolation"
-    },
-    {
-      "selector": "body > div.grid > div.gradient-box linear-6:nth-of-type(6)",
-      "tag": "div",
-      "rect": {
-        "x": 533.328125,
-        "y": 400,
-        "width": 226.671875,
-        "height": 180
-      },
-      "diff_pixels": 37248,
-      "contribution_percent": 7.76,
-      "element_diff_percent": 91.29201994439467,
-      "corner_ratio": 0.015463917525773196,
-      "likely_cause": "gradient_interpolation"
-    },
-    {
-      "selector": "body > div.grid > div.gradient-box linear-2:nth-of-type(2)",
-      "tag": "div",
-      "rect": {
-        "x": 286.65625,
-        "y": 200,
+        "y": 215.390625,
         "width": 226.671875,
         "height": 180
       },
@@ -145,18 +100,63 @@
       "likely_cause": "gradient_interpolation"
     },
     {
+      "selector": "body > div.grid > div.gradient-box linear-4:nth-of-type(4)",
+      "tag": "div",
+      "rect": {
+        "x": 40,
+        "y": 415.390625,
+        "width": 226.65625,
+        "height": 180
+      },
+      "diff_pixels": 36828,
+      "contribution_percent": 7.6725,
+      "element_diff_percent": 90.26885426719979,
+      "corner_ratio": 0.015640273704789834,
+      "likely_cause": "gradient_interpolation"
+    },
+    {
+      "selector": "body > div.grid > div.gradient-box linear-6:nth-of-type(6)",
+      "tag": "div",
+      "rect": {
+        "x": 533.328125,
+        "y": 415.390625,
+        "width": 226.671875,
+        "height": 180
+      },
+      "diff_pixels": 36732,
+      "contribution_percent": 7.6525,
+      "element_diff_percent": 90.02734312171135,
+      "corner_ratio": 0.015681149950996405,
+      "likely_cause": "gradient_interpolation"
+    },
+    {
+      "selector": "body > div.grid > div.gradient-box linear-2:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 286.65625,
+        "y": 215.390625,
+        "width": 226.671875,
+        "height": 180
+      },
+      "diff_pixels": 36424,
+      "contribution_percent": 7.588333333333333,
+      "element_diff_percent": 89.27245850662132,
+      "corner_ratio": 0.015813749176367232,
+      "likely_cause": "gradient_interpolation"
+    },
+    {
       "selector": "body > h1",
       "tag": "h1",
       "rect": {
         "x": 40,
         "y": 40,
         "width": 720,
-        "height": 38
+        "height": 48
       },
-      "diff_pixels": 27360,
-      "contribution_percent": 5.7,
+      "diff_pixels": 34560,
+      "contribution_percent": 7.199999999999999,
       "element_diff_percent": 100,
-      "corner_ratio": 0.021052631578947368,
+      "corner_ratio": 0.016666666666666666,
       "likely_cause": "text_metrics"
     }
   ]
