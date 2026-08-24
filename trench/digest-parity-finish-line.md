@@ -3853,3 +3853,167 @@ Nothing landed on `atlas/trench-parity-finish-line` except this digest.
   deleted the arm and nothing noticed". So the property had a guard for blocks
   and no implementation for replaced elements, which is the shape that makes a
   reader assume the feature works.
+
+## 2026-08-24
+
+**Metric: 1/26 → 1/26.** `bg-pure` is the green case before and after; no case
+crossed the conjunction in either direction. Geometry moved on exactly one
+case: `images-intrinsic` **54 → 50** failing axes. The four removed are the
+three `width: 80px` flex images going 102 → 80 tall and their row container
+going 126 → 104 — every one now matching Chrome to the digit. The case stays
+red because its remaining failures are `span` text-advance widths (P4), so the
+geometry win does not reach the metric. No macOS run tonight; every number
+below is Linux/SwiftShader and is mechanics, not a receipt.
+
+**P-item: the geometry-first queue (ratified 2026-08-12), on night 20's named
+next unit. That unit is complete.** Night 20 named "a flex item's image still
+ignores its own natural ratio ... the largest remaining defect on that page"
+and left it. It is fixed.
+
+### The fix
+
+A flex row of `width: 80px` images (100x100 natural, 1px border,
+box-sizing: border-box) built 80x102 where Chrome builds 80x80 — the width
+applied, the height stayed natural. The block pre-pass
+(`layout_block_children_with_collapse`, which runs before flex in the real
+dispatch) already resolves the image to 78x78 content / 80x80 border-box via
+`layout_image`'s ratio handling. The bug was one term downstream:
+`get_intrinsic_cross_size` supplied the flex item's cross MINIMUM from the raw
+`natural_height` (100), and that floor overrode the correct laid-out 80,
+re-inflating the box to 102. `get_content_cross_height` a few lines away
+already prefers the laid-out dimension; the minimum did not, so the two flex
+sizing terms disagreed about the same box.
+
+The image arm of `get_intrinsic_cross_size` now prefers the cross extent
+already in `dimensions` (what the pre-pass resolved), falling back to the
+natural dimension only when nothing has been laid out. Scoped to images: form
+controls, text and block items are untouched.
+
+### Measured — Linux/SwiftShader, all 26 gating cases, same base, only the one
+### commit differs. MECHANICS, NOT A RECEIPT.
+
+Base = `origin/atlas/replaced-aspect-ratio` (e0c8503); after = that plus the
+one fix. Both captured on this seat and scored by Gate A.
+
+| Oracle | before | after |
+|---|---|---|
+| Gate A geometry failures | 2765 | **2761** |
+| Gate A join failures | 20 | 20 |
+| Gate A green | 2/26 | 2/26 |
+| N/26 | 1/26 | 1/26 |
+
+Per case, the only one that moved is `images-intrinsic` (54 → 50). The other
+25 cases are bit-identical on Gate A.
+
+### Stop rule
+
+Checked per axis across all 26 cases, not per case: **4 axes removed
+(0.25 / 0.25.0 / 0.25.2 / 0.25.4, all height), 0 axes added, 0 common axes
+worsened, 0 cases regressed, no case lost its green.** The rule did not fire,
+and there is no judgement call to hand to Pete here — the change only removed
+failures.
+
+### Mutation-check results
+
+**1 guard, RED then GREEN, committed before mutating (118bca7 was in place
+before the probe).**
+
+| Mutation | Test | Result |
+|---|---|---|
+| image arm ignores the laid-out dimension, returns raw natural | `test_image_flex_item_cross_size_follows_its_ratio_not_natural_height` | RED (border-box 102 vs asserted 80) |
+
+The test seeds the child's `dimensions` to reproduce what the block pre-pass
+leaves behind (78x78 content, 1px border), because flex.rs unit tests call
+`layout_flex_container` directly and skip that pre-pass — without the seeding
+the defect cannot reproduce in isolation, since it lives in the disagreement
+between the laid-out size and the minimum floor. `align-items: flex-start` (not
+the page's default stretch) is used deliberately so the assertion isolates the
+cross MINIMUM: with stretch a single item's stretch target equals its own
+content size and would mask which term was wrong.
+
+### I checked for the duplicate before writing a line of code
+
+Night 20's lesson was that night 19 re-implemented `9fcfbdf` three nights after
+it landed because nobody ran `git log origin/develop..origin/<branch> -S<symbol>`
+over the unmerged branches first. I ran it this time, before touching
+`crates/`: `-S"natural"` and a scan of `layout_image`/`get_intrinsic_cross_size`
+across all five unmerged engine branches. The fix is on none of them. It is
+genuinely new work, not a rebuild.
+
+### Commits
+
+Engine, on `atlas/replaced-flex-image-ratio` (cut from
+`atlas/replaced-aspect-ratio`, because the defect is in the same
+replaced-element sizing family and the test's expected numbers assume night
+19's border decoration and night 20's ratio work):
+
+- `118bca7` — a flex item image derives its cross size from its ratio, not
+  natural height.
+
+Nothing landed on `atlas/trench-parity-finish-line` except this digest.
+`cargo test -p rustkit-layout --lib` (296) and `-p rustkit-engine --lib` (52)
+both green before the commit.
+
+### The engine-branch pile is now six deep, and my branch is on the losing side
+
+This is the part Pete most needs, and it is the ninth night of asking. The
+unmerged engine work off `develop` is now:
+
+- **Stack A** (`atlas/percent-height-basis`, tip d711e89): 15 commits, contains
+  `9fcfbdf` — the join-key fix in its single-exit-block form.
+- **Stack B** (`atlas/replaced-aspect-ratio`, tip e0c8503): 5 commits, contains
+  `b2ad86e` — the DUPLICATE join-key fix in its patched-returns form.
+- **tonight** (`atlas/replaced-flex-image-ratio`): 1 commit on top of Stack B.
+
+Stacks A and B still conflict in 8 hunks on the duplicated join-key, and my
+branch now sits on top of Stack B, so the replaced-element work is three
+commits deep on the `b2ad86e` side of that conflict. I did **not** resolve the
+conflict or rebase anything: nights 20 and 23 escalated "which implementation
+survives" to Pete as a deliberate decision, and consolidating the stack picks
+that winner. Overriding eight nights of that restraint silently, on branches I
+do not own, on a night with less context than those nights had, is the wrong
+trade. So I added one clean, measured, mutation-checked fix in the established
+pattern (nights 19/20/23 each cut a fresh replaced-element branch and pushed
+it) and left the merge decision where it was left.
+
+But the cost the last two nights predicted is now compounding on schedule:
+every replaced-element fix lands on the side of an unresolved conflict that was
+clean on 08-21, and the pile grows by roughly one branch a night with no PR to
+absorb it.
+
+### Decisions needed from Pete
+
+1. **Open the P2 PR and resolve the join-key duplicate — ninth night of
+   asking, and the pile is now six branches with one unresolved 8-hunk
+   conflict at its base.** Every further geometry night stacks on top of that.
+2. When the duplicate is resolved, which join-key implementation survives —
+   `9fcfbdf`'s single-exit block (the standing recommendation; it is the one
+   that cannot regrow the defect) or `b2ad86e`'s patched return sites? Once
+   that is settled, tonight's `atlas/replaced-flex-image-ratio` rebases onto
+   the survivor cleanly (it does not touch the join-key code).
+3. Still open from 08-10 onward: keep or literally revert the overflow-clip
+   change that cost `sticky-scroll` 36 pixels on a card RustKit lays out 38px
+   too low?
+
+### Surprises
+
+- **The cron prompt this session started from is badly stale — it told me to
+  work P0a-0, which completed on night 1 (2026-08-04).** I followed the plan
+  and the digest to the real next unit rather than the prompt. Worth flagging
+  because a fresh session that trusted the prompt over the repo would have
+  redone three-week-old work; the prompt's own "READ FIRST" order is what
+  prevented that, but the stored prompt should be refreshed to point at the
+  geometry-first queue rather than P0a-0.
+- **The bug was two flex sizing terms disagreeing about one box.**
+  `get_content_cross_height` prefers the laid-out dimension; the cross-minimum
+  path a few lines away read the raw natural size instead. Neither is wrong in
+  isolation — the box math in `layout_image` was already correct — but the
+  minimum silently overrode the correct content size, which is why twelve
+  nights of "images-intrinsic geometry" carried this without it being visible
+  as an image bug (night 19 recorded that no image was even being compared).
+- **A flex.rs unit test cannot reproduce this defect without simulating the
+  block pre-pass**, because the tests call `layout_flex_container` directly and
+  the real dispatch runs a block pass first. The guard seeds the child's
+  dimensions to stand in for that pass. A test that skipped the seeding would
+  have been green with and without the fix — the fourth or fifth variant this
+  campaign has hit of "the guard could not reach the code."
