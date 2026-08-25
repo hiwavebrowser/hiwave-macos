@@ -4017,3 +4017,248 @@ absorb it.
   dimensions to stand in for that pass. A test that skipped the seeding would
   have been green with and without the fix — the fourth or fifth variant this
   campaign has hit of "the guard could not reach the code."
+
+## 2026-08-25
+
+**Metric: 1/26 → 1/26.** `bg-pure` is the green case before and after; no case
+crossed the conjunction in either direction, and Gate A's green count is 2/26
+on both trees. Geometry moved on two cases and the direction is **not the
+flattering one**: total failures **2763 → 2766**. That is a regression on this
+seat, it is the headline, and the rest of this entry is about why it is a
+regression *here* and a strict improvement under a Chrome-correct font metric —
+established by measurement, not by argument. No macOS run tonight; every number
+below is Linux/SwiftShader and is mechanics, not a receipt.
+
+**P-item: the geometry-first queue (ratified 2026-08-12), on the last
+unretired root from night 18's font-independent board. That unit is complete.**
+Night 18 published four readable axes; nights 19 and 20 retired three of them
+(the natural-size image border, the unapplied `aspect-ratio`). The fourth —
+`rounded-corners body > div:nth-of-type(7) height 126 vs 120 −6.00`, recorded
+then as "stated as observed and not diagnosed" — is diagnosed and fixed.
+
+### The defect
+
+CSS2 §10.8.1 gives an inline-block the baseline of its last in-flow line box
+**unless** it has no in-flow line boxes **or** its `overflow` computes to
+something other than `visible` — then the baseline is the bottom *margin* edge
+and the strut's descent hangs below the box. `baseline_is_bottom_edge()`
+implemented only the first half of that "unless":
+
+```rust
+self.style.display.is_atomic_inline() && self.children.is_empty()
+```
+
+`rounded-corners .test7` is `border-radius: 30px; overflow: hidden` with one
+block child. It is the only box on that page with a child, so it was the only
+one of nine that missed the bottom-edge path: its wrapper built 120 where
+Chrome builds 126, while its eight childless siblings already built 126 (127.12
+here — the +1.12 is this seat's strut error, i.e. P4's).
+
+Second instance found by the sweep, not predicted: `about .sponsor-btn`
+(`display: inline-flex; overflow: hidden`). Those are the only two elements in
+26 cases that change.
+
+### Measured — Linux/SwiftShader, 26 gating cases. MECHANICS, NOT A RECEIPT
+
+| Oracle | before | after |
+|---|---|---|
+| Gate A geometry failures | 2763 | **2766** |
+| Gate A join failures | 20 | 20 |
+| Gate A green | 2/26 | 2/26 |
+| N/26 | 1/26 | 1/26 |
+
+Every changed axis is one of exactly **two uniform shifts** — nothing else in
+the corpus moved:
+
+```
+rounded-corners   +7.1200  x10 axes
+about             +3.3599/+3.3600/+3.3601  x136 axes   (+ one -0.0002 float wobble)
+```
+
+One strut descent added per element, and no third mechanism hiding in the diff.
+
+| case | count | sum abs delta |
+|---|---|---|
+| rounded-corners | 66 → 66 | 263.73 → **322.93** |
+| about | 390 → **393** | 138633.22 → **138810.49** |
+
+### Why it regresses here, measured rather than argued
+
+This seat's stub strut is **7.12px where Chrome's is 6.00**, so every strut it
+adds carries +1.12 of P4's font error — and `.test7`'s *missing* strut had been
+cancelling six of those. Before: divs 1–6 contribute +1.12 each (+6.72), div7
+contributes −6.00, net drift +0.72 at the bottom of the page. After: seven
+uniform +1.12s, net +7.84. The pre-fix page was two bugs partially cancelling;
+the post-fix page has one root, and the number preferred the cancellation.
+
+That is §1 of the plan reproducing itself, so I did not stop at the argument.
+Both trees were re-captured with the stub ratios tuned so the strut lands on
+Chrome's 6.00 (`0.82/0.21` → `0.94/0.19`, chosen because the strut is
+`12 + (descent − ascent)/2` at this page's `line-height: 1.5`):
+
+```
+                    strut 7.12 (this seat)      strut 6.00 (Chrome-correct)
+rounded-corners     66 → 66                     27 → 17     11 axes REMOVED, 0 added
+                    sum|d| 263.73 → 322.93      sum|d| 185.81 → 125.81
+```
+
+Under the corrected strut, `rounded-corners` divs 1–6 are **exact**, and the
+only top-level failures on the whole page are `.test7`'s −6.00 and its five
+downstream −6.00 shifts:
+
+```
+probe-base   html > body                 height   1681 vs 1675   -6.00
+             body > div:nth-of-type(7)   height    126 vs  120   -6.00
+             body > h2:nth-of-type(8)    y        1327 vs 1321   -6.00
+             body > div:nth-of-type(8)   y        1358 vs 1352   -6.00
+             body > h2:nth-of-type(9)    y        1504 vs 1498   -6.00
+             body > div:nth-of-type(9)   y        1535 vs 1529   -6.00
+probe-fix    all eleven gone, none added
+```
+
+`about` still shifts +3.04 under the corrected strut, so its regression is not
+a font artefact — but `about`'s container is **2617px taller** than Chrome's
+before any of this. It is the `known_fail` case; nothing on it is measurable at
+that scale, and its "131 worsened axes" sit at 5px–2600px of pre-existing
+error.
+
+**The falsifiable prediction for the macOS lane**, stated so it can be checked
+rather than assumed: if CoreText puts the strut at 6.00, `rounded-corners`
+loses 10 geometry failures and gains none, and `about` gains roughly 131 axes
+of +3px on a page already thousands of pixels out. If macOS instead shows
+`rounded-corners` gaining failures, this fix is wrong and I have mis-modelled
+the strut.
+
+### Stop rule
+
+Checked per axis across all 26 cases, not per case. The rule's literal
+antecedent — *improves the metric while an oracle regresses* — is **not met**:
+the metric did not improve (1/26 → 1/26, Gate A green 2/26 → 2/26). What
+happened is the inverse: correctness improved and the count got worse. I am
+flagging it as decision 1 rather than treating "the antecedent is false" as
+permission, because that reading is exactly the kind of lawyering the rule
+exists to stop, and 08-10's identical question has been open for fifteen
+nights.
+
+Nothing was auto-reverted. The change is on an unmerged branch and imposes
+nothing.
+
+### Mutation-check results
+
+**8 probes, 8/8 RED, control green before and after, committed before
+mutating.** A null probe — the clause reordered to the same truth value —
+came back **GREEN**, so the harness can produce green and 8/8 is a count rather
+than a harness that reds everything (night 20's check, repeated).
+
+| Mutation | Result |
+|---|---|
+| M1 overflow clause removed (the fix itself) | RED |
+| M2 clause unconditional — every atomic inline takes the bottom edge | RED |
+| M3 `clips_content` inverted | RED |
+| M4 either-axis becomes both-axes (OR → AND) | RED |
+| M5 only `overflow_x` consulted | RED |
+| M6 only `overflow_y` consulted | RED |
+| M7 `is_atomic_inline` precondition dropped | RED *(see below)* |
+| M8 `clips_content` restated as `== Hidden` instead of cited | RED |
+| NULL clause reordered, same truth value | GREEN (correctly) |
+
+**M7's RED is not mine, and I deleted the guard that claimed it.** The sweep
+reported RED, but the failing test was the pre-existing
+`flex::tests::test_header_nav_row_like_chrome` — my
+`a_block_level_clipping_box_gets_no_strut_under_it` stayed **green** under the
+mutation it was written for. It asserts a true property (a block-level clipping
+box contributes exactly its own height) that is held by the block/inline
+dispatch, not by the precondition: the fixture's box never reaches
+`baseline_is_bottom_edge` at all. I tried `Display::Inline` as well as
+`Display::Block` and it still could not reach it. So the repo is **not**
+unguarded on M7 — but tonight's guard is not what holds it, and a guard whose
+name asserts a mechanism it cannot exercise is worse than no guard. Deleted,
+with the reasoning in `4c3255f`.
+
+That is the ninth sweep in a row with a survivor of the same shape, and the
+third distinct variant of "the guard could not reach the code" (night 21 hit
+the flex pre-pass version two nights ago). It was caught only because I checked
+*which* test went red on a probe whose failure list came back empty.
+
+### Commits
+
+Engine, on `atlas/inline-block-clip-baseline`, cut from **`develop`**:
+
+- `ca9856c` — a clipping atomic inline's baseline is its bottom margin edge.
+
+Nothing landed on `atlas/trench-parity-finish-line` except this digest.
+`cargo test -p rustkit-layout --lib` (283) and `-p rustkit-engine --lib` (52)
+both green on plain `develop` before the commit.
+
+**This branch does not deepen the pile.** Unlike nights 19–21, the patch
+applies cleanly to `develop` with no dependency on either stack (`git apply
+--check` clean), so it is one commit off the trunk rather than a seventh branch
+on the conflicted side.
+
+### I rebuilt the aiming board, on a locally merged tree, and did not push the merge
+
+Night 20 declined to publish a board because its captures were `develop` +
+one branch while night 21's were the stack tip: *"a board that looks like the
+aiming board and is measured on a different tree is worse than no board"*, and
+producing the real one needs the 8-hunk join-key conflict resolved, which is
+Pete's decision 2.
+
+I resolved it **in a throwaway local worktree** (`scratch/union-board`, never
+pushed, never a branch anyone can pull) purely so tonight's numbers come off
+the union of Stack A + Stack B rather than half of it. The join-key duplicate
+was resolved to `9fcfbdf`'s single-exit form — the standing recommendation —
+and taking that side also drops the 91 lines of *tests* from `00fcefb` and
+`8671ada`, which is fine for a measurement tree and would not be fine for a
+real merge. **That is not a decision, it is a measurement**; decision 2 is
+still open and I did not touch a branch I do not own.
+
+Worth recording from it: the union merges with **one** conflicted file
+(`crates/rustkit-engine/src/lib.rs`, 8 hunks, all the duplicate), and
+`rustkit-layout/flex.rs` and `lib.rs` auto-merge. Both suites pass on the
+union (340 layout, 56 engine). The consolidation is still mechanical.
+
+### Decisions needed from Pete
+
+1. **`rounded-corners` loses 6px of accidental cancellation and this seat's
+   count goes 2763 → 2766** — keep the spec-cited fix (my reading: under a
+   Chrome-correct strut it removes 11 axes and adds none), or revert it
+   literally? This is 08-10's question in a second instance, and that one is
+   still unanswered.
+2. **Open the P2 PR and resolve the join-key duplicate — tenth night of
+   asking.** The pile is six branches; tonight's is a seventh but off
+   `develop`, so it does not compound. I measured that the union still merges
+   with one conflicted file and both suites pass.
+3. Still open from 08-10 onward: keep or literally revert the overflow-clip
+   change that cost `sticky-scroll` 36 pixels on a card RustKit lays out 38px
+   too low?
+
+### Surprises
+
+- **The number got worse and that is the finding, not a failure of the night.**
+  I expected the last readable root on the board to be a clean removal like
+  nights 19–21. Instead the corpus had been *paying* for this bug: six
+  accumulated font errors of +1.12 were being cancelled by one missing 6px
+  strut, and removing the cancellation exposes them. The instrument preferred
+  the version with two bugs. That is the campaign's thesis showing up inside
+  the campaign's own work for the third time (08-10, 08-12, tonight).
+- **The font probe is good for more than classifying roots.** Night 18 built
+  `--font-probe-root` to measure which boxes a font can move. Re-tuning the
+  same constants to make the seat's strut *correct* turns it into a
+  platform-difference simulator, and it settled in twenty minutes a question
+  that would otherwise have waited for a macOS lane run and been argued in
+  prose meanwhile. It is not a substitute for the macOS receipt and I am not
+  claiming it is — but "the Linux regression is a font artefact" went from an
+  assertion to a measurement for one of the two cases, and was *refuted* for
+  the other.
+- **A probe with an empty failure list is the tell.** M7 came back RED with no
+  test name captured because my harness only scanned `test tests::` lines and
+  the real failure was in `flex::tests::`. If I had trusted the verdict I would
+  have shipped a decorative guard and counted it. The harness's reporting gap
+  and the decorative guard were two separate defects that happened to point at
+  each other.
+- **`about` is not measurable and the board still lets it dominate a count.**
+  Its container is 2617px out; 393 of the corpus's 2766 geometry failures are
+  on a page nothing can be read from. A count that includes `about` will move
+  by ±100 axes for any change that shifts one line, and three nights of
+  "geometry failures went from X to Y" have been quoting a number `about` can
+  swamp at will.
