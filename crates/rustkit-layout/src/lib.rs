@@ -1666,10 +1666,25 @@ impl LayoutBox {
     /// down the page). Computed from the CONTAINER's font/line-height, since
     /// the strut belongs to the line box, not the image.
     /// True when this inline-level box's baseline is its bottom margin edge
-    /// (CSS2 §10.8.1): replaced elements (images), and atomic inlines with no
-    /// in-flow line boxes. The line box then extends below the box by the
-    /// strut's descent + half-leading; boxes with in-flow content carry their
-    /// own below-baseline part inside their margin height instead.
+    /// (CSS2 §10.8.1): replaced elements (images), atomic inlines with no
+    /// in-flow line boxes, and atomic inlines whose `overflow` computes to
+    /// anything other than `visible`. The line box then extends below the box
+    /// by the strut's descent + half-leading; boxes with in-flow content carry
+    /// their own below-baseline part inside their margin height instead.
+    ///
+    /// The overflow clause is the second half of §10.8.1's "unless", and it was
+    /// missing: `children.is_empty()` alone covered only the no-line-boxes half.
+    /// `rounded-corners .test7` (`border-radius: 30px; overflow: hidden` with
+    /// one block child) is the corpus instance — its wrapper built 120 where
+    /// Chrome builds 126, while its eight sibling wrappers, whose boxes are
+    /// childless, already took the bottom-edge path.
+    ///
+    /// `children.is_empty()` remains a PROXY for "no in-flow line boxes" and is
+    /// still narrower than the spec: a box whose children are all blocks with no
+    /// text generates no line boxes either. Widening it needs the subtree walked
+    /// for line-box generation, which is its own unit with its own blast radius,
+    /// so it is recorded rather than half-landed. `.test7` is covered here
+    /// because it clips, not because the proxy got wider.
     fn baseline_is_bottom_edge(&self) -> bool {
         if matches!(self.box_type, BoxType::Image { .. }) {
             return true;
@@ -1696,7 +1711,19 @@ impl LayoutBox {
                 + px(&self.style.border_bottom_width);
             return author_pb_v > 0.0;
         }
-        self.style.display.is_atomic_inline() && self.children.is_empty()
+        if !self.style.display.is_atomic_inline() {
+            return false;
+        }
+        self.children.is_empty() || self.clips_own_overflow()
+    }
+
+    /// `overflow` computes to something other than `visible` on either axis.
+    /// Either axis is enough: a box that clips one axis is a scroll container,
+    /// and CSS2 §10.8.1 keys the baseline override off the property, not an
+    /// axis. `Overflow::clips_content` is cited rather than restated so the
+    /// set of clipping values lives in exactly one place.
+    fn clips_own_overflow(&self) -> bool {
+        self.style.overflow_x.clips_content() || self.style.overflow_y.clips_content()
     }
 
     /// Distance from a form control's synthetic baseline (its inner text
@@ -6633,6 +6660,139 @@ mod tests {
             (second_row.content.y - expected_y).abs() < 0.5,
             "wrapped row must advance by line height incl. strut descent; expected content.y {expected_y}, got {}",
             second_row.content.y
+        );
+    }
+
+    /// One box, 100px tall, holding a single block child, on a line of its
+    /// own inside a plain block parent. Returns the parent after layout.
+    fn wrapper_around_child_bearing_box(
+        display: rustkit_css::Display,
+        overflow_x: rustkit_css::Overflow,
+        overflow_y: rustkit_css::Overflow,
+    ) -> LayoutBox {
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 900.0, 0.0);
+
+        let mut inner_style = ComputedStyle::new();
+        inner_style.width = Length::Percent(100.0);
+        inner_style.height = Length::Percent(100.0);
+
+        let mut box_style = ComputedStyle::new();
+        box_style.display = display;
+        box_style.width = Length::Px(150.0);
+        box_style.height = Length::Px(100.0);
+        box_style.overflow_x = overflow_x;
+        box_style.overflow_y = overflow_y;
+
+        let mut subject = LayoutBox::new(BoxType::Block, box_style);
+        subject
+            .children
+            .push(LayoutBox::new(BoxType::Block, inner_style));
+
+        let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        parent.children.push(subject);
+        parent.layout(&cb);
+        parent
+    }
+
+    #[test]
+    fn a_clipping_atomic_inline_needs_only_one_axis_to_clip() {
+        // `overflow-x: hidden; overflow-y: visible` computes overflow-y to
+        // `auto` in a real UA — the box is a scroll container either way, and
+        // §10.8.1 keys off the property, not an axis. An AND here would read
+        // the fixture in the sibling test (both axes hidden) as passing while
+        // silently excluding every single-axis clip on a real page.
+        for (ox, oy) in [
+            (rustkit_css::Overflow::Hidden, rustkit_css::Overflow::Visible),
+            (rustkit_css::Overflow::Visible, rustkit_css::Overflow::Scroll),
+        ] {
+            let parent = wrapper_around_child_bearing_box(
+                rustkit_css::Display::InlineBlock,
+                ox,
+                oy,
+            );
+            let expected = 100.0 + parent.inline_strut_descent();
+            assert!(
+                (parent.dimensions.content.height - expected).abs() < 0.5,
+                "clipping on one axis ({ox:?}/{oy:?}) must still put the baseline \
+                 on the bottom margin edge; expected {expected}, got {}",
+                parent.dimensions.content.height
+            );
+        }
+    }
+
+    /// One inline-block, 100px tall, holding a single block child, on a line
+    /// of its own. `clips` selects `overflow: hidden` vs `visible`.
+    /// Returns the parent block after layout.
+    fn wrapper_around_atomic_inline_with_a_child(clips: bool) -> LayoutBox {
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 900.0, 0.0);
+
+        let mut inner_style = ComputedStyle::new();
+        inner_style.width = Length::Percent(100.0);
+        inner_style.height = Length::Percent(100.0);
+
+        let mut box_style = ComputedStyle::new();
+        box_style.display = rustkit_css::Display::InlineBlock;
+        box_style.width = Length::Px(150.0);
+        box_style.height = Length::Px(100.0);
+        if clips {
+            box_style.overflow_x = rustkit_css::Overflow::Hidden;
+            box_style.overflow_y = rustkit_css::Overflow::Hidden;
+        }
+
+        let mut atomic = LayoutBox::new(BoxType::Block, box_style);
+        atomic
+            .children
+            .push(LayoutBox::new(BoxType::Block, inner_style));
+
+        let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        parent.children.push(atomic);
+        parent.layout(&cb);
+        parent
+    }
+
+    #[test]
+    fn a_clipping_atomic_inline_puts_its_baseline_on_its_bottom_margin_edge() {
+        // CSS2 §10.8.1: an inline-block's baseline is its last in-flow line
+        // box's baseline UNLESS it has no in-flow line boxes OR its overflow
+        // computes to something other than `visible` — then it is the bottom
+        // MARGIN edge, and the strut's descent hangs below the box.
+        //
+        // Corpus instance: `rounded-corners .test7`
+        // (`border-radius: 30px; overflow: hidden`) with one block child. Its
+        // wrapper built 120 where Chrome builds 126; its eight sibling
+        // wrappers, whose boxes are childless, already took this path. The
+        // engine only implemented the no-line-boxes half of the "unless", so
+        // the one box on the page that clips was the one that missed out.
+        let parent = wrapper_around_atomic_inline_with_a_child(true);
+        let strut = parent.inline_strut_descent();
+        assert!(strut > 0.0, "fixture needs a positive strut to be able to fail");
+
+        let expected = 100.0 + strut;
+        assert!(
+            (parent.dimensions.content.height - expected).abs() < 0.5,
+            "a clipping inline-block sits ON the baseline, so its line box must \
+             be box height + strut descent ({expected}), got {}",
+            parent.dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn a_non_clipping_atomic_inline_with_a_child_keeps_the_last_line_baseline() {
+        // The other side of the same rule, and the one that stops the fix
+        // widening into "any atomic inline with children gets the strut".
+        // With `overflow: visible` the baseline stays inside the box, so the
+        // line box is exactly the box and NOTHING hangs below it.
+        let parent = wrapper_around_atomic_inline_with_a_child(false);
+        let strut = parent.inline_strut_descent();
+        assert!(strut > 0.0, "fixture needs a positive strut to be able to fail");
+
+        assert!(
+            (parent.dimensions.content.height - 100.0).abs() < 0.5,
+            "a non-clipping inline-block with in-flow content carries its own \
+             below-baseline part, so the line must be 100, got {}",
+            parent.dimensions.content.height
         );
     }
 
