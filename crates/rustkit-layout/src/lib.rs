@@ -55,6 +55,24 @@ pub use text::{
 
 use rustkit_css::{BoxSizing, Color, ComputedStyle, Length, TextAlign};
 use std::cmp::Ordering;
+
+/// The `word-break` the line breaker should run with.
+///
+/// css-text-3 §5.3: `line-break: anywhere` puts a soft wrap opportunity
+/// around every typographic character unit, "disregarding any prohibition
+/// against line breaks" — including `word-break: keep-all` on the same
+/// element. The breaker models exactly that set of opportunities for
+/// `break-all` (every grapheme boundary is a REAL opportunity, used in normal
+/// line filling), so `anywhere` maps onto it here rather than onto
+/// `overflow-wrap: anywhere`, whose emergency breaks only fire for a word
+/// that overflows a line on its own.
+pub fn effective_word_break(style: &ComputedStyle) -> rustkit_css::WordBreak {
+    if style.line_break == rustkit_css::LineBreak::Anywhere {
+        rustkit_css::WordBreak::BreakAll
+    } else {
+        style.word_break
+    }
+}
 use thiserror::Error;
 
 /// Errors that can occur in layout.
@@ -1322,7 +1340,7 @@ impl LayoutBox {
                 self.style.font_stretch,
                 font_size,
                 container_width,
-                self.style.word_break,
+                effective_word_break(&self.style),
                 self.style.overflow_wrap,
             ) {
                 if lines.len() > 1 {
@@ -1431,7 +1449,7 @@ impl LayoutBox {
             font_size,
             first_line_width,
             container_width,
-            self.style.word_break,
+            effective_word_break(&self.style),
             self.style.overflow_wrap,
         ) {
             Ok(lines) if !lines.is_empty() => lines,
