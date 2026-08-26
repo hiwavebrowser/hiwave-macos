@@ -1442,6 +1442,74 @@ impl TextShaper {
         word_break: CssWordBreak,
         overflow_wrap: CssOverflowWrap,
     ) -> Result<Vec<WrappedLine>, TextError> {
+        // Legacy proxy: a narrower first line IS the mid-line signal here.
+        self.wrap_text_lines(
+            text,
+            font_chain,
+            weight,
+            style,
+            stretch,
+            size,
+            first_line_max_width,
+            max_width,
+            word_break,
+            overflow_wrap,
+            first_line_max_width < max_width,
+        )
+    }
+
+    /// `wrap_text_with_first_line` for a run that is KNOWN to start mid-line.
+    ///
+    /// The legacy entry infers "starts mid-line" from `first < max`, which is
+    /// blind when the container is zero-wide: `first == max == 0`, so a run
+    /// that cannot fit the remainder of a line it is not alone on used to
+    /// glue its first grapheme onto that line (`xyz` + `d` on WPT
+    /// break-boundary-2-chars-001) instead of starting on the next line box.
+    /// Callers that know the cursor is past the line start say so explicitly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn wrap_text_mid_line(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        first_line_max_width: f32,
+        max_width: f32,
+        word_break: CssWordBreak,
+        overflow_wrap: CssOverflowWrap,
+    ) -> Result<Vec<WrappedLine>, TextError> {
+        self.wrap_text_lines(
+            text,
+            font_chain,
+            weight,
+            style,
+            stretch,
+            size,
+            first_line_max_width,
+            max_width,
+            word_break,
+            overflow_wrap,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn wrap_text_lines(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        first_line_max_width: f32,
+        max_width: f32,
+        word_break: CssWordBreak,
+        overflow_wrap: CssOverflowWrap,
+        starts_mid_line: bool,
+    ) -> Result<Vec<WrappedLine>, TextError> {
         if text.is_empty() {
             return Ok(vec![]);
         }
@@ -1498,6 +1566,7 @@ impl TextShaper {
                 max_width,
                 &breaker,
                 segment.start,
+                starts_mid_line && lines.is_empty(),
             )?;
 
             lines.extend(segment_lines);
@@ -1516,6 +1585,7 @@ impl TextShaper {
                 max_width,
                 &breaker,
                 0,
+                starts_mid_line,
             )?;
         }
 
@@ -1523,6 +1593,10 @@ impl TextShaper {
     }
 
     /// Internal helper to wrap a single segment (no mandatory breaks).
+    /// `starts_mid_line`: the segment's first line begins at an inline
+    /// cursor past the line start, so "nothing fits" means "start on the
+    /// next line box", never "overflow the partially-filled line".
+    #[allow(clippy::too_many_arguments)]
     fn wrap_segment(
         &self,
         text: &str,
@@ -1535,6 +1609,7 @@ impl TextShaper {
         max_width: f32,
         breaker: &LineBreaker,
         base_offset: usize,
+        starts_mid_line: bool,
     ) -> Result<Vec<WrappedLine>, TextError> {
         if text.is_empty() {
             return Ok(vec![]);
@@ -1575,10 +1650,12 @@ impl TextShaper {
             )?;
 
             if break_offset == 0 {
-                // Nothing fits on a NARROWED first line: start the run on
-                // the next (full-width) line box instead of overflowing a
-                // partially-filled line.
-                if lines.is_empty() && first_line_max_width < max_width {
+                // Nothing fits on a first line that begins MID-LINE: start
+                // the run on the next (full-width) line box instead of
+                // overflowing a partially-filled line. `starts_mid_line`, not
+                // `first < max`: at container width 0 both budgets are 0 and
+                // the proxy went blind (WPT break-boundary-2-chars-001).
+                if lines.is_empty() && starts_mid_line {
                     lines.push(WrappedLine {
                         runs: vec![],
                         width: 0.0,
@@ -2522,5 +2599,54 @@ mod tests {
         assert!(!line.is_empty());
         assert_eq!(line.start_offset, 0);
         assert_eq!(line.end_offset, 4);
+    }
+}
+
+#[cfg(test)]
+mod mid_line_zero_width_tests {
+    use super::*;
+
+    fn wrap(mid_line: bool) -> Vec<String> {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let f = if mid_line {
+            TextShaper::wrap_text_mid_line
+        } else {
+            TextShaper::wrap_text_with_first_line
+        };
+        f(
+            &shaper,
+            "def",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            32.0,
+            0.0,
+            0.0,
+            CssWordBreak::BreakAll,
+            CssOverflowWrap::Normal,
+        )
+        .expect("wraps")
+        .iter()
+        .map(|l| l.text())
+        .collect()
+    }
+
+    #[test]
+    fn a_mid_line_run_with_no_room_starts_on_the_next_line_box() {
+        // WPT break-boundary-2-chars-001: `def` follows a `pre` span on a
+        // zero-wide line. Nothing fits the remainder, so the run's first line
+        // is EMPTY (closes the open line) and the graphemes go one per line.
+        // The old `first < max` proxy saw 0 < 0 == false and glued `d` onto
+        // the span's line.
+        assert_eq!(wrap(true), ["", "d", "e", "f"]);
+    }
+
+    #[test]
+    fn the_legacy_entry_keeps_its_first_lt_max_proxy() {
+        // Callers that do not know the cursor position keep the old reading:
+        // equal budgets mean "not mid-line", so no empty leading line.
+        assert_eq!(wrap(false), ["d", "e", "f"]);
     }
 }
