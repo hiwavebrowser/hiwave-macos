@@ -4,8 +4,8 @@
 ## Board
 | | develop `7591e1c` | `atlas/webfont-load` tip |
 |---|---|---|
-| WPT Tier-1 scored | 9/25 (36.0%), 1 ERROR | **16/26 (61.5%), 0 ERROR** |
-| honest (ex "font never loaded") | 4/25 | 16/26 — the tag no longer means "never loaded" |
+| WPT Tier-1 scored | 9/25 (36.0%), 1 ERROR | **17/26 (65.4%), 0 ERROR** |
+| honest (ex "font never loaded") | 4/25 | 17/26 — the tag no longer means "never loaded" |
 | campaign pixel board | 26/26, avg 4.25% | **26/26, avg 4.1%** (23 of 26 cases improve) |
 
 Every number measured on a fresh-built `parity-capture` with the n24 freshness guard on.
@@ -48,6 +48,13 @@ Each step exposed the next; none was visible before the one above it.
    (both sides wrapped identically in the wrong font) and failed honestly once `<br>` made the
    reference correct; parsing the shorthand passes them for real and un-blanks the ERROR case.
    14/25 → 16/26.
+10. **U+00A0 collapsed at BOX BUILD too.** Gap 8 fixed the wrapper, and lba006 did not move —
+    because the engine's collapsible-white-space pass used `split_whitespace` /
+    `char::is_whitespace`, which treat nbsp as document white space: "XXXX&nbsp;XXXX" was
+    already "XXXX XXXX" before layout. Document white space is now exactly space/tab/LF/CR/FF
+    there and in the edge-trim (`trim_start()` also ate a following nbsp). 16/26 → **17/26**.
+
+Ten, then. The title stays as written; the count is in the receipts.
 
 ## What the tag means now
 `blocked_by: "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)"` is
@@ -55,10 +62,13 @@ attribution for trendline continuity only. A fail is measured IN the declared fa
 real. The runner's "suspect pass" framing is retired in the comment and the console line.
 
 ## Ledgered, not chased
-- Remaining Tier-1 fails (10): lba001/002 (0.0196/0.0131 — ~90/60 px, not localized),
-  lba006 (0.1302 — one 25px cell, NOT the nbsp hypothesis: that fix didn't move it),
-  owa002/003 (0.05/0.08), lba005 0.39, owa001/005 2.08, bb2c001 2.25, empty-span-size-002
-  0.0102 (outline paint, n21).
+- Remaining Tier-1 fails (9): **lba001/002 (0.0196/0.0131) are ONE COLUMN of ~1%-coverage
+  glyph antialiasing** peeking past a 1ch (8.9px) cover whose right edge is correctly
+  centre-sampled at 16.9 → pixel 17 uncovered, same as Chrome's snap. That is AA noise, not
+  an engine bug; the exact-match threshold is Pete-locked (wpt_tier1.py: "raised HERE, with
+  Pete's sign-off") — decision item, not a fix. owa002/003 (0.05/0.08; owa003's markup has an
+  unclosed `<div>`), lba005 0.39, owa001/005 2.08, bb2c001 2.25, empty-span-size-002 0.0102
+  (outline paint, n21).
 - WOFF/WOFF2 — what real sites ship — need a decoder the workspace lacks; today they
   install as nothing and are counted as rejected.
 - Relative `src` in an external sheet resolves against the document URL, not the sheet URL.

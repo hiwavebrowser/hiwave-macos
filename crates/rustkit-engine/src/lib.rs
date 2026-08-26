@@ -217,6 +217,13 @@ impl EngineConfig {
     }
 }
 
+/// css-text §4.1 "document white space": the characters that collapse under
+/// `white-space: normal`. NOT `char::is_whitespace` — that also says yes to
+/// U+00A0 NO-BREAK SPACE, a rendered, non-collapsible character.
+fn is_document_white_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c')
+}
+
 /// The pieces of a `font` shorthand value, as longhand-ready strings.
 #[derive(Debug, PartialEq)]
 struct FontShorthand {
@@ -2854,11 +2861,13 @@ impl Engine {
                         continue;
                     }
                     if let BoxType::Text(ref mut t) = layout_box.children[i].box_type {
+                        // Strip the collapsed SPACE only: `trim_start()` also
+                        // eats a following nbsp, which is content.
                         if !prev_inline && t.starts_with(' ') {
-                            *t = t.trim_start().to_string();
+                            *t = t.trim_start_matches(' ').to_string();
                         }
                         if !next_inline && t.ends_with(' ') {
-                            *t = t.trim_end().to_string();
+                            *t = t.trim_end_matches(' ').to_string();
                         }
                     }
                 }
@@ -2886,22 +2895,30 @@ impl Engine {
                         | rustkit_css::WhiteSpace::BreakSpaces
                 );
                 let content = if collapsible {
+                    // Only DOCUMENT white space collapses (css-text §4.1:
+                    // space, tab, and the line-ending characters).
+                    // `split_whitespace`/`char::is_whitespace` also match
+                    // U+00A0 NO-BREAK SPACE, which turned "XXXX&nbsp;XXXX"
+                    // into "XXXX XXXX" here — a rendered character silently
+                    // rewritten into a collapsible one before layout ever
+                    // saw it (WPT line-break-anywhere-006).
                     let mut s = String::new();
-                    if text.starts_with(char::is_whitespace) {
-                        s.push(' ');
-                    }
-                    let mut first = true;
-                    for w in text.split_whitespace() {
-                        if !first {
-                            s.push(' ');
+                    let mut in_ws = false;
+                    for c in text.chars() {
+                        if is_document_white_space(c) {
+                            in_ws = true;
+                        } else {
+                            if in_ws {
+                                s.push(' ');
+                                in_ws = false;
+                            }
+                            s.push(c);
                         }
-                        s.push_str(w);
-                        first = false;
                     }
-                    if !first && text.ends_with(char::is_whitespace) {
+                    if in_ws {
                         s.push(' ');
                     }
-                    s // whitespace-only input -> " " (leading-ws branch only)
+                    s // whitespace-only input -> " "
                 } else {
                     text.clone()
                 };
@@ -11736,6 +11753,7 @@ mod web_font_tests {
             <div id="b" style="white-space: pre"> </div>
             <div id="c"> XX </div>
             <div id="d" style="white-space: break-spaces"> Z </div>
+            <div id="e">  a&nbsp; b &nbsp;</div>
         </body></html>"#;
         let document = Rc::new(Document::parse_html(html).expect("parse"));
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -11752,9 +11770,17 @@ mod web_font_tests {
         texts(&layout, &mut found);
         assert_eq!(
             found,
-            vec![" XX ".to_string(), " ".to_string(), "XX".to_string(), " Z ".to_string()],
+            vec![
+                " XX ".to_string(),
+                " ".to_string(),
+                "XX".to_string(),
+                " Z ".to_string(),
+                // nbsp is content: it neither collapses nor gets trimmed at
+                // the edges; the collapsible spaces around it still do.
+                "a\u{a0} b \u{a0}".to_string(),
+            ],
             "pre-wrap keeps both edge spaces, pre keeps a space-only run, normal collapses, \
-             break-spaces (previously unparsed) preserves"
+             break-spaces (previously unparsed) preserves, nbsp survives collapsing"
         );
     }
 
