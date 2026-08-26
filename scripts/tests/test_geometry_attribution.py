@@ -459,6 +459,205 @@ def test_a_mixed_board_is_not_reported_as_measured():
     assert geometry_attribution.board_font_basis([]) == "heuristic"
 
 
+# ---------------------------------------------------------------------------
+# the magnitude column (font-INEXPLICABLE)
+#
+# The strict column asks whether a font CAN reach a box and by 2026-08-26 it
+# disqualified all 1993 roots. This one asks whether a font could produce an
+# error that BIG, and it must not become a second way to flatter the work: the
+# lies available to it are admitting a box no probe could compare, taking a
+# narrower envelope than the probes measured, and letting a carried box in.
+# ---------------------------------------------------------------------------
+
+
+def test_a_residual_far_larger_than_the_font_envelope_is_published():
+    """`new_tab body > div.footer:nth-of-type(3)`: 1280px against Chrome's
+    137.59, and 0.000px of movement under every probe. It holds text, so the
+    strict column is right to withhold it; no advance width makes a box 9x too
+    wide, so a board that publishes nothing here is not aiming anything."""
+    chrome = chrome_doc(("div.footer", rect(width=137.59)))
+    rustkit = box("div.footer", rect(width=1280.0), [text("Privacy")])
+    probe = box("div.footer", rect(width=1280.0), [text("Privacy")])
+
+    result = attribute_case("c", chrome, rustkit, probe_docs=[probe])
+    finding = next(f for f in result["findings"] if f["axis"] == "width")
+    assert finding["text_reachable"] is True, "the strict column still withholds it"
+    assert finding["font_envelope_px"] == 0.0
+    assert finding["font_inexplicable"] is True
+    assert result["font_inexplicable_roots"] == 1
+    assert result["font_independent_roots"] == 0, "the two columns are independent"
+
+
+def test_a_residual_inside_the_envelope_is_not_published():
+    """The whole claim is a comparison of magnitudes. A box 8px out that a
+    probe already moves 4px has no demonstrated non-font component."""
+    chrome = chrome_doc(("h2.title", rect(y=100.0)))
+    rustkit = box("h2.title", rect(y=108.0), [text("Heading")])
+    probe = box("h2.title", rect(y=112.0), [text("Heading")])
+
+    result = attribute_case("c", chrome, rustkit, probe_docs=[probe])
+    finding = next(f for f in result["findings"] if f["axis"] == "y")
+    assert finding["root"] is True and finding["font_envelope_px"] == 4.0
+    assert finding["font_inexplicable"] is False
+    assert result["font_inexplicable_roots"] == 0
+
+
+def test_an_axis_one_probe_could_not_compare_has_no_envelope():
+    """Unknown is not readable, the same rule the strict column and Gate B use.
+
+    A probe that dropped the box measures nothing about it; taking the max over
+    the probes that DID see it would publish a box on partial evidence, and the
+    partial evidence is the flattering half."""
+    chrome = chrome_doc(("div.a", rect(width=100.0)))
+    rustkit = box("div.a", rect(width=900.0), [text("x")])
+    saw_it = box("div.a", rect(width=900.0), [text("x")])
+    missed_it = {"selector": "root", "children": []}
+
+    result = attribute_case("c", chrome, rustkit, probe_docs=[saw_it, missed_it])
+    finding = next(f for f in result["findings"] if f["axis"] == "width")
+    assert finding["font_envelope_px"] is None
+    assert finding["font_inexplicable"] is False, (
+        "800px out and still withheld — one blind probe is missing evidence"
+    )
+
+
+def test_the_envelope_is_the_widest_probe_not_the_first():
+    """Two probes, and the second moves the box ten times further. Taking the
+    first (or the smallest) would understate what a font can do to this axis
+    and publish a box the wider probe already explains."""
+    chrome = chrome_doc(("div.a", rect(y=100.0)))
+    rustkit = box("div.a", rect(y=180.0), [text("x")])
+    small = box("div.a", rect(y=181.0), [text("x")])
+    wide = box("div.a", rect(y=270.0), [text("x")])
+
+    result = attribute_case("c", chrome, rustkit, probe_docs=[small, wide])
+    finding = next(f for f in result["findings"] if f["axis"] == "y")
+    assert finding["font_envelope_px"] == 90.0, "the widest probe sets the envelope"
+    assert finding["font_inexplicable"] is False
+    only_small = attribute_case("c", chrome, rustkit, probe_docs=[small])
+    assert only_small["findings"][0]["font_envelope_px"] == 1.0
+    assert only_small["findings"][0]["font_inexplicable"] is True
+
+
+def test_the_envelope_is_per_axis_not_per_box():
+    """`images-intrinsic` test11 is the shape: a box whose `y` rides on a page
+    of text while its `height` is an unapplied aspect-ratio that no font can
+    touch. One envelope per box would hide the readable axis behind the other."""
+    chrome = chrome_doc(("img.test", rect(y=100.0, height=90.0)))
+    rustkit = box("img.test", rect(y=2000.0, height=160.0), [text("x")])
+    probe = box("img.test", rect(y=2400.0, height=160.0), [text("x")])
+
+    result = attribute_case("c", chrome, rustkit, probe_docs=[probe])
+    by_axis = {f["axis"]: f for f in result["findings"]}
+    assert by_axis["y"]["font_envelope_px"] == 400.0
+    assert by_axis["y"]["font_inexplicable"] is False
+    assert by_axis["height"]["font_envelope_px"] == 0.0
+    assert by_axis["height"]["font_inexplicable"] is True
+
+
+def test_a_carried_box_is_never_font_inexplicable():
+    """The column aims work at a box's own edge. A box moving exactly with its
+    parent has no own-edge error to explain, however large its delta."""
+    chrome = chrome_doc(("div.row", rect(y=100.0)), ("span.a", rect(y=110.0)))
+    rustkit = box(
+        "div.row", rect(y=1100.0), [box("span.a", rect(y=1110.0), [text("x")])]
+    )
+    probe = box(
+        "div.row", rect(y=1100.0), [box("span.a", rect(y=1110.0), [text("x")])]
+    )
+
+    result = attribute_case("c", chrome, rustkit, probe_docs=[probe])
+    child = next(
+        f for f in result["findings"] if f["selector"] == "span.a" and f["axis"] == "y"
+    )
+    assert child["root"] is False and abs(child["residual"]) < 1e-6
+    assert child["font_inexplicable"] is False
+    assert result["font_inexplicable_roots"] == 1, "only the row itself"
+
+
+def test_the_floor_is_gate_as_tolerance_not_a_second_number():
+    """With a zero envelope the factor multiplies to nothing, so something has
+    to stop a 0.4px wobble being published as a defect. That something is the
+    pinned tolerance, imported — a second threshold invented here is a second
+    number that must agree with the first and eventually will not."""
+    tol = layout_oracle_gate.GEOMETRY_TOLERANCE_PX
+    still = box("div.a", rect(y=100.0 + tol * 1.5), [text("x")])
+    chrome = chrome_doc(("div.a", rect(y=100.0)))
+    result = attribute_case(
+        "c", chrome, box("div.a", rect(y=100.0 + tol * 1.5), [text("x")]),
+        probe_docs=[still],
+    )
+    finding = next(f for f in result["findings"] if f["axis"] == "y")
+    assert finding["root"] is True and finding["font_envelope_px"] == 0.0
+    assert finding["font_inexplicable"] is True
+
+    inside = geometry_attribution.font_inexplicable(
+        {"root": True, "residual": tol * 0.9, "font_envelope_px": 0.0}
+    )
+    assert inside is False, "a residual inside the tolerance is not a failure at all"
+
+
+def test_two_boxes_under_one_selector_take_the_widest_envelope():
+    """`annotate` keeps the first box for a selector; the movement map keys on
+    the selector, so a second box under the same key must widen the envelope
+    rather than be dropped. The strict column has the same rule with OR."""
+    chrome = chrome_doc(("div.dup", rect(y=100.0)))
+    rustkit = box(
+        "root-wrapper",
+        rect(),
+        [box("div.dup", rect(y=200.0), [text("x")]), box("div.dup", rect(y=300.0))],
+    )
+    probe = box(
+        "root-wrapper",
+        rect(),
+        [box("div.dup", rect(y=200.0), [text("x")]), box("div.dup", rect(y=390.0))],
+    )
+
+    result = attribute_case("c", chrome, rustkit, probe_docs=[probe])
+    finding = next(f for f in result["findings"] if f["axis"] == "y")
+    assert finding["font_envelope_px"] == 90.0
+    assert finding["font_inexplicable"] is False
+
+
+def test_the_factor_reaches_the_finding():
+    """A factor nobody can change is a constant with a flag in front of it."""
+    chrome = chrome_doc(("div.a", rect(y=100.0)))
+    rustkit = box("div.a", rect(y=140.0), [text("x")])
+    probe = box("div.a", rect(y=145.0), [text("x")])
+
+    lenient = attribute_case("c", chrome, rustkit, probe_docs=[probe], envelope_factor=2.0)
+    strict = attribute_case("c", chrome, rustkit, probe_docs=[probe], envelope_factor=50.0)
+    assert lenient["findings"][0]["font_inexplicable"] is True
+    assert strict["findings"][0]["font_inexplicable"] is False
+
+
+def test_a_board_with_no_probe_publishes_no_magnitude_claim():
+    """The claim is measured or it is not made. Without a probe there is no
+    envelope, and an absent envelope must not read as zero."""
+    chrome = chrome_doc(("div.a", rect(width=10.0)))
+    rustkit = box("div.a", rect(width=900.0), [text("x")])
+
+    result = attribute_case("c", chrome, rustkit)
+    finding = next(f for f in result["findings"] if f["axis"] == "width")
+    assert finding["font_envelope_px"] is None
+    assert finding["font_inexplicable"] is False
+    assert result["font_inexplicable_roots"] == 0
+
+
+def test_sensitivity_is_still_any_movement_at_all_after_the_refactor():
+    """The strict column is now derived from the magnitude. It must keep its own
+    rule: ANY movement disqualifies, however small — a 0.0001px shift is still
+    a font reaching the box."""
+    base = box("div.a", rect(y=100.0))
+    probe = box("div.a", rect(y=100.0001))
+    moved = geometry_attribution.measure_font_sensitivity(base, probe)
+    assert moved[("div.a", "y")] is True
+    assert moved[("div.a", "x")] is False
+    distance = geometry_attribution.measure_font_movement(base, probe)
+    assert distance[("div.a", "x")] == 0.0
+    assert 0.0 < distance[("div.a", "y")] < 0.001
+
+
 def test_the_report_is_json_serialisable():
     """It is published as an artifact; a report that cannot be written is not
     a report."""

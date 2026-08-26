@@ -94,6 +94,27 @@ Without the flag the heuristic still runs and the report says which basis it
 used. The heuristic OVER-REPORTS readable work; it must never be read as
 measured.
 
+FONT-INEXPLICABLE (the magnitude column, 2026-08-26)
+----------------------------------------------------
+The rule above disqualifies a root when a font CAN reach it. By 2026-08-26 it
+disqualified everything: 1993 roots, **0** published as readable, while
+`new_tab body > div.footer:nth-of-type(3)` sat 1280px wide against Chrome's
+137.59 and moved **0.000px** under every probe. It holds text, so the rule is
+right that a font can reach it; no advance width makes a box 9x too wide, so
+the board was right about reachability and useless for aiming.
+
+The second column asks the other question — not *can a font touch this box* but
+*could a font produce an error this BIG*. `font_envelope_px` is the furthest the
+axis moved across the whole probe set; a residual more than
+`--font-envelope-factor` times that has a non-font component of at least the
+difference. The two columns are published side by side and neither replaces the
+other: the strict one says what a text-less seat can measure end to end, the
+magnitude one says where a defect certainly exists. A root can be in both.
+
+Its limits are on `font_inexplicable`, and the first is load-bearing: the claim
+is only as strong as the probes' perturbations, so the digest must publish those
+next to the number.
+
 Usage:
     python3 scripts/geometry_attribution.py --layout-root parity-baseline/captures
     python3 scripts/geometry_attribution.py --layout-root <dir> --case rounded-corners
@@ -126,6 +147,13 @@ from layout_oracle_gate import (  # noqa: E402
 )
 
 TEXT_SIZED_CONTROLS = ("Button", "TextInput", "TextArea", "Select")
+
+# How many times the measured font envelope a residual must exceed before the
+# board will say a font cannot account for it. Ten, because the probes are a
+# finite sample of metric space and the claim has to survive the metrics they
+# did not perturb. Overridable with --font-envelope-factor; the value used is
+# published in the report so a board can never be read without it.
+FONT_ENVELOPE_FACTOR = 10.0
 
 
 def annotate(root: Dict[str, Any]) -> Tuple[
@@ -182,10 +210,21 @@ def annotate(root: Dict[str, Any]) -> Tuple[
     return boxes, parent, text_reachable
 
 
-def measure_font_sensitivity(
+def measure_font_movement(
     root: Dict[str, Any], probe_root: Dict[str, Any]
-) -> Dict[Tuple[str, str], bool]:
-    """(selector, axis) -> did THAT AXIS move when the font metrics moved?
+) -> Dict[Tuple[str, str], float]:
+    """(selector, axis) -> HOW FAR that axis moved when the font metrics moved.
+
+    The magnitude behind `measure_font_sensitivity`, which is this with a
+    `> 0` on the end. One implementation, because a boolean "did it move" and
+    a float "how far" that must agree about the same join, the same fallbacks
+    and the same absent-axis rule will eventually disagree if written twice —
+    the reasoning that put Gate B's tolerance on an import from Gate A.
+
+    Absent means absent: an axis this probe could not compare is left out of
+    the dict rather than given 0.0, because 0.0 reads as "the font cannot move
+    this box" and is the flattering direction. Both consumers apply their own
+    "unknown is not green" default.
 
     Per axis, not per box, because the board aims work at an axis. `test11`'s
     image on `images-intrinsic` is the case that forced it: its `y` shifts with
@@ -202,6 +241,7 @@ def measure_font_sensitivity(
     reported SENSITIVE — the conservative direction, and the same rule as
     "unmeasured is never green".
     """
+
     def by_path(node: Dict[str, Any]) -> Dict[Tuple[int, ...], Dict[str, Any]]:
         out: Dict[Tuple[int, ...], Dict[str, Any]] = {}
 
@@ -216,14 +256,15 @@ def measure_font_sensitivity(
     base = by_path(root)
     probe = by_path(probe_root)
 
-    sensitive: Dict[Tuple[str, str], bool] = {}
+    movement: Dict[Tuple[str, str], float] = {}
 
-    def mark(selector: str, axis: str, moved: bool) -> None:
-        # OR-accumulate: one selector can key several boxes (the walk in
+    def mark(selector: str, axis: str, moved: float) -> None:
+        # MAX-accumulate: one selector can key several boxes (the walk in
         # `annotate` keeps the first). If ANY of them moves on this axis, the
-        # axis moves.
+        # axis moves — and the envelope is the widest of them, because the
+        # smaller one would understate what a font can do to this selector.
         key = (selector, axis)
-        sensitive[key] = sensitive.get(key, False) or moved
+        movement[key] = max(movement.get(key, 0.0), moved)
 
     for path, node in base.items():
         selector = node.get("selector")
@@ -242,9 +283,24 @@ def measure_font_sensitivity(
             mark(
                 selector,
                 axis,
-                float(here.get(axis, 0.0)) != float(there.get(axis, 0.0)),
+                abs(float(here.get(axis, 0.0)) - float(there.get(axis, 0.0))),
             )
-    return sensitive
+    return movement
+
+
+def measure_font_sensitivity(
+    root: Dict[str, Any], probe_root: Dict[str, Any]
+) -> Dict[Tuple[str, str], bool]:
+    """(selector, axis) -> did THAT AXIS move when the font metrics moved?
+
+    The board's original question, now derived from the magnitude rather than
+    measured separately. Any movement at all disqualifies: this is the strict
+    readability rule and it does not care how far the box moved.
+    """
+    return {
+        key: distance != 0.0
+        for key, distance in measure_font_movement(root, probe_root).items()
+    }
 
 
 def nearest_comparable(
@@ -297,12 +353,60 @@ def font_dependent(finding: Dict[str, Any]) -> bool:
     return bool(finding.get("font_sensitive") or False)
 
 
+def font_inexplicable(
+    finding: Dict[str, Any],
+    factor: float = FONT_ENVELOPE_FACTOR,
+    tolerance: float = GEOMETRY_TOLERANCE_PX,
+) -> bool:
+    """Is this root's residual too LARGE for any font metric to account for?
+
+    A different question from `font_dependent`, and it exists because that one
+    stopped aiming anything. On 2026-08-26 the strict board published **zero**
+    readable roots out of 1993 while `new_tab body > div.footer:nth-of-type(3)`
+    was 1280px wide against Chrome's 137.59 and moved **0.000px** under every
+    font probe. No advance width produces a 9x width. The strict board is right
+    that a font *can* reach that box — it holds text — and useless for deciding
+    what to work on.
+
+    So measure the font's reach instead of its presence. `font_envelope_px` is
+    the furthest this axis moved across the probe set; a residual more than
+    `factor` times that cannot be the font alone, and the leftover is a defect
+    of at least `residual - envelope`.
+
+    Stated limits, because this is evidence and not proof:
+      * SOUND ONLY IF THE PROBES BRACKET THE REAL GAP. The envelope measures
+        what a perturbation of the size actually run does. Perturb a metric by
+        less than this seat differs from Chrome and the envelope understates;
+        `factor` is what absorbs that, and the probe magnitudes belong in the
+        digest next to the number.
+      * It is a LOWER bound on real defects. A box carrying a font error AND a
+        layout defect of similar size is excluded, correctly by this rule and
+        wrongly by any reading of it as "these are all the defects".
+      * It does NOT say the font is irrelevant to the box, only that the font
+        cannot account for the residual. Both flags are published per finding
+        so the two readings stay separable.
+      * An axis any probe could not compare has NO envelope and is never
+        published here. Unknown is not readable — the same rule as everywhere
+        else on this board.
+      * The floor is Gate A's tolerance, imported. A residual inside the
+        tolerance is not a failure at all, and inventing a second threshold
+        here would be a second number that must agree with the pinned one.
+    """
+    if not finding.get("root"):
+        return False
+    envelope = finding.get("font_envelope_px")
+    if envelope is None:
+        return False
+    return abs(float(finding["residual"])) > max(tolerance, factor * float(envelope))
+
+
 def attribute_case(
     case_id: str,
     chrome_doc: Dict[str, Any],
     rustkit_doc: Dict[str, Any],
     tolerance: float = GEOMETRY_TOLERANCE_PX,
     probe_docs: Optional[List[Dict[str, Any]]] = None,
+    envelope_factor: float = FONT_ENVELOPE_FACTOR,
 ) -> Dict[str, Any]:
     """Split one case's failing axes into root/carried and reachable/independent."""
     root_node = rustkit_doc.get("root", rustkit_doc)
@@ -313,13 +417,27 @@ def attribute_case(
     # re-read later without re-running, and so the gap between them stays
     # visible — it was 9 of 12 the night the probe was built.
     font_sensitive: Optional[Dict[Tuple[str, str], bool]] = None
+    # The envelope is the widest movement across the probe set, and it is only
+    # KNOWN where EVERY probe could compare the axis. A probe that could not is
+    # missing evidence, not evidence of stillness, so one silent probe leaves
+    # the axis unpublished rather than admitted on the strength of the others.
+    font_envelope: Optional[Dict[Tuple[str, str], float]] = None
     if probe_docs:
         font_sensitive = {}
+        font_envelope = {}
+        seen: Dict[Tuple[str, str], int] = {}
         for probe in probe_docs:
-            for key, moved in measure_font_sensitivity(
+            for key, distance in measure_font_movement(
                 root_node, probe.get("root", probe)
             ).items():
-                font_sensitive[key] = font_sensitive.get(key, False) or moved
+                font_sensitive[key] = font_sensitive.get(key, False) or distance != 0.0
+                font_envelope[key] = max(font_envelope.get(key, 0.0), distance)
+                seen[key] = seen.get(key, 0) + 1
+        font_envelope = {
+            key: distance
+            for key, distance in font_envelope.items()
+            if seen.get(key, 0) == len(probe_docs)
+        }
 
     chrome: Dict[str, Dict[str, float]] = {}
     for element in chrome_doc.get("elements", []):
@@ -353,22 +471,29 @@ def attribute_case(
                 if font_sensitive is not None
                 else None
             )
-            findings.append(
-                {
-                    "case_id": case_id,
-                    "selector": selector,
-                    "anchor": anchor,
-                    "axis": axis,
-                    "expected": float(chrome[selector][axis]),
-                    "actual": float(rustkit[selector][axis]),
-                    "delta": delta,
-                    "residual": residual,
-                    "root": abs(residual) > tolerance,
-                    "text_reachable": heuristic,
-                    "font_sensitive": measured,
-                    "font_basis": "measured" if measured is not None else "heuristic",
-                }
+            finding = {
+                "case_id": case_id,
+                "selector": selector,
+                "anchor": anchor,
+                "axis": axis,
+                "expected": float(chrome[selector][axis]),
+                "actual": float(rustkit[selector][axis]),
+                "delta": delta,
+                "residual": residual,
+                "root": abs(residual) > tolerance,
+                "text_reachable": heuristic,
+                "font_sensitive": measured,
+                "font_basis": "measured" if measured is not None else "heuristic",
+                "font_envelope_px": (
+                    font_envelope.get((selector, axis))
+                    if font_envelope is not None
+                    else None
+                ),
+            }
+            finding["font_inexplicable"] = font_inexplicable(
+                finding, envelope_factor, tolerance
             )
+            findings.append(finding)
 
     roots = [f for f in findings if f["root"]]
     return {
@@ -379,6 +504,7 @@ def attribute_case(
         "roots": len(roots),
         "carried": len(findings) - len(roots),
         "font_independent_roots": sum(1 for f in roots if not font_dependent(f)),
+        "font_inexplicable_roots": sum(1 for f in roots if f["font_inexplicable"]),
         "font_basis": "measured" if font_sensitive is not None else "heuristic",
         "findings": findings,
     }
@@ -395,6 +521,7 @@ def unmeasured_case(case_id: str, reason: str) -> Dict[str, Any]:
         "roots": 0,
         "carried": 0,
         "font_independent_roots": 0,
+        "font_inexplicable_roots": 0,
         "findings": [],
     }
 
@@ -435,6 +562,7 @@ def run_attribution(
     include_non_gating: bool = False,
     tolerance: float = GEOMETRY_TOLERANCE_PX,
     font_probe_roots: Optional[List[Path]] = None,
+    envelope_factor: float = FONT_ENVELOPE_FACTOR,
 ) -> Dict[str, Any]:
     registry = load_case_registry()
     cases: List[Dict[str, Any]] = []
@@ -476,7 +604,14 @@ def run_attribution(
         probe_docs = complete_probe_set(probe_docs, len(font_probe_roots or []))
 
         cases.append(
-            attribute_case(case_id, chrome_doc, rustkit_doc, tolerance, probe_docs)
+            attribute_case(
+                case_id,
+                chrome_doc,
+                rustkit_doc,
+                tolerance,
+                probe_docs,
+                envelope_factor,
+            )
         )
 
     measured = [c for c in cases if c["measured"]]
@@ -486,6 +621,7 @@ def run_attribution(
         "tolerance_px": tolerance,
         "layout_root": str(layout_root),
         "font_probe_roots": [str(p) for p in (font_probe_roots or [])],
+        "font_envelope_factor": envelope_factor,
         "cases": cases,
         "summary": {
             "total_cases": len(cases),
@@ -495,6 +631,9 @@ def run_attribution(
             "roots": sum(c["roots"] for c in cases),
             "carried": sum(c["carried"] for c in cases),
             "font_independent_roots": sum(c["font_independent_roots"] for c in cases),
+            "font_inexplicable_roots": sum(
+                c.get("font_inexplicable_roots", 0) for c in cases
+            ),
             "font_basis": board_font_basis(measured),
         },
     }
@@ -537,8 +676,20 @@ def print_report(report: Dict[str, Any], verbose: bool = False) -> None:
             "    roots it called readable moved when the font metrics moved."
             " Pass --font-probe-root to measure instead of guessing."
         )
+    if summary.get("font_basis") == "measured":
+        print(
+            f"  of the roots, {summary.get('font_inexplicable_roots', 0)} have a residual"
+            f" more than {report.get('font_envelope_factor', FONT_ENVELOPE_FACTOR):g}x"
+            " the measured font envelope —"
+        )
+        print(
+            "    a font cannot account for those, whether or not it can reach them."
+        )
     print()
-    print(f"  {'case':24s} {'fail':>6s} {'root':>6s} {'carried':>8s} {'font-free':>10s}")
+    print(
+        f"  {'case':24s} {'fail':>6s} {'root':>6s} {'carried':>8s} {'font-free':>10s}"
+        f" {'font-inexpl':>12s}"
+    )
     for case in sorted(
         report["cases"], key=lambda c: (-c["font_independent_roots"], c["case_id"])
     ):
@@ -548,6 +699,7 @@ def print_report(report: Dict[str, Any], verbose: bool = False) -> None:
         print(
             f"  {case['case_id']:24s} {case['failing_axes']:6d} {case['roots']:6d}"
             f" {case['carried']:8d} {case['font_independent_roots']:10d}"
+            f" {case.get('font_inexplicable_roots', 0):12d}"
         )
 
     print()
@@ -568,6 +720,33 @@ def print_report(report: Dict[str, Any], verbose: bool = False) -> None:
     if not aimable:
         print("    (none — every root on this board is downstream of a text measurement)")
     hidden = len(aimable) - len(shown)
+    if hidden > 0:
+        print(f"    … {hidden} more (use --verbose)")
+
+    if report["summary"].get("font_basis") != "measured":
+        return
+    print()
+    print(
+        "  font-INEXPLICABLE roots, worst first — residual, then the envelope it"
+        " has to beat:"
+    )
+    oversized = [
+        f
+        for case in report["cases"]
+        for f in case["findings"]
+        if f.get("font_inexplicable")
+    ]
+    oversized.sort(key=lambda f: -(abs(f["residual"]) - float(f["font_envelope_px"])))
+    shown = oversized if verbose else oversized[:20]
+    for f in shown:
+        print(
+            f"    {f['case_id']} · {f['selector']} · {f['axis']} ·"
+            f" {f['expected']:.4f} · {f['actual']:.4f} · {f['residual']:+.4f}"
+            f" · envelope {f['font_envelope_px']:.4f}px"
+        )
+    if not oversized:
+        print("    (none — every root is inside the font envelope this probe set measured)")
+    hidden = len(oversized) - len(shown)
     if hidden > 0:
         print(f"    … {hidden} more (use --verbose)")
 
@@ -602,6 +781,16 @@ def main() -> int:
             "between the two captures is font-dependent) instead of guessed."
         ),
     )
+    parser.add_argument(
+        "--font-envelope-factor",
+        type=float,
+        default=FONT_ENVELOPE_FACTOR,
+        help=(
+            "How many times the MEASURED font envelope a root's residual must "
+            "exceed before the board reports that a font cannot account for it. "
+            "Needs --font-probe-root; the value used is written into the report."
+        ),
+    )
     parser.add_argument("--json", type=Path, help="Write the full report here")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
@@ -612,6 +801,7 @@ def main() -> int:
         include_non_gating=args.include_non_gating,
         tolerance=args.tolerance,
         font_probe_roots=args.font_probe_roots,
+        envelope_factor=args.font_envelope_factor,
     )
     print_report(report, verbose=args.verbose)
 
