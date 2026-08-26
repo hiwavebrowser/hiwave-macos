@@ -574,6 +574,21 @@ def test_a_carried_box_is_never_font_inexplicable():
     assert child["font_inexplicable"] is False
     assert result["font_inexplicable_roots"] == 1, "only the row itself"
 
+    # Inside `attribute_case` the tolerance floor already holds this, because a
+    # carried box is BY DEFINITION inside the tolerance. The `root` gate is
+    # load-bearing on exactly one path — a direct call at a tolerance smaller
+    # than the one the finding's `root` flag was computed at — so that is what
+    # this asserts. A sweep found the integration assertion above could not
+    # reach the gate at all.
+    carried_at_a_coarser_tolerance = {
+        "root": False,
+        "residual": 4.0,
+        "font_envelope_px": 0.0,
+    }
+    assert geometry_attribution.font_inexplicable(
+        carried_at_a_coarser_tolerance, tolerance=0.5
+    ) is False, "the finding's own root verdict wins over a re-supplied tolerance"
+
 
 def test_the_floor_is_gate_as_tolerance_not_a_second_number():
     """With a zero envelope the factor multiplies to nothing, so something has
