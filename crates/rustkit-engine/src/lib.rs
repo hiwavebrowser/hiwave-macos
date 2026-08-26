@@ -1870,6 +1870,15 @@ impl Engine {
                 _ => None,
             };
             layout_box.set_offsets(px(&style.top), px(&style.right), px(&style.bottom), px(&style.left));
+            // z-index was parsed into the computed style and never copied
+            // here, so every positioned box painted at z 0: a `z-index: -1`
+            // overlay (the WPT css-text "red under green" idiom) painted ON
+            // TOP of the in-flow text it was meant to sit beneath. The
+            // display-list builder already groups negative-z children
+            // before normal flow — it only ever saw zeros. Field only, no
+            // stacking-context push: the builder's grouping is what CSS 2.1
+            // App. E needs here, and the context pipeline is still gated.
+            layout_box.z_index = style.z_index;
         }
     }
 
@@ -11506,6 +11515,35 @@ mod web_font_tests {
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
         })
+    }
+
+    #[test]
+    fn z_index_reaches_the_layout_box_of_a_positioned_element() {
+        // Found under Ahem: the WPT css-text idiom puts red text in an
+        // absolutely positioned `z-index: -1` box and green in-flow text
+        // over it. The value was parsed into ComputedStyle and never copied
+        // to the LayoutBox, so the overlay painted at z 0 — after the
+        // in-flow text — and every such test showed red.
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <div style="position: absolute; z-index: -1; color: red">under</div>
+            <div style="color: green">over</div>
+            <div style="position: absolute; z-index: 7">seven</div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        fn positioned_z(b: &LayoutBox, out: &mut Vec<i32>) {
+            if b.position == Position::Absolute {
+                out.push(b.z_index);
+            }
+            for c in &b.children {
+                positioned_z(c, out);
+            }
+        }
+        let mut zs = Vec::new();
+        positioned_z(&layout, &mut zs);
+        assert_eq!(zs, vec![-1, 7], "positioned boxes must carry their computed z-index");
     }
 
     #[test]
