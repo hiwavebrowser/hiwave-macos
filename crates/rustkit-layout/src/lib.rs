@@ -708,6 +708,12 @@ pub enum BoxType {
     },
     /// Form control (input, button, textarea, select).
     FormControl(FormControlType),
+    /// A forced line break (`<br>`, CSS 2.1 §9.4.2): closes the current
+    /// line box in its parent's inline flow, occupies no space, paints
+    /// nothing. Before this variant existed `<br>` was an empty inline that
+    /// the tree builder filtered out, so "a<br>b" rendered on one line on
+    /// every page.
+    LineBreak,
 }
 
 /// Type of form control for layout/rendering.
@@ -1091,6 +1097,15 @@ impl LayoutBox {
             BoxType::FormControl(ref control) => {
                 // Form controls are replaced elements with intrinsic sizing
                 self.layout_form_control(control.clone(), containing_block);
+            }
+            BoxType::LineBreak => {
+                // Zero-size marker; the parent's inline flow closes the line.
+                self.dimensions.content = Rect::new(
+                    containing_block.content.x,
+                    containing_block.content.y + containing_block.content.height,
+                    0.0,
+                    0.0,
+                );
             }
         }
 
@@ -1870,6 +1885,14 @@ impl LayoutBox {
             BoxType::FormControl(ref control) => {
                 self.layout_form_control(control.clone(), containing_block);
             }
+            BoxType::LineBreak => {
+                self.dimensions.content = Rect::new(
+                    containing_block.content.x,
+                    containing_block.content.y + containing_block.content.height,
+                    0.0,
+                    0.0,
+                );
+            }
         }
 
         // Handle float
@@ -2402,6 +2425,9 @@ impl LayoutBox {
         let container_width = self.dimensions.content.width;
         let text_align = self.style.text_align;
         let strut_descent = self.inline_strut_descent();
+        // A `<br>` on an otherwise empty line still produces a line box of
+        // the container's line-height (CSS 2.1 §9.4.2 / §10.8).
+        let empty_line_height = self.get_line_height();
         // white-space: nowrap|pre suppress soft-wrapping of inline-level
         // children — the line box grows past container_width and overflow
         // handles any scroll. Captured before the &mut children borrow.
@@ -2434,6 +2460,33 @@ impl LayoutBox {
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y;
                 child.layout(&cb);
+                continue;
+            }
+
+            // `<br>`: forced line break — close the current line box. With
+            // nothing on the line yet, the break still advances by one
+            // empty line box.
+            if matches!(child.box_type, BoxType::LineBreak) {
+                if let Some(start) = line_start_index {
+                    lines.push((start, i, line_width));
+                }
+                let advance = if cursor_x > 0.0 || line_height > 0.0 {
+                    line_height.max(line_below_baseline)
+                } else {
+                    empty_line_height
+                };
+                child.dimensions.content = Rect::new(
+                    self.dimensions.content.x + cursor_x,
+                    self.dimensions.content.y + cursor_y,
+                    0.0,
+                    0.0,
+                );
+                cursor_y += advance;
+                cursor_x = 0.0;
+                line_height = 0.0;
+                line_below_baseline = 0.0;
+                line_start_index = None;
+                line_width = 0.0;
                 continue;
             }
 
@@ -2944,6 +2997,8 @@ impl LayoutBox {
         let container_width = self.dimensions.content.width;
         let text_align = self.style.text_align;
         let strut_descent = self.inline_strut_descent();
+        // See layout_block_children: a `<br>` on an empty line is a line box.
+        let empty_line_height = self.get_line_height();
         // white-space: nowrap|pre suppress soft-wrapping (see layout_block_children).
         let container_allows_wrap = !matches!(
             self.style.white_space,
@@ -3000,10 +3055,36 @@ impl LayoutBox {
                         | BoxType::Text(_)
                         | BoxType::Image { .. }
                         | BoxType::FormControl(_)
+                        | BoxType::LineBreak
                 );
             if is_inline_level {
                 cursor_y += margin_context.resolve();
                 margin_context.reset();
+            }
+
+            // `<br>`: forced line break (see layout_block_children).
+            if matches!(child.box_type, BoxType::LineBreak) {
+                if let Some(start) = line_start_index {
+                    lines.push((start, i, line_width));
+                }
+                let advance = if cursor_x > 0.0 || line_height > 0.0 {
+                    line_height.max(line_below_baseline)
+                } else {
+                    empty_line_height
+                };
+                child.dimensions.content = Rect::new(
+                    self.dimensions.content.x + cursor_x,
+                    self.dimensions.content.y + cursor_y,
+                    0.0,
+                    0.0,
+                );
+                cursor_y += advance;
+                cursor_x = 0.0;
+                line_height = 0.0;
+                line_below_baseline = 0.0;
+                line_start_index = None;
+                line_width = 0.0;
+                continue;
             }
 
             // CSS2 §9.4.2: ALL inline-level boxes share line boxes — see

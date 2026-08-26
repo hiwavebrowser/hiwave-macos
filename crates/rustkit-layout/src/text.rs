@@ -1730,9 +1730,10 @@ impl TextShaper {
                     end_offset: base_offset + line_start + line_end,
                 });
 
-                // Skip whitespace at the break point
+                // Skip collapsible white space at the break point
                 line_start += line_end;
-                while line_start < text.len() && text[line_start..].starts_with(char::is_whitespace)
+                while line_start < text.len()
+                    && text[line_start..].starts_with(is_collapsible_space)
                 {
                     line_start += text[line_start..]
                         .chars()
@@ -1752,9 +1753,10 @@ impl TextShaper {
                     end_offset: base_offset + line_start + break_offset,
                 });
 
-                // Skip whitespace at the break point
+                // Skip collapsible white space at the break point
                 line_start += break_offset;
-                while line_start < text.len() && text[line_start..].starts_with(char::is_whitespace)
+                while line_start < text.len()
+                    && text[line_start..].starts_with(is_collapsible_space)
                 {
                     line_start += text[line_start..]
                         .chars()
@@ -1803,6 +1805,16 @@ impl TextShaper {
 
         Ok(best_break)
     }
+}
+
+/// css-text-3 §4.1: the white space that COLLAPSES (and is removed at a
+/// line's edges) is document white space — space, tab, and the line-ending
+/// characters. `char::is_whitespace` also says yes to U+00A0 NO-BREAK SPACE,
+/// which is a rendered, non-collapsible character: skipping it at a break
+/// point deleted it from the next line (WPT line-break-anywhere-006:
+/// "XXXX&nbsp;XXXX X X" lost its nbsp and re-flowed every later line).
+fn is_collapsible_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c')
 }
 
 /// A wrapped line of text.
@@ -2239,6 +2251,48 @@ mod tests {
         let run = result.unwrap();
         assert_eq!(run.text, "Hello");
         assert!(!run.glyphs.is_empty());
+    }
+
+    #[test]
+    fn nbsp_survives_a_break_point() {
+        // U+00A0 is White_Space to `char::is_whitespace` but NOT collapsible
+        // document white space (css-text §4.1): the break-point skip must not
+        // eat it. WPT line-break-anywhere-006 wraps "XXXX&nbsp;XXXX X X" in a
+        // 4ch box as "XXXX" / "&nbsp;XXX" / ...; skipping the nbsp gave
+        // "XXXX" / "XXXX" and re-flowed every later line.
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::new("monospace");
+        let cell = |s: &str| {
+            shaper
+                .shape(s, &chain, FontWeight::NORMAL, FontStyle::Normal, FontStretch::Normal, 16.0)
+                .unwrap()
+                .metrics
+                .width
+        };
+        let four = cell("XXXX");
+        assert!(four > 0.0 && cell("XXXX\u{a0}") > four + 0.5, "monospace nbsp has an advance");
+        let lines = shaper
+            .wrap_text(
+                "XXXX\u{a0}XXXX X X",
+                &chain,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                FontStretch::Normal,
+                16.0,
+                four + 0.5,
+                CssWordBreak::BreakAll,
+                CssOverflowWrap::Normal,
+            )
+            .unwrap();
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|l| l.runs.iter().map(|r| r.text.as_str()).collect::<String>())
+            .collect();
+        assert_eq!(texts.first().map(String::as_str), Some("XXXX"), "{texts:?}");
+        assert!(
+            texts.get(1).map_or(false, |t| t.starts_with('\u{a0}')),
+            "the nbsp must start line 2, not vanish at the break: {texts:?}"
+        );
     }
 
     fn face(family: &str, src: &str) -> FontFaceRule {
