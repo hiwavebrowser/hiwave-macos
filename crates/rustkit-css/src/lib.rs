@@ -1777,14 +1777,31 @@ pub enum WordBreak {
 /// Distinct from [`WordBreak`]: `word-break` changes where soft wrap
 /// opportunities exist in normal text, while `overflow-wrap` only adds
 /// last-resort opportunities for words that would otherwise overflow.
-/// `line-break: anywhere` also lands here — it is the strictness axis, but
-/// `anywhere` has the same "break between any two characters" effect that
-/// the line breaker already implements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OverflowWrap {
     #[default]
     Normal,
     BreakWord,
+    Anywhere,
+}
+
+/// Line-break strictness (CSS Text 3 §5.3).
+///
+/// Only `anywhere` changes where opportunities exist in a way the line
+/// breaker models: a soft wrap opportunity around EVERY typographic
+/// character unit, disregarding every prohibition — including
+/// `word-break: keep-all`. It is NOT `overflow-wrap: anywhere`: that only
+/// breaks a word that would otherwise overflow, whereas `line-break:
+/// anywhere` fills each line to the last character that fits (WPT
+/// line-break-anywhere-004: "XX XXX" in a 4ch box is "XX X" / "XX", not
+/// "XX" / "XXX"). loose/normal/strict are recorded, not distinguished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineBreak {
+    #[default]
+    Auto,
+    Loose,
+    Normal,
+    Strict,
     Anywhere,
 }
 
@@ -2106,6 +2123,7 @@ pub struct ComputedStyle {
     pub white_space: WhiteSpace,
     pub word_break: WordBreak,
     pub overflow_wrap: OverflowWrap,
+    pub line_break: LineBreak,
     pub vertical_align: VerticalAlign,
     pub writing_mode: WritingMode,
     pub direction: Direction,
@@ -2273,6 +2291,7 @@ impl ComputedStyle {
             white_space: parent.white_space,
             word_break: parent.word_break,
             overflow_wrap: parent.overflow_wrap,
+            line_break: parent.line_break,
             direction: parent.direction,
             writing_mode: parent.writing_mode,
 

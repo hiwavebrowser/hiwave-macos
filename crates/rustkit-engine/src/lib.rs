@@ -2825,6 +2825,7 @@ impl Engine {
                         s.white_space = parent.white_space;
                         s.word_break = parent.word_break;
                         s.overflow_wrap = parent.overflow_wrap;
+                        s.line_break = parent.line_break;
                         s.font_stretch = parent.font_stretch;
                         // NOT CSS inheritance — feature plumbing: gradient
                         // text (background-clip:text + transparent fill) is
@@ -4342,16 +4343,22 @@ impl Engine {
                     _ => rustkit_css::OverflowWrap::Normal,
                 };
             }
-            // `line-break` is the strictness axis (CSS Text 3 §5.3). Only
-            // `anywhere` changes where opportunities exist in a way the line
-            // breaker models today, and its effect — a soft wrap opportunity
-            // around every typographic character unit — is what
-            // OverflowWrap::Anywhere already implements. loose/normal/strict
-            // are deliberately no-ops rather than fake distinctions.
+            // `line-break` is the strictness axis (CSS Text 3 §5.3). It used
+            // to be written INTO overflow_wrap as Anywhere, which is a
+            // different property: overflow-wrap only breaks a word that
+            // overflows, so "XX XXX" in a 4ch box still broke at the space
+            // ("XX" / "XXX") where `line-break: anywhere` must fill the line
+            // ("XX X" / "XX", WPT line-break-anywhere-004). It now computes
+            // as its own value; layout maps Anywhere onto break-everywhere
+            // opportunities (see rustkit_layout::effective_word_break).
             "line-break" => {
-                if value.trim().eq_ignore_ascii_case("anywhere") {
-                    style.overflow_wrap = rustkit_css::OverflowWrap::Anywhere;
-                }
+                style.line_break = match value.trim().to_lowercase().as_str() {
+                    "anywhere" => rustkit_css::LineBreak::Anywhere,
+                    "loose" => rustkit_css::LineBreak::Loose,
+                    "normal" => rustkit_css::LineBreak::Normal,
+                    "strict" => rustkit_css::LineBreak::Strict,
+                    _ => rustkit_css::LineBreak::Auto,
+                };
             }
             "border-top-width" => {
                 if let Some(length) = parse_length(value) {
@@ -11515,6 +11522,60 @@ mod web_font_tests {
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
         })
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn line_break_anywhere_fills_the_line_even_under_keep_all() {
+        // WPT line-break-anywhere-004: "XX XXX" in a 4ch Ahem box with
+        // `word-break: keep-all; line-break: anywhere` must render as
+        // "XX X" / "XX" — the line is filled to the last character that
+        // fits. Mapping `line-break: anywhere` onto overflow-wrap's
+        // emergency arm gave "XX" / "XXX": "XXX" fits a line by itself, so
+        // no emergency ever fired and the space was the only opportunity.
+        let Some(engine) = test_engine() else { return };
+        let html = format!(
+            r#"<!DOCTYPE html><html><head><style>
+            @font-face {{ font-family: "EngineTestAhem"; src: url({}); }}
+            #probe {{ font-family: EngineTestAhem; font-size: 25px; line-height: 1;
+                      width: 100px; word-break: keep-all; line-break: anywhere; }}
+            </style></head><body><div id="probe">XX XXX</div></body></html>"#,
+            ahem_data_uri()
+        );
+        let document = Rc::new(Document::parse_html(&html).expect("parse"));
+        let rules: Vec<rustkit_css::FontFaceRule> = engine
+            .extract_stylesheets(&document)
+            .iter()
+            .flat_map(|s| s.font_face_rules())
+            .collect();
+        engine.load_local_web_fonts_from(None, &rules);
+        engine.install_web_fonts_for(&rustkit_layout::TopLevelSite::opaque());
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        layout.layout(&Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        });
+
+        fn lines_of(b: &LayoutBox, out: &mut Vec<Vec<String>>) {
+            if let Some(lines) = &b.text_lines {
+                out.push(lines.iter().map(|l| l.text.trim_end().to_string()).collect());
+            }
+            for c in &b.children {
+                lines_of(c, out);
+            }
+        }
+        let mut found = Vec::new();
+        lines_of(&layout, &mut found);
+        let probe = found
+            .iter()
+            .find(|ls| ls.concat().replace(' ', "").starts_with("XXXXX"))
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            probe,
+            vec!["XX X".to_string(), "XX".to_string()],
+            "line-break: anywhere must fill the first line (all line records: {found:?})"
+        );
     }
 
     #[test]

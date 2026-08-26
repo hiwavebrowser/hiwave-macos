@@ -1,28 +1,26 @@
 {
   "schema": 1,
   "wpt_pin": "a6f29b0bedaf3f1edba7b6739127fe8e713bfcb3",
-  "hiwave_git_sha": "517cfdd38eea6d1f1844f08acc5927cde54923a9",
+  "hiwave_git_sha": "d480663cb0ebe9408fd84e50fa5b37c2c854d1b0",
   "runner": "scripts/wpt_tier1.py",
   "viewport": {
     "width": 800,
     "height": 600
   },
   "wpt_max_diff_pct": 0.0,
-  "ts": "2026-08-26T12:28:17.915151+00:00",
+  "ts": "2026-08-26T12:35:18.884199+00:00",
   "n": 30,
-  "pass": 12,
-  "fail": 13,
+  "pass": 14,
+  "fail": 11,
   "skip": 4,
   "error": 1,
-  "rate": 0.48,
+  "rate": 0.56,
   "attribution": {
     "_comment": "Fails grouped by a named engine capability gap. Attribution only \u2014 these cases stay in the denominator. A gap here is a lane, not an excuse.",
     "blocked_fails": {
       "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)": [
-        "css-text/line-break/line-break-anywhere-004",
         "css-text/line-break/line-break-anywhere-005",
         "css-text/line-break/line-break-anywhere-006",
-        "css-text/line-break/line-break-anywhere-007",
         "css-text/overflow-wrap/overflow-wrap-anywhere-001",
         "css-text/overflow-wrap/overflow-wrap-anywhere-002",
         "css-text/overflow-wrap/overflow-wrap-anywhere-003",
@@ -35,6 +33,8 @@
       "ids": [
         "css-inline/br-font-size",
         "css-inline/br-line-height",
+        "css-text/line-break/line-break-anywhere-004",
+        "css-text/line-break/line-break-anywhere-007",
         "css-text/overflow-wrap/overflow-wrap-001",
         "css-text/overflow-wrap/overflow-wrap-002",
         "css-text/overflow-wrap/overflow-wrap-004",
@@ -247,10 +247,10 @@
     },
     {
       "id": "css-text/line-break/line-break-anywhere-004",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 0.1302,
-      "diff_pixels": 625,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
       "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
@@ -279,8 +279,8 @@
       "id": "css-text/line-break/line-break-anywhere-005",
       "status": "FAIL",
       "reason": null,
-      "diff_pct": 2.0346,
-      "diff_pixels": 9766,
+      "diff_pct": 2.0375,
+      "diff_pixels": 9780,
       "rel_match": "ok",
       "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
@@ -337,10 +337,10 @@
     },
     {
       "id": "css-text/line-break/line-break-anywhere-007",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 0.25,
-      "diff_pixels": 1200,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
       "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
@@ -350,6 +350,6 @@
     "all_green": false,
     "all_green_suspect": false,
     "negative_control": "FAIL as required (checked every run; run aborts otherwise)",
-    "note": "Not suspect: this run contains red (13 FAIL, 1 ERROR), so the oracle demonstrably distinguishes pass from fail on real cases. A run with pass==n and fail==0 and error==0 would flip this field."
+    "note": "Not suspect: this run contains red (11 FAIL, 1 ERROR), so the oracle demonstrably distinguishes pass from fail on real cases. A run with pass==n and fail==0 and error==0 would flip this field."
   }
 }
