@@ -4262,3 +4262,245 @@ union (340 layout, 56 engine). The consolidation is still mechanical.
   by ±100 axes for any change that shifts one line, and three nights of
   "geometry failures went from X to Y" have been quoting a number `about` can
   swamp at will.
+
+## 2026-08-26
+
+**Metric: 1/26 → 1/26, and this is a proof rather than a re-run.** Nothing in
+`crates/` changed on this branch tonight — both commits are `scripts/` — so
+every gate reads exactly what it read before and no case can have crossed the
+conjunction in either direction. No macOS run tonight.
+
+**P-item: the geometry-first queue (ratified 2026-08-12). The night's unit —
+the aiming board — is complete. I did not fix an engine defect, because the
+board published none to fix, and establishing *that* is the finding.**
+
+### The board that aims this queue now publishes zero work
+
+Night 22 retired the last of the four readable roots night 18 put on the board.
+I rebuilt the board on the current tree expecting a short list. It is empty:
+
+```
+26/26 cases measured · 2685 failing axes = 1993 root + 692 carried
+font-independent roots:  0     of 1993
+```
+
+Not "few". Zero. Meanwhile the corpus contains this:
+
+```
+new_tab  body > div.footer:nth-of-type(3)  width  137.59 vs 1280.00  +1142.41
+         movement under every font probe:  0.0000px
+```
+
+A footer nine times too wide that does not move by one thousandth of a pixel
+when every glyph advance grows by half. The strict column is not wrong about
+it — the footer holds text, so a font *can* reach it — but a rule that
+withholds a 1142px error on a box it has measured to be perfectly still is
+no longer aiming anything.
+
+### So the board now asks the other question
+
+Not *can a font touch this box* but *could a font produce an error this BIG*.
+`font_envelope_px` is the furthest an axis moved across the whole probe set; a
+residual more than `--font-envelope-factor` (default 10) times that has a
+non-font component of at least the difference. Published as a **second column**
+beside the strict one, never as a replacement — the strict column says what a
+text-less seat can score end to end, the magnitude column says where a defect
+certainly exists.
+
+The claim is only as strong as the probes, so the probes are stated with the
+number. Four, each perturbing one stub metric in `rustkit-layout/src/text.rs`,
+rebuilt and re-captured:
+
+| probe | change | relative |
+|---|---|---|
+| descent | 0.21 → 0.31 | +48% |
+| ascent | 0.82 → 0.99 | +21% |
+| advance (weak) | 0.50 → 0.53 | +6% |
+| advance (strong) | 0.50 → 0.75 | +50% |
+
+Night 22 measured this seat's real gap against a Chrome-correct strut at
+0.82/0.21 → 0.94/0.19 — 0.12 on ascent, 0.02 on descent. Every probe above is
+larger than the gap it perturbs, which is the condition the claim needs, and it
+is stated here rather than assumed.
+
+```
+                        roots the board calls font-inexplicable
+2 probes (nights 18-22's set)        637
+4 probes (tonight)                   397
+```
+
+The stronger probe set publishes **fewer**, which is the direction that says
+the envelope is doing work rather than the factor.
+
+| case | fail | root | carried | font-free | font-inexpl |
+|---|---|---|---|---|---|
+| about | 393 | 337 | 56 | 0 | 156 |
+| settings | 434 | 281 | 153 | 0 | 60 |
+| new_tab | 207 | 193 | 14 | 0 | 50 |
+| form-controls | 110 | 92 | 18 | 0 | 23 |
+| image-gallery | 155 | 96 | 59 | 0 | 20 |
+| form-elements | 124 | 88 | 36 | 0 | 17 |
+| images-intrinsic | 50 | 36 | 14 | 0 | 15 |
+| card-grid | 150 | 89 | 61 | 0 | 12 |
+| flex-positioning | 176 | 115 | 61 | 0 | 9 |
+| article-typography · combinators · css-selectors | | | | 0 | 8 each |
+| sticky-scroll 5 · chrome_rustkit 4 · shelf 2 | | | | 0 | |
+| backgrounds · bg-pure · bg-solid · gpu-gradient-regression · gradients · the three gradient cases · pseudo-classes · rounded-corners · specificity | | | | 0 | **0** |
+
+276 of the 397 have an envelope of **exactly 0.000px** — four metric
+perturbations, and the box does not move at all.
+
+### The limit I found in it before publishing, measured not guessed
+
+`residual = delta − (the anchor's delta)`. On a page whose ancestor is
+hundreds of pixels wrong, that subtraction stops measuring the box's own edge
+and starts measuring the ancestor:
+
+```
+settings  body > div.container            height  3023.58 vs 2716.90   -306.67
+          body > div.container > p.subtitle height    17.00 vs   15.00     -2.00
+          ...residual +304.67, and the box's own error is 2px.
+```
+
+Counted across the whole board: **125 of the 397 have an own delta less than
+half their residual**, concentrated in `settings` (33), `about` (29),
+`images-intrinsic` (11) and `new_tab` (11). The remaining **272** have
+`|delta| ≈ |residual|` and are the ones worth aiming at. I did not add a clause
+for this — this classifier has been wrong four times and every correction came
+from a clause — but the finding carries `delta` and `residual` side by side so
+the reading is available, and separating them properly is a candidate for the
+next instrument unit.
+
+`about` is the other distortion and it is not new: 156 of the 397 are on the
+one `known_fail` case whose container is 2551px out. Any count including
+`about` moves by ±100 for anything that shifts one line.
+
+### The next units this makes readable, worst first with their own delta
+
+```
+image-gallery  div.loading-box error-state:nth-of-type(3) > div.icon  width    32.00 vs 1200.00   envelope 0.000
+new_tab        body > div.footer:nth-of-type(3)                       width   137.59 vs 1280.00   envelope 0.000
+new_tab        body > div.footer:nth-of-type(3)                       x       571.20 vs    0.00   envelope 0.000
+settings       div.section:nth-of-type(6) > div.setting-*             width   205.25 vs  660.00   envelope 0.000
+article-typo   div.columns:nth-of-type(1) > *                         width   360.00 vs  760.00   envelope 0.000
+new_tab        div.shortcuts-section > *                              x       372.00 vs  756.00   envelope 0.000
+```
+
+Every one is a box stretched to its container instead of shrinking to fit, or
+placed at the container's edge instead of its column's. That is night 13's
+`fit-content` family — recorded then as "text-bearing and its defect was a
+1400px stretch", which is exactly the shape the strict column cannot publish.
+
+### Commits (all `scripts/` — `crates/` untouched, branch law held)
+
+- `abc66a7` — the board measures whether a font could produce an error this big.
+- `cf5e976` — guard the root gate where it is actually load-bearing.
+
+`measure_font_sensitivity` is now derived from a new `measure_font_movement`
+rather than measured separately, because a boolean "did it move" and a float
+"how far" that must agree about the same join and the same absent-axis rule are
+one implementation or they eventually disagree. **Verified behaviour-preserving
+rather than asserted:** all 2685 findings of the 26-case board are bit-identical
+across the refactor on every strict field.
+
+### Mutation-check results
+
+**12 probes: first sweep 10/12, second 11/12. Control green before and after
+every sweep, committed before mutating.** The NULL probe — the comparison
+reordered to the same truth value — came back **GREEN**, so the harness can
+produce green and 11/12 is a count rather than a harness that reds everything.
+
+| Mutation | Result |
+|---|---|
+| M1 the column is never computed (the fix itself) | RED |
+| M2 an absent envelope reads as zero movement | RED |
+| M3 the envelope is admitted on partial probe evidence | RED |
+| M4 the envelope keeps the first probe instead of the widest | RED |
+| M5 max-accumulate across duplicate selectors becomes last-write-wins | RED |
+| M6 the factor is ignored — any root above tolerance publishes | RED |
+| M7 the tolerance floor is dropped | RED |
+| M8 carried boxes are published too | RED *(survivor, closed — see below)* |
+| M9 the caller's factor is discarded for the module default | RED |
+| M10 sensitivity loses the derived movement | RED |
+| M11 movement is signed rather than a distance | RED |
+| NULL comparison reordered, same truth value | GREEN (correctly) |
+
+**M8's survival was not a missing test, it was dead code, and the difference
+matters.** Deleting the `root` gate from `font_inexplicable` left every guard
+green because inside `attribute_case` the gate is *provably redundant*: a
+carried box is by definition inside the tolerance, and the floor is that same
+tolerance. My integration assertion could not reach the branch at all. The gate
+is load-bearing on exactly one path — a direct call at a tolerance smaller than
+the one the finding's `root` flag was computed at — so that is what the guard
+now asserts, and the redundancy is written at the branch so nobody reads it as
+holding something it does not.
+
+That is the tenth sweep in a row with a survivor, and the fourth variant of
+"the guard could not reach the code". This one is the first where the honest
+fix was to document a branch as redundant rather than to write a better
+fixture.
+
+### Stop rule
+
+Did not fire and could not have: no `crates/` change on this branch, Gate A
+byte-identical on all 26 cases, Gate B untouched, and the board is non-gating.
+The only thing that moved is which roots a board prints, and it prints a
+column it did not print before.
+
+### Measurement tree
+
+Linux/SwiftShader, `develop` (7591e1c) + Stack A (`atlas/percent-height-basis`)
++ Stack B tip (`atlas/replaced-flex-image-ratio`) + `atlas/inline-block-clip-baseline`,
+merged in a throwaway local worktree that was never pushed. **MECHANICS, NOT A
+RECEIPT** — this seat is not CoreText and not Metal. Gate A on it: 2685
+geometry failures, 2/26 green (`bg-pure`, `specificity`), 20 join failures.
+
+The union now conflicts in **three** places rather than one, and `develop` has
+moved: Stack A itself no longer merges clean (the abspos margin-context change
+from #154 and the `ch`-unit block from develop both collide with it), on top of
+the 8-hunk join-key duplicate between Stack A and Stack B. All three resolve
+mechanically — the join-key to `9fcfbdf`'s single-exit form as recommended, the
+layout one by taking both changes, the `ch` one by taking develop — and both
+suites build afterwards. It was clean on 08-21. It is getting worse on schedule.
+
+### Decisions needed from Pete
+
+1. **Open the P2 PR and resolve the join-key duplicate — eleventh night of
+   asking, and the merge that was one conflicted file on 08-25 is three
+   tonight.**
+2. **The strict readability column now publishes zero work, so may the trench
+   aim at the magnitude column's 272 own-delta-consistent roots** — boxes a
+   font can reach but cannot possibly have broken by 400–1100px — accepting
+   that a fix there is verified by Gate A's per-axis before/after on this seat
+   rather than by a font-free reading?
+3. Still open from 08-10 onward: keep or literally revert the overflow-clip
+   change that cost `sticky-scroll` 36 pixels on a card RustKit lays out 38px
+   too low?
+
+### Surprises
+
+- **The board went to zero and I nearly reported that as the night's result.**
+  "No readable root remains on this seat" is a true sentence, it was the
+  expected outcome after night 22, and it would have been a bad night's work:
+  the corpus contains a footer that is 1142px wrong and provably font-still.
+  The instrument had stopped disagreeing with the work and started disagreeing
+  with the corpus, and only looking at one withheld entry showed which.
+- **Adding probes makes the board more conservative, not less.** I expected the
+  two new probes to sharpen the claim and assumed sharper meant more findings.
+  637 → 397. A wider envelope explains more residuals away, which is the
+  correct direction and the opposite of what a board that wanted a number would
+  do.
+- **A mutation survivor was dead code rather than an untested rule**, and the
+  first nine sweeps trained me to reach for a better fixture. Writing a guard
+  that reached the branch took ten minutes; proving the branch was redundant on
+  the path that actually runs took two.
+- **`residual` stops measuring the box's own edge on a badly broken page.** 125
+  of 397. This is stated in the file's docstring as "CARRIED is arithmetic, not
+  blame" and I had read that line twice without noticing it cuts the other way
+  too: on `settings` a box 2px wrong reports a residual of +304.67 because its
+  ancestor is −306.67. The root/carried split has been aiming this campaign
+  since night 14 and this is the first night anyone has counted how often the
+  arithmetic inverts.
+- The stale cron prompt flagged on 08-24 is still stale — it opens by naming
+  P0a-0, which completed on 2026-08-04. The repo's own reading order is what
+  prevents that costing a night, and it should not have to.
