@@ -229,6 +229,54 @@ mod tests {
     }
 
     #[test]
+    fn an_ahem_square_rasterizes_with_no_partial_coverage_fringe() {
+        // Ahem's glyphs are exact em squares. Rasterized at an integer size
+        // on an integer origin, every bitmap pixel must be fully inside the
+        // square (255) or fully outside (0); any intermediate value is the
+        // rasterizer adding ink the outline does not have. n33 measured that
+        // ink on the WPT board: a ~30% fringe one column either side of every
+        // Ahem square and ~60% on the row above, which is exactly the
+        // difference between a reftest PASS and FAIL for every overlap case.
+        let faces = [ahem_face("WebfontsRasterProbe", 400, false)];
+        install("t5", &faces);
+        let r = crate::macos::GlyphRasterizer::new("WebfontsRasterProbe", 20.0)
+            .expect("registered family rasterizes");
+        let (bitmap, w, h, advance, bx, by) = r.rasterize_char('X', 0.0).expect("glyph");
+        assert_eq!(advance, 20.0, "Ahem advance is exactly 1em");
+        let mut partial = Vec::new();
+        let mut ink_cols = std::collections::BTreeSet::new();
+        let mut ink_rows = std::collections::BTreeSet::new();
+        for row in 0..h as usize {
+            for col in 0..w as usize {
+                let v = bitmap[row * w as usize + col];
+                if v != 0 && v != 255 {
+                    partial.push((col, row, v));
+                }
+                if v != 0 {
+                    ink_cols.insert(col);
+                    ink_rows.insert(row);
+                }
+            }
+        }
+        assert_eq!(
+            ink_cols.len(),
+            20,
+            "ink spans {} columns, expected exactly 20 (bitmap {w}x{h}, bearing {bx},{by}); \
+             partial pixels: {:?}",
+            ink_cols.len(),
+            &partial[..partial.len().min(12)]
+        );
+        assert_eq!(ink_rows.len(), 20, "ink spans {} rows, expected exactly 20", ink_rows.len());
+        assert!(
+            partial.is_empty(),
+            "{} partially-covered pixels in an integer-aligned em square, e.g. {:?} — \
+             the rasterizer is dilating the outline",
+            partial.len(),
+            &partial[..partial.len().min(12)]
+        );
+    }
+
+    #[test]
     fn the_nearest_style_wins_and_italic_outranks_weight() {
         let faces = [
             ahem_face("WebfontsTestStyled", 400, false),
