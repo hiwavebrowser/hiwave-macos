@@ -3728,6 +3728,14 @@ pub enum DisplayCommand {
         border_width: f32,
         focused: bool,
         caret_position: Option<usize>,
+        /// The control's computed font — the renderer used to paint every
+        /// control in a hardcoded sans-serif 400.
+        font_family: String,
+        font_weight: u16,
+        /// Resolved author padding `[top, right, bottom, left]` (px, zero for
+        /// a bare UA control). `rect` is the border box; the text line is
+        /// seated inside border + padding, as Chrome's inner editor is.
+        padding: [f32; 4],
     },
     /// Draw a button.
     Button {
@@ -3741,6 +3749,10 @@ pub enum DisplayCommand {
         border_radius: f32,
         pressed: bool,
         focused: bool,
+        /// See `TextInput::font_family` / `padding`.
+        font_family: String,
+        font_weight: u16,
+        padding: [f32; 4],
     },
     /// Draw a focus ring around an element.
     FocusRing {
@@ -5273,6 +5285,23 @@ impl DisplayList {
         let text_color = layout_box.style.color;
         let bg_color = layout_box.style.background_color;
         let border_color = layout_box.style.border_top_color;
+        let font_family = layout_box.style.font_family.clone();
+        let font_weight = layout_box.style.font_weight.0;
+        // Same resolution layout_form_control composes the box from, so the
+        // painter's text seat and the box's height agree on the padding.
+        let padding = {
+            let px = |l: &Length| match l {
+                Length::Px(v) => *v,
+                Length::Em(em) => em * font_size,
+                _ => 0.0,
+            };
+            [
+                px(&layout_box.style.padding_top),
+                px(&layout_box.style.padding_right),
+                px(&layout_box.style.padding_bottom),
+                px(&layout_box.style.padding_left),
+            ]
+        };
 
         match control {
             FormControlType::TextInput {
@@ -5283,6 +5312,9 @@ impl DisplayList {
                     value: value.clone(),
                     placeholder: placeholder.clone(),
                     font_size,
+                    font_family: font_family.clone(),
+                    font_weight,
+                    padding,
                     text_color,
                     placeholder_color: Color::new(160, 160, 160, 1.0),
                     // The UA layer supplies the default background for form
@@ -5310,6 +5342,9 @@ impl DisplayList {
                     value: value.clone(),
                     placeholder: placeholder.clone(),
                     font_size,
+                    font_family: font_family.clone(),
+                    font_weight,
+                    padding,
                     text_color,
                     placeholder_color: Color::new(160, 160, 160, 1.0),
                     // The UA layer supplies the default background for form
@@ -5331,6 +5366,9 @@ impl DisplayList {
                     rect,
                     label: label.clone(),
                     font_size,
+                    font_family: font_family.clone(),
+                    font_weight,
+                    padding,
                     text_color: if text_color.a > 0.0 {
                         text_color
                     } else {
@@ -5431,6 +5469,9 @@ impl DisplayList {
                     value: display_text,
                     placeholder: String::new(),
                     font_size,
+                    font_family: font_family.clone(),
+                    font_weight,
+                    padding,
                     text_color,
                     placeholder_color: Color::new(160, 160, 160, 1.0),
                     // The UA layer supplies the default background for form

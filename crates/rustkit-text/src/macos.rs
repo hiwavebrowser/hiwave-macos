@@ -561,8 +561,8 @@ impl GlyphRasterizer {
             let shift_pad = if subpixel_x > 0.0 { 1 } else { 0 };
             let width =
                 (bounds.size.width.ceil() + padding * 2.0).max(4.0) as u32 + shift_pad;
-            let height = (bounds.size.height.ceil() + padding * 2.0).max(4.0) as u32;
-            
+            let (draw_y, height, bearing_y) = baseline_seat(&bounds, padding);
+
             // Create grayscale bitmap context
             let color_space = CGColorSpace::create_device_gray();
             let mut context = CGContext::create_bitmap_context(
@@ -599,8 +599,10 @@ impl GlyphRasterizer {
             // Calculate position to draw glyph
             // Origin is at bottom-left, glyph origin needs adjustment
             let x = padding - bounds.origin.x + subpixel_x as f64;
-            let y = padding - bounds.origin.y;
-            
+            // INTEGER-BASELINE CONTRACT: `draw_y` is a whole CG row (see
+            // baseline_seat) so the outline is rasterized at vertical phase 0.
+            let y = draw_y;
+
             let positions = [CGPoint::new(x, y)];
             
             // Draw the glyph
@@ -623,8 +625,10 @@ impl GlyphRasterizer {
             // in HERE. Returning the outline's bounds while shipping a padded
             // bitmap seated every glyph on every page (+2,+2)px (n30: 'a' ink
             // at x=11 for pen x=8, poking past lba001's 1ch cover).
+            // `bearing_y` comes from baseline_seat: the exact integer row
+            // count from the bitmap top to the baseline row it was drawn on
+            // (INTEGER-BASELINE CONTRACT).
             let bearing_x = (bounds.origin.x - padding) as f32;
-            let bearing_y = (bounds.origin.y + bounds.size.height + padding) as f32;
 
             Some((bitmap, width, height, advance, bearing_x, bearing_y))
         }
@@ -769,8 +773,8 @@ impl GlyphRasterizer {
             
             let padding = 2.0;
             let width = (bounds.size.width.ceil() + padding * 2.0).max(4.0) as u32;
-            let height = (bounds.size.height.ceil() + padding * 2.0).max(4.0) as u32;
-            
+            let (draw_y, height, bearing_y) = baseline_seat(&bounds, padding);
+
             let color_space = CGColorSpace::create_device_gray();
             let mut context = CGContext::create_bitmap_context(
                 None,
@@ -788,8 +792,7 @@ impl GlyphRasterizer {
             context.set_gray_fill_color(1.0, 1.0);
             
             let draw_x = padding - bounds.origin.x;
-            let draw_y = padding - bounds.origin.y;
-            
+
             let position = CGPoint::new(draw_x, draw_y);
             CTFontDrawGlyphs(
                 font_ref,
@@ -798,18 +801,18 @@ impl GlyphRasterizer {
                 1,
                 context.as_ptr() as *mut c_void,
             );
-            
+
             let data = context.data();
             let bitmap: Vec<u8> = std::slice::from_raw_parts(
                 data.as_ptr() as *const u8,
                 (width * height) as usize,
             ).to_vec();
-            
+
             let advance = advance_size.width as f32;
             // BITMAP-EDGE CONTRACT (see rasterize_char): bearings place the
-            // padded bitmap, not the outline.
+            // padded bitmap, not the outline. bearing_y is baseline_seat's
+            // integer row count (INTEGER-BASELINE CONTRACT).
             let bearing_x = (bounds.origin.x - padding) as f32;
-            let bearing_y = (bounds.origin.y + bounds.size.height + padding) as f32;
 
             Some((bitmap, width, height, advance, bearing_x, bearing_y))
         }
@@ -903,7 +906,7 @@ impl GlyphRasterizer {
 
             let padding = 2.0;
             let width = (bounds.size.width.ceil() + padding * 2.0).max(4.0) as u32;
-            let height = (bounds.size.height.ceil() + padding * 2.0).max(4.0) as u32;
+            let (draw_y, height, bearing_y) = baseline_seat(&bounds, padding);
 
             // Device-RGB, premultiplied-last (RGBA). CTFontDrawGlyphs renders
             // the color-bitmap artwork here instead of a coverage mask.
@@ -923,7 +926,6 @@ impl GlyphRasterizer {
             context.set_should_antialias(true);
 
             let draw_x = padding - bounds.origin.x;
-            let draw_y = padding - bounds.origin.y;
             let position = CGPoint::new(draw_x, draw_y);
             CTFontDrawGlyphs(font_ref, glyphs.as_ptr(), &position, 1, context.as_ptr() as *mut c_void);
 
@@ -936,9 +938,9 @@ impl GlyphRasterizer {
 
             let advance = advance_size.width as f32;
             // BITMAP-EDGE CONTRACT (see rasterize_char): bearings place the
-            // padded bitmap, not the outline.
+            // padded bitmap, not the outline. bearing_y is baseline_seat's
+            // integer row count (INTEGER-BASELINE CONTRACT).
             let bearing_x = (bounds.origin.x - padding) as f32;
-            let bearing_y = (bounds.origin.y + bounds.size.height + padding) as f32;
 
             Some((rgba, width, height, advance, bearing_x, bearing_y))
         }
@@ -957,6 +959,38 @@ impl GlyphRasterizer {
             None
         }
     }
+}
+
+/// Vertical seat of a padded glyph bitmap — the INTEGER-BASELINE CONTRACT.
+///
+/// Returns `(draw_y, height, bearing_y)`: the CG y at which to draw the glyph
+/// origin, the bitmap height, and the exact number of rows from the bitmap's
+/// TOP edge down to the baseline row.
+///
+/// WHY (the intra-word "wave", 2026-08-26): a CoreGraphics bitmap context has
+/// its origin at the BOTTOM-left, so the baseline is anchored from the
+/// bitmap's bottom — but `bearing_y` is consumed from the TOP. The previous
+/// seat drew the baseline at the fractional CG row `padding - origin.y` in a
+/// bitmap `ceil(h) + 2*padding` tall and reported `bearing_y = origin.y + h +
+/// padding`, i.e. where the ink top is. The bitmap TOP is `ceil(h) - h`
+/// higher than that. So every glyph seated `ceil(h) - h` px LOW — a 0..1px
+/// error keyed to each glyph's OWN ink height. 'l', 'o' and 'g' on one line
+/// each landed on a different fraction and were then bilinearly resampled
+/// at that fraction: that is the wave. Capitals share a height, which is why
+/// a line of initials looks straight and the wave grows with a word's
+/// letter variety.
+///
+/// FIX: put the baseline on a WHOLE CG row (so CoreText rasterizes the
+/// outline at vertical phase 0 — what Skia does for horizontal text), size
+/// the bitmap from that row, and report the bearing as the exact integer row
+/// count from the top. A caller that snaps its baseline to a device row then
+/// paints every glyph on the line pixel-aligned, with no vertical resampling.
+fn baseline_seat(bounds: &CGRect, padding: f64) -> (f64, u32, f32) {
+    let draw_y = (padding - bounds.origin.y).ceil().max(0.0);
+    let ink_top = draw_y + bounds.origin.y + bounds.size.height;
+    let height = (ink_top + padding).ceil().max(4.0) as u32;
+    let bearing_y = (height as f64 - draw_y) as f32;
+    (draw_y, height, bearing_y)
 }
 
 /// Estimate glyph size based on character and font size
@@ -1255,6 +1289,62 @@ mod tests {
         );
 
         assert!(advance > 0.0);
+    }
+
+    /// Last row (from the top) holding ink at or above `threshold`.
+    fn last_ink_row(bitmap: &[u8], width: u32, height: u32, threshold: u8) -> Option<u32> {
+        (0..height)
+            .rev()
+            .find(|&y| (0..width).any(|x| bitmap[(y * width + x) as usize] >= threshold))
+    }
+
+    #[test]
+    fn integer_baseline_contract_seats_every_flat_glyph_on_the_same_row() {
+        // THE WAVE DISCRIMINATOR. Flat-bottomed glyphs of one font at one
+        // size all sit ON the baseline, so `bearing_y - (last_ink_row + 1)`
+        // must be the SAME number — zero — for every one of them, and
+        // `bearing_y` must be a whole row. The old seat reported
+        // `origin.y + h + padding` for a bitmap whose top was `ceil(h) - h`
+        // higher: 'x' (short) and 'l' (tall) got different fractional
+        // bearings and painted on different fractional rows. That per-glyph
+        // 0..1px spread IS the intra-word wave; this test fails on it.
+        let r = GlyphRasterizer::with_style("Helvetica", 16.0, 400, false);
+        let mut residuals = Vec::new();
+        for ch in ['H', 'x', 'l', 'n', 'm', 'E', 'z'] {
+            let (bitmap, w, h, _adv, _bx, by) = r.rasterize_char(ch, 0.0).expect("rasterizes");
+            assert_eq!(by.fract(), 0.0, "{ch:?}: bearing_y {by} is not a whole row");
+            // Full-coverage rows only: the AA fringe below a flat bottom is
+            // the vertical-phase leak this contract removes, so a fringe row
+            // at >=64 would itself be the bug.
+            let last = last_ink_row(&bitmap, w, h, 128).expect("has ink") as f32;
+            residuals.push((ch, by - (last + 1.0)));
+        }
+        for (ch, res) in &residuals {
+            assert_eq!(
+                *res, 0.0,
+                "{ch:?}: ink bottom is {res} rows off the baseline row (all: {residuals:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn integer_baseline_contract_holds_for_descenders_and_fallback_paths() {
+        // Descenders hang BELOW the baseline; the contract still says the
+        // bitmap's baseline row is exactly `bearing_y` from the top, so the
+        // ink top of 'g' must sit above it by its outline height, whole rows.
+        let r = GlyphRasterizer::with_style("Helvetica", 16.0, 400, false);
+        for ch in ['g', 'p', 'y', '_', '\u{00B0}'] {
+            let (_b, _w, h, _adv, _bx, by) = r.rasterize_char(ch, 0.0).expect("rasterizes");
+            assert_eq!(by.fract(), 0.0, "{ch:?}: bearing_y {by} is not a whole row");
+            assert!(by <= h as f32, "{ch:?}: baseline row {by} is below the bitmap ({h})");
+        }
+        // Color path (emoji) shares the seat.
+        if let Some((_rgba, h, _w, _adv, _bx, by)) =
+            r.rasterize_char_color('\u{1F3D4}').map(|(a, w, h, adv, bx, by)| (a, h, w, adv, bx, by))
+        {
+            assert_eq!(by.fract(), 0.0, "color path bearing_y {by} is not a whole row");
+            assert!(by <= h as f32);
+        }
     }
 
     #[test]
