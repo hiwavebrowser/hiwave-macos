@@ -217,6 +217,103 @@ impl EngineConfig {
     }
 }
 
+/// Where a `@font-face` `src` resolves to, given the document it came from.
+#[derive(Debug)]
+enum FontSource {
+    /// Decoded `data:` payload — nothing to fetch.
+    Data(Vec<u8>),
+    /// A local file. Only reachable from about:/file: documents.
+    File(std::path::PathBuf),
+    /// Needs the network.
+    Remote(Url),
+    /// Refused, with the reason for the log line.
+    Blocked(&'static str),
+}
+
+/// Resolve a `@font-face` `src` against the document's base URL.
+///
+/// The one security rule: a remote (http/https) document never reads the
+/// local filesystem, whatever its stylesheet says. Local documents (inline
+/// content via `load_html`, whose base is about:blank; and file: documents)
+/// may — that is how parity-capture and the WPT runner hand the engine a
+/// font file the way wptserve would have served it.
+fn resolve_font_source(base: Option<&Url>, src: &str) -> FontSource {
+    let src = src.trim();
+    if src.len() >= 5 && src[..5].eq_ignore_ascii_case("data:") {
+        return match decode_data_url(src) {
+            Some(bytes) => FontSource::Data(bytes),
+            None => FontSource::Blocked("undecodable data: URI"),
+        };
+    }
+    let document_is_local = base
+        .map(|b| matches!(b.scheme(), "about" | "file"))
+        .unwrap_or(true);
+    if let Ok(url) = Url::parse(src) {
+        return match url.scheme() {
+            "http" | "https" => FontSource::Remote(url),
+            "file" if document_is_local => url
+                .to_file_path()
+                .map(FontSource::File)
+                .unwrap_or(FontSource::Blocked("file: URL is not a local path")),
+            "file" => FontSource::Blocked("a remote document may not load file: fonts"),
+            _ => FontSource::Blocked("unsupported URL scheme"),
+        };
+    }
+    match base {
+        Some(b) if matches!(b.scheme(), "http" | "https") => b
+            .join(src)
+            .map(FontSource::Remote)
+            .unwrap_or(FontSource::Blocked("unresolvable relative URL")),
+        Some(b) if b.scheme() == "file" => b
+            .join(src)
+            .ok()
+            .and_then(|u| u.to_file_path().ok())
+            .map(FontSource::File)
+            .unwrap_or(FontSource::Blocked("unresolvable relative file path")),
+        _ => {
+            let path = std::path::Path::new(src);
+            if path.is_absolute() {
+                FontSource::File(path.to_path_buf())
+            } else {
+                FontSource::Blocked("relative source with no document base (inline content)")
+            }
+        }
+    }
+}
+
+/// `data:[<mediatype>][;base64],<payload>` → bytes. Fonts ship base64; the
+/// percent-encoded form is decoded too so a valid URI never fails here.
+fn decode_data_url(src: &str) -> Option<Vec<u8>> {
+    let rest = src.get(5..)?;
+    let (meta, payload) = rest.split_once(',')?;
+    if meta.to_ascii_lowercase().contains(";base64") {
+        use base64::Engine as _;
+        let compact: String = payload.chars().filter(|c| !c.is_whitespace()).collect();
+        base64::engine::general_purpose::STANDARD.decode(compact).ok()
+    } else {
+        Some(percent_decode(payload))
+    }
+}
+
+fn percent_decode(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
 /// The main browser engine.
 pub struct Engine {
     config: EngineConfig,
@@ -1240,7 +1337,9 @@ impl Engine {
             view.bindings = Some(bindings);
         }
 
-        // Initial layout and render
+        // Initial layout and render (inline data:-sourced faces first; the
+        // remote ones arrive with the other subresources below)
+        self.load_local_web_fonts(id);
         self.relayout(id)?;
 
         // Load external resources (stylesheets, images)
@@ -1386,6 +1485,11 @@ impl Engine {
             view.bindings = Some(bindings);
         }
 
+        // Fonts the document declares inline (data:/file:/local paths) must
+        // be in place BEFORE the first layout, or text is measured in the
+        // fallback face and only repainted right on a later relayout.
+        self.load_local_web_fonts(id);
+
         // Layout and render
         self.relayout(id)?;
 
@@ -1426,6 +1530,10 @@ impl Engine {
         let _span = tracing::info_span!("relayout", ?id).entered();
 
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+
+        // Text measurement below resolves family names; make THIS view's
+        // declared faces the ones that resolve.
+        self.install_web_fonts(id);
 
         let document = view
             .document
@@ -4975,7 +5083,14 @@ impl Engine {
             info!("No external stylesheets on this document — cleared the previous document's");
         }
 
-        if count > 0 || had_previous {
+        // Web fonts: faces declared in the external sheets that just arrived
+        // (plus any inline data: faces not yet loaded), then the network ones.
+        let fonts_loaded = self.load_local_web_fonts(id) + self.load_remote_web_fonts(id).await;
+        if fonts_loaded > 0 {
+            info!(count = fonts_loaded, "Loaded web fonts");
+        }
+
+        if count > 0 || had_previous || fonts_loaded > 0 {
             self.relayout(id)?;
         }
 
@@ -4988,6 +5103,189 @@ impl Engine {
         }
 
         Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // Web fonts (@font-face)
+    //
+    // The parse (#124) and the partitioned loader (#128/#129) landed with
+    // no caller: `FontLoader::load_font` tracked rules and fetched nothing,
+    // so every `@font-face` family fell through to the platform fallback.
+    // This is the missing middle: collect the document's rules, fetch the
+    // bytes (local sources synchronously, remote ones with the other
+    // subresources), file them in the view's partition, and hand that
+    // partition's faces to the text stack before each layout and paint.
+    // -----------------------------------------------------------------
+
+    /// The font-cache partition a document belongs to: its host for
+    /// http(s), the opaque bucket for inline/about:/file: content.
+    fn font_partition(url: Option<&Url>) -> rustkit_layout::TopLevelSite {
+        match url {
+            Some(u) if matches!(u.scheme(), "http" | "https") => u
+                .host_str()
+                .map(rustkit_layout::TopLevelSite::from_host)
+                .unwrap_or_else(rustkit_layout::TopLevelSite::opaque),
+            _ => rustkit_layout::TopLevelSite::opaque(),
+        }
+    }
+
+    fn layout_font_face(rule: &rustkit_css::FontFaceRule) -> rustkit_layout::FontFaceRule {
+        use rustkit_css::FontDisplayValue as D;
+        use rustkit_layout::FontDisplay as L;
+        rustkit_layout::FontFaceRule {
+            family: rule.family.clone(),
+            src: rule.src.clone(),
+            weight: rule.weight,
+            style: rule.style,
+            stretch: rule.stretch,
+            unicode_range: rule.unicode_range.clone(),
+            display: match rule.display {
+                D::Auto => L::Auto,
+                D::Block => L::Block,
+                D::Swap => L::Swap,
+                D::Fallback => L::Fallback,
+                D::Optional => L::Optional,
+            },
+        }
+    }
+
+    /// Every `@font-face` a view's document declares, in cascade order:
+    /// inline `<style>` sheets, then the loaded external sheets.
+    fn view_font_face_rules(&self, id: EngineViewId) -> Vec<rustkit_css::FontFaceRule> {
+        let Some(view) = self.views.get(&id) else {
+            return Vec::new();
+        };
+        let Some(document) = view.document.as_ref() else {
+            return Vec::new();
+        };
+        let mut rules = Vec::new();
+        for sheet in self.extract_stylesheets(document) {
+            rules.extend(sheet.font_face_rules());
+        }
+        for sheet in &view.external_stylesheets {
+            rules.extend(sheet.font_face_rules());
+        }
+        rules
+    }
+
+    /// Load every face reachable WITHOUT the network — `data:` payloads,
+    /// `file:` URLs and (for local documents) filesystem paths — into the
+    /// partition for `base`. Returns how many faces newly loaded; remote
+    /// sources are left for [`load_remote_web_fonts`](Self::load_remote_web_fonts).
+    fn load_local_web_fonts_from(
+        &self,
+        base: Option<&Url>,
+        rules: &[rustkit_css::FontFaceRule],
+    ) -> usize {
+        let partition = Self::font_partition(base);
+        let mut loaded = 0;
+        for rule in rules {
+            let face = Self::layout_font_face(rule);
+            let key = rustkit_layout::FontCacheKey::new(partition.clone(), &face);
+            if self.font_loader.is_loaded_key(&key) || self.font_loader.is_failed(&key) {
+                continue;
+            }
+            match resolve_font_source(base, &rule.src) {
+                FontSource::Data(bytes) => {
+                    self.font_loader.insert_loaded(key, bytes);
+                    loaded += 1;
+                }
+                FontSource::File(path) => match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        debug!(family = %rule.family, ?path, len = bytes.len(), "@font-face: loaded local font");
+                        self.font_loader.insert_loaded(key, bytes);
+                        loaded += 1;
+                    }
+                    Err(e) => {
+                        warn!(family = %rule.family, ?path, ?e, "@font-face: could not read local font file");
+                        self.font_loader.mark_failed(key);
+                    }
+                },
+                FontSource::Remote(_) => {}
+                FontSource::Blocked(reason) => {
+                    warn!(family = %rule.family, src = %rule.src, reason, "@font-face: source not loadable");
+                    self.font_loader.mark_failed(key);
+                }
+            }
+        }
+        loaded
+    }
+
+    /// [`load_local_web_fonts_from`](Self::load_local_web_fonts_from) for a view's own document.
+    fn load_local_web_fonts(&self, id: EngineViewId) -> usize {
+        let base = self.views.get(&id).and_then(|v| v.url.clone());
+        let rules = self.view_font_face_rules(id);
+        let n = self.load_local_web_fonts_from(base.as_ref(), &rules);
+        if n > 0 {
+            info!(?id, count = n, "Loaded local web fonts");
+        }
+        n
+    }
+
+    /// Fetch the view's http(s)-sourced faces. Returns how many newly loaded.
+    async fn load_remote_web_fonts(&mut self, id: EngineViewId) -> usize {
+        let base = self.views.get(&id).and_then(|v| v.url.clone());
+        let partition = Self::font_partition(base.as_ref());
+        let mut targets = Vec::new();
+        for rule in self.view_font_face_rules(id) {
+            let face = Self::layout_font_face(&rule);
+            let key = rustkit_layout::FontCacheKey::new(partition.clone(), &face);
+            if self.font_loader.is_loaded_key(&key) || self.font_loader.is_failed(&key) {
+                continue;
+            }
+            if let FontSource::Remote(url) = resolve_font_source(base.as_ref(), &rule.src) {
+                targets.push((key, rule.family.clone(), url));
+            }
+        }
+
+        let mut loaded = 0;
+        for (key, family, url) in targets {
+            info!(%family, %url, "Loading web font");
+            match self.loader.fetch(Request::get(url.clone())).await {
+                Ok(response) if response.ok() => match response.bytes().await {
+                    Ok(bytes) => {
+                        self.font_loader.insert_loaded(key, bytes.to_vec());
+                        loaded += 1;
+                    }
+                    Err(e) => {
+                        warn!(%family, %url, ?e, "Failed to read web font body");
+                        self.font_loader.mark_failed(key);
+                    }
+                },
+                Ok(response) => {
+                    warn!(%family, %url, status = %response.status, "Failed to fetch web font");
+                    self.font_loader.mark_failed(key);
+                }
+                Err(e) => {
+                    warn!(%family, %url, ?e, "Failed to fetch web font");
+                    self.font_loader.mark_failed(key);
+                }
+            }
+        }
+        loaded
+    }
+
+    /// Point the text stack at ONE partition's faces. Called before every
+    /// layout and paint of a view, so a view only ever sees its own site's
+    /// fonts — the registry is a slot the engine swaps, not a shared cache.
+    fn install_web_fonts_for(&self, partition: &rustkit_layout::TopLevelSite) {
+        let faces = self.font_loader.faces_for(partition);
+        // The tag names the installed set; the loader only ever grows a
+        // partition, so partition + count identifies it exactly.
+        let tag = format!("{}#{}", partition.as_str(), faces.len());
+        let accepted = rustkit_layout::webfonts::install(&tag, &faces);
+        if accepted < faces.len() {
+            debug!(
+                partition = partition.as_str(),
+                rejected = faces.len() - accepted,
+                "web font face(s) rejected by the platform (unsupported container or bad data)"
+            );
+        }
+    }
+
+    fn install_web_fonts(&self, id: EngineViewId) {
+        let base = self.views.get(&id).and_then(|v| v.url.as_ref());
+        self.install_web_fonts_for(&Self::font_partition(base));
     }
 
     /// Extract CSS variables from :root rules.
@@ -6544,6 +6842,10 @@ impl Engine {
     #[tracing::instrument(skip(self), fields(view_id = ?id))]
     fn render(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         let _span = tracing::info_span!("render", ?id).entered();
+
+        // Glyph rasterization resolves family names too; another view may
+        // have laid out since this one did.
+        self.install_web_fonts(id);
 
         // Extract needed values from view, avoiding long-lived borrows
         let (viewhost_id, has_display_list, cmd_count, is_headless) = {
@@ -11075,6 +11377,187 @@ mod link_click_tests {
             Some("https://example.com/target")
         );
         assert_eq!(engine.link_at_point(id, 10.0, 505.0), None);
+    }
+}
+
+#[cfg(test)]
+mod web_font_tests {
+    use super::*;
+
+    const AHEM: &[u8] = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.ttf");
+
+    fn ahem_data_uri() -> String {
+        use base64::Engine as _;
+        format!(
+            "data:font/ttf;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(AHEM)
+        )
+    }
+
+    #[test]
+    fn a_remote_document_never_reads_the_local_filesystem() {
+        let http = Url::parse("https://example.com/page.html").unwrap();
+        assert!(matches!(
+            resolve_font_source(Some(&http), "file:///etc/hosts"),
+            FontSource::Blocked(_)
+        ));
+        assert!(matches!(
+            resolve_font_source(Some(&http), "/fonts/a.ttf"),
+            FontSource::Remote(u) if u.as_str() == "https://example.com/fonts/a.ttf"
+        ));
+        assert!(matches!(
+            resolve_font_source(Some(&http), "../x.woff2"),
+            FontSource::Remote(_)
+        ));
+    }
+
+    #[test]
+    fn a_local_document_may_read_local_font_files() {
+        // about:blank is what load_html uses; parity-capture and the WPT
+        // runner hand us absolute paths that way (staged from /fonts/...).
+        let about = Url::parse("about:blank").unwrap();
+        assert!(matches!(
+            resolve_font_source(Some(&about), "/tmp/Ahem.ttf"),
+            FontSource::File(p) if p == std::path::Path::new("/tmp/Ahem.ttf")
+        ));
+        assert!(matches!(
+            resolve_font_source(Some(&about), "fonts/Ahem.ttf"),
+            FontSource::Blocked(_)
+        ), "a relative path has nothing to resolve against for inline content");
+        let file = Url::parse("file:///srv/site/index.html").unwrap();
+        assert!(matches!(
+            resolve_font_source(Some(&file), "fonts/Ahem.ttf"),
+            FontSource::File(p) if p == std::path::Path::new("/srv/site/fonts/Ahem.ttf")
+        ));
+    }
+
+    #[test]
+    fn data_uris_decode_in_both_encodings() {
+        assert_eq!(
+            decode_data_url("data:font/ttf;base64,AAEC").as_deref(),
+            Some(&[0u8, 1, 2][..])
+        );
+        assert_eq!(
+            decode_data_url("data:,%00%01x").as_deref(),
+            Some(&[0u8, 1, b'x'][..])
+        );
+        assert!(decode_data_url("data:font/ttf;base64,!!!").is_none());
+        assert!(matches!(
+            resolve_font_source(None, &ahem_data_uri()),
+            FontSource::Data(b) if b == AHEM
+        ));
+    }
+
+    /// The laid-out advance of the probe text run "XXXX".
+    fn widest_inline_block(b: &LayoutBox, out: &mut f32) {
+        if matches!(&b.box_type, BoxType::Text(t) if t.trim() == "XXXX") {
+            *out = out.max(b.dimensions.content.width);
+        }
+        for c in &b.children {
+            widest_inline_block(c, out);
+        }
+    }
+
+    fn probe_width(engine: &Engine, html: &str) -> f32 {
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        // The path load_html takes, minus the view: rules out of the sheets,
+        // local sources into the opaque partition, partition installed.
+        let rules: Vec<rustkit_css::FontFaceRule> = engine
+            .extract_stylesheets(&document)
+            .iter()
+            .flat_map(|s| s.font_face_rules())
+            .collect();
+        engine.load_local_web_fonts_from(None, &rules);
+        engine.install_web_fonts_for(&rustkit_layout::TopLevelSite::opaque());
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        let containing_block = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        layout.layout(&containing_block);
+        let mut w = 0.0f32;
+        widest_inline_block(&layout, &mut w);
+        w
+    }
+
+    fn test_engine() -> Option<Engine> {
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return None;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        Some(Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        })
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_declared_web_font_is_the_face_the_text_is_measured_in() {
+        // Ahem: every glyph is exactly 1em wide, so "XXXX" at 25px is 100px
+        // in Ahem and something else in any fallback face. The family name
+        // exists nowhere on the system; if the text measures 100px, the
+        // bytes the stylesheet declared are what shaped it.
+        let Some(engine) = test_engine() else { return };
+        let styled = |font_face: &str| {
+            format!(
+                r#"<!DOCTYPE html><html><head><style>
+                {font_face}
+                #probe {{ font-family: EngineTestAhem; font-size: 25px; line-height: 1; display: inline-block; }}
+                </style></head><body><span id="probe">XXXX</span></body></html>"#
+            )
+        };
+
+        let control = probe_width(&engine, &styled(""));
+        assert!(
+            control > 0.0 && (control - 100.0).abs() > 2.0,
+            "setup failed: without @font-face the fallback face already measures {control}px, \
+             so a 100px reading could not prove the web font loaded"
+        );
+
+        let via_data = probe_width(
+            &engine,
+            &styled(&format!(
+                r#"@font-face {{ font-family: "EngineTestAhem"; src: url({}); }}"#,
+                ahem_data_uri()
+            )),
+        );
+        assert!(
+            (via_data - 100.0).abs() < 0.5,
+            "data: @font-face did not reach the shaper: XXXX measured {via_data}px, expected 100"
+        );
+
+        // Same face via a filesystem path — the WPT runner's shape. A fresh
+        // engine so the data: load above cannot be what satisfies this.
+        let Some(engine) = test_engine() else { return };
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../rustkit-text/tests/fixtures/Ahem.ttf");
+        let via_file = probe_width(
+            &engine,
+            &styled(&format!(
+                r#"@font-face {{ font-family: EngineTestAhem; src: url("{path}"); }}"#
+            )),
+        );
+        assert!(
+            (via_file - 100.0).abs() < 0.5,
+            "file-path @font-face did not reach the shaper: XXXX measured {via_file}px, expected 100"
+        );
     }
 }
 
