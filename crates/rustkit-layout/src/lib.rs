@@ -1241,6 +1241,23 @@ impl LayoutBox {
 
     /// Layout a text box.
     fn layout_text(&mut self, text: String, containing_block: &Dimensions) {
+        self.layout_text_with_zero_wrap(text, containing_block, false);
+    }
+
+    /// Block-path text layout. `container_is_definite_zero`: the containing
+    /// block's used width is an AUTHOR `width: 0` (css-text-3 §5.1 — a
+    /// resolved width, text wraps at every opportunity it has), as opposed
+    /// to the bare `container_width == 0` this path otherwise reads as "no
+    /// resolved width yet" (intrinsic sizing pass — never wrap against it).
+    /// Only the container knows which zero it is, so the inline-flow loops
+    /// pass it down (WPT break-boundary-2-chars-001: `abc` in a zero-wide
+    /// `word-break: break-all` inline-block is `a` / `b` / `c`).
+    fn layout_text_with_zero_wrap(
+        &mut self,
+        text: String,
+        containing_block: &Dimensions,
+        container_is_definite_zero: bool,
+    ) {
         // Get font size
         let font_size = match self.style.font_size {
             Length::Px(px) => px,
@@ -1283,12 +1300,14 @@ impl LayoutBox {
 
         // Wrap overflowing text into line boxes (CSS2 §9.4.2, css-text-3 §5).
         // container_width == 0 means the containing block has no resolved width
-        // yet (intrinsic sizing pass) — never wrap against an unresolved width.
+        // yet (intrinsic sizing pass) — never wrap against an unresolved width
+        // — UNLESS the container said its zero is an author `width: 0`.
         let can_wrap = !matches!(
             self.style.white_space,
             rustkit_css::WhiteSpace::Nowrap | rustkit_css::WhiteSpace::Pre
         );
-        if can_wrap && container_width > 0.0 && text_width > container_width {
+        let width_is_resolved = container_width > 0.0 || container_is_definite_zero;
+        if can_wrap && width_is_resolved && text_width > container_width {
             let shaper = TextShaper::new();
             let chain = FontFamilyChain::from_css_value(&self.style.font_family);
             if let Ok(lines) = shaper.wrap_text(
@@ -1395,7 +1414,11 @@ impl LayoutBox {
 
         let shaper = TextShaper::new();
         let chain = FontFamilyChain::from_css_value(&self.style.font_family);
-        let lines = match shaper.wrap_text_with_first_line(
+        // This run starts at the inline cursor (the caller's gate requires
+        // cursor_x > 0), so say so: with a zero-wide container the first and
+        // full budgets are both 0 and the shaper's `first < max` proxy can
+        // no longer tell — it glued the first grapheme onto the open line.
+        let lines = match shaper.wrap_text_mid_line(
             &text,
             &chain,
             self.style.font_weight,
@@ -2364,6 +2387,16 @@ impl LayoutBox {
             self.style.white_space,
             rustkit_css::WhiteSpace::Nowrap | rustkit_css::WhiteSpace::Pre
         );
+        // css-text-3 §5.1: an author `width: 0` is a RESOLVED used width, so
+        // text in it wraps at every opportunity it has (WPT
+        // break-boundary-2-chars-001: `a` / `b` / `c` down a zero-wide
+        // break-all inline-block). The block path reads a bare 0 as "no
+        // resolved width yet" (intrinsic pass); only the container can say
+        // which zero this is. Absolute lengths only — a percentage of an
+        // unresolved parent also lands on 0 and must keep the guard.
+        let container_is_definite_zero = container_width <= 0.0
+            && (matches!(self.style.width, Length::Zero)
+                || matches!(self.style.width, Length::Px(px) if px <= 0.0));
 
         // Track lines for text-align adjustment after layout: (start_index, end_index, line_width)
         let mut lines: Vec<(usize, usize, f32)> = Vec::new();
@@ -2555,7 +2588,15 @@ impl LayoutBox {
 
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y;
-                child.layout(&cb);
+                match (container_is_definite_zero, &child.box_type) {
+                    // Author `width: 0`: block-path text wraps against it
+                    // (see layout_text_with_zero_wrap).
+                    (true, BoxType::Text(t)) => {
+                        let t = t.clone();
+                        child.layout_text_with_zero_wrap(t, &cb, true);
+                    }
+                    _ => child.layout(&cb),
+                }
 
                 // An inline-level box (e.g. a styled <span>/<a>) laid out on
                 // its own is centered/right-aligned as a single-item line so
@@ -2886,6 +2927,16 @@ impl LayoutBox {
             self.style.white_space,
             rustkit_css::WhiteSpace::Nowrap | rustkit_css::WhiteSpace::Pre
         );
+        // css-text-3 §5.1: an author `width: 0` is a RESOLVED used width, so
+        // text in it wraps at every opportunity it has (WPT
+        // break-boundary-2-chars-001: `a` / `b` / `c` down a zero-wide
+        // break-all inline-block). The block path reads a bare 0 as "no
+        // resolved width yet" (intrinsic pass); only the container can say
+        // which zero this is. Absolute lengths only — a percentage of an
+        // unresolved parent also lands on 0 and must keep the guard.
+        let container_is_definite_zero = container_width <= 0.0
+            && (matches!(self.style.width, Length::Zero)
+                || matches!(self.style.width, Length::Px(px) if px <= 0.0));
 
         // Track lines for text-align adjustment after layout: (start_index, end_index, line_width)
         let mut lines: Vec<(usize, usize, f32)> = Vec::new();
@@ -3098,7 +3149,16 @@ impl LayoutBox {
 
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y;
-                child.layout_with_collapse(&cb, margin_context, float_context);
+                match (container_is_definite_zero, &child.box_type) {
+                    // Author `width: 0`: block-path text wraps against it
+                    // (see layout_text_with_zero_wrap). Text has no margins
+                    // to collapse, so bypassing the collapse entry is exact.
+                    (true, BoxType::Text(t)) => {
+                        let t = t.clone();
+                        child.layout_text_with_zero_wrap(t, &cb, true);
+                    }
+                    _ => child.layout_with_collapse(&cb, margin_context, float_context),
+                }
 
                 // See layout_block_children: keep inline box decoration aligned.
                 if matches!(child.box_type, BoxType::Inline) {
@@ -7473,5 +7533,106 @@ mod object_fit_default_tests {
     #[test]
     fn object_fit_derived_default_is_fill_not_contain() {
         assert_eq!(ObjectFit::default(), ObjectFit::Fill);
+    }
+}
+
+#[cfg(test)]
+mod w3_zero_width_wrap_tests {
+    use super::*;
+    use rustkit_css::{Display, WhiteSpace, WordBreak};
+
+    fn text(t: &str, ws: WhiteSpace, wb: WordBreak) -> LayoutBox {
+        let mut s = ComputedStyle::new();
+        s.font_size = Length::Px(32.0);
+        s.white_space = ws;
+        s.word_break = wb;
+        LayoutBox::new(BoxType::Text(t.to_string()), s)
+    }
+
+    /// `<div style="display:inline-block; width:0; font-size:32px">abc<span>xyz</span>def</div>`
+    /// with `div { white-space: DIV_WS; word-break: DIV_WB }` and
+    /// `span { white-space: SPAN_WS; word-break: SPAN_WB }` (text nodes carry
+    /// their parent's computed values, as the engine's cascade would set).
+    fn fixture(div_ws: WhiteSpace, div_wb: WordBreak, span_ws: WhiteSpace, span_wb: WordBreak) -> LayoutBox {
+        let mut s = ComputedStyle::new();
+        s.display = Display::InlineBlock;
+        s.font_size = Length::Px(32.0);
+        s.width = Length::Zero;
+        s.white_space = div_ws;
+        s.word_break = div_wb;
+        let mut div = LayoutBox::new(BoxType::Block, s);
+        div.children.push(text("abc", div_ws, div_wb));
+        let mut ss = ComputedStyle::new();
+        ss.display = Display::Inline;
+        ss.font_size = Length::Px(32.0);
+        ss.white_space = span_ws;
+        ss.word_break = span_wb;
+        let mut span = LayoutBox::new(BoxType::Inline, ss);
+        span.children.push(text("xyz", span_ws, span_wb));
+        div.children.push(span);
+        div.children.push(text("def", div_ws, div_wb));
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 800.0, 0.0);
+        div.layout(&cb);
+        div
+    }
+
+    fn line_texts(b: &LayoutBox) -> Vec<String> {
+        b.text_lines
+            .as_ref()
+            .map(|ls| ls.iter().map(|l| l.text.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn wpt_break_boundary_2_chars_001_shape_is_seven_line_boxes() {
+        // css-text-3 §5.1, 7th bullet: the white-space of the NEAREST COMMON
+        // ANCESTOR of two characters governs the opportunity between them.
+        // div (normal, break-all) governs a|b|c, c|x, z|d, d|e|f; the span
+        // (pre) governs x|y|z. Ref: a / b / c / xyz / d / e / f.
+        let div = fixture(WhiteSpace::Normal, WordBreak::BreakAll, WhiteSpace::Pre, WordBreak::BreakAll);
+        let lh = div.children[0].get_line_height();
+
+        assert_eq!(line_texts(&div.children[0]), ["a", "b", "c"], "abc wraps per grapheme at width 0");
+        assert!(
+            div.children[1].children[0].text_lines.is_none(),
+            "xyz is one run: the span is white-space: pre"
+        );
+        // def starts on the span's line (offset past the cursor) with NO
+        // room: an empty first line closes that line box, then d / e / f.
+        let def = &div.children[2];
+        assert_eq!(line_texts(def), ["", "d", "e", "f"]);
+        assert!((def.dimensions.content.y - 3.0 * lh).abs() < 0.01, "def's line 0 is the xyz line");
+        assert!((div.dimensions.content.height - 7.0 * lh).abs() < 0.01,
+            "seven line boxes, got {} line-heights", div.dimensions.content.height / lh);
+    }
+
+    #[test]
+    fn wpt_break_boundary_2_chars_002_inverse_stays_one_line() {
+        // Inverse pair: break-all on the SPAN cannot create opportunities when
+        // the NCA (div: pre / nowrap) disallows wrapping. One line: abcxyzdef.
+        for div_ws in [WhiteSpace::Pre, WhiteSpace::Nowrap] {
+            let div = fixture(div_ws, WordBreak::Normal, div_ws, WordBreak::BreakAll);
+            let lh = div.children[0].get_line_height();
+            assert!(div.children[0].text_lines.is_none(), "{div_ws:?}: abc must not wrap");
+            assert!(div.children[2].text_lines.is_none(), "{div_ws:?}: def must not wrap");
+            assert!((div.dimensions.content.height - lh).abs() < 0.01,
+                "{div_ws:?}: one line box, got {}", div.dimensions.content.height / lh);
+        }
+    }
+
+    #[test]
+    fn a_bare_zero_container_width_is_still_the_intrinsic_guard() {
+        // The block path must keep reading an UNQUALIFIED 0 as "no resolved
+        // width yet": only the definite-zero flag unlocks wrapping. Both
+        // arms on the same text so a regression in either direction reds.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 0.0, 0.0);
+        let mut guarded = text("abc", WhiteSpace::Normal, WordBreak::BreakAll);
+        guarded.layout_text("abc".into(), &cb);
+        assert!(guarded.text_lines.is_none(), "bare 0 must not wrap (intrinsic pass)");
+        let mut definite = text("abc", WhiteSpace::Normal, WordBreak::BreakAll);
+        definite.layout_text_with_zero_wrap("abc".into(), &cb, true);
+        assert_eq!(line_texts(&definite), ["a", "b", "c"]);
     }
 }
