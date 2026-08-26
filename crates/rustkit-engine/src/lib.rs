@@ -217,6 +217,84 @@ impl EngineConfig {
     }
 }
 
+/// The pieces of a `font` shorthand value, as longhand-ready strings.
+#[derive(Debug, PartialEq)]
+struct FontShorthand {
+    /// Tokens before the size: style / variant / weight / stretch keywords.
+    prefix: Vec<String>,
+    /// The size, as a length string (`20px`, `1.5em`; keywords mapped to px).
+    size: String,
+    /// The `/line-height` part, if given.
+    line_height: Option<String>,
+    /// Everything after the size, verbatim: the family list.
+    family: String,
+}
+
+/// Split a `font` shorthand into its longhands. `None` for the system-font
+/// keywords (caption, menu, ...) and for values with no size or no family —
+/// an invalid shorthand must not partially apply.
+fn split_font_shorthand(value: &str) -> Option<FontShorthand> {
+    let value = value.trim();
+    if matches!(
+        value.to_ascii_lowercase().as_str(),
+        "caption" | "icon" | "menu" | "message-box" | "small-caption" | "status-bar"
+    ) {
+        return None;
+    }
+    let tokens: Vec<&str> = value.split_whitespace().collect();
+    // The size is the first token that is a length, a size keyword, or a
+    // `size/line-height` pair. Everything before is prefix, after is family.
+    let size_keyword = |t: &str| -> Option<&'static str> {
+        Some(match t {
+            "xx-small" => "9px",
+            "x-small" => "10px",
+            "small" => "13px",
+            "medium" => "16px",
+            "large" => "18px",
+            "x-large" => "24px",
+            "xx-large" => "32px",
+            "xxx-large" => "48px",
+            _ => return None,
+        })
+    };
+    let is_length = |t: &str| {
+        t.starts_with(|c: char| c.is_ascii_digit() || c == '.') && parse_length(t).is_some()
+    };
+    let idx = tokens.iter().position(|t| {
+        let (size, _) = t.split_once('/').unwrap_or((t, ""));
+        let lower = size.to_ascii_lowercase();
+        size_keyword(&lower).is_some() || is_length(size)
+    })?;
+    let (size_part, lh_part) = match tokens[idx].split_once('/') {
+        Some((s, lh)) => (s, Some(lh)),
+        None => (tokens[idx], None),
+    };
+    let lower = size_part.to_ascii_lowercase();
+    let size = size_keyword(&lower)
+        .map(str::to_string)
+        .unwrap_or_else(|| size_part.to_string());
+    // `20px / 1.5` with spaces around the slash also occurs in the wild.
+    let mut rest = idx + 1;
+    let mut line_height = lh_part.filter(|s| !s.is_empty()).map(str::to_string);
+    if line_height.is_none() && lh_part == Some("") && rest < tokens.len() {
+        line_height = Some(tokens[rest].to_string());
+        rest += 1;
+    } else if line_height.is_none() && tokens.get(rest) == Some(&"/") {
+        line_height = tokens.get(rest + 1).map(|s| s.to_string());
+        rest += 2;
+    }
+    let family = tokens.get(rest..)?.join(" ");
+    if family.is_empty() {
+        return None;
+    }
+    Some(FontShorthand {
+        prefix: tokens[..idx].iter().map(|s| s.to_string()).collect(),
+        size,
+        line_height,
+        family,
+    })
+}
+
 /// Where a `@font-face` `src` resolves to, given the document it came from.
 #[derive(Debug)]
 enum FontSource {
@@ -1819,7 +1897,7 @@ impl Engine {
                         return true;
                     }
                 }
-                BoxType::Image { .. } | BoxType::FormControl(_) => {
+                BoxType::Image { .. } | BoxType::FormControl(_) | BoxType::LineBreak => {
                     return true;
                 }
                 BoxType::Inline | BoxType::Block | BoxType::AnonymousBlock => {
@@ -2573,12 +2651,20 @@ impl Engine {
                 // (one term of the page-wide vertical drift). UA defaults
                 // have already stamped display for every known tag by this
                 // point, so style is authoritative here.
-                let box_type = match style.display {
-                    rustkit_css::Display::Inline => BoxType::Inline,
-                    // Atomic inlines (inline-block/-flex/-grid) lay out their
-                    // CONTENTS as blocks; inline-level placement is handled by
-                    // the block child loop via display, not box type.
-                    _ => BoxType::Block,
+                let box_type = if tag_lower == "br" {
+                    // A forced line break, not an empty inline: as an empty
+                    // inline it had no content children and was filtered
+                    // out of the tree, so "a<br>b" rendered on one line.
+                    BoxType::LineBreak
+                } else {
+                    match style.display {
+                        rustkit_css::Display::Inline => BoxType::Inline,
+                        // Atomic inlines (inline-block/-flex/-grid) lay out
+                        // their CONTENTS as blocks; inline-level placement is
+                        // handled by the block child loop via display, not
+                        // box type.
+                        _ => BoxType::Block,
+                    }
                 };
 
                 let mut layout_box = LayoutBox::new(box_type, style.clone());
@@ -2716,7 +2802,10 @@ impl Engine {
                             Self::has_content_children(&child_box)
                                 || Self::has_visible_styling(&child_box.style)
                         }
-                        BoxType::Text(_) | BoxType::Image { .. } | BoxType::FormControl(_) => true,
+                        BoxType::Text(_)
+                        | BoxType::Image { .. }
+                        | BoxType::FormControl(_)
+                        | BoxType::LineBreak => true,
                     };
 
                     if should_include {
@@ -2748,6 +2837,22 @@ impl Engine {
                         i > 0 && Self::is_inline_level_box(&layout_box.children[i - 1]);
                     let next_inline =
                         i + 1 < n && Self::is_inline_level_box(&layout_box.children[i + 1]);
+                    // Phase 2 only applies to COLLAPSIBLE spaces. Under
+                    // pre/pre-wrap/break-spaces every space is preserved
+                    // and renders (css-text §4.1.1): " XX" in a pre-wrap
+                    // box starts with a space-wide gap, and a
+                    // whitespace-only line is a line. Stripping here made
+                    // WPT word-break-break-all-011's " <br>X<br>X" lose
+                    // its first line entirely.
+                    let preserved = matches!(
+                        layout_box.children[i].style.white_space,
+                        rustkit_css::WhiteSpace::Pre
+                            | rustkit_css::WhiteSpace::PreWrap
+                            | rustkit_css::WhiteSpace::BreakSpaces
+                    );
+                    if preserved {
+                        continue;
+                    }
                     if let BoxType::Text(ref mut t) = layout_box.children[i].box_type {
                         if !prev_inline && t.starts_with(' ') {
                             *t = t.trim_start().to_string();
@@ -3695,6 +3800,40 @@ impl Engine {
                     }
                 }
             }
+            // `font` shorthand (css-fonts-4 §3.9):
+            //   [ <style> || <variant> || <weight> || <stretch> ]? <size> [ / <line-height> ]? <family>
+            // Never parsed before this: `font: 20px/1 Ahem` set NOTHING, so a
+            // page (or every WPT css-text test written with the shorthand)
+            // rendered in the inherited 16px fallback face. A shorthand resets
+            // every longhand it covers before applying what was given.
+            "font" => {
+                if let Some(parts) = split_font_shorthand(value) {
+                    self.apply_style_property(style, "font-style", "normal");
+                    self.apply_style_property(style, "font-weight", "normal");
+                    self.apply_style_property(style, "line-height", "normal");
+                    for tok in &parts.prefix {
+                        match tok.as_str() {
+                            "italic" | "oblique" => {
+                                self.apply_style_property(style, "font-style", "italic")
+                            }
+                            "bold" | "bolder" | "lighter" => {
+                                self.apply_style_property(style, "font-weight", tok)
+                            }
+                            t if t.parse::<f32>().is_ok() => {
+                                self.apply_style_property(style, "font-weight", tok)
+                            }
+                            // normal / small-caps / stretch keywords: no
+                            // computed representation to set.
+                            _ => {}
+                        }
+                    }
+                    self.apply_style_property(style, "font-size", &parts.size);
+                    if let Some(lh) = &parts.line_height {
+                        self.apply_style_property(style, "line-height", lh);
+                    }
+                    self.apply_style_property(style, "font-family", &parts.family);
+                }
+            }
             "font-size" => {
                 if let Some(length) = parse_length(value) {
                     style.font_size = length;
@@ -4310,6 +4449,11 @@ impl Engine {
                     "nowrap" => rustkit_css::WhiteSpace::Nowrap,
                     "pre-wrap" => rustkit_css::WhiteSpace::PreWrap,
                     "pre-line" => rustkit_css::WhiteSpace::PreLine,
+                    // css-text-3 §3: preserved spaces that also wrap and
+                    // never hang. Unparsed, it fell to `normal` and the
+                    // leading space of WPT word-break-break-all-012's
+                    // " XXXXX" collapsed away.
+                    "break-spaces" => rustkit_css::WhiteSpace::BreakSpaces,
                     _ => rustkit_css::WhiteSpace::Normal,
                 };
             }
@@ -9068,6 +9212,7 @@ fn layout_box_body_to_json(layout_box: &LayoutBox) -> serde_json::Value {
         BoxType::Block => "block",
         BoxType::Inline => "inline",
         BoxType::AnonymousBlock => "anonymous_block",
+        BoxType::LineBreak => "line_break",
         BoxType::Text(t) => {
             return serde_json::json!({
                 "type": "text",
@@ -11575,6 +11720,142 @@ mod web_font_tests {
             probe,
             vec!["XX X".to_string(), "XX".to_string()],
             "line-break: anywhere must fill the first line (all line records: {found:?})"
+        );
+    }
+
+    #[test]
+    fn preserved_white_space_keeps_its_edge_spaces_through_box_assembly() {
+        // css-text §4.1.1: under pre/pre-wrap every space renders. The
+        // child-assembly post-pass stripped edge spaces regardless of
+        // white-space, so " XX" in a pre-wrap box lost its leading space
+        // (WPT word-break-break-all-011: the first line of " <br>X<br>X" is
+        // a space-only line, and it vanished).
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <div id="a" style="white-space: pre-wrap"> XX </div>
+            <div id="b" style="white-space: pre"> </div>
+            <div id="c"> XX </div>
+            <div id="d" style="white-space: break-spaces"> Z </div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        fn texts(b: &LayoutBox, out: &mut Vec<String>) {
+            if let BoxType::Text(t) = &b.box_type {
+                out.push(t.clone());
+            }
+            for c in &b.children {
+                texts(c, out);
+            }
+        }
+        let mut found = Vec::new();
+        texts(&layout, &mut found);
+        assert_eq!(
+            found,
+            vec![" XX ".to_string(), " ".to_string(), "XX".to_string(), " Z ".to_string()],
+            "pre-wrap keeps both edge spaces, pre keeps a space-only run, normal collapses, \
+             break-spaces (previously unparsed) preserves"
+        );
+    }
+
+    #[test]
+    fn br_is_a_forced_line_break_and_an_empty_br_line_has_height() {
+        // `<br>` was an empty inline with no content children, so the tree
+        // builder dropped it: "a<br>b" laid out on ONE line on every page.
+        // It only ever "worked" where the preceding text happened to fill
+        // the container exactly (the WPT .red overlay idiom).
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <div id="a" style="width: 400px; font-size: 16px; line-height: 20px">ab<br>cd</div>
+            <div id="b" style="width: 400px; font-size: 16px; line-height: 20px">x<br><br>y</div>
+            <div id="c" style="width: 400px; white-space: pre; font-size: 16px; line-height: 20px">p<br>q</div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        layout.layout(&Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        });
+
+        fn text_y(b: &LayoutBox, out: &mut Vec<(String, f32)>) {
+            if let BoxType::Text(t) = &b.box_type {
+                out.push((t.clone(), b.dimensions.content.y));
+            }
+            for c in &b.children {
+                text_y(c, out);
+            }
+        }
+        let mut ys = Vec::new();
+        text_y(&layout, &mut ys);
+        let y = |s: &str| {
+            ys.iter()
+                .find(|(t, _)| t == s)
+                .map(|(_, y)| *y)
+                .unwrap_or_else(|| panic!("no text run {s:?} in {ys:?}"))
+        };
+        assert!(
+            (y("cd") - y("ab") - 20.0).abs() < 0.5,
+            "cd must sit one 20px line below ab: ab@{} cd@{}",
+            y("ab"),
+            y("cd")
+        );
+        assert!(
+            (y("y") - y("x") - 40.0).abs() < 0.5,
+            "<br><br> must leave one EMPTY 20px line between x and y: x@{} y@{}",
+            y("x"),
+            y("y")
+        );
+        assert!(
+            (y("q") - y("p") - 20.0).abs() < 0.5,
+            "a br breaks under white-space: pre too: p@{} q@{}",
+            y("p"),
+            y("q")
+        );
+    }
+
+    #[test]
+    fn the_font_shorthand_sets_every_longhand_it_names() {
+        assert_eq!(
+            split_font_shorthand("italic bold 20px/1.5 'Foo Bar', serif"),
+            Some(FontShorthand {
+                prefix: vec!["italic".into(), "bold".into()],
+                size: "20px".into(),
+                line_height: Some("1.5".into()),
+                family: "'Foo Bar', serif".into(),
+            })
+        );
+        assert_eq!(
+            split_font_shorthand("20px/1 Ahem").map(|p| (p.size, p.line_height, p.family)),
+            Some(("20px".into(), Some("1".into()), "Ahem".into()))
+        );
+        assert_eq!(
+            split_font_shorthand("large Georgia").map(|p| p.size),
+            Some("18px".into())
+        );
+        assert_eq!(split_font_shorthand("menu"), None, "system fonts are not parsed");
+        assert_eq!(split_font_shorthand("20px"), None, "a size with no family is invalid");
+
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <p style="font-weight: 700; line-height: 3; font: italic 20px/1.5 Ahem, serif">x</p>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+        fn style_of_x(b: &LayoutBox) -> Option<ComputedStyle> {
+            if matches!(&b.box_type, BoxType::Text(t) if t == "x") {
+                return Some(b.style.clone());
+            }
+            b.children.iter().find_map(style_of_x)
+        }
+        let s = style_of_x(&layout).expect("text run");
+        assert_eq!(s.font_size, rustkit_css::Length::Px(20.0));
+        assert_eq!(s.line_height, rustkit_css::LineHeight::Number(1.5));
+        assert_eq!(s.font_style, rustkit_css::FontStyle::Italic);
+        assert_eq!(s.font_family, "Ahem, serif");
+        assert_eq!(
+            s.font_weight,
+            rustkit_css::FontWeight(400),
+            "the shorthand resets an earlier font-weight it does not name"
         );
     }
 
