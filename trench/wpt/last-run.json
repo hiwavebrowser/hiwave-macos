@@ -1,20 +1,20 @@
 {
   "schema": 1,
   "wpt_pin": "a6f29b0bedaf3f1edba7b6739127fe8e713bfcb3",
-  "hiwave_git_sha": "48395d4ff72e4f4b540ddb6ba371ebf1cc270308",
+  "hiwave_git_sha": "a4f37aec3d9bf2d8950d6089619529217b29303e",
   "runner": "scripts/wpt_tier1.py",
   "viewport": {
     "width": 800,
     "height": 600
   },
   "wpt_max_diff_pct": 0.0,
-  "ts": "2026-08-26T13:07:24.924751+00:00",
+  "ts": "2026-08-26T14:02:45.276874+00:00",
   "n": 30,
-  "pass": 17,
-  "fail": 9,
+  "pass": 18,
+  "fail": 8,
   "skip": 4,
   "error": 0,
-  "rate": 0.6538,
+  "rate": 0.6923,
   "attribution": {
     "_comment": "Fails grouped by a named engine capability gap. Attribution only \u2014 these cases stay in the denominator. A gap here is a lane, not an excuse.",
     "blocked_fails": {
@@ -208,10 +208,10 @@
     },
     {
       "id": "css-text/word-break/break-boundary-2-chars-001",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 2.2477,
-      "diff_pixels": 10789,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
       "blocked_by": null,
       "maps_to": "slice-0"
@@ -351,6 +351,6 @@
     "all_green": false,
     "all_green_suspect": false,
     "negative_control": "FAIL as required (checked every run; run aborts otherwise)",
-    "note": "Not suspect: this run contains red (9 FAIL, 0 ERROR), so the oracle demonstrably distinguishes pass from fail on real cases. A run with pass==n and fail==0 and error==0 would flip this field."
+    "note": "Not suspect: this run contains red (8 FAIL, 0 ERROR), so the oracle demonstrably distinguishes pass from fail on real cases. A run with pass==n and fail==0 and error==0 would flip this field."
   }
 }
