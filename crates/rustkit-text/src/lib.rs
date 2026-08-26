@@ -22,6 +22,7 @@
 pub mod bidi;
 pub mod line_break;
 pub mod segmentation;
+pub mod webfonts;
 
 use thiserror::Error;
 

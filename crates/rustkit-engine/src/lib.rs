@@ -217,6 +217,188 @@ impl EngineConfig {
     }
 }
 
+/// css-text §4.1 "document white space": the characters that collapse under
+/// `white-space: normal`. NOT `char::is_whitespace` — that also says yes to
+/// U+00A0 NO-BREAK SPACE, a rendered, non-collapsible character.
+fn is_document_white_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c')
+}
+
+/// The pieces of a `font` shorthand value, as longhand-ready strings.
+#[derive(Debug, PartialEq)]
+struct FontShorthand {
+    /// Tokens before the size: style / variant / weight / stretch keywords.
+    prefix: Vec<String>,
+    /// The size, as a length string (`20px`, `1.5em`; keywords mapped to px).
+    size: String,
+    /// The `/line-height` part, if given.
+    line_height: Option<String>,
+    /// Everything after the size, verbatim: the family list.
+    family: String,
+}
+
+/// Split a `font` shorthand into its longhands. `None` for the system-font
+/// keywords (caption, menu, ...) and for values with no size or no family —
+/// an invalid shorthand must not partially apply.
+fn split_font_shorthand(value: &str) -> Option<FontShorthand> {
+    let value = value.trim();
+    if matches!(
+        value.to_ascii_lowercase().as_str(),
+        "caption" | "icon" | "menu" | "message-box" | "small-caption" | "status-bar"
+    ) {
+        return None;
+    }
+    let tokens: Vec<&str> = value.split_whitespace().collect();
+    // The size is the first token that is a length, a size keyword, or a
+    // `size/line-height` pair. Everything before is prefix, after is family.
+    let size_keyword = |t: &str| -> Option<&'static str> {
+        Some(match t {
+            "xx-small" => "9px",
+            "x-small" => "10px",
+            "small" => "13px",
+            "medium" => "16px",
+            "large" => "18px",
+            "x-large" => "24px",
+            "xx-large" => "32px",
+            "xxx-large" => "48px",
+            _ => return None,
+        })
+    };
+    let is_length = |t: &str| {
+        t.starts_with(|c: char| c.is_ascii_digit() || c == '.') && parse_length(t).is_some()
+    };
+    let idx = tokens.iter().position(|t| {
+        let (size, _) = t.split_once('/').unwrap_or((t, ""));
+        let lower = size.to_ascii_lowercase();
+        size_keyword(&lower).is_some() || is_length(size)
+    })?;
+    let (size_part, lh_part) = match tokens[idx].split_once('/') {
+        Some((s, lh)) => (s, Some(lh)),
+        None => (tokens[idx], None),
+    };
+    let lower = size_part.to_ascii_lowercase();
+    let size = size_keyword(&lower)
+        .map(str::to_string)
+        .unwrap_or_else(|| size_part.to_string());
+    // `20px / 1.5` with spaces around the slash also occurs in the wild.
+    let mut rest = idx + 1;
+    let mut line_height = lh_part.filter(|s| !s.is_empty()).map(str::to_string);
+    if line_height.is_none() && lh_part == Some("") && rest < tokens.len() {
+        line_height = Some(tokens[rest].to_string());
+        rest += 1;
+    } else if line_height.is_none() && tokens.get(rest) == Some(&"/") {
+        line_height = tokens.get(rest + 1).map(|s| s.to_string());
+        rest += 2;
+    }
+    let family = tokens.get(rest..)?.join(" ");
+    if family.is_empty() {
+        return None;
+    }
+    Some(FontShorthand {
+        prefix: tokens[..idx].iter().map(|s| s.to_string()).collect(),
+        size,
+        line_height,
+        family,
+    })
+}
+
+/// Where a `@font-face` `src` resolves to, given the document it came from.
+#[derive(Debug)]
+enum FontSource {
+    /// Decoded `data:` payload — nothing to fetch.
+    Data(Vec<u8>),
+    /// A local file. Only reachable from about:/file: documents.
+    File(std::path::PathBuf),
+    /// Needs the network.
+    Remote(Url),
+    /// Refused, with the reason for the log line.
+    Blocked(&'static str),
+}
+
+/// Resolve a `@font-face` `src` against the document's base URL.
+///
+/// The one security rule: a remote (http/https) document never reads the
+/// local filesystem, whatever its stylesheet says. Local documents (inline
+/// content via `load_html`, whose base is about:blank; and file: documents)
+/// may — that is how parity-capture and the WPT runner hand the engine a
+/// font file the way wptserve would have served it.
+fn resolve_font_source(base: Option<&Url>, src: &str) -> FontSource {
+    let src = src.trim();
+    if src.len() >= 5 && src[..5].eq_ignore_ascii_case("data:") {
+        return match decode_data_url(src) {
+            Some(bytes) => FontSource::Data(bytes),
+            None => FontSource::Blocked("undecodable data: URI"),
+        };
+    }
+    let document_is_local = base
+        .map(|b| matches!(b.scheme(), "about" | "file"))
+        .unwrap_or(true);
+    if let Ok(url) = Url::parse(src) {
+        return match url.scheme() {
+            "http" | "https" => FontSource::Remote(url),
+            "file" if document_is_local => url
+                .to_file_path()
+                .map(FontSource::File)
+                .unwrap_or(FontSource::Blocked("file: URL is not a local path")),
+            "file" => FontSource::Blocked("a remote document may not load file: fonts"),
+            _ => FontSource::Blocked("unsupported URL scheme"),
+        };
+    }
+    match base {
+        Some(b) if matches!(b.scheme(), "http" | "https") => b
+            .join(src)
+            .map(FontSource::Remote)
+            .unwrap_or(FontSource::Blocked("unresolvable relative URL")),
+        Some(b) if b.scheme() == "file" => b
+            .join(src)
+            .ok()
+            .and_then(|u| u.to_file_path().ok())
+            .map(FontSource::File)
+            .unwrap_or(FontSource::Blocked("unresolvable relative file path")),
+        _ => {
+            let path = std::path::Path::new(src);
+            if path.is_absolute() {
+                FontSource::File(path.to_path_buf())
+            } else {
+                FontSource::Blocked("relative source with no document base (inline content)")
+            }
+        }
+    }
+}
+
+/// `data:[<mediatype>][;base64],<payload>` → bytes. Fonts ship base64; the
+/// percent-encoded form is decoded too so a valid URI never fails here.
+fn decode_data_url(src: &str) -> Option<Vec<u8>> {
+    let rest = src.get(5..)?;
+    let (meta, payload) = rest.split_once(',')?;
+    if meta.to_ascii_lowercase().contains(";base64") {
+        use base64::Engine as _;
+        let compact: String = payload.chars().filter(|c| !c.is_whitespace()).collect();
+        base64::engine::general_purpose::STANDARD.decode(compact).ok()
+    } else {
+        Some(percent_decode(payload))
+    }
+}
+
+fn percent_decode(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
 /// The main browser engine.
 pub struct Engine {
     config: EngineConfig,
@@ -1240,7 +1422,9 @@ impl Engine {
             view.bindings = Some(bindings);
         }
 
-        // Initial layout and render
+        // Initial layout and render (inline data:-sourced faces first; the
+        // remote ones arrive with the other subresources below)
+        self.load_local_web_fonts(id);
         self.relayout(id)?;
 
         // Load external resources (stylesheets, images)
@@ -1386,6 +1570,11 @@ impl Engine {
             view.bindings = Some(bindings);
         }
 
+        // Fonts the document declares inline (data:/file:/local paths) must
+        // be in place BEFORE the first layout, or text is measured in the
+        // fallback face and only repainted right on a later relayout.
+        self.load_local_web_fonts(id);
+
         // Layout and render
         self.relayout(id)?;
 
@@ -1426,6 +1615,10 @@ impl Engine {
         let _span = tracing::info_span!("relayout", ?id).entered();
 
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+
+        // Text measurement below resolves family names; make THIS view's
+        // declared faces the ones that resolve.
+        self.install_web_fonts(id);
 
         let document = view
             .document
@@ -1711,7 +1904,7 @@ impl Engine {
                         return true;
                     }
                 }
-                BoxType::Image { .. } | BoxType::FormControl(_) => {
+                BoxType::Image { .. } | BoxType::FormControl(_) | BoxType::LineBreak => {
                     return true;
                 }
                 BoxType::Inline | BoxType::Block | BoxType::AnonymousBlock => {
@@ -1762,6 +1955,15 @@ impl Engine {
                 _ => None,
             };
             layout_box.set_offsets(px(&style.top), px(&style.right), px(&style.bottom), px(&style.left));
+            // z-index was parsed into the computed style and never copied
+            // here, so every positioned box painted at z 0: a `z-index: -1`
+            // overlay (the WPT css-text "red under green" idiom) painted ON
+            // TOP of the in-flow text it was meant to sit beneath. The
+            // display-list builder already groups negative-z children
+            // before normal flow — it only ever saw zeros. Field only, no
+            // stacking-context push: the builder's grouping is what CSS 2.1
+            // App. E needs here, and the context pipeline is still gated.
+            layout_box.z_index = style.z_index;
         }
     }
 
@@ -2456,12 +2658,20 @@ impl Engine {
                 // (one term of the page-wide vertical drift). UA defaults
                 // have already stamped display for every known tag by this
                 // point, so style is authoritative here.
-                let box_type = match style.display {
-                    rustkit_css::Display::Inline => BoxType::Inline,
-                    // Atomic inlines (inline-block/-flex/-grid) lay out their
-                    // CONTENTS as blocks; inline-level placement is handled by
-                    // the block child loop via display, not box type.
-                    _ => BoxType::Block,
+                let box_type = if tag_lower == "br" {
+                    // A forced line break, not an empty inline: as an empty
+                    // inline it had no content children and was filtered
+                    // out of the tree, so "a<br>b" rendered on one line.
+                    BoxType::LineBreak
+                } else {
+                    match style.display {
+                        rustkit_css::Display::Inline => BoxType::Inline,
+                        // Atomic inlines (inline-block/-flex/-grid) lay out
+                        // their CONTENTS as blocks; inline-level placement is
+                        // handled by the block child loop via display, not
+                        // box type.
+                        _ => BoxType::Block,
+                    }
                 };
 
                 let mut layout_box = LayoutBox::new(box_type, style.clone());
@@ -2599,7 +2809,10 @@ impl Engine {
                             Self::has_content_children(&child_box)
                                 || Self::has_visible_styling(&child_box.style)
                         }
-                        BoxType::Text(_) | BoxType::Image { .. } | BoxType::FormControl(_) => true,
+                        BoxType::Text(_)
+                        | BoxType::Image { .. }
+                        | BoxType::FormControl(_)
+                        | BoxType::LineBreak => true,
                     };
 
                     if should_include {
@@ -2631,12 +2844,30 @@ impl Engine {
                         i > 0 && Self::is_inline_level_box(&layout_box.children[i - 1]);
                     let next_inline =
                         i + 1 < n && Self::is_inline_level_box(&layout_box.children[i + 1]);
+                    // Phase 2 only applies to COLLAPSIBLE spaces. Under
+                    // pre/pre-wrap/break-spaces every space is preserved
+                    // and renders (css-text §4.1.1): " XX" in a pre-wrap
+                    // box starts with a space-wide gap, and a
+                    // whitespace-only line is a line. Stripping here made
+                    // WPT word-break-break-all-011's " <br>X<br>X" lose
+                    // its first line entirely.
+                    let preserved = matches!(
+                        layout_box.children[i].style.white_space,
+                        rustkit_css::WhiteSpace::Pre
+                            | rustkit_css::WhiteSpace::PreWrap
+                            | rustkit_css::WhiteSpace::BreakSpaces
+                    );
+                    if preserved {
+                        continue;
+                    }
                     if let BoxType::Text(ref mut t) = layout_box.children[i].box_type {
+                        // Strip the collapsed SPACE only: `trim_start()` also
+                        // eats a following nbsp, which is content.
                         if !prev_inline && t.starts_with(' ') {
-                            *t = t.trim_start().to_string();
+                            *t = t.trim_start_matches(' ').to_string();
                         }
                         if !next_inline && t.ends_with(' ') {
-                            *t = t.trim_end().to_string();
+                            *t = t.trim_end_matches(' ').to_string();
                         }
                     }
                 }
@@ -2664,22 +2895,30 @@ impl Engine {
                         | rustkit_css::WhiteSpace::BreakSpaces
                 );
                 let content = if collapsible {
+                    // Only DOCUMENT white space collapses (css-text §4.1:
+                    // space, tab, and the line-ending characters).
+                    // `split_whitespace`/`char::is_whitespace` also match
+                    // U+00A0 NO-BREAK SPACE, which turned "XXXX&nbsp;XXXX"
+                    // into "XXXX XXXX" here — a rendered character silently
+                    // rewritten into a collapsible one before layout ever
+                    // saw it (WPT line-break-anywhere-006).
                     let mut s = String::new();
-                    if text.starts_with(char::is_whitespace) {
-                        s.push(' ');
-                    }
-                    let mut first = true;
-                    for w in text.split_whitespace() {
-                        if !first {
-                            s.push(' ');
+                    let mut in_ws = false;
+                    for c in text.chars() {
+                        if is_document_white_space(c) {
+                            in_ws = true;
+                        } else {
+                            if in_ws {
+                                s.push(' ');
+                                in_ws = false;
+                            }
+                            s.push(c);
                         }
-                        s.push_str(w);
-                        first = false;
                     }
-                    if !first && text.ends_with(char::is_whitespace) {
+                    if in_ws {
                         s.push(' ');
                     }
-                    s // whitespace-only input -> " " (leading-ws branch only)
+                    s // whitespace-only input -> " "
                 } else {
                     text.clone()
                 };
@@ -2708,6 +2947,7 @@ impl Engine {
                         s.white_space = parent.white_space;
                         s.word_break = parent.word_break;
                         s.overflow_wrap = parent.overflow_wrap;
+                        s.line_break = parent.line_break;
                         s.font_stretch = parent.font_stretch;
                         // NOT CSS inheritance — feature plumbing: gradient
                         // text (background-clip:text + transparent fill) is
@@ -3577,6 +3817,40 @@ impl Engine {
                     }
                 }
             }
+            // `font` shorthand (css-fonts-4 §3.9):
+            //   [ <style> || <variant> || <weight> || <stretch> ]? <size> [ / <line-height> ]? <family>
+            // Never parsed before this: `font: 20px/1 Ahem` set NOTHING, so a
+            // page (or every WPT css-text test written with the shorthand)
+            // rendered in the inherited 16px fallback face. A shorthand resets
+            // every longhand it covers before applying what was given.
+            "font" => {
+                if let Some(parts) = split_font_shorthand(value) {
+                    self.apply_style_property(style, "font-style", "normal");
+                    self.apply_style_property(style, "font-weight", "normal");
+                    self.apply_style_property(style, "line-height", "normal");
+                    for tok in &parts.prefix {
+                        match tok.as_str() {
+                            "italic" | "oblique" => {
+                                self.apply_style_property(style, "font-style", "italic")
+                            }
+                            "bold" | "bolder" | "lighter" => {
+                                self.apply_style_property(style, "font-weight", tok)
+                            }
+                            t if t.parse::<f32>().is_ok() => {
+                                self.apply_style_property(style, "font-weight", tok)
+                            }
+                            // normal / small-caps / stretch keywords: no
+                            // computed representation to set.
+                            _ => {}
+                        }
+                    }
+                    self.apply_style_property(style, "font-size", &parts.size);
+                    if let Some(lh) = &parts.line_height {
+                        self.apply_style_property(style, "line-height", lh);
+                    }
+                    self.apply_style_property(style, "font-family", &parts.family);
+                }
+            }
             "font-size" => {
                 if let Some(length) = parse_length(value) {
                     style.font_size = length;
@@ -4192,6 +4466,11 @@ impl Engine {
                     "nowrap" => rustkit_css::WhiteSpace::Nowrap,
                     "pre-wrap" => rustkit_css::WhiteSpace::PreWrap,
                     "pre-line" => rustkit_css::WhiteSpace::PreLine,
+                    // css-text-3 §3: preserved spaces that also wrap and
+                    // never hang. Unparsed, it fell to `normal` and the
+                    // leading space of WPT word-break-break-all-012's
+                    // " XXXXX" collapsed away.
+                    "break-spaces" => rustkit_css::WhiteSpace::BreakSpaces,
                     _ => rustkit_css::WhiteSpace::Normal,
                 };
             }
@@ -4225,16 +4504,22 @@ impl Engine {
                     _ => rustkit_css::OverflowWrap::Normal,
                 };
             }
-            // `line-break` is the strictness axis (CSS Text 3 §5.3). Only
-            // `anywhere` changes where opportunities exist in a way the line
-            // breaker models today, and its effect — a soft wrap opportunity
-            // around every typographic character unit — is what
-            // OverflowWrap::Anywhere already implements. loose/normal/strict
-            // are deliberately no-ops rather than fake distinctions.
+            // `line-break` is the strictness axis (CSS Text 3 §5.3). It used
+            // to be written INTO overflow_wrap as Anywhere, which is a
+            // different property: overflow-wrap only breaks a word that
+            // overflows, so "XX XXX" in a 4ch box still broke at the space
+            // ("XX" / "XXX") where `line-break: anywhere` must fill the line
+            // ("XX X" / "XX", WPT line-break-anywhere-004). It now computes
+            // as its own value; layout maps Anywhere onto break-everywhere
+            // opportunities (see rustkit_layout::effective_word_break).
             "line-break" => {
-                if value.trim().eq_ignore_ascii_case("anywhere") {
-                    style.overflow_wrap = rustkit_css::OverflowWrap::Anywhere;
-                }
+                style.line_break = match value.trim().to_lowercase().as_str() {
+                    "anywhere" => rustkit_css::LineBreak::Anywhere,
+                    "loose" => rustkit_css::LineBreak::Loose,
+                    "normal" => rustkit_css::LineBreak::Normal,
+                    "strict" => rustkit_css::LineBreak::Strict,
+                    _ => rustkit_css::LineBreak::Auto,
+                };
             }
             "border-top-width" => {
                 if let Some(length) = parse_length(value) {
@@ -4975,7 +5260,14 @@ impl Engine {
             info!("No external stylesheets on this document — cleared the previous document's");
         }
 
-        if count > 0 || had_previous {
+        // Web fonts: faces declared in the external sheets that just arrived
+        // (plus any inline data: faces not yet loaded), then the network ones.
+        let fonts_loaded = self.load_local_web_fonts(id) + self.load_remote_web_fonts(id).await;
+        if fonts_loaded > 0 {
+            info!(count = fonts_loaded, "Loaded web fonts");
+        }
+
+        if count > 0 || had_previous || fonts_loaded > 0 {
             self.relayout(id)?;
         }
 
@@ -4988,6 +5280,189 @@ impl Engine {
         }
 
         Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // Web fonts (@font-face)
+    //
+    // The parse (#124) and the partitioned loader (#128/#129) landed with
+    // no caller: `FontLoader::load_font` tracked rules and fetched nothing,
+    // so every `@font-face` family fell through to the platform fallback.
+    // This is the missing middle: collect the document's rules, fetch the
+    // bytes (local sources synchronously, remote ones with the other
+    // subresources), file them in the view's partition, and hand that
+    // partition's faces to the text stack before each layout and paint.
+    // -----------------------------------------------------------------
+
+    /// The font-cache partition a document belongs to: its host for
+    /// http(s), the opaque bucket for inline/about:/file: content.
+    fn font_partition(url: Option<&Url>) -> rustkit_layout::TopLevelSite {
+        match url {
+            Some(u) if matches!(u.scheme(), "http" | "https") => u
+                .host_str()
+                .map(rustkit_layout::TopLevelSite::from_host)
+                .unwrap_or_else(rustkit_layout::TopLevelSite::opaque),
+            _ => rustkit_layout::TopLevelSite::opaque(),
+        }
+    }
+
+    fn layout_font_face(rule: &rustkit_css::FontFaceRule) -> rustkit_layout::FontFaceRule {
+        use rustkit_css::FontDisplayValue as D;
+        use rustkit_layout::FontDisplay as L;
+        rustkit_layout::FontFaceRule {
+            family: rule.family.clone(),
+            src: rule.src.clone(),
+            weight: rule.weight,
+            style: rule.style,
+            stretch: rule.stretch,
+            unicode_range: rule.unicode_range.clone(),
+            display: match rule.display {
+                D::Auto => L::Auto,
+                D::Block => L::Block,
+                D::Swap => L::Swap,
+                D::Fallback => L::Fallback,
+                D::Optional => L::Optional,
+            },
+        }
+    }
+
+    /// Every `@font-face` a view's document declares, in cascade order:
+    /// inline `<style>` sheets, then the loaded external sheets.
+    fn view_font_face_rules(&self, id: EngineViewId) -> Vec<rustkit_css::FontFaceRule> {
+        let Some(view) = self.views.get(&id) else {
+            return Vec::new();
+        };
+        let Some(document) = view.document.as_ref() else {
+            return Vec::new();
+        };
+        let mut rules = Vec::new();
+        for sheet in self.extract_stylesheets(document) {
+            rules.extend(sheet.font_face_rules());
+        }
+        for sheet in &view.external_stylesheets {
+            rules.extend(sheet.font_face_rules());
+        }
+        rules
+    }
+
+    /// Load every face reachable WITHOUT the network — `data:` payloads,
+    /// `file:` URLs and (for local documents) filesystem paths — into the
+    /// partition for `base`. Returns how many faces newly loaded; remote
+    /// sources are left for [`load_remote_web_fonts`](Self::load_remote_web_fonts).
+    fn load_local_web_fonts_from(
+        &self,
+        base: Option<&Url>,
+        rules: &[rustkit_css::FontFaceRule],
+    ) -> usize {
+        let partition = Self::font_partition(base);
+        let mut loaded = 0;
+        for rule in rules {
+            let face = Self::layout_font_face(rule);
+            let key = rustkit_layout::FontCacheKey::new(partition.clone(), &face);
+            if self.font_loader.is_loaded_key(&key) || self.font_loader.is_failed(&key) {
+                continue;
+            }
+            match resolve_font_source(base, &rule.src) {
+                FontSource::Data(bytes) => {
+                    self.font_loader.insert_loaded(key, bytes);
+                    loaded += 1;
+                }
+                FontSource::File(path) => match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        debug!(family = %rule.family, ?path, len = bytes.len(), "@font-face: loaded local font");
+                        self.font_loader.insert_loaded(key, bytes);
+                        loaded += 1;
+                    }
+                    Err(e) => {
+                        warn!(family = %rule.family, ?path, ?e, "@font-face: could not read local font file");
+                        self.font_loader.mark_failed(key);
+                    }
+                },
+                FontSource::Remote(_) => {}
+                FontSource::Blocked(reason) => {
+                    warn!(family = %rule.family, src = %rule.src, reason, "@font-face: source not loadable");
+                    self.font_loader.mark_failed(key);
+                }
+            }
+        }
+        loaded
+    }
+
+    /// [`load_local_web_fonts_from`](Self::load_local_web_fonts_from) for a view's own document.
+    fn load_local_web_fonts(&self, id: EngineViewId) -> usize {
+        let base = self.views.get(&id).and_then(|v| v.url.clone());
+        let rules = self.view_font_face_rules(id);
+        let n = self.load_local_web_fonts_from(base.as_ref(), &rules);
+        if n > 0 {
+            info!(?id, count = n, "Loaded local web fonts");
+        }
+        n
+    }
+
+    /// Fetch the view's http(s)-sourced faces. Returns how many newly loaded.
+    async fn load_remote_web_fonts(&mut self, id: EngineViewId) -> usize {
+        let base = self.views.get(&id).and_then(|v| v.url.clone());
+        let partition = Self::font_partition(base.as_ref());
+        let mut targets = Vec::new();
+        for rule in self.view_font_face_rules(id) {
+            let face = Self::layout_font_face(&rule);
+            let key = rustkit_layout::FontCacheKey::new(partition.clone(), &face);
+            if self.font_loader.is_loaded_key(&key) || self.font_loader.is_failed(&key) {
+                continue;
+            }
+            if let FontSource::Remote(url) = resolve_font_source(base.as_ref(), &rule.src) {
+                targets.push((key, rule.family.clone(), url));
+            }
+        }
+
+        let mut loaded = 0;
+        for (key, family, url) in targets {
+            info!(%family, %url, "Loading web font");
+            match self.loader.fetch(Request::get(url.clone())).await {
+                Ok(response) if response.ok() => match response.bytes().await {
+                    Ok(bytes) => {
+                        self.font_loader.insert_loaded(key, bytes.to_vec());
+                        loaded += 1;
+                    }
+                    Err(e) => {
+                        warn!(%family, %url, ?e, "Failed to read web font body");
+                        self.font_loader.mark_failed(key);
+                    }
+                },
+                Ok(response) => {
+                    warn!(%family, %url, status = %response.status, "Failed to fetch web font");
+                    self.font_loader.mark_failed(key);
+                }
+                Err(e) => {
+                    warn!(%family, %url, ?e, "Failed to fetch web font");
+                    self.font_loader.mark_failed(key);
+                }
+            }
+        }
+        loaded
+    }
+
+    /// Point the text stack at ONE partition's faces. Called before every
+    /// layout and paint of a view, so a view only ever sees its own site's
+    /// fonts — the registry is a slot the engine swaps, not a shared cache.
+    fn install_web_fonts_for(&self, partition: &rustkit_layout::TopLevelSite) {
+        let faces = self.font_loader.faces_for(partition);
+        // The tag names the installed set; the loader only ever grows a
+        // partition, so partition + count identifies it exactly.
+        let tag = format!("{}#{}", partition.as_str(), faces.len());
+        let accepted = rustkit_layout::webfonts::install(&tag, &faces);
+        if accepted < faces.len() {
+            debug!(
+                partition = partition.as_str(),
+                rejected = faces.len() - accepted,
+                "web font face(s) rejected by the platform (unsupported container or bad data)"
+            );
+        }
+    }
+
+    fn install_web_fonts(&self, id: EngineViewId) {
+        let base = self.views.get(&id).and_then(|v| v.url.as_ref());
+        self.install_web_fonts_for(&Self::font_partition(base));
     }
 
     /// Extract CSS variables from :root rules.
@@ -6544,6 +7019,10 @@ impl Engine {
     #[tracing::instrument(skip(self), fields(view_id = ?id))]
     fn render(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         let _span = tracing::info_span!("render", ?id).entered();
+
+        // Glyph rasterization resolves family names too; another view may
+        // have laid out since this one did.
+        self.install_web_fonts(id);
 
         // Extract needed values from view, avoiding long-lived borrows
         let (viewhost_id, has_display_list, cmd_count, is_headless) = {
@@ -8750,6 +9229,7 @@ fn layout_box_body_to_json(layout_box: &LayoutBox) -> serde_json::Value {
         BoxType::Block => "block",
         BoxType::Inline => "inline",
         BoxType::AnonymousBlock => "anonymous_block",
+        BoxType::LineBreak => "line_break",
         BoxType::Text(t) => {
             return serde_json::json!({
                 "type": "text",
@@ -11075,6 +11555,415 @@ mod link_click_tests {
             Some("https://example.com/target")
         );
         assert_eq!(engine.link_at_point(id, 10.0, 505.0), None);
+    }
+}
+
+#[cfg(test)]
+mod web_font_tests {
+    use super::*;
+
+    const AHEM: &[u8] = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.ttf");
+
+    fn ahem_data_uri() -> String {
+        use base64::Engine as _;
+        format!(
+            "data:font/ttf;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(AHEM)
+        )
+    }
+
+    #[test]
+    fn a_remote_document_never_reads_the_local_filesystem() {
+        let http = Url::parse("https://example.com/page.html").unwrap();
+        assert!(matches!(
+            resolve_font_source(Some(&http), "file:///etc/hosts"),
+            FontSource::Blocked(_)
+        ));
+        assert!(matches!(
+            resolve_font_source(Some(&http), "/fonts/a.ttf"),
+            FontSource::Remote(u) if u.as_str() == "https://example.com/fonts/a.ttf"
+        ));
+        assert!(matches!(
+            resolve_font_source(Some(&http), "../x.woff2"),
+            FontSource::Remote(_)
+        ));
+    }
+
+    #[test]
+    fn a_local_document_may_read_local_font_files() {
+        // about:blank is what load_html uses; parity-capture and the WPT
+        // runner hand us absolute paths that way (staged from /fonts/...).
+        let about = Url::parse("about:blank").unwrap();
+        assert!(matches!(
+            resolve_font_source(Some(&about), "/tmp/Ahem.ttf"),
+            FontSource::File(p) if p == std::path::Path::new("/tmp/Ahem.ttf")
+        ));
+        assert!(matches!(
+            resolve_font_source(Some(&about), "fonts/Ahem.ttf"),
+            FontSource::Blocked(_)
+        ), "a relative path has nothing to resolve against for inline content");
+        let file = Url::parse("file:///srv/site/index.html").unwrap();
+        assert!(matches!(
+            resolve_font_source(Some(&file), "fonts/Ahem.ttf"),
+            FontSource::File(p) if p == std::path::Path::new("/srv/site/fonts/Ahem.ttf")
+        ));
+    }
+
+    #[test]
+    fn data_uris_decode_in_both_encodings() {
+        assert_eq!(
+            decode_data_url("data:font/ttf;base64,AAEC").as_deref(),
+            Some(&[0u8, 1, 2][..])
+        );
+        assert_eq!(
+            decode_data_url("data:,%00%01x").as_deref(),
+            Some(&[0u8, 1, b'x'][..])
+        );
+        assert!(decode_data_url("data:font/ttf;base64,!!!").is_none());
+        assert!(matches!(
+            resolve_font_source(None, &ahem_data_uri()),
+            FontSource::Data(b) if b == AHEM
+        ));
+    }
+
+    /// The laid-out advance of the probe text run "XXXX".
+    fn widest_inline_block(b: &LayoutBox, out: &mut f32) {
+        if matches!(&b.box_type, BoxType::Text(t) if t.trim() == "XXXX") {
+            *out = out.max(b.dimensions.content.width);
+        }
+        for c in &b.children {
+            widest_inline_block(c, out);
+        }
+    }
+
+    fn probe_width(engine: &Engine, html: &str) -> f32 {
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        // The path load_html takes, minus the view: rules out of the sheets,
+        // local sources into the opaque partition, partition installed.
+        let rules: Vec<rustkit_css::FontFaceRule> = engine
+            .extract_stylesheets(&document)
+            .iter()
+            .flat_map(|s| s.font_face_rules())
+            .collect();
+        engine.load_local_web_fonts_from(None, &rules);
+        engine.install_web_fonts_for(&rustkit_layout::TopLevelSite::opaque());
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        let containing_block = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        layout.layout(&containing_block);
+        let mut w = 0.0f32;
+        widest_inline_block(&layout, &mut w);
+        w
+    }
+
+    fn test_engine() -> Option<Engine> {
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return None;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        Some(Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        })
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn line_break_anywhere_fills_the_line_even_under_keep_all() {
+        // WPT line-break-anywhere-004: "XX XXX" in a 4ch Ahem box with
+        // `word-break: keep-all; line-break: anywhere` must render as
+        // "XX X" / "XX" — the line is filled to the last character that
+        // fits. Mapping `line-break: anywhere` onto overflow-wrap's
+        // emergency arm gave "XX" / "XXX": "XXX" fits a line by itself, so
+        // no emergency ever fired and the space was the only opportunity.
+        let Some(engine) = test_engine() else { return };
+        let html = format!(
+            r#"<!DOCTYPE html><html><head><style>
+            @font-face {{ font-family: "EngineTestAhem"; src: url({}); }}
+            #probe {{ font-family: EngineTestAhem; font-size: 25px; line-height: 1;
+                      width: 100px; word-break: keep-all; line-break: anywhere; }}
+            </style></head><body><div id="probe">XX XXX</div></body></html>"#,
+            ahem_data_uri()
+        );
+        let document = Rc::new(Document::parse_html(&html).expect("parse"));
+        let rules: Vec<rustkit_css::FontFaceRule> = engine
+            .extract_stylesheets(&document)
+            .iter()
+            .flat_map(|s| s.font_face_rules())
+            .collect();
+        engine.load_local_web_fonts_from(None, &rules);
+        engine.install_web_fonts_for(&rustkit_layout::TopLevelSite::opaque());
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        layout.layout(&Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        });
+
+        fn lines_of(b: &LayoutBox, out: &mut Vec<Vec<String>>) {
+            if let Some(lines) = &b.text_lines {
+                out.push(lines.iter().map(|l| l.text.trim_end().to_string()).collect());
+            }
+            for c in &b.children {
+                lines_of(c, out);
+            }
+        }
+        let mut found = Vec::new();
+        lines_of(&layout, &mut found);
+        let probe = found
+            .iter()
+            .find(|ls| ls.concat().replace(' ', "").starts_with("XXXXX"))
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            probe,
+            vec!["XX X".to_string(), "XX".to_string()],
+            "line-break: anywhere must fill the first line (all line records: {found:?})"
+        );
+    }
+
+    #[test]
+    fn preserved_white_space_keeps_its_edge_spaces_through_box_assembly() {
+        // css-text §4.1.1: under pre/pre-wrap every space renders. The
+        // child-assembly post-pass stripped edge spaces regardless of
+        // white-space, so " XX" in a pre-wrap box lost its leading space
+        // (WPT word-break-break-all-011: the first line of " <br>X<br>X" is
+        // a space-only line, and it vanished).
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <div id="a" style="white-space: pre-wrap"> XX </div>
+            <div id="b" style="white-space: pre"> </div>
+            <div id="c"> XX </div>
+            <div id="d" style="white-space: break-spaces"> Z </div>
+            <div id="e">  a&nbsp; b &nbsp;</div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        fn texts(b: &LayoutBox, out: &mut Vec<String>) {
+            if let BoxType::Text(t) = &b.box_type {
+                out.push(t.clone());
+            }
+            for c in &b.children {
+                texts(c, out);
+            }
+        }
+        let mut found = Vec::new();
+        texts(&layout, &mut found);
+        assert_eq!(
+            found,
+            vec![
+                " XX ".to_string(),
+                " ".to_string(),
+                "XX".to_string(),
+                " Z ".to_string(),
+                // nbsp is content: it neither collapses nor gets trimmed at
+                // the edges; the collapsible spaces around it still do.
+                "a\u{a0} b \u{a0}".to_string(),
+            ],
+            "pre-wrap keeps both edge spaces, pre keeps a space-only run, normal collapses, \
+             break-spaces (previously unparsed) preserves, nbsp survives collapsing"
+        );
+    }
+
+    #[test]
+    fn br_is_a_forced_line_break_and_an_empty_br_line_has_height() {
+        // `<br>` was an empty inline with no content children, so the tree
+        // builder dropped it: "a<br>b" laid out on ONE line on every page.
+        // It only ever "worked" where the preceding text happened to fill
+        // the container exactly (the WPT .red overlay idiom).
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <div id="a" style="width: 400px; font-size: 16px; line-height: 20px">ab<br>cd</div>
+            <div id="b" style="width: 400px; font-size: 16px; line-height: 20px">x<br><br>y</div>
+            <div id="c" style="width: 400px; white-space: pre; font-size: 16px; line-height: 20px">p<br>q</div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        layout.layout(&Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        });
+
+        fn text_y(b: &LayoutBox, out: &mut Vec<(String, f32)>) {
+            if let BoxType::Text(t) = &b.box_type {
+                out.push((t.clone(), b.dimensions.content.y));
+            }
+            for c in &b.children {
+                text_y(c, out);
+            }
+        }
+        let mut ys = Vec::new();
+        text_y(&layout, &mut ys);
+        let y = |s: &str| {
+            ys.iter()
+                .find(|(t, _)| t == s)
+                .map(|(_, y)| *y)
+                .unwrap_or_else(|| panic!("no text run {s:?} in {ys:?}"))
+        };
+        assert!(
+            (y("cd") - y("ab") - 20.0).abs() < 0.5,
+            "cd must sit one 20px line below ab: ab@{} cd@{}",
+            y("ab"),
+            y("cd")
+        );
+        assert!(
+            (y("y") - y("x") - 40.0).abs() < 0.5,
+            "<br><br> must leave one EMPTY 20px line between x and y: x@{} y@{}",
+            y("x"),
+            y("y")
+        );
+        assert!(
+            (y("q") - y("p") - 20.0).abs() < 0.5,
+            "a br breaks under white-space: pre too: p@{} q@{}",
+            y("p"),
+            y("q")
+        );
+    }
+
+    #[test]
+    fn the_font_shorthand_sets_every_longhand_it_names() {
+        assert_eq!(
+            split_font_shorthand("italic bold 20px/1.5 'Foo Bar', serif"),
+            Some(FontShorthand {
+                prefix: vec!["italic".into(), "bold".into()],
+                size: "20px".into(),
+                line_height: Some("1.5".into()),
+                family: "'Foo Bar', serif".into(),
+            })
+        );
+        assert_eq!(
+            split_font_shorthand("20px/1 Ahem").map(|p| (p.size, p.line_height, p.family)),
+            Some(("20px".into(), Some("1".into()), "Ahem".into()))
+        );
+        assert_eq!(
+            split_font_shorthand("large Georgia").map(|p| p.size),
+            Some("18px".into())
+        );
+        assert_eq!(split_font_shorthand("menu"), None, "system fonts are not parsed");
+        assert_eq!(split_font_shorthand("20px"), None, "a size with no family is invalid");
+
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <p style="font-weight: 700; line-height: 3; font: italic 20px/1.5 Ahem, serif">x</p>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+        fn style_of_x(b: &LayoutBox) -> Option<ComputedStyle> {
+            if matches!(&b.box_type, BoxType::Text(t) if t == "x") {
+                return Some(b.style.clone());
+            }
+            b.children.iter().find_map(style_of_x)
+        }
+        let s = style_of_x(&layout).expect("text run");
+        assert_eq!(s.font_size, rustkit_css::Length::Px(20.0));
+        assert_eq!(s.line_height, rustkit_css::LineHeight::Number(1.5));
+        assert_eq!(s.font_style, rustkit_css::FontStyle::Italic);
+        assert_eq!(s.font_family, "Ahem, serif");
+        assert_eq!(
+            s.font_weight,
+            rustkit_css::FontWeight(400),
+            "the shorthand resets an earlier font-weight it does not name"
+        );
+    }
+
+    #[test]
+    fn z_index_reaches_the_layout_box_of_a_positioned_element() {
+        // Found under Ahem: the WPT css-text idiom puts red text in an
+        // absolutely positioned `z-index: -1` box and green in-flow text
+        // over it. The value was parsed into ComputedStyle and never copied
+        // to the LayoutBox, so the overlay painted at z 0 — after the
+        // in-flow text — and every such test showed red.
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <div style="position: absolute; z-index: -1; color: red">under</div>
+            <div style="color: green">over</div>
+            <div style="position: absolute; z-index: 7">seven</div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        fn positioned_z(b: &LayoutBox, out: &mut Vec<i32>) {
+            if b.position == Position::Absolute {
+                out.push(b.z_index);
+            }
+            for c in &b.children {
+                positioned_z(c, out);
+            }
+        }
+        let mut zs = Vec::new();
+        positioned_z(&layout, &mut zs);
+        assert_eq!(zs, vec![-1, 7], "positioned boxes must carry their computed z-index");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_declared_web_font_is_the_face_the_text_is_measured_in() {
+        // Ahem: every glyph is exactly 1em wide, so "XXXX" at 25px is 100px
+        // in Ahem and something else in any fallback face. The family name
+        // exists nowhere on the system; if the text measures 100px, the
+        // bytes the stylesheet declared are what shaped it.
+        let Some(engine) = test_engine() else { return };
+        let styled = |font_face: &str| {
+            format!(
+                r#"<!DOCTYPE html><html><head><style>
+                {font_face}
+                #probe {{ font-family: EngineTestAhem; font-size: 25px; line-height: 1; display: inline-block; }}
+                </style></head><body><span id="probe">XXXX</span></body></html>"#
+            )
+        };
+
+        let control = probe_width(&engine, &styled(""));
+        assert!(
+            control > 0.0 && (control - 100.0).abs() > 2.0,
+            "setup failed: without @font-face the fallback face already measures {control}px, \
+             so a 100px reading could not prove the web font loaded"
+        );
+
+        let via_data = probe_width(
+            &engine,
+            &styled(&format!(
+                r#"@font-face {{ font-family: "EngineTestAhem"; src: url({}); }}"#,
+                ahem_data_uri()
+            )),
+        );
+        assert!(
+            (via_data - 100.0).abs() < 0.5,
+            "data: @font-face did not reach the shaper: XXXX measured {via_data}px, expected 100"
+        );
+
+        // Same face via a filesystem path — the WPT runner's shape. A fresh
+        // engine so the data: load above cannot be what satisfies this.
+        let Some(engine) = test_engine() else { return };
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../rustkit-text/tests/fixtures/Ahem.ttf");
+        let via_file = probe_width(
+            &engine,
+            &styled(&format!(
+                r#"@font-face {{ font-family: EngineTestAhem; src: url("{path}"); }}"#
+            )),
+        );
+        assert!(
+            (via_file - 100.0).abs() < 0.5,
+            "file-path @font-face did not reach the shaper: XXXX measured {via_file}px, expected 100"
+        );
     }
 }
 

@@ -1618,6 +1618,8 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f3
                 Axis::Vertical => crate::resolve_line_height(style, font_size),
             }
         }
+        // A forced break occupies no main-axis space of its own.
+        crate::BoxType::LineBreak => 0.0,
     }
 }
 

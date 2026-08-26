@@ -78,12 +78,15 @@ STAGED_SUFFIX = ".__staged"
 ROOT_ABS_ATTR_RE = re.compile(r"((?:href|src)\s*=\s*[\"'])(/(?!/)[^\"']*)([\"'])", re.IGNORECASE)
 ROOT_ABS_URL_RE = re.compile(r"(url\(\s*[\"']?)(/(?!/)[^\"')]*)([\"']?\s*\))", re.IGNORECASE)
 
-# A test whose declared web font never loads is still a real engine failure —
-# @font-face is unimplemented (rustkit-layout FontLoader::load_font never
-# fetches or registers; queue_font_face has no caller outside its own unit
-# test). It is NOT excluded from the score; it is ATTRIBUTED, so a digest can
-# say "N of the fails are one capability gap" instead of "N text bugs".
-WEBFONT_GAP = "@font-face unimplemented (rustkit-layout FontLoader is dead code)"
+# A test that declares a web font is tagged so a digest can group its fails.
+# Until n33 (2026-08-26) the tag read "@font-face unimplemented": FontLoader
+# never fetched or registered anything, so every declared face fell back.
+# Since n33 a TTF/OTF face loads and is what the shaper measures with (Ahem
+# included). The tag is ATTRIBUTION ONLY and is deliberately kept as the same
+# field so the trendline stays comparable: a fail here is a real engine
+# failure measured IN the declared font, and a PASS is real if the face was
+# accepted — the tag no longer implies either "blocked" or "suspect".
+WEBFONT_GAP = "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)"
 
 
 def read_ppm(path: Path):
@@ -446,7 +449,7 @@ def main():
                                    if c["status"] == "FAIL" and c.get("blocked_by")})
             },
             "suspect_passes": {
-                "_comment": "PASSes on tests whose declared web font never loaded. The more dangerous direction: a green case that is not measuring its own assertion. Read these before quoting the rate.",
+                "_comment": "PASSes on tests that declare a web font. Before n33 the font never loaded, so these were the dangerous direction (a green case not measuring its own assertion); since n33 the face loads (TTF/OTF) and a PASS here is measured in the declared font. Kept as the same field for trendline continuity.",
                 "ids": sorted(c["id"] for c in cases
                               if c["status"] == "PASS" and c.get("blocked_by")),
             },
@@ -481,7 +484,7 @@ def main():
         print(f"  attributed: {len(ids)} fail(s) blocked by {gap}")
     suspect = last_run["attribution"]["suspect_passes"]["ids"]
     if suspect:
-        print(f"  SUSPECT: {len(suspect)} PASS(es) on tests whose web font never loaded: "
+        print(f"  web-font PASS(es) ({len(suspect)}; measured in the declared face since n33): "
               + ", ".join(suspect))
     return 0
 

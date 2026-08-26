@@ -307,6 +307,11 @@ pub fn create_font(family: &str, size: f64) -> Result<CTFont, TextError> {
         if fam.is_empty() {
             continue;
         }
+        // A face the document itself registered (@font-face) outranks every
+        // platform lookup: the family name may exist nowhere else.
+        if let Some(cg) = crate::webfonts::lookup(fam, 400, false) {
+            return Ok(font::new_from_CGFont(&cg, size));
+        }
         let lower = fam.to_ascii_lowercase();
         if is_system_family(&lower) {
             return Ok(font::new_ui_font_for_language(
@@ -335,6 +340,11 @@ fn create_font_with_traits(
         let fam = fam.trim().trim_matches('"').trim_matches('\'');
         if fam.is_empty() {
             continue;
+        }
+        // Document-registered face first (see create_font); the registry
+        // picks the nearest declared weight/style itself.
+        if let Some(cg) = crate::webfonts::lookup(fam, weight, italic) {
+            return Ok(font::new_from_CGFont(&cg, size));
         }
         let lower = fam.to_ascii_lowercase();
 
@@ -521,7 +531,7 @@ impl GlyphRasterizer {
                 );
                 fn CGContextSetShouldSubpixelQuantizeFonts(c: *mut c_void, should: bool);
             }
-            
+
             let success = CTFontGetGlyphsForCharacters(
                 font_ref,
                 chars.as_ptr(),
@@ -584,6 +594,14 @@ impl GlyphRasterizer {
             CGContextSetShouldSubpixelPositionFonts(ctx_ptr, true);
             CGContextSetAllowsFontSubpixelQuantization(ctx_ptr, false);
             CGContextSetShouldSubpixelQuantizeFonts(ctx_ptr, false);
+            // Font smoothing DILATES the outline (~0.3px per side, ~0.6px
+            // on top) — measured n33 on Ahem: an integer-aligned 20px em
+            // square rasterized 22 columns wide with a 60%-coverage row
+            // above it, so every Ahem overlap reftest read a fringe where
+            // Chrome reads a hard edge. Skia/Chrome disable smoothing for
+            // grayscale AA; coverage must come from the outline alone.
+            context.set_allows_font_smoothing(false);
+            context.set_should_smooth_fonts(false);
 
             // Set up drawing context
             // Fill with black (transparent in our alpha usage)
@@ -592,10 +610,10 @@ impl GlyphRasterizer {
                 &CGPoint::new(0.0, 0.0),
                 &CGSize::new(width as CGFloat, height as CGFloat),
             ));
-            
+
             // Set text color to white (opaque)
             context.set_rgb_fill_color(1.0, 1.0, 1.0, 1.0);
-            
+
             // Calculate position to draw glyph
             // Origin is at bottom-left, glyph origin needs adjustment
             let x = padding - bounds.origin.x + subpixel_x as f64;
@@ -788,7 +806,10 @@ impl GlyphRasterizer {
             
             context.set_allows_antialiasing(true);
             context.set_should_antialias(true);
-            context.set_should_smooth_fonts(true);
+            // Same contract as rasterize_char: no smoothing dilation, the
+            // fallback face must not paint heavier than the primary one.
+            context.set_allows_font_smoothing(false);
+            context.set_should_smooth_fonts(false);
             context.set_gray_fill_color(1.0, 1.0);
             
             let draw_x = padding - bounds.origin.x;

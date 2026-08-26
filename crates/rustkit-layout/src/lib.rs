@@ -43,14 +43,36 @@ pub use scroll::{
     ScrollAlignment, ScrollMomentum, ScrollState, Scrollbar, ScrollbarOrientation, StickyOffsets,
     StickyState, WheelDeltaMode,
 };
+/// The document-scoped web-font registry (`@font-face` faces the engine
+/// installs per view). Re-exported so the engine reaches it through the
+/// crate that owns the loader rather than depending on rustkit-text directly.
+pub use rustkit_text::webfonts;
 pub use text::{
-    apply_text_transform, collapse_whitespace, FontCache, FontDisplay, FontFaceRule,
+    apply_text_transform, collapse_whitespace, FontCache, FontCacheKey, FontDisplay, FontFaceRule,
     FontFamilyChain, FontLoader, LineHeight, PositionedGlyph, ShapedRun, TextDecoration, TextError,
-    TextMetrics, TextShaper,
+    TextMetrics, TextShaper, TopLevelSite,
 };
 
 use rustkit_css::{BoxSizing, Color, ComputedStyle, Length, TextAlign};
 use std::cmp::Ordering;
+
+/// The `word-break` the line breaker should run with.
+///
+/// css-text-3 §5.3: `line-break: anywhere` puts a soft wrap opportunity
+/// around every typographic character unit, "disregarding any prohibition
+/// against line breaks" — including `word-break: keep-all` on the same
+/// element. The breaker models exactly that set of opportunities for
+/// `break-all` (every grapheme boundary is a REAL opportunity, used in normal
+/// line filling), so `anywhere` maps onto it here rather than onto
+/// `overflow-wrap: anywhere`, whose emergency breaks only fire for a word
+/// that overflows a line on its own.
+pub fn effective_word_break(style: &ComputedStyle) -> rustkit_css::WordBreak {
+    if style.line_break == rustkit_css::LineBreak::Anywhere {
+        rustkit_css::WordBreak::BreakAll
+    } else {
+        style.word_break
+    }
+}
 use thiserror::Error;
 
 /// Errors that can occur in layout.
@@ -686,6 +708,12 @@ pub enum BoxType {
     },
     /// Form control (input, button, textarea, select).
     FormControl(FormControlType),
+    /// A forced line break (`<br>`, CSS 2.1 §9.4.2): closes the current
+    /// line box in its parent's inline flow, occupies no space, paints
+    /// nothing. Before this variant existed `<br>` was an empty inline that
+    /// the tree builder filtered out, so "a<br>b" rendered on one line on
+    /// every page.
+    LineBreak,
 }
 
 /// Type of form control for layout/rendering.
@@ -1070,6 +1098,15 @@ impl LayoutBox {
                 // Form controls are replaced elements with intrinsic sizing
                 self.layout_form_control(control.clone(), containing_block);
             }
+            BoxType::LineBreak => {
+                // Zero-size marker; the parent's inline flow closes the line.
+                self.dimensions.content = Rect::new(
+                    containing_block.content.x,
+                    containing_block.content.y + containing_block.content.height,
+                    0.0,
+                    0.0,
+                );
+            }
         }
 
         // Apply positioning offsets after normal layout
@@ -1318,7 +1355,7 @@ impl LayoutBox {
                 self.style.font_stretch,
                 font_size,
                 container_width,
-                self.style.word_break,
+                effective_word_break(&self.style),
                 self.style.overflow_wrap,
             ) {
                 if lines.len() > 1 {
@@ -1427,7 +1464,7 @@ impl LayoutBox {
             font_size,
             first_line_width,
             container_width,
-            self.style.word_break,
+            effective_word_break(&self.style),
             self.style.overflow_wrap,
         ) {
             Ok(lines) if !lines.is_empty() => lines,
@@ -1847,6 +1884,14 @@ impl LayoutBox {
             }
             BoxType::FormControl(ref control) => {
                 self.layout_form_control(control.clone(), containing_block);
+            }
+            BoxType::LineBreak => {
+                self.dimensions.content = Rect::new(
+                    containing_block.content.x,
+                    containing_block.content.y + containing_block.content.height,
+                    0.0,
+                    0.0,
+                );
             }
         }
 
@@ -2380,6 +2425,9 @@ impl LayoutBox {
         let container_width = self.dimensions.content.width;
         let text_align = self.style.text_align;
         let strut_descent = self.inline_strut_descent();
+        // A `<br>` on an otherwise empty line still produces a line box of
+        // the container's line-height (CSS 2.1 §9.4.2 / §10.8).
+        let empty_line_height = self.get_line_height();
         // white-space: nowrap|pre suppress soft-wrapping of inline-level
         // children — the line box grows past container_width and overflow
         // handles any scroll. Captured before the &mut children borrow.
@@ -2412,6 +2460,33 @@ impl LayoutBox {
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y;
                 child.layout(&cb);
+                continue;
+            }
+
+            // `<br>`: forced line break — close the current line box. With
+            // nothing on the line yet, the break still advances by one
+            // empty line box.
+            if matches!(child.box_type, BoxType::LineBreak) {
+                if let Some(start) = line_start_index {
+                    lines.push((start, i, line_width));
+                }
+                let advance = if cursor_x > 0.0 || line_height > 0.0 {
+                    line_height.max(line_below_baseline)
+                } else {
+                    empty_line_height
+                };
+                child.dimensions.content = Rect::new(
+                    self.dimensions.content.x + cursor_x,
+                    self.dimensions.content.y + cursor_y,
+                    0.0,
+                    0.0,
+                );
+                cursor_y += advance;
+                cursor_x = 0.0;
+                line_height = 0.0;
+                line_below_baseline = 0.0;
+                line_start_index = None;
+                line_width = 0.0;
                 continue;
             }
 
@@ -2922,6 +2997,8 @@ impl LayoutBox {
         let container_width = self.dimensions.content.width;
         let text_align = self.style.text_align;
         let strut_descent = self.inline_strut_descent();
+        // See layout_block_children: a `<br>` on an empty line is a line box.
+        let empty_line_height = self.get_line_height();
         // white-space: nowrap|pre suppress soft-wrapping (see layout_block_children).
         let container_allows_wrap = !matches!(
             self.style.white_space,
@@ -2978,10 +3055,36 @@ impl LayoutBox {
                         | BoxType::Text(_)
                         | BoxType::Image { .. }
                         | BoxType::FormControl(_)
+                        | BoxType::LineBreak
                 );
             if is_inline_level {
                 cursor_y += margin_context.resolve();
                 margin_context.reset();
+            }
+
+            // `<br>`: forced line break (see layout_block_children).
+            if matches!(child.box_type, BoxType::LineBreak) {
+                if let Some(start) = line_start_index {
+                    lines.push((start, i, line_width));
+                }
+                let advance = if cursor_x > 0.0 || line_height > 0.0 {
+                    line_height.max(line_below_baseline)
+                } else {
+                    empty_line_height
+                };
+                child.dimensions.content = Rect::new(
+                    self.dimensions.content.x + cursor_x,
+                    self.dimensions.content.y + cursor_y,
+                    0.0,
+                    0.0,
+                );
+                cursor_y += advance;
+                cursor_x = 0.0;
+                line_height = 0.0;
+                line_below_baseline = 0.0;
+                line_start_index = None;
+                line_width = 0.0;
+                continue;
             }
 
             // CSS2 §9.4.2: ALL inline-level boxes share line boxes — see
