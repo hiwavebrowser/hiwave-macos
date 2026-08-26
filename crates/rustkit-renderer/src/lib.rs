@@ -2031,6 +2031,9 @@ impl Renderer {
                 border_width,
                 focused,
                 caret_position,
+                font_family,
+                font_weight,
+                padding,
             } => {
                 self.draw_text_input(
                     *rect,
@@ -2044,6 +2047,9 @@ impl Renderer {
                     *border_width,
                     *focused,
                     *caret_position,
+                    font_family,
+                    *font_weight,
+                    *padding,
                 );
             }
 
@@ -2058,6 +2064,9 @@ impl Renderer {
                 border_radius,
                 pressed,
                 focused,
+                font_family,
+                font_weight,
+                padding,
             } => {
                 self.draw_button(
                     *rect,
@@ -2070,6 +2079,9 @@ impl Renderer {
                     *border_radius,
                     *pressed,
                     *focused,
+                    font_family,
+                    *font_weight,
+                    *padding,
                 );
             }
 
@@ -4160,10 +4172,13 @@ impl Renderer {
         border_width: f32,
         focused: bool,
         caret_position: Option<usize>,
+        font_family: &str,
+        font_weight: u16,
+        padding: [f32; 4],
     ) {
         // Draw background
         self.draw_solid_rect(rect, background_color);
-        
+
         // Draw border
         let border_rect = rect;
         self.draw_solid_rect(
@@ -4183,31 +4198,44 @@ impl Renderer {
             border_color,
         );
         
-        // Draw text or placeholder
-        let padding = 6.0;
-        let text_x = rect.x + padding;
-        let text_y = rect.y + (rect.height + font_size) / 2.0 - font_size * 0.2;
-        
+        // Draw text or placeholder, seated like Chrome's inner editor (see
+        // form_text_seat for what the old formula got wrong).
+        let (text_x, text_top, ascent, descent) =
+            Self::form_text_seat(rect, border_width, padding, font_family, font_size);
+
         let (display_text, display_color) = if value.is_empty() {
             (placeholder, placeholder_color)
         } else {
             (value, text_color)
         };
-        
+
         if !display_text.is_empty() {
-            self.draw_text(display_text, text_x, text_y, display_color, font_size, "sans-serif", 400, 0);
+            self.draw_text_with_metrics(
+                display_text,
+                text_x,
+                text_top,
+                display_color,
+                font_size,
+                font_family,
+                font_weight,
+                0,
+                None,
+                Some(ascent),
+            );
         }
-        
+
         // Draw focus ring if focused
         if focused {
             self.draw_focus_ring(border_rect, Color::new(0, 122, 255, 1.0), 2.0, 2.0);
         }
-        
-        // Draw caret if focused and position is set
+
+        // Draw caret if focused and position is set: after the measured
+        // width of the value's first `pos` chars, spanning the text line.
         if focused {
             if let Some(pos) = caret_position {
-                let caret_x = text_x + (pos as f32 * font_size * 0.5);
-                self.draw_caret(caret_x, rect.y + 4.0, rect.height - 8.0, text_color);
+                let prefix: String = value.chars().take(pos).collect();
+                let caret_x = text_x + Self::measure_run_width(&prefix, font_family, font_size);
+                self.draw_caret(caret_x, text_top, ascent + descent, text_color);
             }
         }
     }
@@ -4226,6 +4254,9 @@ impl Renderer {
         _border_radius: f32,
         pressed: bool,
         focused: bool,
+        font_family: &str,
+        font_weight: u16,
+        padding: [f32; 4],
     ) {
         // Adjust colors for pressed state
         let bg = if pressed {
@@ -4260,12 +4291,28 @@ impl Renderer {
             border_color,
         );
         
-        // Draw label (centered)
+        // Draw label: measured width centred in the content box, line box
+        // centred vertically (form_text_seat — the old seat painted ~0.8em
+        // low and centred a `bytes * 0.5em` guess of the width).
         if !label.is_empty() {
-            let label_width = label.len() as f32 * font_size * 0.5;
-            let text_x = rect.x + (rect.width - label_width) / 2.0;
-            let text_y = rect.y + (rect.height + font_size) / 2.0 - font_size * 0.2;
-            self.draw_text(label, text_x, text_y, text_color, font_size, "sans-serif", 400, 0);
+            let (_left, text_top, ascent, _descent) =
+                Self::form_text_seat(rect, border_width, padding, font_family, font_size);
+            let label_width = Self::measure_run_width(label, font_family, font_size);
+            let inner_x = rect.x + border_width + padding[3];
+            let inner_w = (rect.width - 2.0 * border_width - padding[1] - padding[3]).max(0.0);
+            let text_x = inner_x + (inner_w - label_width) / 2.0;
+            self.draw_text_with_metrics(
+                label,
+                text_x,
+                text_top,
+                text_color,
+                font_size,
+                font_family,
+                font_weight,
+                0,
+                None,
+                Some(ascent),
+            );
         }
         
         // Draw focus ring if focused
@@ -4477,34 +4524,69 @@ impl Renderer {
 
     /// One-per-run ascent fallback for legacy callers that ship no layout
     /// ascent — same metric source the deleted per-glyph lookup used.
-    #[cfg(target_os = "macos")]
     fn fallback_run_ascent(font_family: &str, font_size: f32) -> f32 {
-        let family = if font_family.is_empty() { "Helvetica" } else { font_family };
-        rustkit_text::macos::TextShaper::new(family, font_size as f64)
-            .unwrap_or_else(|_| rustkit_text::macos::TextShaper::with_system_font(font_size as f64))
-            .get_metrics()
-            .ascent
+        Self::fallback_run_metrics(font_family, font_size).0
+    }
+
+    /// `(ascent, descent)` of the run font — the renderer-side metric source
+    /// for callers that ship no layout metrics (form-control text).
+    #[cfg(target_os = "macos")]
+    fn fallback_run_metrics(font_family: &str, font_size: f32) -> (f32, f32) {
+        let m = Self::run_shaper(font_family, font_size).get_metrics();
+        (m.ascent, m.descent)
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn fallback_run_ascent(_font_family: &str, font_size: f32) -> f32 {
-        font_size * 0.8
+    fn fallback_run_metrics(_font_family: &str, font_size: f32) -> (f32, f32) {
+        (font_size * 0.8, font_size * 0.2)
     }
 
-    fn draw_text(
-        &mut self,
-        text: &str,
-        x: f32,
-        y: f32,
-        color: Color,
-        font_size: f32,
+    /// Advance width of `text` in the run font. Form-control callers use it
+    /// to centre a button label / place a caret; the old code guessed
+    /// `chars * 0.5em`.
+    #[cfg(target_os = "macos")]
+    fn measure_run_width(text: &str, font_family: &str, font_size: f32) -> f32 {
+        Self::run_shaper(font_family, font_size)
+            .shape(text)
+            .map(|shaped| shaped.advances.iter().sum())
+            .unwrap_or_else(|_| text.chars().count() as f32 * font_size * 0.5)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn measure_run_width(text: &str, _font_family: &str, font_size: f32) -> f32 {
+        text.chars().count() as f32 * font_size * 0.5
+    }
+
+    #[cfg(target_os = "macos")]
+    fn run_shaper(font_family: &str, font_size: f32) -> rustkit_text::macos::TextShaper {
+        let family = if font_family.is_empty() { "Helvetica" } else { font_family };
+        rustkit_text::macos::TextShaper::new(family, font_size as f64)
+            .unwrap_or_else(|_| rustkit_text::macos::TextShaper::with_system_font(font_size as f64))
+    }
+
+    /// Where a form control's text line goes. Chrome centres the inner
+    /// editor's line box inside the control's CONTENT box (border-box minus
+    /// border and padding); returns `(text_x, text_top, ascent, descent)` so
+    /// the caller hands `text_top` + `Some(ascent)` to draw_text_with_metrics.
+    ///
+    /// The old seat was `rect.y + (h + fs)/2 - 0.2fs` — a BASELINE formula —
+    /// handed to draw_text, which treats y as the line TOP and adds the
+    /// ascent AGAIN: every input/button label painted ~0.8em too low (a bare
+    /// 19px control drew its text below its own bottom border), 6px from the
+    /// left regardless of border/padding, in a hardcoded sans-serif.
+    fn form_text_seat(
+        rect: Rect,
+        border_width: f32,
+        padding: [f32; 4],
         font_family: &str,
-        font_weight: u16,
-        font_style: u8,
-    ) {
-        self.draw_text_with_metrics(
-            text, x, y, color, font_size, font_family, font_weight, font_style, None, None,
-        );
+        font_size: f32,
+    ) -> (f32, f32, f32, f32) {
+        let (ascent, descent) = Self::fallback_run_metrics(font_family, font_size);
+        let inner_top = rect.y + border_width + padding[0];
+        let inner_h = (rect.height - 2.0 * border_width - padding[0] - padding[2]).max(0.0);
+        let text_top = inner_top + (inner_h - (ascent + descent)) / 2.0;
+        let text_x = rect.x + border_width + padding[3];
+        (text_x, text_top, ascent, descent)
     }
 
     /// Draw text honoring the ADVANCE CONTRACT: when layout ships per-char
@@ -4537,8 +4619,17 @@ impl Renderer {
         // Baseline: layout's ascent when the command carries one (ADVANCE
         // CONTRACT), else ONE per-run fallback from the same source the old
         // per-glyph lookup used. Glyph entries are baseline-relative.
-        let baseline =
-            y + layout_ascent.unwrap_or_else(|| Self::fallback_run_ascent(font_family, font_size));
+        //
+        // SNAPPED TO A WHOLE DEVICE ROW (INTEGER-BASELINE CONTRACT, pairs
+        // with rustkit_text::macos::baseline_seat): the atlas bitmaps are
+        // rasterized with their baseline on an integer row and report an
+        // integer bearing_y, so a whole-row baseline here means every glyph
+        // on the line lands pixel-aligned with NO vertical resampling. This
+        // is what Skia does for horizontal text (subpixel x, rounded y);
+        // a fractional baseline smeared every glyph across two rows.
+        let baseline = (y
+            + layout_ascent.unwrap_or_else(|| Self::fallback_run_ascent(font_family, font_size)))
+        .round();
 
         // PAINT-0 seating probe (RUSTKIT_PAINT_PROBE=1): paint half of the
         // seating chain — pairs with the layout-side y_cmd log so a flat vs
@@ -6401,3 +6492,58 @@ pub(crate) fn paint0_probe() -> bool {
     *ON.get_or_init(|| std::env::var("RUSTKIT_PAINT_PROBE").as_deref() == Ok("1"))
 }
 
+
+#[cfg(test)]
+mod form_text_seat_tests {
+    use super::*;
+
+    /// Chrome centres the inner editor's line box in the CONTENT box. On the
+    /// form-controls Chrome baseline a bare input is Arial 13.333px, padding
+    /// 0, border 2px, 19px border-box: content 15px, Arial line box ~14.9px,
+    /// so the text top sits ~2px below the border-box top and the baseline
+    /// ~2 + ascent. The old seat put the baseline at
+    /// rect.y + (h+fs)/2 - 0.2fs + ascent ≈ rect.y + 23.8 — under the box.
+    #[test]
+    fn bare_input_text_line_is_centred_in_the_content_box() {
+        let rect = Rect::new(156.0, 145.0, 149.0, 19.0);
+        let (text_x, text_top, ascent, descent) =
+            Renderer::form_text_seat(rect, 2.0, [0.0; 4], "Arial", 13.333);
+        assert!(ascent > 0.0 && descent > 0.0);
+        let line = ascent + descent;
+        let content_top = rect.y + 2.0;
+        let content_h = rect.height - 4.0;
+        // Centred: equal slack above and below the line box.
+        let slack_above = text_top - content_top;
+        let slack_below = (content_top + content_h) - (text_top + line);
+        assert!(
+            (slack_above - slack_below).abs() < 1e-3,
+            "line box not centred: above {slack_above}, below {slack_below}"
+        );
+        // Baseline lands INSIDE the box, not under its bottom border.
+        let baseline = text_top + ascent;
+        assert!(baseline < rect.y + rect.height - 2.0, "baseline {baseline} is under the box");
+        assert!(baseline > rect.y + 2.0);
+        // Text starts after the border (padding 0), not at a hardcoded 6px.
+        assert_eq!(text_x, rect.x + 2.0);
+    }
+
+    #[test]
+    fn author_padding_moves_the_seat_and_the_box_agrees() {
+        // input { padding: 8px 16px; border: 2px } → Chrome builds
+        // (fs+1) + 16 + 4 = 35 tall (layout_form_control's DIG-1 compose).
+        let fs = 14.0;
+        let rect = Rect::new(0.0, 0.0, 200.0, (fs + 1.0) + 16.0 + 4.0);
+        let padding = [8.0, 16.0, 8.0, 16.0];
+        let (text_x, text_top, ascent, descent) =
+            Renderer::form_text_seat(rect, 2.0, padding, "Arial", fs);
+        assert_eq!(text_x, 2.0 + 16.0);
+        let content_top = 2.0 + 8.0;
+        let content_h = rect.height - 4.0 - 16.0;
+        let centred_top = content_top + (content_h - (ascent + descent)) / 2.0;
+        assert!((text_top - centred_top).abs() < 1e-3);
+        // Compose says the content is fs+1 tall; the font's line box must
+        // fit within ~a pixel of that or the two formulas disagree.
+        assert!(((ascent + descent) - content_h).abs() <= 1.5,
+            "line box {} vs composed content {}", ascent + descent, content_h);
+    }
+}
