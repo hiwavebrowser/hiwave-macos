@@ -6492,3 +6492,58 @@ pub(crate) fn paint0_probe() -> bool {
     *ON.get_or_init(|| std::env::var("RUSTKIT_PAINT_PROBE").as_deref() == Ok("1"))
 }
 
+
+#[cfg(test)]
+mod form_text_seat_tests {
+    use super::*;
+
+    /// Chrome centres the inner editor's line box in the CONTENT box. On the
+    /// form-controls Chrome baseline a bare input is Arial 13.333px, padding
+    /// 0, border 2px, 19px border-box: content 15px, Arial line box ~14.9px,
+    /// so the text top sits ~2px below the border-box top and the baseline
+    /// ~2 + ascent. The old seat put the baseline at
+    /// rect.y + (h+fs)/2 - 0.2fs + ascent ≈ rect.y + 23.8 — under the box.
+    #[test]
+    fn bare_input_text_line_is_centred_in_the_content_box() {
+        let rect = Rect::new(156.0, 145.0, 149.0, 19.0);
+        let (text_x, text_top, ascent, descent) =
+            Renderer::form_text_seat(rect, 2.0, [0.0; 4], "Arial", 13.333);
+        assert!(ascent > 0.0 && descent > 0.0);
+        let line = ascent + descent;
+        let content_top = rect.y + 2.0;
+        let content_h = rect.height - 4.0;
+        // Centred: equal slack above and below the line box.
+        let slack_above = text_top - content_top;
+        let slack_below = (content_top + content_h) - (text_top + line);
+        assert!(
+            (slack_above - slack_below).abs() < 1e-3,
+            "line box not centred: above {slack_above}, below {slack_below}"
+        );
+        // Baseline lands INSIDE the box, not under its bottom border.
+        let baseline = text_top + ascent;
+        assert!(baseline < rect.y + rect.height - 2.0, "baseline {baseline} is under the box");
+        assert!(baseline > rect.y + 2.0);
+        // Text starts after the border (padding 0), not at a hardcoded 6px.
+        assert_eq!(text_x, rect.x + 2.0);
+    }
+
+    #[test]
+    fn author_padding_moves_the_seat_and_the_box_agrees() {
+        // input { padding: 8px 16px; border: 2px } → Chrome builds
+        // (fs+1) + 16 + 4 = 35 tall (layout_form_control's DIG-1 compose).
+        let fs = 14.0;
+        let rect = Rect::new(0.0, 0.0, 200.0, (fs + 1.0) + 16.0 + 4.0);
+        let padding = [8.0, 16.0, 8.0, 16.0];
+        let (text_x, text_top, ascent, descent) =
+            Renderer::form_text_seat(rect, 2.0, padding, "Arial", fs);
+        assert_eq!(text_x, 2.0 + 16.0);
+        let content_top = 2.0 + 8.0;
+        let content_h = rect.height - 4.0 - 16.0;
+        let centred_top = content_top + (content_h - (ascent + descent)) / 2.0;
+        assert!((text_top - centred_top).abs() < 1e-3);
+        // Compose says the content is fs+1 tall; the font's line box must
+        // fit within ~a pixel of that or the two formulas disagree.
+        assert!(((ascent + descent) - content_h).abs() <= 1.5,
+            "line box {} vs composed content {}", ascent + descent, content_h);
+    }
+}

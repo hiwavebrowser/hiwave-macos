@@ -1333,18 +1333,21 @@ mod tests {
         // bitmap's baseline row is exactly `bearing_y` from the top, so the
         // ink top of 'g' must sit above it by its outline height, whole rows.
         let r = GlyphRasterizer::with_style("Helvetica", 16.0, 400, false);
-        for ch in ['g', 'p', 'y', '_', '\u{00B0}'] {
-            let (_b, _w, h, _adv, _bx, by) = r.rasterize_char(ch, 0.0).expect("rasterizes");
+        // Primary path: descenders and a glyph that floats above the baseline.
+        // Fallback path (rasterize_char_with_font): a CJK ideograph Helvetica
+        // has no glyph for, so rasterize_char routes through rasterize_fallback.
+        for ch in ['g', 'p', 'y', '_', '\u{00B0}', '\u{6F22}'] {
+            let (bitmap, w, h, _adv, _bx, by) = r.rasterize_char(ch, 0.0).expect("rasterizes");
+            assert!(bitmap.iter().any(|&v| v > 0), "{ch:?}: no ink — fallback font missing?");
             assert_eq!(by.fract(), 0.0, "{ch:?}: bearing_y {by} is not a whole row");
             assert!(by <= h as f32, "{ch:?}: baseline row {by} is below the bitmap ({h})");
+            assert_eq!(bitmap.len(), (w * h) as usize);
         }
         // Color path (emoji) shares the seat.
-        if let Some((_rgba, h, _w, _adv, _bx, by)) =
-            r.rasterize_char_color('\u{1F3D4}').map(|(a, w, h, adv, bx, by)| (a, h, w, adv, bx, by))
-        {
-            assert_eq!(by.fract(), 0.0, "color path bearing_y {by} is not a whole row");
-            assert!(by <= h as f32);
-        }
+        let (_rgba, _w, h, _adv, _bx, by) =
+            r.rasterize_char_color('\u{1F3D4}').expect("color emoji rasterizes");
+        assert_eq!(by.fract(), 0.0, "color path bearing_y {by} is not a whole row");
+        assert!(by <= h as f32, "color path baseline row {by} is below the bitmap ({h})");
     }
 
     #[test]
