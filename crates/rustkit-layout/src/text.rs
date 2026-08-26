@@ -1160,6 +1160,13 @@ impl TextShaper {
         weight: u16,
         italic: bool,
     ) -> Result<core_text::font::CTFont, TextError> {
+        // A face the document registered via @font-face outranks every
+        // platform lookup — the family may exist nowhere else. The engine
+        // installs the current view's faces before each layout.
+        if let Some(cg) = rustkit_text::webfonts::lookup(family, weight, italic) {
+            return Ok(ct_font::new_from_CGFont(&cg, size as f64));
+        }
+
         // The macOS system font has no by-name trait variants
         // (".AppleSystemUIFont-Bold" does not exist), so bold system-ui text
         // silently shaped with the REGULAR face — every bold heading
@@ -1967,14 +1974,20 @@ impl FontCacheKey {
 pub struct FontLoader {
     /// Loaded font faces, keyed by (partition, face identity).
     loaded: RwLock<HashMap<FontCacheKey, LoadedFont>>,
+    /// Faces whose source could not be fetched or read. Remembered so a
+    /// relayout does not retry (and re-log) the same dead URL every frame.
+    failed: RwLock<std::collections::HashSet<FontCacheKey>>,
     /// Queued loads, each carrying the partition it was requested in.
     pending: RwLock<Vec<(FontCacheKey, FontFaceRule)>>,
 }
 
-#[allow(dead_code)]
+/// The bytes of one fetched face plus the descriptors its rule declared.
+/// The bytes are shared, not copied, into the platform registry on install.
 struct LoadedFont {
     family: String,
-    data: Vec<u8>,
+    weight: u16,
+    italic: bool,
+    data: std::sync::Arc<Vec<u8>>,
 }
 
 impl FontLoader {
@@ -1982,6 +1995,7 @@ impl FontLoader {
     pub fn new() -> Self {
         Self {
             loaded: RwLock::new(HashMap::new()),
+            failed: RwLock::new(std::collections::HashSet::new()),
             pending: RwLock::new(Vec::new()),
         }
     }
@@ -2003,44 +2017,67 @@ impl FontLoader {
         self.pending.read().unwrap().len()
     }
 
-    /// Load all pending fonts (call from network thread).
-    #[allow(unused)]
-    pub async fn load_pending(&self) -> Vec<Result<String, TextError>> {
-        let rules = {
-            let mut pending = self.pending.write().unwrap();
-            std::mem::take(&mut *pending)
-        };
-
-        let mut results = Vec::with_capacity(rules.len());
-        for (key, rule) in rules {
-            results.push(self.load_font(key, rule).await);
-        }
-        results
+    /// Hand the queued rules to whoever owns the network. The loader has no
+    /// fetch path of its own — the engine resolves and fetches, then calls
+    /// [`insert_loaded`](Self::insert_loaded) with the bytes.
+    pub fn take_pending(&self) -> Vec<(FontCacheKey, FontFaceRule)> {
+        let mut pending = self.pending.write().unwrap();
+        std::mem::take(&mut *pending)
     }
 
-    /// Load a single font.
-    async fn load_font(
-        &self,
-        key: FontCacheKey,
-        rule: FontFaceRule,
-    ) -> Result<String, TextError> {
-        // In a full implementation, this would:
-        // 1. Fetch the font file from rule.src
-        // 2. Parse the font data
-        // 3. Register with DirectWrite
-        // For now, we just track the rule
+    /// Record a fetched face. The family/weight/style come from the key, so
+    /// the bytes can never be filed under a different identity than the rule
+    /// that asked for them.
+    pub fn insert_loaded(&self, key: FontCacheKey, data: Vec<u8>) {
+        let entry = LoadedFont {
+            family: key.family.clone(),
+            weight: key.weight,
+            italic: key.style != "Normal",
+            data: std::sync::Arc::new(data),
+        };
+        self.failed.write().unwrap().remove(&key);
+        self.loaded.write().unwrap().insert(key, entry);
+    }
 
-        let family = rule.family.clone();
-        let mut loaded = self.loaded.write().unwrap();
-        loaded.insert(
-            key,
-            LoadedFont {
-                family: rule.family,
-                data: Vec::new(),
-            },
-        );
+    /// Record that this face's source is dead, so relayouts stop retrying it.
+    pub fn mark_failed(&self, key: FontCacheKey) {
+        self.failed.write().unwrap().insert(key);
+    }
 
-        Ok(family)
+    pub fn is_failed(&self, key: &FontCacheKey) -> bool {
+        self.failed.read().unwrap().contains(key)
+    }
+
+    /// Is this exact face (partition + identity) loaded?
+    pub fn is_loaded_key(&self, key: &FontCacheKey) -> bool {
+        self.loaded.read().unwrap().contains_key(key)
+    }
+
+    /// Every loaded face of ONE partition, in a deterministic order, ready
+    /// for the platform registry. Only the requested partition's faces are
+    /// ever returned — this is the slice the engine installs before laying
+    /// out a view of that site, and it is the only way faces leave here.
+    pub fn faces_for(&self, partition: &TopLevelSite) -> Vec<rustkit_text::webfonts::WebFontFace> {
+        let loaded = self.loaded.read().unwrap();
+        let mut faces: Vec<(&FontCacheKey, &LoadedFont)> = loaded
+            .iter()
+            .filter(|(k, _)| k.partition == *partition)
+            .collect();
+        // HashMap order is arbitrary; a stable order keeps the installed set
+        // (and its identity tag) the same across relayouts.
+        faces.sort_by(|(a, _), (b, _)| {
+            (&a.family, a.weight, &a.style, &a.stretch, &a.src)
+                .cmp(&(&b.family, b.weight, &b.style, &b.stretch, &b.src))
+        });
+        faces
+            .into_iter()
+            .map(|(_, f)| rustkit_text::webfonts::WebFontFace {
+                family: f.family.clone(),
+                weight: f.weight,
+                italic: f.italic,
+                data: f.data.clone(),
+            })
+            .collect()
     }
 
     /// Is this face loaded IN THIS PARTITION?
@@ -2223,6 +2260,56 @@ mod tests {
         assert!(!loader.is_loaded(&site, "TestFont"));
         loader.queue_font_face(site, face("TestFont", "url(test.woff2)"));
         assert_eq!(loader.pending_count(), 1);
+        assert_eq!(loader.take_pending().len(), 1);
+        assert_eq!(loader.pending_count(), 0, "take_pending drains the queue");
+    }
+
+    #[test]
+    fn a_loaded_face_is_visible_only_in_its_own_partition() {
+        // THE PRIVACY PROPERTY on the read side: the slice handed to the
+        // platform registry for site A must never carry a face site B loaded.
+        let loader = FontLoader::new();
+        let a = TopLevelSite::from_host("a.test");
+        let b = TopLevelSite::from_host("b.test");
+        let key = FontCacheKey::new(a.clone(), &face("Inter", "/i.woff2"));
+        assert!(!loader.is_loaded_key(&key));
+        loader.insert_loaded(key.clone(), vec![1, 2, 3]);
+        assert!(loader.is_loaded_key(&key));
+        assert!(loader.is_loaded(&a, "Inter"));
+        assert!(!loader.is_loaded(&b, "Inter"));
+        let faces_a = loader.faces_for(&a);
+        assert_eq!(faces_a.len(), 1);
+        assert_eq!(faces_a[0].family, "Inter");
+        assert_eq!(faces_a[0].weight, 400);
+        assert!(!faces_a[0].italic);
+        assert_eq!(*faces_a[0].data, vec![1, 2, 3]);
+        assert!(loader.faces_for(&b).is_empty());
+    }
+
+    #[test]
+    fn a_failed_face_stays_failed_until_it_loads() {
+        let loader = FontLoader::new();
+        let site = TopLevelSite::from_host("example.com");
+        let key = FontCacheKey::new(site, &face("Dead", "/dead.ttf"));
+        assert!(!loader.is_failed(&key));
+        loader.mark_failed(key.clone());
+        assert!(loader.is_failed(&key), "a dead source is remembered, not retried every relayout");
+        loader.insert_loaded(key.clone(), vec![0]);
+        assert!(!loader.is_failed(&key), "a later successful load clears the failure");
+    }
+
+    #[test]
+    fn faces_for_is_deterministically_ordered() {
+        // The engine tags the installed set by partition + count; if the
+        // order wandered between calls the registry would re-parse every
+        // font file on every relayout.
+        let loader = FontLoader::new();
+        let site = TopLevelSite::from_host("example.com");
+        for name in ["Zeta", "Alpha", "Mid"] {
+            loader.insert_loaded(FontCacheKey::new(site.clone(), &face(name, "/x.ttf")), vec![]);
+        }
+        let names: Vec<String> = loader.faces_for(&site).into_iter().map(|f| f.family).collect();
+        assert_eq!(names, vec!["Alpha", "Mid", "Zeta"]);
     }
 
     #[test]

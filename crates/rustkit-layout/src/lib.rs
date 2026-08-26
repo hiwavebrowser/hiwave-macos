@@ -43,10 +43,14 @@ pub use scroll::{
     ScrollAlignment, ScrollMomentum, ScrollState, Scrollbar, ScrollbarOrientation, StickyOffsets,
     StickyState, WheelDeltaMode,
 };
+/// The document-scoped web-font registry (`@font-face` faces the engine
+/// installs per view). Re-exported so the engine reaches it through the
+/// crate that owns the loader rather than depending on rustkit-text directly.
+pub use rustkit_text::webfonts;
 pub use text::{
-    apply_text_transform, collapse_whitespace, FontCache, FontDisplay, FontFaceRule,
+    apply_text_transform, collapse_whitespace, FontCache, FontCacheKey, FontDisplay, FontFaceRule,
     FontFamilyChain, FontLoader, LineHeight, PositionedGlyph, ShapedRun, TextDecoration, TextError,
-    TextMetrics, TextShaper,
+    TextMetrics, TextShaper, TopLevelSite,
 };
 
 use rustkit_css::{BoxSizing, Color, ComputedStyle, Length, TextAlign};

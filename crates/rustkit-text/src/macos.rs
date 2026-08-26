@@ -307,6 +307,11 @@ pub fn create_font(family: &str, size: f64) -> Result<CTFont, TextError> {
         if fam.is_empty() {
             continue;
         }
+        // A face the document itself registered (@font-face) outranks every
+        // platform lookup: the family name may exist nowhere else.
+        if let Some(cg) = crate::webfonts::lookup(fam, 400, false) {
+            return Ok(font::new_from_CGFont(&cg, size));
+        }
         let lower = fam.to_ascii_lowercase();
         if is_system_family(&lower) {
             return Ok(font::new_ui_font_for_language(
@@ -335,6 +340,11 @@ fn create_font_with_traits(
         let fam = fam.trim().trim_matches('"').trim_matches('\'');
         if fam.is_empty() {
             continue;
+        }
+        // Document-registered face first (see create_font); the registry
+        // picks the nearest declared weight/style itself.
+        if let Some(cg) = crate::webfonts::lookup(fam, weight, italic) {
+            return Ok(font::new_from_CGFont(&cg, size));
         }
         let lower = fam.to_ascii_lowercase();
 
