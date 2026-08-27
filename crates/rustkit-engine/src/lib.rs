@@ -1894,6 +1894,59 @@ impl Engine {
             || b.style.display.is_atomic_inline()
     }
 
+    /// Push a built child, hoisting any `<br>` out of an INLINE child into
+    /// this box's child list (the continuation split of CSS 2.1 §9.2.1.1).
+    ///
+    /// The inline flow only closes a line for its DIRECT `LineBreak`
+    /// children, so `<span>XX<br></span>` laid its break out as a 0×0
+    /// nothing inside the span and the text after it stayed on the same
+    /// line (WPT overflow-wrap-anywhere-005: a five-row red fixture came
+    /// out as two 300px rows). `<span>a<br>b</span>` becomes
+    /// `[span(a)] [br] [span(b)]`; each piece re-derives its positioning
+    /// from the same computed style, and only the first keeps the element
+    /// identity so the geometry oracle joins one Chrome rect to one box.
+    /// Deeper nesting splits level by level: an inline parent that just
+    /// received a hoisted `<br>` is itself split when ITS parent pushes it.
+    fn push_child_hoisting_line_breaks(children: &mut Vec<LayoutBox>, child: LayoutBox) {
+        let has_break = matches!(child.box_type, BoxType::Inline)
+            && child
+                .children
+                .iter()
+                .any(|c| matches!(c.box_type, BoxType::LineBreak));
+        if !has_break {
+            children.push(child);
+            return;
+        }
+
+        let mut current = child;
+        let grandchildren = std::mem::take(&mut current.children);
+        let style = current.style.clone();
+        let node_id = current.node_id;
+        let link_href = current.link_href.clone();
+        let keep = |piece: &LayoutBox| {
+            !piece.children.is_empty() || Self::has_visible_styling(&piece.style)
+        };
+
+        for grandchild in grandchildren {
+            if matches!(grandchild.box_type, BoxType::LineBreak) {
+                if keep(&current) {
+                    children.push(current);
+                }
+                children.push(grandchild);
+                let mut piece = LayoutBox::new(BoxType::Inline, style.clone());
+                Self::transfer_positioning(&mut piece, &style);
+                piece.node_id = node_id;
+                piece.link_href = link_href.clone();
+                current = piece;
+            } else {
+                current.children.push(grandchild);
+            }
+        }
+        if keep(&current) {
+            children.push(current);
+        }
+    }
+
     /// Check if a layout box has content children (text, images, form controls).
     /// This is used to determine if an inline wrapper should be included.
     fn has_content_children(layout_box: &LayoutBox) -> bool {
@@ -2816,7 +2869,7 @@ impl Engine {
                     };
 
                     if should_include {
-                        layout_box.children.push(child_box);
+                        Self::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
                     }
                 }
 
@@ -9541,6 +9594,87 @@ mod tests {
             "Should have at least 2 text boxes (h1 and p content), got {}",
             text_count
         );
+    }
+
+    /// WPT overflow-wrap-anywhere-005: `<span>XX<br></span>` — the break
+    /// sat INSIDE the span, where no inline flow closes a line, so the text
+    /// after it stayed on the same line. The builder now splits the inline
+    /// around the break (`[span(a)] [br] [span(b)]`), keeping the element
+    /// identity on the first piece only. T-RED before the split: the div
+    /// had one inline child holding a LineBreak.
+    #[test]
+    fn br_inside_an_inline_is_hoisted_to_the_block_flow() {
+        let html = r#"<!DOCTYPE html>
+            <html><body><div><span>a<br>b</span>c</div></body></html>"#;
+        let document = Document::parse_html(html).expect("Failed to parse HTML");
+        let document = Rc::new(document);
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(
+                ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
+            ),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        };
+
+        let layout = engine.build_layout_from_document(&document, &[]);
+        let div = &layout.children[0].children[0];
+
+        fn text_of(b: &LayoutBox) -> String {
+            match &b.box_type {
+                BoxType::Text(t) => t.clone(),
+                _ => b.children.iter().map(text_of).collect(),
+            }
+        }
+        let shape: Vec<(&str, String)> = div
+            .children
+            .iter()
+            .map(|c| {
+                let kind = match c.box_type {
+                    BoxType::Inline => "inline",
+                    BoxType::LineBreak => "br",
+                    BoxType::Text(_) => "text",
+                    _ => "other",
+                };
+                (kind, text_of(c))
+            })
+            .collect();
+        let expected: Vec<(&str, String)> = vec![
+            ("inline", "a".into()),
+            ("br", String::new()),
+            ("inline", "b".into()),
+            ("text", "c".into()),
+        ];
+        assert_eq!(shape, expected, "the <br> must become a sibling of the split span");
+        assert!(
+            div.children[0].identity.is_some(),
+            "first piece keeps the element identity"
+        );
+        assert!(
+            div.children[2].identity.is_none(),
+            "continuation pieces must not duplicate the element identity"
+        );
+        assert_eq!(div.children[0].node_id, div.children[2].node_id);
     }
 
     #[test]
