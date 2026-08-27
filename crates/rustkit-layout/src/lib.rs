@@ -1347,7 +1347,7 @@ impl LayoutBox {
         if can_wrap && width_is_resolved && text_width > container_width {
             let shaper = TextShaper::new();
             let chain = FontFamilyChain::from_css_value(&self.style.font_family);
-            if let Ok(lines) = shaper.wrap_text(
+            if let Ok(lines) = shaper.wrap_text_white_space(
                 &text,
                 &chain,
                 self.style.font_weight,
@@ -1357,6 +1357,7 @@ impl LayoutBox {
                 container_width,
                 effective_word_break(&self.style),
                 self.style.overflow_wrap,
+                self.style.white_space,
             ) {
                 if lines.len() > 1 {
                     // Known phase-1 gap: wrap_text shapes without letter/word-
@@ -1455,7 +1456,7 @@ impl LayoutBox {
         // cursor_x > 0), so say so: with a zero-wide container the first and
         // full budgets are both 0 and the shaper's `first < max` proxy can
         // no longer tell — it glued the first grapheme onto the open line.
-        let lines = match shaper.wrap_text_mid_line(
+        let lines = match shaper.wrap_text_mid_line_white_space(
             &text,
             &chain,
             self.style.font_weight,
@@ -1466,6 +1467,7 @@ impl LayoutBox {
             container_width,
             effective_word_break(&self.style),
             self.style.overflow_wrap,
+            self.style.white_space,
         ) {
             Ok(lines) if !lines.is_empty() => lines,
             _ => {
@@ -2175,6 +2177,57 @@ impl LayoutBox {
         }
     }
 
+    /// This box's content height when it is definite BEFORE its children
+    /// lay out (an absolute `height`), else `None`. Percentages are left
+    /// out: they need the grandparent's definite height, which this box
+    /// does not hold. Mirrors the absolute arms of calculate_block_height.
+    fn definite_content_height(&self) -> Option<f32> {
+        let padding_border = self.dimensions.padding.top
+            + self.dimensions.padding.bottom
+            + self.dimensions.border.top
+            + self.dimensions.border.bottom;
+        let specified = match self.style.height {
+            Length::Px(h) => h,
+            Length::Em(em) => {
+                em * match self.style.font_size {
+                    Length::Px(px) => px,
+                    _ => 16.0,
+                }
+            }
+            Length::Rem(rem) => rem * 16.0,
+            Length::Vh(vh) if self.viewport.1 > 0.0 => vh / 100.0 * self.viewport.1,
+            _ => return None,
+        };
+        Some(if self.style.box_sizing == BoxSizing::BorderBox {
+            (specified - padding_border).max(0.0)
+        } else {
+            specified
+        })
+    }
+
+    /// Re-resolve an absolutely positioned box's offsets against its REAL
+    /// containing block, carrying the already-laid-out subtree with it. The
+    /// first pass positioned it against a stand-in whose height was the
+    /// parent's flow cursor (static position); only `bottom`-anchored and
+    /// `inset`-stretched boxes move here. `position: fixed` is untouched —
+    /// its containing block is the viewport, not this parent.
+    fn reanchor_absolute(&mut self, containing_block: &Dimensions) {
+        if self.position != Position::Absolute {
+            return;
+        }
+        let (origin_x, origin_y) = (self.dimensions.content.x, self.dimensions.content.y);
+        self.apply_position_offsets_absolute(containing_block);
+        let (dx, dy) = (
+            self.dimensions.content.x - origin_x,
+            self.dimensions.content.y - origin_y,
+        );
+        if dx != 0.0 || dy != 0.0 {
+            for child in &mut self.children {
+                crate::flex::translate_subtree(child, dx, dy);
+            }
+        }
+    }
+
     /// Apply absolute positioning offsets.
     fn apply_position_offsets_absolute(&mut self, containing_block: &Dimensions) {
         let offsets = self.resolved_offsets(containing_block);
@@ -2454,12 +2507,21 @@ impl LayoutBox {
         // + middles) need alignment after the loop: (line_start, text_index).
         let mut split_records: Vec<(usize, usize)> = Vec::new();
 
+        // See layout_block_children_with_collapse: the real containing-block
+        // height an abspos child's `bottom`/`inset` resolve against.
+        let definite_height = self.definite_content_height();
+
         for (i, child) in self.children.iter_mut().enumerate() {
             // Skip absolutely/fixed positioned children for flow layout
             if child.position == Position::Absolute || child.position == Position::Fixed {
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y;
                 child.layout(&cb);
+                if let Some(height) = definite_height {
+                    let mut real_cb = self.dimensions.clone();
+                    real_cb.content.height = height;
+                    child.reanchor_absolute(&real_cb);
+                }
                 continue;
             }
 
@@ -3023,6 +3085,17 @@ impl LayoutBox {
         // + middles) need alignment after the loop: (line_start, text_index).
         let mut split_records: Vec<(usize, usize)> = Vec::new();
 
+        // `cb.content.height = cursor_y` below is the STATIC POSITION trick
+        // (calculate_block_position stacks a box at cb.y + cb.height), not
+        // the containing block's height — so `bottom: 0` / `inset: 0` on an
+        // abspos child resolved against "content laid out so far". A
+        // `::after { inset: 0 }` cover on a `height: 100px` div holding two
+        // 27px lines came out 54px tall (WPT overflow-wrap-anywhere-001).
+        // When this box's height is definite before its children lay out,
+        // the child is re-anchored against it afterwards (CSS 2.1 §10.1:
+        // the containing block is the positioned ancestor's padding box).
+        let definite_height = self.definite_content_height();
+
         for (i, child) in self.children.iter_mut().enumerate() {
             // Skip absolutely/fixed positioned children for flow layout
             if child.position == Position::Absolute || child.position == Position::Fixed {
@@ -3037,6 +3110,11 @@ impl LayoutBox {
                 // swallow the margin between them).
                 let mut oof_margin_context = margin_context.clone();
                 child.layout_with_collapse(&cb, &mut oof_margin_context, float_context);
+                if let Some(height) = definite_height {
+                    let mut real_cb = self.dimensions.clone();
+                    real_cb.content.height = height;
+                    child.reanchor_absolute(&real_cb);
+                }
                 continue;
             }
 
@@ -7399,6 +7477,68 @@ mod tests {
         assert_eq!(layout_box.offsets.left, Some(20.0));
         assert_eq!(layout_box.offsets.right, None);
         assert_eq!(layout_box.offsets.bottom, None);
+    }
+
+    /// WPT overflow-wrap-anywhere-001: `::after { position:absolute; inset:0 }`
+    /// on a `height: 100px` div holding 54px of flow content was 54px tall —
+    /// the abspos child resolved `bottom` against the parent's flow cursor
+    /// (the static-position stand-in), not the parent's definite height.
+    /// T-RED without `reanchor_absolute`: height reads 54, not 100.
+    #[test]
+    fn abspos_inset_fills_parents_definite_height_not_its_flow_cursor() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(100.0);
+        parent_style.height = Length::Px(100.0);
+        let mut parent =
+            LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
+
+        let mut flow_style = ComputedStyle::new();
+        flow_style.height = Length::Px(54.0);
+        parent.children.push(LayoutBox::new(BoxType::Block, flow_style));
+
+        let mut cover =
+            LayoutBox::with_position(BoxType::Block, ComputedStyle::new(), Position::Absolute);
+        cover.set_offsets(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
+        parent.children.push(cover);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+
+        let cover = &parent.children[1];
+        assert_eq!(
+            cover.dimensions.content.height, 100.0,
+            "inset:0 must stretch to the containing block's definite height"
+        );
+        assert_eq!(cover.dimensions.content.y, parent.dimensions.content.y);
+        assert_eq!(cover.dimensions.content.width, 100.0);
+    }
+
+    /// The re-anchor must not touch `position: fixed` (viewport containing
+    /// block) or a parent whose height is auto (nothing definite to anchor
+    /// to — the flow-cursor stand-in stays the best available answer).
+    #[test]
+    fn abspos_reanchor_leaves_auto_height_parents_alone() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(100.0);
+        let mut parent =
+            LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
+        let mut flow_style = ComputedStyle::new();
+        flow_style.height = Length::Px(30.0);
+        parent.children.push(LayoutBox::new(BoxType::Block, flow_style));
+        let mut cover =
+            LayoutBox::with_position(BoxType::Block, ComputedStyle::new(), Position::Absolute);
+        cover.set_offsets(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
+        parent.children.push(cover);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+        assert_eq!(parent.children[1].dimensions.content.height, 30.0);
     }
 
     #[test]
