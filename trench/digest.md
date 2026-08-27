@@ -3976,3 +3976,88 @@ One, unchanged, and still the only thing that can stop these entries.
    nights 3–24 to master is worth doing either way: master's digest ends at
    night 3, so any fresh agent that checks out master reads the stale prompt
    corroborated by a digest containing no NONE entries at all.
+
+---
+
+## 2026-08-27 — night 26 (NONE — stop condition, no work started)
+
+**Metric: 4 of 4 → 4 of 4** (trench 1, closed 2026-08-02; trench 2 stands at
+11 of 12, buried 2026-08-11)
+
+**Moved no → yes: NONE.**
+
+The stored prompt's stop condition applies on both clauses, so I started no
+work. Clause 1 has been met since night 3 — `hiwave_layout`,
+`hiwave_display_list`, `hiwave_style` and `hiwave_diff` each carry a passing
+smoke assertion against a hand-derivable value. Clause 2's dry-night threshold
+has now fired twelve consecutive times (nights 14–25).
+
+### What I ran, so the state is checkable rather than inherited
+
+```
+$ git fetch origin master
+   34ec5b4..f58950c  master     -> origin/master
+$ git log -1 --format='%H %ad %s' --date=iso origin/master
+f58950cf745a93a26c0986165a3ac57193dd9d4e 2026-08-25 23:07:23 -0400 Merge pull request #158 from hiwavebrowser/atlas/e0a-ratchet-port
+$ git log -1 --format='%H %ad %s' --date=iso HEAD
+36f02a7c25548de0021ec8e4908ce0aa972fa6a6 2026-08-26 07:14:07 +0000 docs(trench): night 25 NONE — stop condition, master moved to f58950c
+$ git log --oneline origin/master..HEAD | wc -l
+29
+$ git show origin/master:trench/digest.md | grep -c '^## '
+4        # master's digest still ends at night 3
+$ git log --oneline f58950c..origin/master
+         # empty — master unmoved since night 25
+$ git status --short
+         # clean
+```
+
+Note the fetch line: the local ref was stale at `34ec5b4`, so the update to
+`f58950c` is this clone catching up, **not** master moving. `f58950c..origin/master`
+is empty — master is on the same commit night 25 reported, and no new work has
+landed on it in the ~32 hours since.
+
+PR list for `atlas/trench-mcp-exports` is still **#79 only**, merged
+2026-08-01, carrying nights 1–2. Nothing open. Nights 3–25 remain on this
+branch alone; nights 3–26 after tonight's commit.
+
+I did **not** re-run `cargo build -p hiwave-mcp && python3 crates/hiwave-mcp/smoke.py`.
+The compiled tree is unchanged since night 16's cold-build paste (digest line
+3174), and pasting an identical run of an identical tree is motion reported as
+evidence — the one failure this trench was built to avoid. That paste remains
+the current receipt and reproduces with that one command.
+
+### On the notification
+
+**Not sent tonight.** Night 25 sent the repoint ask when master moved to
+`f58950c`, and gated the next send on another change of state. Master has not
+moved since, the PR list is unchanged, and the branch is unchanged but for this
+entry — so there is no new state to report. The next send waits for a real
+change of state, or night 29 if nothing changes.
+
+### What the engine still cannot answer
+
+Unchanged from nights 14–25, not re-listed in full: `opacity` (no consumer in
+the engine — `SolidColor` has no field to carry it), `white-space`'s two engine
+gaps (no element inheritance, no UA default on a bare `<pre>`), `overflow-x`
+answered for what layout did rather than for whether anything was clipped,
+`!important` still dead in the cascade, UA origin still indistinguishable from
+"nobody set it", computed values still a fixed longhand set, `hiwave_style`
+still simple selectors only, unmodelled display ops still `"modelled": false`
+with no contract, capture-kind references still refused, `style` still not a
+diffable stage, and **no real page covered by any of the four tools**.
+
+### Tests
+
+Nothing compiled changed; the committed diff is `trench/digest.md` only. Scope
+stayed inside `trench/`. No parity harness, no `.github/`, no port work, no
+engine change, no export altered, no force-push, no merge, no PR.
+
+### Decisions needed from Pete
+
+One, unchanged, and still the only thing that can stop these entries.
+
+1. **Repoint or disable this routine.** Trench 1 has been closed for
+   twenty-four nights. Disabling costs nothing while it stays closed. Landing
+   nights 3–25 to master is worth doing either way: master's digest ends at
+   night 3, so any fresh agent that checks out master reads the stale prompt
+   corroborated by a digest containing no NONE entries at all.
