@@ -550,6 +550,54 @@ fn rects_overlap(a: &Rect, b: &Rect) -> bool {
     a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y
 }
 
+/// CSS 2.1 §10.3.7: with `width: auto`, does an out-of-flow box shrink to fit?
+///
+/// **Precondition: the caller has already established `width` computes to
+/// `auto`.** The width test is the caller's `match` arm and is deliberately
+/// not restated here, so this predicate has no branch its call site makes
+/// unreachable.
+///
+/// The rule reads as six sub-cases in the spec, but on the auto-width side it
+/// collapses to one question: are BOTH `left` and `right` specified? If they
+/// are, the equation is solved for width and the box stretches between them
+/// (`inset: 0` overlays). In every other combination — both auto, or exactly
+/// one of them given — width is shrink-to-fit and the remaining offset is
+/// solved afterwards.
+///
+/// In-flow block boxes are untouched: `width: auto` there fills the
+/// containing block (§10.3.3), which is a different rule with the same
+/// keyword.
+pub(crate) fn auto_width_shrinks_to_fit(position: Position, offsets: &PositionOffsets) -> bool {
+    matches!(position, Position::Absolute | Position::Fixed)
+        && !(offsets.left.is_some() && offsets.right.is_some())
+}
+
+/// CSS 2.1 §10.3.5 shrink-to-fit: `min(max(preferred minimum, available),
+/// preferred)`, in CONTENT-box px.
+///
+/// `available` is the space left for content after the box's own margins,
+/// borders and padding — i.e. exactly what the `width: auto` fill path would
+/// have used. The intrinsic estimators answer border-box widths, so the same
+/// padding+border they added is subtracted back off; taking it from
+/// `horizontal_padding_border` rather than from the caller's separately
+/// resolved values keeps the two halves of that subtraction from drifting
+/// apart on a relative unit.
+pub(crate) fn shrink_to_fit_content_width(layout_box: &LayoutBox, available: f32) -> f32 {
+    let padding_border = crate::grid::horizontal_padding_border(&layout_box.style);
+    // No `.max(0.0)` on the floor, deliberately: `available` is non-negative
+    // at every call site, so `.max(available)` already dominates a negative
+    // preferred minimum and a clamp here could never change an answer. It was
+    // written, measured to survive its own mutation probe, and removed —
+    // a guard nothing can hold is decoration.
+    let preferred_minimum = crate::grid::own_min_content_width(layout_box) - padding_border;
+    // The clamp on the CEILING is load-bearing and is not the same case:
+    // `own_max_content_width` answers 0 without adding padding+border back for
+    // a `display: none` box, and `.min(preferred)` would then hand back that
+    // negative number as the used width.
+    let preferred = (crate::grid::own_max_content_width(layout_box) - padding_border).max(0.0);
+    preferred_minimum.max(available).min(preferred)
+}
+
 /// Margin collapse context.
 #[derive(Debug, Clone, Default)]
 pub struct MarginCollapseContext {
@@ -2286,8 +2334,31 @@ impl LayoutBox {
         // Calculate content width
         let content_width = match style.width {
             Length::Auto => {
-                // Fill available space
-                (containing_block.content.width - total_margin_border_padding).max(0.0)
+                // Fill available space (CSS 2.1 §10.3.3) — unless the box is
+                // out of flow, where §10.3.7 makes `width: auto` shrink-to-fit
+                // instead. `.footer { position: fixed; bottom: 1rem }` on
+                // new_tab is the corpus's clearest case: Chrome sizes it to its
+                // text at 137.59px, RustKit stretched it across the whole
+                // 1280px viewport.
+                let available =
+                    (containing_block.content.width - total_margin_border_padding).max(0.0);
+                // Presence of left/right is read through `resolved_offsets` —
+                // the same accessor `apply_position_offsets_absolute` uses to
+                // decide the very same stretch-vs-solve question — so the two
+                // cannot disagree about whether an offset was specified.
+                //
+                // Known limit, stated rather than hidden: for `position:
+                // fixed` the containing block is the viewport, and this
+                // function is handed the flow parent. That only matters when
+                // it clamps, i.e. when max-content exceeds `available`.
+                if auto_width_shrinks_to_fit(
+                    self.position,
+                    &self.resolved_offsets(containing_block),
+                ) {
+                    shrink_to_fit_content_width(self, available)
+                } else {
+                    available
+                }
             }
             _ => {
                 let specified_width =
@@ -6867,6 +6938,215 @@ mod tests {
         layout_box.calculate_block_width(&containing_1000());
         assert_eq!(layout_box.dimensions.margin.left, 0.0);
         assert_eq!(layout_box.dimensions.margin.right, 0.0);
+    }
+
+    // ---- CSS 2.1 §10.3.7: out-of-flow `width: auto` is shrink-to-fit ----
+    //
+    // Driven through `calculate_block_width`, the function the engine calls,
+    // rather than through the free helpers alone: `.footer { position: fixed;
+    // bottom: 1rem }` on new_tab was 1280px wide against Chrome's 137.59
+    // because the WIRING sent every auto width down §10.3.3's fill path, and
+    // a helper that computes the right number but is never reached is worth
+    // nothing. Every expected width below is derived from the shaper the
+    // engine uses, never a hardcoded pixel count, so these do not encode this
+    // seat's stub font metrics as if they were Chrome's.
+
+    /// The text this measures must contain a space, so min-content (longest
+    /// word) and max-content (whole run) are genuinely different numbers and
+    /// a test can tell which one a formula returned.
+    const STF_TEXT: &str = "aaaaaaaaaaaaaaaaaaaa bb";
+
+    fn stf_measure(s: &str) -> f32 {
+        let st = ComputedStyle::new();
+        let fs = match st.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        measure_text_advanced(s, &st.font_family, fs, st.font_weight, st.font_style).width
+    }
+
+    /// An out-of-flow box carrying one text child, laid out against `cb_width`.
+    fn stf_box(position: Position, left: Option<f32>, right: Option<f32>) -> LayoutBox {
+        let mut b = LayoutBox::with_position(BoxType::Block, ComputedStyle::new(), position);
+        b.set_offsets(None, right, None, left);
+        b.children.push(LayoutBox::new(
+            BoxType::Text(STF_TEXT.to_string()),
+            ComputedStyle::new(),
+        ));
+        b
+    }
+
+    fn stf_width(mut b: LayoutBox, cb_width: f32) -> f32 {
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, cb_width, 600.0);
+        b.calculate_block_width(&cb);
+        b.dimensions.content.width
+    }
+
+    #[test]
+    fn an_out_of_flow_auto_width_box_shrinks_to_its_content() {
+        // Room to spare: shrink-to-fit is the max-content width, NOT the
+        // containing block. This is new_tab's footer defect in miniature.
+        let max_content = stf_measure(STF_TEXT);
+        for position in [Position::Fixed, Position::Absolute] {
+            let w = stf_width(stf_box(position, None, None), 1000.0);
+            assert!(
+                (w - max_content).abs() < 0.01,
+                "{position:?} with width:auto must shrink to its max-content \
+                 width {max_content}, got {w}"
+            );
+            assert!(w < 1000.0, "{position:?} must not fill the containing block");
+        }
+    }
+
+    #[test]
+    fn an_in_flow_auto_width_block_still_fills_its_containing_block() {
+        // §10.3.3 is a different rule wearing the same keyword and must not
+        // have been dragged along.
+        assert_eq!(stf_width(stf_box(Position::Static, None, None), 1000.0), 1000.0);
+        assert_eq!(
+            stf_width(stf_box(Position::Relative, None, None), 1000.0),
+            1000.0
+        );
+    }
+
+    #[test]
+    fn an_out_of_flow_box_with_both_inline_offsets_still_stretches() {
+        // `inset: 0` overlays (settings' toggle sliders) solve for width and
+        // fill between left and right. Shrinking them would be a regression
+        // dressed as a fix.
+        let w = stf_width(stf_box(Position::Absolute, Some(0.0), Some(0.0)), 1000.0);
+        assert_eq!(w, 1000.0, "left+right both set must keep the stretch");
+    }
+
+    #[test]
+    fn one_inline_offset_alone_does_not_restore_the_stretch() {
+        // §10.3.7 stretches only when BOTH are given; with exactly one, width
+        // is shrink-to-fit and the other offset is solved afterwards.
+        let max_content = stf_measure(STF_TEXT);
+        for (l, r) in [(Some(10.0), None), (None, Some(10.0))] {
+            let w = stf_width(stf_box(Position::Absolute, l, r), 1000.0);
+            assert!(
+                (w - max_content).abs() < 0.01,
+                "left={l:?} right={r:?} must still shrink to fit, got {w}"
+            );
+        }
+    }
+
+    #[test]
+    fn shrink_to_fit_is_clamped_by_the_available_width() {
+        // min(max(min-content, available), max-content): with available
+        // BETWEEN the two intrinsic sizes, available wins.
+        let min_content = stf_measure("aaaaaaaaaaaaaaaaaaaa");
+        let max_content = stf_measure(STF_TEXT);
+        let available = (min_content + max_content) / 2.0;
+        assert!(min_content < available && available < max_content, "fixture setup");
+        let w = stf_width(stf_box(Position::Fixed, None, None), available);
+        assert!(
+            (w - available).abs() < 0.01,
+            "available {available} must clamp the preferred width, got {w}"
+        );
+    }
+
+    #[test]
+    fn shrink_to_fit_is_floored_by_the_min_content_width() {
+        // Available narrower than the longest unbreakable word: the floor
+        // wins and the box overflows, rather than being squeezed to fit.
+        let min_content = stf_measure("aaaaaaaaaaaaaaaaaaaa");
+        let available = min_content / 4.0;
+        let w = stf_width(stf_box(Position::Fixed, None, None), available);
+        assert!(
+            (w - min_content).abs() < 0.01,
+            "min-content {min_content} is the floor, got {w} (available {available})"
+        );
+    }
+
+    #[test]
+    fn shrink_to_fit_measures_content_not_the_padding_box() {
+        // The intrinsic estimators answer BORDER-box widths; the used value
+        // here is a CONTENT width. Subtracting the wrong amount, or none,
+        // moves the box by exactly its horizontal padding+border.
+        let max_content = stf_measure(STF_TEXT);
+        let mut b = stf_box(Position::Fixed, None, None);
+        b.style.padding_left = Length::Px(10.0);
+        b.style.padding_right = Length::Px(10.0);
+        b.style.border_left_width = Length::Px(2.0);
+        b.style.border_right_width = Length::Px(2.0);
+        let w = stf_width(b, 1000.0);
+        assert!(
+            (w - max_content).abs() < 0.01,
+            "content width must be the content's own max-content {max_content}, got {w}"
+        );
+    }
+
+    #[test]
+    fn the_out_of_flow_contribution_rule_does_not_size_the_box_itself() {
+        // The split this rule needed: the estimators answer 0 for an
+        // out-of-flow box because it contributes nothing to an ANCESTOR, and
+        // sizing it from that would give a zero-width footer.
+        let b = stf_box(Position::Fixed, None, None);
+        assert_eq!(crate::grid::estimate_max_content_width(&b), 0.0);
+        assert_eq!(crate::grid::estimate_min_content_width(&b), 0.0);
+        assert!(crate::grid::own_max_content_width(&b) > 0.0);
+        assert!(crate::grid::own_min_content_width(&b) > 0.0);
+        // …and an out-of-flow CHILD still contributes nothing to its parent.
+        let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        parent.children.push(stf_box(Position::Absolute, None, None));
+        assert_eq!(crate::grid::own_max_content_width(&parent), 0.0);
+    }
+
+    #[test]
+    fn shrink_to_fit_never_returns_a_negative_width() {
+        // `own_*_content_width` has early returns that answer WITHOUT adding
+        // padding+border back — `display: none` answers 0, a text box answers
+        // its bare text width — so subtracting it can go negative. Neither is
+        // reachable from `calculate_block_width` today (a `display: none` box
+        // is never laid out, and a text box never takes the block-width
+        // path), which is precisely why the clamps need a test that calls the
+        // free function directly. Without them this returns -80.
+        let mut b = stf_box(Position::Fixed, None, None);
+        b.style.display = rustkit_css::Display::None;
+        b.style.padding_left = Length::Px(40.0);
+        b.style.padding_right = Length::Px(40.0);
+        assert_eq!(shrink_to_fit_content_width(&b, 1000.0), 0.0);
+    }
+
+    #[test]
+    fn the_shrink_to_fit_predicate_reads_position_and_both_offsets() {
+        let none = PositionOffsets::default();
+        let both = PositionOffsets {
+            left: Some(0.0),
+            right: Some(0.0),
+            ..Default::default()
+        };
+        let left_only = PositionOffsets {
+            left: Some(0.0),
+            ..Default::default()
+        };
+        for p in [Position::Absolute, Position::Fixed] {
+            assert!(auto_width_shrinks_to_fit(p, &none));
+            assert!(auto_width_shrinks_to_fit(p, &left_only));
+            assert!(!auto_width_shrinks_to_fit(p, &both));
+        }
+        for p in [Position::Static, Position::Relative, Position::Sticky] {
+            assert!(!auto_width_shrinks_to_fit(p, &none));
+            assert!(!auto_width_shrinks_to_fit(p, &left_only));
+        }
+    }
+
+    #[test]
+    fn a_percentage_offset_counts_as_specified_for_the_stretch_test() {
+        // `set_offsets` drops percentages (they need the containing block);
+        // `resolved_offsets` puts them back. Reading raw `offsets` here would
+        // shrink a `left: 0%; right: 0%` overlay that must stretch.
+        let mut b = stf_box(Position::Absolute, None, None);
+        b.style.left = Some(Length::Percent(0.0));
+        b.style.right = Some(Length::Percent(0.0));
+        assert_eq!(
+            stf_width(b, 1000.0),
+            1000.0,
+            "percentage insets must be seen as specified"
+        );
     }
 
     #[test]
