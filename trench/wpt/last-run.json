@@ -1,20 +1,20 @@
 {
   "schema": 1,
   "wpt_pin": "a6f29b0bedaf3f1edba7b6739127fe8e713bfcb3",
-  "hiwave_git_sha": "d223b31ffe2c107c4b0983b6d0d9dfc2dc57acba",
+  "hiwave_git_sha": "2961adc82cef5d54af604b8398a4365abb1c71c8",
   "runner": "scripts/wpt_tier1.py",
   "viewport": {
     "width": 800,
     "height": 600
   },
   "wpt_max_diff_pct": 0.0,
-  "ts": "2026-08-27T06:07:37.326464+00:00",
+  "ts": "2026-08-27T06:35:07.186802+00:00",
   "n": 30,
-  "pass": 21,
-  "fail": 5,
+  "pass": 22,
+  "fail": 4,
   "skip": 4,
   "error": 0,
-  "rate": 0.8077,
+  "rate": 0.8462,
   "attribution": {
     "_comment": "Fails grouped by a named engine capability gap. Attribution only \u2014 these cases stay in the denominator. A gap here is a lane, not an excuse.",
     "blocked_fails": {
@@ -190,8 +190,8 @@
       "id": "css-text/line-break/line-break-anywhere-001",
       "status": "FAIL",
       "reason": null,
-      "diff_pct": 0.0196,
-      "diff_pixels": 94,
+      "diff_pct": 0.0173,
+      "diff_pixels": 83,
       "rel_match": "ok",
       "blocked_by": null,
       "maps_to": "slice-0"
@@ -218,10 +218,10 @@
     },
     {
       "id": "css-text/line-break/line-break-anywhere-002",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 0.0131,
-      "diff_pixels": 63,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
       "blocked_by": null,
       "maps_to": "slice-0"
@@ -230,8 +230,8 @@
       "id": "css-text/overflow-wrap/overflow-wrap-anywhere-002",
       "status": "FAIL",
       "reason": null,
-      "diff_pct": 0.0492,
-      "diff_pixels": 236,
+      "diff_pct": 0.0533,
+      "diff_pixels": 256,
       "rel_match": "ok",
       "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
@@ -260,8 +260,8 @@
       "id": "css-text/overflow-wrap/overflow-wrap-anywhere-003",
       "status": "FAIL",
       "reason": null,
-      "diff_pct": 0.0817,
-      "diff_pixels": 392,
+      "diff_pct": 0.0533,
+      "diff_pixels": 256,
       "rel_match": "ok",
       "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
@@ -351,6 +351,6 @@
     "all_green": false,
     "all_green_suspect": false,
     "negative_control": "FAIL as required (checked every run; run aborts otherwise)",
-    "note": "Not suspect: this run contains red (5 FAIL, 0 ERROR), so the oracle demonstrably distinguishes pass from fail on real cases. A run with pass==n and fail==0 and error==0 would flip this field."
+    "note": "Not suspect: this run contains red (4 FAIL, 0 ERROR), so the oracle demonstrably distinguishes pass from fail on real cases. A run with pass==n and fail==0 and error==0 would flip this field."
   }
 }
