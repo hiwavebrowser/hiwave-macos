@@ -305,7 +305,12 @@ fn apply_weight_trait(base: &CTFont, size: f64, css_weight: u16) -> Option<CTFon
 /// PostScript name is the one asked for (names compared without case,
 /// spaces or hyphens; a PostScript prefix match admits "Menlo-Regular" for
 /// "Menlo" and "ArialMT" for "Arial").
-fn named_font(name: &str, size: f64) -> Option<CTFont> {
+///
+/// `pub` so the LAYOUT side's chain walk (rustkit-layout
+/// `create_ct_font_with_traits`) rejects substitutes the same way — until it
+/// did, paint walked the chain but measure did not, and `"Missing", Menlo`
+/// measured Helvetica while drawing Menlo.
+pub fn named_font(name: &str, size: f64) -> Option<CTFont> {
     let norm = |s: &str| -> String {
         s.chars()
             .filter(|c| !matches!(c, ' ' | '-' | '_'))
