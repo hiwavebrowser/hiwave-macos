@@ -132,10 +132,15 @@ impl FontFamilyChain {
     }
 
     /// Create default font chain for monospace.
+    /// Menlo first: it is Chrome's default `monospace` on macOS and ships
+    /// with the OS. SF Mono is an Xcode/Terminal bundle font — leading with
+    /// it measured a Core Text substitute on stock machines (see
+    /// rustkit-text `named_font`) and would measure a different face from
+    /// Chrome's on machines that have it.
     #[cfg(target_os = "macos")]
     pub fn monospace() -> Self {
-        Self::new("SF Mono")
-            .with_fallback("Menlo")
+        Self::new("Menlo")
+            .with_fallback("SF Mono")
             .with_fallback("Monaco")
             .with_fallback("Courier New")
             .with_fallback("monospace")
@@ -2222,7 +2227,7 @@ mod tests {
 
         let mono = FontFamilyChain::from_css_value("monospace");
         #[cfg(target_os = "macos")]
-        assert_eq!(mono.primary, "SF Mono");
+        assert_eq!(mono.primary, "Menlo");
         #[cfg(not(target_os = "macos"))]
         assert_eq!(mono.primary, "Cascadia Code");
 

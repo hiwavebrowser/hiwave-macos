@@ -294,6 +294,38 @@ fn apply_weight_trait(base: &CTFont, size: f64, css_weight: u16) -> Option<CTFon
     Some(font::new_from_descriptor(&desc, size))
 }
 
+/// `CTFontCreateWithName` never fails: an UNINSTALLED name comes back as a
+/// substitute face (Helvetica here), so a chain walk that trusts `Ok` stops
+/// at its first missing family. The layout crate's monospace chain led with
+/// "SF Mono" (not on a stock Mac): `1ch` measured Helvetica's "0" (8.896px
+/// at 16px = 0.556em) while the painter, given the bare generic, drew Menlo
+/// — WPT overflow-wrap-anywhere-003 laid `PASS` out as `PAS` / `S`. Any
+/// page naming a font the machine lacks ahead of its generic fallback hit
+/// the same substitute. A face is accepted only when its family or
+/// PostScript name is the one asked for (names compared without case,
+/// spaces or hyphens; a PostScript prefix match admits "Menlo-Regular" for
+/// "Menlo" and "ArialMT" for "Arial").
+fn named_font(name: &str, size: f64) -> Option<CTFont> {
+    let norm = |s: &str| -> String {
+        s.chars()
+            .filter(|c| !matches!(c, ' ' | '-' | '_'))
+            .collect::<String>()
+            .to_ascii_lowercase()
+    };
+    let font = font::new_from_name(name, size).ok()?;
+    let want = norm(name);
+    if want.is_empty() {
+        return None;
+    }
+    let family = norm(&font.family_name());
+    let postscript = norm(&font.postscript_name());
+    if family == want || postscript == want || postscript.starts_with(&want) {
+        Some(font)
+    } else {
+        None
+    }
+}
+
 /// Create a CTFont with the specified family and size.
 ///
 /// `family` may be a raw CSS font-family LIST ("system-ui, -apple-system,
@@ -322,10 +354,12 @@ pub fn create_font(family: &str, size: f64) -> Result<CTFont, TextError> {
         }
         let mapped = map_generic(&lower, fam);
         let name = if mapped.is_empty() { fam } else { mapped };
-        if let Ok(f) = font::new_from_name(name, size) {
+        if let Some(f) = named_font(name, size) {
             return Ok(f);
         }
     }
+    // Nothing in the list exists here: take Core Text's substitute rather
+    // than no font at all.
     font::new_from_name(family, size).map_err(|_| TextError::FontNotFound(family.to_string()))
 }
 
@@ -374,7 +408,7 @@ fn create_font_with_traits(
         variants.push(base.to_string());
 
         for v in &variants {
-            if let Ok(f) = font::new_from_name(v, size) {
+            if let Some(f) = named_font(v, size) {
                 return Ok(f);
             }
         }
@@ -1113,6 +1147,22 @@ mod tests {
     fn test_create_font() {
         let font = create_font("Helvetica", 16.0);
         assert!(font.is_ok(), "Should create Helvetica font");
+    }
+
+    /// Core Text hands back a substitute for a name it does not have, so
+    /// the chain must keep walking past it. T-RED before `named_font`: the
+    /// first, nonexistent family "won" as Helvetica and Menlo was never
+    /// reached (WPT overflow-wrap-anywhere-003's `4ch` measured a
+    /// proportional "0").
+    #[test]
+    fn test_chain_walks_past_an_uninstalled_family() {
+        let font = create_font("No Such Face n34, Menlo, monospace", 16.0).expect("font");
+        assert_eq!(font.family_name(), "Menlo");
+        let weighted = create_font_with_traits("No Such Face n34, Menlo", 16.0, 700, false)
+            .expect("font");
+        assert_eq!(weighted.family_name(), "Menlo");
+        // A bare generic still maps straight to its platform face.
+        assert_eq!(create_font("monospace", 16.0).expect("font").family_name(), "Menlo");
     }
 
     #[test]
