@@ -1211,8 +1211,14 @@ impl TextShaper {
             variants_to_try.push(format!("{}Italic", family));
         }
 
+        // `CTFontCreateWithName` never fails: an uninstalled name comes back
+        // as a substitute (Helvetica), so trusting `Ok` here stopped the
+        // chain walk at the first MISSING family and MEASURED the substitute
+        // while paint (which already walked, via `named_font`) drew the next
+        // real family. Same accept/reject as paint: the face must be the
+        // one asked for, or this family is a miss and the caller walks on.
         for variant in &variants_to_try {
-            if let Ok(font) = ct_font::new_from_name(variant, size as f64) {
+            if let Some(font) = rustkit_text::macos::named_font(variant, size as f64) {
                 return Ok(font);
             }
         }
@@ -2926,5 +2932,35 @@ mod mid_line_zero_width_tests {
         // Callers that do not know the cursor position keep the old reading:
         // equal budgets mean "not mid-line", so no empty leading line.
         assert_eq!(wrap(false), ["d", "e", "f"]);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod measure_side_font_chain_tests {
+    use super::*;
+
+    fn width(chain_css: &str) -> f32 {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::from_css_value(chain_css);
+        shaper
+            .shape("0000", &chain, FontWeight::NORMAL, FontStyle::Normal, FontStretch::Normal, 16.0)
+            .expect("shapes")
+            .metrics
+            .width
+    }
+
+    /// Core Text hands back a substitute for a name it does not have. Paint
+    /// (`named_font`, #164) walks past it; MEASURE must too, or a page
+    /// naming a missing family ahead of Menlo lays text out at Helvetica's
+    /// advances and paints it in Menlo. T-RED: with `new_from_name` trusted
+    /// as installed, the first width is Helvetica's "0000" (≈35.6px), not
+    /// Menlo's (≈38.5px).
+    #[test]
+    fn measure_walks_past_an_uninstalled_family_like_paint_does() {
+        let walked = width("No Such Face n34, Menlo");
+        let menlo = width("Menlo");
+        let helvetica = width("Helvetica");
+        assert_ne!(menlo, helvetica, "probe fonts must differ for this test to discriminate");
+        assert_eq!(walked, menlo, "missing family must be skipped at measure time");
     }
 }
