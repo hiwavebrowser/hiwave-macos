@@ -4504,3 +4504,200 @@ suites build afterwards. It was clean on 08-21. It is getting worse on schedule.
 - The stale cron prompt flagged on 08-24 is still stale — it opens by naming
   P0a-0, which completed on 2026-08-04. The repo's own reading order is what
   prevents that costing a night, and it should not have to.
+
+## 2026-08-27
+
+**Metric: 1/26 → 1/26, and this is a proof rather than a re-run.** Gate A's
+green set is unchanged (2/26 on this seat, same two cases), and Gate B is
+**bit-identical on all 26 cases** — measured, not assumed. A case can cross the
+conjunction only if one of those two moves, so neither direction is available.
+No macOS run tonight; every number below is Linux/SwiftShader and is
+**MECHANICS, NOT A RECEIPT**.
+
+**P-item: the geometry-first queue (ratified 2026-08-12), aimed by night 23's
+magnitude column. The unit — the #2 entry on that board — is complete.**
+
+Night 23 asked (decision 2) whether the trench may aim at the magnitude column
+now that the strict font-independent column publishes zero work. That question
+is unanswered, and waiting for it would have produced a night with no work at
+all, because the strict column has nothing left in it. I took the entry whose
+case for being font-independent is strongest on its own evidence — a **0.000px
+measured font-movement envelope across four probes** and a **1142px** residual —
+rather than one that needed the factor rule to be believed. Decision 2 stays
+open below because the general permission still matters; this one entry did not
+need it.
+
+### The defect
+
+`.footer { position: fixed; bottom: 1rem }` on new_tab, with no `left`,
+`right` or `width`. CSS 2.1 §10.3.7: with `width: auto` an out-of-flow box is
+shrink-to-fit **unless both `left` and `right` are specified**, in which case
+the equation solves for width and it stretches between them.
+`calculate_block_width` sent every auto width down §10.3.3's fill path — a
+different rule wearing the same keyword — so every out-of-flow box was as wide
+as its containing block regardless of its content.
+
+```
+body > div.footer:nth-of-type(3)   width   137.59 (Chrome)  vs  1280.00 (RustKit)
+```
+
+The predicate and the arithmetic are free functions so the **wiring** is
+mutation-checkable and not just the math. That is the specific lesson from
+08-10: the math here was never wrong, it was never called.
+
+### Measured — Linux/SwiftShader, 26 gating cases
+
+| Oracle | before | after |
+|---|---|---|
+| Gate A geometry failures | 2536 | 2536 |
+| Gate A join failures | 110 | 110 |
+| Gate A green | 2/26 | 2/26 |
+| Gate B percentage half | — | **bit-identical, all 26** |
+| Gate B paint-green / discrete | 1/26 · 0 | 1/26 · 0 |
+| N/26 | 1/26 | 1/26 |
+
+Per axis across all 26 cases: **0 worsened, 0 added, 0 removed, 1 improved.**
+Across all **3018 boxes** in the layout dumps, exactly one moved:
+
+```
+new_tab  body > div.footer:nth-of-type(3)   width  1280.00 -> 144.00   (Chrome 137.59)
+                                            delta  +1142.41 -> +6.41
+```
+
+**The failure count does not move and that is the honest headline.** The same
+axis still fails: 6.41px is this seat's stub advance error on the footer's
+text, i.e. P4's, not this fix's. What moved is magnitude — new_tab's `sum|Δ|`
+falls 26434.06 → 25298.06 (−4.3%), corpus-wide 267090.32 → 265954.32. Night 9
+recorded that a count is not a magnitude; this is the same reading in the
+other direction, where a count-only board would have shown a 1136px
+improvement as doing nothing at all.
+
+Gate B being bit-identical is not a guess: the footer has `color` and no
+background, and its inline `<a>` child was already at x=96 in both trees, so
+shrinking the box changes no pixel. I measured it rather than reasoning it,
+because the reasoning is exactly the kind that has been wrong before.
+
+### The blast radius is the corpus, not the guard
+
+One box in 3018 is a small return for a general spec rule, so I checked
+whether the rule was firing at all or just narrowly reachable. A scan of all
+26 cases finds **exactly two** `position: absolute|fixed` rules that declare
+no width and not both insets — `.footer` and `.ripple` — and only `.footer` is
+in a rendered DOM. Every other out-of-flow box in the corpus is either
+explicitly sized or `inset`-stretched, and those must not shrink.
+
+So the corpus does not exercise this rule broadly. That is worth saying plainly
+rather than dressing the change up: it is correct, it is spec-cited, it fixes
+the second-worst entry on the aiming board, and it is one box.
+
+### Stop rule
+
+Checked per axis across all 26 cases and per case on both gates. Zero axes
+worsened, Gate B bit-identical, no case lost its green, no case gained a
+discrete failure. The rule did not fire.
+
+### Mutation-check results
+
+**13 probes, 13/13 RED, control green before and after, committed before
+mutating** (night 1's instruction, which nights 8 and 11 both broke). A NULL
+probe — the predicate's clauses reordered to the same truth value — came back
+**GREEN**, so the harness can produce green and 13/13 is a count rather than a
+harness that reds everything.
+
+| Mutation | Result |
+|---|---|
+| M1 the shrink-to-fit branch is never taken (the fix itself) | RED |
+| M2 every auto width shrinks, in flow or not | RED |
+| M3 the both-offsets stretch exception is dropped | RED |
+| M4 the exception fires on EITHER offset, not both | RED |
+| M5 `Fixed` is not out of flow for sizing purposes | RED |
+| M6 the available-width clamp is dropped | RED |
+| M7 the min-content floor is dropped | RED |
+| M8 min and max content are swapped | RED |
+| M9 padding+border is not subtracted off the border-box estimate | RED |
+| M10 sizing goes through the CONTRIBUTION entry point (answers 0) | RED |
+| M11 offsets read raw, so a percentage inset reads as unspecified | RED |
+| M12 the contribution rule stops applying to out-of-flow CHILDREN | RED |
+| M13 the load-bearing ceiling clamp is removed | RED |
+| NULL clauses reordered, same truth value | GREEN (correctly) |
+
+**The eleven-sweep survivor streak is broken, but only because I went looking
+for one after the sweep came back clean.** The first pass was 12/12 RED, which
+after ten consecutive sweeps with a survivor is itself a warning sign. I
+applied night 9's checklist — *which line of the change would no assertion
+miss?* — and found two `.max(0.0)` clamps nothing reached. Probed separately,
+**both survived**. They are not the same case:
+
+- the **ceiling** clamp is real. `own_max_content_width` answers 0 for a
+  `display: none` box without adding padding+border back, so `.min(preferred)`
+  would hand back a negative used width. Unreachable from
+  `calculate_block_width` — a `display: none` box is never laid out — which is
+  exactly why it needed a test calling the free function directly. It is now
+  M13 and RED.
+- the **floor** clamp is genuinely redundant and has been **deleted**, not
+  documented and kept. `available` is non-negative at every call site, so
+  `.max(available)` already dominates any negative preferred minimum: no input
+  exists for which the clamp changes an answer. Night 23 hit the same shape and
+  documented the branch; here removal was available and is better.
+
+### Commits
+
+Engine, on `atlas/abspos-shrink-to-fit`, cut from **`develop`** (branch law,
+2026-08-12) and pushed:
+
+- `e187be0` — split the out-of-flow CONTRIBUTION rule off the intrinsic
+  estimators, so shrink-to-fit can ask an out-of-flow box for its own
+  intrinsic width. **Behaviour-preserving is measured, not asserted:** Gate A
+  over all 26 cases produces an identical finding set before and after — 2646
+  findings, same selectors, same axes, same actual values.
+- `2f60f2a` — the §10.3.7 sizing rule itself.
+
+Nothing landed on `atlas/trench-parity-finish-line` except this digest.
+`cargo test -p rustkit-layout --lib` (300) and `-p rustkit-engine --lib` (59)
+green before both commits.
+
+**This branch does not deepen the pile.** It is cut from plain `develop` and
+touches `grid.rs` and `lib.rs` only in the intrinsic-sizing and block-width
+paths; it does not touch the join-key duplicate that decisions 2/3 are about.
+
+### Decisions needed from Pete
+
+1. **Open the P2 PR and resolve the join-key duplicate — twelfth night of
+   asking.** The pile is now seven branches plus tonight's eighth. On 08-25 the
+   union merged with one conflicted file; on 08-26 it was three.
+2. **May the trench aim at the magnitude column's 272 own-delta-consistent
+   roots** — boxes a font can reach but cannot plausibly have broken by
+   400–1100px — accepting Gate A's per-axis before/after on this seat as the
+   verification? Night 23's decision 2, unanswered, and the strict column
+   publishes zero so this is now the only thing to aim at.
+3. Still open from 08-10 onward: keep or literally revert the overflow-clip
+   change that cost `sticky-scroll` 36 pixels on a card RustKit lays out 38px
+   too low?
+
+### Surprises
+
+- **A 1142px error was worth 1136px of magnitude and zero failure count.** I
+  expected the corpus's second-worst box to remove an axis. It does not: the
+  residual is the seat's font error on the same axis, so Gate A's headline
+  number is byte-identical before and after a change that fixed a box nine
+  times too wide. Three nights of this campaign have now had the count and the
+  correctness point in different directions, in both directions.
+- **The rule has one instance in 26 cases.** I assumed a spec-level sizing rule
+  this basic would touch dozens of boxes. It touches one, and I only know that
+  because I went and counted the corpus's abspos rules after the measurement
+  came back at one box rather than trusting either number alone.
+- **A clean first sweep is a warning, not a result.** After ten nights of
+  survivors, 12/12 RED read as suspicious rather than good, and the checklist
+  found two unreachable clamps within minutes. If I had taken the clean sweep
+  at face value I would have shipped two decorative guards and counted them —
+  and the count would have been 12/12 either way.
+- **The two intrinsic estimators disagree about text.** `estimate_min_content_width`
+  checked `BoxType::Text` BEFORE its out-of-flow guard and `estimate_max_content_width`
+  checks it after, so an out-of-flow text box answers its text width from one
+  and 0 from the other. Pre-existing, found while splitting them, and preserved
+  verbatim with the asymmetry recorded at both sites — harmonising it would be
+  an engine behaviour change riding along on a refactor whose whole value is
+  that Gate A is identical across it.
+- The stale cron prompt flagged on 08-24 and again on 08-26 is still stale: it
+  opens by naming P0a-0, completed 2026-08-04, and describes the first unit as
+  work that is twenty-three nights old. Third night of saying so.
