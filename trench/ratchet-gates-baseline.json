@@ -1,0 +1,286 @@
+{
+  "cases": {
+    "about": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 361,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 5,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.7310875
+    },
+    "article-typography": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 83,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 0,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.8884541015625
+    },
+    "backgrounds": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 2,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 0,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.9609711111111111
+    },
+    "bg-pure": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 0,
+      "geometry_green": true,
+      "geometry_measured": true,
+      "join_fail_count": 0,
+      "paint_green": true,
+      "paint_measured": true,
+      "paint_pct": 1.0
+    },
+    "bg-solid": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 0,
+      "geometry_green": true,
+      "geometry_measured": true,
+      "join_fail_count": 0,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.98240625
+    },
+    "card-grid": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 35,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 0,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.776763671875
+    },
+    "chrome_rustkit": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 13,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 0,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.950140625
+    },
+    "combinators": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 25,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 0,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.9461609375
+    },
+    "css-selectors": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 60,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 5,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.7870875
+    },
+    "flex-positioning": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 95,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 7,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.70880375
+    },
+    "form-controls": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 42,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 30,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.91328125
+    },
+    "form-elements": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 57,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 17,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.9248729166666667
+    },
+    "gpu-gradient-regression": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 1,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 0,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.9396854166666667
+    },
+    "gradient-backgrounds": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 57,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 0,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.80223125
+    },
+    "gradient-no-radius": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 47,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 0,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.7980541666666666
+    },
+    "gradient-radius-only": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 46,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 0,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.88779375
+    },
+    "gradients": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 1,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 0,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.9882466666666667
+    },
+    "image-gallery": {
+      "discrete_fail_ids": [
+        "missing_clip::body > div.gallery:nth-of-type(1) > div.gallery-item tall:nth-of-type(1)",
+        "missing_clip::body > div.gallery:nth-of-type(1) > div.gallery-item tall:nth-of-type(1)",
+        "missing_clip::body > div.gallery:nth-of-type(1) > div.gallery-item tall:nth-of-type(8)",
+        "missing_clip::body > div.gallery:nth-of-type(1) > div.gallery-item tall:nth-of-type(8)",
+        "missing_clip::body > div.gallery:nth-of-type(1) > div.gallery-item wide:nth-of-type(3)",
+        "missing_clip::body > div.gallery:nth-of-type(1) > div.gallery-item wide:nth-of-type(3)",
+        "missing_clip::body > div.gallery:nth-of-type(1) > div.gallery-item:nth-of-type(2)",
+        "missing_clip::body > div.gallery:nth-of-type(1) > div.gallery-item:nth-of-type(4)",
+        "missing_clip::body > div.gallery:nth-of-type(1) > div.gallery-item:nth-of-type(4)",
+        "missing_clip::body > div.gallery:nth-of-type(1) > div.gallery-item:nth-of-type(5)",
+        "missing_clip::body > div.gallery:nth-of-type(1) > div.gallery-item:nth-of-type(5)",
+        "missing_clip::body > div.gallery:nth-of-type(1) > div.gallery-item:nth-of-type(6)",
+        "missing_clip::body > div.gallery:nth-of-type(1) > div.gallery-item:nth-of-type(6)"
+      ],
+      "geometry_fail_count": 52,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 0,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.8545234375
+    },
+    "images-intrinsic": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 28,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 14,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.7479446428571429
+    },
+    "new_tab": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 224,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 1,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.7918681640625
+    },
+    "pseudo-classes": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 0,
+      "geometry_green": true,
+      "geometry_measured": true,
+      "join_fail_count": 0,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.95893125
+    },
+    "rounded-corners": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 11,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 0,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.96225
+    },
+    "settings": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 280,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 31,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.9050649007161459
+    },
+    "shelf": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 9,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 4,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.8400846354166667
+    },
+    "specificity": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 0,
+      "geometry_green": true,
+      "geometry_measured": true,
+      "join_fail_count": 0,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.9406104166666667
+    },
+    "sticky-scroll": {
+      "discrete_fail_ids": [],
+      "geometry_fail_count": 162,
+      "geometry_green": false,
+      "geometry_measured": true,
+      "join_fail_count": 1,
+      "paint_green": false,
+      "paint_measured": true,
+      "paint_pct": 0.795423828125
+    }
+  },
+  "max_variance": 0.1,
+  "provenance": {
+    "captured_at": "2026-08-28T21:58:45+00:00",
+    "engine_sha": "f58950cf745a93a26c0986165a3ac57193dd9d4e",
+    "receipt_run": "33209750736",
+    "stability_runs": 3
+  },
+  "schema": 1
+}
