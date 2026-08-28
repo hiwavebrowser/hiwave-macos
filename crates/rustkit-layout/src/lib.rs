@@ -4367,14 +4367,26 @@ pub struct DisplayList {
     pub commands: Vec<DisplayCommand>,
     /// Root element font size for rem unit calculations
     root_font_size: f32,
+    /// Tree depth of the box being rendered (root = 0). The root's overflow
+    /// propagates to the viewport, so the root box itself never clips.
+    depth: u32,
+    /// Whether the ROOT box's overflow is `visible`. When it is, `body`'s
+    /// overflow propagates to the viewport instead (CSS 2.1 §11.1.1 /
+    /// css-overflow-3 §3.3) and body does not clip either.
+    root_overflow_visible: bool,
+    /// Overflow clips pushed by NON-positioned boxes since the nearest
+    /// positioned ancestor, outermost first. `overflow` only clips descendants
+    /// whose containing block is the clipping box or lies inside it; an
+    /// absolutely positioned box whose containing block is ABOVE a static
+    /// clipper is not clipped by it (css-overflow-3 §3.1 — the classic
+    /// dropdown escaping an `overflow: hidden` wrapper). Such a box pops
+    /// exactly these clips before painting and re-pushes them after.
+    escapable_clips: Vec<(Rect, BorderRadius)>,
 }
 
 impl Default for DisplayList {
     fn default() -> Self {
-        Self {
-            commands: Vec::new(),
-            root_font_size: 16.0,
-        }
+        Self::new()
     }
 }
 
@@ -4384,11 +4396,13 @@ impl DisplayList {
         Self {
             commands: Vec::new(),
             root_font_size: 16.0,
+            depth: 0,
+            root_overflow_visible: true,
+            escapable_clips: Vec::new(),
         }
     }
 
-    /// Build display list from a layout box with proper stacking order.
-    pub fn build(root: &LayoutBox) -> Self {
+    fn for_root(root: &LayoutBox) -> Self {
         // Extract root font size from root element
         let root_font_size = match root.style.font_size {
             Length::Px(px) => px,
@@ -4396,11 +4410,19 @@ impl DisplayList {
             Length::Rem(rem) => rem * 16.0, // Relative to browser default
             _ => 16.0,
         };
-
-        let mut list = DisplayList {
+        DisplayList {
             commands: Vec::new(),
             root_font_size,
-        };
+            depth: 0,
+            root_overflow_visible: root.style.overflow_x == rustkit_css::Overflow::Visible
+                && root.style.overflow_y == rustkit_css::Overflow::Visible,
+            escapable_clips: Vec::new(),
+        }
+    }
+
+    /// Build display list from a layout box with proper stacking order.
+    pub fn build(root: &LayoutBox) -> Self {
+        let mut list = DisplayList::for_root(root);
         list.render_stacking_context(root, 0, &mut 0);
         list
     }
@@ -4419,19 +4441,8 @@ impl DisplayList {
         // Update sticky positions based on scroll
         root.update_sticky_positions(scroll_x, scroll_y, viewport);
 
-        // Extract root font size from root element
-        let root_font_size = match root.style.font_size {
-            Length::Px(px) => px,
-            Length::Em(em) => em * 16.0,
-            Length::Rem(rem) => rem * 16.0,
-            _ => 16.0,
-        };
-
         // Build the display list
-        let mut list = DisplayList {
-            commands: Vec::new(),
-            root_font_size,
-        };
+        let mut list = DisplayList::for_root(root);
         list.render_stacking_context(root, 0, &mut 0);
         list
     }
@@ -4442,6 +4453,25 @@ impl DisplayList {
             layout_box.z_index
         } else {
             parent_z
+        };
+
+        // A positioned box is the containing block for the absolutely
+        // positioned boxes inside it, so clips pushed by static boxes ABOVE it
+        // are not escapable from within its subtree: scope them out for the
+        // duration. An absolutely/fixed positioned box additionally escapes
+        // those clips itself — its containing block is above them.
+        let positioned = layout_box.position != Position::Static;
+        let escapes = matches!(layout_box.position, Position::Absolute | Position::Fixed);
+        let outer_escapable = if positioned {
+            let outer = std::mem::take(&mut self.escapable_clips);
+            if escapes {
+                for _ in &outer {
+                    self.commands.push(DisplayCommand::PopClip);
+                }
+            }
+            Some(outer)
+        } else {
+            None
         };
 
         // Check if this creates a new stacking context
@@ -4489,16 +4519,27 @@ impl DisplayList {
         // Render this box
         self.render_box_content(layout_box);
 
-        // A box that clips its overflow under a border radius rounds its
-        // DESCENDANTS too. Pushed after the box's own content — the background
-        // rounds itself via BorderRadius on its own commands and must not be
-        // clipped twice — and popped after every child, including positioned
-        // ones, because `overflow` clips them all.
+        // A box that clips its overflow clips its DESCENDANTS to its padding
+        // box (rounded when it has a radius). Pushed after the box's own
+        // content — the background rounds itself via BorderRadius on its own
+        // commands and must not be clipped twice — and popped after every
+        // child. Positioned children are inside the clip too, EXCEPT an
+        // absolutely positioned descendant whose containing block is above a
+        // static clipper: that one escapes via `escapable_clips` when it is
+        // rendered (see the top of this function).
         let overflow_clip = self.overflow_clip(layout_box);
         if let Some((rect, radius)) = overflow_clip {
-            self.commands
-                .push(DisplayCommand::PushClipRounded { rect, radius });
+            if radius.is_zero() {
+                self.commands.push(DisplayCommand::PushClip(rect));
+            } else {
+                self.commands
+                    .push(DisplayCommand::PushClipRounded { rect, radius });
+            }
+            if !positioned {
+                self.escapable_clips.push((rect, radius));
+            }
         }
+        self.depth += 1;
 
         // Collect children grouped by paint order
         let mut negative_z: Vec<(&LayoutBox, u32)> = Vec::new();
@@ -4557,8 +4598,12 @@ impl DisplayList {
             self.render_stacking_context(child, z_index, layer);
         }
 
+        self.depth -= 1;
         if overflow_clip.is_some() {
             self.commands.push(DisplayCommand::PopClip);
+            if !positioned {
+                self.escapable_clips.pop();
+            }
         }
 
         // Pop transform if we pushed one
@@ -4568,6 +4613,23 @@ impl DisplayList {
 
         if creates_context {
             self.commands.push(DisplayCommand::PopStackingContext);
+        }
+
+        // Restore the clips this box's subtree was scoped out of; an escaping
+        // box re-pushes the ones it popped so its later siblings are clipped
+        // exactly as before.
+        if let Some(outer) = outer_escapable {
+            if escapes {
+                for &(rect, radius) in &outer {
+                    if radius.is_zero() {
+                        self.commands.push(DisplayCommand::PushClip(rect));
+                    } else {
+                        self.commands
+                            .push(DisplayCommand::PushClipRounded { rect, radius });
+                    }
+                }
+            }
+            self.escapable_clips = outer;
         }
     }
 
@@ -4687,13 +4749,15 @@ impl DisplayList {
 
     /// The rounded clip a box imposes on its descendants, if any.
     ///
-    /// `None` unless the box both clips its overflow AND has a corner radius.
-    /// The square half of overflow clipping is deliberately NOT implemented
-    /// here: RustKit has never clipped overflow at all, so turning it on for
-    /// every `overflow: hidden` box is a separate change with its own blast
-    /// radius, and mixing the two would make neither attributable. What this
-    /// closes is the discrete `missing_clip` class Gate B reports — a child
-    /// painting square into a rounded parent's corner notch.
+    /// The clip a box imposes on its descendants: `None` unless `overflow`
+    /// is anything but `visible` on either axis (a single non-visible axis
+    /// computes the other to `auto`, css-overflow-3 §3.1, so both clip). The
+    /// rect is the padding box; the radius is zero for square corners.
+    ///
+    /// The root box never clips — its overflow propagates to the viewport —
+    /// and neither does `body` while the root's overflow is `visible`, because
+    /// then body's is what propagates (CSS 2.1 §11.1.1). Clipping either to its
+    /// own padding box would cut the page at the first screen of content.
     fn overflow_clip(&self, layout_box: &LayoutBox) -> Option<(Rect, BorderRadius)> {
         let s = &layout_box.style;
         let clips = s.overflow_x != rustkit_css::Overflow::Visible
@@ -4702,10 +4766,19 @@ impl DisplayList {
             return None;
         }
 
-        let radius = self.border_radius_px(layout_box);
-        if radius.is_zero() {
+        if self.depth == 0 {
             return None;
         }
+        let is_body = layout_box
+            .identity
+            .as_ref()
+            .map(|id| id.tag == "body")
+            .unwrap_or(false);
+        if is_body && self.root_overflow_visible {
+            return None;
+        }
+
+        let radius = self.border_radius_px(layout_box);
 
         // Overflow clips to the PADDING box, and the clip's radius is the
         // border radius shrunk inward by the border it sits inside.
@@ -4734,9 +4807,6 @@ impl DisplayList {
             bottom_right: inset(radius.bottom_right, d.border.right, d.border.bottom),
             bottom_left: inset(radius.bottom_left, d.border.left, d.border.bottom),
         };
-        if inner.is_zero() {
-            return None;
-        }
 
         Some((padding_rect, inner))
     }
@@ -5975,7 +6045,7 @@ mod tests {
 
     #[test]
     fn overflow_hidden_under_a_radius_pushes_a_rounded_clip_around_its_children() {
-        let list = DisplayList::build(&rounded_overflow_parent(12.0, true));
+        let list = DisplayList::build(&under_root(rounded_overflow_parent(12.0, true)));
         let (rect, radius) = rounded_clip(&list).expect(
             "a rounded box that clips its overflow must push a rounded clip for its children",
         );
@@ -6005,12 +6075,14 @@ mod tests {
 
     #[test]
     fn positioned_children_are_inside_the_clip_too() {
-        // `overflow` clips EVERY descendant, not just the in-flow ones, so the
-        // pop belongs after the positioned pass. image-gallery's
-        // `.image-overlay` is `position: absolute` and sits on the parent's
-        // bottom corners — pop it early and the overlay paints square into
-        // exactly the notches this change exists to clear.
+        // `overflow` clips EVERY descendant it contains, not just the in-flow
+        // ones, so the pop belongs after the positioned pass. image-gallery's
+        // `.image-overlay` is `position: absolute` inside a `position: relative`
+        // item and sits on its bottom corners — pop it early and the overlay
+        // paints square into exactly the notches this change exists to clear.
+        // (A STATIC clipper is a different case: see the escape tests below.)
         let mut parent = rounded_overflow_parent(12.0, true);
+        parent.position = Position::Relative;
         let mut overlay_style = ComputedStyle::new();
         overlay_style.background_color = Color { r: 0, g: 0, b: 0, a: 0.7 };
         let mut overlay = LayoutBox::new(BoxType::Block, overlay_style);
@@ -6018,7 +6090,7 @@ mod tests {
         overlay.dimensions.content = Rect::new(0.0, 120.0, 227.0, 60.0);
         parent.children.push(overlay);
 
-        let list = DisplayList::build(&parent);
+        let list = DisplayList::build(&under_root(parent));
         let push = list
             .commands
             .iter()
@@ -6051,22 +6123,169 @@ mod tests {
         );
     }
 
+    /// Wrap `inner` in a root box so the unit under test is not itself the
+    /// root (the root's overflow propagates to the viewport and never clips).
+    fn under_root(inner: LayoutBox) -> LayoutBox {
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.dimensions.content = Rect::new(0.0, 0.0, 800.0, 600.0);
+        root.children.push(inner);
+        root
+    }
+
+    fn square_clip(list: &DisplayList) -> Option<Rect> {
+        list.commands.iter().find_map(|c| match c {
+            DisplayCommand::PushClip(rect) => Some(*rect),
+            _ => None,
+        })
+    }
+
     #[test]
-    fn overflow_hidden_with_square_corners_pushes_no_clip() {
-        // Deliberate scope line, not an oversight: RustKit has never clipped
-        // overflow at all, and turning that on for every `overflow: hidden` box
-        // is a separate change with its own blast radius. This unit closes the
-        // rounded-corner half only. If square overflow clipping is added later
-        // this test is the one that should change.
-        let list = DisplayList::build(&rounded_overflow_parent(0.0, true));
+    fn overflow_hidden_with_square_corners_pushes_a_square_clip_around_its_children() {
+        // The square half of overflow clipping (n35): `overflow: hidden` on a
+        // box with no radius clips its descendants to its padding box. WPT
+        // overflow-wrap-anywhere-002/003 are the exact-match probes — a
+        // `height: 1em; overflow: hidden` div whose second line must not paint.
+        let list = DisplayList::build(&under_root(rounded_overflow_parent(0.0, true)));
         assert!(
             rounded_clip(&list).is_none(),
-            "square overflow clipping is out of scope for this unit"
+            "no radius means no rounded clip"
         );
+        let rect = square_clip(&list).expect("a square overflow clip must be pushed");
+        assert_eq!((rect.width, rect.height), (227.0, 180.0));
+
+        let push = list
+            .commands
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::PushClip(_)))
+            .unwrap();
+        let child_bg = list
+            .commands
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::SolidColor(color, _) if color.b == 234))
+            .expect("the child's background must be in the list");
+        let pop = list
+            .commands
+            .iter()
+            .rposition(|c| matches!(c, DisplayCommand::PopClip))
+            .expect("the clip must be popped");
         assert!(
-            !list.commands.iter().any(|c| matches!(c, DisplayCommand::PushClip(_))),
-            "and it must not fall back to a square PushClip either"
+            push < child_bg && child_bg < pop,
+            "the child must paint INSIDE the clip, got push={push} child={child_bg} pop={pop}"
         );
+    }
+
+    #[test]
+    fn the_root_never_clips_its_overflow_propagates_to_the_viewport() {
+        let list = DisplayList::build(&rounded_overflow_parent(0.0, true));
+        assert!(
+            square_clip(&list).is_none() && rounded_clip(&list).is_none(),
+            "the root box's overflow belongs to the viewport, not to a clip"
+        );
+    }
+
+    #[test]
+    fn body_does_not_clip_while_the_root_overflow_is_visible() {
+        // CSS 2.1 §11.1.1: when the root's overflow is visible, body's
+        // propagates to the viewport instead — `body { overflow: hidden }`
+        // must not cut the page at body's padding box.
+        let mut body = rounded_overflow_parent(0.0, true);
+        body.identity = Some(Box::new(ElementIdentity {
+            element_id: 1,
+            tag: "body".to_string(),
+            selector: "body".to_string(),
+        }));
+        let list = DisplayList::build(&under_root(body));
+        assert!(
+            square_clip(&list).is_none(),
+            "body's overflow propagates to the viewport when the root's is visible"
+        );
+
+        // But with the root's overflow non-visible, body keeps its own.
+        let mut body = rounded_overflow_parent(0.0, true);
+        body.identity = Some(Box::new(ElementIdentity {
+            element_id: 1,
+            tag: "body".to_string(),
+            selector: "body".to_string(),
+        }));
+        let mut root = under_root(body);
+        root.style.overflow_y = rustkit_css::Overflow::Auto;
+        let list = DisplayList::build(&root);
+        assert!(
+            square_clip(&list).is_some(),
+            "body clips when the root's overflow is already non-visible"
+        );
+    }
+
+    #[test]
+    fn an_absolute_child_of_a_static_clipper_escapes_the_clip() {
+        // css-overflow-3 §3.1: overflow clips descendants whose containing
+        // block is the box or inside it. A static `overflow: hidden` wrapper is
+        // NOT the containing block of an absolutely positioned child — the
+        // dropdown-escapes-its-wrapper case — so that child paints outside the
+        // clip, and the clip is back in force for the sibling after it.
+        let mut parent = rounded_overflow_parent(0.0, true); // position: static
+        let mut overlay_style = ComputedStyle::new();
+        overlay_style.background_color = Color { r: 0, g: 0, b: 0, a: 0.7 };
+        let mut overlay = LayoutBox::new(BoxType::Block, overlay_style);
+        overlay.position = Position::Absolute;
+        overlay.dimensions.content = Rect::new(0.0, 120.0, 227.0, 60.0);
+        parent.children.push(overlay);
+
+        let mut later_style = ComputedStyle::new();
+        later_style.background_color = Color { r: 9, g: 9, b: 9, a: 1.0 };
+        let mut later = LayoutBox::new(BoxType::Block, later_style);
+        later.float = Float::Left; // paints in the positioned pass, after the overlay
+        later.dimensions.content = Rect::new(0.0, 0.0, 10.0, 10.0);
+        parent.children.push(later);
+
+        let list = DisplayList::build(&under_root(parent));
+        let cmds = &list.commands;
+        let overlay_bg = cmds
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::SolidColor(color, _) if color.a == 0.7))
+            .expect("the overlay's background must be in the list");
+        let later_bg = cmds
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::SolidColor(color, _) if color.r == 9))
+            .expect("the later sibling's background must be in the list");
+
+        // Clip depth at a command index: pushes minus pops before it.
+        let depth_at = |i: usize| {
+            cmds[..i].iter().fold(0i32, |d, c| match c {
+                DisplayCommand::PushClip(_) | DisplayCommand::PushClipRounded { .. } => d + 1,
+                DisplayCommand::PopClip => d - 1,
+                _ => d,
+            })
+        };
+        assert_eq!(depth_at(overlay_bg), 0, "the absolute child must paint with the static clip popped");
+        assert_eq!(depth_at(later_bg), 1, "the clip must be re-pushed for the next sibling");
+        assert_eq!(depth_at(cmds.len()), 0, "the list must end balanced");
+    }
+
+    #[test]
+    fn an_absolute_child_of_a_positioned_clipper_stays_inside_the_clip() {
+        // The mirror image: a positioned clipper IS the containing block.
+        let mut parent = rounded_overflow_parent(0.0, true);
+        parent.position = Position::Relative;
+        let mut overlay_style = ComputedStyle::new();
+        overlay_style.background_color = Color { r: 0, g: 0, b: 0, a: 0.7 };
+        let mut overlay = LayoutBox::new(BoxType::Block, overlay_style);
+        overlay.position = Position::Absolute;
+        overlay.dimensions.content = Rect::new(0.0, 120.0, 227.0, 60.0);
+        parent.children.push(overlay);
+
+        let list = DisplayList::build(&under_root(parent));
+        let cmds = &list.commands;
+        let overlay_bg = cmds
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::SolidColor(color, _) if color.a == 0.7))
+            .unwrap();
+        let depth = cmds[..overlay_bg].iter().fold(0i32, |d, c| match c {
+            DisplayCommand::PushClip(_) | DisplayCommand::PushClipRounded { .. } => d + 1,
+            DisplayCommand::PopClip => d - 1,
+            _ => d,
+        });
+        assert_eq!(depth, 1, "a positioned clipper clips its absolute children");
     }
 
     #[test]
@@ -6076,25 +6295,27 @@ mod tests {
         // behind, and the arc would be the outer one, a border-width off.
         let mut parent = rounded_overflow_parent(12.0, true);
         parent.dimensions.border = EdgeSizes { top: 4.0, right: 4.0, bottom: 4.0, left: 4.0 };
-
-        let list = DisplayList::build(&parent);
-        let (rect, radius) = rounded_clip(&list).expect("must still clip");
         let border_box = parent.dimensions.border_box();
+
+        let list = DisplayList::build(&under_root(parent));
+        let (rect, radius) = rounded_clip(&list).expect("must still clip");
         assert_eq!(rect.x, border_box.x + 4.0);
         assert_eq!(rect.width, border_box.width - 8.0);
         assert_eq!(radius.top_left, 8.0, "12px radius inside a 4px border is 8px");
     }
 
     #[test]
-    fn a_radius_swallowed_entirely_by_its_border_pushes_no_clip() {
+    fn a_radius_swallowed_entirely_by_its_border_is_a_square_clip() {
         // Inner radius floors at zero rather than going negative, and a clip
-        // with no rounding left is a square clip — out of scope above, so it
-        // must not be emitted here by the back door.
+        // with no rounding left is a square clip at the padding box — the
+        // border has eaten the arc, so there is nothing round left to clip to.
         let mut parent = rounded_overflow_parent(4.0, true);
         parent.dimensions.border = EdgeSizes { top: 6.0, right: 6.0, bottom: 6.0, left: 6.0 };
 
-        let list = DisplayList::build(&parent);
-        assert!(rounded_clip(&list).is_none());
+        let list = DisplayList::build(&under_root(parent));
+        assert!(rounded_clip(&list).is_none(), "no rounding survives a thicker border");
+        let rect = square_clip(&list).expect("the padding box still clips, square");
+        assert_eq!(rect.width, 227.0, "the padding box is the content box here (no padding)");
     }
 
     #[test]
@@ -6110,7 +6331,7 @@ mod tests {
         let mut parent = rounded_overflow_parent(12.0, true);
         parent.style.background_color = Color { r: 45, g: 45, b: 68, a: 1.0 };
 
-        let list = DisplayList::build(&parent);
+        let list = DisplayList::build(&under_root(parent));
         let push = list
             .commands
             .iter()

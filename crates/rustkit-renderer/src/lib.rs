@@ -4680,10 +4680,24 @@ impl Renderer {
                     let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
                     let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
 
-                    let (x0, y0) = self.transform_point(glyph_x, glyph_y);
-                    let (x1, y1) = self.transform_point(glyph_x + glyph_w, glyph_y);
-                    let (x2, y2) = self.transform_point(glyph_x + glyph_w, glyph_y + glyph_h);
-                    let (x3, y3) = self.transform_point(glyph_x, glyph_y + glyph_h);
+                    // The advance is owed whether or not the glyph survives
+                    // the clip — a clipped-away glyph still occupies its run.
+                    cursor_x += layout_advances
+                        .and_then(|a| a.get(char_idx).copied())
+                        .unwrap_or(entry.advance);
+
+                    let Some((g, tex)) = clip_textured_rect(
+                        self.current_clip(),
+                        Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
+                        entry.tex_coords,
+                    ) else {
+                        continue;
+                    };
+
+                    let (x0, y0) = self.transform_point(g.x, g.y);
+                    let (x1, y1) = self.transform_point(g.x + g.width, g.y);
+                    let (x2, y2) = self.transform_point(g.x + g.width, g.y + g.height);
+                    let (x3, y3) = self.transform_point(g.x, g.y + g.height);
 
                     // White vertex color: the blit pipeline multiplies, so this
                     // passes the emoji's own colors through untinted. Preserve
@@ -4691,19 +4705,15 @@ impl Renderer {
                     let cw = [1.0, 1.0, 1.0, color.a];
                     let base = self.color_glyph_vertices.len() as u32;
                     self.color_glyph_vertices.extend_from_slice(&[
-                        TextureVertex { position: [x0, y0], tex_coords: [entry.tex_coords[0], entry.tex_coords[1]], color: cw },
-                        TextureVertex { position: [x1, y1], tex_coords: [entry.tex_coords[2], entry.tex_coords[1]], color: cw },
-                        TextureVertex { position: [x2, y2], tex_coords: [entry.tex_coords[2], entry.tex_coords[3]], color: cw },
-                        TextureVertex { position: [x3, y3], tex_coords: [entry.tex_coords[0], entry.tex_coords[3]], color: cw },
+                        TextureVertex { position: [x0, y0], tex_coords: [tex[0], tex[1]], color: cw },
+                        TextureVertex { position: [x1, y1], tex_coords: [tex[2], tex[1]], color: cw },
+                        TextureVertex { position: [x2, y2], tex_coords: [tex[2], tex[3]], color: cw },
+                        TextureVertex { position: [x3, y3], tex_coords: [tex[0], tex[3]], color: cw },
                     ]);
                     self.color_glyph_indices.extend_from_slice(&[
                         base, base + 1, base + 2,
                         base, base + 2, base + 3,
                     ]);
-
-                    cursor_x += layout_advances
-                        .and_then(|a| a.get(char_idx).copied())
-                        .unwrap_or(entry.advance);
                     continue;
                 }
             }
@@ -4728,33 +4738,50 @@ impl Renderer {
                 let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
                 let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
 
+                // ADVANCE CONTRACT: layout's advance wins when present so
+                // painted ink tracks measured width 1:1; the atlas advance
+                // is the fallback for legacy callers. Owed before the clip
+                // check — a clipped-away glyph still occupies its run.
+                cursor_x += layout_advances
+                    .and_then(|a| a.get(char_idx).copied())
+                    .unwrap_or(entry.advance);
+
+                // `overflow: hidden` clips glyphs like everything else.
+                let Some((g, tex)) = clip_textured_rect(
+                    self.current_clip(),
+                    Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
+                    entry.tex_coords,
+                ) else {
+                    continue;
+                };
+
                 // Apply transform to glyph corners
-                let (x0, y0) = self.transform_point(glyph_x, glyph_y);
-                let (x1, y1) = self.transform_point(glyph_x + glyph_w, glyph_y);
-                let (x2, y2) = self.transform_point(glyph_x + glyph_w, glyph_y + glyph_h);
-                let (x3, y3) = self.transform_point(glyph_x, glyph_y + glyph_h);
+                let (x0, y0) = self.transform_point(g.x, g.y);
+                let (x1, y1) = self.transform_point(g.x + g.width, g.y);
+                let (x2, y2) = self.transform_point(g.x + g.width, g.y + g.height);
+                let (x3, y3) = self.transform_point(g.x, g.y + g.height);
 
                 let base = self.texture_vertices.len() as u32;
 
                 self.texture_vertices.extend_from_slice(&[
                     TextureVertex {
                         position: [x0, y0],
-                        tex_coords: [entry.tex_coords[0], entry.tex_coords[1]],
+                        tex_coords: [tex[0], tex[1]],
                         color: c,
                     },
                     TextureVertex {
                         position: [x1, y1],
-                        tex_coords: [entry.tex_coords[2], entry.tex_coords[1]],
+                        tex_coords: [tex[2], tex[1]],
                         color: c,
                     },
                     TextureVertex {
                         position: [x2, y2],
-                        tex_coords: [entry.tex_coords[2], entry.tex_coords[3]],
+                        tex_coords: [tex[2], tex[3]],
                         color: c,
                     },
                     TextureVertex {
                         position: [x3, y3],
-                        tex_coords: [entry.tex_coords[0], entry.tex_coords[3]],
+                        tex_coords: [tex[0], tex[3]],
                         color: c,
                     },
                 ]);
@@ -4763,13 +4790,6 @@ impl Renderer {
                     base, base + 1, base + 2,
                     base, base + 2, base + 3,
                 ]);
-
-                // ADVANCE CONTRACT: layout's advance wins when present so
-                // painted ink tracks measured width 1:1; the atlas advance
-                // is the fallback for legacy callers.
-                cursor_x += layout_advances
-                    .and_then(|a| a.get(char_idx).copied())
-                    .unwrap_or(entry.advance);
             } else {
                 // Fallback: advance by estimated width (or layout's, if given)
                 cursor_x += layout_advances
@@ -4782,6 +4802,13 @@ impl Renderer {
     /// Draw an image.
     fn draw_image(&mut self, url: &str, rect: Rect) {
         if self.texture_cache.contains(url) {
+            // `overflow: hidden` clips replaced content like everything else.
+            let Some((rect, tex)) =
+                clip_textured_rect(self.current_clip(), rect, [0.0, 0.0, 1.0, 1.0])
+            else {
+                return;
+            };
+
             // Apply transform to image corners
             let (x0, y0) = self.transform_point(rect.x, rect.y);
             let (x1, y1) = self.transform_point(rect.x + rect.width, rect.y);
@@ -4793,22 +4820,22 @@ impl Renderer {
                 [
                     TextureVertex {
                         position: [x0, y0],
-                        tex_coords: [0.0, 0.0],
+                        tex_coords: [tex[0], tex[1]],
                         color: [1.0, 1.0, 1.0, 1.0],
                     },
                     TextureVertex {
                         position: [x1, y1],
-                        tex_coords: [1.0, 0.0],
+                        tex_coords: [tex[2], tex[1]],
                         color: [1.0, 1.0, 1.0, 1.0],
                     },
                     TextureVertex {
                         position: [x2, y2],
-                        tex_coords: [1.0, 1.0],
+                        tex_coords: [tex[2], tex[3]],
                         color: [1.0, 1.0, 1.0, 1.0],
                     },
                     TextureVertex {
                         position: [x3, y3],
-                        tex_coords: [0.0, 1.0],
+                        tex_coords: [tex[0], tex[3]],
                         color: [1.0, 1.0, 1.0, 1.0],
                     },
                 ],
@@ -5010,6 +5037,15 @@ impl Renderer {
         let tex_top = clip_top / tile_rect.height;
         let tex_right = 1.0 - clip_right / tile_rect.width;
         let tex_bottom = 1.0 - clip_bottom / tile_rect.height;
+
+        // Then the overflow clip on top of the container clip.
+        let Some((draw_rect, [tex_left, tex_top, tex_right, tex_bottom])) = clip_textured_rect(
+            self.current_clip(),
+            draw_rect,
+            [tex_left, tex_top, tex_right, tex_bottom],
+        ) else {
+            return;
+        };
 
         // Apply transform to image corners
         let (x0, y0) = self.transform_point(draw_rect.x, draw_rect.y);
@@ -5491,6 +5527,40 @@ fn clip_entry_for(
     }
 }
 
+/// A textured quad (glyph, image tile) cut to the rectangular part of the
+/// current clip: the surviving rect and its texture coordinates, scaled so the
+/// texels stay where they were. `None` when nothing survives.
+///
+/// Textured quads used to bypass the clip stack entirely — only color quads
+/// went through `collect_clipped_pieces` — so `overflow: hidden` clipped a
+/// box's background but never its text (n35). The rounded part of the clip
+/// is NOT applied to textured quads: a glyph straddling a rounded corner's
+/// arc keeps its square corner. That is a ledgered residual, not a rule.
+fn clip_textured_rect(
+    clip: Option<Rect>,
+    rect: Rect,
+    tex: [f32; 4],
+) -> Option<(Rect, [f32; 4])> {
+    let clip = match clip {
+        Some(clip) => clip,
+        None => return Some((rect, tex)),
+    };
+    if rect.width <= 0.0 || rect.height <= 0.0 {
+        return None;
+    }
+    let clipped = rect.intersect(&clip)?;
+    if clipped.width <= 0.0 || clipped.height <= 0.0 {
+        return None;
+    }
+    let u_per_px = (tex[2] - tex[0]) / rect.width;
+    let v_per_px = (tex[3] - tex[1]) / rect.height;
+    let u0 = tex[0] + (clipped.x - rect.x) * u_per_px;
+    let v0 = tex[1] + (clipped.y - rect.y) * v_per_px;
+    let u1 = u0 + clipped.width * u_per_px;
+    let v1 = v0 + clipped.height * v_per_px;
+    Some((clipped, [u0, v0, u1, v1]))
+}
+
 /// Everything `rect` becomes under `clip`, appended to `out` as
 /// `(piece, coverage)`.
 ///
@@ -5709,6 +5779,49 @@ fn multiply_matrices_2d(a: [f32; 6], b: [f32; 6]) -> [f32; 6] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ==================== Textured-quad clipping (n35) ====================
+
+    #[test]
+    fn no_clip_leaves_a_textured_quad_untouched() {
+        let rect = Rect::new(10.0, 20.0, 30.0, 40.0);
+        let tex = [0.1, 0.2, 0.3, 0.4];
+        let (r, t) = clip_textured_rect(None, rect, tex).unwrap();
+        assert_eq!((r.x, r.y, r.width, r.height), (10.0, 20.0, 30.0, 40.0));
+        assert_eq!(t, tex);
+    }
+
+    #[test]
+    fn a_glyph_below_an_overflow_hidden_box_is_dropped_entirely() {
+        // overflow-wrap-anywhere-002's shape: a 1em-tall clipper, the second
+        // line's glyphs start at its bottom edge.
+        let clip = Rect::new(8.0, 60.0, 40.0, 16.0);
+        let glyph = Rect::new(8.0, 76.0, 10.0, 14.0);
+        assert!(clip_textured_rect(Some(clip), glyph, [0.0, 0.0, 1.0, 1.0]).is_none());
+    }
+
+    #[test]
+    fn a_glyph_straddling_the_clip_edge_keeps_only_the_inside_and_its_texels() {
+        // Clip cuts the glyph's lower half: the surviving quad is the top
+        // half and its v range is the top half of the original, so the atlas
+        // texels do not stretch to fill the smaller quad.
+        let clip = Rect::new(0.0, 0.0, 100.0, 20.0);
+        let glyph = Rect::new(4.0, 10.0, 10.0, 20.0);
+        let tex = [0.5, 0.0, 0.6, 0.4];
+        let (r, t) = clip_textured_rect(Some(clip), glyph, tex).unwrap();
+        assert_eq!((r.x, r.y, r.width, r.height), (4.0, 10.0, 10.0, 10.0));
+        assert!((t[0] - 0.5).abs() < 1e-6 && (t[2] - 0.6).abs() < 1e-6, "u untouched: {t:?}");
+        assert!((t[1] - 0.0).abs() < 1e-6 && (t[3] - 0.2).abs() < 1e-6, "v halved: {t:?}");
+    }
+
+    #[test]
+    fn a_left_cut_shifts_the_u_origin() {
+        let clip = Rect::new(5.0, 0.0, 100.0, 100.0);
+        let glyph = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let (r, t) = clip_textured_rect(Some(clip), glyph, [0.0, 0.0, 1.0, 1.0]).unwrap();
+        assert_eq!((r.x, r.width), (5.0, 5.0));
+        assert!((t[0] - 0.5).abs() < 1e-6 && (t[2] - 1.0).abs() < 1e-6, "{t:?}");
+    }
 
     #[test]
     fn test_color_vertex_size() {
