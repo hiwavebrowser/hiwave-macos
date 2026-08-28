@@ -4460,7 +4460,16 @@ impl DisplayList {
         // are not escapable from within its subtree: scope them out for the
         // duration. An absolutely/fixed positioned box additionally escapes
         // those clips itself — its containing block is above them.
-        let positioned = layout_box.position != Position::Static;
+        //
+        // "Positioned" is read from the COMPUTED STYLE, not `LayoutBox::position`:
+        // the engine deliberately transfers `position: relative` as
+        // `Position::Static` (its paint-side stacking path is not ready for
+        // relative boxes), but a relative box is still the containing block of
+        // its absolute children — image-gallery's `.gallery-item { position:
+        // relative; overflow: hidden }` must keep its `.image-overlay` inside
+        // the clip. `LayoutBox::position` alone would let the overlay escape.
+        let positioned = layout_box.position != Position::Static
+            || layout_box.style.position != rustkit_css::Position::Static;
         let escapes = matches!(layout_box.position, Position::Absolute | Position::Fixed);
         let outer_escapable = if positioned {
             let outer = std::mem::take(&mut self.escapable_clips);
@@ -6260,6 +6269,38 @@ mod tests {
         assert_eq!(depth_at(overlay_bg), 0, "the absolute child must paint with the static clip popped");
         assert_eq!(depth_at(later_bg), 1, "the clip must be re-pushed for the next sibling");
         assert_eq!(depth_at(cmds.len()), 0, "the list must end balanced");
+    }
+
+    #[test]
+    fn a_style_relative_clipper_is_a_containing_block_even_when_laid_out_static() {
+        // The engine transfers `position: relative` onto the layout box as
+        // `Position::Static` (transfer_positioning: the paint-side stacking
+        // path is not ready for relative boxes). The containing-block rule
+        // must read the computed style, or image-gallery's `.gallery-item {
+        // position: relative; overflow: hidden }` lets its absolute overlay
+        // paint square into the corner notch — measured as +74 px on the
+        // campaign board the first time this lane ran.
+        let mut parent = rounded_overflow_parent(12.0, true);
+        parent.style.position = rustkit_css::Position::Relative; // layout position stays Static
+        let mut overlay_style = ComputedStyle::new();
+        overlay_style.background_color = Color { r: 0, g: 0, b: 0, a: 0.7 };
+        let mut overlay = LayoutBox::new(BoxType::Block, overlay_style);
+        overlay.position = Position::Absolute;
+        overlay.dimensions.content = Rect::new(0.0, 120.0, 227.0, 60.0);
+        parent.children.push(overlay);
+
+        let list = DisplayList::build(&under_root(parent));
+        let cmds = &list.commands;
+        let overlay_bg = cmds
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::SolidColor(color, _) if color.a == 0.7))
+            .unwrap();
+        let depth = cmds[..overlay_bg].iter().fold(0i32, |d, c| match c {
+            DisplayCommand::PushClip(_) | DisplayCommand::PushClipRounded { .. } => d + 1,
+            DisplayCommand::PopClip => d - 1,
+            _ => d,
+        });
+        assert_eq!(depth, 1, "a style-relative clipper clips its absolute children");
     }
 
     #[test]
