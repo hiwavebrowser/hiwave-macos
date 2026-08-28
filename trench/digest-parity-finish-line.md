@@ -4701,3 +4701,191 @@ paths; it does not touch the join-key duplicate that decisions 2/3 are about.
 - The stale cron prompt flagged on 08-24 and again on 08-26 is still stale: it
   opens by naming P0a-0, completed 2026-08-04, and describes the first unit as
   work that is twenty-three nights old. Third night of saying so.
+
+## 2026-08-28
+
+**Metric: 1/26 → 1/26, and this is a proof rather than a re-run.** Nothing
+landed in `crates/` on any branch tonight — the one engine change I wrote was
+reverted under the stop rule — so every gate reads exactly what it read
+before and no case can have crossed the conjunction in either direction. No
+macOS run tonight; every number below is Linux/SwiftShader and is
+**MECHANICS, NOT A RECEIPT**.
+
+**P-item: the geometry-first queue (ratified 2026-08-12), aimed by night 23's
+magnitude board. The unit — the #1 entry on that board — is NOT complete, and
+I do not think it can be completed inside `flex.rs`. That is tonight's
+finding.**
+
+### The defect, located exactly
+
+Board entry #1, the corpus's worst single box, untouched since night 23:
+
+```
+image-gallery  .loading-section > .loading-grid > .loading-box.error-state > div.icon
+               width   Chrome 32.00   RustKit 1200.00   delta +1168.00
+                       font-movement envelope 0.000px across four probes
+```
+
+`.error-state` is `display: flex; flex-direction: column; align-items: center`.
+Its width is **correct** — 389.34, exactly Chrome's column. Only the child is
+wrong, and 1200 is not its container's width, it is `.loading-grid`'s.
+
+The path is `get_content_cross_width`, whose first line is:
+
+```rust
+// An already-laid-out width is the best answer available.
+if layout_box.dimensions.content.width > 0.0 {
+    return layout_box.dimensions.content.width;
+}
+```
+
+A grid item is laid out once against the grid container's full width and only
+then assigned its column, so the block pre-pass leaves the item's children
+carrying the pre-column width. Flex then reads that back as a *content-based*
+cross size. The comment is the bug: for an auto-width block the already-laid-out
+width is block layout's **fill-available** answer, not a measure, and here it is
+a fill against a containing block the box is no longer in.
+
+### Three fixes, all measured, all reverted
+
+Base is `develop` at `6e5d944`. Gate A on this seat: **2535 geometry failures,
+2/26 green, 110 join failures, corpus `sum|Δ|` 267139.32.** Every variant was
+scored per `(case, selector, axis)` across all 26 cases, not per case.
+
+| variant | fail | worsened | added | removed | improved | `sum|Δ|` | icon Δ |
+|---|---|---|---|---|---|---|---|
+| A fit-content for every auto-width block | 2545 | 4 | **11** | 1 | 12 | 263379.10 | 1168.00 → **1.00** |
+| B fit-content only where laid-out > available | 2539 | 0 | **5** | 1 | 1 | 265929.66 | 1168.00 → **1.00** |
+| C clamp the laid-out width to available | 2540 | 0 | **5** | 0 | 1 | 266406.65 | 1168.00 → 357.33 |
+
+**All three regress, so all three are reverted.** The stop rule is written for
+the case where the metric improves while an oracle regresses; here the metric
+did not even improve — `N/26` is 1/26 throughout and Gate A's count goes *up*
+in all three — while `sum|Δ|` goes down in all three. A magnitude win with a
+count loss is exactly the pair this campaign refuses to report as one number.
+
+Variant A is the spec-literal one (css-flexbox-1 §9.4: an auto cross size is
+fit-content) and it is the worst of the three, which is worth stating plainly:
+**the spec-correct rule made the corpus worse.** Not because the rule is wrong
+but because it depends on `estimate_max_content_width`, which under-estimates —
+only `Length::Px` short-circuits it, so a `width: 100%` child contributes just
+its own children's measure. On `new_tab` that took four boxes 176px narrow
+where the fill answer had been exact.
+
+### Why B and C still regress — the measurement that ended the night
+
+I expected variant B to be safe: it only fires where the laid-out width is
+*provably* not this container's fill. Instrumenting it, both firings on
+`flex-positioning` are:
+
+```
+RK_CROSS fired: laid=1174  avail=1170  fit=212  type=Block
+RK_CROSS fired: laid=1174  avail=1170  fit=322  type=Block
+```
+
+**A 4px overshoot, not an 810px one.** `.nested-row`'s final container is 710px
+wide; 1170 is what `available_cross` is during an *intermediate* pass, and the
+final width the dump records is downstream of that pass. So the predicate is
+not distinguishing "a fill from a wider containing block" from "a number that
+has not finished settling" — it cannot, because at the moment it runs neither
+figure is final.
+
+That is the reason I stopped rather than iterating on the predicate. **Every
+version of this fix is a guess about which pass it is in.** The stale width is
+written by the block pre-pass over a grid item's subtree, and the repair
+belongs there — re-laying the subtree once the column width is known — not in
+the consumer that reads the stale number back. That is a grid change with a
+real blast radius and it is its own unit.
+
+### The unmerged pile does not contain this fix, and now has a price
+
+`atlas/grid-item-subtree-width` (2026-08-18) sounds by its name like it already
+does this, so I checked rather than assumed. Merged onto current `develop` in a
+throwaway local branch, never pushed:
+
+- the merge **conflicts** in `crates/rustkit-layout/src/lib.rs`, in three hunks,
+  all in abspos containing-block code `develop` has since superseded;
+- resolved to develop's side, **2 of 324 layout tests are red** (both abspos —
+  artefacts of my mechanical resolution, not a claim about the branch);
+- Gate A on the result: **2460 failures against develop's 2535** — the branch is
+  worth **75 fewer failing axes on this seat**, unmerged for ten days;
+- and `div.icon` is **still 1200.00**. It does not fix this box.
+
+So the pile is now measurably costing the campaign in two directions at once:
+75 failures it is holding back, and a night spent confirming a fix it does not
+contain.
+
+### Stop rule
+
+**Fired, three times, and all three changes are reverted.** Logged here as the
+digest requires: I wrote a spec-cited fix for the corpus's worst box, watched
+it take the box from 1168px wrong to 1px wrong, and reverted it because it put
+11 new failing axes on three other cases. Then twice more with narrower forms
+that each still added 5. The working tree ends the night byte-identical to
+`develop`.
+
+The mistake worth naming is not the revert, it is the order I worked in: I
+wrote variant A, measured, narrowed to B, measured, narrowed to C, measured —
+three build-and-capture cycles, roughly forty minutes each — before
+instrumenting what the predicate was actually seeing. **The `eprintln` that
+ended the question took four minutes and would have been the right first move
+after variant A regressed.** Narrowing a predicate is not the same as finding
+out why it fires.
+
+### Commits
+
+**None in `crates/`.** Nothing landed on any engine branch; nothing was pushed
+except this digest. Branch law (2026-08-12) held trivially: there was no
+engine change to place.
+
+`cargo test -p rustkit-layout --lib` (292) and `-p rustkit-engine --lib` (60)
+were green at every point a commit was considered, and are green on the
+reverted tree.
+
+### Mutation-check results
+
+**None — no behavioural change landed, so there is no guard to check.** The
+one test I touched (`test_column_non_stretch_item_uses_content_width_not_height`,
+whose fixture depends on the shortcut variant A removed) is reverted with the
+rest; that fixture question only arises if the shortcut is ever replaced, and
+it is recorded here so the next attempt does not rediscover it.
+
+### Decisions needed from Pete
+
+1. **Open the P2 PR and resolve the join-key duplicate — thirteenth night of
+   asking.** Tonight put a number on the delay for the first time: one pile
+   branch alone is worth 75 Gate A failures on this seat, and the union's
+   conflicts have gone one file (08-25) → three (08-26) → three-plus-two-red-
+   tests (tonight).
+2. **May the next night open the grid unit** — re-laying a grid item's subtree
+   once its column width is known — given it is a larger blast radius than
+   anything this campaign has landed, and it is the only place this class of
+   defect can be fixed?
+3. Still open from 08-10 onward: keep or literally revert the overflow-clip
+   change that cost `sticky-scroll` 36 pixels on a card RustKit lays out 38px
+   too low?
+
+### Surprises
+
+- **The spec-literal fix was the worst of the three.** css-flexbox-1 §9.4 says
+  an auto cross size is fit-content; implementing exactly that added 11 failing
+  axes. The rule is right and the engine's fit-content estimate is not good
+  enough to carry it yet — so "make it match the spec" is currently a
+  regression, and there is no way to know that without measuring.
+- **`available_cross` is not one number.** I built the predicate on the
+  assumption that a flex container's inner cross size is a fact by the time
+  cross sizes are computed. It is not: the same container reports 1170 in one
+  pass and 710 by the time the dump is written. Every fix in this file is
+  implicitly a claim about which pass it runs in, and none of them says so.
+- **A box being 1168px wrong does not make it a big fix.** This is the corpus's
+  single worst box, and the honest outcome is one reverted change and a pointer
+  at a different file. Night 24's footer was the opposite shape — a huge
+  magnitude win with zero count movement. Two nights running, the size of the
+  error has said nothing useful about the size of the work.
+- **I checked whether the pile already fixed this and it did not, which was
+  the cheapest useful thing I did all night** — twenty minutes, and it turned a
+  twelve-night-old process complaint into a measured one (75 failures).
+- The stale cron prompt is stale for a **fourth** night: it opens by naming
+  P0a-0 as "the first unit", which completed 2026-08-04, and describes the
+  queue as beginning at P0a — twenty-four nights behind. The repo's reading
+  order is the only thing preventing that costing a night.
