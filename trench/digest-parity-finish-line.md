@@ -4889,3 +4889,224 @@ it is recorded here so the next attempt does not rediscover it.
   P0a-0 as "the first unit", which completed 2026-08-04, and describes the
   queue as beginning at P0a — twenty-four nights behind. The repo's reading
   order is the only thing preventing that costing a night.
+
+## 2026-08-29
+
+**Metric: 1/26 → 1/26, and this is a proof rather than a re-run.** No case
+changed its Gate A or Gate B green status, so no case can have crossed the
+conjunction in either direction. What moved is inside the columns, on one case.
+No macOS run tonight; every number below is Linux/SwiftShader and is
+**MECHANICS, NOT A RECEIPT**.
+
+**P-item: the geometry-first queue (ratified 2026-08-12). The unit — the grid
+subtree re-layout night 25 pointed at — is complete, and the honest headline is
+that I did not write it. It already existed, tested and mutation-checked, on an
+unmerged branch from fifteen days ago. I rediscovered it, independently
+reproduced its measurement to the axis, then threw my version away and ported
+theirs.**
+
+### What I set out to do, and what I found
+
+Night 25 ended pointing at a grid change: "the stale width is written by the
+block pre-pass over a grid item's subtree, and the repair belongs there — re-
+laying the subtree once the column width is known". Its decision 2 asked Pete
+whether the next night could open that unit. Unanswered, like the twelve before
+it, so I applied night 24's reasoning — waiting produces a night with no work —
+and went looking at the corpus first.
+
+Gate A on `develop` ranks the sidebars of `sticky-scroll` as the largest
+non-`about` cluster in the corpus:
+
+```
+aside.sidebar-left / -right       height   1972.70 vs 577.44 / 566.14
+  ...every h3/ul/li inside them   width    1120.00 vs 210.00
+88 failing axes under sidebar*, sum|Δ| 28726 of the case's 32091
+```
+
+`.sidebar-card` is **exactly right at 250px** and its children are at 1120 —
+the grid container's 1160px content box less the card's 2×20 padding. The
+defect is one line of Phase 9, and the line says so:
+
+```rust
+// For block, children were already laid out - we just fixed the container
+```
+
+I wrote the fix, measured it, and got 2535 → 2500 failing axes with two boxes
+worsened. Then I went to check whether `atlas/grid-item-subtree-width` already
+contained it — night 25 checked that branch for a *different* box and reported
+it did not fix that one, which I had read as "does not fix this class".
+
+It contains exactly this fix. `2e325e2`, 2026-08-14, same primitive
+(`layout_block_children_with_collapse`), same removed comment, same guard shape.
+Its commit message reports **2521 → 2486, −35 axes, sticky-scroll 149 → 114, two
+boxes worsened, one of them float noise and the other `.overflow-content` at
+139.53px**. My independent numbers on a base fifteen days newer: **2535 → 2500,
+−35 axes, sticky-scroll 149 → 114, the same two boxes, the same 139.53**.
+
+Two seats, fifteen days apart, on different bases, to the axis. That is the
+strongest evidence this campaign has produced that the instrument is
+deterministic — and it was bought by doing the work twice.
+
+### What landed
+
+Ported onto current `develop`, **PR #168** (`atlas/grid-grandchild-reflow`),
+`cargo test -p rustkit-layout --lib` 300 and `-p rustkit-engine --lib` 60 green:
+
+- `ea6d4ca` — cherry-pick of `2e325e2`: a grid item's grandchildren size
+  against the item, not the container. Original authorship and message kept.
+- `b57906a` — cherry-pick of `6a26e96`: the flex/grid exclusion labelled a cost
+  guard.
+- `7d0335a` — **mine**: the two survivors a fresh sweep found, closed.
+
+Nothing landed on `atlas/trench-parity-finish-line` except this digest. Branch
+law (2026-08-12) held: the engine change is on its own branch cut from
+`develop`.
+
+### Measured — Gate A and Gate B, 26 gating cases
+
+`develop` at `2be7d37` vs the branch. Per `(case, selector, axis)`.
+
+| Oracle | before | after |
+|---|---|---|
+| Gate A geometry failures | 2535 | **2500** |
+| Gate A join failures | 110 | 110 |
+| Gate A green | 2/26 | 2/26 |
+| Gate A corpus `sum|Δ|` | 267139.32 | **239566.34** |
+| Gate B paint-green / discrete | 1/26 · 0 | 1/26 · 0 |
+| Gate B percentage half | — | **bit-identical on 25 of 26** |
+| Gate B elements ADMITTED to the discrete detectors | 218 | **231** |
+| N/26 | 1/26 | 1/26 |
+
+Per axis: **0 added, 35 removed, 29 improved, 2 worsened.** Only `sticky-scroll`
+moves on either oracle — 149 → 114 axes, `sum|Δ|` 32091.25 → **4518.28**, an 86%
+magnitude drop on the case; paint 92.73% → 94.29% within the pinned tolerance.
+The other 25 cases are bit-identical on both gates.
+
+The admitted count is the half worth reading. 08-12's amendment predicted that
+each geometry fix enlarges Gate B's jurisdiction; 13 of `sticky-scroll`'s
+elements became exact enough for the discrete detectors to be allowed to speak
+about them. 1362 of 1593 are still withheld.
+
+### Stop rule
+
+Checked per axis across all 26 cases and per case on both gates. Two axes
+worsened, both `sticky-scroll`'s `.overflow-demo > .overflow-content`, and
+**I did not revert.** Reasoning, for Pete to overrule:
+
+- `y` worsened by **1.2e-4 px**. Float noise.
+- `x` 82.03 → 139.53. That box is `position: absolute; left: 50%;
+  transform: translate(-50%, -50%)`. RustKit does not apply the transform to
+  the exported box, and the too-narrow containing block was cancelling part of
+  the missing −150px. `left: 50%` now resolves against the used width, which is
+  correct; the pre-existing gap stops being masked.
+
+Nothing was traded away for a number: 0 axes added, no case lost a green, no
+case gained a discrete failure, Gate B bit-identical everywhere it could be.
+This is night 22's shape — a real fix uncovering an error another bug was
+cancelling — and the campaign exists to stop preferring the cancellation.
+
+Worth saying plainly: the fix for the *other* half of that box also already
+exists on the same unmerged branch (`7b48db5`, export the visual rect for
+transformed boxes, written the day the author hit this exact 139.53). I left it
+out. This PR is engine-layout only, and pairing a geometry fix with a change to
+what the oracle measures in one PR is how an unattributable number gets made.
+
+### Mutation-check results
+
+**9 probes, 7 RED, control green (300) before and after every sweep, committed
+before mutating.** Two GREEN, both recorded rather than counted.
+
+| Mutation | Result |
+|---|---|
+| M1 re-flow call deleted (the fix itself) | RED |
+| M2 guard inverted — re-flow only when the width did NOT move | RED |
+| M3 `width_changed` hardcoded false | RED |
+| M4 `stale_width` read AFTER the assignment | RED |
+| M5 re-flow moved AFTER the height resolution | RED *(new guard)* |
+| M6 `!children.is_empty()` dropped | RED *(new guard)* |
+| M7 epsilon widened past every corpus delta | RED |
+| M8 `width_changed` always true | GREEN — measured cost-only |
+| NULL predicate rewritten to an equivalent inequality | GREEN (correctly) |
+
+**Both survivors were real, and both were measured on the corpus before a test
+was written for them** — the sweep cannot tell an untested rule from an
+unreachable branch, and this campaign has been wrong about that four times:
+
+- **M5.** `layout_block_children_with_collapse` writes the flowed extent back
+  onto the box it re-flows, so running it after the height resolution
+  overwrites the height that resolution just decided. `.overflow-demo`
+  (`height: 150px`, one out-of-flow child) comes out **0px tall** and Gate A
+  goes 2500 → 2524, 24 axes added. The ported commit *states* this ordering is
+  load-bearing; nothing tested it.
+- **M6.** The same write, over a box with no children to flow, is a height of
+  zero — and every text run is that shape. Gate A 2500 → **2572**, 72 added,
+  45 worsened. The clause reads exactly like the flex/grid cost guard beside
+  it and is not one.
+
+**M8 is the clause that really is cost-only**, and forcing it true is
+bit-identical on all 26 cases — so it is labelled at the branch and no test
+claims it. That is night 23's precedent applied deliberately rather than
+rediscovered.
+
+### The pile now has a second price, and it is not the merge conflict
+
+Night 25 priced the delay at 75 Gate A failures held back by one branch. Tonight
+adds a different currency: **a night of work spent reproducing a fix that was
+already written, tested and mutation-checked.** I checked the pile — twenty
+minutes, night 25's cheapest useful act — only *after* implementing my own, in
+the wrong order.
+
+There are **no open PRs for any of the eight unmerged engine branches.** Not a
+stalled review; nothing to review. Thirteen digests have asked Pete to "open the
+P2 PR", and the smallest slice of it could have been opened by the trench at any
+point. So tonight it was: **PR #168**, three commits, one file, both suites
+green, the receipt above in the body. That is the ask made concrete rather than
+repeated.
+
+### Decisions needed from Pete
+
+1. **#168 is the smallest reviewable slice of the pile — merge it, or say the
+   pile must land as one union;** it is 260 lines in one file with a per-axis
+   before/after and a 9-probe sweep, and it unblocks the class night 25 could
+   not fix inside `flex.rs`.
+2. **May the trench keep porting the pile forward one measured slice per night**
+   (next: `7b48db5`, the visual rect for transformed boxes, which is what the
+   two worsened axes above are), rather than waiting for the union to be
+   resolved?
+3. Still open from 08-10 onward: keep or literally revert the overflow-clip
+   change that cost `sticky-scroll` 36 pixels on a card RustKit lays out 38px
+   too low?
+
+### Surprises
+
+- **I reproduced a fifteen-day-old measurement to the decimal without knowing
+  it existed.** Same −35 axes, same 149 → 114, same two worsened boxes, same
+  139.53px. I take that as the instrument's strongest determinism evidence to
+  date, and as the most expensive way to have obtained it.
+- **A branch name is not an index.** `atlas/grid-item-subtree-width` sounds like
+  the branch for this fix and *is*, but night 25 checked it against a different
+  box, found it did not fix that one, and the note that reached me read as "the
+  pile does not contain this". Both readings were locally correct. The pile has
+  no manifest, and eight branches deep, the commit subjects are the only index
+  there is.
+- **The corpus's largest non-`about` cluster was 88 axes on one case with one
+  root**, and it survived twenty-five nights of aiming because the boards rank
+  per axis and per root — never per *root's total magnitude*. `sticky-scroll`
+  reads as 149 scattered failures; it is really one line of Phase 9 and a tail.
+- **A guard that reads like a cost guard was worth 72 failing axes.** The
+  neighbouring clause is a genuine cost guard, labelled as such in a comment
+  written by an earlier sweep, and the similarity is exactly what made the
+  second one invisible. Measuring both instead of reasoning about either took
+  four minutes each.
+- **My mutation harness lied once, in the direction that flatters.** Its first
+  run classified two probes RED because it graded on the last line of `cargo
+  test` output and that line was blank. One of those two was M5, a real
+  survivor, which the broken harness had already scored RED — so a harness bug
+  nearly deleted a finding by declaring it already guarded. Now graded on the
+  exit code. Night 2's digest records the same class of failure and I still
+  wrote the string-matching version first.
+- The stale cron prompt is stale for a **fifth** night: it opens by naming
+  P0a-0 as the first unit, completed 2026-08-04, and describes the queue as
+  starting at P0a. Twenty-five nights behind. It is the only thing in this
+  campaign that has never been fixed and never cost anything, purely because the
+  repo's reading order is listed first.
