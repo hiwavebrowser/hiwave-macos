@@ -5110,3 +5110,61 @@ repeated.
   starting at P0a. Twenty-five nights behind. It is the only thing in this
   campaign that has never been fixed and never cost anything, purely because the
   repo's reading order is listed first.
+
+### Addendum — the PR lane produced a macOS receipt, and it reads 2/26
+
+PR #168's Parity Gate ran green on `macos-14`
+([run 33236425745](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/33236425745)),
+and its `pr-aggregate` job published a finish-line receipt. **This is CoreText
+and Metal, not SwiftShader, so unlike everything above it is a receipt** — of
+`develop` at `2be7d37` plus tonight's three commits:
+
+```
+metric:     2/26 cases pass all four conditions
+measured:   26/26 scored on all four  (0 not fully measured)
+  geometry   4/26 green, 26/26 measured
+  paint      3/26 green, 26/26 measured
+  stability 26/26 green, 26/26 measured
+  discrete  25/26 green, 26/26 measured
+```
+
+Green: `bg-pure` **and `bg-solid`**. The campaign has read `1/26` since P0b on
+2026-08-09.
+
+**Almost none of that movement is tonight's, and saying so is the point.**
+Against P0b's columns (4 · 1 · 26 · 18), geometry is unchanged at 4 and the two
+columns that moved are paint (1 → 3) and discrete (18 → 25). Tonight's change
+cannot have moved either: on this seat Gate B was **bit-identical on 25 of 26
+cases**, the one case that moved (`sticky-scroll`) did not change its paint or
+discrete green, and `bg-solid` has no grid on it at all. The geometry column —
+the only one this change touches — is the one that did not move.
+
+So the honest reading is that **`develop` has been ahead of the campaign's
+recorded metric for some time and nobody had run the conjunction on it.** P0b's
+`1/26` was taken on a tree byte-identical to master, every night since has
+compared against it, and `develop` has absorbed a queue of engine work in the
+meantime — `n35`'s square overflow clipping merged on 08-28 is the obvious
+candidate for a discrete column going 18 → 25, and it is a candidate, not an
+attribution: separating it needs a `develop`-only run on the same lane, which
+this PR does not provide.
+
+Two things follow, and the second is time-sensitive:
+
+- **The baseline file's `1/26` is master's number, not the engine's.** I have
+  not edited it. Changing the campaign's headline on a PR-branch run, with the
+  delta unattributed, is exactly the move this campaign exists to refuse. It
+  needs a `develop` receipt of its own.
+- **PR #167 seeds the ratchet floor from master's nightly** (`f58950c`:
+  geometry green 4, paint green 1, 13 discrete failure ids). If `develop` is
+  really at paint 3 and discrete 25, that floor is committed *below where the
+  engine already is*, and the ratchet would then not catch a regression that
+  gave those back. Worth checking before #167 merges.
+
+This also answers a question the digests have carried implicitly since night 6:
+the PR lane on `macos-14` **does** produce a real receipt, so any branch can be
+measured properly without a separate macOS seat. Night 5's correction said so;
+this is the first night a trench-opened PR has used it.
+
+Decision 2 above is superseded by a sharper one: **run the conjunction on
+`develop` and find out what the engine's actual `N/26` is**, before any further
+aiming is done against a number taken from master five weeks of engine work ago.
