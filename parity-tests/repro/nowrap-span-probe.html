@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; padding: 8px; font-family: sans-serif; font-size: 14px; }
+  .box { width: 160px; white-space: nowrap; overflow: hidden; border: 1px solid #888; margin-bottom: 8px; }
+  .b { font-weight: bold; }
+</style>
+</head>
+<body>
+  <div class="box" id="plain-span">Inline <span>plain span that overflows</span> the box</div>
+  <div class="box" id="attr-span">Inline <span style="font-weight: bold">attr span that overflows</span> the box</div>
+  <div class="box" id="class-span">Inline <span class="b">class span that overflows</span> the box</div>
+  <div class="box" id="attr-nowrap-span">Inline <span style="font-weight: bold; white-space: nowrap">attr nowrap span overflows</span> the box</div>
+</body>
+</html>

@@ -3143,8 +3143,18 @@ impl Engine {
         // +29px by the page bottom). font-size seeds the parent's already-
         // absolutized px; a relative author value (em/%) still resolves
         // against the parent right after cascade in the build walk.
-        // white-space / line-height are NOT seeded here: line-height has its
-        // own inheritance pass, and white-space is handled separately.
+        // line-height is NOT seeded here: it has its own inheritance pass.
+        //
+        // white-space / word-break / overflow-wrap / line-break /
+        // text-transform ARE seeded (css-text-3: all five inherit). Until
+        // n36 this comment said white-space was "handled separately" — it
+        // was not: only TEXT nodes copied it, from their own element, which
+        // had never received it. So `.title { white-space: nowrap }` reached
+        // the title's bare text but not `<span>` inside it: the span's text
+        // wrapped onto a second (clipped) line, and the run after the span
+        // painted on line one where the ellipsis belonged
+        // (parity-tests/repro/nowrap-span-probe.html: every span variant
+        // wrapped unless it restated nowrap itself).
         //
         // text-align IS seeded (it is a genuinely inherited CSS property).
         // The old "double-shift" fear was a PRE-Slice-A artifact: back then
@@ -3166,6 +3176,11 @@ impl Engine {
             style.letter_spacing = parent.letter_spacing.clone();
             style.word_spacing = parent.word_spacing.clone();
             style.text_align = parent.text_align;
+            style.white_space = parent.white_space;
+            style.word_break = parent.word_break;
+            style.overflow_wrap = parent.overflow_wrap;
+            style.line_break = parent.line_break;
+            style.text_transform = parent.text_transform;
         }
 
         // Apply tag-specific default styles (user-agent stylesheet)
@@ -11929,6 +11944,51 @@ mod web_font_tests {
             "pre-wrap keeps both edge spaces, pre keeps a space-only run, normal collapses, \
              break-spaces (previously unparsed) preserves, nbsp survives collapsing"
         );
+    }
+
+    #[test]
+    fn inherited_text_properties_reach_inline_children() {
+        // css-text-3: white-space, word-break, overflow-wrap, line-break and
+        // text-transform inherit. The element cascade seeded font/color/
+        // spacing/text-align from the parent and stopped there, so a
+        // `<span>` inside a nowrap block was `normal` — and its TEXT copied
+        // `normal` from the span. Pins the element AND its text box.
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <div style="white-space: nowrap; word-break: break-all; overflow-wrap: anywhere; line-break: anywhere; text-transform: uppercase"><span>a b</span></div>
+            <div style="white-space: nowrap"><span style="white-space: normal">a b</span></div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        fn spans<'a>(b: &'a LayoutBox, out: &mut Vec<&'a LayoutBox>) {
+            if b.identity.as_ref().map(|id| id.tag == "span").unwrap_or(false) {
+                out.push(b);
+            }
+            for c in &b.children {
+                spans(c, out);
+            }
+        }
+        let mut found = Vec::new();
+        spans(&layout, &mut found);
+        assert_eq!(found.len(), 2, "two spans");
+
+        let s = &found[0].style;
+        assert_eq!(s.white_space, rustkit_css::WhiteSpace::Nowrap);
+        assert_eq!(s.word_break, rustkit_css::WordBreak::BreakAll);
+        assert_eq!(s.overflow_wrap, rustkit_css::OverflowWrap::Anywhere);
+        assert_eq!(s.line_break, rustkit_css::LineBreak::Anywhere);
+        assert_eq!(s.text_transform, rustkit_css::TextTransform::Uppercase);
+        let text = found[0]
+            .children
+            .iter()
+            .find(|c| matches!(c.box_type, BoxType::Text(_)))
+            .expect("span text box");
+        assert_eq!(text.style.white_space, rustkit_css::WhiteSpace::Nowrap, "the text inside inherits via the span");
+        assert_eq!(text.style.text_transform, rustkit_css::TextTransform::Uppercase);
+
+        // An author value on the child still wins over the inherited one.
+        assert_eq!(found[1].style.white_space, rustkit_css::WhiteSpace::Normal);
     }
 
     #[test]
