@@ -2085,6 +2085,19 @@ pub fn layout_grid_container(
                     // re-flowing it would be a no-op that still costs a walk of
                     // the subtree on every grid item on the page.
                     //
+                    // That narrowing is a COST guard, measured and not assumed:
+                    // forcing `width_changed` to true is bit-identical on all
+                    // 26 corpus cases, so nothing tests it and nothing should
+                    // pretend to. Deleting the CALL is a different matter and
+                    // is guarded — see the tests below.
+                    //
+                    // `!children.is_empty()` reads like the same kind of cost
+                    // guard and is NOT one. A block re-flow derives the box's
+                    // height from the children it flows, so running it over a
+                    // childless box — every text run is one — writes a height
+                    // of zero. Measured: dropping that clause takes Gate A from
+                    // 2500 to 2572 failing axes.
+                    //
                     // The flex/grid exclusions below are a COST guard and not a
                     // correctness one, stated that way because a mutation sweep
                     // asked and the answer was measured: removing them is
@@ -5630,6 +5643,122 @@ mod tests {
              {expected}, got {line_width} ({} is the CONTAINER's content width \
              less the card padding -- the stale pre-pass value)",
             CONTAINER_WIDTH - 2.0 * CARD_PADDING
+        );
+    }
+
+    /// A grandchild with NO children is never re-flowed, and that clause is a
+    /// correctness guard rather than the cost guard it reads as.
+    ///
+    /// `layout_block_children_with_collapse` derives the box's content height
+    /// from the children it flows, so running it over a box that has none
+    /// writes a height of zero. Text boxes are exactly that shape — they carry
+    /// a measured height and no children — and they arrive in this loop like
+    /// any other grandchild. Measured on the corpus rather than argued: with
+    /// the clause removed, `gradient-backgrounds` loses height under its grid
+    /// items and Gate A goes 2500 -> 2572 failing axes, 72 of them added and
+    /// 45 worsened.
+    #[test]
+    fn a_childless_grandchild_keeps_its_measured_height() {
+        const CONTAINER_WIDTH: f32 = 1000.0;
+        const COLUMN: f32 = 250.0;
+        const TEXT_HEIGHT: f32 = 24.0;
+
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Px(COLUMN)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        let mut item_style = ComputedStyle::new();
+        item_style.box_sizing = BoxSizing::BorderBox;
+        let mut item = LayoutBox::new(BoxType::Block, item_style);
+
+        // A text box: measured height, no children. The pre-pass measured it
+        // against the CONTAINER, so the column assignment moves its width and
+        // anything keyed on "the width changed" fires on it.
+        let text_style = ComputedStyle::new();
+        let mut text = LayoutBox::new(BoxType::Text("a text run".to_string()), text_style);
+        text.dimensions.content.width = CONTAINER_WIDTH;
+        text.dimensions.content.height = TEXT_HEIGHT;
+
+        item.dimensions.content.width = CONTAINER_WIDTH;
+        item.children.push(text);
+        container.children.push(item);
+
+        layout_grid_container(&mut container, CONTAINER_WIDTH, 600.0);
+
+        let text_height = container.children[0].children[0].dimensions.content.height;
+        assert!(
+            (text_height - TEXT_HEIGHT).abs() < 0.01,
+            "a grandchild with no children must not be re-flowed: expected \
+             {TEXT_HEIGHT}, got {text_height} (a block re-flow derives the \
+             height from the children it flows, and there are none)"
+        );
+    }
+
+    /// The subtree re-flow runs BEFORE the height resolution, and that order
+    /// is load-bearing rather than incidental.
+    ///
+    /// `layout_block_children_with_collapse` writes the flowed content extent
+    /// back onto the box it re-flows. Run it after the height resolution and
+    /// it overwrites the height that resolution just decided, so a grandchild
+    /// with an explicit `height` collapses to whatever its children happen to
+    /// occupy. Measured on the corpus rather than argued: with the re-flow
+    /// moved after, sticky-scroll's `.overflow-demo` (`height: 150px`, one
+    /// out-of-flow child) comes out 0px tall and Gate A goes 2500 -> 2524
+    /// failing axes, 24 of them added.
+    ///
+    /// The width guard above stays green under that move -- widths are
+    /// correct either way -- which is why this needs its own test.
+    #[test]
+    fn the_subtree_reflow_does_not_overwrite_an_explicit_grandchild_height() {
+        const CONTAINER_WIDTH: f32 = 1000.0;
+        const COLUMN: f32 = 250.0;
+        const CARD_HEIGHT: f32 = 150.0;
+        const INNER_HEIGHT: f32 = 10.0;
+
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Px(COLUMN)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        let mut item_style = ComputedStyle::new();
+        item_style.box_sizing = BoxSizing::BorderBox;
+        let mut item = LayoutBox::new(BoxType::Block, item_style);
+
+        let mut card_style = ComputedStyle::new();
+        card_style.box_sizing = BoxSizing::BorderBox;
+        card_style.height = Length::Px(CARD_HEIGHT);
+        let mut card = LayoutBox::new(BoxType::Block, card_style);
+
+        let mut inner_style = ComputedStyle::new();
+        inner_style.height = Length::Px(INNER_HEIGHT);
+        let mut inner = LayoutBox::new(BoxType::Block, inner_style);
+
+        // The block pre-pass state: measured against the CONTAINER, so the
+        // width moves when the column is assigned and the re-flow fires.
+        inner.dimensions.content.width = CONTAINER_WIDTH;
+        inner.dimensions.content.height = INNER_HEIGHT;
+        card.dimensions.content.width = CONTAINER_WIDTH;
+        card.dimensions.content.height = CARD_HEIGHT;
+        card.children.push(inner);
+        item.dimensions.content.width = CONTAINER_WIDTH;
+        item.children.push(card);
+        container.children.push(item);
+
+        layout_grid_container(&mut container, CONTAINER_WIDTH, 600.0);
+
+        let card_height = container.children[0].children[0]
+            .dimensions
+            .content
+            .height;
+        assert!(
+            (card_height - CARD_HEIGHT).abs() < 0.01,
+            "an explicit height must survive the subtree re-flow: expected \
+             {CARD_HEIGHT}, got {card_height} ({INNER_HEIGHT} is the flowed \
+             extent of its children -- the re-flow ran after the height \
+             resolution and overwrote it)"
         );
     }
 }
