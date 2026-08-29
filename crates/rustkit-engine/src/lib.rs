@@ -4448,6 +4448,19 @@ impl Engine {
             "overflow-y" => {
                 style.overflow_y = parse_overflow(value);
             }
+            // css-overflow-3 §5.1. Not inherited (a block owns its line
+            // boxes). The two-value form and `<string>` fallback are
+            // unparsed: `ellipsis` anywhere in the value is the ellipsis.
+            "text-overflow" => {
+                style.text_overflow = if value
+                    .split_whitespace()
+                    .any(|v| v.eq_ignore_ascii_case("ellipsis"))
+                {
+                    rustkit_css::TextOverflow::Ellipsis
+                } else {
+                    rustkit_css::TextOverflow::Clip
+                };
+            }
             "z-index" => {
                 if let Ok(z) = value.parse::<i32>() {
                     style.z_index = z;
@@ -11915,6 +11928,45 @@ mod web_font_tests {
             ],
             "pre-wrap keeps both edge spaces, pre keeps a space-only run, normal collapses, \
              break-spaces (previously unparsed) preserves, nbsp survives collapsing"
+        );
+    }
+
+    #[test]
+    fn text_overflow_parses_and_is_not_inherited() {
+        // css-overflow-3 §5.1: `text-overflow` was unparsed (every value fell
+        // through), so the chrome's `.tab-title { text-overflow: ellipsis }`
+        // family never reached paint. The property is NOT inherited — the
+        // block owns its line boxes — so the span inside stays `clip`.
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <div style="text-overflow: ellipsis; overflow: hidden; white-space: nowrap"><span>XX</span></div>
+            <div style="text-overflow: clip">XX</div>
+            <div style="text-overflow: ELLIPSIS">XX</div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        fn collect(b: &LayoutBox, out: &mut Vec<(String, rustkit_css::TextOverflow)>) {
+            if let Some(id) = &b.identity {
+                if id.tag == "div" || id.tag == "span" {
+                    out.push((id.tag.clone(), b.style.text_overflow));
+                }
+            }
+            for c in &b.children {
+                collect(c, out);
+            }
+        }
+        let mut found = Vec::new();
+        collect(&layout, &mut found);
+        assert_eq!(
+            found,
+            vec![
+                ("div".to_string(), rustkit_css::TextOverflow::Ellipsis),
+                ("span".to_string(), rustkit_css::TextOverflow::Clip),
+                ("div".to_string(), rustkit_css::TextOverflow::Clip),
+                ("div".to_string(), rustkit_css::TextOverflow::Ellipsis),
+            ],
+            "ellipsis parses (case-insensitively), clip is the initial value, the span does not inherit"
         );
     }
 
