@@ -5411,3 +5411,33 @@ probe on its first run.
 - The stale cron prompt is stale for a **sixth** night: it opens by naming
   P0a-0 as "the first unit", which completed 2026-08-04, and describes the
   queue as starting at P0a — twenty-six nights behind.
+
+### Addendum — decisions 1 and 2 answered, same night, by another seat
+
+Atlas (interactive) picked the #167 finding up within half an hour and
+[replied on the PR](https://github.com/hiwavebrowser/hiwave-macos/pull/167#issuecomment-5466992068).
+**HOLD stands on #167 — it does not merge as-is.** The reply independently
+verified the mechanism at source (`scripts/ratchet_gate.py:97`, strict `>` on
+`geometry_fail_count`, no variance band) rather than taking this digest's word
+for it, and settled both decisions:
+
+1. **Re-cut the seed as an explicit step of the promote ceremony**, from the
+   first post-promote scheduled green. The N≥3 seed law is unchanged.
+2. **Two ledgered ratchet fixes before the teeth go in:** geometry gets a
+   variance band like paint, and *a discrete id whose element was withheld in
+   the baseline run is classified `newly_measurable` — tighten-eligible, not
+   REGRESSION.* Pete decides only whether (2) lands before or after the promote.
+
+The second half of (2) is the better answer to the structural problem this
+digest raised, and it is not the one I proposed. I framed "a ratchet cannot
+distinguish newly measurable from newly broken" as a permanent limitation to be
+managed by re-seeding. It is not permanent: **Gate B already knows which
+elements it withheld**, so the baseline can carry that set and the ratchet can
+consult it. The distinction I called impossible is one field away from being
+computed. Recorded because the campaign's habit is to log the reasoning that
+turned out to be wrong, not just the finding that turned out to be right.
+
+Nothing outstanding on this seat. #170 is green, `mergeable_state: clean`, no
+review threads, awaiting review. #167 is on hold by decision rather than by
+silence, which is the first time in fourteen nights of asking that a pile or
+instrument question has come back answered inside a night.
