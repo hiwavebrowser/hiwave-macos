@@ -23,8 +23,35 @@
 
 ```
 BASELINE (2026-08-04):  UNMEASURABLE
-P0b      (2026-08-09):  1/26 finish-line-green
+P0b      (2026-08-09):  1/26 finish-line-green   (master 44389f1)
+master   (2026-08-28):  1/26 finish-line-green   (master f58950c, nightly 33209750736)
+develop  (2026-08-30):  2/26 finish-line-green   (develop 2be7d37, run 33294082148)
 ```
+
+**`master` and `develop` are two different numbers and both are live.** The
+campaign's headline for five weeks was master's. `develop` carries 93 commits
+master does not, and until 2026-08-30 nobody had run the conjunction on it.
+Both figures above are `macos-14` — CoreText and Metal — and the comparison is
+instrument-constant: `layout_oracle_gate.py`, `paint_oracle_gate.py`,
+`finish_line_receipt.py`, `forensic_board.py`, `parity_gate.py`,
+`docs/VISUAL_DIFF_POLICY.md` and `baselines/` are **byte-identical between the
+two branches**, so the delta is the engine and nothing else.
+
+| column | master `f58950c` | develop `2be7d37` |
+|---|---|---|
+| **metric** | **1/26** | **2/26** |
+| geometry green | 4/26 | 4/26 |
+| paint green | 1/26 | **3/26** |
+| stability | 26/26 | 26/26 |
+| discrete green | 25/26 | 25/26 |
+| measured on all four | 26/26 | 26/26 |
+| discrete failure sits on | `image-gallery` (13 ids) | **`gradient-backgrounds`** (3 ids, 1 unique) |
+
+Green on master: `bg-pure`. Green on develop: `bg-pure`, **`bg-solid`**.
+develop's third paint-green case is `gradients` (99.2982%), which geometry
+still fails, so it does not reach the conjunction.
+
+**The whole delta is paint.** Geometry's green count is 4 on both.
 
 **UNMEASURABLE was the honest reading for five nights, not a placeholder for a
 bad number.** Any figure produced before the oracle existed would have been a

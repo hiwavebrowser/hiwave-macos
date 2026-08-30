@@ -5168,3 +5168,246 @@ this is the first night a trench-opened PR has used it.
 Decision 2 above is superseded by a sharper one: **run the conjunction on
 `develop` and find out what the engine's actual `N/26` is**, before any further
 aiming is done against a number taken from master five weeks of engine work ago.
+
+## 2026-08-30
+
+**Metric: 1/26 → 2/26, and the movement is a measurement rather than a change.**
+Nothing landed in `crates/` tonight on any branch. The number moved because the
+campaign has been quoting **master's** figure for five weeks while the engine
+work lives on **develop**, and until tonight nobody had run the conjunction on
+develop. Both numbers are `macos-14` — CoreText and Metal — so unlike most
+nights in this digest, **everything below is a receipt.**
+
+**P-item: run the conjunction on `develop` (night 26's superseding decision).
+COMPLETE.**
+
+### The receipt
+
+`develop 2be7d37`, PR **#170**, run
+[33294082148](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/33294082148).
+The PR is docs-only and `crates/`, `Cargo.toml` and `Cargo.lock` are
+byte-identical to develop, so the number is attributable to develop's engine
+and to nothing in the PR.
+
+```
+metric:     2/26 cases pass all four conditions
+measured:   26/26 scored on all four  (0 not fully measured)
+  geometry   4/26 green, 26/26 measured
+  paint      3/26 green, 26/26 measured
+  stability 26/26 green, 26/26 measured
+  discrete  25/26 green, 26/26 measured
+```
+
+Against master's floor, taken from #167's seed (`f58950c`, nightly
+[33209750736](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/33209750736)):
+
+| column | master `f58950c` | develop `2be7d37` |
+|---|---|---|
+| **metric** | **1/26** | **2/26** |
+| geometry green | 4/26 | 4/26 |
+| paint green | 1/26 | **3/26** |
+| stability | 26/26 | 26/26 |
+| discrete green | 25/26 | 25/26 |
+| discrete failure sits on | `image-gallery` (13 ids) | **`gradient-backgrounds`** (3 ids) |
+
+Green on master: `bg-pure`. On develop: `bg-pure` and **`bg-solid`**
+(99.1519%, over the bar). The third paint-green case is `gradients`
+(99.2982%), which geometry still fails, so it does not reach the conjunction.
+
+**The comparison is instrument-constant, and I checked rather than assumed it.**
+`layout_oracle_gate.py`, `paint_oracle_gate.py`, `finish_line_receipt.py`,
+`forensic_board.py`, `parity_gate.py`, `docs/VISUAL_DIFF_POLICY.md` and
+`baselines/` are **byte-identical between master and develop**. The delta is
+the engine and nothing else. That check is the only reason the two numbers can
+be put in one table.
+
+Gate B's admission count, the half this campaign has learned to read: **628
+elements examined, 965 withheld** of 1593. The SwiftShader seat's last figure
+was 231 admitted. Geometry really is better on macOS, and 965 is still the
+majority.
+
+### Correction to night 26's addendum
+
+Night 26 read #168's `2/26` against P0b's columns (4 · 1 · 26 · 18), concluded
+that develop was ahead on paint **and** discrete, and named n35's square
+overflow clipping as "the obvious candidate" for discrete going 18 → 25. Two
+parts of that are wrong, and #167's seed file is what shows it:
+
+- **master already reads discrete 25/26.** The 18 → 25 movement is not
+  develop-vs-master at all.
+- **n35 cannot explain it.** n35 is develop-only; master has never carried it
+  and master reads 25 anyway.
+
+The cause is the instrument. Night 8's `attributable_selectors` precondition —
+which by construction can only *withhold* discrete failures, never add them —
+is on master (via #134, rebased off `eb12d55`), and P0b's 18 was measured two
+days before it existed. Checked, not inferred: master's `paint_oracle_gate.py`
+carries `attributable_selectors`.
+
+What survives from night 26 is the part that mattered: the paint column really
+did move, 1 → 3, and it is develop's engine.
+
+### #168's three commits moved no column
+
+develop alone reads `2/26` with columns `4 · 3 · 26 · 25`. #168's run — develop
+**plus** those three commits — read `2/26` with the identical columns. Night 26
+argued from the SwiftShader seat that its change could not have moved either
+column; that argument is now closed on macOS by direct comparison rather than
+by inference.
+
+### The discrete failure moved, and it is P1's original residual
+
+This is the finding of the night. master's one discrete case is `image-gallery`,
+13 `missing_clip` ids. develop's is `gradient-backgrounds`, and it is a
+different defect entirely:
+
+```
+gradient-backgrounds · body > div.grid > div.gradient-box linear-6:nth-of-type(6)
+    missing_clip · radius 16px top-right    · fill #23c3bb across all 36 notch px
+    missing_clip · radius 16px bottom-left  · fill #23c7b8 across all 36 notch px
+    missing_clip · radius 16px bottom-right · fill #23b4c8 across all 36 notch px
+```
+
+`.linear-6` is the card the plan's §4 names as P1's remaining work — *"rounded
+clip for scaled gradients (corner notches)"*. On 2026-08-12 this digest recorded
+it as **unmeasurable**, in those words:
+
+> *"The named residual — 'rounded clip for scaled gradients (corner notches)' —
+> is still unlanded, and it is still not measurable: the `.linear-6` card it
+> affects is 18px out of place on `gradient-backgrounds`, so the discrete
+> detector withholds it."*
+
+Eighteen days of geometry work later the element is inside 0.5px, the detector
+is allowed to speak about it, and it reports the notch. **Nothing broke. A
+defect that was always there became visible**, which is exactly the dynamic the
+2026-08-12 amendment predicted — each geometry fix enlarges Gate B's
+jurisdiction — arriving on the specific box that motivated the prediction.
+
+The gradient painter has now been shown to be wrong about something, for the
+first time in this campaign. Night 12 closed with "the gradient painter still
+has not been shown to be wrong about anything."
+
+### The #167 finding, and it is time-sensitive
+
+Night 26 asked whether #167's floor is "committed below where the engine
+already is". It is not, on either column it worried about — master genuinely is
+at geometry 4, paint 1, discrete 25. **The real risk is the opposite one: the
+floor will red-lock the first develop→master promote, on a case where nothing
+regressed.**
+
+Verified by running `scripts/ratchet_gate.py` against #167's committed floor,
+with a control:
+
+```
+CONTROL  (probe reproduces the floor exactly)          exit 2  "RATCHET holds"
+PROBE    (develop's discrete profile: linear-6 notches
+          appear, image-gallery's 13 clear)            exit 1
+             RATCHET tighten-eligible (1): image-gallery
+             RATCHET REGRESSION (1):
+               gradient-backgrounds: NEW discrete failure
+               missing_clip::body > div.grid > div.gradient-box linear-6:nth-of-type(6)
+```
+
+The control is the load-bearing half: my first probe scored exit 1 on all 26
+cases because I omitted the `measured` flag the schema requires, and without a
+control I would have reported that as the finding.
+
+A second trigger exists and it is a different shape. Comparing the two receipts
+per case, **`settings` geometry failures read 280 on master's floor and 281 on
+develop**. The ratchet tests geometry counts with a strict `>` and **no variance
+band at all**, while paint gets a 10-percentage-point one. So a single-count
+move — engine delta or run-to-run jitter, and two runs on two trees cannot tell
+which — is enough to red-lock. That asymmetry is worth a decision before the
+teeth go in.
+
+I only captured the tail of Gate A's per-case list from the job log (the
+`parity-oracle` artifact is on a blob host this seat's proxy refuses), so the
+geometry-count comparison above is **partial, not a complete diff**. Stated as
+a limit rather than left implicit.
+
+Cases develop clearly improves against the floor: `image-gallery` 13 discrete
+ids → 0, `sticky-scroll` 162 → 110 geometry, `new_tab` 224 → 171.
+
+### Commits
+
+- `97ef608` — `docs/UNMERGED_ENGINE_BRANCHES_2026-08-30.md`, an index for the
+  pile, on `atlas/develop-receipt-pile-manifest` (**PR #170**). Docs only; its
+  Parity Gate run is the receipt above.
+- this digest, on `atlas/trench-parity-finish-line`.
+
+Nothing in `crates/` on any branch. Branch law (2026-08-12) held trivially.
+`cargo test -p rustkit-layout --lib` and `-p rustkit-engine --lib` green on
+both trees touched: develop 297 / 60, trench branch 267 / 42.
+
+### The pile is smaller than this digest has been claiming
+
+Every night since 08-25 has priced the delay as *eight unmerged engine
+branches*. **Three of the eight are already in `develop`**, landed under an
+`-r2` successor while the original was left behind: `abspos-overlay`,
+`glyph-raster-bearing`, `webfont-load`. Their merge conflicts against develop
+(103 hunks on one) are the *evidence* of supersession, not a cost.
+
+What is live is five branches, two already open as #168 and #169, and the
+other four are two **stacked chains**, not parallel work:
+
+```
+grid-item-subtree-width ⊂ p3-flex-residual ⊂ percent-height-basis   CONFLICT(2), 15 commits
+replaced-border-box ⊂ replaced-aspect-ratio ⊂ replaced-flex-image-ratio   CLEAN, 6 commits
+```
+
+Merging either tip merges the whole chain. **Chain B is clean against develop,
+six commits deep, and has never been measured by any gate.** It also carries
+`b2ad86e`, which gives replaced elements and form controls a join key —
+`form-controls` and `images-intrinsic` carry 30 and 14 join failures, and an
+element that fails to join is never compared, so that branch plausibly moves
+what is *measurable*. That is the cheapest unmeasured work available.
+
+### Mutation-check results
+
+**None — no behavioural change landed, so there is no guard to check.** The
+ratchet probe above carried a control instead, and the control caught a broken
+probe on its first run.
+
+### Decisions needed from Pete
+
+1. **Hold #167, or re-seed the floor as part of the develop→master promote** —
+   as committed it red-locks that promote on `gradient-backgrounds`, for a
+   defect that became *visible* rather than *worse* (verified, exit 1).
+2. **Should the ratchet's geometry counts get a variance band?** Paint has 10
+   points; geometry has none, and `settings` already differs by 1 between the
+   two receipts.
+3. **Merge #168, and may the trench port chain B forward as one measured
+   slice?** It is clean, six commits, and entirely unmeasured — fourteenth
+   night of asking for the pile to move.
+
+### Surprises
+
+- **The campaign's headline number was master's, and nobody had noticed the
+  engine had moved past it.** `1/26` has been quoted since 2026-08-09 and
+  re-derived nightly against a tree that has not carried the engine work for
+  weeks. The fix was one docs-only PR, and it could have been opened on any of
+  the previous seventeen nights.
+- **The night's best finding came from the file I opened to check something
+  else.** #167's seed is a full per-case snapshot of master, which is exactly
+  the comparison basis this campaign lacked — it settled the discrete-column
+  correction, gave the geometry counts, and let the ratchet be tested against a
+  real floor. It was reviewed for six days as a config file.
+- **P1's residual surfaced on its own.** Eighteen nights of geometry work made
+  the one box P1 named measurable, without anyone working P1. The queue's
+  geometry-first amendment predicted this in general; seeing it land on the
+  exact box that motivated the amendment is stronger than the prediction was.
+- **A ratchet cannot tell "newly measurable" from "newly broken".** Every
+  geometry fix in this campaign enlarges Gate B's jurisdiction, so every
+  geometry fix can surface a discrete failure that will read as a regression.
+  This is structural, not a bug in #167, and it will recur.
+- **My first probe was wrong in the direction that would have flattered the
+  finding** — 26 regressions instead of 1, from a missing schema field. The
+  control is what caught it, and this digest has now recorded a
+  harness-lied-to-me entry on three separate nights.
+- I lost a build to my own concurrency: a background `cargo test` was still
+  running when I switched branches under it, and reported eight compile errors
+  that do not exist. I stated that as a finding before re-checking it. Both
+  trees are green.
+- The stale cron prompt is stale for a **sixth** night: it opens by naming
+  P0a-0 as "the first unit", which completed 2026-08-04, and describes the
+  queue as starting at P0a — twenty-six nights behind.
