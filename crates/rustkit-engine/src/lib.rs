@@ -2530,6 +2530,38 @@ impl Engine {
                     );
                 }
 
+                // Inline <svg> is a replaced element: it is sized by its own
+                // width=/height= presentational hints (author CSS wins; the
+                // CSS replaced-element fallback is 300×150 without them)
+                // and its SVG children never generate CSS boxes. It used to
+                // get NO box at all — an empty block with no visible styling
+                // is dropped below — and the shelf's search icon survived
+                // only because the whitespace between <circle> and <path>
+                // left a phantom 18px text line inside it; collapsing that
+                // whitespace correctly made the icon vanish and shifted the
+                // command input 28px left. The graphics are not painted
+                // (inline SVG paint is its own lane); the geometry is what
+                // the flex row needs, and it now matches Chrome's 14×14.
+                if tag_lower == "svg" {
+                    let attr_px = |name: &str| {
+                        attributes
+                            .get(name)
+                            .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+                    };
+                    if matches!(style.width, rustkit_css::Length::Auto) {
+                        style.width = rustkit_css::Length::Px(attr_px("width").unwrap_or(300.0));
+                    }
+                    if matches!(style.height, rustkit_css::Length::Auto) {
+                        style.height = rustkit_css::Length::Px(attr_px("height").unwrap_or(150.0));
+                    }
+                    if style.display == rustkit_css::Display::Inline {
+                        style.display = rustkit_css::Display::InlineBlock;
+                    }
+                    let mut svg_box = LayoutBox::new(BoxType::Block, style.clone());
+                    Self::transfer_positioning(&mut svg_box, &style);
+                    return svg_box;
+                }
+
                 // Handle form controls
                 if tag_lower == "input" {
                     let input_type = attributes
@@ -3504,6 +3536,14 @@ impl Engine {
                 style.display = rustkit_css::Display::Inline;
             }
             "canvas" => {
+                style.display = rustkit_css::Display::Inline;
+            }
+            // Chrome's UA sheet has no display rule for <svg>: an inline
+            // svg is an inline-level replaced element. The `_ => {}`
+            // fallback below leaves ComputedStyle's default (Block), which
+            // made every inline svg a block — and, being childless with no
+            // visible styling, a dropped one.
+            "svg" => {
                 style.display = rustkit_css::Display::Inline;
             }
             "iframe" => {
@@ -10657,6 +10697,86 @@ mod tests {
 
         // Pre-family runs join verbatim — both spaces around the comment stay.
         assert!(all.contains(&"one  two"), "pre run must join verbatim: {:?}", all);
+    }
+
+    #[test]
+    fn test_inline_svg_is_a_sized_replaced_box_without_child_boxes() {
+        // An inline <svg> generated no box of its own: an empty block with
+        // no visible styling is dropped, and the shelf's 14×14 search icon
+        // existed only as the phantom whitespace line between its <circle>
+        // and <path>. A replaced element is sized by its own width=/height=
+        // (CSS fallback 300×150), author CSS wins, and its SVG children
+        // produce no CSS boxes.
+        let html = r#"<!DOCTYPE html>
+            <html><body>
+              <div style="display: flex">
+                <svg width="14" height="14" viewBox="0 0 24 24">
+                  <circle cx="11" cy="11" r="8"/>
+                  <path d="M21 21l-4.35-4.35"/>
+                </svg>
+                <input type="text">
+              </div>
+              <p><svg></svg></p>
+              <p><svg width="40" height="40" style="width: 20px"></svg></p>
+            </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        };
+
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        // Every childless, sized block box: (width, height, display).
+        fn collect(b: &LayoutBox, out: &mut Vec<(rustkit_css::Length, rustkit_css::Length, rustkit_css::Display)>) {
+            if matches!(b.box_type, BoxType::Block) && b.children.is_empty() {
+                out.push((b.style.width.clone(), b.style.height.clone(), b.style.display));
+            }
+            for c in &b.children {
+                collect(c, out);
+            }
+        }
+        let mut boxes = Vec::new();
+        collect(&layout, &mut boxes);
+        let px = |w: f32, h: f32| (rustkit_css::Length::Px(w), rustkit_css::Length::Px(h), rustkit_css::Display::InlineBlock);
+        assert!(boxes.contains(&px(14.0, 14.0)), "svg width=/height= box missing: {:?}", boxes);
+        assert!(boxes.contains(&px(300.0, 150.0)), "attribute-less svg must fall back to 300x150: {:?}", boxes);
+        assert!(boxes.contains(&px(20.0, 40.0)), "author CSS width must win over width=: {:?}", boxes);
+
+        // No <circle>/<path> box, and no whitespace text box, under the svg.
+        fn any_text(b: &LayoutBox) -> bool {
+            b.children.iter().any(|c| matches!(c.box_type, BoxType::Text(_)) || any_text(c))
+        }
+        fn svg_like(b: &LayoutBox) -> Option<&LayoutBox> {
+            if matches!(b.style.width, rustkit_css::Length::Px(w) if (w - 14.0).abs() < 0.01) {
+                return Some(b);
+            }
+            b.children.iter().find_map(svg_like)
+        }
+        let svg = svg_like(&layout).expect("svg box");
+        assert!(svg.children.is_empty() && !any_text(svg), "svg children must not generate boxes");
     }
 
     #[test]
