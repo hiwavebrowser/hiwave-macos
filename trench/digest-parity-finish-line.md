@@ -5632,3 +5632,42 @@ have.
 - The stale cron prompt is stale for a **seventh** night: it opens by naming
   P0a-0 as "the first unit", completed 2026-08-04, and describes the queue as
   starting at P0a — twenty-seven nights behind.
+
+### Addendum — #172 is green, and its run reproduces #167's floor exactly
+
+Run [33361050250](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/33361050250),
+all jobs green, `mergeable_state: clean`. `script-guards` passing is the first
+time the ratchet's guard suite has executed in CI on master at all.
+
+`crates/` on this branch is byte-identical to master, so `pr-aggregate` produced
+a macOS receipt for **master's engine**. Unlike everything else in tonight's
+entry, this is CoreText and Metal, and it is a receipt:
+
+```
+metric:     1/26 cases pass all four conditions
+measured:   26/26 scored on all four  (0 not fully measured)
+  geometry   4/26 green   paint 1/26 green   stability 26/26   discrete 25/26
+```
+
+Green: `bg-pure`. The one discrete case is `image-gallery`, 13 `missing_clip` ids.
+
+**Every column matches #167's committed floor** — cut three days earlier, from a
+different lane (nightly 33209750736, master `f58950c`). Same four columns, same
+green case, same discrete case, same count of 13. Two independent macOS runs on
+two lanes agreeing exactly is the strongest reproducibility evidence this
+instrument has produced on the platform that matters, and it validates #167's
+seed by something other than the seed's own run.
+
+It is also the regression check this PR needed and I had not planned: **Gate B's
+verdicts are unchanged on macOS.** Tonight's Gate B edit adds a published field
+and touches no detector; the discrete column reading 25/26 with the same 13 ids
+as a floor taken before the change is that claim measured rather than asserted.
+I had only the argument from reading the diff until this run.
+
+`RATCHET OFF — no baseline committed` on the run, correctly: master has no floor
+until #167 lands. The fixes are inert until one is seeded, which is the concrete
+answer to decision 1 — merging #172 before the promote costs nothing, because
+there is nothing for it to change until a floor exists.
+
+Nothing outstanding on this seat. #172 is green, clean, no review threads,
+awaiting review; the check-in stays armed until it merges or closes.
