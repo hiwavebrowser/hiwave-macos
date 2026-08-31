@@ -4382,6 +4382,93 @@ pub struct DisplayList {
     /// dropdown escaping an `overflow: hidden` wrapper). Such a box pops
     /// exactly these clips before painting and re-pushes them after.
     escapable_clips: Vec<(Rect, BorderRadius)>,
+    /// `text-overflow: ellipsis` scope of the nearest block container being
+    /// painted (css-overflow-3 §5.1). Inline boxes, anonymous blocks and
+    /// text runs paint inside it; a nested block container replaces it with
+    /// its own (or none) for the duration of its subtree.
+    ellipsis: Option<EllipsisScope>,
+}
+
+/// One block container's `text-overflow: ellipsis` state while its subtree
+/// paints.
+#[derive(Debug, Clone)]
+struct EllipsisScope {
+    /// End edge of the block's CONTENT box — the line box edge the
+    /// ellipsis sits against. (The clip is at the padding edge; the
+    /// ellipsis is not: css-overflow-3 §5.1 places it "at the end of the
+    /// line box".)
+    limit_x: f32,
+    /// Line boxes (keyed by top) that already carry an ellipsis. Runs paint
+    /// in inline order, so every run reaching a cut line AFTER the cut is
+    /// past the ellipsis and does not paint — judged by order, not by x:
+    /// a nowrap run's laid-out width is clamped to its container, so the
+    /// sibling after an overflowing `<span>` is placed at the clamped end,
+    /// short of where its content really is (repro: `Inline <b>bold run
+    /// that overflows</b> the box` painted " th…" over the span's
+    /// ellipsis when x decided).
+    lines: Vec<f32>,
+}
+
+/// What `text-overflow` does to one painted run.
+#[derive(Debug, Clone, PartialEq)]
+enum TextOverflowCut {
+    /// Fits (or cannot be measured): paint as laid out.
+    Keep,
+    /// Starts at or past an ellipsis already painted on this line.
+    Hide,
+    /// Cut so that `…` fits inside the block's content edge.
+    Cut {
+        text: String,
+        advances: Vec<f32>,
+        width: f32,
+    },
+}
+
+impl EllipsisScope {
+    /// css-overflow-3 §5.1 for one run painted at (`x`, line top
+    /// `line_top`) with per-char `advances`: a run ending past the block's
+    /// content edge is cut so that `…` (advance `ellipsis_advance`) fits;
+    /// if not even the ellipsis fits, the ellipsis alone is painted (the
+    /// clip cuts it — the spec says clip the ellipsis, not skip it). A run
+    /// that fits is kept; a run reaching a line that already carries an
+    /// ellipsis is hidden.
+    fn cut(
+        &mut self,
+        text: &str,
+        x: f32,
+        line_top: f32,
+        advances: &[f32],
+        ellipsis_advance: f32,
+    ) -> TextOverflowCut {
+        const EPS: f32 = 0.01;
+        if self.lines.iter().any(|&top| (top - line_top).abs() < 0.5) {
+            return TextOverflowCut::Hide;
+        }
+        let total: f32 = advances.iter().sum();
+        if x + total <= self.limit_x + EPS {
+            return TextOverflowCut::Keep;
+        }
+        let available = self.limit_x - x - ellipsis_advance;
+        let mut kept = 0usize;
+        let mut kept_width = 0.0f32;
+        for &adv in advances {
+            if kept_width + adv > available + EPS {
+                break;
+            }
+            kept_width += adv;
+            kept += 1;
+        }
+        let mut cut: String = text.chars().take(kept).collect();
+        cut.push('\u{2026}');
+        let mut cut_advances: Vec<f32> = advances[..kept].to_vec();
+        cut_advances.push(ellipsis_advance);
+        self.lines.push(line_top);
+        TextOverflowCut::Cut {
+            text: cut,
+            advances: cut_advances,
+            width: kept_width + ellipsis_advance,
+        }
+    }
 }
 
 impl Default for DisplayList {
@@ -4399,6 +4486,7 @@ impl DisplayList {
             depth: 0,
             root_overflow_visible: true,
             escapable_clips: Vec::new(),
+            ellipsis: None,
         }
     }
 
@@ -4417,6 +4505,7 @@ impl DisplayList {
             root_overflow_visible: root.style.overflow_x == rustkit_css::Overflow::Visible
                 && root.style.overflow_y == rustkit_css::Overflow::Visible,
             escapable_clips: Vec::new(),
+            ellipsis: None,
         }
     }
 
@@ -4528,6 +4617,10 @@ impl DisplayList {
         // Render this box
         self.render_box_content(layout_box);
 
+        // A block container starts (or ends) the `text-overflow: ellipsis`
+        // scope its line boxes paint under; restored after its subtree.
+        let outer_ellipsis = self.enter_ellipsis_scope(layout_box);
+
         // A box that clips its overflow clips its DESCENDANTS to its padding
         // box (rounded when it has a radius). Pushed after the box's own
         // content — the background rounds itself via BorderRadius on its own
@@ -4614,6 +4707,9 @@ impl DisplayList {
                 self.escapable_clips.pop();
             }
         }
+        if let Some(outer) = outer_ellipsis {
+            self.ellipsis = outer;
+        }
 
         // Pop transform if we pushed one
         if has_transform {
@@ -4640,6 +4736,32 @@ impl DisplayList {
             }
             self.escapable_clips = outer;
         }
+    }
+
+    /// css-overflow-3 §5.1: `text-overflow` applies to block containers
+    /// whose `overflow` is other than `visible`, and governs THEIR line
+    /// boxes only. Entering a block container therefore replaces the
+    /// current scope — with an ellipsis scope at the block's content edge,
+    /// or with none — and returns the outer scope for the caller to
+    /// restore. Inline-level and anonymous boxes return `None`: they paint
+    /// inside the nearest block container's scope.
+    fn enter_ellipsis_scope(&mut self, layout_box: &LayoutBox) -> Option<Option<EllipsisScope>> {
+        if !matches!(layout_box.box_type, BoxType::Block) {
+            return None;
+        }
+        let s = &layout_box.style;
+        let clips = s.overflow_x != rustkit_css::Overflow::Visible
+            || s.overflow_y != rustkit_css::Overflow::Visible;
+        let scope = if clips && s.text_overflow == rustkit_css::TextOverflow::Ellipsis {
+            let c = &layout_box.dimensions.content;
+            Some(EllipsisScope {
+                limit_x: c.x + c.width,
+                lines: Vec::new(),
+            })
+        } else {
+            None
+        };
+        Some(std::mem::replace(&mut self.ellipsis, scope))
     }
 
     /// Render a layout box's own content (shadows, background, borders, text, images).
@@ -5330,30 +5452,35 @@ impl DisplayList {
             // Build the list of lines to emit: wrapped text boxes carry
             // per-line fragments (see LayoutBox::text_lines); single-run
             // boxes emit exactly one line, positioned as before.
-            // Tuple: (text, x, y, width) — shadowing the outer names inside
-            // the loop keeps the emission code identical for both cases.
-            let render_lines: Vec<(String, f32, f32, f32)> = match &layout_box.text_lines {
+            // Tuple: (text, x, y, width, line_top) — shadowing the outer
+            // names inside the loop keeps the emission code identical for
+            // both cases. `line_top` is the line box's top (y minus the
+            // half-leading), the key runs on one line share regardless of
+            // their own font's leading.
+            let render_lines: Vec<(String, f32, f32, f32, f32)> = match &layout_box.text_lines {
                 Some(lines) => lines
                     .iter()
                     .enumerate()
                     .filter(|(_, l)| !l.text.is_empty())
                     .map(|(i, l)| {
+                        let top = content_y + i as f32 * line_height;
                         (
                             apply_text_transform(&l.text, style.text_transform),
                             x + l.x_offset,
-                            content_y + i as f32 * line_height + half_leading,
+                            top + half_leading,
                             l.width,
+                            top,
                         )
                     })
                     .collect(),
-                None => vec![(text.clone(), x, content_y + half_leading, text_width)],
+                None => vec![(text.clone(), x, content_y + half_leading, text_width, content_y)],
             };
 
             // PAINT-0 seating probe (RUSTKIT_PAINT_PROBE=1): log the layout
             // half of the glyph seating chain so flat-1.2 vs metrics-normal
             // builds can be diffed line-by-line (forensics 2026-07-16 §4.2).
             if paint0_probe() {
-                for (t, _lx, ly, _lw) in &render_lines {
+                for (t, _lx, ly, _lw, _top) in &render_lines {
                     eprintln!(
                         "PAINT0 layout text={:?} fs={} lh={} asc={} desc={} half={} content_y={} y_cmd={}",
                         t.chars().take(16).collect::<String>(),
@@ -5368,7 +5495,7 @@ impl DisplayList {
                 }
             }
 
-            for (text, x, y, text_width) in render_lines {
+            for (text, x, y, text_width, line_top) in render_lines {
                 // ADVANCE CONTRACT: ONE shape call feeds BOTH command types —
                 // layout's per-char advances and ascent ride the command so
                 // paint places glyphs exactly where layout measured them.
@@ -5376,6 +5503,40 @@ impl DisplayList {
                 // and re-owned pitch + baseline in paint — the last dual
                 // text path.)
                 let advances = shape_line_advances(&text, style, font_size);
+
+                // `text-overflow: ellipsis` on the enclosing block container
+                // (css-overflow-3 §5.1): cut the run at the block's content
+                // edge and paint `…` in the run's own font. Without per-char
+                // advances there is nothing to cut against — the run paints
+                // as laid out and the clip alone applies.
+                let (text, advances, text_width) = match (self.ellipsis.as_mut(), &advances) {
+                    (Some(scope), Some(adv)) => {
+                        let ellipsis_advance = shape_line_advances("\u{2026}", style, font_size)
+                            .and_then(|a| a.first().copied())
+                            .unwrap_or_else(|| {
+                                measure_text_with_spacing(
+                                    "\u{2026}",
+                                    &style.font_family,
+                                    font_size,
+                                    style.font_weight,
+                                    style.font_style,
+                                    0.0,
+                                    0.0,
+                                )
+                                .width
+                            });
+                        match scope.cut(&text, x, line_top, adv, ellipsis_advance) {
+                            TextOverflowCut::Keep => (text, advances, text_width),
+                            TextOverflowCut::Hide => continue,
+                            TextOverflowCut::Cut {
+                                text,
+                                advances,
+                                width,
+                            } => (text, Some(advances), width),
+                        }
+                    }
+                    _ => (text, advances, text_width),
+                };
 
                 // Check if this is gradient text (background-clip: text with gradient and transparent fill)
                 let is_gradient_text = style.background_clip == rustkit_css::BackgroundClip::Text
@@ -6014,6 +6175,223 @@ mod tests {
             !list.commands.iter().any(|c| matches!(c, DisplayCommand::PushClip(_))),
             "a gradient that fits its box must not push a clip"
         );
+    }
+
+    // ==================== text-overflow: ellipsis ====================
+    //
+    // css-overflow-3 §5.1. The chrome's `.tab-title` / `.url-text`, the
+    // shelf's `.command-item-name`, settings' `.cellar-item-*`: `white-space:
+    // nowrap; overflow: hidden; text-overflow: ellipsis`. n35 made the clip
+    // real, which cut those titles hard; the ellipsis is the visible half.
+
+    const ELLIPSIS_TEXT: &str = "The quick brown fox jumps over the lazy dog";
+
+    /// root → block(`width` wide, at x=10) → text. The block is NOT the root
+    /// (the root never clips, §11.1.1).
+    fn ellipsis_tree(
+        width: f32,
+        text_overflow: rustkit_css::TextOverflow,
+        overflow: rustkit_css::Overflow,
+        wrap_in_inline: bool,
+    ) -> LayoutBox {
+        let mut style = ComputedStyle::new();
+        style.white_space = rustkit_css::WhiteSpace::Nowrap;
+        let mut root = LayoutBox::new(BoxType::Block, style.clone());
+        root.dimensions.content = Rect::new(0.0, 0.0, 800.0, 600.0);
+
+        let mut block_style = style.clone();
+        block_style.overflow_x = overflow;
+        block_style.overflow_y = overflow;
+        block_style.text_overflow = text_overflow;
+        let mut block = LayoutBox::new(BoxType::Block, block_style);
+        block.dimensions.content = Rect::new(10.0, 10.0, width, 20.0);
+
+        let mut text = LayoutBox::new(BoxType::Text(ELLIPSIS_TEXT.to_string()), style.clone());
+        text.dimensions.content = Rect::new(10.0, 10.0, width, 20.0);
+
+        if wrap_in_inline {
+            let mut inline = LayoutBox::new(BoxType::Inline, style);
+            inline.dimensions.content = Rect::new(10.0, 10.0, width, 20.0);
+            inline.children.push(text);
+            block.children.push(inline);
+        } else {
+            block.children.push(text);
+        }
+        root.children.push(block);
+        root
+    }
+
+    /// (text, x, advances) of every Text command.
+    fn text_commands(list: &DisplayList) -> Vec<(String, f32, Option<Vec<f32>>)> {
+        list.commands
+            .iter()
+            .filter_map(|c| match c {
+                DisplayCommand::Text {
+                    text, x, advances, ..
+                } => Some((text.clone(), *x, advances.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_text_overflow_ellipsis_cuts_overflowing_run_inside_content_edge() {
+        let root = ellipsis_tree(
+            100.0,
+            rustkit_css::TextOverflow::Ellipsis,
+            rustkit_css::Overflow::Hidden,
+            false,
+        );
+        let texts = text_commands(&DisplayList::build(&root));
+        assert_eq!(texts.len(), 1, "one run paints: {texts:?}");
+        let (text, x, advances) = &texts[0];
+        assert!(text.ends_with('\u{2026}'), "run must end in U+2026, got {text:?}");
+        assert!(
+            text.chars().count() > 3 && text.chars().count() < ELLIPSIS_TEXT.chars().count(),
+            "some but not all characters survive the cut: {text:?}"
+        );
+        let advances = advances.as_ref().expect("cut run carries advances");
+        assert_eq!(advances.len(), text.chars().count(), "one advance per char incl. the ellipsis");
+        let width: f32 = advances.iter().sum();
+        assert!(
+            *x + width <= 10.0 + 100.0 + 0.01,
+            "ink (x={x}, w={width}) must end inside the content edge 110"
+        );
+        // The cut is tight: the next original character would not have fit.
+        let full = shape_line_advances(ELLIPSIS_TEXT, &root.children[0].style, 16.0)
+            .expect("shape");
+        let kept = text.chars().count() - 1;
+        let next_width: f32 = full[..kept + 1].iter().sum::<f32>() + advances[kept];
+        assert!(
+            *x + next_width > 110.0,
+            "keeping one more char ({}) would still have fit: {next_width}",
+            kept + 1
+        );
+    }
+
+    #[test]
+    fn test_text_overflow_ellipsis_leaves_a_fitting_run_alone() {
+        let root = ellipsis_tree(
+            1000.0,
+            rustkit_css::TextOverflow::Ellipsis,
+            rustkit_css::Overflow::Hidden,
+            false,
+        );
+        let texts = text_commands(&DisplayList::build(&root));
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].0, ELLIPSIS_TEXT, "a run that fits is painted whole");
+    }
+
+    #[test]
+    fn test_text_overflow_needs_overflow_other_than_visible() {
+        // §5.1: applies to block containers with overflow other than
+        // visible. `text-overflow: ellipsis` alone does nothing.
+        let root = ellipsis_tree(
+            100.0,
+            rustkit_css::TextOverflow::Ellipsis,
+            rustkit_css::Overflow::Visible,
+            false,
+        );
+        let texts = text_commands(&DisplayList::build(&root));
+        assert_eq!(texts[0].0, ELLIPSIS_TEXT, "overflow: visible — no ellipsis");
+    }
+
+    #[test]
+    fn test_text_overflow_clip_is_the_initial_value_and_cuts_nothing() {
+        let root = ellipsis_tree(
+            100.0,
+            rustkit_css::TextOverflow::Clip,
+            rustkit_css::Overflow::Hidden,
+            false,
+        );
+        let texts = text_commands(&DisplayList::build(&root));
+        assert_eq!(texts[0].0, ELLIPSIS_TEXT, "text-overflow: clip — the clip alone applies");
+        assert_eq!(rustkit_css::TextOverflow::default(), rustkit_css::TextOverflow::Clip);
+    }
+
+    #[test]
+    fn test_text_overflow_scope_reaches_through_inline_boxes() {
+        // The block owns its line boxes; a `<span>` inside it paints its
+        // text under the block's ellipsis.
+        let root = ellipsis_tree(
+            100.0,
+            rustkit_css::TextOverflow::Ellipsis,
+            rustkit_css::Overflow::Hidden,
+            true,
+        );
+        let texts = text_commands(&DisplayList::build(&root));
+        assert_eq!(texts.len(), 1);
+        assert!(texts[0].0.ends_with('\u{2026}'), "inline child is cut: {:?}", texts[0].0);
+    }
+
+    #[test]
+    fn test_text_overflow_does_not_leak_into_a_nested_block_container() {
+        // A nested block container establishes its own line boxes and has
+        // its own (initial: clip) text-overflow.
+        let mut root = ellipsis_tree(
+            100.0,
+            rustkit_css::TextOverflow::Ellipsis,
+            rustkit_css::Overflow::Hidden,
+            false,
+        );
+        let text = root.children[0].children.pop().expect("text child");
+        let mut inner = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        inner.dimensions.content = Rect::new(10.0, 10.0, 100.0, 20.0);
+        inner.children.push(text);
+        root.children[0].children.push(inner);
+
+        let texts = text_commands(&DisplayList::build(&root));
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].0, ELLIPSIS_TEXT, "nested block container: no ellipsis from the outer one");
+    }
+
+    #[test]
+    fn test_text_overflow_hides_a_later_run_behind_the_ellipsis() {
+        // Two runs on one line: the first is cut and carries the ellipsis;
+        // the second follows it in inline order and must not paint over it —
+        // wherever layout put it. `x = 300` is the honest position; `x = 60`
+        // is the engine-real one (the first run's laid-out width is clamped
+        // to the 100px container, so its sibling starts short of the edge,
+        // and short of the ellipsis).
+        for second_x in [300.0_f32, 60.0] {
+            let mut root = ellipsis_tree(
+                100.0,
+                rustkit_css::TextOverflow::Ellipsis,
+                rustkit_css::Overflow::Hidden,
+                false,
+            );
+            let mut second = LayoutBox::new(
+                BoxType::Text("tail".to_string()),
+                root.children[0].children[0].style.clone(),
+            );
+            second.dimensions.content = Rect::new(second_x, 10.0, 30.0, 20.0);
+            root.children[0].children.push(second);
+
+            let texts = text_commands(&DisplayList::build(&root));
+            assert_eq!(
+                texts.len(),
+                1,
+                "the second run (x={second_x}) is behind the ellipsis: {texts:?}"
+            );
+            assert!(texts[0].0.ends_with('\u{2026}'));
+        }
+
+        // Control: the same second run on ANOTHER line paints (it fits).
+        let mut root = ellipsis_tree(
+            100.0,
+            rustkit_css::TextOverflow::Ellipsis,
+            rustkit_css::Overflow::Hidden,
+            false,
+        );
+        let mut second = LayoutBox::new(
+            BoxType::Text("tail".to_string()),
+            root.children[0].children[0].style.clone(),
+        );
+        second.dimensions.content = Rect::new(10.0, 30.0, 30.0, 20.0);
+        root.children[0].children.push(second);
+        let texts = text_commands(&DisplayList::build(&root));
+        assert_eq!(texts.len(), 2, "a run on the next line is its own line: {texts:?}");
+        assert_eq!(texts[1].0, "tail");
     }
 
     // ==================== Overflow rounded clip ====================
