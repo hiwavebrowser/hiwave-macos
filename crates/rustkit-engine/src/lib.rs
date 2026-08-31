@@ -2530,6 +2530,38 @@ impl Engine {
                     );
                 }
 
+                // Inline <svg> is a replaced element: it is sized by its own
+                // width=/height= presentational hints (author CSS wins; the
+                // CSS replaced-element fallback is 300×150 without them)
+                // and its SVG children never generate CSS boxes. It used to
+                // get NO box at all — an empty block with no visible styling
+                // is dropped below — and the shelf's search icon survived
+                // only because the whitespace between <circle> and <path>
+                // left a phantom 18px text line inside it; collapsing that
+                // whitespace correctly made the icon vanish and shifted the
+                // command input 28px left. The graphics are not painted
+                // (inline SVG paint is its own lane); the geometry is what
+                // the flex row needs, and it now matches Chrome's 14×14.
+                if tag_lower == "svg" {
+                    let attr_px = |name: &str| {
+                        attributes
+                            .get(name)
+                            .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+                    };
+                    if matches!(style.width, rustkit_css::Length::Auto) {
+                        style.width = rustkit_css::Length::Px(attr_px("width").unwrap_or(300.0));
+                    }
+                    if matches!(style.height, rustkit_css::Length::Auto) {
+                        style.height = rustkit_css::Length::Px(attr_px("height").unwrap_or(150.0));
+                    }
+                    if style.display == rustkit_css::Display::Inline {
+                        style.display = rustkit_css::Display::InlineBlock;
+                    }
+                    let mut svg_box = LayoutBox::new(BoxType::Block, style.clone());
+                    Self::transfer_positioning(&mut svg_box, &style);
+                    return svg_box;
+                }
+
                 // Handle form controls
                 if tag_lower == "input" {
                     let input_type = attributes
@@ -2884,6 +2916,54 @@ impl Engine {
                 ) {
                     layout_box.children.push(after_box);
                 }
+
+                // css-text §4.1.1: collapsible spaces collapse ACROSS text
+                // node boundaries within one inline formatting context —
+                // "any collapsible space immediately following another
+                // collapsible space ... is collapsed", even when a comment,
+                // a display:none element or a hidden element sits between
+                // the two text nodes. The DOM keeps them as separate nodes
+                // (`</h1> <!-- c --> <!-- d --> <h2>` is THREE
+                // whitespace-only text nodes) and the boundary strip below
+                // reads only the immediate siblings, so the middle run saw a
+                // text box on each side, called both inline-level, and
+                // survived as a 24px line box between two blocks
+                // (images-intrinsic: every block after the <h1> sat 24px
+                // low; a second and third space also survived between two
+                // inline siblings). Join adjacent text boxes first — bare
+                // text siblings of one element always share the parent's
+                // computed style (pseudo-element text lives inside its own
+                // Inline wrapper), so the join loses nothing — and let the
+                // strip run on the joined run. Pre-family runs are joined
+                // verbatim: nothing collapses there.
+                let mut joined: Vec<LayoutBox> = Vec::with_capacity(layout_box.children.len());
+                for child in layout_box.children.drain(..) {
+                    let joins_previous = matches!(child.box_type, BoxType::Text(_))
+                        && matches!(joined.last().map(|b| &b.box_type), Some(BoxType::Text(_)));
+                    if !joins_previous {
+                        joined.push(child);
+                        continue;
+                    }
+                    let BoxType::Text(next) = child.box_type else {
+                        unreachable!("joins_previous requires a text box");
+                    };
+                    let last = joined.last_mut().expect("joins_previous requires a previous box");
+                    let collapsible = !matches!(
+                        last.style.white_space,
+                        rustkit_css::WhiteSpace::Pre
+                            | rustkit_css::WhiteSpace::PreWrap
+                            | rustkit_css::WhiteSpace::PreLine
+                            | rustkit_css::WhiteSpace::BreakSpaces
+                    );
+                    if let BoxType::Text(ref mut run) = last.box_type {
+                        if collapsible && run.ends_with(' ') && next.starts_with(' ') {
+                            run.push_str(&next[1..]);
+                        } else {
+                            run.push_str(&next);
+                        }
+                    }
+                }
+                layout_box.children = joined;
 
                 // css-text §4.2 phase 2: collapsed spaces at segment
                 // boundaries do not render. A text child's leading space is
@@ -3471,6 +3551,14 @@ impl Engine {
                 style.display = rustkit_css::Display::Inline;
             }
             "canvas" => {
+                style.display = rustkit_css::Display::Inline;
+            }
+            // Chrome's UA sheet has no display rule for <svg>: an inline
+            // svg is an inline-level replaced element. The `_ => {}`
+            // fallback below leaves ComputedStyle's default (Block), which
+            // made every inline svg a block — and, being childless with no
+            // visible styling, a dropped one.
+            "svg" => {
                 style.display = rustkit_css::Display::Inline;
             }
             "iframe" => {
@@ -10547,6 +10635,176 @@ mod tests {
                 "{name}: height {got} not within {tol} of Chrome's {want} (all: {heights:?})"
             );
         }
+    }
+
+    #[test]
+    fn test_collapsible_space_collapses_across_text_node_boundaries() {
+        // css-text §4.1.1: a collapsible space following another collapsible
+        // space collapses even across text-node boundaries. Comments (and
+        // display:none / hidden elements) split one whitespace run into
+        // several DOM text nodes; the boundary strip only looked at the
+        // immediate siblings, so `</h1> <!-- --> <!-- --> <h2>` kept its
+        // MIDDLE run as a whitespace-only text box between two blocks — a
+        // 24px line box that pushed every following block down
+        // (images-intrinsic). Between two inline siblings the same shape
+        // produced three spaces where Chrome renders one; inside a run,
+        // "a <!-- --> b" became "a " + " b".
+        let html = r#"<!DOCTYPE html>
+            <html><body>
+              <h1>Head</h1>
+
+              <!-- first comment -->
+              <!-- second comment -->
+
+              <h2>Sub</h2>
+              <p>alpha <!-- c --> beta</p>
+              <div><span>x</span> <!-- c --> <span>y</span></div>
+              <pre style="white-space: pre">one <!-- c --> two</pre>
+            </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        };
+
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        // Every text box with the box types of its immediate siblings.
+        fn collect(b: &LayoutBox, out: &mut Vec<(String, bool, bool)>) {
+            for (i, c) in b.children.iter().enumerate() {
+                if let BoxType::Text(t) = &c.box_type {
+                    let prev_block = i > 0
+                        && matches!(b.children[i - 1].box_type, BoxType::Block | BoxType::AnonymousBlock);
+                    let next_block = i + 1 < b.children.len()
+                        && matches!(b.children[i + 1].box_type, BoxType::Block | BoxType::AnonymousBlock);
+                    out.push((t.clone(), prev_block, next_block));
+                }
+                collect(c, out);
+            }
+        }
+        let mut texts = Vec::new();
+        collect(&layout, &mut texts);
+        let all: Vec<&str> = texts.iter().map(|(t, _, _)| t.as_str()).collect();
+
+        // No whitespace-only text box may sit next to a block sibling: that
+        // is the phantom line box. (The one between the two spans is real —
+        // css-text §4.1.3 keeps a single collapsed space between inlines.)
+        let phantom: Vec<&(String, bool, bool)> = texts
+            .iter()
+            .filter(|(t, p, n)| t.trim().is_empty() && (*p || *n))
+            .collect();
+        assert!(phantom.is_empty(), "whitespace-only text next to a block: {:?} (all: {:?})", phantom, all);
+        let ws_only = texts.iter().filter(|(t, _, _)| t.trim().is_empty()).count();
+        assert_eq!(ws_only, 1, "exactly one collapsed space (between the spans): {:?}", all);
+
+        // Inside a run the comment must not split (or double) the space.
+        assert!(all.contains(&"alpha beta"), "comment inside a run splits it: {:?}", all);
+        assert!(!all.iter().any(|t| *t == "alpha " || *t == " beta"), "{:?}", all);
+
+        // Pre-family runs join verbatim — both spaces around the comment stay.
+        assert!(all.contains(&"one  two"), "pre run must join verbatim: {:?}", all);
+    }
+
+    #[test]
+    fn test_inline_svg_is_a_sized_replaced_box_without_child_boxes() {
+        // An inline <svg> generated no box of its own: an empty block with
+        // no visible styling is dropped, and the shelf's 14×14 search icon
+        // existed only as the phantom whitespace line between its <circle>
+        // and <path>. A replaced element is sized by its own width=/height=
+        // (CSS fallback 300×150), author CSS wins, and its SVG children
+        // produce no CSS boxes.
+        let html = r#"<!DOCTYPE html>
+            <html><body>
+              <div style="display: flex">
+                <svg width="14" height="14" viewBox="0 0 24 24">
+                  <circle cx="11" cy="11" r="8"/>
+                  <path d="M21 21l-4.35-4.35"/>
+                </svg>
+                <input type="text">
+              </div>
+              <p><svg></svg></p>
+              <p><svg width="40" height="40" style="width: 20px"></svg></p>
+            </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        };
+
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        // Every childless, sized block box: (width, height, display).
+        fn collect(b: &LayoutBox, out: &mut Vec<(rustkit_css::Length, rustkit_css::Length, rustkit_css::Display)>) {
+            if matches!(b.box_type, BoxType::Block) && b.children.is_empty() {
+                out.push((b.style.width.clone(), b.style.height.clone(), b.style.display));
+            }
+            for c in &b.children {
+                collect(c, out);
+            }
+        }
+        let mut boxes = Vec::new();
+        collect(&layout, &mut boxes);
+        let px = |w: f32, h: f32| (rustkit_css::Length::Px(w), rustkit_css::Length::Px(h), rustkit_css::Display::InlineBlock);
+        assert!(boxes.contains(&px(14.0, 14.0)), "svg width=/height= box missing: {:?}", boxes);
+        assert!(boxes.contains(&px(300.0, 150.0)), "attribute-less svg must fall back to 300x150: {:?}", boxes);
+        assert!(boxes.contains(&px(20.0, 40.0)), "author CSS width must win over width=: {:?}", boxes);
+
+        // No <circle>/<path> box, and no whitespace text box, under the svg.
+        fn any_text(b: &LayoutBox) -> bool {
+            b.children.iter().any(|c| matches!(c.box_type, BoxType::Text(_)) || any_text(c))
+        }
+        fn svg_like(b: &LayoutBox) -> Option<&LayoutBox> {
+            if matches!(b.style.width, rustkit_css::Length::Px(w) if (w - 14.0).abs() < 0.01) {
+                return Some(b);
+            }
+            b.children.iter().find_map(svg_like)
+        }
+        let svg = svg_like(&layout).expect("svg box");
+        assert!(svg.children.is_empty() && !any_text(svg), "svg children must not generate boxes");
     }
 
     #[test]
