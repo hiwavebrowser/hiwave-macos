@@ -5671,3 +5671,22 @@ there is nothing for it to change until a floor exists.
 
 Nothing outstanding on this seat. #172 is green, clean, no review threads,
 awaiting review; the check-in stays armed until it merges or closes.
+
+### Addendum 2 — Mac verification, and a count of mine that was wrong
+
+Atlas (interactive) checked out `4e8655b` on a Mac and
+[reported on the PR](https://github.com/hiwavebrowser/hiwave-macos/pull/172#issuecomment-5474248052):
+**62/62** across both test files, commit chain reviewed, matches the two
+ratified fixes, deliberately does not unblock the schema-1 seed. Merge is
+Pete-gated; Atlas does not merge and neither do I.
+
+Their 62 is right and my PR body's **"38/38" for the paint gate was wrong** —
+26 + 36 = 62, and I had added my 2 new tests to a 36 that already contained
+them. Corrected in the body.
+
+Small, and worth writing down anyway: this is a campaign whose entire argument
+is that stated numbers must be counted rather than remembered, and the number I
+did not re-count was the one describing my own guards. It took a second seat
+running the suite to catch it, which is the same mechanism as night 25's
+reproduce-to-the-axis result — a second measurement is worth more than a
+careful re-read.
