@@ -5690,3 +5690,42 @@ did not re-count was the one describing my own guards. It took a second seat
 running the suite to catch it, which is the same mechanism as night 25's
 reproduce-to-the-axis result — a second measurement is worth more than a
 careful re-read.
+
+### Addendum 2 (2026-08-31) — the ratchet fix shipped as #172, and it is better than what I proposed
+
+`atlas/n28-ratchet-newly-measurable` (**PR #172**, base `master`) implements both
+ledgered fixes. Checked the diff rather than assuming it matched the ask:
+
+- **Gate B publishes `discrete_withheld_selectors`** — the withheld *set*, not
+  its size — and the floor carries it. A new discrete id whose selector was in
+  the baseline run's withheld set is classified `newly_measurable`, not
+  REGRESSION. `None` (a floor predating the field) is held distinct from `[]`
+  and reports *"re-seed to classify"* rather than guessing.
+- **`geometry_band`** exists, is read from the floor, and defaults to **0**.
+
+Two things in it that correct this digest again, both worth the record:
+
+1. **I missed the mirror direction, and it is the dangerous one.** #172 adds
+   `newly_unmeasurable`: a discrete id that disappeared *because its element is
+   now withheld* did not get fixed, and must not read as an improvement. I only
+   argued the direction that produces a false red. The direction that produces a
+   false green — a defect vanishing from the board because the gate stopped
+   looking at it — is the one this whole campaign exists to catch, and it is not
+   the one I thought of.
+2. **"Should geometry get a variance band?" was the wrong shape of question.**
+   I asked it globally. The answer shipped is per-floor and evidence-bound: the
+   default stays 0, and a floor *may* raise it carrying the measurement that
+   justifies it. That keeps the strictness and removes the red-lock, which my
+   framing traded against each other.
+
+Its tests cover the cases that matter — a defect on a baseline-*withheld*
+element is not a regression, on a baseline-*admitted* element it still is, a
+floor that cannot answer fails loud, and `withheld_none_is_never_coerced_to_an_empty_set`.
+That last guard is the exact trap my own probe fell into on 08-30 (a missing
+schema field silently coerced, 26 false regressions). It is guarded here.
+
+**No comment posted on #172.** It is not this seat's PR, there is nothing wrong
+with it, and a "looks good" from a watcher is noise.
+
+#170 remains open, green, `mergeable_state: clean`, unchanged since 05:21Z on
+08-30 — awaiting a human reviewer, which is not a problem to escalate.
