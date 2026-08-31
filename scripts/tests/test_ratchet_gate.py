@@ -31,17 +31,27 @@ def gate_b(cases):
     # failures live in failures[] flagged "discrete": true, alongside a
     # non-discrete paint_below_bar row this builder includes so tests
     # cannot pass by treating every failures[] entry as an id.
-    return {"gate": "B", "cases": [
-        {"case_id": cid, "measured": m.get("measured", True),
-         "green": m.get("green", not m.get("disc", []) and m.get("pct", 1.0) >= 0.99),
-         "within_fraction": m.get("pct", 1.0),
-         "discrete_failures": len(m.get("disc", [])),
-         "failures": (
-             [{"kind": "paint_below_bar", "selector": None, "discrete": False}]
-             if m.get("pct", 1.0) < 0.99 else []
-         ) + [{"kind": k, "selector": s, "discrete": True}
-              for k, s in m.get("disc", [])]}
-        for cid, m in cases.items()]}
+    #
+    # `withheld` is OMITTED unless a case asks for it, so every pre-existing
+    # probe keeps exercising the old-floor path (no jurisdiction recorded)
+    # rather than being silently moved onto the new one.
+    out = []
+    for cid, m in cases.items():
+        row = {
+            "case_id": cid, "measured": m.get("measured", True),
+            "green": m.get("green", not m.get("disc", []) and m.get("pct", 1.0) >= 0.99),
+            "within_fraction": m.get("pct", 1.0),
+            "discrete_failures": len(m.get("disc", [])),
+            "failures": (
+                [{"kind": "paint_below_bar", "selector": None, "discrete": False}]
+                if m.get("pct", 1.0) < 0.99 else []
+            ) + [{"kind": k, "selector": s, "discrete": True}
+                 for k, s in m.get("disc", [])],
+        }
+        if "withheld" in m:
+            row["discrete_withheld_selectors"] = m["withheld"]
+        out.append(row)
+    return {"gate": "B", "cases": out}
 
 
 def run(tmp, a, b, baseline=None, extra=None):
@@ -190,6 +200,181 @@ class SeedLawTests(unittest.TestCase):
             seed = seed_from(t, gate_a(BASE_A), gate_b(BASE_B))
             self.assertEqual(seed["provenance"]["engine_sha"], "deadbeef")
             self.assertEqual(seed["provenance"]["stability_runs"], 3)
+
+
+class NewlyMeasurableTests(unittest.TestCase):
+    """A ratchet must not read a widened jurisdiction as a regression.
+
+    Gate B only speaks about elements whose geometry Gate A would call exact,
+    so every geometry fix ENLARGES the set it may report on. A defect that was
+    always there then appears for the first time. Measured on 2026-08-30:
+    develop's `gradient-backgrounds .linear-6` corner notch — withheld on
+    2026-08-12 because the card was 18px out of place — read as a REGRESSION
+    against master's floor while nothing had regressed, and would have
+    red-locked the develop->master promote.
+
+    The floor therefore carries the jurisdiction, and the direction of every
+    rule below is the point: the classification may only ever soften a NEW id
+    the baseline could not have seen, never one it could.
+    """
+
+    # A floor whose run examined `s1` and withheld `s9`.
+    BASE_B_J = {"clean": {"withheld": []},
+                "red": {"pct": 0.8, "green": False,
+                        "disc": [("missing_clip", "s1")],
+                        "withheld": ["s9"]}}
+
+    def _seeded(self, tmp):
+        return seed_from(tmp, gate_a(BASE_A), gate_b(self.BASE_B_J))
+
+    def test_a_defect_on_a_baseline_withheld_element_is_not_a_regression(self):
+        with tempfile.TemporaryDirectory() as t:
+            now = {"clean": {"withheld": []},
+                   "red": {"pct": 0.8, "green": False,
+                           "disc": [("missing_clip", "s1"),
+                                    ("missing_clip", "s9")],
+                           "withheld": []}}
+            rc, out = run(t, gate_a(BASE_A), gate_b(now), self._seeded(t))
+            self.assertEqual(rc, 2, out)
+            self.assertNotIn("REGRESSION", out)
+            self.assertIn("newly-measurable", out)
+            self.assertIn("missing_clip::s9", out)
+            self.assertIn("RATCHET tighten-eligible", out)
+
+    def test_a_defect_on_a_baseline_ADMITTED_element_is_still_a_regression(self):
+        """The other direction, and the one the rule must not swallow.
+
+        `s7` was inside the baseline's jurisdiction and clean; a failure on it
+        now is a real regression. Without this probe the softening rule could
+        be written to pass everything and the test above would not notice.
+        """
+        with tempfile.TemporaryDirectory() as t:
+            now = {"clean": {"withheld": []},
+                   "red": {"pct": 0.8, "green": False,
+                           "disc": [("missing_clip", "s1"),
+                                    ("wrong_solid_color", "s7")],
+                           "withheld": ["s9"]}}
+            rc, out = run(t, gate_a(BASE_A), gate_b(now), self._seeded(t))
+            self.assertEqual(rc, 1, out)
+            self.assertIn("NEW discrete failure wrong_solid_color::s7", out)
+
+    def test_a_floor_that_cannot_answer_fails_loud_and_names_the_remedy(self):
+        """An old floor carries no jurisdiction. Unknown is not permission.
+
+        #167's committed seed is exactly this shape. The safe direction is to
+        keep failing — and to say why, so a reader knows a re-seed resolves it
+        rather than assuming the gate is broken.
+        """
+        with tempfile.TemporaryDirectory() as t:
+            old_floor = seed_from(t, gate_a(BASE_A), gate_b(BASE_B))
+            self.assertIsNone(old_floor["cases"]["red"]["discrete_withheld"])
+            now = {"clean": {"withheld": []},
+                   "red": {"pct": 0.8, "green": False,
+                           "disc": [("missing_clip", "s1"),
+                                    ("missing_clip", "s9")],
+                           "withheld": []}}
+            rc, out = run(t, gate_a(BASE_A), gate_b(now), old_floor)
+            self.assertEqual(rc, 1, out)
+            self.assertIn("floor predates discrete_withheld", out)
+
+    def test_an_id_that_vanished_because_we_stopped_looking_is_not_a_tighten(self):
+        """The mirror image, and the one that would bake a lie into a floor.
+
+        `s1` is absent now only because the element left Gate B's
+        jurisdiction. Calling that an improvement invites a floor commit
+        recording zero discrete failures on evidence nobody collected.
+        """
+        with tempfile.TemporaryDirectory() as t:
+            now = {"clean": {"withheld": []},
+                   "red": {"pct": 0.8, "green": False, "disc": [],
+                           "withheld": ["s1", "s9"]}}
+            rc, out = run(t, gate_a(BASE_A), gate_b(now), self._seeded(t))
+            self.assertIn("newly-UNMEASURABLE", out)
+            self.assertIn("missing_clip::s1", out)
+            self.assertNotIn("RATCHET tighten-eligible", out)
+
+    def test_an_id_that_was_actually_fixed_still_reads_as_tighten(self):
+        """Same shape as above with the element still in jurisdiction."""
+        with tempfile.TemporaryDirectory() as t:
+            now = {"clean": {"withheld": []},
+                   "red": {"pct": 0.8, "green": False, "disc": [],
+                           "withheld": ["s9"]}}
+            rc, out = run(t, gate_a(BASE_A), gate_b(now), self._seeded(t))
+            self.assertIn("RATCHET tighten-eligible", out)
+            self.assertNotIn("newly-UNMEASURABLE", out)
+
+    def test_the_id_is_split_on_the_first_separator(self):
+        """A selector may contain `::`. Splitting on the last one renames the
+        element the ratchet is about to make a decision about."""
+        sys.path.insert(0, str(RATCHET.parent))
+        import ratchet_gate
+
+        self.assertEqual(
+            ratchet_gate.selector_of("missing_clip::div.card::before"),
+            "div.card::before",
+        )
+
+    def test_withheld_none_is_never_coerced_to_an_empty_set(self):
+        sys.path.insert(0, str(RATCHET.parent))
+        import ratchet_gate
+
+        self.assertIsNone(ratchet_gate.withheld_selectors({"case_id": "x"}))
+        self.assertIsNone(
+            ratchet_gate.withheld_selectors(
+                {"case_id": "x", "discrete_withheld_selectors": None}
+            )
+        )
+        self.assertEqual(
+            ratchet_gate.withheld_selectors(
+                {"case_id": "x", "discrete_withheld_selectors": ["b", "a"]}
+            ),
+            ["a", "b"],
+        )
+
+
+class GeometryBandTests(unittest.TestCase):
+    """The band exists; it is OFF by default, and that is the measured choice.
+
+    Paint has a variance band because Chrome is not bit-stable against itself.
+    Gate A reads `layout.json` — layout output, not pixels — so on one binary
+    and one font stack its failure count is deterministic (measured
+    2026-08-31, 3 identical captures, byte-identical layout dumps). A band
+    defaulting to 1 would absorb no jitter and hide one real regressed box per
+    case, so the default is 0 and a floor may raise it explicitly.
+    """
+
+    def test_one_count_over_is_a_regression_by_default(self):
+        with tempfile.TemporaryDirectory() as t:
+            seeded = seed_from(t, gate_a(BASE_A), gate_b(BASE_B))
+            self.assertEqual(seeded["geometry_band"], 0)
+            a = {"clean": {}, "red": {"geo": ["s1", "s2", "s3"], "green": False}}
+            rc, out = run(t, gate_a(a), gate_b(BASE_B), seeded)
+            self.assertEqual(rc, 1, out)
+
+    def test_a_floor_may_raise_the_band_and_it_is_read_from_the_floor(self):
+        with tempfile.TemporaryDirectory() as t:
+            seeded = seed_from(t, gate_a(BASE_A), gate_b(BASE_B))
+            seeded["geometry_band"] = 1
+            a = {"clean": {}, "red": {"geo": ["s1", "s2", "s3"], "green": False}}
+            rc, out = run(t, gate_a(a), gate_b(BASE_B), seeded)
+            self.assertEqual(rc, 2, out)
+            # and one past the raised band still fails
+            a2 = {"clean": {}, "red": {"geo": ["s1", "s2", "s3", "s4"],
+                                       "green": False}}
+            rc2, out2 = run(t, gate_a(a2), gate_b(BASE_B), seeded)
+            self.assertEqual(rc2, 1, out2)
+
+    def test_the_band_covers_join_failures_too(self):
+        with tempfile.TemporaryDirectory() as t:
+            seeded = seed_from(t, gate_a(BASE_A), gate_b(BASE_B))
+            seeded["geometry_band"] = 1
+            a = {"clean": {"join": ["j1"]}, "red": BASE_A["red"]}
+            rc, out = run(t, gate_a(a), gate_b(BASE_B), seeded)
+            self.assertNotIn("join failures", out)
+            a2 = {"clean": {"join": ["j1", "j2"]}, "red": BASE_A["red"]}
+            rc2, out2 = run(t, gate_a(a2), gate_b(BASE_B), seeded)
+            self.assertEqual(rc2, 1, out2)
+            self.assertIn("join failures", out2)
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
