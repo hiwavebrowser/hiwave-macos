@@ -86,15 +86,16 @@ impl SvgDocument {
         }
 
         // Extract SVG attributes
+        let mut root_style = SvgStyle::default();
         if let Some(svg_start) = xml.find("<svg") {
             if let Some(svg_end) = xml[svg_start..].find('>') {
                 let attrs = &xml[svg_start..svg_start + svg_end + 1];
-                
+
                 // Parse viewBox
                 if let Some(vb) = extract_attr(attrs, "viewBox") {
                     doc.view_box = ViewBox::parse(&vb);
                 }
-                
+
                 // Parse width/height
                 if let Some(w) = extract_attr(attrs, "width") {
                     doc.width = SvgLength::parse(&w);
@@ -102,11 +103,27 @@ impl SvgDocument {
                 if let Some(h) = extract_attr(attrs, "height") {
                     doc.height = SvgLength::parse(&h);
                 }
+
+                // Root presentation attributes seed every shape's style: the
+                // parser is FLAT (no nesting), so this is the only way
+                // `<svg fill="none" stroke="currentColor">` — the standard
+                // icon idiom — reaches its shapes. Without it the circles of
+                // every stroke-only icon painted a default-black disc.
+                let mut root_attrs = HashMap::new();
+                let mut attr_str = attrs
+                    .trim_start_matches("<svg")
+                    .trim_end_matches('>')
+                    .trim_end_matches('/');
+                while let Some((key, value, rest)) = parse_attr(attr_str) {
+                    root_attrs.insert(key.to_lowercase(), value);
+                    attr_str = rest;
+                }
+                root_style.parse_attributes(&root_attrs);
             }
         }
 
         // Parse elements (simplified)
-        doc.root = parse_svg_content(xml)?;
+        doc.root = parse_svg_content(xml, &root_style)?;
 
         Ok(doc)
     }
@@ -1383,6 +1400,15 @@ impl SvgPath {
     }
 }
 
+/// Horizontal anchoring of a text run (`text-anchor`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextAnchor {
+    #[default]
+    Start,
+    Middle,
+    End,
+}
+
 /// Text element (<text>).
 #[derive(Debug, Clone, Default)]
 pub struct SvgText {
@@ -1391,6 +1417,7 @@ pub struct SvgText {
     pub content: String,
     pub font_family: String,
     pub font_size: f32,
+    pub anchor: TextAnchor,
     pub transform: Transform2D,
     pub style: SvgStyle,
 }
@@ -1406,7 +1433,39 @@ impl SvgText {
             return;
         }
 
-        let (x, y) = transform.apply(self.x, self.y);
+        let font_size = if self.font_size > 0.0 { self.font_size } else { 16.0 };
+        let font_family = if self.font_family.is_empty() {
+            "sans-serif".to_string()
+        } else {
+            self.font_family.clone()
+        };
+
+        // text-anchor offsets the run in LOCAL units before the transform:
+        // the shaper measures at the local font size, so the offset scales
+        // with the viewBox mapping like every other coordinate.
+        let anchor_dx = match self.anchor {
+            TextAnchor::Start => 0.0,
+            TextAnchor::Middle | TextAnchor::End => {
+                let width = rustkit_layout::measure_text_advanced(
+                    &self.content,
+                    &font_family,
+                    font_size,
+                    rustkit_css::FontWeight(400),
+                    rustkit_css::FontStyle::Normal,
+                )
+                .width;
+                if self.anchor == TextAnchor::Middle {
+                    -width / 2.0
+                } else {
+                    -width
+                }
+            }
+        };
+
+        let (x, y) = transform.apply(self.x + anchor_dx, self.y);
+        // Uniform scale (a == d for the viewBox mapping); fonts don't
+        // anisotropically scale here.
+        let scaled_font_size = font_size * transform.a;
 
         if let Some(color) = style.fill.as_color() {
             let alpha = (color.a * style.fill_opacity * style.opacity).clamp(0.0, 1.0);
@@ -1415,8 +1474,8 @@ impl SvgText {
                 x,
                 y,
                 text: self.content.clone(),
-                font_family: if self.font_family.is_empty() { "sans-serif".to_string() } else { self.font_family.clone() },
-                font_size: self.font_size,
+                font_family,
+                font_size: scaled_font_size,
                 color: text_color,
                 font_weight: 400, // Normal
                 font_style: 0, // Normal
@@ -1424,7 +1483,10 @@ impl SvgText {
                 // layout shaper of its own, so paint falls back to its own
                 // advances (the None arm the contract documents).
                 advances: None,
-                ascent: None,
+                // SVG y is the BASELINE; the renderer computes
+                // baseline = y + ascent, so a zero ascent hands it the
+                // baseline directly instead of a run-top.
+                ascent: Some(0.0),
             });
         }
     }
@@ -1536,13 +1598,21 @@ fn quad_bezier_points(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), segments: 
 
 /// Extract attribute value from XML tag.
 fn extract_attr(tag: &str, name: &str) -> Option<String> {
-    let pattern = format!("{}=", name);
-    if let Some(start) = tag.find(&pattern) {
-        let rest = &tag[start + pattern.len()..];
-        let quote = rest.chars().next()?;
-        if quote == '"' || quote == '\'' {
-            let end = rest[1..].find(quote)?;
-            return Some(rest[1..1 + end].to_string());
+    // Both spellings: HTML's tree builder lowercases attribute names, so an
+    // inline <svg viewBox=...> serialized back out of the DOM carries
+    // `viewbox=` — the camelCase spelling only survives in external .svg
+    // files. (The spec-correct place to re-case it is the HTML parser's
+    // "adjust SVG attributes" step, which rustkit-html does not have.)
+    let lower = name.to_lowercase();
+    for candidate in [name, lower.as_str()] {
+        let pattern = format!("{}=", candidate);
+        if let Some(start) = tag.find(&pattern) {
+            let rest = &tag[start + pattern.len()..];
+            let quote = rest.chars().next()?;
+            if quote == '"' || quote == '\'' {
+                let end = rest[1..].find(quote)?;
+                return Some(rest[1..1 + end].to_string());
+            }
         }
     }
     None
@@ -1609,7 +1679,7 @@ fn parse_svg_color(s: &str) -> Option<Color> {
 }
 
 /// Parse SVG content into elements.
-fn parse_svg_content(xml: &str) -> Result<SvgElement, SvgError> {
+fn parse_svg_content(xml: &str, base_style: &SvgStyle) -> Result<SvgElement, SvgError> {
     let mut group = SvgGroup::new();
     
     // Simple element parsing
@@ -1637,13 +1707,38 @@ fn parse_svg_content(xml: &str) -> Result<SvgElement, SvgError> {
             // Find tag end
             if let Some(tag_end) = xml[tag_start..].find('>') {
                 let tag = &xml[tag_start..tag_start + tag_end + 1];
-                
+                let after_tag = tag_start + tag_end + 1;
+
+                // <text> carries its content BETWEEN the tags, which
+                // parse_element (open tag only) can never see. Grab up to
+                // the closing tag and consume the whole element.
+                let tag_name = tag
+                    .trim_start_matches('<')
+                    .split(|c: char| c.is_whitespace() || c == '>' || c == '/')
+                    .next()
+                    .unwrap_or("")
+                    .to_lowercase();
+                if tag_name == "text" && !tag.ends_with("/>") {
+                    if let Some(close) = xml[after_tag..].find("</text") {
+                        let content = &xml[after_tag..after_tag + close];
+                        if let Some(element) = parse_text_element(tag, content, base_style) {
+                            group.children.push(element);
+                        }
+                        let rest = after_tag + close;
+                        pos = xml[rest..]
+                            .find('>')
+                            .map(|e| rest + e + 1)
+                            .unwrap_or(xml.len());
+                        continue;
+                    }
+                }
+
                 // Parse element
-                if let Some(element) = parse_element(tag) {
+                if let Some(element) = parse_element(tag, base_style) {
                     group.children.push(element);
                 }
-                
-                pos = tag_start + tag_end + 1;
+
+                pos = after_tag;
             } else {
                 break;
             }
@@ -1656,7 +1751,7 @@ fn parse_svg_content(xml: &str) -> Result<SvgElement, SvgError> {
 }
 
 /// Parse a single SVG element.
-fn parse_element(tag: &str) -> Option<SvgElement> {
+fn parse_element(tag: &str, base_style: &SvgStyle) -> Option<SvgElement> {
     let tag = tag.trim_start_matches('<').trim_end_matches('>').trim_end_matches('/');
     let parts: Vec<&str> = tag.splitn(2, char::is_whitespace).collect();
     let name = parts.first()?.to_lowercase();
@@ -1681,6 +1776,7 @@ fn parse_element(tag: &str) -> Option<SvgElement> {
             if let Some(t) = attrs.get("transform") {
                 rect.transform = Transform2D::parse(t);
             }
+            rect.style = base_style.clone();
             rect.style.parse_attributes(&attrs);
             Some(SvgElement::Rect(rect))
         }
@@ -1692,6 +1788,7 @@ fn parse_element(tag: &str) -> Option<SvgElement> {
             if let Some(t) = attrs.get("transform") {
                 circle.transform = Transform2D::parse(t);
             }
+            circle.style = base_style.clone();
             circle.style.parse_attributes(&attrs);
             Some(SvgElement::Circle(circle))
         }
@@ -1704,6 +1801,7 @@ fn parse_element(tag: &str) -> Option<SvgElement> {
             if let Some(t) = attrs.get("transform") {
                 ellipse.transform = Transform2D::parse(t);
             }
+            ellipse.style = base_style.clone();
             ellipse.style.parse_attributes(&attrs);
             Some(SvgElement::Ellipse(ellipse))
         }
@@ -1716,6 +1814,7 @@ fn parse_element(tag: &str) -> Option<SvgElement> {
             if let Some(t) = attrs.get("transform") {
                 line.transform = Transform2D::parse(t);
             }
+            line.style = base_style.clone();
             line.style.parse_attributes(&attrs);
             Some(SvgElement::Line(line))
         }
@@ -1727,6 +1826,7 @@ fn parse_element(tag: &str) -> Option<SvgElement> {
             if let Some(t) = attrs.get("transform") {
                 path.transform = Transform2D::parse(t);
             }
+            path.style = base_style.clone();
             path.style.parse_attributes(&attrs);
             Some(SvgElement::Path(path))
         }
@@ -1738,6 +1838,7 @@ fn parse_element(tag: &str) -> Option<SvgElement> {
             if let Some(t) = attrs.get("transform") {
                 polyline.transform = Transform2D::parse(t);
             }
+            polyline.style = base_style.clone();
             polyline.style.parse_attributes(&attrs);
             Some(SvgElement::Polyline(polyline))
         }
@@ -1749,11 +1850,76 @@ fn parse_element(tag: &str) -> Option<SvgElement> {
             if let Some(t) = attrs.get("transform") {
                 polygon.transform = Transform2D::parse(t);
             }
+            polygon.style = base_style.clone();
             polygon.style.parse_attributes(&attrs);
             Some(SvgElement::Polygon(polygon))
         }
         _ => None,
     }
+}
+
+/// Parse a `<text>` element from its open tag and the content between the
+/// tags. Nested markup (tspan) is stripped to its text; the three basic
+/// XML entities are decoded because the content is read literally.
+fn parse_text_element(tag: &str, content: &str, base_style: &SvgStyle) -> Option<SvgElement> {
+    let attrs_str = tag
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .splitn(2, char::is_whitespace)
+        .nth(1)
+        .unwrap_or("");
+
+    let mut attrs = HashMap::new();
+    let mut attr_str = attrs_str;
+    while let Some((key, value, rest)) = parse_attr(attr_str) {
+        attrs.insert(key.to_lowercase(), value);
+        attr_str = rest;
+    }
+
+    let mut text = String::new();
+    let mut in_tag = false;
+    for c in content.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => text.push(c),
+            _ => {}
+        }
+    }
+    let text = text
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        return None;
+    }
+
+    let mut t = SvgText {
+        x: attrs.get("x").and_then(|s| s.parse().ok()).unwrap_or(0.0),
+        y: attrs.get("y").and_then(|s| s.parse().ok()).unwrap_or(0.0),
+        content: text,
+        font_family: attrs.get("font-family").cloned().unwrap_or_default(),
+        font_size: attrs
+            .get("font-size")
+            .and_then(|s| SvgLength::parse(s))
+            .map(|l| l.to_px(16.0))
+            .unwrap_or(16.0),
+        anchor: match attrs.get("text-anchor").map(|s| s.trim()) {
+            Some("middle") => TextAnchor::Middle,
+            Some("end") => TextAnchor::End,
+            _ => TextAnchor::Start,
+        },
+        ..Default::default()
+    };
+    if let Some(tr) = attrs.get("transform") {
+        t.transform = Transform2D::parse(tr);
+    }
+    t.style = base_style.clone();
+    t.style.parse_attributes(&attrs);
+    Some(SvgElement::Text(t))
 }
 
 /// Parse a single attribute.
@@ -1801,6 +1967,95 @@ fn parse_points(s: &str) -> Vec<(f32, f32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_lowercase_viewbox_scales_the_document() {
+        // HTML's tree builder lowercases attribute names, so an inline
+        // <svg viewBox=...> serialized out of the DOM reads `viewbox=`.
+        // The case-sensitive lookup dropped the viewBox entirely and every
+        // path/circle under a viewBox != box-size painted UNSCALED (the
+        // repro triangle: 20px where Chrome draws 40).
+        let doc = SvgDocument::parse(
+            r##"<svg width="48" height="48" viewbox="0 0 24 24">
+                <path d="M12 2L2 22h20z" fill="#d9534f"/>
+            </svg>"##,
+        )
+        .expect("parse");
+        assert!(doc.view_box.is_some(), "lowercased viewbox must still parse");
+
+        let commands = doc.render(0.0, 0.0, 48.0, 48.0);
+        let points = commands
+            .iter()
+            .find_map(|c| match c {
+                DisplayCommand::FillPolygon { points, .. } => Some(points.clone()),
+                _ => None,
+            })
+            .expect("path fill");
+        let max_x = points.iter().map(|p| p.0).fold(f32::MIN, f32::max);
+        let min_x = points.iter().map(|p| p.0).fold(f32::MAX, f32::min);
+        // Path x spans 2..22 in a 24-unit viewBox mapped to 48px: 4..44.
+        assert!((min_x - 4.0).abs() < 0.01 && (max_x - 44.0).abs() < 0.01,
+            "viewBox scale must reach path points: {min_x}..{max_x}");
+    }
+
+    #[test]
+    fn test_text_element_parses_content_between_tags() {
+        let doc = SvgDocument::parse(
+            r##"<svg width="200" height="150" viewBox="0 0 200 150">
+                <rect fill="#4a90d9" width="200" height="150"/>
+                <text x="100" y="75" text-anchor="middle" fill="white" font-size="14">200&#215;150 &amp; more</text>
+            </svg>"##,
+        )
+        .expect("parse");
+
+        let commands = doc.render(0.0, 0.0, 200.0, 150.0);
+        let text = commands
+            .iter()
+            .find_map(|c| match c {
+                DisplayCommand::Text { text, y, font_size, ascent, .. } => {
+                    Some((text.clone(), *y, *font_size, *ascent))
+                }
+                _ => None,
+            })
+            .expect("text command");
+        // Numeric entities are not decoded (only the named basics), so the
+        // raw &#215; stays; the point is the content and the & decode.
+        assert!(text.0.contains("150 & more"), "content must reach the command: {:?}", text.0);
+        // y is the BASELINE and must be handed over as one (zero ascent).
+        assert_eq!(text.1, 75.0);
+        assert_eq!(text.3, Some(0.0));
+        assert_eq!(text.2, 14.0);
+
+        // Anchor=middle shifts the run left of x=100.
+        if let Some(DisplayCommand::Text { x, .. }) = commands.iter().find(|c| matches!(c, DisplayCommand::Text { .. })) {
+            assert!(*x < 100.0, "middle anchor must shift the run left: x={x}");
+        }
+    }
+
+    #[test]
+    fn test_root_presentation_attributes_seed_shape_styles() {
+        // The stroke-only icon idiom: fill/stroke live on the <svg> root and
+        // the shapes carry none of their own. The flat parser must seed
+        // every shape from the root or the circle paints a default-black
+        // disc where Chrome draws an outline.
+        let doc = SvgDocument::parse(
+            r#"<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"/>
+                <path d="M21 21l-4.35-4.35"/>
+            </svg>"#,
+        )
+        .expect("parse");
+
+        let commands = doc.render(0.0, 0.0, 14.0, 14.0);
+        assert!(
+            !commands.iter().any(|c| matches!(c, DisplayCommand::FillPolygon { .. })),
+            "fill=none on the root must reach the shapes (no fills)"
+        );
+        assert!(
+            commands.iter().any(|c| matches!(c, DisplayCommand::Polyline { .. })),
+            "stroke=currentColor on the root must reach the shapes (strokes present)"
+        );
+    }
 
     #[test]
     fn test_transform_identity() {
