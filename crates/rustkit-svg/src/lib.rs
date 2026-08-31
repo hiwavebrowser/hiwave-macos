@@ -86,15 +86,16 @@ impl SvgDocument {
         }
 
         // Extract SVG attributes
+        let mut root_style = SvgStyle::default();
         if let Some(svg_start) = xml.find("<svg") {
             if let Some(svg_end) = xml[svg_start..].find('>') {
                 let attrs = &xml[svg_start..svg_start + svg_end + 1];
-                
+
                 // Parse viewBox
                 if let Some(vb) = extract_attr(attrs, "viewBox") {
                     doc.view_box = ViewBox::parse(&vb);
                 }
-                
+
                 // Parse width/height
                 if let Some(w) = extract_attr(attrs, "width") {
                     doc.width = SvgLength::parse(&w);
@@ -102,11 +103,27 @@ impl SvgDocument {
                 if let Some(h) = extract_attr(attrs, "height") {
                     doc.height = SvgLength::parse(&h);
                 }
+
+                // Root presentation attributes seed every shape's style: the
+                // parser is FLAT (no nesting), so this is the only way
+                // `<svg fill="none" stroke="currentColor">` — the standard
+                // icon idiom — reaches its shapes. Without it the circles of
+                // every stroke-only icon painted a default-black disc.
+                let mut root_attrs = HashMap::new();
+                let mut attr_str = attrs
+                    .trim_start_matches("<svg")
+                    .trim_end_matches('>')
+                    .trim_end_matches('/');
+                while let Some((key, value, rest)) = parse_attr(attr_str) {
+                    root_attrs.insert(key.to_lowercase(), value);
+                    attr_str = rest;
+                }
+                root_style.parse_attributes(&root_attrs);
             }
         }
 
         // Parse elements (simplified)
-        doc.root = parse_svg_content(xml)?;
+        doc.root = parse_svg_content(xml, &root_style)?;
 
         Ok(doc)
     }
@@ -1662,7 +1679,7 @@ fn parse_svg_color(s: &str) -> Option<Color> {
 }
 
 /// Parse SVG content into elements.
-fn parse_svg_content(xml: &str) -> Result<SvgElement, SvgError> {
+fn parse_svg_content(xml: &str, base_style: &SvgStyle) -> Result<SvgElement, SvgError> {
     let mut group = SvgGroup::new();
     
     // Simple element parsing
@@ -1704,7 +1721,7 @@ fn parse_svg_content(xml: &str) -> Result<SvgElement, SvgError> {
                 if tag_name == "text" && !tag.ends_with("/>") {
                     if let Some(close) = xml[after_tag..].find("</text") {
                         let content = &xml[after_tag..after_tag + close];
-                        if let Some(element) = parse_text_element(tag, content) {
+                        if let Some(element) = parse_text_element(tag, content, base_style) {
                             group.children.push(element);
                         }
                         let rest = after_tag + close;
@@ -1717,7 +1734,7 @@ fn parse_svg_content(xml: &str) -> Result<SvgElement, SvgError> {
                 }
 
                 // Parse element
-                if let Some(element) = parse_element(tag) {
+                if let Some(element) = parse_element(tag, base_style) {
                     group.children.push(element);
                 }
 
@@ -1734,7 +1751,7 @@ fn parse_svg_content(xml: &str) -> Result<SvgElement, SvgError> {
 }
 
 /// Parse a single SVG element.
-fn parse_element(tag: &str) -> Option<SvgElement> {
+fn parse_element(tag: &str, base_style: &SvgStyle) -> Option<SvgElement> {
     let tag = tag.trim_start_matches('<').trim_end_matches('>').trim_end_matches('/');
     let parts: Vec<&str> = tag.splitn(2, char::is_whitespace).collect();
     let name = parts.first()?.to_lowercase();
@@ -1759,6 +1776,7 @@ fn parse_element(tag: &str) -> Option<SvgElement> {
             if let Some(t) = attrs.get("transform") {
                 rect.transform = Transform2D::parse(t);
             }
+            rect.style = base_style.clone();
             rect.style.parse_attributes(&attrs);
             Some(SvgElement::Rect(rect))
         }
@@ -1770,6 +1788,7 @@ fn parse_element(tag: &str) -> Option<SvgElement> {
             if let Some(t) = attrs.get("transform") {
                 circle.transform = Transform2D::parse(t);
             }
+            circle.style = base_style.clone();
             circle.style.parse_attributes(&attrs);
             Some(SvgElement::Circle(circle))
         }
@@ -1782,6 +1801,7 @@ fn parse_element(tag: &str) -> Option<SvgElement> {
             if let Some(t) = attrs.get("transform") {
                 ellipse.transform = Transform2D::parse(t);
             }
+            ellipse.style = base_style.clone();
             ellipse.style.parse_attributes(&attrs);
             Some(SvgElement::Ellipse(ellipse))
         }
@@ -1794,6 +1814,7 @@ fn parse_element(tag: &str) -> Option<SvgElement> {
             if let Some(t) = attrs.get("transform") {
                 line.transform = Transform2D::parse(t);
             }
+            line.style = base_style.clone();
             line.style.parse_attributes(&attrs);
             Some(SvgElement::Line(line))
         }
@@ -1805,6 +1826,7 @@ fn parse_element(tag: &str) -> Option<SvgElement> {
             if let Some(t) = attrs.get("transform") {
                 path.transform = Transform2D::parse(t);
             }
+            path.style = base_style.clone();
             path.style.parse_attributes(&attrs);
             Some(SvgElement::Path(path))
         }
@@ -1816,6 +1838,7 @@ fn parse_element(tag: &str) -> Option<SvgElement> {
             if let Some(t) = attrs.get("transform") {
                 polyline.transform = Transform2D::parse(t);
             }
+            polyline.style = base_style.clone();
             polyline.style.parse_attributes(&attrs);
             Some(SvgElement::Polyline(polyline))
         }
@@ -1827,6 +1850,7 @@ fn parse_element(tag: &str) -> Option<SvgElement> {
             if let Some(t) = attrs.get("transform") {
                 polygon.transform = Transform2D::parse(t);
             }
+            polygon.style = base_style.clone();
             polygon.style.parse_attributes(&attrs);
             Some(SvgElement::Polygon(polygon))
         }
@@ -1837,7 +1861,7 @@ fn parse_element(tag: &str) -> Option<SvgElement> {
 /// Parse a `<text>` element from its open tag and the content between the
 /// tags. Nested markup (tspan) is stripped to its text; the three basic
 /// XML entities are decoded because the content is read literally.
-fn parse_text_element(tag: &str, content: &str) -> Option<SvgElement> {
+fn parse_text_element(tag: &str, content: &str, base_style: &SvgStyle) -> Option<SvgElement> {
     let attrs_str = tag
         .trim_start_matches('<')
         .trim_end_matches('>')
@@ -1893,6 +1917,7 @@ fn parse_text_element(tag: &str, content: &str) -> Option<SvgElement> {
     if let Some(tr) = attrs.get("transform") {
         t.transform = Transform2D::parse(tr);
     }
+    t.style = base_style.clone();
     t.style.parse_attributes(&attrs);
     Some(SvgElement::Text(t))
 }
@@ -2005,6 +2030,31 @@ mod tests {
         if let Some(DisplayCommand::Text { x, .. }) = commands.iter().find(|c| matches!(c, DisplayCommand::Text { .. })) {
             assert!(*x < 100.0, "middle anchor must shift the run left: x={x}");
         }
+    }
+
+    #[test]
+    fn test_root_presentation_attributes_seed_shape_styles() {
+        // The stroke-only icon idiom: fill/stroke live on the <svg> root and
+        // the shapes carry none of their own. The flat parser must seed
+        // every shape from the root or the circle paints a default-black
+        // disc where Chrome draws an outline.
+        let doc = SvgDocument::parse(
+            r#"<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"/>
+                <path d="M21 21l-4.35-4.35"/>
+            </svg>"#,
+        )
+        .expect("parse");
+
+        let commands = doc.render(0.0, 0.0, 14.0, 14.0);
+        assert!(
+            !commands.iter().any(|c| matches!(c, DisplayCommand::FillPolygon { .. })),
+            "fill=none on the root must reach the shapes (no fills)"
+        );
+        assert!(
+            commands.iter().any(|c| matches!(c, DisplayCommand::Polyline { .. })),
+            "stroke=currentColor on the root must reach the shapes (strokes present)"
+        );
     }
 
     #[test]
