@@ -5441,3 +5441,194 @@ Nothing outstanding on this seat. #170 is green, `mergeable_state: clean`, no
 review threads, awaiting review. #167 is on hold by decision rather than by
 silence, which is the first time in fourteen nights of asking that a pile or
 instrument question has come back answered inside a night.
+
+## 2026-08-31
+
+**Metric: 2/26 → 2/26, and nothing was run to produce that.** No engine change
+landed on any branch tonight, so the conjunction cannot have moved from
+develop's `2/26` (night 27's receipt, run 33294082148, `macos-14`). I did not
+re-run it and there is no new receipt in this entry. What changed is the
+instrument that will guard that number when the teeth go in.
+
+**P-item: the two ledgered ratchet fixes (Atlas, on #167, 2026-08-30 — Pete
+decides only whether they land before or after the promote). COMPLETE, as
+**PR #172** against master.**
+
+### Commits — all on `atlas/n28-ratchet-newly-measurable`, cut from master
+
+- `183f3d9` — port `scripts/tests/test_ratchet_gate.py` and its two fixtures
+  to master. Control 15/15 green on master's unmodified gate.
+- `6006789` — the two fixes: jurisdiction carried into the floor and
+  `newly_measurable` classification; the geometry band, defaulting to 0.
+- `4e8655b` — close the sweep's one survivor.
+
+`crates/`, `Cargo.toml` and `Cargo.lock` byte-identical to master, verified by
+`git diff --name-only master...HEAD`. Branch law (2026-08-12) held.
+`cargo test -p rustkit-layout --lib` 260 and `-p rustkit-engine --lib` 49
+green on master's tree.
+
+### master has been running the blocking ratchet with no guard on it
+
+Found while looking for the gate's tests: #158 ported `scripts/ratchet_gate.py`
+to master on 2026-08-25 and left `scripts/tests/test_ratchet_gate.py` behind on
+develop. The `script-guards` job globs `scripts/tests/test_*.py`, so nothing
+skipped it — the file simply was not there. Six days of master carrying the
+layer that is meant to be the blocking one, with nothing checking it.
+
+It was harmless so far only because the ratchet is OFF on master (no committed
+floor), which is exactly the condition #167 exists to end. Ported before
+touching anything, and green on the unmodified gate first, so the 15 probes are
+a control rather than a claim.
+
+### Fix 1 — a widened jurisdiction is not a regression
+
+Night 27's finding, turned into code. Gate B may only speak about an element
+whose geometry Gate A calls exact, so every geometry fix ENLARGES the set it
+reports on, and a defect that was always there appears for the first time.
+`gradient-backgrounds .linear-6` is the measured instance: this digest recorded
+it as unmeasurable on 2026-08-12 because the card was 18px out of place, and it
+now fails against master's floor with nothing about the notch changed.
+
+Gate B publishes the withheld **set**, not only its size. That distinction is
+the whole fix: `discrete_unattributable` is a number, and two runs with the
+same number can have withheld disjoint sets, so a count can never answer *was
+THIS element withheld*.
+
+Three directions are enforced, and the two that are not the ratified one are
+why this is not just a softening:
+
+| situation | verdict |
+|---|---|
+| new id, element WITHHELD in the baseline run | `newly_measurable`, tighten-eligible |
+| new id, element ADMITTED in the baseline run | REGRESSION, unchanged |
+| new id, floor records no jurisdiction (schema 1) | REGRESSION, naming the re-seed |
+| id gone, element now WITHHELD | `newly_UNMEASURABLE` — **not** tighten-eligible |
+| id gone, element still admitted | improvement, tighten-eligible |
+
+The fourth row is the one I would not have written from the ratified text and
+is the more dangerous half. Without it a geometry regression buys a lower floor
+by making the gate stop looking — and the band added in fix 2 makes exactly
+that reachable, since a small geometry regression could now hold while silently
+withdrawing an element.
+
+`discrete_withheld_selectors` is `None`, never `[]`, for a case the gate never
+opened. `[]` asserts "everything was examined and nothing withheld", which for
+an unmeasured case is false in the direction that manufactures confident
+regression reports.
+
+### Fix 2 — the band exists, and it is zero, because I measured instead of picking
+
+The ratified text says "geometry gets a variance band like paint". Before
+building one I asked what the band would be absorbing. Gate A reads
+`layout.json` — layout output, not pixels — so the question is whether one
+binary produces one layout dump.
+
+**26/26 gating cases, captured 3 times each on one binary: byte-identical
+dumps.** Control: a one-byte perturbation of one dump is detected by the same
+comparison that produced the 26/26. Linux/SwiftShader, and the caveat is in the
+docstring — CoreText is not measured.
+
+So there is no run-to-run jitter for a geometry band to absorb, and #167's
+`settings` 280-vs-281 is an engine delta between master and develop, which is
+the thing the ratchet exists to see. The band ships as a mechanism — symmetric
+with paint, carried in the floor, settable per floor — with a default of **0**.
+A default of 1 would absorb nothing and permanently hide one regressed box per
+case, forever.
+
+I want to be plain that this is not what was ratified. "Geometry gets a
+variance band like paint" reads as *turn one on*; I built the mechanism and
+left it off, with the measurement in the docstring and a floor-level knob to
+raise it. If Pete wants a nonzero default that is one line, but it should be
+one line with a number behind it.
+
+### Verified against #167's real committed floor, not a fixture
+
+The floor file as committed on `atlas/e0b-ratchet-seed`, with controls in both
+directions:
+
+```
+CONTROL  floor reproduced exactly                  exit 2  RATCHET holds (25 red)
+
+(a) floor AS COMMITTED (schema 1), .linear-6 present
+    exit 1  gradient-backgrounds: NEW discrete failure missing_clip::…linear-6
+              (floor predates discrete_withheld — re-seed to classify)
+
+(b) same floor RE-CUT carrying its own jurisdiction
+    exit 2  RATCHET newly-measurable (1): …linear-6 — WITHHELD in the baseline run
+            RATCHET tighten-eligible (1): gradient-backgrounds
+
+(c) CONTROL defect on an element the floor ADMITTED
+    exit 1  card-grid: NEW discrete failure wrong_solid_color::body > div.header
+```
+
+**This does not by itself unblock #167, and that is deliberate.** A schema-1
+floor still fails; it just says why and names the remedy. The promote is
+unblocked by (b) — re-cutting the seed as a step of the promote ceremony, which
+is what was ratified. Worth stating because "the fix is in" would otherwise
+read as "the floor is now safe to merge", and it is not.
+
+### Mutation-check results
+
+**19 probes, 19 RED, control green before and after every sweep.** Graded on
+exit code, mutant compiled first, `PYTHONDONTWRITEBYTECODE` set — the three
+harness failures this digest has recorded on separate nights, guarded together.
+Committed before mutating, which this digest has told itself to do twice and
+which I did this time. Full table in #172.
+
+**The first sweep was 18/19 and the survivor was real.** M7: when the CURRENT
+run's jurisdiction is unknown, `fixed, withdrawn = set(), gone` could be
+reversed to `fixed, withdrawn = gone, set()` with all 25 tests green — claiming
+every discrete failure the floor carries was *fixed*, on a run that never said
+whether it looked. Reachable through a Gate B that did not publish the set, or
+a case it never opened; the consequence is a floor re-cut to zero discrete
+failures on no evidence. That is precisely the failure this pair of fixes
+exists to prevent, arriving through the door I had just built.
+
+Cause: every probe I wrote supplied the jurisdiction on **both** sides, so the
+unknown-current branch was never executed. Fifth sweep running whose survivor
+has the same shape — *the guard gets written against the example, not against
+the rule.* Night 9 proposed making it a checklist item rather than a lesson;
+I did not run that checklist, and the sweep caught what the checklist would
+have.
+
+### Decisions needed from Pete
+
+1. **#172 lands the two fixes before the promote — merge it now, or hold both
+   it and #167 until after?** Ratification left only this ordering open, and
+   the fixes are inert until a floor is seeded, so merging early costs nothing.
+2. **The geometry band ships as a mechanism defaulting to 0**, against a
+   measurement showing no jitter to absorb — accept, or do you want a nonzero
+   default and on what evidence?
+3. Still open from 08-10 onward: keep or literally revert the overflow-clip
+   change that cost `sticky-scroll` 36 pixels on a card RustKit lays out 38px
+   too low?
+
+### Surprises
+
+- **The blocking layer of the gate had no guard on the branch where it
+  blocks.** I went looking for the ratchet's tests to extend them and there
+  were none on master. The suite exists, was mutation-checked when it was
+  written, and was left on develop by a port that took the source and not the
+  tests. Nothing in CI could have said so: the guard job globs, and a glob over
+  an absent file matches nothing and passes.
+- **The ratified fix was right and its premise was half wrong.** The
+  `newly_measurable` half is exactly correct and I implemented it as stated.
+  The band half assumed geometry jitters like paint; thirty minutes of
+  capturing says it does not, on this seat. That is the third time in this
+  campaign that a ratified item dissolved on measurement (night 6's selector
+  drift is the other big one), and the pattern is the same: the premise came
+  from reading the code's shape rather than running it.
+- **Choosing `None` over `[]` was the highest-leverage line of the night**, and
+  it is one character of intent. Four of the nineteen probes are about it. A
+  gate that returns "nothing withheld" for a case it never opened turns every
+  future defect there into a confident regression — the exact class of confident
+  wrong number this campaign was opened to stop.
+- **A guard of mine failed on the prose beside the thing it guarded, in the
+  reverse direction.** `assertNotIn("tighten-eligible", out)` failed because
+  the newly-UNMEASURABLE block's own explanatory sentence contains the words
+  "do not make a case tighten-eligible". Every previous instance in this digest
+  is a guard passing on the prose; this one failed on it. Same defect, and the
+  fix is the same: assert on the command, not the paragraph next to it.
+- The stale cron prompt is stale for a **seventh** night: it opens by naming
+  P0a-0 as "the first unit", completed 2026-08-04, and describes the queue as
+  starting at P0a — twenty-seven nights behind.
