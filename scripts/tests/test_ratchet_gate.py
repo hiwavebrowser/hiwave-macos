@@ -293,6 +293,24 @@ class NewlyMeasurableTests(unittest.TestCase):
             self.assertIn("missing_clip::s1", out)
             self.assertNotIn("RATCHET tighten-eligible", out)
 
+    def test_an_unknown_CURRENT_jurisdiction_cannot_claim_anything_was_fixed(self):
+        """The survivor from the 2026-08-31 sweep, and it is the same shape.
+
+        Every other probe here supplies the jurisdiction on BOTH sides, so the
+        unknown-current path was untested and `fixed, withdrawn = set(), gone`
+        could be reversed with the suite still green. It is reachable: a Gate B
+        that did not publish the set — an older gate binary, or a case it never
+        opened — produces exactly this row, and the reversed form would let a
+        floor be tightened to zero discrete failures on no evidence at all.
+        """
+        with tempfile.TemporaryDirectory() as t:
+            now = {"clean": {"withheld": []},
+                   "red": {"pct": 0.8, "green": False, "disc": []}}  # no withheld
+            rc, out = run(t, gate_a(BASE_A), gate_b(now), self._seeded(t))
+            self.assertIn("newly-UNMEASURABLE", out)
+            self.assertIn("missing_clip::s1", out)
+            self.assertNotIn("RATCHET tighten-eligible", out)
+
     def test_an_id_that_was_actually_fixed_still_reads_as_tighten(self):
         """Same shape as above with the element still in jurisdiction."""
         with tempfile.TemporaryDirectory() as t:
