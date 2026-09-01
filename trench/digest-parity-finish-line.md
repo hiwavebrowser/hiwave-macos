@@ -5835,3 +5835,44 @@ site) are both RED. `9eb42c0` makes the skip say that nothing was asserted.
 - The stale cron prompt is stale for an **eighth** night: it opens by naming
   P0a-0 as "the first unit", completed 2026-08-04, and describes the queue as
   starting at P0a — twenty-eight nights behind.
+
+### Addendum — the macOS receipt for #175, and one number I could not attribute
+
+Run [33473548819](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/33473548819),
+all jobs green, `macos-14` — CoreText and Metal, so this part **is** a receipt:
+
+```
+metric:     2/26 cases pass all four conditions
+measured:   26/26 scored on all four  (0 not fully measured)
+  geometry   4/26 green   paint 3/26 green   stability 26/26   discrete 25/26
+```
+
+Green: `bg-pure`, `bg-solid`. Discrete: `gradient-backgrounds`, the same three
+`.linear-6` notch ids. **Every column is identical to develop's own 2/26** — the
+chain neither moves the metric nor breaks it, which is what a port of six
+commits nobody had measured most needed to establish.
+
+**The images-intrinsic cost reproduces on macOS.** Gate C's board, which is the
+only per-case paint figure I could reach from the logs:
+
+| case | develop `2be7d37` | #175 |
+|---|---|---|
+| `images-intrinsic` above tolerance | 25.023% | **26.433%** |
+| `sticky-scroll` above tolerance | 4.855% | **3.141%** |
+
+`images-intrinsic` −1.41 points on macOS against −1.38 on SwiftShader. Two
+seats, two font stacks, two rasterizers, agreeing to 0.03 of a point: the +2px
+is the border, not the platform, and the case really does pay for it.
+
+**`sticky-scroll`'s 1.7-point gain is not this chain's, and the comparison that
+would prove it does not exist.** develop's receipt is from `2be7d37`, two merges
+ago — #168 (grid subtree re-flow) and #169 (text-overflow) have landed since, so
+the macOS table above is develop+2 PRs+chain B against develop-as-of-08-30. What
+isolates chain B is the SwiftShader A/B on one tree, where `sticky-scroll` is
+**bit-identical** on both oracles. So the gain is almost certainly #168 arriving
+on macOS. I am recording it as unattributed rather than claiming it: a clean
+read needs a receipt for `5b89ed8` alone, which no run has produced.
+
+That is the same defect as night 27's finding, one layer in — a receipt taken
+against a tree the engine has moved past. It cost nothing this time only because
+the Linux A/B existed to check it against.
