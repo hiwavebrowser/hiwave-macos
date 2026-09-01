@@ -6026,3 +6026,42 @@ Also recorded: the drift-cancelling counterfactual **failed to arbitrate**. At
 because the two trees have different drift profiles — which is the ±2 itself. A
 uniform shift cannot answer the question, and publishing only the experiment
 that worked would be this campaign's own failure mode.
+
+### Addendum 6 — the crop compare, and develop was painting no border at all
+
+Pete's third comment described his own row diff — wide bands over every image
+region, plus 4-row full-width bands at each section boundary — and asked R1 to
+decide between *"the new paint extent is the Chrome-ward one"* and *"an actual
+content-box/border-box paint bug"*, naming the experiment: crop `test1` against
+the Chrome baseline.
+
+Ran it on all 14 images, each cropped at **its own border-box origin** so the
++24px drift is cancelled and only the painted extent is compared.
+
+```
+test1 border ring — the fixture's `border: 1px solid red`
+  chrome 148   (255,0,0)    (255,0,0)    (255,0,0)    (255,0,0)
+  develop      (231,76,60)  (231,76,60)  (231,76,60)  (231,76,60)
+  this tip     (255,0,0)    (255,0,0)    (255,0,0)    (255,0,0)
+```
+
+`(231,76,60)` is the image's own content colour: **develop painted no border
+ring at all**, content running to the edge of a box 2px short in each axis.
+
+Per-image mismatch inside the box, on-screen images only: **3141 → 586**, with
+five of seven now **pixel-exact against Chrome**, two closer, none worse.
+Images 8–14 read zero on both sides only because they sit below the 800×1400
+viewport — recorded as not-evidence rather than left to look like agreement.
+
+So R1's question resolves to its first branch, by measurement rather than
+argument: the chain paints the box Chrome paints, with Chrome's ring, at
+Chrome's size, and the frame-level diff worsens because those now-correct
+pixels are displaced by the n37 offset. It also explains Pete's second pattern —
+the 4-row full-width bands at section boundaries are border rings that
+previously were not drawn.
+
+Worth naming as method: **three of tonight's four disagreements were settled by
+cropping at each tree's own box rather than at a shared coordinate.** A frame
+diff at page coordinates cannot separate "painted wrong" from "painted right,
+somewhere else", and every confusion in this thread — mine included — came from
+reading a page-aligned number as if it could.
