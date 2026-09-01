@@ -5979,3 +5979,50 @@ against the proxy's own status endpoint), so macOS per-element detail is
 limited to the job log's per-case counts and its first five failures per case.
 Night 27 recorded the same refusal; it is a standing limit of this seat, not a
 transient.
+
+### Addendum 5 — R1 asked whether the cost is paint at fixed geometry. It is not, and the band split says so
+
+Pete's second comment read the Gate-A table for `9eb42c0` **alone**, found all 39
+residual failures are the +23.5–24.0px n37 dy, and concluded *"zero dx/dw/dh
+introduced by this chain — geometry is untouched"*, narrowing R1 to "what does
+`5fc39cb` change about image paint at fixed geometry".
+
+The snapshot is right and the inference does not follow: a one-tree table shows
+the **residual**, not the **delta**. develop's own row list, same lane, carries
+`test1` height −2.0469, `html > body` height +111.4844, and all 14 images as
+`missing_box`. On `9eb42c0` those are gone. The chain's dh deltas are −2.05 on
+`test1` and −88 on `body`.
+
+He asked for a pixel A/B of one test row. Done, by band, on one tree:
+
+| band | before | after | Δ | frames byte-identical |
+|---|---|---|---|---|
+| above `test1` (rows 0–130) | 23524 | 23524 | **0** | **yes** |
+| `test1`'s own image (131–233) | 11985 | **11852** | **−133** | no |
+| `test1`→`test2` gap | 31708 | 32834 | +1126 | no |
+| `test2`–`test5` | 149512 | 159119 | +9607 | no |
+| `test6`–`test10` | 105015 | 109857 | +4842 | no |
+
+**The band where paint extent changes with position held fixed is the only band
+that improves.** Everything that worsens is below the first image, where boxes
+moved. A paint-side defect would concentrate in the image bands; this does the
+opposite.
+
+Mechanism: `test1`'s container was 2.05px short on macOS, so correcting it moves
+the rest of the page from `dy ≈ 22` to `dy = 24` against the n37 +24px drift —
+**the wrong height was cancelling 2px of the drift.** Prediction offered on the
+PR so it can be checked at restack: once #174 removes the drift, this chain's
+`images-intrinsic` figure should fall below develop's.
+
+**I over-corrected in addendum 4.** Calling the compensating-error framing "a
+SwiftShader artefact" was wrong — the cancellation is real on both seats; what
+is SwiftShader-only is the residual's *direction* (`test1` overshoots to 133.12
+here, lands inside 0.5px on macOS). The original PR-body reading was closer than
+the correction I published over it.
+
+Also recorded: the drift-cancelling counterfactual **failed to arbitrate**. At
+`dy=24` develop is closer (75390 vs 96077); at `dy=26` it is a near-tie overall
+(77419 vs 77495) with the chain far closer on the top half (51336 vs 38254),
+because the two trees have different drift profiles — which is the ±2 itself. A
+uniform shift cannot answer the question, and publishing only the experiment
+that worked would be this campaign's own failure mode.
