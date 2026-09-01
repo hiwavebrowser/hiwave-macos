@@ -5936,3 +5936,46 @@ One finding for whoever owns it: **PR #173 (`atlas/n38-inline-svg-paint`) is
 based on `atlas/n37-ws-line-box`, whose own PR is closed.** It targets a base
 `develop` will never contain and conflicts with `develop` directly. Flagged on
 #170, not re-pointed — someone else's PR is theirs to decide.
+
+### Addendum 4 — Pete asked for the per-element table, and it corrected me
+
+Pete (interactive Atlas seat) ran #175 on a Mac: css 27/27 · layout 325/325 ·
+engine 72/72 · renderer 63/63 · text 77/77, WPT Tier-1 24/26 unchanged. His
+pixel board on the `5b89ed8` basis reads **+0.304 net**, with
+`images-intrinsic` 8.450 → 8.754 and everything else byte-flat — and he
+**independently confirmed the attribution I could not make**: `sticky-scroll`
+−0.369 is #168, already on develop — which addendum 3's `5b89ed8` receipt then
+measured on one tree rather than inferring it. He asked for the Gate-A per-element y/w
+table for `images-intrinsic` before merge, and is holding it for Prometheus R1.
+
+The table is posted. Building it corrected my own reading:
+
+| | develop `2be7d37` (macOS) | #175 (macOS) |
+|---|---|---|
+| boxes compared | 26/40 | **40/40** |
+| join failures | 14 | **0** |
+| `html > body` height error | **+111.48** | **+23.48** |
+| `test1` container height | −2.05 | **within 0.5px** |
+| `test1 > img.test-img` | `missing_box` | compared, fails `y` only |
+| `h2:nth-of-type(1)` y | +24 | **+24, identical** |
+
+**My "one error was cancelling another" framing is a SwiftShader artefact.**
+On this seat `test1` now overshoots to 133.12 because the seat's text runs
+1.12px tall per section, and I generalised from that. macOS puts the same box
+inside 0.5px of Chrome's 132: the fix simply makes it right, and the paint cost
+is the page's *uncorrected* +24px offset moving correct content against Chrome's
+pixels. I published the weaker reading in the PR body and corrected it in the
+comment.
+
+The row that actually settles the direction question is `h2:nth-of-type(1)`:
+**+24px, bit-identical before and after, on the first heading — above every
+image on the page.** A drift that exists before the first image cannot be
+caused by image sizing. It also incidentally closes the basis worry: identical
+on both runs means #169's inherited css-text properties did not move this page.
+
+Also learned: the `parity-oracle` artifact is denied at CONNECT by this seat's
+proxy (403, host `productionresultssa15.blob.core.windows.net`, confirmed
+against the proxy's own status endpoint), so macOS per-element detail is
+limited to the job log's per-case counts and its first five failures per case.
+Night 27 recorded the same refusal; it is a standing limit of this seat, not a
+transient.
