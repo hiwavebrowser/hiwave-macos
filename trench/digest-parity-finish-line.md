@@ -5706,3 +5706,132 @@ did not re-count was the one describing my own guards. It took a second seat
 running the suite to catch it, which is the same mechanism as night 25's
 reproduce-to-the-axis result — a second measurement is worth more than a
 careful re-read.
+
+## 2026-09-01
+
+**Metric: 2/26 → 2/26, and nothing tonight has moved it yet.** `develop`'s
+`2/26` (night 27's receipt, run 33294082148, `macos-14`) still stands. Tonight's
+engine work sits on **PR #175** against `develop`; its `macos-14` lane produces
+the receipt and had not finished when this was written. Every number below is
+Linux/SwiftShader — **MECHANICS, NOT A RECEIPT.**
+
+**P-item: the pile — port chain B forward as one measured slice. COMPLETE, as
+PR #175.** This is the ask night 27 put to Pete and the fourteenth night the
+pile question has gone unanswered; I applied night 24's reasoning (waiting
+produces a night with no work) rather than asking a fifteenth time. Chain B was
+the queue-correct choice on evidence, not preference: chain A still conflicts in
+three files, chain B has been clean against `develop` since 2026-08-24 and had
+never been measured by any gate.
+
+### Commits — `atlas/n29-replaced-chain-port`, cut from `develop 5b89ed8`
+
+Five cherry-picks with authorship kept, plus one of mine:
+
+- `5fc39cb` — a replaced element carries its own margin/border/padding.
+- `116f1f5` — every `<img>`/`<input>`/`<select>`/`<textarea>`/leaf `<button>`
+  carries the oracle's join key and exports all four box-model rects.
+- `1f963a0`, `55b63aa` — the original author's two guard commits.
+- `8de3c38` — a specified `aspect-ratio` reaches replaced elements.
+- `64ec5a1` — a flex item image takes its cross size from its ratio.
+- `9eb42c0` — **mine, test-only**: the GPU-gated identity guard says when it
+  skipped.
+
+`cargo test -p rustkit-layout --lib` 324 (develop 307) and `-p rustkit-engine
+--lib` 65 (develop 62), green with and without a GPU adapter visible. Branch law
+held: engine work on its own branch off `develop`, nothing in `crates/` on this
+branch.
+
+### What the measurement says
+
+| Gate A | develop | + chain B |
+|---|---|---|
+| green | 2/26 | 2/26 |
+| geometry failures | 2500 | **2739** |
+| join failures | **110** | **15** |
+| axes newly compared | — | **240** |
+
+The count going up is the gate seeing more, not the engine doing worse. 103 join
+failures clear — `settings` 30, `form-controls` 26, `form-elements` 17,
+`images-intrinsic` 14, `flex-positioning` 7, `css-selectors` 5, `shelf` 2,
+`sticky-scroll` 1, `new_tab` 1 — and those elements bring their pre-existing
+failures into the count for the first time. This is night 28's `newly_measurable`
+distinction arriving as data three days after it was built as code.
+
+**All 14 `img` boxes in `images-intrinsic` are now exact in both size axes**
+against Chrome 148 — test11 160×90 (was 160×160), test12 80×80 (was 80×102).
+Only `y` still fails on them, and that is the page's text drift, i.e. P4.
+
+The 8 new join failures are `phantom_box` on inputs that only now have
+identities (`settings #shieldEnabled` and six siblings, one `form-elements`
+toggle): Chrome collapses them to zero size, RustKit gives them a box. A real
+defect, newly visible.
+
+### The stop rule, and why I did not revert
+
+Gate B is **bit-identical on 25 of 26 cases**. `images-intrinsic` goes
+**71.2729% → 69.8941%** within ±5, and Gate A on that case has **21 worsened
+axes** — 20 of them one rigid **+2.0px `y`** shift, the 21st test1's container
+height `−0.88` → `+1.12`.
+
+Chrome's baseline gives that image a **102×102** border box: 100 natural plus
+2×1px border. RustKit built 100 and now builds 102, so everything below moves
+2px down on a page this seat already renders ~24px low. **The old number was
+better because one error was cancelling another** — an image 2px too small
+partly offsetting text 1.12px too tall. That is §1's Goodhart finding in
+miniature, and reverting would buy 1.38 paint points by restoring the
+cancellation.
+
+The rule fires on *improving the metric while an oracle regresses*. Nothing
+improved: the metric's columns are unchanged on this seat and both raw counts
+got worse. So this is logged as a **judgement**, not a silent pass, and it is
+decision 1 below. On the same case: `html > body` height error 124.32 → 36.32,
+test11 height 71.12 → 1.12, test12 height 20.0 → 0.
+
+### Mutation-check results
+
+**13 probes, 13 RED, control green before and after.** Graded on exit code,
+committed before mutating, restored with `git checkout --`. Full table in #175.
+
+**M10 survived the first sweep and the survivor was the runner, not the guard.**
+Deleting `attach_identity` from the `<img>` build path — the exact defect
+`116f1f5` exists to fix — left the whole suite green. Cause:
+`a_replaced_element_is_built_with_its_element_identity` needs a compositor,
+`cargo test` on this seat sees no Vulkan adapter, so it returns before asserting
+anything and prints `ok`. With `VK_ICD_FILENAMES` pointed at the SwiftShader ICD
+this trench has used for captures since night 4, M10 and M13 (the `<input>` call
+site) are both RED. `9eb42c0` makes the skip say that nothing was asserted.
+
+### Decisions needed from Pete
+
+1. **#175 keeps a fix that costs `images-intrinsic` 1.38 paint points on this
+   seat** because the fix is right and the old number depended on two errors
+   cancelling — accept that reading of the stop rule, or revert on the letter?
+2. **May the trench port chain A (`percent-height-basis`, 15 commits, conflicts
+   in three files) next?** With chain B on a PR it is the last live engine work
+   in the pile, and it carries `7b48db5`, the fix for the two axes #168 worsened.
+3. Still open from 2026-08-31: **merge #172 before or after the promote**, and
+   from 08-10 onward: keep or revert the overflow-clip change that cost
+   `sticky-scroll` 36 pixels.
+
+### Surprises
+
+- **Clearing 103 join failures bought Gate B almost nothing.** Elements examined
+  went 231 → 232, withheld 1362 → 1361. The manifest predicted this chain
+  "plausibly moves what is measurable"; it moves **Gate A's** jurisdiction by 240
+  axes and **Gate B's** by one element, because Gate B admits only elements that
+  are exact on *every* axis and the newly joined ones still fail `y`. Join keys
+  buy geometry measurement; only geometry fixes buy paint measurement.
+- **A correct fix made two oracles worse on one case, and the reason is the
+  campaign's own thesis.** I expected the compensating-error pattern to show up
+  as a story about instruments. It showed up as arithmetic on one image.
+- **This seat's default `cargo test` never executes the only production-path
+  identity guard**, and it has not since that guard was written on 2026-08-22. A
+  guard that skips itself prints the same word as one that passed. Night 4 found
+  the seat can render; nothing carried that discovery into the test invocation,
+  so every "green" this trench has reported on a GPU-gated guard was silent about
+  not having run it.
+- Capture is cheap once built: 26 cases in **16 seconds**, both frames and layout
+  dumps. The cost of a measured night is the two release builds, not the run.
+- The stale cron prompt is stale for an **eighth** night: it opens by naming
+  P0a-0 as "the first unit", completed 2026-08-04, and describes the queue as
+  starting at P0a — twenty-eight nights behind.
