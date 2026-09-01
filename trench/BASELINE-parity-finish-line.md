@@ -26,6 +26,7 @@ BASELINE (2026-08-04):  UNMEASURABLE
 P0b      (2026-08-09):  1/26 finish-line-green   (master 44389f1)
 master   (2026-08-28):  1/26 finish-line-green   (master f58950c, nightly 33209750736)
 develop  (2026-08-30):  2/26 finish-line-green   (develop 2be7d37, run 33294082148)
+develop  (2026-09-01):  2/26 finish-line-green   (develop 5b89ed8, run 33474303817)
 ```
 
 **`master` and `develop` are two different numbers and both are live.** The

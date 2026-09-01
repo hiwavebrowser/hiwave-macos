@@ -5876,3 +5876,63 @@ read needs a receipt for `5b89ed8` alone, which no run has produced.
 That is the same defect as night 27's finding, one layer in — a receipt taken
 against a tree the engine has moved past. It cost nothing this time only because
 the Linux A/B existed to check it against.
+
+### Addendum 3 — the `5b89ed8` receipt night 29 said did not exist, and it settles both attributions
+
+Night 29 closed by naming a gap precisely: *"a clean read needs a receipt for
+`5b89ed8` alone, which no run has produced."* One now has.
+
+**PR #170**, re-pointed at the new base (merged `develop 5b89ed8` in; `crates/`,
+`Cargo.toml` and `Cargo.lock` verified byte-identical to it, so it is still
+docs-only), [run 33474303817](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/33474303817),
+`macos-14`, all 12 checks green.
+
+```
+metric:     2/26 cases pass all four conditions
+measured:   26/26 scored on all four  (0 not fully measured)
+  geometry   4/26 green   paint 3/26 green   stability 26/26   discrete 25/26
+```
+
+**Identical to the `2be7d37` receipt on every column and every case.** Green:
+`bg-pure`, `bg-solid`. Discrete failure still `gradient-backgrounds`. So
+**#168 and #169 landed between these two receipts and moved no column of the
+conjunction** — nothing crossed it, nothing fell off. Neither PR claimed
+otherwise (#168 reported a magnitude win with no green-status change, #169
+reported its boards byte-flat); it is the conjunction being a harder bar than
+the boards, which is the point of it.
+
+**Gate C on `5b89ed8` alone settles night 29's two open attributions**, and it
+splits them in opposite directions:
+
+| case (Gate C `>tol`) | develop `2be7d37` | **develop `5b89ed8`** | #175 |
+|---|---|---|---|
+| `sticky-scroll` | 4.855% | **3.141%** | 3.141% |
+| `images-intrinsic` | 25.023% | **25.023%** | 26.433% |
+
+- **`sticky-scroll`'s 1.7-point gain is not chain B's.** develop alone already
+  reads 3.141%, bit-identical to #175. Night 29 inferred this from the
+  SwiftShader A/B and declined to claim it; the inference was right, and it is
+  now measured rather than reasoned.
+- **`images-intrinsic`'s 1.41-point cost *is* chain B's.** develop alone is
+  unchanged at 25.023%, so the whole of that move belongs to #175. Night 29's
+  attribution stands, now isolated on one tree instead of across two merges.
+
+Night 29 called its own version of this "the same defect as night 27's finding,
+one layer in — a receipt taken against a tree the engine has moved past." The
+fix was cheap: re-point the docs-only PR at the current base and let CI produce
+the receipt. That is worth naming as a reusable move rather than a one-off,
+because `develop` will move again: **a docs-only PR whose `crates/` is
+byte-identical to `develop` is a receipt generator, and re-pointing it costs one
+merge commit.**
+
+Also re-measured on the same pass, in `docs/UNMERGED_ENGINE_BRANCHES_2026-08-30.md`:
+#168/#169 out of the pile; the `-r2` supersession pattern at a **fourth**
+instance (#171 closed for `n37-ws-line-box-r2`/#174); chain B now #175; and
+chain A partly redundant in a way a SHA check hides — #168 cherry-picked
+`2e325e2` as `ea6d4ca`, so the *change* is in `develop` while the *SHA* is not,
+and `merge-base --is-ancestor` still reports the chain wholly unmerged.
+
+One finding for whoever owns it: **PR #173 (`atlas/n38-inline-svg-paint`) is
+based on `atlas/n37-ws-line-box`, whose own PR is closed.** It targets a base
+`develop` will never contain and conflicts with `develop` directly. Flagged on
+#170, not re-pointed — someone else's PR is theirs to decide.
