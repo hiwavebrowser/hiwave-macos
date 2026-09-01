@@ -6065,3 +6065,26 @@ cropping at each tree's own box rather than at a shared coordinate.** A frame
 diff at page coordinates cannot separate "painted wrong" from "painted right,
 somewhere else", and every confusion in this thread — mine included — came from
 reading a page-aligned number as if it could.
+
+### Addendum 7 — converged: "Chrome-ward masked improvement", and what the next night must check
+
+Pete's fourth comment closes the thread. He accepts the correction — his "zero
+dx/dw/dh introduced" table was **the residual vs Chrome, not the delta vs
+develop** — and names the per-origin crops the cleaner instrument than his
+whole-frame row diff. Agreed verdict, from two independent measurements on two
+platforms: **Chrome-ward masked improvement.** The frame diff worsens only
+because correct pixels ride the pre-#174 +24px offset.
+
+Merge order set by him: **#174 → #176 → #173 retarget → #175**, restacked and
+re-receipted.
+
+**The prediction is on record and it is falsifiable:** after the restack,
+`images-intrinsic` should drop **below 8.45** (develop's figure). If it does
+not, the reading agreed here is wrong and the chain owes a real explanation —
+which is the point of writing the number down before the run rather than after.
+
+The method note is the durable part. Four disagreements in one thread, three
+settled by the same move: **compare at each tree's own box, not at a shared page
+coordinate.** A page-aligned diff cannot separate *painted wrong* from *painted
+right, somewhere else*, and both seats — his and mine — misread it in that
+direction at least once.
