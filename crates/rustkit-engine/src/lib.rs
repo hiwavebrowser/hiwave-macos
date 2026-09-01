@@ -9662,6 +9662,22 @@ mod tests {
     /// there rather than pretending. On macOS — the platform this campaign
     /// measures, and the one the parity swarm runs on in CI — a missing
     /// adapter FAILS: a guard that skips itself is not a pass.
+    ///
+    /// The skip is LOUD, and that is the point rather than politeness. A
+    /// mutation sweep on 2026-09-01 recorded this guard as a SURVIVOR —
+    /// deleting the `attach_identity` call on the `<img>` build path left the
+    /// whole suite green — and the survival was an artefact of the runner:
+    /// the trench seat has a software Vulkan adapter (SwiftShader, shipped
+    /// with the bundled Playwright Chromium) that `cargo test` does not see
+    /// unless `VK_ICD_FILENAMES` points at it. With
+    ///
+    /// ```sh
+    /// VK_ICD_FILENAMES=/opt/pw-browsers/chromium-1194/chrome-linux/vk_swiftshader_icd.json \
+    ///     cargo test -p rustkit-engine --lib
+    /// ```
+    ///
+    /// the same probe is RED. A silently-skipped guard and a passing guard
+    /// print the same word, so the run says which one it was.
     #[test]
     fn a_replaced_element_is_built_with_its_element_identity() {
         let engine = match layout_only_engine() {
@@ -9673,6 +9689,12 @@ mod tests {
                          report a pass without building a layout tree"
                     );
                 }
+                eprintln!(
+                    "SKIPPED a_replaced_element_is_built_with_its_element_identity: \
+                     no GPU adapter, so no layout tree was built and NOTHING was \
+                     asserted. Re-run with VK_ICD_FILENAMES set to a software \
+                     Vulkan ICD to make this guard actually execute."
+                );
                 return;
             }
         };
