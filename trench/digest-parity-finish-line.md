@@ -6088,3 +6088,179 @@ settled by the same move: **compare at each tree's own box, not at a shared page
 coordinate.** A page-aligned diff cannot separate *painted wrong* from *painted
 right, somewhere else*, and both seats — his and mine — misread it in that
 direction at least once.
+
+## 2026-09-02
+
+**Metric: 2/26 → 2/26, and no run tonight could have moved it.** `develop`'s
+`2/26` (night 27's receipt, run 33294082148, `macos-14`) still stands. Tonight's
+change is a measurement fix, not an engine fix: the layout tree is byte-identical
+and so are all 32 rendered frames. `N/26` cannot have moved because no case
+changed green status on either gate. Every number below is Linux/SwiftShader —
+**MECHANICS, NOT A RECEIPT.**
+
+**P-item: chain A, ported as its highest-value single commit rather than as
+fifteen. COMPLETE, as the pair #177 + #178.** Night 29's decision 2 asked
+whether the trench may port chain A next and went unanswered, like the pile
+question before it; night 24's reasoning applies (waiting produces a night with
+no work), so I ported the one commit the manifest names as still worth the most
+and left the other fourteen alone.
+
+### What I actually found, which is not what I set out to do
+
+`7b48db5` — *export the visual rect for transformed boxes* — is **half a fix**,
+and the other half has been sitting on this branch since the same day.
+
+- **2026-08-17, engine half:** `7b48db5` on `atlas/percent-height-basis`, emit
+  `visual_border_box`. Its own commit message ends *"Inert until a consumer
+  prefers the new field."*
+- **2026-08-17, gate half:** `6ec2017` on this branch, make Gate A prefer that
+  field. Its message ends *"inert until the engine emits it."*
+
+Both halves are honest about being inert. Neither says the other exists, and
+**neither has ever been in the same tree.** `master` and `develop` still join on
+`border_box` alone, which means every Gate A receipt this campaign has published
+— P0b's `1/26`, every `2/26` since — scored the corpus's transformed boxes
+against a rect they are not comparable to. Sixteen nights, two correct commits,
+zero effect.
+
+### Commits
+
+`atlas/n30-visual-rect-port` (engine, cut from `develop 5b89ed8`) — **PR #178**:
+
+- `d665975` — a transformed box exports the rect Chrome measures. `7b48db5`
+  cherry-picked; two documented differences (its tests move out of a
+  chain-A-only module, and the three helpers move above the doc comment
+  `7b48db5` leaves them wedged under — on that branch "Convert one layout box to
+  its JSON form" documents `compose_affine`). No expression differs.
+- `54f1b73` — close the survivor: a two-corner bound is right by accident.
+
+`atlas/n30-gate-visual-rect` (instrument, cut from `develop 5b89ed8`) — **PR #177**:
+
+- `6c6a3c6` — Gate A prefers `visual_border_box`. `6ec2017` ported forward.
+
+Two PRs rather than one, and the order matters: **#177 first.** The campaign's
+own rule is that instrument PRs carry zero engine change so the delta stays
+attributable, and here that rule pays for itself — #177 is provably a no-op on
+`develop` today, so the whole delta belongs to #178. In the other order, #178's
+CI receipt would show nothing and the pair would look like it did nothing.
+
+(One wart: `6c6a3c6`'s message says "the engine half is #NNN" because the PR did
+not exist when it was written, and this branch never force-pushes. It is #178.)
+
+### The 2x2, which is the actual receipt
+
+Two release binaries differing only by the engine half, 32 registry cases
+captured from each, both gate versions run over both captures:
+
+| Gate A geometry failures | joins on `border_box` | prefers `visual_border_box` |
+|---|---|---|
+| capture from `develop 5b89ed8` | **2500** | **2500** |
+| capture from `atlas/n30-visual-rect-port` | **2500** | **2461** |
+
+Three cells the same number is the point: neither half moves anything alone.
+2500 also reproduces night 29's independently measured `develop` figure exactly,
+which is a free check that this seat has not drifted.
+
+Two supporting measurements, because "zero engine behavior change" is a claim
+that should not be taken on trust:
+
+- **32/32 layout dumps identical** to `develop`'s once the added key is removed.
+  `border_box` kept its meaning on every box of every case.
+- **32/32 frames byte-identical.** The painter is untouched.
+
+### What moved, reported as movement rather than as a win
+
+**39 rows clear · 0 rows added · 22 rows get worse.** Two cases move, 24 are
+bit-identical: `new_tab` 243 → 205, `sticky-scroll` 114 → 113.
+
+The two largest cleared rows are boxes that were never wrong:
+
+```
+sticky-scroll  .overflow-content     y   Δ 150.05  (translate(-50%,-50%))
+new_tab        div.ambient-glow      x   Δ 400.00  (translateX(-50%))
+```
+
+**The 22 worsened rows are the gate becoming honest, and they are one defect.**
+30 `kbd` boxes on `new_tab` carry a measured `scale(1.05)` — border box 42x23,
+visual box 44.1x24.15 — and the only source of that transform in the page is
+`.shortcut:hover kbd`, matched in a static capture with no pointer. On 22 of
+those axes the untransformed layout rect happened to sit closer to Chrome, so
+the old join was scoring the defect as partial credit. The engine's simple
+pseudo-class matcher returns `false` for `hover` (lib.rs:6122), so the leak is
+somewhere in the descendant/compound path, not there. Recorded as a finding with
+its measurement; not fixed tonight.
+
+Gate B: percentage half **bit-identical on all 26 cases**, discrete failures
+0 → 0, elements examined 231 → 232 (the `ambient-glow`, now attributable
+because its visual rect matches Chrome's).
+
+### Stop rule
+
+Did not fire, and the check is worth stating precisely because the row counts
+move in both directions. Nothing improved the metric — the green set is
+identical on both gates (`bg-pure`, `specificity` on this seat) — and **no case
+gained a failing row**: 0 rows added across all 26 cases on either gate. The 22
+worsened magnitudes are on rows that were already failing, on a box that is
+genuinely transformed.
+
+### Mutation-check results
+
+**Engine half: 7 probes, 7 RED**, control green before and after. Committed
+before mutating, restored with `git checkout --`, graded on exit code.
+
+| Mutation | Caught by |
+|---|---|
+| M1 the box's own transform ignored | 4 tests |
+| M2 visual rect emitted on every box | `an_untransformed_box_exports_no_visual_rect` |
+| M3 ancestor transform not composed down to children | `a_child_inherits_its_ancestors_transform` |
+| M4 transform taken about the page origin, not `transform-origin` | `a_scale_is_taken_about_the_transform_origin` |
+| M5 bound taken from one diagonal, not four corners | `a_rotated_box_is_bounded_by_all_four_corners` *(added tonight)* |
+| M6 `border_box` redefined as the visual rect | `a_translated_box_exports_the_rect_chrome_measures` |
+| M7 compose drops the outer translation | 4 tests |
+
+**M5 survived the first sweep, 6/7.** Every guard the ported commit carries uses
+translate or scale, and an axis-aligned affine maps the two ends of one diagonal
+onto opposite corners of the bound — so two corners span the box *by accident*
+on every one of them. The rule is "the axis-aligned bound of the mapped rect";
+the examples could not tell it apart from "the bound of the mapped diagonal".
+`rotate(45deg)` separates them: a 100x40 box bounds to 98.99 square, and the
+main diagonal alone reads 98.99 tall but **42.43 wide**. `rotate(90deg)` would
+NOT have caught it — a quarter turn maps the rect back onto an axis-aligned
+rect. Seventh sweep running whose survivor is the same shape.
+
+**Instrument half: 4 probes, 4 RED**, control green before and after: preference
+removed; preference made a requirement (no fallback); layout rect ranked first;
+visual rect joined ALONGSIDE so a right layout rect excuses a wrong visual one.
+
+### Decisions needed from Pete
+
+1. **`master`'s Gate A has the same blind join and I did not open a second PR
+   for it** — #177 targets `develop` because that is where the pair must meet;
+   should `master` get the same 14 lines directly, or by a lane merge?
+2. **Chain A's other 14 commits:** port them the same way, one measured commit
+   at a time, or resolve the tip's three-file conflict in one go?
+3. Still open from 2026-08-31 and 09-01: merge #172 before or after the promote;
+   and the merge order #174 → #176 → #173 retarget → #175 has not started, so
+   #175's on-record prediction (`images-intrinsic` below 8.45 after the restack)
+   is still unchecked.
+
+### Surprises
+
+- **The night's work was already written, twice, and had been for sixteen
+  days.** I came in expecting to port a fix and spent the night pairing two
+  commits that each said, correctly and in their own message, that they did
+  nothing alone. Nobody was wrong; nobody read the other half. A branch name is
+  not an index — night 28's lesson — and neither, it turns out, is a commit
+  message that documents its own inertness.
+- **A correct instrument change makes 22 rows worse, and the campaign should
+  want that.** The `kbd` chips are 5% too large; the old join was reading their
+  untransformed rect, which sat closer to Chrome. This is §1's Goodhart finding
+  in the instrument rather than the engine: the number was better because the
+  measurement was wrong.
+- **The 2x2 cost one extra release build and settled three questions at once**
+  — that each half is inert alone, that the delta belongs to the engine half,
+  and that the seat reproduces `develop`'s 2500. Measuring the no-op cells was
+  the cheap part and it is what makes the one moving cell attributable.
+- **`new_tab` carries the campaign's largest single geometry row and nobody has
+  named it**: `div.ambient-glow` was 400.00px "out of place", the width of half
+  its own box, purely because `translateX(-50%)` was invisible to the gate.
