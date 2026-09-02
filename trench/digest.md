@@ -4534,3 +4534,96 @@ One, unchanged, and still the only thing that can stop these entries.
    night 3, so every fresh agent that starts from master — now five nights
    running — reads a stale prompt corroborated by a digest with no dry nights
    in it. The prompt's own stop condition is the only thing catching it.
+
+---
+
+## 2026-09-02 — night 32 (NONE — stop condition, no work started)
+
+**Metric: 4 of 4 → 4 of 4** (trench 1, closed 2026-08-02)
+
+**Moved no → yes: NONE.**
+
+Both clauses of the stored prompt's stop condition hold, so I started no work.
+Clause 1 has been met since night 3; clause 2's dry-night threshold has now
+fired eighteen consecutive times (nights 14–31).
+
+### What I ran, so the state is checkable rather than inherited
+
+```
+$ git log -1 --format='%H %ad %s' --date=iso origin/master
+f58950cf745a93a26c0986165a3ac57193dd9d4e 2026-08-25 23:07:23 -0400 Merge pull request #158 from hiwavebrowser/atlas/e0a-ratchet-port
+$ git log -1 --format='%H %ad %s' --date=iso HEAD
+09830288b856e7b26e890bba3279ad2522238036 2026-09-01 07:12:32 +0000 docs(trench): night 31 NONE — stop condition, master unmoved for seven days
+$ git log --oneline origin/master..HEAD | wc -l
+35
+$ git show origin/master:trench/digest.md | grep -c '^## '
+4        # master's digest still ends at night 3
+$ git status --short
+         # clean
+```
+
+**Master has not moved in eight days** — still `f58950c`, now ~173 hours old.
+PR list for `atlas/trench-mcp-exports` queried directly (`state=all`,
+`head=hiwavebrowser:atlas/trench-mcp-exports`): still **#79 only**, merged
+2026-08-01, carrying nights 1–2; nothing open. Nights 3–31 remain on this
+branch alone; 3–32 after tonight's commit.
+
+Sixth consecutive night the run started on a fresh clone at master, so the
+first `trench/digest.md` it read was master's four-entry version ending at
+night 3 — a trench that reads as freshly closed at 4 of 4 with no dry night in
+it. Nights 4–31 became visible only after checking out this branch.
+
+Clause 1 re-verified against the tree rather than inherited from the prose
+above it. `crates/hiwave-mcp/smoke.py` still carries real-value assertions
+naming all four tools, at the same lines night 31 cited:
+
+```
+182:  ok  hiwave_layout        .hero border_box = 432.0x152.0
+208:  ok  hiwave_display_list  .hero painted rgb(0,136,204) over that same rect
+280:  ok  hiwave_style         width=400px won by .hero [0,1,0] over div [0,0,1]
+898:  ok  hiwave_diff          hero/layout agrees on 12/12 hand-derived values
+940:  ok  hiwave_diff          important-width DISAGREES: expected 100.0, engine 400.0
+```
+
+I did **not** re-run `cargo build -p hiwave-mcp && python3 crates/hiwave-mcp/smoke.py`.
+`crates/hiwave-mcp/` last changed at `2b785e7` (trench 2), well before night
+16's cold-build paste at digest line 3174; pasting an identical run of an
+identical tree is motion reported as evidence. That paste remains the current
+receipt and reproduces with that one command.
+
+### On the notification
+
+**Not sent tonight.** Night 29 sent; nights 30 and 31 held and named **night 33
+(2026-09-03)** as the fallback send absent a state change. None arrived: master
+unmoved, PR list unchanged, branch unchanged but for these entries. Moving the
+send a night earlier would restart a clock the previous two nights set on
+purpose, and the ask carries nothing new tonight. Holding to night 33, or
+sending immediately on any real change of state.
+
+### What the engine still cannot answer
+
+Unchanged from nights 14–31, not re-listed in full: `opacity` (no consumer in
+the engine), `white-space`'s two engine gaps, `overflow-x` answered for what
+layout did rather than for whether anything was clipped, `!important` still
+dead in the cascade, UA origin still indistinguishable from "nobody set it",
+computed values still a fixed longhand set, `hiwave_style` still simple
+selectors only, unmodelled display ops still `"modelled": false` with no
+contract, capture-kind references still refused, `style` still not a diffable
+stage, and **no real page covered by any of the four tools**.
+
+### Tests
+
+Nothing compiled changed; the committed diff is `trench/digest.md` only. Scope
+stayed inside `trench/`. No parity harness, no `.github/`, no port work, no
+engine change, no export altered, no force-push, no merge, no PR.
+
+### Decisions needed from Pete
+
+One, unchanged, and still the only thing that can stop these entries.
+
+1. **Repoint or disable this routine.** Trench 1 has been closed for thirty
+   nights. Disabling costs nothing while it stays closed. Landing nights 3–31
+   to master is worth doing either way: master's digest ends at night 3, so
+   every fresh agent that starts from master — now six nights running — reads a
+   stale prompt corroborated by a digest with no dry nights in it. The prompt's
+   own stop condition is the only thing catching it.
