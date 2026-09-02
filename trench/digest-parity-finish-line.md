@@ -6264,3 +6264,29 @@ visual rect joined ALONGSIDE so a right layout rect excuses a wrong visual one.
 - **`new_tab` carries the campaign's largest single geometry row and nobody has
   named it**: `div.ambient-glow` was 400.00px "out of place", the width of half
   its own box, purely because `translateX(-50%)` was invisible to the gate.
+
+### Addendum — both PRs are green on macOS, and both receipts read 2/26, as predicted
+
+Written after the digest above, once CI finished.
+
+| PR | run | checks | receipt |
+|---|---|---|---|
+| **#177** (gate half) | [33594385470](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/33594385470) | 12/12 green | `2/26` · geometry 4/26 · paint 3/26 · stability 26/26 · discrete 25/26 |
+| **#178** (engine half) | [33594412771](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/33594412771) | 12/12 green | `2/26`, per-case rows identical |
+
+**#177's receipt is identical to `develop 5b89ed8`'s on every column and every
+case**, and Gate C agrees to the digit (`sticky-scroll` 3.141%,
+`images-intrinsic` 25.023%). The inertness claim measured as three equal cells
+of the SwiftShader 2x2 now also holds on CoreText and Metal.
+
+**#178's lane runs `develop`'s copy of Gate A**, which still joins on
+`border_box` — so it emits the field and nobody reads it, and its receipt is
+`develop`'s too. That is the ordering argument as a measurement rather than an
+assertion: neither PR can show its own worth on its own lane, and #177 has to
+land first or #178's CI receipt will keep saying nothing.
+
+One limit, stated: I read #178's per-case rows (green set, the single discrete
+case) from the job log; the `geometry N/26 · paint N/26` sub-columns sat outside
+the fetchable window. `parity-oracle` is on a blob host this seat's proxy denies
+at CONNECT — the same standing limit nights 27 and 29 recorded, confirmed again
+tonight against the proxy's status endpoint.
