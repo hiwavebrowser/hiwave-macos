@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>fallback-font line height (n40)</title>
+<style>
+  body { margin: 0; padding: 16px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  div { margin: 0 0 8px 0; }
+  #t16 { font-size: 16px; }
+  #e16 { font-size: 16px; }
+  #t20 { font-size: 20px; }
+  #e20 { font-size: 20px; }
+  #e18b { font-size: 18px; font-weight: 600; }
+  #e32 { font-size: 32px; }
+  #lh16 { font-size: 16px; line-height: 24px; }
+  #btn { display: inline-flex; align-items: center; padding: 12px 24px; font-size: 16px; background: #0e7490; color: #fff; border-radius: 8px; }
+  #title { display: flex; align-items: center; gap: 10px; font-size: 18px; font-weight: 600; margin: 0 0 16px 0; }
+  #title .icon { font-size: 20px; }
+  #arial { font-family: Arial; font-size: 16px; }
+  #arialemoji { font-family: Arial; font-size: 16px; }
+</style>
+</head>
+<body>
+  <div id="t16">plain text sixteen</div>
+  <div id="e16">☕ coffee sixteen</div>
+  <div id="t20">plain text twenty</div>
+  <div id="e20">🎯 target twenty</div>
+  <div id="e18b">✨ sparkle eighteen bold</div>
+  <div id="e32">⚙️ gear thirty-two</div>
+  <div id="lh16">☕ coffee with line-height 24px</div>
+  <div><span id="btn">☕ Support Independent Development</span></div>
+  <h2 id="title"><span class="icon">🎯</span> Why HiWave Exists</h2>
+  <div id="arial">plain arial sixteen</div>
+  <div id="arialemoji">☕ arial coffee sixteen</div>
+</body>
+</html>
