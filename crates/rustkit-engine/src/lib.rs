@@ -13065,4 +13065,35 @@ mod visual_rect_tests {
              (75, 75), got ({x}, {y})"
         );
     }
+
+    /// The bound is taken from all FOUR corners, and rotation is the only
+    /// thing that says so. Under translate and scale the two ends of one
+    /// diagonal already span the box, so a two-corner bound stays right by
+    /// accident on every other test in this module — it was the survivor of
+    /// this port's mutation sweep.
+    ///
+    /// A 100x40 box turned 45deg about its centre bounds to 98.99 square:
+    /// `(100 + 40) / sqrt(2)`. Read from the main diagonal alone the width
+    /// comes out 42.43, so the width assertion is the one doing the work.
+    /// 90deg would NOT catch it — a quarter turn maps the rect back onto an
+    /// axis-aligned rect, and then either diagonal spans it.
+    #[test]
+    fn a_rotated_box_is_bounded_by_all_four_corners() {
+        let mut style = rustkit_css::ComputedStyle::new();
+        style.transform = rustkit_css::TransformList {
+            ops: vec![rustkit_css::TransformOp::Rotate(45.0)],
+        };
+        let json = layout_box_to_json(&boxed(100.0, 100.0, 100.0, 40.0, style));
+        let (x, y, w, h) = visual(&json).expect("a rotated box must export a visual rect");
+        assert!(
+            (w - 98.9949).abs() < 0.01 && (h - 98.9949).abs() < 0.01,
+            "a 45deg turn bounds a 100x40 box to 98.99 square, not to one of \
+             its diagonals: got {w}x{h}"
+        );
+        assert!(
+            (x - 100.5025).abs() < 0.01 && (y - 70.5025).abs() < 0.01,
+            "the bound stays centred on the box's centre (150, 120): expected \
+             (100.50, 70.50), got ({x}, {y})"
+        );
+    }
 }
