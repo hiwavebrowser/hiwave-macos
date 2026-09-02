@@ -60,7 +60,7 @@ fn probe_normal_line_height_vs_chrome() {
         let m = measure_text_advanced("x", family, size, FontWeight::NORMAL, FontStyle::Normal);
         // The TARGET model: Blink rounds ascent/descent independently, so
         // `normal` always lands on a whole pixel.
-        let rk = m.ascent.round() + m.descent.round() + m.leading;
+        let rk = m.ascent.round() + m.descent.round() + m.leading.round();
         let raw = m.height; // ascent + descent + line_gap, unrounded
         let flat = size * 1.2;
         sum_rk += (rk - chrome).abs();
