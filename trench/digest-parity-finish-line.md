@@ -6136,7 +6136,7 @@ zero effect.
 
 `atlas/n30-gate-visual-rect` (instrument, cut from `develop 5b89ed8`) — **PR #177**:
 
-- `6c6a3c6` — Gate A prefers `visual_border_box`. `6ec2017` ported forward.
+- `e7189f6` — Gate A prefers `visual_border_box`. `6ec2017` ported forward.
 
 Two PRs rather than one, and the order matters: **#177 first.** The campaign's
 own rule is that instrument PRs carry zero engine change so the delta stays
@@ -6144,7 +6144,7 @@ attributable, and here that rule pays for itself — #177 is provably a no-op on
 `develop` today, so the whole delta belongs to #178. In the other order, #178's
 CI receipt would show nothing and the pair would look like it did nothing.
 
-(One wart: `6c6a3c6`'s message says "the engine half is #NNN" because the PR did
+(One wart: `e7189f6`'s message says "the engine half is #NNN" because the PR did
 not exist when it was written, and this branch never force-pushes. It is #178.)
 
 ### The 2x2, which is the actual receipt
