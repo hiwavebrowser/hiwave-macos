@@ -1905,16 +1905,30 @@ pub fn layout_grid_container(
             child.dimensions.border.top = border_top;
             child.dimensions.border.bottom = border_bottom;
 
-            // Calculate content dimensions based on box-sizing
+            // Derive the content box. The alignment helpers hand back the
+            // SPECIFIED size: an explicit `width`/`height` verbatim (so
+            // box-sizing decides what it covers), or the grid area for
+            // `auto`. An auto-sized item fills the area with its margin box
+            // (css-grid-1 §6.6 / css-align-3 §5.4 stretch), so its content
+            // is the area minus padding and border whatever its box-sizing.
+            // Treating the area as a content-box size added the padding on
+            // top: a padded content-box item overflowed its track by its
+            // padding in both axes (repro grid-auto-fit-minmax: 223.3 wide
+            // in a 199.3 track).
             let is_border_box = child.style.box_sizing == BoxSizing::BorderBox;
-            let (content_width, content_height) = if is_border_box {
-                // With border-box, the specified size includes padding and border
-                let content_w = (border_box_width - padding_left - padding_right - border_left - border_right).max(0.0);
-                let content_h = (border_box_height - padding_top - padding_bottom - border_top - border_bottom).max(0.0);
-                (content_w, content_h)
+            let explicit_width = !matches!(child.style.width, Length::Auto);
+            let explicit_height = !matches!(child.style.height, Length::Auto);
+            let h_padding_border = padding_left + padding_right + border_left + border_right;
+            let v_padding_border = padding_top + padding_bottom + border_top + border_bottom;
+            let content_width = if explicit_width && !is_border_box {
+                border_box_width
             } else {
-                // With content-box, the specified size is just the content
-                (border_box_width, border_box_height)
+                (border_box_width - h_padding_border).max(0.0)
+            };
+            let content_height = if explicit_height && !is_border_box {
+                border_box_height
+            } else {
+                (border_box_height - v_padding_border).max(0.0)
             };
 
             // Position includes padding and border offset
@@ -2642,20 +2656,63 @@ fn size_grid_tracks(tracks: &mut [GridTrack], container_size: f32, gap: f32) {
         }
     }
 
-    // Step 3: Distribute remaining space to flexible tracks
-    let fixed_size: f32 = tracks.iter().filter(|t| !t.is_flexible).map(|t| t.size).sum();
-    let flex_space = (available_space - fixed_size).max(0.0);
-
-    let total_flex: f32 = tracks.iter().filter(|t| t.is_flexible).map(|t| t.flex_factor).sum();
-
-    if total_flex > 0.0 {
-        let flex_unit = flex_space / total_flex;
-        for track in tracks.iter_mut().filter(|t| t.is_flexible) {
-            track.size = (track.flex_factor * flex_unit).max(track.base_size);
-            // Respect growth limit
-            if track.growth_limit < f32::INFINITY {
-                track.size = track.size.min(track.growth_limit);
+    // Step 3: Distribute remaining space to flexible tracks.
+    //
+    // css-grid-1 §12.7.1 "find the size of an fr": the hypothetical fr size
+    // is leftover / sum(flex factors); any flexible track whose factor × that
+    // size is LESS than its base size is treated as inflexible at its base
+    // size and the fr is re-found over the rest. Sizing every fr track from
+    // the first unit and flooring each at its base leaves the surplus from
+    // the floored tracks undistributed: minmax(150px, 1fr) × 3 in 622px
+    // (gap 12) gives 199.33 each either way, but minmax(150px, 1fr) 1fr in
+    // 200px gave 150 + 100 (overflow) instead of 150 + 50.
+    let flexible_count = tracks.iter().filter(|t| t.is_flexible).count();
+    if flexible_count > 0 {
+        let mut treat_inflexible = vec![false; tracks.len()];
+        loop {
+            let fixed_size: f32 = tracks
+                .iter()
+                .enumerate()
+                .filter(|(i, t)| !t.is_flexible || treat_inflexible[*i])
+                .map(|(_, t)| t.size)
+                .sum();
+            let flex_space = (available_space - fixed_size).max(0.0);
+            let total_flex: f32 = tracks
+                .iter()
+                .enumerate()
+                .filter(|(i, t)| t.is_flexible && !treat_inflexible[*i])
+                .map(|(_, t)| t.flex_factor)
+                .sum();
+            if total_flex <= 0.0 {
+                break;
             }
+            // Spec: a flex-factor sum below 1 is treated as 1.
+            let flex_unit = flex_space / total_flex.max(1.0);
+
+            let mut floored_any = false;
+            for (i, track) in tracks.iter().enumerate() {
+                if track.is_flexible
+                    && !treat_inflexible[i]
+                    && track.flex_factor * flex_unit < track.base_size
+                {
+                    treat_inflexible[i] = true;
+                    floored_any = true;
+                }
+            }
+            if floored_any {
+                continue;
+            }
+
+            for (i, track) in tracks.iter_mut().enumerate() {
+                if track.is_flexible && !treat_inflexible[i] {
+                    track.size = track.flex_factor * flex_unit;
+                    // Respect growth limit
+                    if track.growth_limit < f32::INFINITY {
+                        track.size = track.size.min(track.growth_limit);
+                    }
+                }
+            }
+            break;
         }
     }
 
@@ -3229,6 +3286,148 @@ mod tests {
         assert!(
             (width - 1275.0).abs() < 1.0,
             "fr track should be floored at the item's 1275px min-content, got {width}"
+        );
+    }
+
+    #[test]
+    fn test_auto_fit_minmax_fits_columns_to_the_container_with_gap() {
+        // The about-page features shape: repeat(auto-fit, minmax(150px, 1fr))
+        // with a 12px gap in a 622px container. Three repetitions fit
+        // (3×150 + 2×12 = 474; a fourth needs 636), and the 1fr max stretches
+        // each to (622 − 24) / 3 = 199.33 — Chrome's exact track.
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns = GridTemplate {
+            tracks: Vec::new(),
+            repeats: vec![(
+                0,
+                TrackRepeat::AutoFit(vec![TrackDefinition::simple(TrackSize::MinMax(
+                    Box::new(TrackSize::Px(150.0)),
+                    Box::new(TrackSize::Fr(1.0)),
+                ))]),
+            )],
+            final_line_names: Vec::new(),
+        };
+        container_style.column_gap = Length::Px(12.0);
+        container_style.row_gap = Length::Px(12.0);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+        for _ in 0..6 {
+            container
+                .children
+                .push(LayoutBox::new(BoxType::Block, ComputedStyle::new()));
+        }
+
+        layout_grid_container(&mut container, 622.0, 600.0);
+
+        let xs: Vec<f32> = container
+            .children
+            .iter()
+            .map(|c| c.dimensions.content.x)
+            .collect();
+        let ws: Vec<f32> = container
+            .children
+            .iter()
+            .map(|c| c.dimensions.content.width)
+            .collect();
+        for w in &ws {
+            assert!(
+                (w - 199.33).abs() < 0.1,
+                "column width should be 199.33, got {ws:?}"
+            );
+        }
+        assert!(
+            (xs[0] - 0.0).abs() < 0.01
+                && (xs[1] - 211.33).abs() < 0.1
+                && (xs[2] - 422.67).abs() < 0.1,
+            "first row should sit at 0 / 211.33 / 422.67, got {xs:?}"
+        );
+        assert!(
+            (xs[3] - 0.0).abs() < 0.01,
+            "fourth item wraps to the second row, got {xs:?}"
+        );
+    }
+
+    #[test]
+    fn test_stretched_content_box_item_keeps_its_padding_inside_the_track() {
+        // A padded grid item with the default box-sizing (content-box) and
+        // width:auto fills its 200px area with its border box: content 176,
+        // not 200 + 24 (which overflowed the track by the padding).
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Px(200.0)]);
+        container_style.grid_template_rows = GridTemplate::from_sizes(vec![TrackSize::Px(100.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        let mut item_style = ComputedStyle::new();
+        item_style.box_sizing = BoxSizing::ContentBox;
+        item_style.padding_left = Length::Px(12.0);
+        item_style.padding_right = Length::Px(12.0);
+        item_style.padding_top = Length::Px(12.0);
+        item_style.padding_bottom = Length::Px(12.0);
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, item_style));
+
+        // An explicit content-box width still means what it says.
+        let mut fixed_style = ComputedStyle::new();
+        fixed_style.box_sizing = BoxSizing::ContentBox;
+        fixed_style.width = Length::Px(100.0);
+        fixed_style.padding_left = Length::Px(10.0);
+        fixed_style.padding_right = Length::Px(10.0);
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, fixed_style));
+
+        layout_grid_container(&mut container, 200.0, 100.0);
+
+        let d = &container.children[0].dimensions;
+        assert!(
+            (d.content.width - 176.0).abs() < 0.01,
+            "content width {}",
+            d.content.width
+        );
+        assert!(
+            (d.content.height - 76.0).abs() < 0.01,
+            "content height {}",
+            d.content.height
+        );
+        assert!(
+            (d.border_box().width - 200.0).abs() < 0.01,
+            "border box {}",
+            d.border_box().width
+        );
+
+        let f = &container.children[1].dimensions;
+        assert!(
+            (f.content.width - 100.0).abs() < 0.01,
+            "explicit content width {}",
+            f.content.width
+        );
+    }
+
+    #[test]
+    fn test_fr_floored_track_returns_its_surplus_to_the_other_fr_tracks() {
+        // css-grid-1 §12.7.1: minmax(150px, 1fr) 1fr in 200px. The first
+        // hypothetical fr is 100px, below the 150px base, so that track is
+        // treated as inflexible at 150 and the remaining 50px is the fr.
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::MinMax(
+                Box::new(TrackSize::Px(150.0)),
+                Box::new(TrackSize::Fr(1.0)),
+            )),
+            GridTrack::new(&TrackSize::Fr(1.0)),
+        ];
+        size_grid_tracks(&mut tracks, 200.0, 0.0);
+        assert!(
+            (tracks[0].size - 150.0).abs() < 0.01,
+            "got {}",
+            tracks[0].size
+        );
+        assert!(
+            (tracks[1].size - 50.0).abs() < 0.01,
+            "got {}",
+            tracks[1].size
         );
     }
 

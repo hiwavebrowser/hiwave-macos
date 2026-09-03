@@ -9089,8 +9089,72 @@ fn parse_transform_origin(value: &str) -> Option<rustkit_css::TransformOrigin> {
     }
 }
 
+/// Split a track-list value at top-level whitespace, keeping function
+/// arguments (`minmax(150px, 1fr)`, `repeat(auto-fit, ...)`) and bracketed
+/// line names (`[full-start]`) together as single tokens.
+fn split_track_list(value: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut depth = 0i32;
+    let mut start: Option<usize> = None;
+    for (i, ch) in value.char_indices() {
+        match ch {
+            '(' | '[' => {
+                depth += 1;
+                if start.is_none() {
+                    start = Some(i);
+                }
+            }
+            ')' | ']' => {
+                depth -= 1;
+            }
+            c if c.is_whitespace() && depth <= 0 => {
+                if let Some(s) = start.take() {
+                    tokens.push(&value[s..i]);
+                }
+            }
+            _ => {
+                if start.is_none() {
+                    start = Some(i);
+                }
+            }
+        }
+    }
+    if let Some(s) = start {
+        tokens.push(&value[s..]);
+    }
+    tokens
+}
+
+/// Parse a space-separated list of track sizes with optional `[line names]`
+/// before each track (css-grid-1 §7.2.1). Line names attach to the next
+/// track; a trailing group is returned separately.
+fn parse_track_list(value: &str) -> (Vec<rustkit_css::TrackDefinition>, Vec<String>) {
+    let mut tracks = Vec::new();
+    let mut pending_names: Vec<String> = Vec::new();
+    for token in split_track_list(value) {
+        if let Some(names) = token.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
+            pending_names.extend(names.split_whitespace().map(|n| n.to_string()));
+            continue;
+        }
+        if let Some(size) = parse_track_size(token) {
+            tracks.push(rustkit_css::TrackDefinition {
+                size,
+                line_names: std::mem::take(&mut pending_names),
+            });
+        }
+    }
+    (tracks, pending_names)
+}
+
 /// Parse a grid-template-columns or grid-template-rows value.
-/// Supports: repeat(N, 1fr), explicit track sizes, and combinations.
+///
+/// Supports explicit track sizes, `[line names]`, `repeat(N, <tracks>)`
+/// (expanded inline) and `repeat(auto-fill | auto-fit, <tracks>)`, which is
+/// handed to layout as a `TrackRepeat` so the repetition count is computed
+/// against the container's actual size (css-grid-1 §7.2.3.2). It used to be
+/// hardcoded to 4 repetitions regardless of width, which is why
+/// `repeat(auto-fit, minmax(150px, 1fr))` in a 622px container produced four
+/// 150px columns (Chrome: three of 199.3px).
 fn parse_grid_template(value: &str) -> Option<rustkit_css::GridTemplate> {
     let value = value.trim();
 
@@ -9098,51 +9162,80 @@ fn parse_grid_template(value: &str) -> Option<rustkit_css::GridTemplate> {
         return Some(rustkit_css::GridTemplate::none());
     }
 
-    let mut tracks = Vec::new();
+    let mut tracks: Vec<rustkit_css::TrackDefinition> = Vec::new();
+    let mut repeats: Vec<(usize, rustkit_css::TrackRepeat)> = Vec::new();
+    let mut pending_names: Vec<String> = Vec::new();
 
-    // Check for repeat() function
-    if let Some(repeat_start) = value.find("repeat(") {
-        let after_repeat = &value[repeat_start + 7..];
-        if let Some(close_paren) = find_matching_paren(after_repeat) {
+    for token in split_track_list(value) {
+        if let Some(names) = token.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
+            pending_names.extend(names.split_whitespace().map(|n| n.to_string()));
+            continue;
+        }
+
+        if let Some(after_repeat) = token.strip_prefix("repeat(") {
+            let Some(close_paren) = find_matching_paren(after_repeat) else {
+                continue;
+            };
             let repeat_content = &after_repeat[..close_paren];
+            let Some(comma_pos) = repeat_content.find(',') else {
+                continue;
+            };
+            let count_str = repeat_content[..comma_pos].trim();
+            let track_str = repeat_content[comma_pos + 1..].trim();
 
-            // Parse repeat(count, track-size)
-            if let Some(comma_pos) = repeat_content.find(',') {
-                let count_str = repeat_content[..comma_pos].trim();
-                let track_str = repeat_content[comma_pos + 1..].trim();
+            let (mut repeat_tracks, trailing) = parse_track_list(track_str);
+            if repeat_tracks.is_empty() {
+                continue;
+            }
+            // Names pending before the repeat() lead its first track.
+            if !pending_names.is_empty() {
+                let mut names = std::mem::take(&mut pending_names);
+                names.append(&mut repeat_tracks[0].line_names);
+                repeat_tracks[0].line_names = names;
+            }
+            // A trailing name group inside the repeat leads whatever follows.
+            pending_names = trailing;
 
-                // Parse count (could be number, auto-fill, auto-fit)
-                let count: Option<u32> = if count_str == "auto-fill" || count_str == "auto-fit" {
-                    // For now, default to a reasonable number
-                    Some(4)
-                } else {
-                    count_str.parse().ok()
-                };
-
-                if let (Some(count), Some(track_size)) = (count, parse_track_size(track_str)) {
-                    for _ in 0..count {
-                        tracks.push(rustkit_css::TrackDefinition::simple(track_size.clone()));
+            match count_str {
+                "auto-fill" => {
+                    repeats.push((
+                        tracks.len(),
+                        rustkit_css::TrackRepeat::AutoFill(repeat_tracks),
+                    ));
+                }
+                "auto-fit" => {
+                    repeats.push((
+                        tracks.len(),
+                        rustkit_css::TrackRepeat::AutoFit(repeat_tracks),
+                    ));
+                }
+                _ => {
+                    if let Ok(count) = count_str.parse::<u32>() {
+                        for _ in 0..count {
+                            tracks.extend(repeat_tracks.iter().cloned());
+                        }
                     }
                 }
             }
+            continue;
         }
-    } else {
-        // Parse space-separated track sizes
-        for part in value.split_whitespace() {
-            if let Some(track_size) = parse_track_size(part) {
-                tracks.push(rustkit_css::TrackDefinition::simple(track_size));
-            }
+
+        if let Some(track_size) = parse_track_size(token) {
+            tracks.push(rustkit_css::TrackDefinition {
+                size: track_size,
+                line_names: std::mem::take(&mut pending_names),
+            });
         }
     }
 
-    if tracks.is_empty() {
+    if tracks.is_empty() && repeats.is_empty() {
         return None;
     }
 
     Some(rustkit_css::GridTemplate {
         tracks,
-        repeats: Vec::new(),
-        final_line_names: Vec::new(),
+        repeats,
+        final_line_names: pending_names,
     })
 }
 
@@ -10634,6 +10727,60 @@ mod tests {
         assert_eq!(
             parse_length("50%"),
             Some(rustkit_css::Length::Percent(50.0))
+        );
+    }
+
+    #[test]
+    fn test_parse_grid_template_auto_repeat_is_not_hardcoded() {
+        use rustkit_css::{TrackRepeat, TrackSize};
+
+        // auto-fit / auto-fill are handed to layout as a repeat pattern, never
+        // pre-expanded to a fixed count (the old parser emitted 4 tracks).
+        let t = parse_grid_template("repeat(auto-fit, minmax(150px, 1fr))").unwrap();
+        assert!(t.tracks.is_empty());
+        assert_eq!(t.repeats.len(), 1);
+        match &t.repeats[0] {
+            (0, TrackRepeat::AutoFit(defs)) => {
+                assert_eq!(defs.len(), 1);
+                assert_eq!(
+                    defs[0].size,
+                    TrackSize::MinMax(Box::new(TrackSize::Px(150.0)), Box::new(TrackSize::Fr(1.0)))
+                );
+            }
+            other => panic!("expected auto-fit repeat at 0, got {other:?}"),
+        }
+
+        let t = parse_grid_template("repeat(auto-fill, 100px)").unwrap();
+        assert!(matches!(t.repeats[0], (0, TrackRepeat::AutoFill(_))));
+
+        // Fixed counts still expand inline, with tracks around them kept in order.
+        let t = parse_grid_template("200px repeat(2, 1fr 2fr) auto").unwrap();
+        let sizes: Vec<_> = t.tracks.iter().map(|d| d.size.clone()).collect();
+        assert_eq!(
+            sizes,
+            vec![
+                TrackSize::Px(200.0),
+                TrackSize::Fr(1.0),
+                TrackSize::Fr(2.0),
+                TrackSize::Fr(1.0),
+                TrackSize::Fr(2.0),
+                TrackSize::Auto,
+            ]
+        );
+        assert!(t.repeats.is_empty());
+
+        // An auto repeat after explicit tracks records its insert position.
+        let t = parse_grid_template("100px repeat(auto-fill, 50px) 100px").unwrap();
+        assert_eq!(t.tracks.len(), 2);
+        assert_eq!(t.repeats[0].0, 1);
+
+        // Line names attach to the following track; a trailing group is final.
+        let t = parse_grid_template("[full-start] 1fr [content-start] 2fr [content-end full-end]").unwrap();
+        assert_eq!(t.tracks[0].line_names, vec!["full-start".to_string()]);
+        assert_eq!(t.tracks[1].line_names, vec!["content-start".to_string()]);
+        assert_eq!(
+            t.final_line_names,
+            vec!["content-end".to_string(), "full-end".to_string()]
         );
     }
 
