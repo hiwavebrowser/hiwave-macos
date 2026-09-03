@@ -2642,20 +2642,63 @@ fn size_grid_tracks(tracks: &mut [GridTrack], container_size: f32, gap: f32) {
         }
     }
 
-    // Step 3: Distribute remaining space to flexible tracks
-    let fixed_size: f32 = tracks.iter().filter(|t| !t.is_flexible).map(|t| t.size).sum();
-    let flex_space = (available_space - fixed_size).max(0.0);
-
-    let total_flex: f32 = tracks.iter().filter(|t| t.is_flexible).map(|t| t.flex_factor).sum();
-
-    if total_flex > 0.0 {
-        let flex_unit = flex_space / total_flex;
-        for track in tracks.iter_mut().filter(|t| t.is_flexible) {
-            track.size = (track.flex_factor * flex_unit).max(track.base_size);
-            // Respect growth limit
-            if track.growth_limit < f32::INFINITY {
-                track.size = track.size.min(track.growth_limit);
+    // Step 3: Distribute remaining space to flexible tracks.
+    //
+    // css-grid-1 §12.7.1 "find the size of an fr": the hypothetical fr size
+    // is leftover / sum(flex factors); any flexible track whose factor × that
+    // size is LESS than its base size is treated as inflexible at its base
+    // size and the fr is re-found over the rest. Sizing every fr track from
+    // the first unit and flooring each at its base leaves the surplus from
+    // the floored tracks undistributed: minmax(150px, 1fr) × 3 in 622px
+    // (gap 12) gives 199.33 each either way, but minmax(150px, 1fr) 1fr in
+    // 200px gave 150 + 100 (overflow) instead of 150 + 50.
+    let flexible_count = tracks.iter().filter(|t| t.is_flexible).count();
+    if flexible_count > 0 {
+        let mut treat_inflexible = vec![false; tracks.len()];
+        loop {
+            let fixed_size: f32 = tracks
+                .iter()
+                .enumerate()
+                .filter(|(i, t)| !t.is_flexible || treat_inflexible[*i])
+                .map(|(_, t)| t.size)
+                .sum();
+            let flex_space = (available_space - fixed_size).max(0.0);
+            let total_flex: f32 = tracks
+                .iter()
+                .enumerate()
+                .filter(|(i, t)| t.is_flexible && !treat_inflexible[*i])
+                .map(|(_, t)| t.flex_factor)
+                .sum();
+            if total_flex <= 0.0 {
+                break;
             }
+            // Spec: a flex-factor sum below 1 is treated as 1.
+            let flex_unit = flex_space / total_flex.max(1.0);
+
+            let mut floored_any = false;
+            for (i, track) in tracks.iter().enumerate() {
+                if track.is_flexible
+                    && !treat_inflexible[i]
+                    && track.flex_factor * flex_unit < track.base_size
+                {
+                    treat_inflexible[i] = true;
+                    floored_any = true;
+                }
+            }
+            if floored_any {
+                continue;
+            }
+
+            for (i, track) in tracks.iter_mut().enumerate() {
+                if track.is_flexible && !treat_inflexible[i] {
+                    track.size = track.flex_factor * flex_unit;
+                    // Respect growth limit
+                    if track.growth_limit < f32::INFINITY {
+                        track.size = track.size.min(track.growth_limit);
+                    }
+                }
+            }
+            break;
         }
     }
 
@@ -3230,6 +3273,81 @@ mod tests {
             (width - 1275.0).abs() < 1.0,
             "fr track should be floored at the item's 1275px min-content, got {width}"
         );
+    }
+
+    #[test]
+    fn test_auto_fit_minmax_fits_columns_to_the_container_with_gap() {
+        // The about-page features shape: repeat(auto-fit, minmax(150px, 1fr))
+        // with a 12px gap in a 622px container. Three repetitions fit
+        // (3×150 + 2×12 = 474; a fourth needs 636), and the 1fr max stretches
+        // each to (622 − 24) / 3 = 199.33 — Chrome's exact track.
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns = GridTemplate {
+            tracks: Vec::new(),
+            repeats: vec![(
+                0,
+                TrackRepeat::AutoFit(vec![TrackDefinition::simple(TrackSize::MinMax(
+                    Box::new(TrackSize::Px(150.0)),
+                    Box::new(TrackSize::Fr(1.0)),
+                ))]),
+            )],
+            final_line_names: Vec::new(),
+        };
+        container_style.column_gap = Length::Px(12.0);
+        container_style.row_gap = Length::Px(12.0);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+        for _ in 0..6 {
+            container
+                .children
+                .push(LayoutBox::new(BoxType::Block, ComputedStyle::new()));
+        }
+
+        layout_grid_container(&mut container, 622.0, 600.0);
+
+        let xs: Vec<f32> = container
+            .children
+            .iter()
+            .map(|c| c.dimensions.content.x)
+            .collect();
+        let ws: Vec<f32> = container
+            .children
+            .iter()
+            .map(|c| c.dimensions.content.width)
+            .collect();
+        for w in &ws {
+            assert!(
+                (w - 199.33).abs() < 0.1,
+                "column width should be 199.33, got {ws:?}"
+            );
+        }
+        assert!(
+            (xs[0] - 0.0).abs() < 0.01
+                && (xs[1] - 211.33).abs() < 0.1
+                && (xs[2] - 422.67).abs() < 0.1,
+            "first row should sit at 0 / 211.33 / 422.67, got {xs:?}"
+        );
+        assert!(
+            (xs[3] - 0.0).abs() < 0.01,
+            "fourth item wraps to the second row, got {xs:?}"
+        );
+    }
+
+    #[test]
+    fn test_fr_floored_track_returns_its_surplus_to_the_other_fr_tracks() {
+        // css-grid-1 §12.7.1: minmax(150px, 1fr) 1fr in 200px. The first
+        // hypothetical fr is 100px, below the 150px base, so that track is
+        // treated as inflexible at 150 and the remaining 50px is the fr.
+        let mut tracks = vec![
+            GridTrack::new(&TrackSize::MinMax(
+                Box::new(TrackSize::Px(150.0)),
+                Box::new(TrackSize::Fr(1.0)),
+            )),
+            GridTrack::new(&TrackSize::Fr(1.0)),
+        ];
+        size_grid_tracks(&mut tracks, 200.0, 0.0);
+        assert!((tracks[0].size - 150.0).abs() < 0.01, "got {}", tracks[0].size);
+        assert!((tracks[1].size - 50.0).abs() < 0.01, "got {}", tracks[1].size);
     }
 
     #[test]
