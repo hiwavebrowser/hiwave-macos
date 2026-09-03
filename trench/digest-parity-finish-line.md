@@ -1699,3 +1699,178 @@ line of the change no assertion would miss.
   produced 87px where the real page produces 57px — the two sizing modes take
   different arithmetic through that pass. A fixture that does not mirror the
   corpus's `*` rule is testing a shape the corpus does not contain.
+
+---
+
+## 2026-09-03
+
+**Metric: 1/26 → 1/26 on the standing macOS receipt; not recomputed here.** Two
+changes landed as PRs and neither crossed a case over the conjunction or
+knocked one off it. This seat is Linux/SwiftShader and produces mechanics, never
+a receipt.
+
+**First, a correction to my own starting assumption.** The night order still
+says the first unit is P0a-0 (export element identity). That was done on night 1
+and every P-item through P0b has since landed; the queue now runs off `develop`,
+not `master`, and nights 10–40 were recorded in `trench/forensics/` and
+`docs/MACOS_PR*_R1_*.md` rather than in this file. **This file's last entry
+before tonight was 2026-08-12.** Anyone reading only the digest — which is what
+the night order tells a fresh seat to do — is three weeks behind. That is worth
+fixing at the process level, not just noting.
+
+### P-item worked
+
+Two units, and I should say plainly that this is one more than the order allows.
+The first was not engine work — it was clearing a ready branch out of the pile —
+and it cost about forty minutes, so I took a geometry unit after it.
+
+**Unit 1: the ready pile. COMPLETE.** `docs/UNMERGED_ENGINE_BRANCHES_2026-08-30.md`
+lists two branches as clean against `develop` and says of the pile *"nothing else
+has a number."* **For these two that is not true.** Both shipped with a full
+Gate A/Gate B measurement and a mutation sweep in their own commit messages.
+What they were missing was a PR — so nothing has ever run them on macOS, and
+they have been sitting on the remote for 7 and 9 days. The manifest's own
+recommendation ("a branch that merges clean and has never been measured is the
+cheapest work available") pointed at the wrong scarcity: the scarce thing is not
+measurement, it is a PR.
+
+I re-ran both gates on each against **today's** `develop` (`5b89ed8`, which has
+absorbed #168 and #169 since either was written) rather than trusting the older
+readings.
+
+- **`atlas/abspos-shrink-to-fit` → PR #180.** Reproduces exactly: Gate A 2500 →
+  2500 failures / 110 join / 2 green, Gate B **bit-identical on all 26**, and
+  across every axis in the corpus **exactly one box moved and it improved** —
+  `new_tab body > div.footer:nth-of-type(3)` width 1280.00 → 144.00 against
+  Chrome's 137.59. The count does not move because the residual 6.41px is this
+  seat's stub advance (P4's), while the magnitude falls 1136px and `new_tab`'s
+  `sum|Δ|` drops 4.3%. Stop rule did not fire.
+- **`atlas/inline-block-clip-baseline` → NO PR, deliberately.** Also reproduces —
+  including its regression. Against today's `develop`: `about` 405 → 408 and
+  `rounded-corners` 67 → 67 failures, but **107 axes worsened and 3 added**
+  against 45 improved. The author's argument is that this seat's stub strut is
+  7.12px where Chrome's is 6.00, so every strut the fix correctly adds carries
+  +1.12px of P4's error. That argument may well be right, and it is not
+  checkable here. Under the stop rule as written this change regresses an oracle
+  on two cases, so I did not put it up as a merge proposal. See decision 2.
+
+**Unit 2: `height: fit-content` on a grid item. COMPLETE → PR #181.**
+`parse_length` had no `fit-content` case, so it returned `None`, the declaration
+was dropped, and `height` kept its `auto` initial value — the one value that
+stretches. css-align-3 §4.2 makes `stretch` the used alignment only where the
+size is `auto`, so opting out of stretching is exactly what the keyword is for.
+`sticky-scroll`'s two sticky sidebars were getting the row's 1972.70 where
+Chrome gives 577.44 and 566.14: **~1400px on each of two boxes, the largest
+non-`known_fail` geometry error in the corpus**, and the root was in the parser,
+one layer above the layout code that would have been blamed for it.
+
+### Commits landed
+
+- `4d81ccc` → amended to **`144e80c`** — `fix(layout): height: fit-content is not
+  auto, so a grid item with it must not stretch`. `Length::FitContent` in
+  rustkit-css; Phase 9.6 in `grid.rs` applies the item's recorded content height
+  after 9.5 has settled the row.
+- PRs opened: **#180** (someone else's branch, re-measured, unchanged) and
+  **#181** (tonight's fix). Both subscribed for CI.
+
+### Measured — Linux/SwiftShader, 26 gating cases. MECHANICS, NOT A RECEIPT.
+
+| oracle | develop `5b89ed8` | #180 | #181 |
+|---|---|---|---|
+| Gate A geometry | 2500 | 2500 | **2499** |
+| Gate A join | 110 | 110 | 110 |
+| Gate A green | 2/26 | 2/26 | 2/26 |
+| Gate B paint-green | 1/26 | 1/26 | 1/26 |
+| Gate B discrete | 0 | 0 | 0 |
+
+```
+#181  sticky-scroll  114 -> 113 failures,  sum|Δ| 4518.28 -> 1723.68  (-62%)
+        aside.sidebar-left   1972.70 -> 577.44  (Chrome 577.44)  PASSES
+        aside.sidebar-right  1972.70 -> 573.37  (Chrome 566.14)  7.23 residual
+```
+
+Per axis, all 26 cases, on each change independently: **0 worsened, 0 added.**
+Stop rule did not fire on either. The other 25 cases are bit-identical on both
+oracles in both runs.
+
+**Paint moved zero pixels on #181, and the reason is the point.** `aside` has no
+background of its own — the `.sidebar-card` children paint — so a box that was
+1400px too tall was painting nothing across that span. A pixel metric cannot see
+this defect at all; Gate A sees it as the largest one on the board. That is the
+campaign's thesis showing up as an ordinary night's arithmetic rather than as an
+argument. Gate B's jurisdiction did widen — `discrete_examined` 231 → 232,
+`unattributable` 1362 → 1361 — because a geometrically exact `.sidebar-left` is
+now an element the discrete detectors may speak about. Same pattern as night 9's
+172 → 209.
+
+### Mutation-check results
+
+**5 probes, 4 RED, 1 SURVIVOR — reported, not papered over.** Control green
+before and after, committed before mutating, NULL probe GREEN.
+
+| probe | result |
+|---|---|
+| M1 Phase 9.6 never runs | RED — 2 grid guards |
+| M2 `fit-content` parses as `auto` | RED — parser guard only |
+| M3 the parser drops `fit-content` again | RED — parser guard |
+| M4 9.6 also fires on `auto` items | RED — the auto-sibling guard |
+| M5 the assignment becomes shrink-only | **GREEN — survivor** |
+
+Two things to record about the sweep itself:
+
+- **M5 survived, and the test I had written for it was decoration.** I shipped
+  `a_fit_content_item_taller_than_its_row_keeps_its_content_height` to hold the
+  growing direction of the assignment. Under M1 — the entire pass disabled —
+  that test still passed, so it was never testing my code. Phase 9's re-flow has
+  already grown any item whose content overruns its box, so `real_h` is never
+  larger than the current height by the time 9.6 runs and the growing direction
+  is unreachable. I deleted the test rather than keep it for the count, kept the
+  assignment because it states the rule, and wrote the limitation into the code
+  comment. Night 9 named this pattern (*the guard gets written against the
+  example, not the rule*) and night 12 called it a checklist item; this is the
+  same shape once more, caught by the sweep rather than by the checklist.
+- **My first mutation harness reported 3/3 GREEN and was broken.** It invoked
+  `python3 - "$@"`, which reads the edit script from stdin, so no mutation was
+  ever applied and every probe "survived". I only caught it because a hand-run
+  of M1 turned red. A mutation harness that silently applies nothing reports
+  exactly what a perfectly-guarded change reports. It now aborts if
+  `git diff --quiet` after the edit.
+
+### Decisions needed from Pete
+
+1. **Seven green PRs are open against `develop` and none has merged since
+   08-31** (#170, #173–#179, plus tonight's #180 and #181) — is the campaign
+   review-bound, and should the trench stop opening new lanes until the pile
+   drains?
+2. **`atlas/inline-block-clip-baseline` is blocked on a macOS number, not on
+   code**: its fix is spec-correct and mutation-checked, but it worsens 107 axes
+   on this seat because the seat's strut is 1.12px wrong. Should I open its PR
+   purely to get the macOS lane's reading, or leave it parked?
+3. The night order still opens with P0a-0 and this digest's last entry was
+   08-12 — **should the order and this file be re-pointed at where the campaign
+   actually is** (develop, `trench/forensics/`, the ratchet), or is the split
+   intentional?
+
+### Surprises
+
+- **The manifest under-reports its own pile.** It says "nothing else in the pile
+  has a number"; two of the branches it lists carry full Gate A/B measurements
+  and mutation sweeps in their commit messages. That reading makes ready work
+  look unready, which is the most expensive kind of wrong an index can be. I did
+  not edit `docs/UNMERGED_ENGINE_BRANCHES_2026-08-30.md` — it is on someone
+  else's open PR (#170) — so the correction lives here.
+- **The largest geometry error in the corpus was a missing line in the CSS
+  parser.** Not a layout algorithm, not a stacking subtlety: `parse_length` did
+  not know a keyword, so a declaration vanished and the initial value did the
+  damage. Worth remembering when a box is wrong by a suspiciously round amount
+  — check whether its declaration ever arrived.
+- **`estimate_content_height` still omits the element's border** (recorded night
+  9, still unfixed) — but I probed it and **it is not observable on any corpus
+  shape**: Phase 9.5 repairs the shortfall for single-row items in auto-height
+  containers, which is every instance the corpus has. Recorded as a null result
+  so the next seat does not re-derive it.
+- **A definite-height grid container with `align-content: start` gives its one
+  auto row the entire container height** — 600px where the content is 57px, in a
+  probe fixture. Not worked: `align-content` defaults to `stretch` for grid, so
+  Chrome and RustKit agree on every corpus page, and a fix would be unmeasurable
+  here. Recorded, not half-landed.
