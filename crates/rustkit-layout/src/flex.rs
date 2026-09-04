@@ -122,6 +122,13 @@ pub struct FlexItem<'a> {
 
     /// Padding+border extent at the cross-axis end edge.
     pub cross_pb_end: f32,
+
+    /// The main size came from the item's CONTENT (flex-basis auto with an
+    /// auto main size, or flex-basis content) on a non-replaced box. On the
+    /// vertical main axis that content size is a line-height guess until the
+    /// children are laid out (step 11); step 11d re-derives it from the real
+    /// laid-out height for exactly these items.
+    pub main_size_from_content: bool,
 }
 
 impl<'a> FlexItem<'a> {
@@ -487,14 +494,37 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
                 // items vertically: a 5-link nav measured 9 line-heights
                 // tall, and align-items:center then pushed the sibling logo
                 // 96px below a 60px header.
-                let children_height: f32 = if item.layout_box.style.display.is_flex() {
-                    item.layout_box.dimensions.content.height
-                } else {
-                    item.layout_box
-                        .children
-                        .iter()
-                        .map(|c| c.dimensions.margin_box().height)
-                        .sum()
+                //
+                // The measure is taken on the CROSS axis: a row container's
+                // items grow to their stacked children's HEIGHT, a column
+                // container's items to their widest child's WIDTH. The old
+                // code summed heights on both axes and then stored the sum
+                // as a width — new_tab's `.container` (a column item,
+                // max-width 600) came out 745.4 wide: 681.4 of stacked
+                // child heights plus its own 64 of padding.
+                let children_height: f32 = match cross_axis {
+                    Axis::Vertical => {
+                        if item.layout_box.style.display.is_flex() {
+                            item.layout_box.dimensions.content.height
+                        } else {
+                            item.layout_box
+                                .children
+                                .iter()
+                                .map(|c| c.dimensions.margin_box().height)
+                                .sum()
+                        }
+                    }
+                    Axis::Horizontal => {
+                        if item.layout_box.style.display.is_flex() {
+                            item.layout_box.dimensions.content.width
+                        } else {
+                            item.layout_box
+                                .children
+                                .iter()
+                                .map(|c| c.dimensions.margin_box().width)
+                                .fold(0.0f32, f32::max)
+                        }
+                    }
                 };
 
                 // children_height is a content measure; item.cross_size is
@@ -580,6 +610,111 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
                 match cross_axis {
                     Axis::Vertical => translate_subtree(item.layout_box, 0.0, delta),
                     Axis::Horizontal => translate_subtree(item.layout_box, delta, 0.0),
+                }
+            }
+        }
+    }
+
+    // 11d. Re-derive MAIN sizes on the vertical axis now that children are
+    // laid out. create_flex_item guessed a content-sized item's height at
+    // one line (get_intrinsic_main_size has no height estimator) and steps
+    // 4–10 placed every later item on that guess. 11b/11c correct the CROSS
+    // axis this way; the main axis had no such pass, so a column container
+    // stacked its rows at one-line pitch and they overlapped whenever a row
+    // was taller than a text line (flex-positioning section 4: row 2 placed
+    // at y=534 while row 1 ended at 537; Chrome 548). Only items whose main
+    // size came from content are touched; explicit heights and flex-basis
+    // lengths keep their numbers. With an indefinite (auto) container height
+    // there is no free space to distribute, so the main size used for
+    // justification is the content sum; a definite height re-runs the
+    // grow/shrink resolution from the corrected hypotheticals.
+    if main_axis == Axis::Vertical {
+        let mut any_changed = false;
+        for line in &mut lines {
+            for item in &mut line.items {
+                if !item.main_size_from_content || item.layout_box.children.is_empty() {
+                    continue;
+                }
+                let laid_out: f32 = if item.layout_box.style.display.is_flex() {
+                    item.layout_box.dimensions.content.height
+                } else {
+                    item.layout_box
+                        .children
+                        .iter()
+                        .map(|c| c.dimensions.margin_box().height)
+                        .sum()
+                };
+                if laid_out <= 0.0 {
+                    continue;
+                }
+                let new_hyp = (laid_out + item.main_pb())
+                    .max(item.min_main_size)
+                    .min(item.max_main_size);
+                if (new_hyp - item.hypothetical_main_size).abs() > 0.01 {
+                    item.hypothetical_main_size = new_hyp;
+                    item.target_main_size = new_hyp;
+                    any_changed = true;
+                }
+            }
+        }
+        if any_changed {
+            // The main size to justify/grow against. A definite pixel height
+            // resolves from STYLE (inner, like definite_inner_cross above) —
+            // container_main_size is the containing block's number, and it
+            // is NOT the container's used height: the engine hands a column
+            // container its own pre-pass stacked height (new_tab's body got
+            // 713.4, the container's stale guess-sized stack; the repro's
+            // 160px column grew its rows against 94). An auto height is
+            // sized by content, floored at min-height (css-sizing-3 §5.1 —
+            // `min-height: 100vh; justify-content: center` is the centring
+            // idiom on new_tab's body and on real landing pages), so rows
+            // can never be placed closer than their real heights and the
+            // free space centred in is the real one.
+            let main_pb_container =
+                container.dimensions.padding.vertical() + container.dimensions.border.vertical();
+            let container_is_border_box =
+                container.style.box_sizing == rustkit_css::BoxSizing::BorderBox;
+            let inner_from_spec = |raw: f32| {
+                if container_is_border_box {
+                    (raw - main_pb_container).max(0.0)
+                } else {
+                    raw
+                }
+            };
+            let definite_inner_main = match container.style.height {
+                Length::Px(v) => Some(inner_from_spec(v)),
+                _ => None,
+            };
+            let min_inner_main = match container.style.min_height {
+                Length::Px(px) => inner_from_spec(px),
+                Length::Vh(vh) => inner_from_spec(vh / 100.0 * container.viewport.1),
+                _ => 0.0,
+            };
+            for line in &mut lines {
+                let content_sum = line.hypothetical_main_size()
+                    + main_gap * line.items.len().saturating_sub(1) as f32;
+                let redistribute_main = match definite_inner_main {
+                    Some(m) => m,
+                    None => content_sum.max(min_inner_main),
+                };
+                resolve_flexible_lengths(line, redistribute_main, main_gap);
+                distribute_main_axis(
+                    line,
+                    redistribute_main,
+                    main_gap,
+                    style.justify_content,
+                    direction.is_reverse(),
+                );
+                for item in &mut line.items {
+                    let d = &item.layout_box.dimensions;
+                    let new_content_y =
+                        container_origin.1 + item.main_position + d.padding.top + d.border.top;
+                    let delta = new_content_y - d.content.y;
+                    if delta != 0.0 {
+                        translate_subtree(item.layout_box, 0.0, delta);
+                    }
+                    item.layout_box.dimensions.content.height =
+                        (item.target_main_size - item.main_pb()).max(0.0);
                 }
             }
         }
@@ -709,6 +844,11 @@ fn create_flex_item<'a>(
     let spec_cross_to_border_box = |v: f32| if is_border_box { v } else { v + cross_pb };
 
     // Calculate flex basis (border-box)
+    let content_sized_box = matches!(
+        layout_box.box_type,
+        crate::BoxType::Block | crate::BoxType::Inline | crate::BoxType::AnonymousBlock
+    );
+    let mut main_size_from_content = false;
     let flex_basis = match flex_basis_value {
         FlexBasis::Auto => {
             // Use main size property, or intrinsic size for replaced elements
@@ -720,6 +860,7 @@ fn create_flex_item<'a>(
             // If explicit size is 0 (auto), check for intrinsic sizing
             if explicit_size == 0.0 {
                 // Get intrinsic size for replaced elements (form controls, images)
+                main_size_from_content = content_sized_box;
                 get_intrinsic_main_size(layout_box, main_axis) + main_pb
             } else {
                 spec_main_to_border_box(explicit_size)
@@ -727,6 +868,7 @@ fn create_flex_item<'a>(
         }
         FlexBasis::Content => {
             // Use content size - for replaced elements, use intrinsic size
+            main_size_from_content = content_sized_box;
             get_intrinsic_main_size(layout_box, main_axis) + main_pb
         }
         FlexBasis::Length(len) => spec_main_to_border_box(len),
@@ -881,6 +1023,7 @@ fn create_flex_item<'a>(
         main_pb_end,
         cross_pb_start,
         cross_pb_end,
+        main_size_from_content,
     }
 }
 
@@ -1582,11 +1725,24 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f3
             // §9.2.3.C) — text measured on one line, inline runs summed.
             // flex-shrink then pulls oversized items back to the container.
             // Falls back to line height when content gives nothing to
-            // measure. Vertical main axis keeps the line-height heuristic:
-            // heights come from the flex layout pass itself.
+            // measure. Vertical main axis keeps the line-height heuristic
+            // as a FIRST guess only: step 11d of layout_flex_container
+            // replaces it with the laid-out height once the item's
+            // children exist.
+            //
+            // This function's contract is a CONTENT figure — every caller
+            // adds the item's own padding+border. estimate_max_content_width
+            // returns a BORDER-box figure for element boxes (it folds
+            // horizontal_padding_border in itself), so that term is taken
+            // back out here. Without this every auto-width padded flex
+            // item was max-content + 2×padding: flex-positioning's
+            // `.flex-item { padding: 10px 20px }` measured 123.2 against
+            // Chrome's 83.1 (+40), `.justify-item` +30, `.nested-item` +24.
             match main_axis {
                 Axis::Horizontal => {
-                    let content = crate::grid::estimate_max_content_width(layout_box);
+                    let border_box = crate::grid::estimate_max_content_width(layout_box);
+                    let content =
+                        (border_box - crate::grid::horizontal_padding_border(style)).max(0.0);
                     if content > 0.0 {
                         content
                     } else {
@@ -2476,6 +2632,275 @@ mod tests {
             "stretched child width {} should be the container's inner width 1230, \
              not the containing block's 1280 (overflowing by the container's own edges)",
             child_width
+        );
+    }
+
+    /// A block box with resolved padding (the way the block pre-pass leaves
+    /// it) and no explicit size, wrapping one text run.
+    fn padded_text_item(text: &str, font_px: f32, pad_x: f32, pad_y: f32) -> LayoutBox {
+        let mut s = ComputedStyle::new();
+        s.font_size = Length::Px(font_px);
+        s.padding_left = Length::Px(pad_x);
+        s.padding_right = Length::Px(pad_x);
+        s.padding_top = Length::Px(pad_y);
+        s.padding_bottom = Length::Px(pad_y);
+        s.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        let mut b = LayoutBox::new(BoxType::Block, s);
+        b.dimensions.padding = EdgeSizes {
+            left: pad_x,
+            right: pad_x,
+            top: pad_y,
+            bottom: pad_y,
+        };
+        let mut ts = ComputedStyle::new();
+        ts.font_size = Length::Px(font_px);
+        b.children
+            .push(LayoutBox::new(BoxType::Text(text.to_string()), ts));
+        b
+    }
+
+    #[test]
+    fn test_padded_auto_width_row_item_counts_padding_once() {
+        // Regression (flex-positioning, n42): an auto-width flex item's
+        // basis was estimate_max_content_width (a BORDER-box figure) plus
+        // the item's padding again. `.flex-item { padding: 10px 20px }`
+        // measured 123.2 wide against Chrome's 83.1 — +2×20 — and every
+        // padded pill, tab and button in a flex row was too wide by its
+        // horizontal padding.
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Row;
+        style.column_gap = Length::Px(10.0);
+        let mut container = LayoutBox::new(BoxType::Block, style);
+        container
+            .children
+            .push(padded_text_item("Item 1", 16.0, 20.0, 10.0));
+        container
+            .children
+            .push(padded_text_item("Item 2", 16.0, 20.0, 10.0));
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        let text_style = &container.children[0].children[0].style;
+        let text_w = crate::measure_text_advanced(
+            "Item 1",
+            &text_style.font_family,
+            16.0,
+            text_style.font_weight,
+            text_style.font_style,
+        )
+        .width;
+        let c0 = &container.children[0].dimensions;
+        assert!(
+            (c0.content.width - text_w).abs() < 0.5,
+            "content width must be the text's max-content measure {text_w}, got {}",
+            c0.content.width
+        );
+        let border_box_w = c0.content.width + 40.0;
+        let c1 = &container.children[1].dimensions;
+        assert!(
+            ((c1.content.x - 20.0) - (border_box_w + 10.0)).abs() < 0.5,
+            "second item must start one gap after the first border box ({border_box_w}), got x={}",
+            c1.content.x - 20.0
+        );
+    }
+
+    #[test]
+    fn test_column_container_stacks_rows_at_laid_out_heights() {
+        // Regression (flex-positioning section 4, n42): a column container
+        // sized each auto-height row at one text line (18 + 16 padding = 34)
+        // and placed the next row on that guess; the row then laid out at
+        // its real 47 and overlapped the one below (row 2 at y=534, row 1
+        // ending at 537; Chrome 548). The cross axis had 11b/11c to fix its
+        // guesses — the main axis needs the same pass.
+        fn padded_flex_row(child_h: f32) -> LayoutBox {
+            let mut s = ComputedStyle::new();
+            s.display = rustkit_css::Display::Flex;
+            s.flex_direction = FlexDirection::Row;
+            s.padding_top = Length::Px(8.0);
+            s.padding_bottom = Length::Px(8.0);
+            s.box_sizing = rustkit_css::BoxSizing::BorderBox;
+            let mut row = LayoutBox::new(BoxType::Block, s);
+            row.dimensions.padding = EdgeSizes {
+                top: 8.0,
+                bottom: 8.0,
+                ..Default::default()
+            };
+            let mut cs = ComputedStyle::new();
+            cs.height = Length::Px(child_h);
+            cs.width = Length::Px(100.0);
+            row.children.push(LayoutBox::new(BoxType::Block, cs));
+            row
+        }
+
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.row_gap = Length::Px(10.0);
+        let mut container = LayoutBox::new(BoxType::Block, style);
+        container.children.push(padded_flex_row(31.0));
+        container.children.push(padded_flex_row(31.0));
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 100.0, 710.0, 0.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        let r0 = &container.children[0].dimensions;
+        let r1 = &container.children[1].dimensions;
+        let r0_border_h = r0.content.height + 16.0;
+        assert!(
+            (r0_border_h - 47.0).abs() < 0.5,
+            "row 1 border-box height must be 31 + 16 = 47, got {r0_border_h}"
+        );
+        let r0_top = r0.content.y - 8.0;
+        let r1_top = r1.content.y - 8.0;
+        assert!(
+            (r1_top - (r0_top + 47.0 + 10.0)).abs() < 0.5,
+            "row 2 must start one gap below row 1's real border box: r0_top={r0_top} r1_top={r1_top}"
+        );
+        assert!(
+            (container.dimensions.content.height - (47.0 + 10.0 + 47.0)).abs() < 0.5,
+            "column container height must be the rows plus the gap, got {}",
+            container.dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn test_definite_height_column_grows_rows_from_laid_out_heights() {
+        // Repro section E (n42): a 160px border-box column with 6px padding
+        // and gap, two auto-height rows of real height 47 with flex-grow: 1.
+        // Inner main = 148; content 47+47+6 = 100; free 48 -> 71 each
+        // (Chrome). The grow must run against the container's OWN definite
+        // inner height, not the containing block's number.
+        fn padded_flex_row(child_h: f32) -> LayoutBox {
+            let mut s = ComputedStyle::new();
+            s.display = rustkit_css::Display::Flex;
+            s.flex_direction = FlexDirection::Row;
+            s.padding_top = Length::Px(8.0);
+            s.padding_bottom = Length::Px(8.0);
+            s.box_sizing = rustkit_css::BoxSizing::BorderBox;
+            s.flex_grow = 1.0;
+            let mut row = LayoutBox::new(BoxType::Block, s);
+            row.dimensions.padding = EdgeSizes {
+                top: 8.0,
+                bottom: 8.0,
+                ..Default::default()
+            };
+            let mut cs = ComputedStyle::new();
+            cs.height = Length::Px(child_h);
+            cs.width = Length::Px(100.0);
+            row.children.push(LayoutBox::new(BoxType::Block, cs));
+            row
+        }
+
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.row_gap = Length::Px(6.0);
+        style.height = Length::Px(160.0);
+        style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        let mut container = LayoutBox::new(BoxType::Block, style);
+        container.dimensions.padding = EdgeSizes {
+            top: 6.0,
+            bottom: 6.0,
+            left: 6.0,
+            right: 6.0,
+        };
+        container.children.push(padded_flex_row(31.0));
+        container.children.push(padded_flex_row(31.0));
+
+        let containing = Dimensions {
+            content: Rect::new(6.0, 6.0, 748.0, 94.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        let r0 = &container.children[0].dimensions;
+        let r1 = &container.children[1].dimensions;
+        let h0 = r0.content.height + 16.0;
+        let h1 = r1.content.height + 16.0;
+        assert!(
+            (h0 - 71.0).abs() < 0.5 && (h1 - 71.0).abs() < 0.5,
+            "rows must grow to 71 each (148 inner, 100 content, 48 free): got {h0} / {h1}"
+        );
+        let r1_top = r1.content.y - 8.0;
+        let r0_top = r0.content.y - 8.0;
+        assert!(
+            (r1_top - (r0_top + 71.0 + 6.0)).abs() < 0.5,
+            "row 2 sits one gap below the grown row 1: r0_top={r0_top} r1_top={r1_top}"
+        );
+    }
+
+    #[test]
+    fn test_min_height_column_centres_content_sized_item_in_the_viewport() {
+        // new_tab's body: `min-height: 100vh; display: flex; flex-direction:
+        // column; align-items: center; justify-content: center`, one padded
+        // content-sized `.container`. The engine passes the body its own
+        // pre-pass stacked height as the containing block (713.4 on the
+        // board), which is neither the content height nor the viewport.
+        // The item must centre in max(content, min-height) = the viewport:
+        // children 300 + padding 64 = 364 in 800 -> top at 218. On develop
+        // an 82px line guess centred in 713.4 put it at 315.7 (Chrome 33.5
+        // on the real page); the first cut of this pass put it at 0.
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.align_items = AlignItems::Center;
+        style.justify_content = JustifyContent::Center;
+        style.min_height = Length::Vh(100.0);
+        let mut body = LayoutBox::new(BoxType::Block, style);
+        body.set_viewport(1280.0, 800.0);
+
+        let mut cs = ComputedStyle::new();
+        cs.padding_top = Length::Px(32.0);
+        cs.padding_bottom = Length::Px(32.0);
+        cs.padding_left = Length::Px(32.0);
+        cs.padding_right = Length::Px(32.0);
+        cs.max_width = Length::Px(600.0);
+        cs.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        let mut item = LayoutBox::new(BoxType::Block, cs);
+        item.dimensions.padding = EdgeSizes {
+            top: 32.0,
+            bottom: 32.0,
+            left: 32.0,
+            right: 32.0,
+        };
+        let mut child_style = ComputedStyle::new();
+        child_style.height = Length::Px(300.0);
+        child_style.width = Length::Px(400.0);
+        item.children
+            .push(LayoutBox::new(BoxType::Block, child_style));
+        body.children.push(item);
+
+        // The stale containing block the engine really passes.
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 713.4),
+            ..Default::default()
+        };
+        layout_flex_container(&mut body, &containing);
+
+        let d = &body.children[0].dimensions;
+        let top = d.content.y - 32.0;
+        let border_h = d.content.height + 64.0;
+        assert!(
+            (border_h - 364.0).abs() < 0.5,
+            "item border-box height must be 300 + 64 = 364, got {border_h}"
+        );
+        assert!(
+            (top - 218.0).abs() < 0.5,
+            "item must centre in the 800 viewport: expected top 218, got {top}"
+        );
+        // 11b must not turn the stacked child HEIGHT into the item's width.
+        let border_w = d.content.width + 64.0;
+        assert!(
+            (border_w - 464.0).abs() < 0.5,
+            "column item width is its widest child + padding (400 + 64), got {border_w}"
         );
     }
 }
