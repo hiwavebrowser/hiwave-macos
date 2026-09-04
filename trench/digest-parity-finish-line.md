@@ -6470,11 +6470,15 @@ Two things to record about the sweep itself:
 
 ## 2026-09-04
 
-**Metric: 2/26 → 2/26, and tonight's change cannot have moved it.** `develop`'s
-`2/26` (night 27's receipt, run 33294082148, `macos-14`) still stands. Gate B's
-percentage half is **bit-identical on all 26 cases** and no case changed green
-status on either gate, so no case can have crossed the conjunction or fallen off
-it. Every number below is Linux/SwiftShader — **MECHANICS, NOT A RECEIPT.**
+**Metric: 2/26 → 2/26, measured on macOS, and the prediction was checked rather
+than asserted.** PR #183's own `macos-14` lane
+([run 33841194741](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/33841194741),
+all jobs green) reads `2/26` — geometry 4/26, paint 3/26, stability 26/26,
+discrete 25/26, green set `bg-pure` and `bg-solid` — **identical to `develop`'s
+standing receipt on every column and every case**. That is the outcome the
+reasoning below predicts: Gate B's percentage half is bit-identical on all 26,
+and every box this change moves is below the fold. Every OTHER number in this
+entry is Linux/SwiftShader — **MECHANICS, NOT A RECEIPT.**
 
 **P-item: the geometry-first queue (ratified 2026-08-12). One unit, complete,
 as PR #183.** The night's larger result is not that PR: it is a **measurement of
