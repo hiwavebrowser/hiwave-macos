@@ -2522,6 +2522,114 @@ mod tests {
         );
     }
 
+    /// The min-content floor is a term, not decoration: fit-content never
+    /// crushes an item below its min-content width, however little cross space
+    /// is available.
+    #[test]
+    fn a_non_stretch_column_item_is_not_crushed_below_its_min_content() {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.align_items = AlignItems::FlexStart;
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        let mut item = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut inner = ComputedStyle::new();
+        inner.width = Length::Px(900.0);
+        inner.height = Length::Px(20.0);
+        item.children.push(LayoutBox::new(BoxType::Block, inner));
+        item.dimensions.content = Rect::new(0.0, 0.0, 300.0, 20.0);
+        container.children.push(item);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 300.0, 600.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        let w = container.children[0].dimensions.content.width;
+        assert!(
+            (w - 900.0).abs() < 0.5,
+            "item width {w}: min-content 900 in 300px of available space stays \
+             900. 300 means the min-content floor was dropped and the item was \
+             crushed to the space it had."
+        );
+    }
+
+    /// `align-self` on the ITEM decides, not only `align-items` on the
+    /// container: an item that opts out of a stretching container takes its
+    /// fit-content width.
+    #[test]
+    fn align_self_flex_start_opts_an_item_out_of_a_stretching_container() {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.align_items = AlignItems::Stretch;
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        let mut item_style = ComputedStyle::new();
+        item_style.align_self = rustkit_css::AlignSelf::FlexStart;
+        let mut item = LayoutBox::new(BoxType::Block, item_style);
+        let mut inner = ComputedStyle::new();
+        inner.width = Length::Px(240.0);
+        inner.height = Length::Px(20.0);
+        item.children.push(LayoutBox::new(BoxType::Block, inner));
+        item.dimensions.content = Rect::new(0.0, 0.0, 660.0, 20.0);
+        container.children.push(item);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 660.0, 600.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        let w = container.children[0].dimensions.content.width;
+        assert!(
+            (w - 240.0).abs() < 0.5,
+            "align-self:flex-start item width {w}, expected its fit-content 240. \
+             660 means align-self was read as the container's stretch."
+        );
+    }
+
+    /// A control the estimators CAN see — one with a specified pixel width —
+    /// must still be measured. The unmeasurable guard is about what the
+    /// estimators cannot read, not about the box type.
+    #[test]
+    fn a_control_with_a_pixel_width_is_still_measured() {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.align_items = AlignItems::FlexStart;
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        let mut item = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut control_style = ComputedStyle::new();
+        control_style.width = Length::Px(200.0);
+        item.children.push(LayoutBox::new(
+            BoxType::FormControl(crate::FormControlType::TextInput {
+                value: String::new(),
+                placeholder: String::new(),
+                input_type: "text".to_string(),
+            }),
+            control_style,
+        ));
+        item.dimensions.content = Rect::new(0.0, 0.0, 660.0, 20.0);
+        container.children.push(item);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 660.0, 600.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        let w = container.children[0].dimensions.content.width;
+        assert!(
+            (w - 200.0).abs() < 0.5,
+            "item width {w}: a control with width:200px is measurable, so the \
+             item is 200. 660 means every control was treated as opaque."
+        );
+    }
+
     /// Where the intrinsic estimators cannot see the content — a form control
     /// or image with no specified pixel width — the previously measured width
     /// is kept rather than a zero estimate becoming a zero box.
@@ -2538,9 +2646,19 @@ mod tests {
         let mut container = LayoutBox::new(BoxType::Block, style);
 
         let mut item = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        // Measurable content, so the estimate is NOT zero — the zero-estimate
+        // fallback must not be what saves this box, or the guard is untested.
+        let mut sibling = ComputedStyle::new();
+        sibling.width = Length::Px(240.0);
+        sibling.height = Length::Px(20.0);
+        item.children
+            .push(LayoutBox::new(BoxType::Block, sibling));
+        // …and one control the estimators cannot read, nested a level down so
+        // the guard has to walk to find it.
+        let mut wrapper = LayoutBox::new(BoxType::Block, ComputedStyle::new());
         let mut control_style = ComputedStyle::new();
         control_style.width = Length::Percent(100.0);
-        item.children.push(LayoutBox::new(
+        wrapper.children.push(LayoutBox::new(
             BoxType::FormControl(crate::FormControlType::TextInput {
                 value: String::new(),
                 placeholder: String::new(),
@@ -2548,6 +2666,7 @@ mod tests {
             }),
             control_style,
         ));
+        item.children.push(wrapper);
         item.dimensions.content = Rect::new(0.0, 0.0, 536.0, 40.0);
         container.children.push(item);
 
