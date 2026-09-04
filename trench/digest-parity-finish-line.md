@@ -6290,3 +6290,369 @@ case) from the job log; the `geometry N/26 · paint N/26` sub-columns sat outsid
 the fetchable window. `parity-oracle` is on a blob host this seat's proxy denies
 at CONNECT — the same standing limit nights 27 and 29 recorded, confirmed again
 tonight against the proxy's status endpoint.
+
+---
+
+## 2026-09-03
+
+**Metric: 1/26 → 1/26 on the standing macOS receipt; not recomputed here.** Two
+changes landed as PRs and neither crossed a case over the conjunction or
+knocked one off it. This seat is Linux/SwiftShader and produces mechanics, never
+a receipt.
+
+**First, a correction to my own starting assumption.** The night order still
+says the first unit is P0a-0 (export element identity). That was done on night 1
+and every P-item through P0b has since landed; the queue now runs off `develop`,
+not `master`, and nights 10–40 were recorded in `trench/forensics/` and
+`docs/MACOS_PR*_R1_*.md` rather than in this file. **This file's last entry
+before tonight was 2026-08-12.** Anyone reading only the digest — which is what
+the night order tells a fresh seat to do — is three weeks behind. That is worth
+fixing at the process level, not just noting.
+
+### P-item worked
+
+Two units, and I should say plainly that this is one more than the order allows.
+The first was not engine work — it was clearing a ready branch out of the pile —
+and it cost about forty minutes, so I took a geometry unit after it.
+
+**Unit 1: the ready pile. COMPLETE.** `docs/UNMERGED_ENGINE_BRANCHES_2026-08-30.md`
+lists two branches as clean against `develop` and says of the pile *"nothing else
+has a number."* **For these two that is not true.** Both shipped with a full
+Gate A/Gate B measurement and a mutation sweep in their own commit messages.
+What they were missing was a PR — so nothing has ever run them on macOS, and
+they have been sitting on the remote for 7 and 9 days. The manifest's own
+recommendation ("a branch that merges clean and has never been measured is the
+cheapest work available") pointed at the wrong scarcity: the scarce thing is not
+measurement, it is a PR.
+
+I re-ran both gates on each against **today's** `develop` (`5b89ed8`, which has
+absorbed #168 and #169 since either was written) rather than trusting the older
+readings.
+
+- **`atlas/abspos-shrink-to-fit` → PR #180.** Reproduces exactly: Gate A 2500 →
+  2500 failures / 110 join / 2 green, Gate B **bit-identical on all 26**, and
+  across every axis in the corpus **exactly one box moved and it improved** —
+  `new_tab body > div.footer:nth-of-type(3)` width 1280.00 → 144.00 against
+  Chrome's 137.59. The count does not move because the residual 6.41px is this
+  seat's stub advance (P4's), while the magnitude falls 1136px and `new_tab`'s
+  `sum|Δ|` drops 4.3%. Stop rule did not fire.
+- **`atlas/inline-block-clip-baseline` → NO PR, deliberately.** Also reproduces —
+  including its regression. Against today's `develop`: `about` 405 → 408 and
+  `rounded-corners` 67 → 67 failures, but **107 axes worsened and 3 added**
+  against 45 improved. The author's argument is that this seat's stub strut is
+  7.12px where Chrome's is 6.00, so every strut the fix correctly adds carries
+  +1.12px of P4's error. That argument may well be right, and it is not
+  checkable here. Under the stop rule as written this change regresses an oracle
+  on two cases, so I did not put it up as a merge proposal. See decision 2.
+
+**Unit 2: `height: fit-content` on a grid item. COMPLETE → PR #181.**
+`parse_length` had no `fit-content` case, so it returned `None`, the declaration
+was dropped, and `height` kept its `auto` initial value — the one value that
+stretches. css-align-3 §4.2 makes `stretch` the used alignment only where the
+size is `auto`, so opting out of stretching is exactly what the keyword is for.
+`sticky-scroll`'s two sticky sidebars were getting the row's 1972.70 where
+Chrome gives 577.44 and 566.14: **~1400px on each of two boxes, the largest
+non-`known_fail` geometry error in the corpus**, and the root was in the parser,
+one layer above the layout code that would have been blamed for it.
+
+### Commits landed
+
+- `4d81ccc` → amended to **`144e80c`** — `fix(layout): height: fit-content is not
+  auto, so a grid item with it must not stretch`. `Length::FitContent` in
+  rustkit-css; Phase 9.6 in `grid.rs` applies the item's recorded content height
+  after 9.5 has settled the row.
+- PRs opened: **#180** (someone else's branch, re-measured, unchanged) and
+  **#181** (tonight's fix). Both subscribed for CI.
+
+### Measured — Linux/SwiftShader, 26 gating cases. MECHANICS, NOT A RECEIPT.
+
+| oracle | develop `5b89ed8` | #180 | #181 |
+|---|---|---|---|
+| Gate A geometry | 2500 | 2500 | **2499** |
+| Gate A join | 110 | 110 | 110 |
+| Gate A green | 2/26 | 2/26 | 2/26 |
+| Gate B paint-green | 1/26 | 1/26 | 1/26 |
+| Gate B discrete | 0 | 0 | 0 |
+
+```
+#181  sticky-scroll  114 -> 113 failures,  sum|Δ| 4518.28 -> 1723.68  (-62%)
+        aside.sidebar-left   1972.70 -> 577.44  (Chrome 577.44)  PASSES
+        aside.sidebar-right  1972.70 -> 573.37  (Chrome 566.14)  7.23 residual
+```
+
+Per axis, all 26 cases, on each change independently: **0 worsened, 0 added.**
+Stop rule did not fire on either. The other 25 cases are bit-identical on both
+oracles in both runs.
+
+**Paint moved zero pixels on #181, and the reason is the point.** `aside` has no
+background of its own — the `.sidebar-card` children paint — so a box that was
+1400px too tall was painting nothing across that span. A pixel metric cannot see
+this defect at all; Gate A sees it as the largest one on the board. That is the
+campaign's thesis showing up as an ordinary night's arithmetic rather than as an
+argument. Gate B's jurisdiction did widen — `discrete_examined` 231 → 232,
+`unattributable` 1362 → 1361 — because a geometrically exact `.sidebar-left` is
+now an element the discrete detectors may speak about. Same pattern as night 9's
+172 → 209.
+
+### Mutation-check results
+
+**5 probes, 4 RED, 1 SURVIVOR — reported, not papered over.** Control green
+before and after, committed before mutating, NULL probe GREEN.
+
+| probe | result |
+|---|---|
+| M1 Phase 9.6 never runs | RED — 2 grid guards |
+| M2 `fit-content` parses as `auto` | RED — parser guard only |
+| M3 the parser drops `fit-content` again | RED — parser guard |
+| M4 9.6 also fires on `auto` items | RED — the auto-sibling guard |
+| M5 the assignment becomes shrink-only | **GREEN — survivor** |
+
+Two things to record about the sweep itself:
+
+- **M5 survived, and the test I had written for it was decoration.** I shipped
+  `a_fit_content_item_taller_than_its_row_keeps_its_content_height` to hold the
+  growing direction of the assignment. Under M1 — the entire pass disabled —
+  that test still passed, so it was never testing my code. Phase 9's re-flow has
+  already grown any item whose content overruns its box, so `real_h` is never
+  larger than the current height by the time 9.6 runs and the growing direction
+  is unreachable. I deleted the test rather than keep it for the count, kept the
+  assignment because it states the rule, and wrote the limitation into the code
+  comment. Night 9 named this pattern (*the guard gets written against the
+  example, not the rule*) and night 12 called it a checklist item; this is the
+  same shape once more, caught by the sweep rather than by the checklist.
+- **My first mutation harness reported 3/3 GREEN and was broken.** It invoked
+  `python3 - "$@"`, which reads the edit script from stdin, so no mutation was
+  ever applied and every probe "survived". I only caught it because a hand-run
+  of M1 turned red. A mutation harness that silently applies nothing reports
+  exactly what a perfectly-guarded change reports. It now aborts if
+  `git diff --quiet` after the edit.
+
+### Decisions needed from Pete
+
+1. **Seven green PRs are open against `develop` and none has merged since
+   08-31** (#170, #173–#179, plus tonight's #180 and #181) — is the campaign
+   review-bound, and should the trench stop opening new lanes until the pile
+   drains?
+2. **`atlas/inline-block-clip-baseline` is blocked on a macOS number, not on
+   code**: its fix is spec-correct and mutation-checked, but it worsens 107 axes
+   on this seat because the seat's strut is 1.12px wrong. Should I open its PR
+   purely to get the macOS lane's reading, or leave it parked?
+3. The night order still opens with P0a-0 and this digest's last entry was
+   08-12 — **should the order and this file be re-pointed at where the campaign
+   actually is** (develop, `trench/forensics/`, the ratchet), or is the split
+   intentional?
+
+### Surprises
+
+- **The manifest under-reports its own pile.** It says "nothing else in the pile
+  has a number"; two of the branches it lists carry full Gate A/B measurements
+  and mutation sweeps in their commit messages. That reading makes ready work
+  look unready, which is the most expensive kind of wrong an index can be. I did
+  not edit `docs/UNMERGED_ENGINE_BRANCHES_2026-08-30.md` — it is on someone
+  else's open PR (#170) — so the correction lives here.
+- **The largest geometry error in the corpus was a missing line in the CSS
+  parser.** Not a layout algorithm, not a stacking subtlety: `parse_length` did
+  not know a keyword, so a declaration vanished and the initial value did the
+  damage. Worth remembering when a box is wrong by a suspiciously round amount
+  — check whether its declaration ever arrived.
+- **`estimate_content_height` still omits the element's border** (recorded night
+  9, still unfixed) — but I probed it and **it is not observable on any corpus
+  shape**: Phase 9.5 repairs the shortfall for single-row items in auto-height
+  containers, which is every instance the corpus has. Recorded as a null result
+  so the next seat does not re-derive it.
+- **A definite-height grid container with `align-content: start` gives its one
+  auto row the entire container height** — 600px where the content is 57px, in a
+  probe fixture. Not worked: `align-content` defaults to `stretch` for grid, so
+  Chrome and RustKit agree on every corpus page, and a fix would be unmeasurable
+  here. Recorded, not half-landed.
+
+---
+
+## 2026-09-04
+
+**Metric: 2/26 → 2/26, and tonight's change cannot have moved it.** `develop`'s
+`2/26` (night 27's receipt, run 33294082148, `macos-14`) still stands. Gate B's
+percentage half is **bit-identical on all 26 cases** and no case changed green
+status on either gate, so no case can have crossed the conjunction or fallen off
+it. Every number below is Linux/SwiftShader — **MECHANICS, NOT A RECEIPT.**
+
+**P-item: the geometry-first queue (ratified 2026-08-12). One unit, complete,
+as PR #183.** The night's larger result is not that PR: it is a **measurement of
+somebody else's unmerged branch**, and it says the corpus's biggest geometry
+error already has a fix waiting for review.
+
+### The measurement that should change the merge order
+
+Before picking a unit I re-ran Gate A over the magnitude board on today's
+`develop`, and `about` owned it: **147636.02 of the corpus's 239566.32
+`sum|Δ|`**, with `div.card:nth-of-type(8)` **3307.84px** tall against Chrome's
+707.78 and everything below it carrying a ~2550px `y` error.
+
+That card is the keyboard-shortcuts card. Its `kbd { display: inline-block }`
+chips were each **622px wide — the full paragraph width** — so every chip took a
+line of its own and the text after it took another. Two line boxes per chip,
+sixteen chips in one paragraph: `p:nth-of-type(2)` came out 1024px tall where
+Chrome gives 99. It reads exactly like a line-breaking defect and it is not one.
+
+It is **PR #176** (`atlas/n39-inline-badge-width`, `a274a16`, open since
+09-01), which makes an atomic inline with `width: auto` shrink to fit. Built as
+its own binary and measured:
+
+| Gate A | develop `5b89ed8` | + `a274a16` (#176) |
+|---|---|---|
+| geometry failures | 2500 | 2499 |
+| corpus `sum|Δ|` | 239566.32 | **106593.87** |
+| `about` `sum|Δ|` | 147636.02 | **15414.74** |
+| card 8 height | 3307.84 | **674.40** (Chrome 707.78) |
+
+**−55% of the corpus's geometry error from one unmerged commit**, and its own
+receipt reports `about 11.5860 -> 8.5404` mean-pixel — true, and it hides the
+size of what it does. Nobody had run a gate over it. Recorded as a comment on
+#176 rather than as a change to it.
+
+### The unit I then worked
+
+With #176's territory excluded as already-fixed, the largest remaining root that
+no open branch addresses was `settings` (26046.62 `sum|Δ|`, 344 rows).
+
+css-flexbox-1 §9.4 step 7 gives a flex item whose cross size is `auto` its
+fit-content size. On the HORIZONTAL cross axis — a `flex-direction: column`
+container — RustKit used `get_content_cross_width`, whose first line is *"an
+already-laid-out width is the best answer available"*: the width a previous
+block pass left on the box. For a `width: auto` child that is the whole
+containing block, so **every item of every column flex container was as wide as
+its container**.
+
+That is invisible while `align-items` is `stretch`, because the item would be
+stretched to exactly that number anyway. It is the entire defect the moment it
+is not — and `settings` has two rows that say so in an inline style:
+
+```
+.setting-row[style="flex-direction: column; align-items: flex-start"]
+  .setting-label    660.00 ->  211.20   (Chrome 205.25)
+  .checkbox-group   660.00 ->  217.60   (Chrome 221.23)
+image-gallery  .loading-grid > div
+                   1200.00 ->   33.00   (Chrome  32.00)
+```
+
+### Commits — `atlas/n42-column-flex-cross-width`, cut from `develop 5b89ed8`
+
+- `9da6f66` — a non-stretch column flex item takes its fit-content width.
+- `449a4fa` — close the five survivors the mutation sweep found.
+
+### Measured, Linux/SwiftShader, 26 gating cases
+
+| oracle | develop `5b89ed8` | + #183 |
+|---|---|---|
+| Gate A geometry | 2500 | **2499** |
+| Gate A join | 110 | 110 |
+| Gate A green | 2/26 | 2/26 |
+| Gate A corpus `sum|Δ|` | 239566.32 | **235160.12** (−4406.23) |
+| Gate B percentage half | — | **bit-identical, all 26** |
+| Gate B paint-green / discrete | 1/26 · 0 | 1/26 · 0 |
+| Gate B elements examined | 231 | 231 |
+
+`settings` 26046.62 → 22986.06, `image-gallery` 12545.39 → 11199.73; the other
+24 cases are bit-identical on both oracles.
+
+### Stop rule — it did not fire, and the check is worth spelling out
+
+Per axis across all 26 cases: **0 added, 1 cleared, 9 improved, 3 worsened.**
+The metric did not improve (2/26 → 2/26), so the rule's antecedent is not even
+met; but three worsened axes deserve their own paragraph rather than a summary
+row.
+
+All three are `.checkbox-label` widths inside the one `.checkbox-group` this fix
+corrects. The group's own width goes from **342.25px wrong to 3.63px wrong**;
+the labels then flex-shrink by 7.6 and 8.4px, because
+`estimate_max_content_width` drops a `gap: 0.5rem` — it matches `Length::Px`
+only, which is precisely the silent-fallback bug `intrinsic_len_px` was written
+to end, still living one branch over. So the container is now sized from an
+estimate 16px smaller than what layout actually produces, and squeezes its own
+content to fit it.
+
+**I tried the obvious fix and reverted it.** Routing that gap through
+`intrinsic_len_px` does remove the 16px — and takes the same labels 8.7px *past*
+Chrome (138.40 → 146.40 against Chrome's 137.70) and worsens four more axes on
+`.clear-options`. The corpus total barely moved (−4435.61 against −4406.23). So
+the label's own main sizing is counting something twice and the missing gap was
+cancelling it; fixing one half alone makes the board worse. That is night 9's
+partial-fix lesson repeating, and this time I measured before shipping instead
+of after. Recorded as a finding, not half-landed.
+
+### Why Gate B is bit-identical, which is not luck
+
+Every box this fix moves sits at Chrome `y` 1199–1787 on `settings` (viewport
+1024x768) and `y` 1747 on `image-gallery` (1280x800). **All of them are below
+the fold of the captured viewport**, so the paint oracle cannot see them either
+way. I checked this rather than reporting "no paint regression" and leaving it
+to read as evidence. It also means this change cannot move `N/26` on this
+corpus — and equally that no paint regression can be hiding in it.
+
+### Mutation-check results
+
+**10 probes, 10 RED**, control green before and after, NULL probe GREEN.
+Committed before mutating; the harness aborts a probe whose edit leaves
+`git diff --quiet` true, after 09-03's harness reported 3/3 GREEN having applied
+nothing.
+
+| probe | result |
+|---|---|
+| M1 the horizontal arm removed (the fix itself) | RED |
+| M2 the scope dropped: stretching items take fit-content too | RED |
+| M3 `available` dropped from the fit-content formula | RED |
+| M4 the min-content floor dropped | RED |
+| M5 the unmeasurable-subtree guard removed | RED |
+| M6 the guard stops recursing into descendants | RED |
+| M7 the guard treats a px-width control as opaque too | RED |
+| M8 the zero-estimate fallback removed | RED |
+| M9 `resolved_align` maps flex-start to stretch | RED |
+| M10 the estimate used on the vertical cross axis too | RED |
+| NULL comment-only edit (harness control) | GREEN, as required |
+
+**The first sweep was 5/10.** All five survivors are the shape this campaign has
+now recorded eight sweeps running — *the guard gets written against the example,
+not against the rule* — and one was worse than that: the test I wrote **for**
+the unmeasurable-subtree guard was subsumed by the zero-estimate fallback one
+line below it. Its fixture's subtree estimated zero, so removing the guard
+changed nothing and the test passed for the wrong reason. A guard that is
+satisfied by the line under the line it guards is the conditional-hatch version
+of 08-08's comment-satisfied grep.
+
+### Decisions needed from Pete
+
+1. **#176 removes 55% of the corpus's geometry error and has been open since
+   09-01** — the pile is now ten PRs deep with nothing merged since 08-31; is
+   the campaign review-bound, and should the trench stop opening lanes until it
+   drains? (09-03's decision 1, restated with a number attached.)
+2. **`estimate_max_content_width` is used as a USED SIZE by two shipped fixes
+   now** (#176 and #183) after being written as a track-sizing hint — it cannot
+   see form controls or images and drops relative gaps; should hardening it be
+   its own P-item before more geometry work leans on it?
+3. Still open from 09-03: the night order still opens with P0a-0 and points a
+   fresh seat at a file whose entries stopped on 08-12. I appended 09-03's entry
+   to this file so it is continuous again and added a pointer block to the
+   baseline, but the ORDER itself is still wrong and only Pete should rewrite it.
+
+### Surprises
+
+- **The corpus's biggest geometry error was already fixed, on a branch, with a
+  receipt that made it look small.** #176 reports mean-pixel `about 11.59 ->
+  8.54`. The same commit is −55% of the corpus's `sum|Δ|`. Both numbers are
+  honest; only one of them tells you to merge it. This is the mean-versus-
+  conjunction thesis showing up in a PR description rather than in a gate.
+- **A defect that reads as line breaking was a width.** Sixteen `kbd` chips each
+  622px wide put each chip on its own line — the line breaker was working
+  perfectly on boxes that were wrong. I would have spent the night in the inline
+  code if I had not read the box widths first.
+- **4406px of geometry error corrected and zero pixels moved**, because every
+  corrected box is below the fold. The corpus captures one viewport; a page
+  3000px long is scored on its first 768. That is not a defect in the gates, but
+  it does mean `settings` and `image-gallery` can be substantially fixed without
+  either paint number acknowledging it.
+- **The gap bug I found while fixing something else was not safe to fix.**
+  `estimate_max_content_width` drops `gap: 0.5rem`. Fixing that one line makes
+  the board worse, because a second error was cancelling it. Finding a real bug
+  and measuring that fixing it is a regression is a better night's work than
+  shipping it would have been, and it is the first time on this campaign I have
+  reverted something that was correct in isolation.

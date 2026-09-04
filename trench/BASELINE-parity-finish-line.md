@@ -10,6 +10,32 @@
 
 ---
 
+## WHERE THE CAMPAIGN ACTUALLY IS (added 2026-09-04 — read this before the rest)
+
+The night order below still opens *"the first unit is P0a-0"*. **P0a-0 was done
+on night 1 and every P-item through P0b has landed.** Two nights running
+(09-03, 09-04) a fresh seat has spent its first stretch discovering that. Facts,
+so the third does not:
+
+- **The queue runs off `develop`, not `master`.** Engine work goes on its own
+  branch cut from `develop` and opens its own PR; this branch stays the
+  instrument lane (see *Branch law* at the foot of this file).
+- **The standing metric is `2/26`** — night 27's receipt, run 33294082148,
+  `macos-14`, on `develop`. The `1/26` recorded under *The one metric* below is
+  P0b's original receipt and is kept as history, not as current state.
+- **This digest was not the whole record.** Nights 10–41 were written to
+  `trench/forensics/`, `docs/MACOS_PR*_R1_*.md` and PR bodies; this file's
+  entries jumped 2026-08-12 → 2026-09-02 on this branch and 08-12 → 09-03 on
+  `develop`'s copy. 09-03's entry has been merged back in here so the file reads
+  continuously again. If an entry you expect is missing, check the other
+  lineage before concluding the night did not happen.
+- **The bottleneck is review, not work.** Ten PRs are open against `develop`
+  and none has merged since 08-31. One of them, #176, removes 55% of the
+  corpus's Gate A `sum|Δ|` on its own (measured 09-04).
+
+Rewriting the ORDER itself is Pete's call and is decision 3 of the 09-04 entry.
+This block states where things are; it changes nothing.
+
 ## The one metric
 
 **`N/26 finish-line-green`** — cases passing the FULL conjunction, not a mean:
