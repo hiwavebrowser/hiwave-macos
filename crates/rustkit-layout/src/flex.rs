@@ -1060,6 +1060,19 @@ fn calculate_cross_sizes(
         // the item's own padding+border.
         let content_cross_size = match item.explicit_cross_size {
             Some(explicit) => explicit,
+            // On the HORIZONTAL cross axis an item that will NOT be stretched
+            // keeps its fit-content width, which the already-laid-out width is
+            // not. See `fit_content_cross_width` for what was wrong with it and
+            // `SCOPE` below for why a stretching item is left alone.
+            None if cross_axis == Axis::Horizontal
+                && resolved_align(item.align_self, align_items) != AlignItems::Stretch =>
+            {
+                let available = (container_cross
+                    - item.cross_margin_start
+                    - item.cross_margin_end)
+                    .max(0.0);
+                fit_content_cross_width(item.layout_box, available, item.cross_pb())
+            }
             None => get_content_cross_size(item.layout_box, cross_axis) + item.cross_pb(),
         };
 
@@ -1083,18 +1096,7 @@ fn calculate_cross_sizes(
 
     // PASS 2: Apply stretch behavior based on container sizing
     for (i, item) in line.items.iter_mut().enumerate() {
-        let align = if item.align_self == AlignSelf::Auto {
-            align_items
-        } else {
-            match item.align_self {
-                AlignSelf::Auto => align_items,
-                AlignSelf::FlexStart => AlignItems::FlexStart,
-                AlignSelf::FlexEnd => AlignItems::FlexEnd,
-                AlignSelf::Center => AlignItems::Center,
-                AlignSelf::Baseline => AlignItems::Baseline,
-                AlignSelf::Stretch => AlignItems::Stretch,
-            }
-        };
+        let align = resolved_align(item.align_self, align_items);
 
         // Per CSS spec: stretch only applies if cross size is "auto"
         // Items with explicit height/width should NOT be stretched
@@ -1125,6 +1127,110 @@ fn calculate_cross_sizes(
         .iter()
         .map(|i| i.cross_size + i.cross_margin_start + i.cross_margin_end)
         .fold(0.0, f32::max);
+}
+
+/// `align-self` resolved against the container's `align-items`.
+///
+/// Two passes of `calculate_cross_sizes` need the same answer — the one that
+/// decides whether an item keeps its fit-content cross size and the one that
+/// stretches it — and a copy of this mapping that drifts from the other puts
+/// an item at a size one pass chose and a position the other did.
+fn resolved_align(align_self: AlignSelf, align_items: AlignItems) -> AlignItems {
+    match align_self {
+        AlignSelf::Auto => align_items,
+        AlignSelf::FlexStart => AlignItems::FlexStart,
+        AlignSelf::FlexEnd => AlignItems::FlexEnd,
+        AlignSelf::Center => AlignItems::Center,
+        AlignSelf::Baseline => AlignItems::Baseline,
+        AlignSelf::Stretch => AlignItems::Stretch,
+    }
+}
+
+/// Whether the intrinsic estimators can actually measure this subtree.
+///
+/// `estimate_max_content_width` knows about text, explicit pixel widths, flex
+/// containers and children. It has no case for `BoxType::Image` or
+/// `BoxType::FormControl`, so a replaced or form box with no specified pixel
+/// width contributes **zero** to its ancestors' max-content — and an estimate
+/// that is silently too small becomes a box that is silently too narrow the
+/// moment it is used as a size rather than as a track-sizing hint.
+///
+/// This is not a guess about which subtrees are risky. Every axis the first
+/// version of this fix added to Gate A traced to one such box:
+/// `new_tab`'s `.search-input` (`width: 100%`, so no pixel width) zeroed the
+/// max-content of `.container`, `.search-container` and `.shortcuts-section`
+/// above it, and `settings`' `.blocklist-add` holds the same shape. Where the
+/// estimators cannot see the content, the previously measured width is kept.
+///
+/// Percentage widths are deliberately NOT disqualifying: css-sizing-3 §5.2.2
+/// says a percentage resolves against the containing block that is being
+/// sized, so treating it as no contribution is the correct intrinsic answer,
+/// not a gap. The gap is the replaced/control box underneath it.
+fn estimators_can_measure(layout_box: &LayoutBox) -> bool {
+    let opaque = matches!(
+        layout_box.box_type,
+        crate::BoxType::Image { .. } | crate::BoxType::FormControl(_)
+    ) && !matches!(layout_box.style.width, Length::Px(_));
+    if opaque {
+        return false;
+    }
+    layout_box.children.iter().all(estimators_can_measure)
+}
+
+/// The hypothetical cross size of a flex item on the HORIZONTAL cross axis,
+/// i.e. in a `flex-direction: column` container, as a BORDER-box width.
+///
+/// css-flexbox-1 §9.4 step 7 sizes an item whose cross size is `auto` to its
+/// fit-content size, which css-sizing-3 §5.1 defines as
+/// `min(max(min-content, available), max-content)`.
+///
+/// The previous answer came from `get_content_cross_width`, whose first line
+/// is *"an already-laid-out width is the best answer available"* — the width a
+/// prior block pass left on the box. For a `width: auto` child that width is
+/// the whole containing block, so a column flex container handed every item
+/// its own full width. That is invisible while `align-items` is `stretch`,
+/// because the item would be stretched to exactly that anyway; it is the
+/// entire defect the moment it is not. On the settings page,
+/// `.setting-row[style="flex-direction: column; align-items: flex-start"]`
+/// gave `.setting-label` and `.checkbox-group` 660px where Chrome gives
+/// 205.25 and 221.23 — and the text that should have wrapped inside them did
+/// not, so the page came out 306.67px too short below.
+///
+/// SCOPE: items whose resolved alignment is `stretch` are deliberately left on
+/// the old measurement. Their used cross size is the stretch target, so the
+/// hypothetical size only reaches them through the auto-cross-size line
+/// (`line_cross_size`) — and narrowing that line shrinks a stretching item to
+/// its content instead of to its container. Measured, not assumed: applying
+/// this to every item took `shelf`'s `#commandResults` from 1248 to 1216 and
+/// `new_tab`'s `.shortcuts-section` from 536 to 360, adding 12 failing axes.
+/// A column container with `width: auto` still has a used width its items
+/// should stretch to; that the stretch path reads the content line instead is
+/// a separate defect, and it is not this one.
+///
+/// The estimators already include the item's own padding and border, so this
+/// returns a border-box figure and the caller must NOT add `cross_pb()`.
+///
+/// LIMIT, stated rather than left to be discovered: the estimators measure
+/// text, explicit widths and children, and know nothing about replaced or
+/// form-control content — a childless `<img>` or `<input>` with no specified
+/// width estimates 0. Collapsing such an item to zero would be a new defect
+/// in place of the old one, so where max-content reports nothing this keeps
+/// the previously measured width. That fallback is the OLD behaviour and is
+/// not a fix; it is the blast radius held to boxes the estimators cannot see.
+fn fit_content_cross_width(
+    layout_box: &LayoutBox,
+    available_border_box: f32,
+    cross_pb: f32,
+) -> f32 {
+    if !estimators_can_measure(layout_box) {
+        return get_content_cross_width(layout_box) + cross_pb;
+    }
+    let preferred = crate::grid::estimate_max_content_width(layout_box);
+    if preferred <= 0.0 {
+        return get_content_cross_width(layout_box) + cross_pb;
+    }
+    let preferred_min = crate::grid::estimate_min_content_width(layout_box);
+    preferred_min.max(available_border_box.min(preferred))
 }
 
 /// Get the content-based cross size for a layout box.
@@ -2268,6 +2374,194 @@ mod tests {
             (w - 200.0).abs() < 0.5,
             "non-stretch column child width {w}, expected 200. A value near 400 means \
              the cross size was measured as a HEIGHT."
+        );
+    }
+
+    /// A column flex container whose items do NOT stretch sizes each item to
+    /// its FIT-CONTENT width, not to the container.
+    ///
+    /// `.setting-row[style="flex-direction: column; align-items: flex-start"]`
+    /// on the settings page: Chrome gives `.setting-label` 205.25px and
+    /// RustKit gave it the row's whole 660px, because the hypothetical cross
+    /// size came from `get_content_cross_width`, whose first answer is the
+    /// width a previous block pass left on the box — for a `width: auto`
+    /// child, the containing block.
+    ///
+    /// The child here carries real content (a 240px block) so the intrinsic
+    /// estimators have something to measure; the fixture in the test above
+    /// deliberately has none, which is why it exercises the fallback rather
+    /// than this path.
+    #[test]
+    fn a_non_stretch_column_item_takes_its_fit_content_width() {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.align_items = AlignItems::FlexStart;
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        let mut item_style = ComputedStyle::new();
+        let mut item = LayoutBox::new(BoxType::Block, item_style.clone());
+        let mut inner = ComputedStyle::new();
+        inner.width = Length::Px(240.0);
+        inner.height = Length::Px(20.0);
+        item.children.push(LayoutBox::new(BoxType::Block, inner));
+        // A stale fill-available width, exactly as the block pre-pass leaves
+        // one. Reading this is the defect; it must not win over the estimate.
+        item.dimensions.content = Rect::new(0.0, 0.0, 660.0, 20.0);
+        container.children.push(item);
+
+        // A second item, narrower, so a wrong answer cannot come from "every
+        // item got the same number" for some unrelated reason.
+        item_style.height = Length::Px(20.0);
+        let mut item2 = LayoutBox::new(BoxType::Block, item_style);
+        let mut inner2 = ComputedStyle::new();
+        inner2.width = Length::Px(100.0);
+        item2.children.push(LayoutBox::new(BoxType::Block, inner2));
+        item2.dimensions.content = Rect::new(0.0, 0.0, 660.0, 20.0);
+        container.children.push(item2);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 660.0, 600.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        let w0 = container.children[0].dimensions.content.width;
+        let w1 = container.children[1].dimensions.content.width;
+        assert!(
+            (w0 - 240.0).abs() < 0.5,
+            "flex-start column item width {w0}, expected its fit-content 240. \
+             660 means the stale fill-available width won."
+        );
+        assert!(
+            (w1 - 100.0).abs() < 0.5,
+            "second flex-start column item width {w1}, expected its fit-content 100."
+        );
+    }
+
+    /// Fit-content is `min(max(min-content, available), max-content)`, so the
+    /// available cross space is a real term and not decoration: two 200px
+    /// inline-level children give max-content 400 and min-content 200, and in
+    /// 300px of available space the answer is 300 — neither end.
+    #[test]
+    fn a_non_stretch_column_item_takes_the_available_cross_space_between_the_two() {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.align_items = AlignItems::FlexStart;
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        let mut item = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        for _ in 0..2 {
+            let mut inner = ComputedStyle::new();
+            inner.display = rustkit_css::Display::InlineBlock;
+            inner.width = Length::Px(200.0);
+            inner.height = Length::Px(20.0);
+            item.children.push(LayoutBox::new(BoxType::Block, inner));
+        }
+        item.dimensions.content = Rect::new(0.0, 0.0, 300.0, 20.0);
+        container.children.push(item);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 300.0, 600.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        let w = container.children[0].dimensions.content.width;
+        assert!(
+            (w - 300.0).abs() < 0.5,
+            "item width {w}: max-content 400 clamped by 300 of available cross \
+             space is 300. 400 means available was dropped from the formula."
+        );
+    }
+
+    /// STRETCHING items keep the old measurement, and that scope is not
+    /// cosmetic: applying fit-content to them shrinks a stretching item to its
+    /// content instead of to its container. Measured on the corpus — `shelf`'s
+    /// `#commandResults` went 1248 -> 1216 and `flex-positioning`'s nested-flex
+    /// child 710 -> 690, four failing axes added, when the scope was removed.
+    ///
+    /// The shape that bites is an INDEFINITE cross size: `width: auto` with a
+    /// containing block that has no content width yet, which is what a nested
+    /// container sees during the pre-pass. There `stretch_target` is the line's
+    /// own cross size rather than the container's, so narrowing the
+    /// hypothetical sizes narrows the very target the items stretch to — the
+    /// item ends up at its content width having gone through the stretch path.
+    /// A definite-width container cannot show this: its target is the
+    /// container, which the hypothetical size does not feed.
+    #[test]
+    fn a_stretching_column_item_is_not_shrunk_to_its_content() {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.align_items = AlignItems::Stretch;
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        let mut item = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut inner = ComputedStyle::new();
+        inner.width = Length::Px(240.0);
+        inner.height = Length::Px(20.0);
+        item.children.push(LayoutBox::new(BoxType::Block, inner));
+        // The width a previous pass measured, which is the number a stretching
+        // item must keep.
+        item.dimensions.content = Rect::new(0.0, 0.0, 1216.0, 20.0);
+        container.children.push(item);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 0.0, 600.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        let w = container.children[0].dimensions.content.width;
+        assert!(
+            (w - 1216.0).abs() < 0.5,
+            "stretching column item width {w}, expected the measured 1216. \
+             240 means the fit-content path reached an item that stretches."
+        );
+    }
+
+    /// Where the intrinsic estimators cannot see the content — a form control
+    /// or image with no specified pixel width — the previously measured width
+    /// is kept rather than a zero estimate becoming a zero box.
+    ///
+    /// `new_tab`'s `.search-input` is `width: 100%`, so it contributes nothing
+    /// to max-content; without this the whole `.container` above it collapsed
+    /// from 536 to 360 and took seven failing axes with it.
+    #[test]
+    fn an_item_the_estimators_cannot_measure_keeps_its_measured_width() {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.align_items = AlignItems::Center;
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        let mut item = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut control_style = ComputedStyle::new();
+        control_style.width = Length::Percent(100.0);
+        item.children.push(LayoutBox::new(
+            BoxType::FormControl(crate::FormControlType::TextInput {
+                value: String::new(),
+                placeholder: String::new(),
+                input_type: "text".to_string(),
+            }),
+            control_style,
+        ));
+        item.dimensions.content = Rect::new(0.0, 0.0, 536.0, 40.0);
+        container.children.push(item);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 600.0, 600.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        let w = container.children[0].dimensions.content.width;
+        assert!(
+            (w - 536.0).abs() < 0.5,
+            "item width {w}: an unmeasurable subtree keeps its measured 536, it \
+             does not collapse to an estimate that could not see the control."
         );
     }
 
