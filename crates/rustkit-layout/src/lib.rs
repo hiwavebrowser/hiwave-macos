@@ -134,13 +134,21 @@ pub fn normal_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
         style.font_style,
     );
     let px = if m.ascent > 0.0 {
-        m.ascent.round() + m.descent.round() + m.leading
+        used_font_line_height(&m)
     } else {
         font_size * rustkit_css::NORMAL_LINE_HEIGHT_FALLBACK_RATIO
     };
 
     NORMAL_LINE_HEIGHT_CACHE.with(|c| c.borrow_mut().insert(key, px));
     px
+}
+
+/// Blink's `normal` line height for one face's extents:
+/// `round(ascent) + round(descent) + round(line_gap)` (SimpleFontData rounds
+/// all three; Arial at 16px is 14.48 + 3.39 + 0.52 = 18 in Chrome, and
+/// 17.52 when the gap rides unrounded).
+fn used_font_line_height(m: &TextMetrics) -> f32 {
+    m.ascent.round() + m.descent.round() + m.leading.round()
 }
 
 /// Resolve a box's `line-height` to px, consulting font metrics for `normal`.
@@ -300,6 +308,25 @@ pub fn preferred_ratio_sizes(
             _ => (None, None),
         },
     }
+}
+
+/// Line height of ONE shaped text run: the box's `line-height`, except that
+/// under `normal` the run's own extents win when they are taller. A run's
+/// metrics are the union of every face it used (`TextShaper::shape` folds
+/// in the fallback faces), and Blink sizes a `normal` line box from the
+/// used faces, not the primary alone (NGInlineBoxState::AccumulateUsedFonts):
+/// "☕ coffee" at 16px system-ui is a 26px line in Chrome (emoji face 20 + 6),
+/// not the primary face's 18. An explicit `line-height` ignores the used
+/// faces, as in Chrome (the 24px control on the repro stays 24).
+///
+/// Layout (`layout_text*`) and paint (`render_text`) MUST both go through
+/// here — the half-leading that seats the baseline is derived from it.
+pub fn run_line_height(style: &ComputedStyle, font_size: f32, metrics: &TextMetrics) -> f32 {
+    let base = resolve_line_height(style, font_size);
+    if !matches!(style.line_height, rustkit_css::LineHeight::Normal) || metrics.ascent <= 0.0 {
+        return base;
+    }
+    base.max(used_font_line_height(metrics))
 }
 
 /// CSS position property values.
@@ -1534,7 +1561,8 @@ impl LayoutBox {
                     self.dimensions.content.y =
                         containing_block.content.y + containing_block.content.height;
                     self.dimensions.content.width = max_line_width.min(container_width);
-                    self.dimensions.content.height = line_count as f32 * self.get_line_height();
+                    self.dimensions.content.height =
+                        line_count as f32 * run_line_height(&self.style, font_size, &metrics);
                     return;
                 }
             }
@@ -1554,7 +1582,7 @@ impl LayoutBox {
         } else {
             text_width // Don't clamp if containing block has no width yet
         };
-        self.dimensions.content.height = self.get_line_height();
+        self.dimensions.content.height = run_line_height(&self.style, font_size, &metrics);
     }
 
     /// Whether a text child that does NOT fit the remaining line space
@@ -1598,7 +1626,6 @@ impl LayoutBox {
             Length::Px(px) => px,
             _ => 16.0,
         };
-        let line_height = self.get_line_height();
 
         let shaper = TextShaper::new();
         let chain = FontFamilyChain::from_css_value(&self.style.font_family);
@@ -1626,6 +1653,19 @@ impl LayoutBox {
                 return (1, self.dimensions.content.width);
             }
         };
+
+        // The run's extents across all its lines (fallback faces included),
+        // so the line height matches what `render_text` derives from
+        // measuring the same text.
+        let mut run_metrics = TextMetrics::default();
+        for line in &lines {
+            run_metrics.ascent = run_metrics.ascent.max(line.ascent());
+            run_metrics.descent = run_metrics.descent.max(line.descent());
+            for run in &line.runs {
+                run_metrics.leading = run_metrics.leading.max(run.metrics.leading);
+            }
+        }
+        let line_height = run_line_height(&self.style, font_size, &run_metrics);
 
         let text_lines: Vec<TextLine> = lines
             .iter()
@@ -5679,7 +5719,6 @@ impl DisplayList {
             // CSS line-height creates extra space above and below the text content
             // The half-leading is split evenly above and below the text
             // (must resolve `normal` exactly as layout did, or the baseline moves)
-            let line_height = resolve_line_height(style, font_size);
 
             // Get font metrics for accurate baseline calculation
             let metrics = measure_text_advanced(
@@ -5689,6 +5728,7 @@ impl DisplayList {
                 style.font_weight,
                 style.font_style,
             );
+            let line_height = run_line_height(style, font_size, &metrics);
 
             // Content height is ascent + descent (the actual rendered text height)
             let content_height = metrics.ascent + metrics.descent;
