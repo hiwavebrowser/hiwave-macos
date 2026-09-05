@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; font-family: Arial, sans-serif; font-size: 14px; }
+  .wrap { width: 622px; margin: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); column-gap: 12px; row-gap: 12px; margin-bottom: 20px; }
+  .grid3 { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .grid4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin-bottom: 20px; }
+  .grid5 { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .cell { background: #ddd; padding: 12px; border-radius: 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="grid" id="g1">
+    <div class="cell">one</div><div class="cell">two</div><div class="cell">three</div>
+    <div class="cell">four</div><div class="cell">five</div><div class="cell">six</div>
+  </div>
+  <div class="grid2" id="g2">
+    <div class="cell">one</div><div class="cell">two</div><div class="cell">three</div>
+    <div class="cell">four</div><div class="cell">five</div><div class="cell">six</div>
+  </div>
+  <div class="grid3" id="g3">
+    <div class="cell">one</div><div class="cell">two</div><div class="cell">three</div>
+    <div class="cell">four</div><div class="cell">five</div><div class="cell">six</div>
+  </div>
+  <div class="grid4" id="g4">
+    <div class="cell">one</div><div class="cell">two</div><div class="cell">three</div>
+    <div class="cell">four</div><div class="cell">five</div><div class="cell">six</div>
+  </div>
+  <div class="grid5" id="g5">
+    <div class="cell">one</div><div class="cell">two</div>
+  </div>
+</div>
+</body>
+</html>
