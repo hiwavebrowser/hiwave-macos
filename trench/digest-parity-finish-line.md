@@ -6660,3 +6660,174 @@ of 08-08's comment-satisfied grep.
   and measuring that fixing it is a regression is a better night's work than
   shipping it would have been, and it is the first time on this campaign I have
   reverted something that was correct in isolation.
+
+---
+
+## 2026-09-05
+
+**Metric: 2/26 → 2/26 on the standing macOS receipt; nothing landed tonight that
+could move it.** No engine change of mine was written, so there is nothing to
+attribute. Every number below is Linux/SwiftShader — **MECHANICS, NOT A
+RECEIPT.** On this seat both `develop` and the stacked pile read `1/26` under
+the same 3-iteration protocol, columns identical (geometry 2, paint 1,
+stability 26, discrete 26).
+
+**P-item: none of the queue's engine items. I measured why, and the measurement
+is the night's unit.** Twelve open PRs now cover most of the corpus's large
+geometry roots. Picking "the largest root no open branch addresses" — 09-04's
+rule — meant re-fixing work that already exists on a branch, which the night
+order bans. So I stacked the pile and measured it instead. That answers the
+decision this digest has carried unanswered for three nights with a number.
+
+### What the pile is worth, measured
+
+Twelve open PR branches merged onto `develop 5b89ed8` in PR order
+(`atlas/n43-stack-probe`, pushed, **not for merge** — see conflicts below):
+
+| Gate A | develop `5b89ed8` | stacked pile |
+|---|---|---|
+| corpus `sum\|Δ\|` | 239566.34 | **75641.32** |
+| …on the develop-measurable set | 239566.34 | **66038.21  (−72.4%)** |
+| …on elements only the pile makes measurable | — | 9603.11 |
+| geometry failures | 2500 | 2639 |
+| join failures | **110** | **16** |
+| geometry-green | 2/26 | 2/26 |
+
+**The failure count rises while the error falls by 72%, and the two are the
+same fact.** Join failures 110 → 16: elements that had no box at all — every
+`<input>`, `<select>`, `<textarea>` and `<button>` on the two form cases — now
+join and their geometry is wrong. Four cases read "worse" on raw `sum|Δ|`
+(`settings`, `css-selectors`, `form-elements`, `form-controls`); split by
+jurisdiction, **three of the four are byte-identical on the set develop could
+already measure** (2926.54, 1504.02, 458.54 unchanged to the last decimal) and
+`settings` improves 26046.62 → 21523.03. **Zero cases are worse on the
+develop-measurable set.** The stop rule does not fire on the pile.
+
+Gate B over the same captures: **10 cases better, 1 worse.**
+`images-intrinsic` +19.70pp, `shelf` +13.76pp, `about` +5.97pp;
+`new_tab` **−0.98pp**. Discrete failures 0 → 0; elements examined 231 → 239.
+
+### The finding that should change how these PRs are reviewed
+
+`new_tab` is not targeted by #182 or #184, and both move it — in opposite
+directions on the two oracles. Each measured **alone** against `develop`:
+
+| new_tab | geometry `sum\|Δ\|` | paint within tolerance |
+|---|---|---|
+| develop `5b89ed8` | 26434.06 | 77.46563% |
+| **#182 alone** | **37411.09  (+41%)** | 79.69414%  (+2.23pp) |
+| **#184 alone** | 19152.51  (−28%) | **76.00410%  (−1.46pp)** |
+| #182 + #184 (in the stack) | **10362.62  (−61%)** | 76.48994% |
+
+**#182's own change is correct and its number still reads as a 41% geometry
+regression.** I checked the boxes rather than the total: with #182 the
+`.shortcuts` grid gets Chrome's column count for the first time — every `x`
+failure on those twelve items disappears, leaving only `y` and `height`. What
+grows is accumulated `y` drift from an unfixed root *above* the grid, which
+#184 then removes. Alone, #182 trips the stop rule as written; paired with
+#184 the two are a 61% improvement on a case neither PR mentions.
+
+Read the other way round: **#184 alone costs `new_tab` 1.46pp of paint** while
+taking 28% off its geometry error — the compensating-error pattern this
+campaign keeps finding, now visible across two PRs instead of inside one.
+
+Neither effect is discoverable from a per-PR receipt taken against `develop`.
+The pile has to be measured stacked, and the merge order is load-bearing.
+
+### Residual board after the pile — where the next unit actually is
+
+| case | `sum\|Δ\|` after the pile | geometry failures |
+|---|---|---|
+| settings | 27363.05 | 434 |
+| image-gallery | 11198.73 | 153 |
+| new_tab | 8766.15 | 186 |
+| article-typography | 6056.65 | 97 |
+| about | 5063.92 | 382 |
+
+`settings` and the two form cases are the honest next targets: their growth is
+newly-measurable elements — form controls whose boxes nobody has ever compared.
+`article-typography` is byte-unchanged by all twelve branches and is P4.
+
+### Commits landed
+
+None on `develop`. `atlas/n43-stack-probe` is pushed as the reproduction of the
+table above and **must not be merged**: it carries three hand-resolved
+conflicts (see below) and takes receipt files arbitrarily.
+
+### Conflicts — the pile does not stack clean
+
+Nine of twelve branches merge with no conflict. Three do not, and only these
+three need a human:
+
+- **#178** (`n30-visual-rect-port`) vs #175 — one hunk, both added a function
+  at the same point in `rustkit-engine/src/lib.rs`. Keep both.
+- **#179** (`n40-fallback-face-line-height`) vs #175 — same shape in
+  `rustkit-layout/src/lib.rs`. Keep both.
+- **#180** (`abspos-shrink-to-fit`) vs #176 — **a real semantic conflict.**
+  Both rewrote the same `Length::Auto` arm of `calculate_block_width`: #176 for
+  atomic inlines, #180 for out-of-flow boxes. Neither is a superset. The
+  resolution is `if is_atomic_inline() … else if auto_width_shrinks_to_fit() …
+  else available`, and whoever merges second has to write it.
+
+A fourth kind is noise, not conflict: `parity-baseline/parity_test_results.json`
+and `trench/wpt/last-run.json` collide on almost every pair because each branch
+commits its own run of them.
+
+### Mutation-check results
+
+**None — no guard was written tonight, because no behaviour was changed.**
+Stated rather than omitted: the campaign's rule is that a guard without a
+mutation check is decoration, and a night with no new guard should say so
+instead of leaving the section out.
+
+### My own mistake, and how it nearly became the headline
+
+The first stacked run read **247121.70** — the pile *worse* than `develop` — with
+`sticky-scroll` 4518 → 32628 and `about` back at its unfixed value. I bisected
+the first-parent chain rather than reporting it, and every prefix was clean
+until the last merge, which was the one where I had hand-resolved a conflict.
+The cause was mine: after writing the resolution I ran a loop that did
+`git checkout --theirs` over every still-unmerged path, and
+`crates/rustkit-layout/src/lib.rs` was still in that list — so the loop replaced
+my resolution with #180's whole-file version and reverted #175's and #179's
+changes to that file along with it. Re-merged properly, the same tree reads
+75641.32.
+
+**A wrong merge and a real regression produce the same board.** The only reason
+this is a paragraph about method rather than a false "the pile regresses the
+corpus" headline is that the bisect was cheap — 43 seconds per probe once the
+release build exists — and I ran it before writing anything down.
+
+### Decisions needed from Pete
+
+1. **The pile is worth −72.4% of the corpus's geometry error and twelve PRs are
+   open with nothing merged since 08-31** — merge it (order matters; #182 before
+   #184, and #180 lands last with a hand-written conflict resolution), or tell
+   the trench to keep opening lanes?
+2. **#182 alone regresses `new_tab` geometry 41% while being correct**, and #184
+   alone costs `new_tab` 1.46pp of paint. Under the stop rule as written each is
+   revertable and the pair is a 61% win; should the rule be evaluated per PR, or
+   per merge group?
+3. Still open from 09-03 and 09-04: the night order still opens with P0a-0
+   (done 2026-08-04) and tells a fresh seat to read a file whose entries had
+   stopped a month back. Only Pete can rewrite the order.
+
+### Surprises
+
+- **Almost every large geometry root in the corpus is already fixed, on a
+  branch, unmerged.** I set out to pick the biggest unaddressed root and could
+  not find one at the top of the board: `about` is #176+#182, `new_tab` is
+  #176/#180/#182/#184, `settings` is #183, `sticky-scroll` is #181. The trench's
+  scarce resource has not been defects for at least a week.
+- **72% of the geometry error can come off the corpus without moving `N/26` by
+  one case.** Both `develop` and the pile read `1/26` on this seat with
+  identical columns. The conjunction is per-case and all-or-nothing; magnitude
+  is not the metric and this is the cleanest demonstration of that so far.
+- **Three of four "regressed" cases are byte-identical where they were
+  comparable.** The extra error is elements that had never been measured. #172's
+  ratchet language — *a widened jurisdiction is not a regression* — is not a
+  nicety; without it the pile reads as a regression on four cases.
+- **The two form cases have never had their controls measured at all.** 17 and
+  30 `missing_box` join failures on `form-elements` and `form-controls`, every
+  one an `<input>`, `<select>`, `<textarea>` or `<button>`. P6 has been sitting
+  behind an identity gap, not behind a paint bug.
