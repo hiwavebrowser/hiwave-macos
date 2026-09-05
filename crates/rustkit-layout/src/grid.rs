@@ -2346,19 +2346,38 @@ pub fn layout_grid_container(
 /// into one unbreakable run; otherwise children contribute independently
 /// (max), per css-sizing-3 §4.
 pub(crate) fn estimate_min_content_width(layout_box: &LayoutBox) -> f32 {
+    // Out-of-flow boxes don't CONTRIBUTE to an ancestor's intrinsic size.
+    // That is a statement about contribution, not about the box's own
+    // min-content width — which CSS 2.1 §10.3.7 needs in order to size the
+    // box itself. Callers that want the latter use `own_min_content_width`.
+    //
+    // The text carve-out is not a new rule: this guard used to sit BELOW the
+    // `BoxType::Text` arm, so a text box carrying an out-of-flow position
+    // always answered its text width. Keeping the precedence keeps the split
+    // behaviour-preserving.
+    if matches!(
+        layout_box.position,
+        crate::Position::Absolute | crate::Position::Fixed
+    ) && !matches!(layout_box.box_type, BoxType::Text(_))
+    {
+        return 0.0;
+    }
+    own_min_content_width(layout_box)
+}
+
+/// The box's OWN min-content width (border box), with the out-of-flow
+/// contribution rule NOT applied to the box itself.
+///
+/// Split out of `estimate_min_content_width` so shrink-to-fit can size an
+/// out-of-flow box from its own content. The contribution rule still applies
+/// to every CHILD walked below, exactly as before.
+pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
     let style = &layout_box.style;
     if style.display == Display::None {
         return 0.0;
     }
     if let BoxType::Text(text) = &layout_box.box_type {
         return text_min_content_width(text, style);
-    }
-    // Out-of-flow boxes don't contribute to intrinsic sizes.
-    if matches!(
-        layout_box.position,
-        crate::Position::Absolute | crate::Position::Fixed
-    ) {
-        return 0.0;
     }
 
     let padding_border = horizontal_padding_border(style);
@@ -2444,14 +2463,27 @@ fn text_max_content_width(text: &str, style: &ComputedStyle) -> f32 {
 /// interrupt the run and contribute independently. Used by flex-basis:auto
 /// content sizing (css-flexbox-1 §9.2.3.C).
 pub(crate) fn estimate_max_content_width(layout_box: &LayoutBox) -> f32 {
-    let style = &layout_box.style;
-    if style.display == Display::None {
-        return 0.0;
-    }
+    // Contribution rule, same as `estimate_min_content_width`. Note the
+    // precedence differs from that function's and is preserved as found: here
+    // the out-of-flow guard sits ABOVE the text arm, so an out-of-flow text
+    // box answers 0 rather than its text width. The asymmetry is pre-existing;
+    // it is recorded rather than quietly harmonised, because harmonising it
+    // would be an engine behaviour change riding along on a refactor.
     if matches!(
         layout_box.position,
         crate::Position::Absolute | crate::Position::Fixed
     ) {
+        return 0.0;
+    }
+    own_max_content_width(layout_box)
+}
+
+/// The box's OWN max-content width (border box), with the out-of-flow
+/// contribution rule NOT applied to the box itself. See
+/// `own_min_content_width` for why the split exists.
+pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
+    let style = &layout_box.style;
+    if style.display == Display::None {
         return 0.0;
     }
     if let BoxType::Text(text) = &layout_box.box_type {
