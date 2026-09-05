@@ -2570,8 +2570,24 @@ impl LayoutBox {
         // Calculate content width
         let content_width = match style.width {
             Length::Auto => {
-                // Fill available space
-                (containing_block.content.width - total_margin_border_padding).max(0.0)
+                let available =
+                    (containing_block.content.width - total_margin_border_padding).max(0.0);
+                if style.display.is_atomic_inline() {
+                    // CSS2 §10.3.9: an atomic inline (inline-block/-flex/
+                    // -grid) with width:auto shrinks to fit —
+                    // min(max(preferred_min, available), preferred) — it
+                    // never fills the containing block. The estimators
+                    // return border-box widths, so strip this box's own
+                    // padding+border to compare in content space.
+                    let pb = border_left + border_right + padding_left + padding_right;
+                    let preferred = (crate::grid::estimate_max_content_width(self) - pb).max(0.0);
+                    let preferred_min =
+                        (crate::grid::estimate_min_content_width(self) - pb).max(0.0);
+                    preferred_min.max(available.min(preferred))
+                } else {
+                    // Fill available space
+                    available
+                }
             }
             _ => {
                 let specified_width =
@@ -8121,6 +8137,88 @@ mod tests {
             (second_row.content.y - expected_y).abs() < 0.5,
             "wrapped row must advance by line height incl. strut descent; expected content.y {expected_y}, got {}",
             second_row.content.y
+        );
+    }
+
+    #[test]
+    fn test_inline_block_auto_width_shrinks_to_fit() {
+        // CSS2 §10.3.9: an atomic inline with width:auto shrinks to its
+        // content, it does not fill the containing block. Found on the
+        // about page (n39): span#versionBadge (inline-block, padding 4/12,
+        // border 1) measured 672px wide vs Chrome's 104.6 — width:auto took
+        // the block fill path, and text-align:center then centered the text
+        // INSIDE the full-width badge instead of the badge itself.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 672.0, 0.0);
+
+        let mut parent_style = ComputedStyle::new();
+        parent_style.text_align = TextAlign::Center;
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut badge_style = ComputedStyle::new();
+        badge_style.display = rustkit_css::Display::InlineBlock;
+        badge_style.padding_left = Length::Px(12.0);
+        badge_style.padding_right = Length::Px(12.0);
+        badge_style.border_left_width = Length::Px(1.0);
+        badge_style.border_right_width = Length::Px(1.0);
+        let mut badge = LayoutBox::new(BoxType::Block, badge_style);
+
+        // Content stands in for a text run via an explicit-width block:
+        // preferred (max-content) = 80.
+        let mut inner_style = ComputedStyle::new();
+        inner_style.width = Length::Px(80.0);
+        inner_style.height = Length::Px(17.0);
+        badge.children.push(LayoutBox::new(BoxType::Block, inner_style));
+        parent.children.push(badge);
+
+        parent.layout(&cb);
+
+        let d = &parent.children[0].dimensions;
+        assert!(
+            (d.content.width - 80.0).abs() < 0.01,
+            "auto-width inline-block must shrink to content (80), got {}",
+            d.content.width
+        );
+        // Border box = 80 + 24 padding + 2 border = 106; text-align:center
+        // on the parent centers the BOX: x = (672 - 106) / 2 = 283.
+        let bb = d.border_box();
+        assert!(
+            (bb.width - 106.0).abs() < 0.01,
+            "border box must be 106, got {}",
+            bb.width
+        );
+        assert!(
+            (bb.x - 283.0).abs() < 0.5,
+            "centered inline-block border box must sit at x=283, got {}",
+            bb.x
+        );
+    }
+
+    #[test]
+    fn test_inline_block_auto_width_floors_at_min_content() {
+        // Shrink-to-fit = min(max(preferred_min, available), preferred):
+        // a container narrower than min-content does not crush the box.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 50.0, 0.0);
+
+        let mut badge_style = ComputedStyle::new();
+        badge_style.display = rustkit_css::Display::InlineBlock;
+        badge_style.padding_left = Length::Px(12.0);
+        badge_style.padding_right = Length::Px(12.0);
+        let mut badge = LayoutBox::new(BoxType::Block, badge_style);
+        let mut inner_style = ComputedStyle::new();
+        inner_style.width = Length::Px(80.0);
+        badge.children.push(LayoutBox::new(BoxType::Block, inner_style));
+
+        let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        parent.children.push(badge);
+        parent.layout(&cb);
+
+        let d = &parent.children[0].dimensions;
+        assert!(
+            (d.content.width - 80.0).abs() < 0.01,
+            "inline-block must not shrink below min-content (80), got {}",
+            d.content.width
         );
     }
 
