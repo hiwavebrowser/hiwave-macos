@@ -1656,6 +1656,10 @@ impl Engine {
             "Created containing block"
         );
 
+        // Inline <svg> subtrees parse into svg_cache before the tree build:
+        // the build runs with &self and can only look the documents up.
+        self.cache_inline_svgs(&document);
+
         // Get external stylesheets from view state
         let external_stylesheets = self
             .views
@@ -2533,15 +2537,16 @@ impl Engine {
                 // Inline <svg> is a replaced element: it is sized by its own
                 // width=/height= presentational hints (author CSS wins; the
                 // CSS replaced-element fallback is 300×150 without them)
-                // and its SVG children never generate CSS boxes. It used to
-                // get NO box at all — an empty block with no visible styling
-                // is dropped below — and the shelf's search icon survived
-                // only because the whitespace between <circle> and <path>
-                // left a phantom 18px text line inside it; collapsing that
-                // whitespace correctly made the icon vanish and shifted the
-                // command input 28px left. The graphics are not painted
-                // (inline SVG paint is its own lane); the geometry is what
-                // the flex row needs, and it now matches Chrome's 14×14.
+                // and its SVG children never generate CSS boxes.
+                //
+                // Paint rides the <img src=*.svg> lane: relayout's pre-pass
+                // serialized this subtree and parsed it into svg_cache under
+                // a content-hash key, so an Image box under the same key
+                // routes through the display-list vector splice. The build
+                // runs with &self, which is why the cache insert cannot
+                // happen here; on a cache miss (pre-pass not run, or the
+                // subtree failed to parse) the box stays the unpainted
+                // replaced block it was before paint existed.
                 if tag_lower == "svg" {
                     let attr_px = |name: &str| {
                         attributes
@@ -2556,6 +2561,23 @@ impl Engine {
                     }
                     if style.display == rustkit_css::Display::Inline {
                         style.display = rustkit_css::Display::InlineBlock;
+                    }
+                    let key = Self::inline_svg_key(&Self::serialize_svg_subtree(node));
+                    if let Some(svg) = self.svg_cache.get(&key) {
+                        let (natural_width, natural_height) = svg.get_size(
+                            attr_px("width").unwrap_or(300.0),
+                            attr_px("height").unwrap_or(150.0),
+                        );
+                        let mut svg_box = LayoutBox::new(
+                            BoxType::Image {
+                                url: key,
+                                natural_width,
+                                natural_height,
+                            },
+                            style.clone(),
+                        );
+                        Self::transfer_positioning(&mut svg_box, &style);
+                        return svg_box;
                     }
                     let mut svg_box = LayoutBox::new(BoxType::Block, style.clone());
                     Self::transfer_positioning(&mut svg_box, &style);
@@ -5175,6 +5197,87 @@ impl Engine {
             .map(|(_, u)| u)
             .or_else(|| densest.map(|(_, u)| u))
             .or(bare)
+    }
+
+    /// Serialize an inline `<svg>` element subtree back to markup for
+    /// rustkit-svg's parser. Attributes are emitted in sorted order because
+    /// the same subtree is serialized twice per layout (cache insert in the
+    /// relayout pre-pass, key lookup at box build) and HashMap iteration
+    /// order is not a contract between two maps. Attribute values are
+    /// emitted verbatim except for `"` — rustkit-svg reads them literally
+    /// and does not decode entities.
+    fn serialize_svg_subtree(node: &Node) -> String {
+        fn walk(node: &Node, out: &mut String) {
+            match &node.node_type {
+                NodeType::Element {
+                    tag_name,
+                    attributes,
+                    ..
+                } => {
+                    out.push('<');
+                    out.push_str(tag_name);
+                    let mut keys: Vec<&String> = attributes.keys().collect();
+                    keys.sort();
+                    for k in keys {
+                        out.push(' ');
+                        out.push_str(k);
+                        out.push_str("=\"");
+                        out.push_str(&attributes[k].replace('"', "&quot;"));
+                        out.push('"');
+                    }
+                    out.push('>');
+                    for child in node.children() {
+                        walk(&child, out);
+                    }
+                    out.push_str("</");
+                    out.push_str(tag_name);
+                    out.push('>');
+                }
+                NodeType::Text(text) => out.push_str(text),
+                _ => {}
+            }
+        }
+        let mut out = String::new();
+        walk(node, &mut out);
+        out
+    }
+
+    /// Cache key for an inline SVG: content-addressed so identical icons
+    /// (repeated list markers, nav glyphs) share one parsed document, and
+    /// deterministic across the two serializations of one layout pass.
+    /// FNV-1a rather than DefaultHasher because the latter's stability is
+    /// unspecified. The `inline-svg:` scheme survives the display-list URL
+    /// normalization: joining an absolute URL against any base returns it
+    /// unchanged.
+    fn inline_svg_key(xml: &str) -> String {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in xml.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("inline-svg:{:016x}", hash)
+    }
+
+    /// Parse every inline `<svg>` subtree in the document into svg_cache so
+    /// the box build (which runs with `&self`) can size them and the
+    /// display-list splice can paint them. Runs per relayout; already-cached
+    /// keys are skipped, so steady-state cost is one serialize per svg.
+    fn cache_inline_svgs(&mut self, document: &Document) {
+        for svg_el in document.get_elements_by_tag_name("svg") {
+            let xml = Self::serialize_svg_subtree(&svg_el);
+            let key = Self::inline_svg_key(&xml);
+            if self.svg_cache.contains_key(&key) {
+                continue;
+            }
+            match rustkit_svg::SvgDocument::parse(&xml) {
+                Ok(doc) => {
+                    self.svg_cache.insert(key, doc);
+                }
+                Err(e) => {
+                    debug!(?e, "Inline SVG failed to parse; box stays unpainted");
+                }
+            }
+        }
     }
 
     fn discover_images(&self, document: &Document, base_url: Option<&Url>) -> Vec<(String, Url)> {
@@ -10805,6 +10908,90 @@ mod tests {
         }
         let svg = svg_like(&layout).expect("svg box");
         assert!(svg.children.is_empty() && !any_text(svg), "svg children must not generate boxes");
+    }
+
+    #[test]
+    fn test_inline_svg_paints_through_the_svg_cache() {
+        // n37 gave the inline <svg> a correctly sized box but nothing ever
+        // painted into it: only <img src=*.svg> went through svg_cache. The
+        // pre-pass serializes the subtree into the cache under a
+        // content-hash key and the box becomes an Image box under the same
+        // key, so the existing display-list splice paints the vector
+        // commands. Identical svgs must share one cache entry, and a
+        // cache miss must leave the n37 unpainted block behavior.
+        let html = r##"<!DOCTYPE html>
+            <html><body>
+              <svg class="a" width="200" height="150" viewBox="0 0 200 150">
+                <rect fill="#4a90d9" width="200" height="150"/>
+              </svg>
+              <svg class="a" width="200" height="150" viewBox="0 0 200 150">
+                <rect fill="#4a90d9" width="200" height="150"/>
+              </svg>
+            </body></html>"##;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        };
+
+        engine.cache_inline_svgs(&document);
+        // Two identical svgs, one content-addressed entry.
+        assert_eq!(engine.svg_cache.len(), 1, "identical svgs must share a cache entry");
+        let (key, doc) = engine.svg_cache.iter().next().unwrap();
+        assert!(key.starts_with("inline-svg:"), "cache key must carry the inline-svg scheme: {key}");
+        // The parsed document carries the svg's own sizing and its rect.
+        assert_eq!(doc.get_size(300.0, 150.0), (200.0, 150.0));
+        assert!(
+            !doc.render(0.0, 0.0, 200.0, 150.0).is_empty(),
+            "parsed inline svg must produce display commands"
+        );
+
+        let layout = engine.build_layout_from_document(&document, &[]);
+        fn image_boxes<'a>(b: &'a LayoutBox, out: &mut Vec<&'a LayoutBox>) {
+            if matches!(b.box_type, BoxType::Image { .. }) {
+                out.push(b);
+            }
+            for c in &b.children {
+                image_boxes(c, out);
+            }
+        }
+        let mut found = Vec::new();
+        image_boxes(&layout, &mut found);
+        assert_eq!(found.len(), 2, "both inline svgs must build Image boxes");
+        for b in &found {
+            if let BoxType::Image {
+                url,
+                natural_width,
+                natural_height,
+            } = &b.box_type
+            {
+                assert!(engine.svg_cache.contains_key(url), "Image box key must hit the cache: {url}");
+                assert_eq!((*natural_width, *natural_height), (200.0, 150.0));
+            }
+            assert!(b.children.is_empty(), "svg children must not generate boxes");
+        }
     }
 
     #[test]
