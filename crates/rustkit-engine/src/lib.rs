@@ -1682,6 +1682,10 @@ impl Engine {
             // layout() path stacks margins additively (gap = bottom + top), which
             // ran every text page taller than Chrome.
             let mut margin_context = rustkit_layout::MarginCollapseContext::new();
+            // The root element's margins never collapse with its children's
+            // (CSS 2.1 §8.3.1): body's top margin (and the h1 chain under it)
+            // collapses with body's siblings and stays under html's top edge.
+            margin_context.children_are_formatting_roots = true;
             let mut float_context = rustkit_layout::FloatContext::new();
             root_box.layout_with_collapse(
                 &containing_block,

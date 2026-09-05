@@ -557,12 +557,35 @@ pub struct MarginCollapseContext {
     pub positive_margin: f32,
     /// Pending negative margin.
     pub negative_margin: f32,
+    /// The boxes laid out against this context are formatting roots (flex /
+    /// grid items, the root element): their own margins never collapse
+    /// through them with their children's (CSS 2.1 §8.3.1, css-flexbox-1
+    /// §4). The container that owns the context sets this.
+    pub children_are_formatting_roots: bool,
+    /// The owner already adjoined its first in-flow block child's top-margin
+    /// chain into ITS OWN context (parent/first-child through-collapse). The
+    /// first in-flow block child takes this flag and contributes no top
+    /// margin of its own — that margin sits above the parent's border box.
+    pub first_child_top_adjoined: bool,
+    /// The owner's bottom edge is open (no border/padding-bottom, auto
+    /// height, no BFC): the last in-flow child's bottom margin stays pending
+    /// in the context on return so the owner can adjoin it to its own bottom
+    /// margin, instead of being materialized into the content height.
+    pub last_child_collapses_through: bool,
 }
 
 impl MarginCollapseContext {
     /// Create a new margin collapse context.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Adjoin another context's pending margins into this one (positive and
+    /// negative parts kept separate, as §8.3.1's max-positive + min-negative
+    /// rule requires).
+    pub fn absorb(&mut self, other: &MarginCollapseContext) {
+        self.add_margin(other.positive_margin);
+        self.add_margin(other.negative_margin);
     }
 
     /// Add a margin to the collapse context.
@@ -1713,9 +1736,24 @@ impl LayoutBox {
             _ => intrinsic_height,
         };
 
-        // Position within containing block
-        self.dimensions.content.x = containing_block.content.x;
-        self.dimensions.content.y = containing_block.content.y + containing_block.content.height;
+        // Author margins are part of the control's margin box: the line box
+        // advances by them and its height counts them (css-selectors §4/§6:
+        // `input{margin:4px 0}` / `button{margin:4px}` rows built 37.5/33.5
+        // where Chrome builds 43/39 — the margins were never resolved, so
+        // margin_box() was the bare rect). The blob/composed height above is
+        // the BORDER box, so padding/border stay folded into content here.
+        let cw = containing_block.content.width;
+        self.dimensions.margin.top = self.length_to_px(&self.style.margin_top, cw);
+        self.dimensions.margin.bottom = self.length_to_px(&self.style.margin_bottom, cw);
+        self.dimensions.margin.left = self.length_to_px(&self.style.margin_left, cw);
+        self.dimensions.margin.right = self.length_to_px(&self.style.margin_right, cw);
+
+        // Position within containing block (the inline path re-places the
+        // box from its margin edge; the block path lands here).
+        self.dimensions.content.x = containing_block.content.x + self.dimensions.margin.left;
+        self.dimensions.content.y = containing_block.content.y
+            + containing_block.content.height
+            + self.dimensions.margin.top;
         self.dimensions.content.width = width;
         self.dimensions.content.height = height;
     }
@@ -1743,20 +1781,23 @@ impl LayoutBox {
         // extend the strut descent under them: bottom-edge treatment made
         // every control line strut_descent too tall (input rows 25 vs Chrome
         // 24, a fixed 50px button line 56 vs Chrome 50), compounding per row.
-        // AUTHOR-PADDED controls keep the bottom-edge model: it measures
-        // closer to Chrome there (css-selectors §6 pad-8 buttons: line 39;
-        // hang model under-built it 30.3, bottom-edge builds ~35) — same
-        // bare-vs-compose split as the DIG-1/DIG-2 height contract.
-        if matches!(self.box_type, BoxType::FormControl(_)) {
-            let px = |l: &Length| match l {
-                Length::Px(v) => *v,
-                _ => 0.0,
-            };
-            let author_pb_v = px(&self.style.padding_top)
-                + px(&self.style.padding_bottom)
-                + px(&self.style.border_top_width)
-                + px(&self.style.border_bottom_width);
-            return author_pb_v > 0.0;
+        // Checkbox / radio have no inner text line: their baseline is the
+        // bottom margin edge (Blink), so the strut hangs below them and a
+        // sibling label's text drops to that baseline — css-selectors §4:
+        // 20px checkbox + "Checkbox" label is a 23px line with the label's
+        // top at +6 in Chrome.
+        // Every other control (bare OR author-padded) uses the hang model.
+        // Author-padded controls used to keep the bottom-edge model because
+        // it "measured closer" (line 39 vs 30.3 for the pad-8 buttons) —
+        // that calibration was made while the controls' MARGINS were never
+        // resolved (n43); with the 4px margins in the margin box, the hang
+        // model builds Chrome's 39 and the bottom-edge model overshoots to
+        // 41.5 (margin box + strut descent).
+        if let BoxType::FormControl(control) = &self.box_type {
+            return matches!(
+                control,
+                FormControlType::Checkbox { .. } | FormControlType::Radio { .. }
+            );
         }
         self.style.display.is_atomic_inline() && self.children.is_empty()
     }
@@ -1949,8 +1990,35 @@ impl LayoutBox {
         // Calculate margin/padding/border
         self.calculate_block_vertical_box_model(containing_block);
 
-        // Handle margin collapse with previous sibling
-        margin_context.add_margin(self.dimensions.margin.top);
+        // CSS 2.1 §8.3.1 parent/first-child through-collapse. A box whose top
+        // edge is open (no border-top, no padding-top, not a formatting root)
+        // adjoins its first in-flow block child's top margin — recursively,
+        // down the chain of open first children — with its own top margin
+        // and the previous sibling's bottom margin, ABOVE its border box.
+        // Before this, `.title{margin-bottom:10px}` followed by a plain
+        // wrapper whose first child had `margin-top:4px` laid the wrapper's
+        // child at 10 + 4 where Chrome puts it at max(10, 4): every
+        // unpadded wrapper on css-selectors carried a +4 (and +8 for the
+        // wrapper-in-wrapper), and every later section rode on it.
+        let in_flow = !matches!(self.position, Position::Absolute | Position::Fixed)
+            && self.float == Float::None;
+        let is_formatting_root = margin_context.children_are_formatting_roots
+            || establishes_bfc(&self.style, self.float);
+        let top_chain = if is_formatting_root {
+            Vec::new()
+        } else {
+            self.first_child_top_margin_chain()
+        };
+        // The parent already adjoined this box's whole chain (its own top
+        // margin included) into the parent's context: contribute nothing.
+        let top_adjoined_by_parent =
+            in_flow && std::mem::take(&mut margin_context.first_child_top_adjoined);
+        if !top_adjoined_by_parent {
+            margin_context.add_margin(self.dimensions.margin.top);
+            for m in &top_chain {
+                margin_context.add_margin(*m);
+            }
+        }
         let collapsed_margin = margin_context.resolve();
 
         // Position the box with collapsed margin
@@ -1965,13 +2033,24 @@ impl LayoutBox {
             + self.dimensions.border.top
             + self.dimensions.padding.top;
 
-        // Children always start with a fresh margin context: this box consumed
-        // the pending margin when it positioned itself above, so passing the
-        // parent context down would re-apply an already-materialized margin to
-        // the first child (double count). The cost is that parent/first-child
-        // edge collapse (CSS 2.1 §8.3.1 through-collapse) is not performed —
-        // sibling collapse within each child list is what this path provides.
+        // Children start with a fresh margin context: this box consumed the
+        // pending margin when it positioned itself above, so passing the
+        // parent context down would re-apply an already-materialized margin
+        // to the first child (double count). The through-collapse edges ride
+        // on the flags instead: the first in-flow block child skips its top
+        // margin when it was adjoined above, and the last child's bottom
+        // margin stays pending when this box's bottom edge is open.
         let mut child_margin_context = MarginCollapseContext::new();
+        child_margin_context.children_are_formatting_roots =
+            self.style.display.is_flex() || self.style.display.is_grid();
+        child_margin_context.first_child_top_adjoined = !top_chain.is_empty();
+        child_margin_context.last_child_collapses_through = !is_formatting_root
+            && should_collapse_with_last_child(
+                &self.style,
+                self.float,
+                self.dimensions.border.bottom,
+                self.dimensions.padding.bottom,
+            );
 
         // Check for flex or grid container - these have special child layout
         if self.style.display.is_flex() {
@@ -1996,9 +2075,54 @@ impl LayoutBox {
         // Height depends on children
         self.calculate_block_height(containing_block.content.height);
 
-        // Reset margin context for next sibling, add bottom margin
+        // Reset margin context for next sibling, add bottom margin — and the
+        // last child's bottom margin that collapsed through our open bottom
+        // edge (it was left pending by layout_block_children_with_collapse).
         margin_context.reset();
         margin_context.add_margin(self.dimensions.margin.bottom);
+        if child_margin_context.last_child_collapses_through {
+            margin_context.absorb(&child_margin_context);
+        }
+    }
+
+    /// CSS 2.1 §8.3.1: the top margins that collapse THROUGH this box's top
+    /// edge — its first in-flow block child's top margin, then that child's
+    /// first in-flow block child's, ... — as long as each edge on the way is
+    /// open (no border-top / padding-top, not a formatting root) and no line
+    /// box or float intervenes. Empty when this box's own top edge is closed.
+    /// Percentage margins resolve against this box's content width (the
+    /// deeper widths are not laid out yet — ledgered approximation).
+    fn first_child_top_margin_chain(&self) -> Vec<f32> {
+        let width = self.dimensions.content.width;
+        let mut chain = Vec::new();
+        let mut node = self;
+        loop {
+            let border_top = node.length_to_px(&node.style.border_top_width, width);
+            let padding_top = node.length_to_px(&node.style.padding_top, width);
+            if !should_collapse_with_first_child(&node.style, node.float, border_top, padding_top) {
+                break;
+            }
+            // First in-flow child: out-of-flow boxes are skipped; anything
+            // inline-level opens a line box and ends the chain.
+            let first = node.children.iter().find(|c| {
+                !matches!(c.position, Position::Absolute | Position::Fixed)
+                    && c.float == Float::None
+            });
+            let Some(child) = first else { break };
+            if !matches!(child.box_type, BoxType::Block | BoxType::AnonymousBlock)
+                || child.style.display.is_atomic_inline()
+            {
+                break;
+            }
+            chain.push(child.length_to_px(&child.style.margin_top, width));
+            // A child that is itself a formatting root still adjoins its own
+            // margin, but nothing collapses through IT.
+            if establishes_bfc(&child.style, child.float) {
+                break;
+            }
+            node = child;
+        }
+        chain
     }
 
     /// Calculate vertical box model values (margin, border, padding).
@@ -3400,15 +3524,14 @@ impl LayoutBox {
         // height. (Every padded container was measuring 10px short: the
         // pending margin was silently dropped on return, and the form-control
         // bare-height blobs had calibrated themselves against the deficit.)
-        // When collapse-through is allowed, keep today's behavior (pending
-        // margin dropped rather than adjoined to the parent's own bottom
-        // margin) — ledgered as a smaller residual, not chased here.
-        if !should_collapse_with_last_child(
-            &self.style,
-            self.float,
-            self.dimensions.border.bottom,
-            self.dimensions.padding.bottom,
-        ) {
+        // When collapse-through is allowed (the owner set the flag), the
+        // margin stays pending: layout_block_with_collapse adjoins it to the
+        // owner's own bottom margin. (It used to be silently dropped here —
+        // `ul > li:last-child{margin-bottom:2px}` lost its 2px, and a plain
+        // wrapper's last child lost its 4px on css-selectors.) Contexts
+        // without the flag — flex/grid item re-layouts, closed bottom edges —
+        // keep the margin inside the box, as a formatting root must.
+        if !margin_context.last_child_collapses_through {
             cursor_y += margin_context.resolve();
             margin_context.reset();
         }
@@ -7829,6 +7952,250 @@ mod tests {
         assert!(
             (gap - 20.0).abs() < 0.1,
             "plain-flow sibling collapse regressed: got gap {gap}"
+        );
+    }
+
+    // ---- CSS 2.1 §8.3.1 parent/child through-collapse (n43) ----
+    // Shapes are css-selectors §1: `.section-title{margin-bottom:10px}`
+    // followed by an unpadded `.test-child` whose first child has
+    // `margin-top:4px` — Chrome lays that child at max(10, 4) below the
+    // title, RustKit laid it at 10 + 4.
+
+    fn n43_block(height: Option<f32>, mt: f32, mb: f32) -> LayoutBox {
+        let mut s = ComputedStyle::new();
+        if let Some(h) = height {
+            s.height = Length::Px(h);
+        }
+        s.margin_top = Length::Px(mt);
+        s.margin_bottom = Length::Px(mb);
+        LayoutBox::new(BoxType::Block, s)
+    }
+
+    fn n43_layout(root: &mut LayoutBox) {
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 0.0),
+            ..Default::default()
+        };
+        let mut mc = MarginCollapseContext::new();
+        let mut fc = FloatContext::new();
+        root.layout_with_collapse(&cb, &mut mc, &mut fc);
+    }
+
+    #[test]
+    fn a_first_childs_top_margin_collapses_through_an_open_parent() {
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.children.push(n43_block(Some(20.0), 0.0, 10.0)); // title
+        let mut wrapper = n43_block(None, 0.0, 0.0);
+        wrapper.children.push(n43_block(Some(30.0), 4.0, 0.0));
+        root.children.push(wrapper);
+        n43_layout(&mut root);
+
+        let wrapper = &root.children[1];
+        let child = &wrapper.children[0];
+        assert!(
+            (wrapper.dimensions.content.y - 30.0).abs() < 0.1,
+            "wrapper sits at title bottom + max(10, 4) = 30, got {}",
+            wrapper.dimensions.content.y
+        );
+        assert!(
+            (child.dimensions.content.y - 30.0).abs() < 0.1,
+            "first child's 4px collapsed through the wrapper: y must be 30, got {} (34 = summed)",
+            child.dimensions.content.y
+        );
+        assert!(
+            (wrapper.dimensions.content.height - 30.0).abs() < 0.1,
+            "the collapsed margin is outside the wrapper: height 30, got {}",
+            wrapper.dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn the_chain_collapses_through_two_open_wrappers() {
+        // section-title (mb 10) / wrapper / wrapper / nested-child (mt 4)
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.children.push(n43_block(Some(20.0), 0.0, 10.0));
+        let mut outer = n43_block(None, 0.0, 0.0);
+        let mut inner = n43_block(None, 0.0, 0.0);
+        inner.children.push(n43_block(Some(30.0), 4.0, 0.0));
+        outer.children.push(inner);
+        root.children.push(outer);
+        n43_layout(&mut root);
+
+        let leaf = &root.children[1].children[0].children[0];
+        assert!(
+            (leaf.dimensions.content.y - 30.0).abs() < 0.1,
+            "4px collapses through both wrappers to max(10, 4): y 30, got {}",
+            leaf.dimensions.content.y
+        );
+        assert!(
+            (root.children[1].dimensions.content.height - 30.0).abs() < 0.1,
+            "neither wrapper grows by the escaped margin, got {}",
+            root.children[1].dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn a_last_childs_bottom_margin_collapses_through_and_adjoins_the_next_sibling() {
+        // wrapper > child (h 30, mb 4), then next (mt 2): Chrome puts next at
+        // 30 + max(4, 2) = 34 and the wrapper stays 30 tall.
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut wrapper = n43_block(None, 0.0, 0.0);
+        wrapper.children.push(n43_block(Some(30.0), 0.0, 4.0));
+        root.children.push(wrapper);
+        root.children.push(n43_block(Some(10.0), 2.0, 0.0));
+        n43_layout(&mut root);
+
+        let wrapper = &root.children[0];
+        let next = &root.children[1];
+        assert!(
+            (wrapper.dimensions.content.height - 30.0).abs() < 0.1,
+            "wrapper height excludes the through-collapsed margin: 30, got {}",
+            wrapper.dimensions.content.height
+        );
+        assert!(
+            (next.dimensions.content.y - 34.0).abs() < 0.1,
+            "next sibling at 30 + max(4, 2) = 34, got {} (32 = the 4px was dropped)",
+            next.dimensions.content.y
+        );
+        // The ul case: two escaped margins (first + last) around a stack of items
+        // must not inflate the parent — css-selectors §5 `.list-items` was +2.
+        assert!(
+            (root.dimensions.content.height - 44.0).abs() < 0.1,
+            "root content = 34 + 10 = 44, got {}",
+            root.dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn a_padded_parent_keeps_its_first_childs_margin_inside() {
+        // NEGATIVE CONTROL: padding-top closes the edge (§8.3.1).
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.children.push(n43_block(Some(20.0), 0.0, 10.0));
+        let mut wrapper = n43_block(None, 0.0, 0.0);
+        wrapper.style.padding_top = Length::Px(15.0);
+        wrapper.children.push(n43_block(Some(30.0), 4.0, 0.0));
+        root.children.push(wrapper);
+        n43_layout(&mut root);
+
+        let wrapper = &root.children[1];
+        let child = &wrapper.children[0];
+        assert!(
+            (wrapper.dimensions.content.y - 45.0).abs() < 0.1,
+            "wrapper content at 20 + 10 + 15 = 45, got {}",
+            wrapper.dimensions.content.y
+        );
+        assert!(
+            (child.dimensions.content.y - 49.0).abs() < 0.1,
+            "child keeps its 4px inside the padded wrapper: 49, got {}",
+            child.dimensions.content.y
+        );
+    }
+
+    #[test]
+    fn a_flex_item_keeps_both_edge_margins_inside() {
+        // A flex item is a formatting root: its children's margins never
+        // escape it (css-flexbox-1 §4), in the pre-pass or the real pass.
+        let mut root_style = ComputedStyle::new();
+        root_style.display = rustkit_css::Display::Flex;
+        let mut root = LayoutBox::new(BoxType::Block, root_style);
+        let mut item = n43_block(None, 0.0, 0.0);
+        item.children.push(n43_block(Some(20.0), 10.0, 6.0));
+        root.children.push(item);
+        n43_layout(&mut root);
+
+        let item = &root.children[0];
+        let child = &item.children[0];
+        assert!(
+            (item.dimensions.content.height - 36.0).abs() < 0.1,
+            "flex item content = 10 + 20 + 6 = 36, got {}",
+            item.dimensions.content.height
+        );
+        assert!(
+            (child.dimensions.content.y - item.dimensions.content.y - 10.0).abs() < 0.1,
+            "child sits 10px inside the item, got offset {}",
+            child.dimensions.content.y - item.dimensions.content.y
+        );
+    }
+
+    #[test]
+    fn the_root_element_does_not_collapse_with_body() {
+        // html > body(mt 8) > h1(mt 21.44): the engine marks html a
+        // formatting root, so body sits at 21.44 under html's top edge and
+        // html stays at 0 (Chrome: body.getBoundingClientRect().top = 21.44).
+        let mut html = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut body = n43_block(None, 8.0, 8.0);
+        body.children.push(n43_block(Some(30.0), 21.44, 0.0));
+        html.children.push(body);
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 0.0),
+            ..Default::default()
+        };
+        let mut mc = MarginCollapseContext::new();
+        mc.children_are_formatting_roots = true;
+        let mut fc = FloatContext::new();
+        html.layout_with_collapse(&cb, &mut mc, &mut fc);
+
+        assert!(
+            (html.dimensions.content.y).abs() < 0.1,
+            "html at 0, got {}",
+            html.dimensions.content.y
+        );
+        let body = &html.children[0];
+        assert!(
+            (body.dimensions.content.y - 21.44).abs() < 0.1,
+            "body's 8 and h1's 21.44 collapse to 21.44, got {}",
+            body.dimensions.content.y
+        );
+        assert!(
+            (body.children[0].dimensions.content.y - 21.44).abs() < 0.1,
+            "h1 shares body's top edge, got {}",
+            body.children[0].dimensions.content.y
+        );
+    }
+
+    #[test]
+    fn a_form_control_carries_its_author_margins_in_the_line() {
+        // css-selectors §6: `button{padding:8px 16px; margin:4px}` — Chrome's
+        // row is 4 + 31 + 4 = 39; the margins were never resolved (row 33.5).
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut s = ComputedStyle::new();
+        s.display = rustkit_css::Display::InlineBlock;
+        s.margin_top = Length::Px(4.0);
+        s.margin_bottom = Length::Px(4.0);
+        s.margin_left = Length::Px(4.0);
+        s.margin_right = Length::Px(4.0);
+        s.padding_top = Length::Px(8.0);
+        s.padding_bottom = Length::Px(8.0);
+        let button = LayoutBox::new(
+            BoxType::FormControl(FormControlType::Button {
+                label: "Active".to_string(),
+                button_type: "button".to_string(),
+            }),
+            s,
+        );
+        root.children.push(button);
+        n43_layout(&mut root);
+
+        let b = &root.children[0];
+        assert!(
+            (b.dimensions.margin.top - 4.0).abs() < 0.01
+                && (b.dimensions.margin.left - 4.0).abs() < 0.01,
+            "margins resolved from style, got {:?}",
+            b.dimensions.margin
+        );
+        assert!(
+            (b.dimensions.content.y - 4.0).abs() < 0.1
+                && (b.dimensions.content.x - 4.0).abs() < 0.1,
+            "the control sits inside its margins, got ({}, {})",
+            b.dimensions.content.x,
+            b.dimensions.content.y
+        );
+        let control_h = b.dimensions.content.height;
+        assert!(
+            root.dimensions.content.height >= control_h + 8.0 - 0.1,
+            "the line counts both vertical margins: >= {} + 8, got {}",
+            control_h,
+            root.dimensions.content.height
         );
     }
 
