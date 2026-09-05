@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>n42 repro: padded auto-width flex items + column rows</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 16px; padding: 20px; background: #fff; }
+  .label { font-size: 12px; color: #666; margin: 12px 0 4px; }
+
+  /* A: auto-width padded items in a row — border box must be text + 2*20 */
+  .row { display: flex; gap: 10px; background: #e0e0e0; padding: 10px; }
+  .pill { background: #4a90d9; color: #fff; padding: 10px 20px; }
+
+  /* B: content-box items — padding must still count once */
+  .row-cb .pill { box-sizing: content-box; }
+
+  /* C: column container whose rows are taller than one line */
+  .col { display: flex; flex-direction: column; gap: 10px; background: #e8e8e8; padding: 10px; }
+  .r { display: flex; gap: 8px; background: #d0d0d0; padding: 8px; }
+  .r > div { background: #28a745; color: #fff; padding: 8px 12px; font-size: 12px; }
+
+  /* D: column of block items with wrapped text — second block must sit below the first's real height */
+  .col-text { display: flex; flex-direction: column; gap: 6px; width: 260px; background: #f0e0e0; padding: 6px; }
+  .col-text > p { background: #fff; padding: 4px; }
+
+  /* E: column with a definite height and flex-grow — grow must still fill after the re-derivation */
+  .col-fixed { display: flex; flex-direction: column; height: 160px; gap: 6px; background: #e0f0e0; padding: 6px; }
+  .col-fixed > .r { flex-grow: 1; }
+</style>
+</head>
+<body>
+  <div class="label">A row / border-box</div>
+  <div class="row" id="a"><div class="pill">Item 1</div><div class="pill">Item 2</div><div class="pill">Item 3</div></div>
+
+  <div class="label">B row / content-box</div>
+  <div class="row row-cb" id="b"><div class="pill">Item 1</div><div class="pill">Item 2</div></div>
+
+  <div class="label">C column of rows</div>
+  <div class="col" id="c">
+    <div class="r"><div>Row 1, Item A</div><div>Row 1, Item B</div></div>
+    <div class="r"><div>Row 2, Item A</div><div>Row 2, Item B</div><div>Row 2, Item C</div></div>
+  </div>
+
+  <div class="label">D column of wrapped paragraphs</div>
+  <div class="col-text" id="d">
+    <p>The quick brown fox jumps over the lazy dog and keeps running until the line wraps twice.</p>
+    <p>Second paragraph.</p>
+  </div>
+
+  <div class="label">E definite-height column, flex-grow rows</div>
+  <div class="col-fixed" id="e">
+    <div class="r"><div>Grow A</div></div>
+    <div class="r"><div>Grow B</div></div>
+  </div>
+</body>
+</html>

@@ -2598,7 +2598,10 @@ pub(crate) fn item_margins(style: &ComputedStyle) -> (f32, f32, f32, f32) {
     )
 }
 
-fn horizontal_padding_border(style: &ComputedStyle) -> f32 {
+/// Horizontal padding+border resolved from STYLE (the figure the intrinsic
+/// estimators above fold into their border-box results). `pub(crate)` so a
+/// caller that needs the CONTENT figure can subtract exactly what was added.
+pub(crate) fn horizontal_padding_border(style: &ComputedStyle) -> f32 {
     let fs = style_font_size_px(style);
     intrinsic_len_px(&style.padding_left, fs)
         + intrinsic_len_px(&style.padding_right, fs)
