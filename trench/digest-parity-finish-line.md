@@ -6831,3 +6831,193 @@ release build exists — and I ran it before writing anything down.
   30 `missing_box` join failures on `form-elements` and `form-controls`, every
   one an `<input>`, `<select>`, `<textarea>` or `<button>`. P6 has been sitting
   behind an identity gap, not behind a paint bug.
+
+---
+
+## 2026-09-06
+
+**Metric: 2/26 → 2/26 on the standing macOS receipt. No engine change was
+written tonight, so there is nothing to attribute and nothing that could have
+moved it.** `develop` is still `5b89ed8` — unchanged for six days — and sixteen
+PRs are open. Every number below is Linux/SwiftShader; the difference from
+previous nights is that for the first time it is possible to say *how much* of
+such a number is Linux.
+
+**P-item: instrument (P0a class), complete.** Not an engine item, and the reason
+is a measurement rather than a preference — see "what I set out to do" below.
+
+### The result
+
+Night 4 recorded that this seat cannot separate real RustKit defects from
+platform noise, and that "the split needs a macOS run to make, not a cleverer
+analysis of this one." Every board from this seat since has carried that caveat.
+
+It needs neither. It needs a **control**: Chrome captured on *this* seat, through
+the same `captureBaseline` code that produced the pinned set, so fonts and
+browser are identical on both sides and the only thing left is box math.
+
+```
+Δ_confound = Chrome_seat  − Chrome_pinned    the seat
+Δ_real     = RustKit_seat − Chrome_seat      the defect
+Δ_reported = RustKit_seat − Chrome_pinned    what Gate A prints here
+```
+
+Measured on `develop 5b89ed8`, all 26 gating cases, 0 unmeasured:
+
+| | sum \|Δ\| | failing axes |
+|---|---:|---:|
+| Δ_reported (Gate A as it stands) | 239566.34 | 2334 |
+| Δ_real (against the seat's own Chrome) | 239930.04 | 2181 |
+| **Δ_confound (the seat itself)** | **20889.77** | 2101 |
+
+**The confound is 8.7% of the corpus.** 2149 of 2334 failing axes survive the
+control. Night 4's reading of the axis histogram — the vertical lean being
+"consistent with the Linux font stack" — does not hold at corpus scale.
+
+Full board, per case, in `trench/forensics/2026-09-06-n44-seat-control-confound-board.md`.
+
+### Where the confound actually is, which is the opposite of the assumption
+
+The four largest cases are 88% of the corpus error and carry almost none of it:
+`new_tab` 1.2%, `image-gallery` 1.2%, `about` 5.7%, `settings` 12.5%. The *small*
+cases are where the seat dominates:
+
+| case | reported | real | share that is the seat |
+|---|---:|---:|---:|
+| gpu-gradient-regression | 542.48 | **45.40** | 88.5% |
+| form-controls | 458.54 | 480.31 | 86.3% |
+| backgrounds | 315.02 | **73.19** | 75.0% |
+| gradients | 341.02 | **83.59** | 73.9% |
+| bg-solid | 34.96 | **8.72** | 67.8% |
+| article-typography | 6056.65 | 6117.61 | 51.9% |
+| combinators | 160.00 | 160.00 | **0.0%** |
+
+So the seat has been trustworthy exactly where the nights have been spending it,
+and untrustworthy on four small cases nobody has worked. That is a better outcome
+than I expected and a duller one than "the seat is compromised".
+
+### Three things the control found that Gate A alone cannot say
+
+- **`masked` is a real category and it is not empty: 32 axes.** These pass
+  against the pinned macOS baseline and *fail* against the seat's own Chrome —
+  RustKit's error and the platform's error cancelling. `article-typography` 13,
+  `sticky-scroll` 10, `about` 6. On macOS they are visible failures. The seat's
+  Gate A scores them green today. That is the opposite of the risk this seat has
+  been carrying, and I did not anticipate it.
+- **`combinators`: 25 failing axes, zero confound, every delta exactly −10.00px.**
+  The cleanest small root on the board, fully diagnosable here, and no open
+  branch touches it.
+- **`sticky-scroll`'s two sticky sidebars are 1406.56 and 1395.27 real with 0.00
+  confound** — both `aside`s take the grid row's height instead of
+  `height: fit-content`. That is PR #181's subject; the control confirms it is
+  box math, not a font artefact.
+
+### Commits landed — `atlas/n44-seat-control-oracle`, cut from `develop 5b89ed8`
+
+Zero `crates/` changes: `git diff origin/develop -- crates/ Cargo.toml Cargo.lock`
+is empty, so nothing here can move any parity number by itself.
+
+- `tools/parity_oracle/capture_seat_control.mjs` — capture the control through
+  the pinned set's own capture code, into a gitignored directory, with a stamp
+  recording platform, Playwright version, per-family font resolution and a
+  sha256 of each fixture.
+- `scripts/seat_control_report.py` — the three-way board and the per-axis
+  attribution. Imports the tolerance, the join rule and the gating scopes from
+  `layout_oracle_gate` rather than restating them.
+- `scripts/tests/test_seat_control_is_not_a_receipt.py` — 14 guards.
+- `trench/forensics/2026-09-06-n44-seat-control-confound-board.md` — the board.
+
+### Mutation-check results
+
+**13 probes, 13 RED; NULL probe GREEN; control GREEN before and after.** The
+harness aborts a probe whose edit leaves `git diff --quiet` true.
+
+| probe | result |
+|---|---|
+| M1 a delta surviving the control is called `confound` | RED |
+| M2 the `masked` category is dropped | RED |
+| M3 a case the stamp does not cover scores as zero confound | RED |
+| M4 the fixture-staleness guard removed | RED |
+| M5 a partial control is scored on the intersection | RED |
+| M6 a missing stamp treated as an empty control | RED |
+| M7 any stamp accepted as a seat control | RED |
+| M8 the report restates the tolerance instead of importing it | RED |
+| M9 a report that measured nothing exits 0 | RED |
+| M10 the JSON drops `not_a_receipt` | RED |
+| M11 the printed board drops its NOT A RECEIPT header | RED |
+| M12 seat-control output becomes committable | RED |
+| M13 a measured record publishes a green verdict | RED |
+| NULL comment-only edit | GREEN, as required |
+
+**The first sweep was 12/13, and the survivor is worth naming** because it is the
+ninth sweep running to find the same shape. `test_a_case_the_control_never_
+captured_is_unmeasured_not_zero_confound` stayed GREEN with its fix mutated
+away — the case it built reached an *earlier* refusal (no control file, then no
+pinned baseline) and never executed the line it was written for. Rewritten to
+score in a synthetic world where nothing else can produce `UNMEASURED`, and it
+now asserts in both directions: refused without the stamp entry, `MEASURED` with
+it. A guard satisfied by a different guard is decoration.
+
+### What I set out to do, and why I did not
+
+I opened on P4 (`article-typography`), the highest queue item that no open branch
+addresses. Two checks stopped it: the seat has no Georgia (`fc-match Georgia →
+DejaVuSerif.ttf`), and P4 is by definition the item that needs CoreText on both
+sides. I then looked for the largest geometry root no open branch covers and
+found `sticky-scroll`'s sidebars — which is PR #181, open since 09-03.
+
+Both dead ends were the same question: *is this delta mine or the seat's?* So I
+built the thing that answers it. It is not an item in plan §4, and I am not going
+to pretend it is; it is the precondition for working §4 from a Linux seat, and
+without it tonight's alternative was an engine fix chosen by a number I could not
+attribute.
+
+### Not wired into CI, deliberately
+
+The gating lanes are `macos-14`, where the control would compare Chromium 141
+against Chrome 148 with no font difference — a smaller, differently-shaped number
+that answers no question the receipt lane has. This is a tool for non-macOS
+seats. Wiring it into `parity.yml` would spend capture minutes producing a figure
+nobody should quote.
+
+### Honest limits
+
+- The control folds **font substitution and the Chromium 141-vs-148 build
+  difference into one term.** Nothing here separates them. For the question asked
+  — is this delta RustKit's? — both are the seat, so the split does not matter;
+  for any other question the number is not clean.
+- `Δ_real` is still measured with DejaVu advances. It says *this box is wrong
+  independently of the font*; it does not say the macOS box is wrong by that
+  amount. `article-typography`'s surviving 6117.61 is not a macOS figure.
+- Nothing here is a receipt, and the report is built so it cannot become one: no
+  green count, no conjunction, no verdict field, output gitignored.
+
+### Decisions needed from Pete
+
+1. **Sixteen PRs are open and `develop` has not moved since 08-31**; 09-05
+   measured the pile at −72.4% of the corpus's geometry error. This is the fourth
+   night carrying the question — should the trench stop opening lanes entirely
+   until it drains?
+2. The night order still opens with P0a-0 (finished 33 nights ago) and points a
+   fresh seat at a stale queue; tonight's seat spent its first hour re-deriving
+   the state. Only you should rewrite it.
+3. Still open from 09-04: `estimate_max_content_width` is now load-bearing as a
+   used size in two shipped fixes — should hardening it be its own P-item?
+
+### Surprises
+
+- **The confound was 8.7%, not the majority.** I expected the opposite, and so
+  did night 4's write-up. The seat has been more trustworthy than its own caveats
+  claimed, and every board it produced on `about`, `new_tab`, `settings` and
+  `image-gallery` was substantially real.
+- **The seat is trustworthy on the big cases and untrustworthy on the small
+  ones** — exactly inverted from the intuition that small CSS micro-tests are the
+  safe things to measure anywhere.
+- **32 axes are green here and wrong on macOS.** The seat's risk was assumed to
+  be false alarms; it also produces false silences.
+- **Zero selector mismatches across all 26 cases** between Chrome 148 on macOS and
+  Chromium 141 on Linux. The P0a-0 join key survives a platform change and seven
+  Chromium milestones — a stronger property than `verify_selector_key.mjs`
+  establishes, and it was free.
+- **`gpu-gradient-regression`'s real geometry error is 45.40.** It has sat on the
+  board at 542.48 as a mid-sized root for five nights. It is not one.
