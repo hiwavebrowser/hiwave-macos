@@ -1874,3 +1874,54 @@ Two things to record about the sweep itself:
   probe fixture. Not worked: `align-content` defaults to `stretch` for grid, so
   Chrome and RustKit agree on every corpus page, and a fix would be unmeasurable
   here. Recorded, not half-landed.
+
+---
+
+## 2026-09-07 (follow-up on the 09-03 night's PRs)
+
+Not a work night — a correction to a measurement, logged because it changes what
+a board says about a PR awaiting merge.
+
+**A regression flagged on #180 is the branch's age, not its change.** The n45
+per-PR condition board measured each open engine branch **checked out detached**
+and reported #180 (`atlas/abspos-shrink-to-fit`) regressing `sticky-scroll`
+114 → 149 failures, `sum|Δ|` 4518.28 → 32016.25, corpus 2500 → 2536 — auto-
+revertable under the stop rule as written. I reproduced both readings on this
+seat:
+
+| tree | geometry | join | green | sticky-scroll fails / sum\|Δ\| |
+|---|---:|---:|---:|---|
+| `develop 5b89ed8` | 2500 | 110 | 2 | 114 / 4518.28 |
+| `develop` + #180 **merged** | 2500 | 110 | 2 | 114 / 4518.28 |
+| #180 **detached** | 2536 | 110 | 2 | **149 / 32016.25** |
+
+Row 3 reproduces the board to the decimal, so it is the same measurement rather
+than a competing one. The branch was cut 08-27 and is **27 commits behind
+develop**, missing `ea6d4ca` (#168). Of the 64 axes the detached tree adds or
+worsens, **42 sit in the `.sidebar-card` subtree at exactly +910.00px** — #168's
+own documented signature. The detached row charges the absence of a merged fix
+to the branch that does not contain it.
+
+**A detached-branch row measures content only where the branch contains
+`develop`.** `git merge-base --is-ancestor origin/develop origin/atlas/<b>`
+settles it per row in one command.
+
+**Scope, checked rather than assumed — and I got this wrong once first.** My
+first PR comment said "several rows on that board are older branches." I had not
+checked. Of the eleven open engine branches, **#180's is the only stale one**;
+the other ten are current and their rows need no re-measurement. Corrected in a
+follow-up comment on the PR. The lesson is the campaign's own: I asserted a
+scope claim in the same breath as a measured one, and only the measured half was
+earned.
+
+**What this does not clear.** #180 still needs `develop` merged into it before
+landing, and it carries the pile's one real semantic conflict (against #176,
+both rewriting the `Length::Auto` arm of `calculate_block_width`). I did not
+push that merge — it is someone else's branch and the resolution is a judgment
+call about which rewrite survives.
+
+Both readings are Linux/SwiftShader. Neither is a receipt.
+
+**Status of the 09-03 pair, unchanged otherwise:** #180 and #181 both open and
+green, heads `2f60f2a` / `144e80c`, no reviews, base `develop` still `5b89ed8`
+— nothing has merged repo-wide since 08-31.
