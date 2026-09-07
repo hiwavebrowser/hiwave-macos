@@ -72,3 +72,9 @@ third_party/wpt/
 # this rule stops new ones, it does not untrack those. They need `git rm --cached`, which is not on the
 # trench seat's allowlist.
 scripts/tests/__pycache__/
+# Seat-control captures: Chrome run on THIS seat, for the confound diagnostic only
+# (trench/digest-parity-finish-line.md 2026-09-06). Never a receipt, and never a
+# baseline — committing it would put a Linux/DejaVu/Chromium-141 capture beside the
+# pinned macOS Chrome-148 set. #186 carries this same rule; duplicated here because
+# that PR is unmerged and the directory surfaced as untracked on this branch on 09-07.
+baselines/seat-control/
