@@ -7021,3 +7021,158 @@ nobody should quote.
   establishes, and it was free.
 - **`gpu-gradient-regression`'s real geometry error is 45.40.** It has sat on the
   board at 542.48 as a mid-sized root for five nights. It is not one.
+
+---
+
+## 2026-09-07
+
+**Metric: 2/26 → 2/26 on the standing macOS receipt. No engine change was
+written tonight, so there is nothing to attribute.** `develop` is still
+`5b89ed8` — unchanged for seven days — and seventeen PRs are open. Every number
+below is Linux/SwiftShader; where it matters I say what the seat control makes
+of it.
+
+**P-item: none completed. The night order's unit turned out to be already fixed
+on an open branch, and the measurement that established that is the night's
+work.** Not an engine item. That is now three nights running, which is itself
+the finding.
+
+### The unit was already done, and nobody knew
+
+Night 44 handed off `combinators`: "the cleanest small root on the board, fully
+diagnosable here, and no open branch touches it." The last clause is false.
+Measured, `develop 5b89ed8` → `#185`:
+
+| combinators | develop | #185 |
+|---|---:|---:|
+| Gate A geometry failures | 25 | **0** |
+| boxes compared | 41/41 | 41/41 |
+| geometry-green (condition 1), 3 iterations | no | **yes, ×3 identical** |
+| Gate B paint within ±5 | 92.7059% | 93.2236% |
+| Gate B elements examined / withheld | 20 / 21 | **41 / 0** |
+| discrete | 0 | 0 |
+
+Reported as a pair, as required: geometry goes to zero failures, paint stays red
+at 93.22% against a 99% bar. The case is condition-1 green and nowhere near
+finish-line green.
+
+`#185`'s own PR body reports this case as **`combinators −0.53`** on the
+mean-pixel board — a number that reads like rounding. It is a case crossing a
+finish-line condition. Night 44 measured `combinators` at **zero seat confound**,
+so this holds on macOS; it is not a Linux artefact.
+
+**This is §1 of the plan reappearing one level up.** The gates are honest. The
+PR prose that summarises them is not, because it still quotes the mean-pixel
+board the gates were built to replace. Nothing in the campaign currently
+computes per-PR condition deltas, so a PR can complete a finish-line condition
+and describe itself as noise.
+
+I also have to correct night 44's own reading: it recorded `combinators` as "25
+failing axes, every delta exactly −10.00px". The count is right; the deltas are
+not. They are a mix of ±5.00 and −10.00, and the shape (an unclassed wrapper
+laid out 45px tall where Chrome gives 40, its child pushed down 5) is CSS 2.1
+§8.3.1 parent/child through-collapse — precisely `#185`'s subject. Had that
+delta description been right, the branch would have been found on night 44
+rather than tonight.
+
+### What each open PR is worth in the metric's own currency
+
+Eleven open engine branches, each measured **alone** against `develop`, all 26
+gating cases, one pinned instrument (develop's Gate A) over every row. Captures
+are 9.5s a set, so the whole sweep is build time. Full board:
+`trench/forensics/2026-09-07-n45-per-pr-condition-board.md`.
+
+| | develop | 175 | 176 | 180 | 181 | 182 | 184 | 185 |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| geometry-green /26 (condition 1) | 2 | 2 | 2 | 2 | 2 | 2 | 2 | **3** |
+| corpus geometry failures | 2500 | 2739 | 2499 | 2536 | 2499 | 2455 | 2494 | 2476 |
+| corpus join failures | 110 | **15** | 110 | 110 | 110 | 110 | 110 | 110 |
+| corpus `sum\|Δ\|` | 239566 | 249918 | **106594** | 265954 | 236772 | 247016 | 226802 | 240156 |
+
+- **`#185` is the only open branch that turns any case green.** Ten others move
+  counts by single digits and none crosses a threshold. In the campaign's metric
+  the entire pile is worth one condition on one case.
+- **`#176` is over half the corpus's geometry error and the count cannot see
+  it.** `sum|Δ|` 239566 → **106594, −55%**, failure count moves by one. A single
+  atomic-inline `width:auto` shrink-to-fit fix. Nothing in its title says this.
+- **`#175`'s "+239 failures" is jurisdiction, not regression.** Join failures
+  **110 → 15**: ~95 elements that had no box now join and fail. `#172`'s ratchet
+  language is the only thing standing between this branch and a false regression
+  reading.
+- **`#180` measured alone regresses `sticky-scroll` 7×** — `sum|Δ|` 4518 →
+  32016, failures 114 → 149 — and `form-elements` 87 → 88. Per PR, the stop rule
+  makes it auto-revertable. It is also the branch with the pile's one real
+  semantic conflict (against `#176`, same `Length::Auto` arm).
+- **`#181` is exactly right about its own number and buys nothing on the
+  metric.** `sticky-scroll` `sum|Δ|` 4518 → 1724 is the −62% its title claims.
+  Failure count 114 → 113.
+- **`#178` and `#179` move Gate A by zero here, and that is not evidence.**
+  `#178`'s gate half (`#177`) is not applied, so its effect is unobservable by
+  construction; `#179` is a fallback-face/line-height item and this seat has no
+  CoreText. Both are NOT MEASURED, not "no value".
+
+### The one uncovered case, and why it is not workable here
+
+`card-grid` — 150 failures, byte-identical across all eleven branches. The only
+sizeable case no open branch touches. Night 44's seat control says why:
+
+```
+card-grid   reported 1504.21   real 1700.41   confound 706.48   47.0% seat
+            buckets: real=43  mixed=103  confound=4  masked=0
+```
+
+The real error is *larger* than the reported one — the confound partially masks
+it — and the worst surviving real deltas are all `.stats > span` widths (46.7,
+−38.8, −34.4, −33.8): **text advance widths**, i.e. P4, the item defined by
+needing CoreText on both sides. Same wall night 44 hit on `article-typography`.
+Night 44's instrument earned its keep on its first independent use: without it I
+would have spent the night chasing DejaVu advances and called it a grid fix.
+
+### Commits landed
+
+Trench branch only, zero `crates/` changes:
+
+- `trench/forensics/2026-09-07-n45-per-pr-condition-board.md` — the board.
+- `trench/tools/n45_capture_all.py`, `trench/tools/n45_condition_board.py` — the
+  reproduction. Both carry NOT-A-RECEIPT headers naming `geometry-green /26` as
+  condition 1 of 4.
+
+### Mutation-check results
+
+**None, and no behaviour changed tonight, so none was required.** Stated rather
+than omitted. The two tools committed have **no mutation-checked guards** and
+say so in their own headers; they aggregate Gate A's JSON and compute nothing,
+but their `geometry-green /26` line would be misread as `N/26` by anyone
+skipping the header, so they are marked not-for-CI. If this board is ever run on
+the macOS lane, it needs guards first.
+
+### Decisions needed from Pete
+
+1. **Merge the pile.** Fifth night carrying it, now with per-PR receipts:
+   `#185` is the only branch that moves the metric, `#176` is −55% of corpus
+   geometry error, `#175` unlocks 95 unmeasurable elements — and `#180` alone
+   regresses `sticky-scroll` 7×, so it wants review or exclusion, not just an
+   ordering.
+2. **PR prose must quote the gates, not the mean-pixel board** — `#185` reported
+   a finish-line condition completion as `−0.53`. Should a per-PR Gate A
+   condition delta be required in every parity PR body?
+3. **Rewrite the night order.** It still opens with P0a-0 (done 34 nights ago)
+   and, tonight, sent the seat at a root that was already fixed. Three
+   consecutive nights have produced instruments instead of engine fixes because
+   the queue is jammed, not because the seat is idle.
+
+### Surprises
+
+- **An open PR completed a finish-line condition and described itself as
+  noise.** I expected the pile to be undersold in ordering, not in kind.
+- **Night 44's delta description was wrong while its count was right**, and the
+  wrong half is what hid `#185`. A per-axis figure quoted from memory into a
+  hand-off cost a night.
+- **`#176` is over half the corpus's geometry error.** It has sat at position
+  eleven of seventeen in the PR list for six days as a "badge width" fix.
+- **The count metric and the magnitude metric disagree about which PR matters
+  most**, cleanly: by count it is `#185` (the only green), by magnitude it is
+  `#176` (−55%), and neither shows up in the other's column.
+- **`card-grid`'s real error exceeds its reported error.** I went in expecting
+  the confound to inflate the number and it deflates it — night 44's `masked`
+  category, at case scale.
