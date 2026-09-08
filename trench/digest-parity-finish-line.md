@@ -7503,3 +7503,76 @@ the run.
 
 Also still open and unmerged, for whoever picks up the pile: #174, #177, #178,
 #179, #180, #181, #182, #183, #184.
+### Second addendum — the pile started draining, and a regression came with it
+
+`develop` moved for the first time in eight days: **`5b89ed8` → `408f2a9`**,
+carrying `#186` (seat control), `#187` (tonight's aspect-ratio fix) and `#185`
+(the §8.3.1 through-collapse fix). Measured stacked on this seat, all 26 cases,
+against the same pinned instrument. **Linux/SwiftShader — not a receipt** — but
+the seat control attributes every figure below, so none of it is a platform
+artefact.
+
+| case | `5b89ed8` reported | `408f2a9` reported | Δ_real (seat-controlled) |
+|---|---:|---:|---|
+| **combinators** | 160.00 (25 fail) | **0.00 — GREEN** | 160.00 → **0.00**, zero confound |
+| **image-gallery** | 12545.39 (155) | **3879.39 (150)** | 12604.66 → **3938.66** |
+| **form-elements** | 1504.02 (87) | **2151.19 (88)** | 1269.23 → **1913.68 (+50.8%)** |
+| **settings** | 26046.62 (344) | **26602.12 (344)** | 24219.65 → **24775.15** |
+| corpus | 239566.34 | 231490.05 | 239930.04 → 231831.03 |
+
+**geometry-green (condition 1 of 4): 2/26 → 3/26**, `combinators` newly green.
+Night 45 predicted exactly this from `#185` measured alone, and it held.
+
+**But the per-box stop rule fires: 140 boxes worsened, all on `form-elements`,
+and it is real.** The seat control reports an identical confound (365.48) on
+both sides — the control is the same capture — so the entire +644 is RustKit.
+`div.container` height 143.44 → 163.60, and the whole `form-card` stack below it
+shifts 15.20 → 32.00 and 85.44 → 105.60. `settings` gains a further +555.50 real
+with its failure count unmoved at 344.
+
+**Attribution, established rather than assumed:**
+
+- `#186` has **zero** `crates/` changes (`git diff 5b89ed8 3ec4e8b -- crates/
+  Cargo.toml Cargo.lock` is empty) — it cannot move a number.
+- `#187` measured alone left `form-elements` and `settings` **bit-identical**,
+  and the corpus's entire `aspect-ratio` surface is four files, none of them
+  these two.
+- So both regressions are **`#185`'s**, and its `crates/` diff (437 lines in
+  `rustkit-layout/src/lib.rs`) is the through-collapse rewrite.
+
+Night 45's board *did* show `form-elements 87 → 88` for `#185` alone. What it
+did not show — because it reported counts — is that the same +1 failure carries
+**+50.8% of real geometry error and 140 worsened boxes**. This is the count/
+magnitude split that night 45 named on `#176`, now landing in the direction that
+costs something: a one-count regression that reads like a rounding artefact and
+is a 140-box regression underneath.
+
+**This is a stop-rule condition on `develop`** — a change that improved the
+metric (`combinators` green) while an oracle regressed on another case. The rule
+prescribes auto-revert *for a change made in the trench*; `#185` is not this
+seat's work and is already merged, so **I have not touched it.** Reverting
+someone else's merged engine work is Pete's call, not a night agent's. What this
+seat owes is the measurement, and that is above.
+
+`#187`'s own win survives stacking intact — `image-gallery` real 12604.66 →
+3938.66, −68.8%.
+
+### And one conflict tonight's merge created
+
+`#181` (`atlas/n41-grid-fit-content`) now **conflicts with `develop` in
+`crates/rustkit-layout/src/grid.rs`**, and it is my merge that caused it. The
+two branches independently invented a pass called **Phase 9.6**, in the same
+place, for the same reason — css-align-3 §4.2, *stretch is the used alignment
+only where the item's size in that axis is `auto`*:
+
+- `#187` (merged): an **`aspect-ratio`** item keeps its ratio instead of stretching.
+- `#181` (open): a **`height: fit-content`** item keeps its content height.
+
+**These are complementary rules, not competing ones**, and the resolution is one
+pass carrying both conditions rather than a choice between them. My guard reads
+`if !matches!(child.style.height, Length::Auto) { continue; }`, which already
+skips `fit-content` items, so the merged code does not contradict `#181` — it
+just occupies the same lines. Three conflict hunks, all in that region.
+
+`#182`'s conflict is in `trench/wpt/last-run.json` (a receipts file `#185`
+re-pinned) and is not mine. `#175`, `#176` and `#180` still merge clean.
