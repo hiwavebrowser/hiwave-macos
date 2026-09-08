@@ -7176,3 +7176,169 @@ the macOS lane, it needs guards first.
 - **`card-grid`'s real error exceeds its reported error.** I went in expecting
   the confound to inflate the number and it deflates it — night 44's `masked`
   category, at case scale.
+
+---
+
+## 2026-09-08
+
+**Metric: 2/26 → 2/26 on the standing macOS receipt.** An engine change landed
+tonight but no case crossed the conjunction, so the metric is unmoved and I am
+not going to dress that up. What moved is magnitude inside condition 1, on the
+largest geometry root no open branch was touching. Every number below is
+Linux/SwiftShader; night 44's seat control puts the case's confound at 1.2%, so
+this one is real rather than a seat artefact.
+
+**P-item: P2/P3-class geometry (the ratified geometry-first order), complete.**
+An engine fix, which is the first in four nights — the last three produced
+instruments because the queue was jammed. `develop` is still `5b89ed8`,
+unchanged for eight days, and the pile is now **eighteen** open PRs including
+tonight's.
+
+### What I worked and why it, specifically
+
+The night order still opens with P0a-0 (finished 34 nights ago). Rather than
+re-derive the queue from the top, I took night 45's board — which measures every
+open branch alone — and looked for the largest geometry root that **no open
+branch moves at all**. Cross-referenced against night 44's seat control so the
+target could not be a Linux artefact, that is `image-gallery`: 155 failures,
+`sum|Δ|` 12545, byte-identical across all eleven engine branches, **1.2% seat
+confound**. `card-grid`, night 45's suggested pick-up, was ruled out on its own
+evidence: its worst surviving real deltas are `.stats > span` advance widths,
+i.e. P4, the item that by definition needs CoreText on both sides.
+
+### The defect
+
+`.aspect-section` collapsed from 332px to 73px, and that single root carried the
+−272px page-wide shift under it — 85 of the case's 155 failing axes.
+
+```
+.aspect-box aspect-1-1   Chrome 288   RustKit 32
+.aspect-box aspect-4-3   Chrome 216   RustKit 32
+.aspect-box aspect-3-2   Chrome 192   RustKit 32
+.aspect-box aspect-16-9  Chrome 162   RustKit 32
+```
+
+`aspect-ratio` is parsed correctly and honoured by the block and flex paths. A
+three-case probe isolated it in about a minute: plain block ✓, flex item ✓,
+**grid item → height 0**. Track sizing runs before the columns are resolved, so
+`get_height_contribution` has no inline size to derive a block size from and
+falls through to its content estimate. Every `aspect-ratio` grid item has been
+sizing to its content alone.
+
+Probing the fix's shape against Chrome found a **second** defect I was not
+looking for: the block path applies the ratio to the CONTENT box regardless of
+`box-sizing`. Measured, a 400px-wide `2 / 1` box with `padding: 20px`:
+
+| `box-sizing` | Chrome | via content box |
+|---|---|---|
+| `border-box` | **200** | 220 — wrong by the padding |
+| `content-box` | **220** | 220 |
+
+Every corpus page opens with `* { box-sizing: border-box }`, so that error was
+live on every padded ratio box. Both call sites now share one helper.
+
+### The fix needed two halves, and I only knew that from measuring
+
+Growing the row is not enough. `align-self: stretch` is the grid default, so
+once the row was right the three shorter boxes stretched to it and read 288
+apiece. Chrome, measured, does not stretch a ratio item: the four boxes share
+one 288px row and are still laid out 288/216/192/162. So a second pass keeps a
+ratio item at its own ratio — deliberately outside the `!has_definite_height`
+guard, because gating it there would make an item's height depend on its
+neighbours' content.
+
+### Commits
+
+- `fbbb8f0` — grid items honour `aspect-ratio` (row contribution + no-stretch),
+  and the ratio applies to the box named by `box-sizing`. Branch
+  `atlas/n46-grid-aspect-ratio`, PR **#187**, cut from `develop 5b89ed8` per the
+  branch law.
+
+### Measured — Linux/SwiftShader, 26 cases. MECHANICS, NOT A RECEIPT
+
+| Oracle | develop | after |
+|---|---:|---:|
+| Gate A `image-gallery` `sum\|Δ\|` | 12545.39 | **3879.39** (−69.1%) |
+| Gate A `image-gallery` failures | 155 | 150 |
+| Gate A corpus failures / joins | 2500 / 110 | 2495 / 110 |
+| Gate B | 26/26 measured | bit-identical on all 26 |
+| geometry-green (condition 1 of 4) | 2/26 | 2/26 |
+
+The other 25 cases are bit-identical on both oracles.
+
+**The count barely moves while the magnitude drops 69%** — night 45 found the
+same shape on `#176` and it is now two for two. A count-only board would have
+recorded this night as "5 failures fixed".
+
+### Stop rule
+
+Checked **per box and per axis**, not per case, across all 26 cases:
+**zero boxes worsened**, no case lost green, no case gained a discrete failure.
+The rule did not fire.
+
+### Mutation-check results
+
+**8 probes, 8 RED; NULL comment-only probe GREEN; control GREEN before and
+after.** The harness aborts a probe whose edit leaves `git diff --quiet` true.
+
+| probe | result |
+|---|---|
+| M1 ratio contribution removed from the row | RED |
+| M2 the no-stretch pass deleted | RED |
+| M3 the no-stretch pass overwrites content taller than the ratio | RED |
+| M4 border-box branch dropped — ratio always on the content box | RED |
+| M5 content-box branch made border-box too | RED |
+| M6 degenerate ratios (0, negative, NaN, ∞) no longer refused | RED |
+| M7 zero inline size accepted — divides from nothing | RED |
+| M8 the no-stretch pass ignores an explicit height | RED |
+| NULL comment-only edit | GREEN, as required |
+
+**8/8 on the first sweep, and that is not the interesting part.** M3 is a bug the
+guards caught *before* the sweep: my first no-stretch pass wrote the ratio
+unconditionally, and `content_taller_than_the_ratio_keeps_its_own_height` went
+red on it. Chrome gives a 400px-wide `4 / 1` item holding a 300px-tall child a
+height of 300, not the ratio's 100 — content wins where it is taller. I had
+written that max() correctly in the row contribution an hour earlier and then
+did not write it in the second pass. The guard existed only because I had
+measured that case in Chrome rather than reasoned about it, which is the first
+time in this campaign's write-ups that the measure-first rule caught one of my
+own defects instead of an inherited assumption.
+
+### Decisions needed from Pete
+
+1. **Merge the pile — sixth night carrying this, and it is now eighteen PRs
+   against a `develop` that has not moved in eight days.**
+2. The night order still opens with P0a-0 (done 34 nights ago) and cost this
+   seat its first hour again; only you can rewrite it.
+3. Should a per-PR Gate A condition delta be required in every parity PR body
+   (night 45's decision 2, unanswered) — `#185` reported a finish-line condition
+   completion as `−0.53`.
+
+### Surprises
+
+- **Gate B cannot see this fix at all, and the reason is the viewport.**
+  `image-gallery` is captured at 1280×800; the repaired region starts below
+  y≈1000 and the page is 1922 tall. All 26 PPM frames are byte-identical by
+  checksum. So the campaign's single largest untouched geometry root was, and
+  would have remained, **invisible to the paint oracle** — not because paint is
+  clean there but because the paint oracle only ever sees the first screenful.
+  I do not think this is a Gate B defect; it is a coverage limit nobody had
+  written down, and it means "paint unchanged" on a below-the-fold fix is a
+  vacuous statement rather than a reassuring one.
+- **I nearly reported paint as bit-identical when Gate B had measured nothing.**
+  My capture tool writes `frame.png`; Gate B wants `frame.ppm`. Its verdict on
+  both capture sets was `no_rustkit_capture` — `measured: false` — and the
+  per-case comparison duly printed "bit-identical on all 26" because `None ==
+  None`. Two gates' worth of unmeasured is indistinguishable from two gates'
+  worth of agreement if you compare the outputs and not the `measured` flag. I
+  caught it only because 26/26 paint-*green* reading 0/26 looked wrong. The
+  gates were honest — `measured: false` was right there — and my comparison
+  script was the thing that lied. Night 5's "the instrument's own disease"
+  turning up in a throwaway diff script.
+- **The corpus's whole `aspect-ratio` surface is four files.** I expected a
+  wide blast radius for a sizing-path change and there is almost none —
+  `images-intrinsic` carries the property and is bit-identical before and after.
+- **`card-grid`'s real error is text advances, and night 45 was right about
+  it.** I re-derived that independently before trusting the hand-off, which cost
+  fifteen minutes and is the correct price after night 45 found night 44's
+  hand-off half wrong.
