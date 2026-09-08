@@ -2373,6 +2373,46 @@ pub fn layout_grid_container(
         }
     }
 
+    // Phase 9.7: `height: fit-content` items take their CONTENT height.
+    //
+    // css-align-3 §4.2: `stretch` is the used alignment only where the item's
+    // size in that axis is `auto`. `fit-content` is not `auto` — it is how a
+    // page opts one item out of stretching — so a fit-content item keeps the
+    // size its content gives it while its siblings fill the row.
+    //
+    // This cannot be done in Phase 8 with the rest of alignment, because an
+    // item's content height does not exist until Phase 9 has flowed its
+    // children; Phase 8 can only hand it the grid area. Phase 9 records that
+    // number for every item, so the correction lands here, after Phase 9.5 has
+    // had its say about the row — 9.5 grows rows and stretches AUTO items, and
+    // must not then be undone. It is its own pass rather than a branch of 9.6
+    // because the two name disjoint items: 9.6 acts only on `height: auto`,
+    // this only on `height: fit-content`.
+    //
+    // Written as an assignment rather than a shrink, because the rule is "size
+    // to content" in both directions. Be clear about what that buys today:
+    // NOTHING, and it is measured rather than assumed. A mutation replacing
+    // this with `min()` survives the whole suite, because Phase 9's re-flow has
+    // already grown any item whose content overruns the box it was handed — so
+    // by the time this runs, `real_h` is never larger than the current height
+    // and the growing direction is unreachable. The assignment states the rule;
+    // the shrink is the only half a test can hold, and that is said here
+    // instead of shipping a guard that would stay green without its fix.
+    {
+        let mut idx = 0usize;
+        for child in container.children.iter_mut() {
+            if child.style.display == Display::None {
+                continue;
+            }
+            if matches!(child.style.height, Length::FitContent) {
+                if let Some(Some(real_h)) = real_heights.get(idx).copied() {
+                    child.dimensions.content.height = real_h.max(0.0);
+                }
+            }
+            idx += 1;
+        }
+    }
+
     debug!(
         "Grid layout complete: {} columns, {} rows, {} items",
         grid.column_count(),
@@ -2391,19 +2431,38 @@ pub fn layout_grid_container(
 /// into one unbreakable run; otherwise children contribute independently
 /// (max), per css-sizing-3 §4.
 pub(crate) fn estimate_min_content_width(layout_box: &LayoutBox) -> f32 {
+    // Out-of-flow boxes don't CONTRIBUTE to an ancestor's intrinsic size.
+    // That is a statement about contribution, not about the box's own
+    // min-content width — which CSS 2.1 §10.3.7 needs in order to size the
+    // box itself. Callers that want the latter use `own_min_content_width`.
+    //
+    // The text carve-out is not a new rule: this guard used to sit BELOW the
+    // `BoxType::Text` arm, so a text box carrying an out-of-flow position
+    // always answered its text width. Keeping the precedence keeps the split
+    // behaviour-preserving.
+    if matches!(
+        layout_box.position,
+        crate::Position::Absolute | crate::Position::Fixed
+    ) && !matches!(layout_box.box_type, BoxType::Text(_))
+    {
+        return 0.0;
+    }
+    own_min_content_width(layout_box)
+}
+
+/// The box's OWN min-content width (border box), with the out-of-flow
+/// contribution rule NOT applied to the box itself.
+///
+/// Split out of `estimate_min_content_width` so shrink-to-fit can size an
+/// out-of-flow box from its own content. The contribution rule still applies
+/// to every CHILD walked below, exactly as before.
+pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
     let style = &layout_box.style;
     if style.display == Display::None {
         return 0.0;
     }
     if let BoxType::Text(text) = &layout_box.box_type {
         return text_min_content_width(text, style);
-    }
-    // Out-of-flow boxes don't contribute to intrinsic sizes.
-    if matches!(
-        layout_box.position,
-        crate::Position::Absolute | crate::Position::Fixed
-    ) {
-        return 0.0;
     }
 
     let padding_border = horizontal_padding_border(style);
@@ -2489,14 +2548,27 @@ fn text_max_content_width(text: &str, style: &ComputedStyle) -> f32 {
 /// interrupt the run and contribute independently. Used by flex-basis:auto
 /// content sizing (css-flexbox-1 §9.2.3.C).
 pub(crate) fn estimate_max_content_width(layout_box: &LayoutBox) -> f32 {
-    let style = &layout_box.style;
-    if style.display == Display::None {
-        return 0.0;
-    }
+    // Contribution rule, same as `estimate_min_content_width`. Note the
+    // precedence differs from that function's and is preserved as found: here
+    // the out-of-flow guard sits ABOVE the text arm, so an out-of-flow text
+    // box answers 0 rather than its text width. The asymmetry is pre-existing;
+    // it is recorded rather than quietly harmonised, because harmonising it
+    // would be an engine behaviour change riding along on a refactor.
     if matches!(
         layout_box.position,
         crate::Position::Absolute | crate::Position::Fixed
     ) {
+        return 0.0;
+    }
+    own_max_content_width(layout_box)
+}
+
+/// The box's OWN max-content width (border box), with the out-of-flow
+/// contribution rule NOT applied to the box itself. See
+/// `own_min_content_width` for why the split exists.
+pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
+    let style = &layout_box.style;
+    if style.display == Display::None {
         return 0.0;
     }
     if let BoxType::Text(text) = &layout_box.box_type {
@@ -5859,6 +5931,115 @@ mod tests {
              {CARD_HEIGHT}, got {card_height} ({INNER_HEIGHT} is the flowed \
              extent of its children -- the re-flow ran after the height \
              resolution and overwrote it)"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // `height: fit-content` on a grid item.
+    //
+    // css-align-3 §4.2: `stretch` is the used alignment only where the item's
+    // size in that axis is `auto`. `fit-content` is not `auto`, and opting an
+    // item out of stretching is the reason a page writes it.
+    //
+    // Measured on sticky-scroll before the fix: `.sidebar-left` and
+    // `.sidebar-right` are `position: sticky; height: fit-content` grid items
+    // sharing their row with a `main { min-height: 1500px }`. Chrome sizes them
+    // to their cards -- 577.44 and 566.14 -- and RustKit gave both the row's
+    // 1972.70. Two boxes, ~1400px each, the largest non-known_fail geometry
+    // error in the corpus. The root was one line up in the parser:
+    // `parse_length` had no `fit-content` case, so it returned None, the
+    // declaration was dropped, and `height` kept its `auto` initial value --
+    // which is precisely the value that DOES stretch.
+    // ---------------------------------------------------------------
+
+    /// Build the sticky-scroll shape: one fit-content item and one tall
+    /// sibling that forces the shared row far past it.
+    fn fit_content_row(fit_height: Length) -> LayoutBox {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Px(250.0), TrackSize::Fr(1.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        let mut aside_style = ComputedStyle::new();
+        aside_style.box_sizing = BoxSizing::BorderBox;
+        aside_style.height = fit_height;
+        let mut aside = LayoutBox::new(BoxType::Block, aside_style);
+        let mut card_style = ComputedStyle::new();
+        card_style.height = Length::Px(120.0);
+        aside
+            .children
+            .push(LayoutBox::new(BoxType::Block, card_style));
+        container.children.push(aside);
+
+        let mut main_style = ComputedStyle::new();
+        main_style.box_sizing = BoxSizing::BorderBox;
+        let mut main = LayoutBox::new(BoxType::Block, main_style);
+        let mut tall_style = ComputedStyle::new();
+        tall_style.height = Length::Px(1500.0);
+        main.children
+            .push(LayoutBox::new(BoxType::Block, tall_style));
+        container.children.push(main);
+
+        container
+    }
+
+    #[test]
+    fn a_fit_content_grid_item_takes_its_content_height_not_the_row() {
+        let mut container = fit_content_row(Length::FitContent);
+        layout_grid_container(&mut container, 1200.0, 800.0);
+
+        let aside = container.children[0].dimensions.border_box().height;
+        let main = container.children[1].dimensions.border_box().height;
+
+        assert!(
+            (aside - 120.0).abs() < 0.51,
+            "a fit-content item is its content: expected 120, got {aside} \
+             ({main} is the row -- the item stretched, which is what `auto` \
+             does and what `fit-content` exists to refuse)"
+        );
+        assert!(
+            main >= 1500.0,
+            "the sibling must still fill the row it forced: expected >= 1500, \
+             got {main}"
+        );
+    }
+
+    /// The other half of the same rule, and the one that stops the fix from
+    /// being "never stretch": an `auto` sibling in that same row still does.
+    #[test]
+    fn an_auto_sibling_in_the_same_row_still_stretches() {
+        let mut container = fit_content_row(Length::Auto);
+        layout_grid_container(&mut container, 1200.0, 800.0);
+
+        let aside = container.children[0].dimensions.border_box().height;
+        assert!(
+            aside >= 1500.0,
+            "`height: auto` still stretches to the row: expected >= 1500, got \
+             {aside} (a pass that keys off the recorded content height instead \
+             of the `fit-content` keyword shrinks this one too)"
+        );
+    }
+
+    /// `display: none` children take no grid slot, and the correction reads a
+    /// per-item vector that was filled by a loop skipping them. Off-by-one
+    /// here would size the fit-content item from its neighbour's content.
+    #[test]
+    fn a_display_none_sibling_does_not_shift_the_fit_content_correction() {
+        let mut container = fit_content_row(Length::FitContent);
+        let mut hidden_style = ComputedStyle::new();
+        hidden_style.display = Display::None;
+        container
+            .children
+            .insert(0, LayoutBox::new(BoxType::Block, hidden_style));
+
+        layout_grid_container(&mut container, 1200.0, 800.0);
+
+        let aside = container.children[1].dimensions.border_box().height;
+        assert!(
+            (aside - 120.0).abs() < 0.51,
+            "the fit-content item is still 120 with a display:none sibling \
+             ahead of it, got {aside}"
         );
     }
 

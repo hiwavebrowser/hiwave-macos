@@ -329,6 +329,19 @@ pub enum Length {
     Vmax(f32),
     /// Auto.
     Auto,
+    /// `fit-content` — css-sizing-3 §4.1.
+    ///
+    /// Content-sized like `auto`, but it is NOT `auto`, and that distinction is
+    /// the whole reason the keyword exists: a grid or flex item only stretches
+    /// to its area when its size is `auto`, so `height: fit-content` is how a
+    /// page opts one item out of stretching. Parsing it away as `auto` (which
+    /// is what happened before this variant existed — `parse_length` returned
+    /// `None` and the declaration was dropped) makes the item stretch, which is
+    /// the opposite of what it asks for.
+    ///
+    /// Everywhere that sizes content it behaves exactly as `auto`; only the
+    /// stretch decision may tell the two apart.
+    FitContent,
     /// Zero.
     #[default]
     Zero,
@@ -367,6 +380,7 @@ impl Length {
             Length::Vmin(vmin) => vmin / 100.0 * viewport_width.min(viewport_height),
             Length::Vmax(vmax) => vmax / 100.0 * viewport_width.max(viewport_height),
             Length::Auto => 0.0, // Context-dependent
+            Length::FitContent => 0.0, // Context-dependent, exactly as Auto
             Length::Zero => 0.0,
             Length::Min(pair) => {
                 let a = pair.0.to_px_with_viewport(
@@ -2680,6 +2694,9 @@ pub fn parse_length(value: &str) -> Option<Length> {
     if value == "auto" {
         return Some(Length::Auto);
     }
+    if value == "fit-content" {
+        return Some(Length::FitContent);
+    }
     if value == "0" {
         return Some(Length::Zero);
     }
@@ -2885,6 +2902,23 @@ mod tests {
         assert_eq!(parse_length("1.5em"), Some(Length::Em(1.5)));
         assert_eq!(parse_length("50%"), Some(Length::Percent(50.0)));
         assert_eq!(parse_length("auto"), Some(Length::Auto));
+    }
+
+    /// `fit-content` must parse, and it must NOT parse as `auto`.
+    ///
+    /// Returning `None` here is what shipped: the declaration was dropped and
+    /// `height` kept its `auto` initial value, so `height: fit-content` made a
+    /// grid item stretch — the one thing the keyword is written to prevent.
+    /// Mapping it to `Length::Auto` would be the same defect with a parse
+    /// result attached, which is why this asserts the variant and not just
+    /// `is_some()`.
+    #[test]
+    fn fit_content_parses_and_is_not_auto() {
+        assert_eq!(parse_length("fit-content"), Some(Length::FitContent));
+        assert_eq!(parse_length("  fit-content  "), Some(Length::FitContent));
+        assert_ne!(parse_length("fit-content"), Some(Length::Auto));
+        // Content-sized like auto everywhere that resolves a used value.
+        assert_eq!(Length::FitContent.to_px(16.0, 16.0, 500.0), 0.0);
     }
 
     #[test]
