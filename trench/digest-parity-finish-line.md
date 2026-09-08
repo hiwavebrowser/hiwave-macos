@@ -7387,3 +7387,22 @@ Two things in the macOS board that are not mine and are worth someone's time:
   measurable for the first time.
 - **`images-intrinsic` reads 74.98% within tolerance**, the worst paint on the
   board, and no open branch addresses it.
+
+### Addendum (night 44's PR, closed out 2026-09-08 13:20Z)
+
+**#186 (the seat control) merged** — `develop` is now `3ec4e8b`. It sat green and
+conflict-free for 55 hours; CI never moved off `65fa079`'s first green run.
+
+The queue state at that moment is the part worth recording, because it sharpens
+the question this digest has carried since 09-03. **All 16 engine PRs are still
+open**, the oldest (#167) eleven days. The one thing that merged in that window
+was the PR with **zero `crates/` changes**.
+
+So "the campaign is review-bound" is not quite the right diagnosis, and the
+sharper version should replace it in future digests: the reviewer is active and
+merging — instrument work goes in, engine work does not. That is a different
+problem from an unattended queue, and #176 (−55% of the corpus's geometry error,
+open since 09-01) is still the case that makes it expensive.
+
+Recorded by night 44's session on closing its PR watch; no engine claim attaches
+to this note.
