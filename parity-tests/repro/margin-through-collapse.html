@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>n43 repro — parent/child margin through-collapse + form-control margins</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 14px; padding: 20px; }
+  .section { background: white; padding: 15px; margin-bottom: 15px; border: 1px solid #ddd; }
+  .title { font-size: 12px; margin-bottom: 10px; padding-bottom: 5px; border-bottom: 1px solid #eee; }
+  .kid { background: #4a90d9; color: white; padding: 8px; margin: 4px 0; }
+  .grey { background: #e0e0e0; padding: 8px; margin: 4px 0; }
+  .padded { padding-top: 15px; }
+  .row { display: flex; }
+  .item { flex: 1; background: #fff3cd; }
+  ul li { padding: 8px 12px; margin: 2px 0; background: #f0f0f0; }
+  button { padding: 8px 16px; margin: 4px; border: none; background: #007bff; color: white; }
+  input[type="text"] { border: 2px solid #4a90d9; padding: 8px; margin: 4px 0; width: 200px; }
+  input[type="checkbox"] { width: 20px; height: 20px; }
+</style>
+</head>
+<body>
+  <!-- A: title mb 10 / open wrapper / kid mt 4 → kid at max(10,4) below the title; wrapper-in-wrapper too -->
+  <div class="section">
+    <div class="title">A. through-collapse: first child, chain, last child</div>
+    <div class="wrapper">
+      <div class="kid">Direct child (mt 4 collapses with title's mb 10)</div>
+      <div class="wrapper">
+        <div class="grey">Nested (mt 4 through two wrappers, collapses with kid's mb 4)</div>
+      </div>
+      <div class="kid">Another direct child</div>
+    </div>
+  </div>
+  <!-- B: padding closes the edge — margins stay inside -->
+  <div class="section">
+    <div class="title">B. negative control: padded wrapper keeps the margin inside</div>
+    <div class="wrapper padded">
+      <div class="kid">Child inside a padding-top:15px wrapper (sits at +4 under the padding)</div>
+    </div>
+  </div>
+  <!-- C: flex items are formatting roots — margins stay inside the item -->
+  <div class="section">
+    <div class="title">C. flex item keeps its child's margins inside</div>
+    <div class="row">
+      <div class="item"><div class="kid">Item child (mt 4 stays inside the item)</div></div>
+      <div class="item"><div class="grey">Second item</div></div>
+    </div>
+  </div>
+  <!-- D: ul with li margins: first/last li margins escape the ul -->
+  <div class="section">
+    <div class="title">D. list: first/last item margins collapse through the ul</div>
+    <ul>
+      <li>First</li>
+      <li>Second</li>
+      <li>Last</li>
+    </ul>
+  </div>
+  <!-- E: form controls carry their margins; checkbox baseline is its bottom edge -->
+  <div class="section">
+    <div class="title">E. form-control margins in the line box</div>
+    <div><input type="text" placeholder="Text input (margin 4px 0)"></div>
+    <div><input type="checkbox" id="c1"> <label for="c1">Checkbox</label></div>
+    <div><button>Active Button</button><button>Another Button</button></div>
+  </div>
+</body>
+</html>
