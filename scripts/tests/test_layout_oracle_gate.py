@@ -176,6 +176,51 @@ def test_the_border_box_is_what_joins_to_chrome():
     assert compare_case("t", chrome, rk_doc(box))["green"]
 
 
+def test_a_transformed_box_joins_on_its_visual_rect_not_its_layout_rect():
+    """getBoundingClientRect is POST-transform; CSS transforms do not lay out.
+
+    Scored against `border_box`, a box the renderer translates reads as a
+    layout defect that isn't there — and getting its layout position RIGHT
+    makes the reported delta bigger. sticky-scroll's `.overflow-content`
+    (`translate(-50%, -50%)`) was 139.53px "out of place" while sitting
+    exactly where it belonged.
+    """
+    chrome = chrome_doc(chrome_el("body > div", "div", rect(837.96875, 1051.25, 300, 300)))
+    box = rk_box("body > div", "div", rect(987.96875, 1201.25, 300, 300))
+    box["visual_border_box"] = rect(837.96875, 1051.25, 300, 300)
+    assert compare_case("t", chrome, rk_doc(box))["green"], (
+        "a box whose visual rect matches Chrome is geometry-green"
+    )
+
+
+def test_an_untransformed_box_still_joins_on_its_border_box():
+    """The preference must not become a requirement.
+
+    Only transformed boxes carry `visual_border_box`; every other box in the
+    corpus would go unscored if its absence stopped the join.
+    """
+    chrome = chrome_doc(chrome_el("body > div", "div", rect(0, 0, 100, 100)))
+    box = rk_box("body > div", "div", rect(0, 0, 100, 100))
+    assert "visual_border_box" not in box
+    assert compare_case("t", chrome, rk_doc(box))["green"]
+
+
+def test_a_wrong_visual_rect_is_not_excused_by_a_right_layout_rect():
+    """The visual rect REPLACES the layout rect for this join, it does not
+    join alongside it. Falling back to `border_box` when the visual rect fails
+    would hide every real transform defect — RustKit paints new_tab's `kbd`
+    chips 5% large from a `:hover` rule it should not be matching, and that is
+    a defect the oracle must be able to see.
+    """
+    chrome = chrome_doc(chrome_el("body > div", "div", rect(0, 0, 100, 100)))
+    box = rk_box("body > div", "div", rect(0, 0, 100, 100))
+    box["visual_border_box"] = rect(0, 0, 105, 105)
+    result = compare_case("t", chrome, rk_doc(box))
+    assert not result["green"]
+    axes = {f["axis"] for f in result["failures"]}
+    assert axes == {"width", "height"}, axes
+
+
 # ---------------------------------------------------------------------------
 # The ways a box could go unscored
 # ---------------------------------------------------------------------------
