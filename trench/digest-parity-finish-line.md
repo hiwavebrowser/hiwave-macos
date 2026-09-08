@@ -7406,3 +7406,68 @@ open since 09-01) is still the case that makes it expensive.
 
 Recorded by night 44's session on closing its PR watch; no engine claim attaches
 to this note.
+
+### Addendum (2026-09-08, later) — #170 merged, and the ratchet's last step is measurable
+
+Closing out night 27's PR watch. Three things happened after the night-44
+addendum above was written, and one of them corrects it.
+
+**The queue moved, and engine work was part of what moved.** `develop` is now
+`3cee84b` and `master` is `4b3fe5d`:
+
+| PR | base | landed |
+|---|---|---|
+| **#185** `n43-css-selectors-block-flow` | develop | **engine** — `00950d4`, 441 lines across `rustkit-layout` and `rustkit-engine` |
+| **#187** `n46-grid-aspect-ratio` | develop | **engine** — `fbbb8f0`, 349 lines across `grid.rs` and `lib.rs` |
+| #186 `n44-seat-control-oracle` | develop | instrument |
+| **#170** `develop-receipt-pile-manifest` | develop | docs (this watch) |
+| **#167** `e0b-ratchet-seed` | master | the ratchet floor |
+| **#172** `n28-ratchet-newly-measurable` | master | the ratchet fixes |
+
+The night-44 addendum sharpened the diagnosis to *"the reviewer is active and
+merging — instrument work goes in, engine work does not."* **That was falsified
+within hours of being written.** #185 and #187 are engine PRs with 790 lines of
+`crates/` between them and both merged. Open PRs went 17 → 11. The honest
+version is narrower: the queue is slow and it was eleven days deep, but it is
+not selectively rejecting engine work. Recorded because this campaign logs the
+reasoning that turned out wrong, and I would rather correct another seat's note
+than let it harden into a premise.
+
+**The ratchet risk from 08-30 is now one step from closed, and the step is
+identifiable.** Both halves reached `master`, in this order: the seed
+(`99b4612`, #167) and then the fixes (`6006789`/`4e8655b`, #172). So the floor
+is committed *and* `newly_measurable` / `discrete_withheld` / `geometry_band`
+are live. But the committed floor was written by the **old** script:
+
+```
+floor schema: 1 | geometry_band: ABSENT | cases carry discrete_withheld: False
+```
+
+Run master's current `ratchet_gate.py` against master's committed floor, with a
+control:
+
+```
+CONTROL  current == committed floor                    exit 2  RATCHET holds
+PROBE    develop's discrete profile vs that floor      exit 1  REGRESSION
+   gradient-backgrounds: NEW discrete failure missing_clip::…linear-6
+   (floor predates discrete_withheld — re-seed to classify)
+   tighten-eligible: image-gallery
+```
+
+**The fix works exactly as designed and the protection is not yet active.**
+`#172` turned a silent misclassification into a loud one that names its own
+remedy — that is the whole improvement, and it is worth having. But the promote
+still exits 1 until master's floor is **re-cut under schema 2** from a current
+nightly, which is precisely the "re-seed as a step of the promote ceremony"
+already ledgered on 08-31. One step, identified, and cheap.
+
+**No fresh `develop` receipt exists for `3cee84b`.** Two engine PRs landed since
+the last one, so the standing `2/26` is now a receipt of a superseded tree —
+the same staleness night 27 and night 29 both hit. The mechanism that fixed it
+last time merged *with* #170: a docs-only PR whose `crates/` is byte-identical
+to `develop` is a receipt generator, and there is no longer one open. Cutting a
+fresh one is the cheapest way to re-measure and is left as the next night's
+call rather than started here.
+
+Night 27's watch ends: #170 is merged, the subscription is closed, and the
+check-ins are stopped.
