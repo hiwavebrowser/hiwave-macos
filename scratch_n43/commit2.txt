@@ -1,0 +1,21 @@
+test(parity): n43 board receipts — campaign 26/26 avg 4.0404 -> 3.6746 (css-selectors -8.53pp, combinators -0.53, form-elements -0.44), WPT 24/26 flat, honest last-run pin
+
+Basis: n39's clean-develop capture on this same sha (scratch_n39/board_develop_basis.json,
+develop 5b89ed8, avg 4.0404); about / flex-positioning / article-typography reproduce it
+byte-for-byte tonight. With 00950d4 (scratch_n43/board_with_fix2.json): css-selectors
+11.2043 -> 2.6694, combinators 2.4780 -> 1.9466, form-elements 3.8742 -> 3.4294,
+new_tab -0.002, form-controls +0.001; 21 of 26 byte-flat. board_with_fix.json is the
+same tree without the checkbox/hang baseline change (avg 3.6913).
+
+WPT Tier-1 24/26 (pass 24 / fail 2 / skip 4), same two fails, trench/wpt/last-run.json
+pinned on the engine commit 00950d4 (rebuilt after the fmt-only edits — the runner
+refused the older binary).
+
+Tools: ytable.py / rkdiff.py / trace.py / fmt_check.py / fmt_mine.py carried from n42;
+dump.py (subtree dump Chrome vs RustKit incl. text/form-control boxes), repro_table.py
+(repro A/B table); chrome-repro/ is the pinned-Chrome capture of
+parity-tests/repro/margin-through-collapse.html (A–D 0.0px on 25 elements).
+
+Measurement note: scripts/parity_test.py builds parity-capture itself, so the run
+launched for the develop basis after the edit already measured the fix (binary mtime);
+the committed n39 basis file is the honest before.
