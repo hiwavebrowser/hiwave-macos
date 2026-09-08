@@ -7750,3 +7750,26 @@ side's receipt attributable. Either is correct; that is why.
 - `cargo fmt` on `rustkit-layout` reformats `flex.rs`/`grid.rs`/`text.rs` that
   are already unformatted on `develop`; ran it once, staged nothing from it,
   and verified the committed `lib.rs` byte-equal to a pure merge.
+
+### Addendum (2026-09-08, 15:0xZ) — the queue is empty
+
+Every PR against `develop` merged today: #170 #175 #176 #177 #183 #185 #186
+#187 (Pete, morning), then #174 #178 #180 #181 #184 #179 #182 on their
+restacked tips. **`develop` is `04562f2`.** Twelve engine-bearing PRs in one
+afternoon; the last four restacks were `last-run.json` and
+`parity-baseline/**` receipt files only, resolved the same way each time.
+
+What this means for the next night, stated once:
+
+- **No macOS receipt exists for `04562f2` itself.** Every receipt today was a
+  PR tip: the newest is #182's on `4011399`, which is `04562f2` minus nothing
+  but the merge commit — so it is the closest thing to a `develop` baseline
+  the campaign has, and the next P-item should measure against it rather than
+  against `5b89ed8`'s numbers, which are now seven-to-twelve PRs stale.
+- **Two things landed unmeasured on the receipt platform:** #185's
+  `form-elements` regression (the 09-04 stop-rule entry, 140 boxes worsened
+  on this seat) and the #184/#183 column-width overlap. Both are on `develop`
+  now. The 09-04 entry's decision — revert or accept #185's trade — is still
+  Pete's and still open.
+- #179 and #180 both merged; the mutual-restack surprise above resolved as
+  predicted (one more `lib.rs`-free restack on `last-run.json`).
