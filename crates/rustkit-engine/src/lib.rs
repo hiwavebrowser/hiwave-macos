@@ -1682,6 +1682,10 @@ impl Engine {
             // layout() path stacks margins additively (gap = bottom + top), which
             // ran every text page taller than Chrome.
             let mut margin_context = rustkit_layout::MarginCollapseContext::new();
+            // The root element's margins never collapse with its children's
+            // (CSS 2.1 §8.3.1): body's top margin (and the h1 chain under it)
+            // collapses with body's siblings and stays under html's top edge.
+            margin_context.children_are_formatting_roots = true;
             let mut float_context = rustkit_layout::FloatContext::new();
             root_box.layout_with_collapse(
                 &containing_block,
@@ -2235,6 +2239,39 @@ impl Engine {
         segment
     }
 
+    /// Attach element identity so the geometry oracle can join this box to
+    /// Chrome's selector-keyed rects.
+    ///
+    /// One implementation for every box built from an element, because the
+    /// branches that build REPLACED and FORM-CONTROL boxes return before the
+    /// generic path and so carried no identity at all: every `<img>` and every
+    /// `<input>`/`<select>`/`<textarea>`/leaf `<button>` in the corpus reached
+    /// Gate A as a `missing_box` join failure and was never compared (measured
+    /// 2026-08-22 — all 14 of images-intrinsic's join failures are its images).
+    ///
+    /// Anonymous, text and pseudo-element boxes are built elsewhere and
+    /// correctly keep `identity: None`; the `Option` is what stops the oracle
+    /// pairing them positionally with real Chrome elements.
+    fn attach_identity(
+        layout_box: &mut LayoutBox,
+        selector_path: &str,
+        attributes: &HashMap<String, String>,
+        tag_lower: &str,
+        element_ids: &Cell<usize>,
+    ) {
+        if selector_path.is_empty() {
+            return;
+        }
+        let reported = Self::reported_selector(selector_path, attributes);
+        let next_id = element_ids.get() + 1;
+        element_ids.set(next_id);
+        layout_box.set_identity(ElementIdentity {
+            element_id: next_id,
+            tag: tag_lower.to_string(),
+            selector: reported,
+        });
+    }
+
     /// The selector Chrome REPORTS for an element, given its structural path.
     ///
     /// Chrome's `getSelector()` short-circuits to `#id` before walking the tree,
@@ -2520,7 +2557,7 @@ impl Engine {
                         },
                     };
 
-                    return LayoutBox::new(
+                    let mut b = LayoutBox::new(
                         BoxType::Image {
                             url: src,
                             natural_width,
@@ -2528,6 +2565,46 @@ impl Engine {
                         },
                         style,
                     );
+                    Self::attach_identity(
+                        &mut b,
+                        selector_path,
+                        attributes,
+                        &tag_lower,
+                        element_ids,
+                    );
+                    return b;
+                }
+
+                // Inline <svg> is a replaced element: it is sized by its own
+                // width=/height= presentational hints (author CSS wins; the
+                // CSS replaced-element fallback is 300×150 without them)
+                // and its SVG children never generate CSS boxes. It used to
+                // get NO box at all — an empty block with no visible styling
+                // is dropped below — and the shelf's search icon survived
+                // only because the whitespace between <circle> and <path>
+                // left a phantom 18px text line inside it; collapsing that
+                // whitespace correctly made the icon vanish and shifted the
+                // command input 28px left. The graphics are not painted
+                // (inline SVG paint is its own lane); the geometry is what
+                // the flex row needs, and it now matches Chrome's 14×14.
+                if tag_lower == "svg" {
+                    let attr_px = |name: &str| {
+                        attributes
+                            .get(name)
+                            .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+                    };
+                    if matches!(style.width, rustkit_css::Length::Auto) {
+                        style.width = rustkit_css::Length::Px(attr_px("width").unwrap_or(300.0));
+                    }
+                    if matches!(style.height, rustkit_css::Length::Auto) {
+                        style.height = rustkit_css::Length::Px(attr_px("height").unwrap_or(150.0));
+                    }
+                    if style.display == rustkit_css::Display::Inline {
+                        style.display = rustkit_css::Display::InlineBlock;
+                    }
+                    let mut svg_box = LayoutBox::new(BoxType::Block, style.clone());
+                    Self::transfer_positioning(&mut svg_box, &style);
+                    return svg_box;
                 }
 
                 // Handle form controls
@@ -2579,6 +2656,13 @@ impl Engine {
                     // unit tests missed it by hand-building boxes; only the
                     // production path exercises this.
                     let mut b = LayoutBox::new(BoxType::FormControl(control), style);
+                    Self::attach_identity(
+                        &mut b,
+                        selector_path,
+                        attributes,
+                        &tag_lower,
+                        element_ids,
+                    );
                     b.node_id = Some(node.id.raw());
                     if self.building_focus.get() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
@@ -2613,13 +2697,21 @@ impl Engine {
                             .cloned()
                             .unwrap_or_else(|| "button".to_string());
 
-                        return LayoutBox::new(
+                        let mut b = LayoutBox::new(
                             BoxType::FormControl(rustkit_layout::FormControlType::Button {
                                 label,
                                 button_type,
                             }),
                             style,
                         );
+                        Self::attach_identity(
+                            &mut b,
+                            selector_path,
+                            attributes,
+                            &tag_lower,
+                            element_ids,
+                        );
+                        return b;
                     }
                     // Element children present: fall through to normal box
                     // construction so the children lay out inside the button.
@@ -2650,6 +2742,13 @@ impl Engine {
                             cols,
                         }),
                         style,
+                    );
+                    Self::attach_identity(
+                        &mut b,
+                        selector_path,
+                        attributes,
+                        &tag_lower,
+                        element_ids,
                     );
                     b.node_id = Some(node.id.raw());
                     if self.building_focus.get() == Some(node.id) {
@@ -2695,6 +2794,13 @@ impl Engine {
                         }),
                         style,
                     );
+                    Self::attach_identity(
+                        &mut b,
+                        selector_path,
+                        attributes,
+                        &tag_lower,
+                        element_ids,
+                    );
                     b.node_id = Some(node.id.raw());
                     if self.building_focus.get() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
@@ -2731,20 +2837,13 @@ impl Engine {
 
                 Self::transfer_positioning(&mut layout_box, &style);
 
-                // Attach element identity so the geometry oracle can join this
-                // box to Chrome's selector-keyed rects. Only ELEMENT boxes reach
-                // here; anonymous, text and pseudo-element boxes are built
-                // elsewhere and correctly keep `identity: None`.
-                if !selector_path.is_empty() {
-                    let reported = Self::reported_selector(selector_path, attributes);
-                    let next_id = element_ids.get() + 1;
-                    element_ids.set(next_id);
-                    layout_box.set_identity(ElementIdentity {
-                        element_id: next_id,
-                        tag: tag_lower.clone(),
-                        selector: reported,
-                    });
-                }
+                Self::attach_identity(
+                    &mut layout_box,
+                    selector_path,
+                    attributes,
+                    &tag_lower,
+                    element_ids,
+                );
 
                 // Every element box remembers which DOM node it came from.
                 // This is what lets a click resolve to an element (focus,
@@ -2884,6 +2983,54 @@ impl Engine {
                 ) {
                     layout_box.children.push(after_box);
                 }
+
+                // css-text §4.1.1: collapsible spaces collapse ACROSS text
+                // node boundaries within one inline formatting context —
+                // "any collapsible space immediately following another
+                // collapsible space ... is collapsed", even when a comment,
+                // a display:none element or a hidden element sits between
+                // the two text nodes. The DOM keeps them as separate nodes
+                // (`</h1> <!-- c --> <!-- d --> <h2>` is THREE
+                // whitespace-only text nodes) and the boundary strip below
+                // reads only the immediate siblings, so the middle run saw a
+                // text box on each side, called both inline-level, and
+                // survived as a 24px line box between two blocks
+                // (images-intrinsic: every block after the <h1> sat 24px
+                // low; a second and third space also survived between two
+                // inline siblings). Join adjacent text boxes first — bare
+                // text siblings of one element always share the parent's
+                // computed style (pseudo-element text lives inside its own
+                // Inline wrapper), so the join loses nothing — and let the
+                // strip run on the joined run. Pre-family runs are joined
+                // verbatim: nothing collapses there.
+                let mut joined: Vec<LayoutBox> = Vec::with_capacity(layout_box.children.len());
+                for child in layout_box.children.drain(..) {
+                    let joins_previous = matches!(child.box_type, BoxType::Text(_))
+                        && matches!(joined.last().map(|b| &b.box_type), Some(BoxType::Text(_)));
+                    if !joins_previous {
+                        joined.push(child);
+                        continue;
+                    }
+                    let BoxType::Text(next) = child.box_type else {
+                        unreachable!("joins_previous requires a text box");
+                    };
+                    let last = joined.last_mut().expect("joins_previous requires a previous box");
+                    let collapsible = !matches!(
+                        last.style.white_space,
+                        rustkit_css::WhiteSpace::Pre
+                            | rustkit_css::WhiteSpace::PreWrap
+                            | rustkit_css::WhiteSpace::PreLine
+                            | rustkit_css::WhiteSpace::BreakSpaces
+                    );
+                    if let BoxType::Text(ref mut run) = last.box_type {
+                        if collapsible && run.ends_with(' ') && next.starts_with(' ') {
+                            run.push_str(&next[1..]);
+                        } else {
+                            run.push_str(&next);
+                        }
+                    }
+                }
+                layout_box.children = joined;
 
                 // css-text §4.2 phase 2: collapsed spaces at segment
                 // boundaries do not render. A text child's leading space is
@@ -3471,6 +3618,14 @@ impl Engine {
                 style.display = rustkit_css::Display::Inline;
             }
             "canvas" => {
+                style.display = rustkit_css::Display::Inline;
+            }
+            // Chrome's UA sheet has no display rule for <svg>: an inline
+            // svg is an inline-level replaced element. The `_ => {}`
+            // fallback below leaves ComputedStyle's default (Block), which
+            // made every inline svg a block — and, being childless with no
+            // visible styling, a dropped one.
+            "svg" => {
                 style.display = rustkit_css::Display::Inline;
             }
             "iframe" => {
@@ -9279,6 +9434,70 @@ fn parse_grid_line_shorthand(
     Some((start, rustkit_css::GridLine::Auto))
 }
 
+/// Compose two page-space affines: `outer ∘ inner`.
+///
+/// Same [a, b, c, d, e, f] convention as `TransformList::to_matrix` — a point
+/// maps to `(a·x + c·y + e, b·x + d·y + f)`.
+fn compose_affine(outer: [f32; 6], inner: [f32; 6]) -> [f32; 6] {
+    [
+        outer[0] * inner[0] + outer[2] * inner[1],
+        outer[1] * inner[0] + outer[3] * inner[1],
+        outer[0] * inner[2] + outer[2] * inner[3],
+        outer[1] * inner[2] + outer[3] * inner[3],
+        outer[0] * inner[4] + outer[2] * inner[5] + outer[4],
+        outer[1] * inner[4] + outer[3] * inner[5] + outer[5],
+    ]
+}
+
+/// The page-space affine this box's own `transform` contributes, or `None`
+/// when it has none.
+///
+/// This MIRRORS the painter (`DisplayCommand::PushTransform` in
+/// rustkit-layout): the same `to_matrix(border_box.width, border_box.height)`
+/// and the same origin resolution. The exported visual rect and the painted
+/// pixels must not be able to disagree — if this drifts from the painter, the
+/// oracle starts scoring a box the renderer never drew.
+///
+/// A transform applies about its origin, so the page-space affine is
+/// `T(origin) · M · T(-origin)`.
+fn own_transform_affine(layout_box: &LayoutBox) -> Option<[f32; 6]> {
+    if layout_box.style.transform.is_identity() {
+        return None;
+    }
+    let border_box = layout_box.dimensions.border_box();
+    let m = layout_box
+        .style
+        .transform
+        .to_matrix(border_box.width, border_box.height);
+    let ox = border_box.x
+        + layout_box
+            .style
+            .transform_origin
+            .x
+            .to_px(16.0, 16.0, border_box.width);
+    let oy = border_box.y
+        + layout_box
+            .style
+            .transform_origin
+            .y
+            .to_px(16.0, 16.0, border_box.height);
+    let to_origin = [1.0, 0.0, 0.0, 1.0, -ox, -oy];
+    let from_origin = [1.0, 0.0, 0.0, 1.0, ox, oy];
+    Some(compose_affine(from_origin, compose_affine(m, to_origin)))
+}
+
+/// Axis-aligned bounding box of a rect under an affine — what
+/// `getBoundingClientRect()` returns, which is the geometry oracle's baseline.
+fn transformed_bounds(m: [f32; 6], x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
+    let map = |px: f32, py: f32| (m[0] * px + m[2] * py + m[4], m[1] * px + m[3] * py + m[5]);
+    let corners = [map(x, y), map(x + w, y), map(x, y + h), map(x + w, y + h)];
+    let min_x = corners.iter().map(|c| c.0).fold(f32::INFINITY, f32::min);
+    let max_x = corners.iter().map(|c| c.0).fold(f32::NEG_INFINITY, f32::max);
+    let min_y = corners.iter().map(|c| c.1).fold(f32::INFINITY, f32::min);
+    let max_y = corners.iter().map(|c| c.1).fold(f32::NEG_INFINITY, f32::max);
+    (min_x, min_y, max_x - min_x, max_y - min_y)
+}
+
 /// Convert one layout box to its JSON form for `export_layout_json`.
 ///
 /// Module-level rather than nested so it can be tested directly: the engine
@@ -9286,11 +9505,28 @@ fn parse_grid_line_shorthand(
 /// SKIP when none is present, which would make an identity test vacuous on any
 /// machine without a GPU adapter.
 fn layout_box_to_json(layout_box: &LayoutBox) -> serde_json::Value {
+    layout_box_to_json_under(layout_box, None)
+}
+
+/// `ancestor` is the composed transform of everything above this box, in page
+/// space. `None` means no transform is in effect and the layout rect IS the
+/// visual rect, so nothing extra is emitted.
+fn layout_box_to_json_under(
+    layout_box: &LayoutBox,
+    ancestor: Option<[f32; 6]>,
+) -> serde_json::Value {
+    let effective = match (ancestor, own_transform_affine(layout_box)) {
+        (None, None) => None,
+        (Some(a), None) => Some(a),
+        (None, Some(o)) => Some(o),
+        (Some(a), Some(o)) => Some(compose_affine(a, o)),
+    };
+
     // Element identity, when this box came from a DOM element. Absent
     // on anonymous and text boxes — the geometry oracle must SKIP
     // those rather than pair them positionally with Chrome elements.
     // Emitting a placeholder here would manufacture geometry failures.
-    let mut value = layout_box_body_to_json(layout_box);
+    let mut value = layout_box_body_to_json(layout_box, effective);
     if let (Some(identity), Some(object)) = (layout_box.identity(), value.as_object_mut()) {
         object.insert("element_id".into(), identity.element_id.into());
         object.insert("tag".into(), identity.tag.clone().into());
@@ -9299,7 +9535,19 @@ fn layout_box_to_json(layout_box: &LayoutBox) -> serde_json::Value {
     value
 }
 
-fn layout_box_body_to_json(layout_box: &LayoutBox) -> serde_json::Value {
+fn rect_to_json(rect: &rustkit_layout::Rect) -> serde_json::Value {
+    serde_json::json!({
+        "x": rect.x,
+        "y": rect.y,
+        "width": rect.width,
+        "height": rect.height,
+    })
+}
+
+fn layout_box_body_to_json(
+    layout_box: &LayoutBox,
+    effective_transform: Option<[f32; 6]>,
+) -> serde_json::Value {
     let dims = &layout_box.dimensions;
     let content = &dims.content;
     let margin_box = dims.margin_box();
@@ -9323,6 +9571,13 @@ fn layout_box_body_to_json(layout_box: &LayoutBox) -> serde_json::Value {
                 }
             })
         }
+        // Replaced elements and form controls carry the four box-model rects
+        // like any other element box. `rect` (the CONTENT rect) stays for
+        // existing consumers, but it must not be the only rect: Chrome's
+        // baseline is `getBoundingClientRect`, i.e. the BORDER box, and the
+        // geometry oracle falls back to `rect` when `border_box` is absent —
+        // so a bordered image was set up to be compared content-box against
+        // border-box and to read a constant deficit as a layout defect.
         BoxType::Image {
             natural_width,
             natural_height,
@@ -9332,32 +9587,33 @@ fn layout_box_body_to_json(layout_box: &LayoutBox) -> serde_json::Value {
                 "type": "image",
                 "natural_width": natural_width,
                 "natural_height": natural_height,
-                "rect": {
-                    "x": content.x,
-                    "y": content.y,
-                    "width": content.width,
-                    "height": content.height
-                }
+                "rect": rect_to_json(content),
+                "content_rect": rect_to_json(content),
+                "padding_box": rect_to_json(&padding_box),
+                "border_box": rect_to_json(&border_box),
+                "margin_box": rect_to_json(&margin_box),
             })
         }
         BoxType::FormControl(ctrl) => {
             return serde_json::json!({
                 "type": "form_control",
                 "control_type": format!("{:?}", ctrl),
-                "rect": {
-                    "x": content.x,
-                    "y": content.y,
-                    "width": content.width,
-                    "height": content.height
-                }
+                "rect": rect_to_json(content),
+                "content_rect": rect_to_json(content),
+                "padding_box": rect_to_json(&padding_box),
+                "border_box": rect_to_json(&border_box),
+                "margin_box": rect_to_json(&margin_box),
             })
         }
     };
 
-    let children: Vec<serde_json::Value> =
-        layout_box.children.iter().map(layout_box_to_json).collect();
+    let children: Vec<serde_json::Value> = layout_box
+        .children
+        .iter()
+        .map(|child| layout_box_to_json_under(child, effective_transform))
+        .collect();
 
-    serde_json::json!({
+    let mut json = serde_json::json!({
         "type": box_type,
         "content_rect": {
             "x": content.x,
@@ -9402,7 +9658,34 @@ fn layout_box_body_to_json(layout_box: &LayoutBox) -> serde_json::Value {
             "left": dims.border.left
         },
         "children": children
-    })
+    });
+
+    // CSS transforms do not change layout, so `border_box` above stays the
+    // LAYOUT rect — Gate B's attributable join and the scroll-extent readers
+    // want that box, and quietly redefining it would move them all.
+    //
+    // Chrome's committed baselines are `getBoundingClientRect()`, which is
+    // post-transform. Comparing a layout rect against it reports the
+    // renderer's own translate as a layout defect: sticky-scroll's
+    // `.overflow-content` (`translate(-50%, -50%)`) read 139.53px out of
+    // place while its layout position was correct. So the visual rect is
+    // emitted ALONGSIDE, and only where a transform is actually in effect —
+    // an untransformed box has no second rect to disagree about.
+    if let (Some(m), Some(object)) = (effective_transform, json.as_object_mut()) {
+        let (vx, vy, vw, vh) = transformed_bounds(
+            m,
+            border_box.x,
+            border_box.y,
+            border_box.width,
+            border_box.height,
+        );
+        object.insert(
+            "visual_border_box".into(),
+            serde_json::json!({ "x": vx, "y": vy, "width": vw, "height": vh }),
+        );
+    }
+
+    json
 }
 
 #[cfg(test)]
@@ -9540,6 +9823,148 @@ mod tests {
             "load_html left {} stylesheet(s) from the previous document on the view — \
              cross-document style leak",
             engine.views[&id].external_stylesheets.len()
+        );
+    }
+
+    /// An engine with nothing but what layout needs.
+    ///
+    /// `None` means this machine has no GPU adapter. Callers must NOT treat
+    /// that as a pass on a platform where an adapter is guaranteed — see
+    /// `a_replaced_element_is_built_with_its_element_identity`.
+    fn layout_only_engine() -> Option<Engine> {
+        let compositor = Compositor::new().ok()?;
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        Some(Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(
+                ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
+            ),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        })
+    }
+
+    /// Replaced elements and form controls are built by branches that return
+    /// BEFORE the general element path, so they carried no identity: every
+    /// `<img>` and `<input>` in the corpus reached the geometry oracle as a
+    /// `missing_box` join failure and was never compared at all.
+    ///
+    /// The export-side tests above did not catch it — they hand-set an
+    /// identity and asserted the JSON carries it, which it always did. Only
+    /// the production build path can say whether one is ever set.
+    ///
+    /// A GPU-less machine cannot build a layout tree, so this returns early
+    /// there rather than pretending. On macOS — the platform this campaign
+    /// measures, and the one the parity swarm runs on in CI — a missing
+    /// adapter FAILS: a guard that skips itself is not a pass.
+    ///
+    /// The skip is LOUD, and that is the point rather than politeness. A
+    /// mutation sweep on 2026-09-01 recorded this guard as a SURVIVOR —
+    /// deleting the `attach_identity` call on the `<img>` build path left the
+    /// whole suite green — and the survival was an artefact of the runner:
+    /// the trench seat has a software Vulkan adapter (SwiftShader, shipped
+    /// with the bundled Playwright Chromium) that `cargo test` does not see
+    /// unless `VK_ICD_FILENAMES` points at it. With
+    ///
+    /// ```sh
+    /// VK_ICD_FILENAMES=/opt/pw-browsers/chromium-1194/chrome-linux/vk_swiftshader_icd.json \
+    ///     cargo test -p rustkit-engine --lib
+    /// ```
+    ///
+    /// the same probe is RED. A silently-skipped guard and a passing guard
+    /// print the same word, so the run says which one it was.
+    #[test]
+    fn a_replaced_element_is_built_with_its_element_identity() {
+        let engine = match layout_only_engine() {
+            Some(engine) => engine,
+            None => {
+                if cfg!(target_os = "macos") {
+                    panic!(
+                        "no GPU adapter on a macOS runner — this guard cannot \
+                         report a pass without building a layout tree"
+                    );
+                }
+                eprintln!(
+                    "SKIPPED a_replaced_element_is_built_with_its_element_identity: \
+                     no GPU adapter, so no layout tree was built and NOTHING was \
+                     asserted. Re-run with VK_ICD_FILENAMES set to a software \
+                     Vulkan ICD to make this guard actually execute."
+                );
+                return;
+            }
+        };
+
+        let html = r#"<!DOCTYPE html><html><body>
+            <div class="container">
+              <img class="test-img" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">
+            </div>
+            <input type="text" name="q">
+            <button>Go</button>
+            <select><option>a</option></select>
+            <textarea>t</textarea>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        let mut found: Vec<(String, String)> = Vec::new();
+        fn collect(b: &LayoutBox, out: &mut Vec<(String, String)>) {
+            if matches!(
+                b.box_type,
+                BoxType::Image { .. } | BoxType::FormControl(_)
+            ) {
+                let identity = b
+                    .identity()
+                    .unwrap_or_else(|| panic!("replaced/form-control box built with no identity — the geometry oracle cannot join it"));
+                out.push((identity.tag.clone(), identity.selector.clone()));
+            }
+            for c in &b.children {
+                collect(c, out);
+            }
+        }
+        collect(&layout, &mut found);
+
+        // An identity with an EMPTY selector is worse than none: it joins
+        // nothing, and the box is then reported as a phantom Chrome collapsed
+        // rather than excluded. Boxes above `body` have no Chrome-side path.
+        fn assert_no_empty_key(b: &LayoutBox) {
+            if let Some(identity) = b.identity() {
+                assert!(
+                    !identity.selector.is_empty(),
+                    "a box was stamped with an empty join key (tag {:?})",
+                    identity.tag
+                );
+            }
+            for c in &b.children {
+                assert_no_empty_key(c);
+            }
+        }
+        assert_no_empty_key(&layout);
+
+        let tags: Vec<&str> = found.iter().map(|(t, _)| t.as_str()).collect();
+        for expected in ["img", "input", "button", "select", "textarea"] {
+            assert!(
+                tags.contains(&expected),
+                "<{expected}> produced no identified box; found {found:?}"
+            );
+        }
+        let img = found
+            .iter()
+            .find(|(t, _)| t == "img")
+            .expect("img identity");
+        assert_eq!(
+            img.1, "body > div.container > img.test-img",
+            "the image's join key must be the selector Chrome's capture reports"
         );
     }
 
@@ -10550,6 +10975,176 @@ mod tests {
     }
 
     #[test]
+    fn test_collapsible_space_collapses_across_text_node_boundaries() {
+        // css-text §4.1.1: a collapsible space following another collapsible
+        // space collapses even across text-node boundaries. Comments (and
+        // display:none / hidden elements) split one whitespace run into
+        // several DOM text nodes; the boundary strip only looked at the
+        // immediate siblings, so `</h1> <!-- --> <!-- --> <h2>` kept its
+        // MIDDLE run as a whitespace-only text box between two blocks — a
+        // 24px line box that pushed every following block down
+        // (images-intrinsic). Between two inline siblings the same shape
+        // produced three spaces where Chrome renders one; inside a run,
+        // "a <!-- --> b" became "a " + " b".
+        let html = r#"<!DOCTYPE html>
+            <html><body>
+              <h1>Head</h1>
+
+              <!-- first comment -->
+              <!-- second comment -->
+
+              <h2>Sub</h2>
+              <p>alpha <!-- c --> beta</p>
+              <div><span>x</span> <!-- c --> <span>y</span></div>
+              <pre style="white-space: pre">one <!-- c --> two</pre>
+            </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        };
+
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        // Every text box with the box types of its immediate siblings.
+        fn collect(b: &LayoutBox, out: &mut Vec<(String, bool, bool)>) {
+            for (i, c) in b.children.iter().enumerate() {
+                if let BoxType::Text(t) = &c.box_type {
+                    let prev_block = i > 0
+                        && matches!(b.children[i - 1].box_type, BoxType::Block | BoxType::AnonymousBlock);
+                    let next_block = i + 1 < b.children.len()
+                        && matches!(b.children[i + 1].box_type, BoxType::Block | BoxType::AnonymousBlock);
+                    out.push((t.clone(), prev_block, next_block));
+                }
+                collect(c, out);
+            }
+        }
+        let mut texts = Vec::new();
+        collect(&layout, &mut texts);
+        let all: Vec<&str> = texts.iter().map(|(t, _, _)| t.as_str()).collect();
+
+        // No whitespace-only text box may sit next to a block sibling: that
+        // is the phantom line box. (The one between the two spans is real —
+        // css-text §4.1.3 keeps a single collapsed space between inlines.)
+        let phantom: Vec<&(String, bool, bool)> = texts
+            .iter()
+            .filter(|(t, p, n)| t.trim().is_empty() && (*p || *n))
+            .collect();
+        assert!(phantom.is_empty(), "whitespace-only text next to a block: {:?} (all: {:?})", phantom, all);
+        let ws_only = texts.iter().filter(|(t, _, _)| t.trim().is_empty()).count();
+        assert_eq!(ws_only, 1, "exactly one collapsed space (between the spans): {:?}", all);
+
+        // Inside a run the comment must not split (or double) the space.
+        assert!(all.contains(&"alpha beta"), "comment inside a run splits it: {:?}", all);
+        assert!(!all.iter().any(|t| *t == "alpha " || *t == " beta"), "{:?}", all);
+
+        // Pre-family runs join verbatim — both spaces around the comment stay.
+        assert!(all.contains(&"one  two"), "pre run must join verbatim: {:?}", all);
+    }
+
+    #[test]
+    fn test_inline_svg_is_a_sized_replaced_box_without_child_boxes() {
+        // An inline <svg> generated no box of its own: an empty block with
+        // no visible styling is dropped, and the shelf's 14×14 search icon
+        // existed only as the phantom whitespace line between its <circle>
+        // and <path>. A replaced element is sized by its own width=/height=
+        // (CSS fallback 300×150), author CSS wins, and its SVG children
+        // produce no CSS boxes.
+        let html = r#"<!DOCTYPE html>
+            <html><body>
+              <div style="display: flex">
+                <svg width="14" height="14" viewBox="0 0 24 24">
+                  <circle cx="11" cy="11" r="8"/>
+                  <path d="M21 21l-4.35-4.35"/>
+                </svg>
+                <input type="text">
+              </div>
+              <p><svg></svg></p>
+              <p><svg width="40" height="40" style="width: 20px"></svg></p>
+            </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        };
+
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        // Every childless, sized block box: (width, height, display).
+        fn collect(b: &LayoutBox, out: &mut Vec<(rustkit_css::Length, rustkit_css::Length, rustkit_css::Display)>) {
+            if matches!(b.box_type, BoxType::Block) && b.children.is_empty() {
+                out.push((b.style.width.clone(), b.style.height.clone(), b.style.display));
+            }
+            for c in &b.children {
+                collect(c, out);
+            }
+        }
+        let mut boxes = Vec::new();
+        collect(&layout, &mut boxes);
+        let px = |w: f32, h: f32| (rustkit_css::Length::Px(w), rustkit_css::Length::Px(h), rustkit_css::Display::InlineBlock);
+        assert!(boxes.contains(&px(14.0, 14.0)), "svg width=/height= box missing: {:?}", boxes);
+        assert!(boxes.contains(&px(300.0, 150.0)), "attribute-less svg must fall back to 300x150: {:?}", boxes);
+        assert!(boxes.contains(&px(20.0, 40.0)), "author CSS width must win over width=: {:?}", boxes);
+
+        // No <circle>/<path> box, and no whitespace text box, under the svg.
+        fn any_text(b: &LayoutBox) -> bool {
+            b.children.iter().any(|c| matches!(c.box_type, BoxType::Text(_)) || any_text(c))
+        }
+        fn svg_like(b: &LayoutBox) -> Option<&LayoutBox> {
+            if matches!(b.style.width, rustkit_css::Length::Px(w) if (w - 14.0).abs() < 0.01) {
+                return Some(b);
+            }
+            b.children.iter().find_map(svg_like)
+        }
+        let svg = svg_like(&layout).expect("svg box");
+        assert!(svg.children.is_empty() && !any_text(svg), "svg children must not generate boxes");
+    }
+
+    #[test]
     fn test_line_height_inherits_from_html_through_body() {
         // `line-height` is inherited, but rustkit only inherited it into text nodes, never
         // element->element, and layout began at <body> with no parent — so a value set on
@@ -11272,6 +11867,80 @@ mod element_identity_tests {
             "image box lost its join key"
         );
         assert_eq!(json["element_id"], 3);
+    }
+
+    /// Chrome's baseline is `getBoundingClientRect` — the BORDER box — and the
+    /// geometry gate falls back to a node's flat `rect` when `border_box` is
+    /// absent. A replaced element that exports only its CONTENT rect is
+    /// therefore compared against the wrong box, and reports its own border as
+    /// a layout defect. Both rects must be present and must differ when the
+    /// element has a border.
+    #[test]
+    fn a_replaced_element_exports_its_border_box_and_not_only_its_content_rect() {
+        use rustkit_css::ComputedStyle;
+
+        let mut image = LayoutBox::new(
+            BoxType::Image {
+                url: String::new(),
+                natural_width: 100.0,
+                natural_height: 100.0,
+            },
+            ComputedStyle::new(),
+        );
+        image.dimensions.content = Rect::new(11.0, 21.0, 100.0, 100.0);
+        image.dimensions.border.left = 1.0;
+        image.dimensions.border.right = 1.0;
+        image.dimensions.border.top = 1.0;
+        image.dimensions.border.bottom = 1.0;
+
+        let json = layout_box_to_json(&image);
+        assert_eq!(json["rect"]["width"], 100.0, "rect stays the content rect");
+        assert_eq!(json["content_rect"]["width"], 100.0);
+        assert_eq!(
+            json["border_box"]["width"], 102.0,
+            "image exported no border box, so the oracle would compare its \
+             content rect against Chrome's border box"
+        );
+        assert_eq!(json["border_box"]["x"], 10.0);
+        assert_eq!(json["border_box"]["y"], 20.0);
+        assert_eq!(json["margin_box"]["width"], 102.0);
+
+        let mut control = LayoutBox::new(
+            BoxType::FormControl(rustkit_layout::FormControlType::Button {
+                label: "Go".into(),
+                button_type: "button".into(),
+            }),
+            ComputedStyle::new(),
+        );
+        control.dimensions.content = Rect::new(5.0, 5.0, 40.0, 20.0);
+        control.dimensions.border.left = 2.0;
+        control.dimensions.border.right = 2.0;
+        let json = layout_box_to_json(&control);
+        assert_eq!(json["border_box"]["width"], 44.0);
+        assert_eq!(json["rect"]["width"], 40.0);
+    }
+
+    /// An empty selector path means "identity not tracked" — the box is above
+    /// or outside what Chrome's capture keys (html, head, foreign content).
+    /// Stamping it anyway produces an identity whose join key is the empty
+    /// string, which joins nothing and turns the box into a reported phantom
+    /// instead of an excluded one. It must also not consume an element id.
+    #[test]
+    fn an_untracked_path_stamps_no_identity_and_burns_no_id() {
+        use rustkit_css::ComputedStyle;
+
+        let ids = Cell::new(7);
+        let mut b = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        Engine::attach_identity(&mut b, "", &HashMap::new(), "html", &ids);
+        assert!(
+            b.identity().is_none(),
+            "a box with no Chrome-side path was stamped with a join key"
+        );
+        assert_eq!(ids.get(), 7, "an untracked box consumed an element id");
+
+        Engine::attach_identity(&mut b, "body > div", &HashMap::new(), "div", &ids);
+        assert_eq!(b.identity().map(|i| i.selector.clone()), Some("body > div".into()));
+        assert_eq!(ids.get(), 8);
     }
 
     /// `set_identity` is the only way in, so `element_id` and `identity` can
@@ -12820,6 +13489,166 @@ mod srcset_tests {
         assert_eq!(
             url, "https://example.com/b.png",
             "layout must resolve the WIDEST srcset candidate, absolutely"
+        );
+    }
+}
+
+#[cfg(test)]
+mod visual_rect_tests {
+    use super::*;
+
+    // ---------------------------------------------------------------
+    // The visual rect, for the geometry oracle's join.
+    //
+    // CSS transforms do not change layout, but `getBoundingClientRect()` — the
+    // whole of Chrome's committed baseline — is POST-transform. Exporting only
+    // the layout rect made the oracle report the renderer's own translate as a
+    // layout defect: sticky-scroll's `.overflow-content`
+    // (`translate(-50%, -50%)`) read 139.53px out of place while its layout
+    // position was correct, and correcting that position made the reported
+    // delta LARGER.
+    // ---------------------------------------------------------------
+
+    fn boxed(x: f32, y: f32, w: f32, h: f32, style: rustkit_css::ComputedStyle) -> LayoutBox {
+        let mut b = LayoutBox::new(BoxType::Block, style);
+        b.dimensions.content = rustkit_layout::Rect::new(x, y, w, h);
+        b
+    }
+
+    fn visual(value: &serde_json::Value) -> Option<(f32, f32, f32, f32)> {
+        let v = value.get("visual_border_box")?;
+        Some((
+            v["x"].as_f64()? as f32,
+            v["y"].as_f64()? as f32,
+            v["width"].as_f64()? as f32,
+            v["height"].as_f64()? as f32,
+        ))
+    }
+
+    /// T-RED. Without the visual rect the oracle scores 987.97 against
+    /// Chrome's 837.97 and calls a correctly-placed box 150px wrong.
+    #[test]
+    fn a_translated_box_exports_the_rect_chrome_measures() {
+        let mut style = rustkit_css::ComputedStyle::new();
+        style.transform = rustkit_css::TransformList {
+            ops: vec![rustkit_css::TransformOp::Translate(
+                rustkit_css::Length::Percent(-50.0),
+                rustkit_css::Length::Percent(-50.0),
+            )],
+        };
+        let json = layout_box_to_json(&boxed(987.96875, 1201.25, 300.0, 300.0, style));
+        let (x, y, w, h) = visual(&json).expect("a transformed box must export a visual rect");
+        assert!(
+            (x - 837.96875).abs() < 0.01 && (y - 1051.25).abs() < 0.01,
+            "translate(-50%,-50%) must move the visual rect by half the box: got ({x}, {y})"
+        );
+        assert!(
+            (w - 300.0).abs() < 0.01 && (h - 300.0).abs() < 0.01,
+            "a pure translate must not resize: got {w}x{h}"
+        );
+        let bb = &json["border_box"];
+        assert!(
+            (bb["x"].as_f64().unwrap() - 987.96875).abs() < 0.01,
+            "border_box must stay the LAYOUT rect — Gate B's attributable join \
+             and the scroll-extent readers want that box"
+        );
+    }
+
+    /// The field exists only where a transform is actually in effect. An
+    /// untransformed box has no second rect to disagree about, and emitting
+    /// one everywhere would double the size of every dump.
+    #[test]
+    fn an_untransformed_box_exports_no_visual_rect() {
+        let json = layout_box_to_json(&boxed(
+            10.0,
+            20.0,
+            30.0,
+            40.0,
+            rustkit_css::ComputedStyle::new(),
+        ));
+        assert!(
+            visual(&json).is_none(),
+            "no transform means the layout rect IS the visual rect"
+        );
+    }
+
+    /// A transform applies to the whole subtree, so a child of a transformed
+    /// box is displaced even with no transform of its own. Chrome's rect for
+    /// that child is displaced too.
+    #[test]
+    fn a_child_inherits_its_ancestors_transform() {
+        let mut style = rustkit_css::ComputedStyle::new();
+        style.transform = rustkit_css::TransformList {
+            ops: vec![rustkit_css::TransformOp::TranslateX(rustkit_css::Length::Px(100.0))],
+        };
+        let mut parent = boxed(0.0, 0.0, 200.0, 200.0, style);
+        parent.children.push(boxed(
+            10.0,
+            10.0,
+            20.0,
+            20.0,
+            rustkit_css::ComputedStyle::new(),
+        ));
+        let json = layout_box_to_json(&parent);
+        let (cx, _, _, _) = visual(&json["children"][0])
+            .expect("a child under a transform must export a visual rect");
+        assert!(
+            (cx - 110.0).abs() < 0.01,
+            "the child must carry its ancestor's +100 translate: got {cx}"
+        );
+    }
+
+    /// A scale is measured about `transform-origin`, which defaults to the
+    /// box's centre — the same origin the painter uses. Getting the origin
+    /// wrong moves the box while leaving its size right, which is exactly the
+    /// error a size-only assertion cannot see.
+    #[test]
+    fn a_scale_is_taken_about_the_transform_origin() {
+        let mut style = rustkit_css::ComputedStyle::new();
+        style.transform = rustkit_css::TransformList {
+            ops: vec![rustkit_css::TransformOp::Scale(2.0, 2.0)],
+        };
+        let json = layout_box_to_json(&boxed(100.0, 100.0, 50.0, 50.0, style));
+        let (x, y, w, h) = visual(&json).expect("a scaled box must export a visual rect");
+        assert!(
+            (w - 100.0).abs() < 0.01 && (h - 100.0).abs() < 0.01,
+            "scale(2) must double the box: got {w}x{h}"
+        );
+        assert!(
+            (x - 75.0).abs() < 0.01 && (y - 75.0).abs() < 0.01,
+            "scaling about the centre grows the box both ways: expected \
+             (75, 75), got ({x}, {y})"
+        );
+    }
+
+    /// The bound is taken from all FOUR corners, and rotation is the only
+    /// thing that says so. Under translate and scale the two ends of one
+    /// diagonal already span the box, so a two-corner bound stays right by
+    /// accident on every other test in this module — it was the survivor of
+    /// this port's mutation sweep.
+    ///
+    /// A 100x40 box turned 45deg about its centre bounds to 98.99 square:
+    /// `(100 + 40) / sqrt(2)`. Read from the main diagonal alone the width
+    /// comes out 42.43, so the width assertion is the one doing the work.
+    /// 90deg would NOT catch it — a quarter turn maps the rect back onto an
+    /// axis-aligned rect, and then either diagonal spans it.
+    #[test]
+    fn a_rotated_box_is_bounded_by_all_four_corners() {
+        let mut style = rustkit_css::ComputedStyle::new();
+        style.transform = rustkit_css::TransformList {
+            ops: vec![rustkit_css::TransformOp::Rotate(45.0)],
+        };
+        let json = layout_box_to_json(&boxed(100.0, 100.0, 100.0, 40.0, style));
+        let (x, y, w, h) = visual(&json).expect("a rotated box must export a visual rect");
+        assert!(
+            (w - 98.9949).abs() < 0.01 && (h - 98.9949).abs() < 0.01,
+            "a 45deg turn bounds a 100x40 box to 98.99 square, not to one of \
+             its diagonals: got {w}x{h}"
+        );
+        assert!(
+            (x - 100.5025).abs() < 0.01 && (y - 70.5025).abs() < 0.01,
+            "the bound stays centred on the box's centre (150, 120): expected \
+             (100.50, 70.50), got ({x}, {y})"
         );
     }
 }
