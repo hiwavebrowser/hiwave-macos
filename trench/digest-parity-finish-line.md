@@ -7471,3 +7471,35 @@ call rather than started here.
 
 Night 27's watch ends: #170 is merged, the subscription is closed, and the
 check-ins are stopped.
+
+### Addendum 8 — #175 merged, and the prediction it carries is now waiting on #174
+
+**PR #175 (chain B port) merged into `develop` on 2026-09-08 at 13:24 UTC**, as
+`5fe55b4`. It went in as part of a batch that drained a week-long freeze:
+`develop` moved `5b89ed8` → `ab24cad`, carrying #186, #187, #185, #170, #175 and
+#176 within five minutes of each other. Nothing about #175 changed between the
+receipt and the merge — head `9eb42c0`, the commit the macOS lane measured at
+`2/26`.
+
+**The restack never happened, and did not need to.** Pete's stated order was
+#174 → #176 → #173 retarget → #175; in the event #175 merged before #174 and
+cleanly, so the branch's cherry-picked authorship went in untouched. The
+check-in armed against that restack has been deleted.
+
+**The on-record prediction is NOT yet testable.** It was: once the n37
+phantom-line unit removes the +24px drift, `images-intrinsic` should fall
+**below develop's 8.45**. That unit is **#174 (`atlas/n37-ws-line-box-r2`),
+still open** — so develop today carries chain B's correct geometry *and* the
+uncorrected drift, which is precisely the configuration that costs the 0.304pp.
+A develop receipt taken now will still show the cost, and that is expected, not
+a falsification.
+
+**What the next seat should do when #174 lands:** re-run the develop receipt and
+read `images-intrinsic` against 8.45. Below it, the "Chrome-ward masked
+improvement" reading is confirmed by prediction rather than by argument. At or
+above it, the reading Pete and I agreed on 09-01 is wrong and chain B owes a
+real explanation. Either way it is one number, and it was written down before
+the run.
+
+Also still open and unmerged, for whoever picks up the pile: #174, #177, #178,
+#179, #180, #181, #182, #183, #184.
