@@ -7342,3 +7342,48 @@ own defects instead of an inherited assumption.
   it.** I re-derived that independently before trusting the hand-off, which cost
   fifteen minutes and is the correct price after night 45 found night 44's
   hand-off half wrong.
+
+### Addendum — #187's macOS lane is green, and the receipt reads 2/26 as predicted
+
+Run [34191363315](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/34191363315),
+`macos-14` (CoreText and Metal). **All 12 checks complete: 9 success, 3 skipped
+by design (the two nightly lanes and `commit-gate` do not run on PRs), zero
+failures.** `mergeable_state` clean against `develop 5b89ed8`.
+
+```
+metric:     2/26 cases pass all four conditions
+measured:   26/26 scored on all four  (0 not fully measured)
+  geometry   4/26 green, 26/26 measured
+  paint      3/26 green, 26/26 measured
+  stability 26/26 green, 26/26 measured
+  discrete  25/26 green, 26/26 measured
+```
+
+`bg-pure` and `bg-solid` are the two. The metric is unmoved, which is what the
+Linux measurement predicted and what the write-up above claims — so the
+prediction is now checked rather than asserted.
+
+**Gate A and Gate B both print `FAIL` in this job and neither fails it.** They
+are advisory per ratified decision 2 and carry `continue-on-error`; the job is
+green. Worth restating because a reader scanning the log for the word FAIL will
+find it twice on a passing PR.
+
+**The below-the-fold finding survives the platform change**, which is the part I
+most wanted checked. `image-gallery` is 1280×800 on macOS too — `total_px`
+1024000 — so the repaired region is off-frame there as well and Gate B reads
+86.3747% within tolerance on both sides of the change. This is not a
+Linux-seat artefact: the campaign's largest untouched geometry root is invisible
+to the paint oracle **on the receipt platform**.
+
+Two things in the macOS board that are not mine and are worth someone's time:
+
+- **`gradient-backgrounds` is the only discrete failure on the whole board** —
+  3 × `missing_clip` on `.gradient-box.linear-6`, radius 16px, top-right and
+  both bottom corners, fill `#23c3bb`/`#23c7b8`/`#23b4c8` across all 36 notch
+  px. That is exactly P1's named residual ("rounded clip for scaled gradients —
+  corner notches"), and night 12 recorded it as unmeasurable because the card
+  was 18px out of place. On macOS the element now passes Gate A's attribution
+  filter, so **the discrete detector can finally see it**. P1's residual is
+  measurable for the first time.
+- **`images-intrinsic` reads 74.98% within tolerance**, the worst paint on the
+  board, and no open branch addresses it.
