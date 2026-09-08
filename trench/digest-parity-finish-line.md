@@ -7576,3 +7576,31 @@ just occupies the same lines. Three conflict hunks, all in that region.
 
 `#182`'s conflict is in `trench/wpt/last-run.json` (a receipts file `#185`
 re-pinned) and is not mine. `#175`, `#176` and `#180` still merge clean.
+
+---
+
+### Addendum to 2026-09-04, written 2026-09-08 — #183 merged, and the pile question
+### answered itself
+
+`#183` (the non-stretch column flex item / fit-content width) **merged into
+`develop` at 2026-09-08 13:32Z** as `bbf9e8b`, on the head this session watched
+throughout (`449a4fa`) with every check run green. Twenty check-ins over four
+days, all quiet: the head never moved, `develop` never moved under it, and no
+review ever arrived. Nothing was pushed after the second commit, so the merged
+tree is exactly the one the mutation sweep and the `2/26` macOS receipt were
+taken against.
+
+**Decision 1 of the 09-04 entry is withdrawn rather than answered.** It asked
+whether the campaign was review-bound and whether the trench should stop opening
+lanes until the pile drained. The pile drained on its own: `#170`, `#175`,
+`#176`, `#177` and `#183` all merged, and nights 43–46 landed on top of them.
+Asking a fifth time would have been the wrong move; so, in hindsight, would
+stopping.
+
+The half of that decision worth keeping is the measurement under it, and it is
+now in `develop`: **`#176` was the corpus's single largest geometry defect**
+(−55% of Gate A `sum|Δ|`, −90% on `about`) and its own receipt reported
+`about 11.59 -> 8.54` mean-pixel. It sat open for a week because nobody had run
+a gate over it. The lesson is not "merge faster" — it is that **a PR carrying
+only a mean-diff receipt is invisible to the queue that decides what matters**,
+and this campaign has the instrument to fix that at the point the PR is written.
