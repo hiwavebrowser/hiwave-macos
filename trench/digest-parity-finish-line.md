@@ -7604,3 +7604,149 @@ now in `develop`: **`#176` was the corpus's single largest geometry defect**
 a gate over it. The lesson is not "merge faster" — it is that **a PR carrying
 only a mean-diff receipt is invisible to the queue that decides what matters**,
 and this campaign has the instrument to fix that at the point the PR is written.
+
+---
+
+## 2026-09-08 — night 30 closed: the transform pair is on `develop`
+
+**Metric: `2/26` → `2/26`, measured on macOS on the merged tree, and the pair's
+own share of that is UNMEASURABLE on macOS — stated as such, not estimated.**
+
+### What landed
+
+- **#177** (gate half, `e7189f6`) merged 13:26Z → `develop 9f81251`.
+- **#178** (engine half) merged 13:47Z on head `df7fa26`, which is `54f1b73`
+  plus a merge of `develop 9f81251`.
+
+The two halves were written the same day, 2026-08-17, and this is the first
+tree that has ever held both. Night-30's P-item is complete.
+
+### The merge that #177 forced on #178
+
+The queue drained under #178 — #170, #175, #176, #177, #185, #186, #187 all
+landed — and #175 added a `rect_to_json` helper immediately above
+`layout_box_body_to_json` while leaving that signature one-argument; this
+branch had added `effective_transform` to the same signature. One hunk, both
+sides wanted, no interaction; merge commit `df7fa26`, no rebase, no
+force-push. Diff against `develop` kept its shape (280/6, one file). Engine
+70 passed (66 + 4 that arrived with `develop`), layout 339 passed.
+
+**One finding the merge surfaced, not fixed:** #175's new `BoxType::Image` and
+`BoxType::FormControl` arms return early, so those two box types carry no
+`visual_border_box` even under a transform. Gate A falls back to `border_box`
+for them exactly as `develop` did before, so nothing regressed — but it is a
+coverage gap the pair did not have when written, and closing it is new
+behavior needing its own guard and measurement.
+
+### The macOS receipt of the merged tree — a receipt of the TREE, not of the pair
+
+Run [34232446073](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/34232446073),
+`macos-14`, 12/12 (9 success, 3 skipped by design), on `df7fa26`:
+
+```
+metric:     2/26 cases pass all four conditions
+  geometry   5/26 green   1528 geometry failures, 15 join
+  paint      3/26 green   3 discrete (gradient-backgrounds missing_clip ×3)
+  stability 26/26 green
+  discrete  25/26 green
+```
+
+Against the last `5b89ed8`-basis macOS receipts (#177's own, #187's):
+geometry 4/26 → 5/26. **That +1 is `combinators`, which #185 alone predicted
+on night 45 and this seat's stacked measurement confirmed on 09-04 — it is not
+the pair's.** Seven engine PRs sit between the two receipts and the workflow
+runs only on `pull_request`, so no `develop`-basis macOS receipt exists to
+difference against. The pair's isolated macOS delta therefore has no number,
+and I have not invented one. (A docs-only PR against `develop` would produce
+that baseline receipt for the cost of one CI run; that is a lane decision.)
+
+### The pair's isolated 2×2, re-run on the NEW basis — Linux/SwiftShader, MECHANICS NOT A RECEIPT
+
+Two release binaries, `develop 9f81251` and `df7fa26`, 32 registry cases each;
+Gate A run as the 5b89ed8 script (joins on `border_box`) and as the current
+script (prefers `visual_border_box`):
+
+| Gate A geometry failures | `border_box` join | `visual_border_box` preferred |
+|---|---|---|
+| capture from `develop 9f81251` | 2708 | 2708 |
+| capture from `df7fa26` | 2708 | **2669** |
+
+Three equal cells again, and the same 39 rows move: **39 cleared, 0 added,
+22 worsened, 62 improved-but-still-failing**, all on `new_tab` 245 → 207 and
+`sticky-scroll` 116 → 115; 24 cases bit-identical. The cleared rows are led
+by the two boxes that were never wrong (`div.ambient-glow` `x` Δ400.00,
+`.overflow-content` `y` Δ150.05); the 22 worsened and the 62 improved are the
+same 30 `kbd` chips carrying `.shortcut:hover kbd { scale(1.05) }` in a static
+capture, now scored on the rect they actually paint. The 62 is new
+information: night 30 counted only rows that appeared, vanished or worsened.
+Green set unchanged (3/26 on this seat: `bg-pure`, `combinators`,
+`specificity`). The basis moved 2500 → 2708 geometry / 110 → 15 join under
+the pair; that is the seven PRs, consistent with the 09-04 stacked entry.
+
+Zero engine behavior change, re-measured after the merge: **32/32 frames
+byte-identical, 32/32 layout dumps identical once the added key is removed;
+56 boxes carry the key** (`about` 12, `new_tab` 43, `sticky-scroll` 1 — the
+same 56 as night 30). **Gate B bit-identical on 26/26 cases** (`within_fraction`,
+`outside_tolerance_px`, discrete 0 → 0, 1/26 green); elements examined
+253 → 254, the `ambient-glow`.
+
+### Stop rule
+
+Did not fire. The metric did not improve (`N/26` unmoved on both seats; green
+sets unchanged on both gates), so the rule's premise is absent; the 22 worsened
+rows are the same instrument-becoming-honest rows night 30 recorded.
+
+### Mutation checks
+
+None new — tonight's only engine commit is a merge, and every guard from
+night 30 (7/7 RED then) still passes in the merged tree. The three fit-content
+and six aspect-ratio guards from other lanes also pass together after #181's
+restack, below.
+
+### Also tonight, at Pete's request: six restacks, not mine to own but mine to resolve
+
+After #177 landed Pete said the remaining open PRs had conflicts. Each was
+restacked on `develop bbf9e8b` (#183 had landed too) as a merge commit, tests
+green locally, one comment each. Receipt files (`trench/wpt/last-run.json`,
+`parity-baseline/diffs/**`) taken from the PR branch per #174's own precedent
+(`816ec61`); this seat cannot re-receipt.
+
+| PR | merge tip | resolution |
+|---|---|---|
+| #174 | `3a395a6` | `last-run.json` only |
+| #182 | `81176c5` | `last-run.json` only |
+| #184 | `0bfc9df` | `new_tab` receipt files; code clean — **#183 overlap flagged** |
+| #179 | `70eec07` | two keep-both hunks in `layout/lib.rs`; byte-identical to a mechanical keep-both |
+| #180 | `8860858` | `calculate_block_width`: #176's atomic-inline branch first, then #180's out-of-flow branch, then fill; no expression edited |
+| #181 | `effcaec` | #187's aspect-ratio pass stays Phase 9.6; #181's fit-content pass is Phase 9.7 |
+
+On #181 the 09-04 session proposed "one pass carrying both conditions". I
+chose two passes instead: they name disjoint items (`auto` vs `fit-content`),
+and two passes leave both authors' expressions untouched, which keeps each
+side's receipt attributable. Either is correct; that is why.
+
+### Decisions needed from Pete
+
+1. **`master`'s Gate A still joins on `border_box` alone.** Every `master`
+   geometry receipt scores transformed boxes against a rect they are not
+   comparable to. Direct 14-line port, or merge-through — a lane call.
+2. **#184 vs #183 may double-correct the same column-item width.** Git found
+   no overlapping lines and both test sets pass together; only the board on
+   `0bfc9df` can say. Someone should read it before #184 merges.
+3. **Two follow-ups are now measurable and need a home:** the
+   `.shortcut:hover kbd` static-capture defect (22 rows on `new_tab`, visible
+   on macOS for the first time) and the Image/FormControl `visual_border_box`
+   gap. Each is one unit with its own guard.
+
+### Surprises
+
+- **The receipt that matters most has no baseline to stand against.** The
+  first-ever run with both halves in one tree exists, and its per-gate numbers
+  cannot be attributed to the pair because seven other PRs landed the same
+  afternoon and nothing runs on `develop` itself. The 2×2 on this seat is the
+  only isolating measurement, and it is mechanics.
+- **#179 and #180 both touch `rustkit-layout/src/lib.rs`**; whichever merges
+  second needs one more restack.
+- `cargo fmt` on `rustkit-layout` reformats `flex.rs`/`grid.rs`/`text.rs` that
+  are already unformatted on `develop`; ran it once, staged nothing from it,
+  and verified the committed `lib.rs` byte-equal to a pure merge.
