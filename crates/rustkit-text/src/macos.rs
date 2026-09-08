@@ -310,6 +310,22 @@ fn apply_weight_trait(base: &CTFont, size: f64, css_weight: u16) -> Option<CTFon
 /// `create_ct_font_with_traits`) rejects substitutes the same way — until it
 /// did, paint walked the chain but measure did not, and `"Missing", Menlo`
 /// measured Helvetica while drawing Menlo.
+/// Faces tried, in order, for a character the requested face has no glyph
+/// for. ONE list for paint (`GlyphRasterizer::rasterize_fallback`) and
+/// layout (rustkit-layout `TextShaper::shape`): layout used to shape such a
+/// character as glyph 0 of the primary face — a .notdef advance and the
+/// primary face's extents — while paint drew it from Apple Color Emoji, so
+/// an emoji overlapped the letter after it and its line box came out the
+/// primary face's height (16px system-ui: 18px; Chrome, which unites the
+/// used fallback face's extents under `line-height: normal`, 26px).
+pub const GLYPH_FALLBACK_FAMILIES: &[&str] = &[
+    "Apple Color Emoji", // emoji — Chrome/Skia's macOS emoji fallback too
+    "Apple Symbols",     // symbols
+    "Arial Unicode MS",  // wide Unicode coverage
+    "Helvetica Neue",    // general fallback
+    "Menlo",             // code/math symbols
+];
+
 pub fn named_font(name: &str, size: f64) -> Option<CTFont> {
     let norm = |s: &str| -> String {
         s.chars()
@@ -693,16 +709,9 @@ impl GlyphRasterizer {
 
     /// Fallback rasterization for characters without glyphs
     fn rasterize_fallback(&self, ch: char) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
-        // Try fallback fonts for the character
-        let fallback_fonts = [
-            "Apple Color Emoji",  // For emoji
-            "Apple Symbols",       // For symbols
-            "Arial Unicode MS",    // Wide Unicode coverage
-            "Helvetica Neue",      // Good general fallback
-            "Menlo",               // For code/math symbols
-        ];
-        
-        for font_name in &fallback_fonts {
+        // Try fallback fonts for the character — the same faces, in the same
+        // order, that layout shapes such characters with.
+        for font_name in GLYPH_FALLBACK_FAMILIES {
             if let Ok(fallback_font) = font::new_from_name(font_name, self.font_size as f64) {
                 // Try to get glyph with this fallback font
                 let chars: [u16; 1] = [ch as u16];

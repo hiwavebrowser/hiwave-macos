@@ -38,15 +38,15 @@ pub use margin_collapse::{
     collapse_margins, establishes_bfc, is_margin_collapsible_through,
     should_collapse_with_first_child, should_collapse_with_last_child, CollapsibleMargin,
 };
+/// The document-scoped web-font registry (`@font-face` faces the engine
+/// installs per view). Re-exported so the engine reaches it through the
+/// crate that owns the loader rather than depending on rustkit-text directly.
+pub use rustkit_text::webfonts;
 pub use scroll::{
     calculate_scroll_into_view, handle_wheel_event, is_scroll_container, render_scrollbars,
     ScrollAlignment, ScrollMomentum, ScrollState, Scrollbar, ScrollbarOrientation, StickyOffsets,
     StickyState, WheelDeltaMode,
 };
-/// The document-scoped web-font registry (`@font-face` faces the engine
-/// installs per view). Re-exported so the engine reaches it through the
-/// crate that owns the loader rather than depending on rustkit-text directly.
-pub use rustkit_text::webfonts;
 pub use text::{
     apply_text_transform, collapse_whitespace, FontCache, FontCacheKey, FontDisplay, FontFaceRule,
     FontFamilyChain, FontLoader, LineHeight, PositionedGlyph, ShapedRun, TextDecoration, TextError,
@@ -134,13 +134,21 @@ pub fn normal_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
         style.font_style,
     );
     let px = if m.ascent > 0.0 {
-        m.ascent.round() + m.descent.round() + m.leading
+        used_font_line_height(&m)
     } else {
         font_size * rustkit_css::NORMAL_LINE_HEIGHT_FALLBACK_RATIO
     };
 
     NORMAL_LINE_HEIGHT_CACHE.with(|c| c.borrow_mut().insert(key, px));
     px
+}
+
+/// Blink's `normal` line height for one face's extents:
+/// `round(ascent) + round(descent) + round(line_gap)` (SimpleFontData rounds
+/// all three; Arial at 16px is 14.48 + 3.39 + 0.52 = 18 in Chrome, and
+/// 17.52 when the gap rides unrounded).
+fn used_font_line_height(m: &TextMetrics) -> f32 {
+    m.ascent.round() + m.descent.round() + m.leading.round()
 }
 
 /// The CONTENT height a non-`auto` `aspect-ratio` implies for a box whose
@@ -182,6 +190,25 @@ pub fn resolve_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
         rustkit_css::LineHeight::Normal => normal_line_height(style, font_size),
         other => other.to_px(font_size),
     }
+}
+
+/// Line height of ONE shaped text run: the box's `line-height`, except that
+/// under `normal` the run's own extents win when they are taller. A run's
+/// metrics are the union of every face it used (`TextShaper::shape` folds
+/// in the fallback faces), and Blink sizes a `normal` line box from the
+/// used faces, not the primary alone (NGInlineBoxState::AccumulateUsedFonts):
+/// "☕ coffee" at 16px system-ui is a 26px line in Chrome (emoji face 20 + 6),
+/// not the primary face's 18. An explicit `line-height` ignores the used
+/// faces, as in Chrome (the 24px control on the repro stays 24).
+///
+/// Layout (`layout_text*`) and paint (`render_text`) MUST both go through
+/// here — the half-leading that seats the baseline is derived from it.
+pub fn run_line_height(style: &ComputedStyle, font_size: f32, metrics: &TextMetrics) -> f32 {
+    let base = resolve_line_height(style, font_size);
+    if !matches!(style.line_height, rustkit_css::LineHeight::Normal) || metrics.ascent <= 0.0 {
+        return base;
+    }
+    base.max(used_font_line_height(metrics))
 }
 
 /// Convert a specified size on a replaced element to a CONTENT size.
@@ -1637,7 +1664,8 @@ impl LayoutBox {
                     self.dimensions.content.y =
                         containing_block.content.y + containing_block.content.height;
                     self.dimensions.content.width = max_line_width.min(container_width);
-                    self.dimensions.content.height = line_count as f32 * self.get_line_height();
+                    self.dimensions.content.height =
+                        line_count as f32 * run_line_height(&self.style, font_size, &metrics);
                     return;
                 }
             }
@@ -1657,7 +1685,7 @@ impl LayoutBox {
         } else {
             text_width // Don't clamp if containing block has no width yet
         };
-        self.dimensions.content.height = self.get_line_height();
+        self.dimensions.content.height = run_line_height(&self.style, font_size, &metrics);
     }
 
     /// Whether a text child that does NOT fit the remaining line space
@@ -1701,7 +1729,6 @@ impl LayoutBox {
             Length::Px(px) => px,
             _ => 16.0,
         };
-        let line_height = self.get_line_height();
 
         let shaper = TextShaper::new();
         let chain = FontFamilyChain::from_css_value(&self.style.font_family);
@@ -1729,6 +1756,19 @@ impl LayoutBox {
                 return (1, self.dimensions.content.width);
             }
         };
+
+        // The run's extents across all its lines (fallback faces included),
+        // so the line height matches what `render_text` derives from
+        // measuring the same text.
+        let mut run_metrics = TextMetrics::default();
+        for line in &lines {
+            run_metrics.ascent = run_metrics.ascent.max(line.ascent());
+            run_metrics.descent = run_metrics.descent.max(line.descent());
+            for run in &line.runs {
+                run_metrics.leading = run_metrics.leading.max(run.metrics.leading);
+            }
+        }
+        let line_height = run_line_height(&self.style, font_size, &run_metrics);
 
         let text_lines: Vec<TextLine> = lines
             .iter()
@@ -2512,10 +2552,26 @@ impl LayoutBox {
             })
         };
         PositionOffsets {
-            top: resolve(self.offsets.top, &self.style.top, containing_block.content.height),
-            bottom: resolve(self.offsets.bottom, &self.style.bottom, containing_block.content.height),
-            left: resolve(self.offsets.left, &self.style.left, containing_block.content.width),
-            right: resolve(self.offsets.right, &self.style.right, containing_block.content.width),
+            top: resolve(
+                self.offsets.top,
+                &self.style.top,
+                containing_block.content.height,
+            ),
+            bottom: resolve(
+                self.offsets.bottom,
+                &self.style.bottom,
+                containing_block.content.height,
+            ),
+            left: resolve(
+                self.offsets.left,
+                &self.style.left,
+                containing_block.content.width,
+            ),
+            right: resolve(
+                self.offsets.right,
+                &self.style.right,
+                containing_block.content.width,
+            ),
         }
     }
 
@@ -3067,7 +3123,10 @@ impl LayoutBox {
                 let child_height = child.dimensions.margin_box().height;
 
                 // Check if child fits on current line (nowrap/pre never soft-wrap)
-                if container_allows_wrap && cursor_x > 0.0 && cursor_x + child_width > container_width {
+                if container_allows_wrap
+                    && cursor_x > 0.0
+                    && cursor_x + child_width > container_width
+                {
                     // Record completed line for text-align
                     if let Some(start) = line_start_index {
                         lines.push((start, i, line_width));
@@ -3265,7 +3324,6 @@ impl LayoutBox {
         self.dimensions.content.height = cursor_y;
     }
 
-
     /// IFC Slice C (CSS2 §10.8 subset): align line members VERTICALLY about
     /// the line's alphabetic baseline. Layout owns Y (same contract as
     /// Slice A owns X): text boxes place so their baseline (content top +
@@ -3283,10 +3341,8 @@ impl LayoutBox {
         let members: Vec<usize> = (0..children.len())
             .filter(|&i| {
                 let c = &children[i];
-                !matches!(
-                    c.position,
-                    Position::Absolute | Position::Fixed
-                ) && c.style.display != rustkit_css::Display::None
+                !matches!(c.position, Position::Absolute | Position::Fixed)
+                    && c.style.display != rustkit_css::Display::None
             })
             .collect();
         if members.is_empty() {
@@ -3420,9 +3476,7 @@ impl LayoutBox {
                     for tl in text_lines.iter_mut() {
                         tl.x_offset = match text_align {
                             TextAlign::Right => (container_width - tl.width).max(0.0),
-                            TextAlign::Center => {
-                                ((container_width - tl.width) / 2.0).max(0.0)
-                            }
+                            TextAlign::Center => ((container_width - tl.width) / 2.0).max(0.0),
                             _ => 0.0,
                         };
                     }
@@ -3680,7 +3734,10 @@ impl LayoutBox {
                 let child_height = child.dimensions.margin_box().height;
 
                 // Check if child fits on current line (nowrap/pre never soft-wrap)
-                if container_allows_wrap && cursor_x > 0.0 && cursor_x + child_width > container_width {
+                if container_allows_wrap
+                    && cursor_x > 0.0
+                    && cursor_x + child_width > container_width
+                {
                     // Record completed line for text-align
                     if let Some(start) = line_start_index {
                         lines.push((start, i, line_width));
@@ -5340,9 +5397,11 @@ impl DisplayList {
             top_left: s
                 .border_top_left_radius
                 .to_px(font_size, root_font_size, border_rect.width),
-            top_right: s
-                .border_top_right_radius
-                .to_px(font_size, root_font_size, border_rect.width),
+            top_right: s.border_top_right_radius.to_px(
+                font_size,
+                root_font_size,
+                border_rect.width,
+            ),
             bottom_right: s.border_bottom_right_radius.to_px(
                 font_size,
                 root_font_size,
@@ -5576,10 +5635,8 @@ impl DisplayList {
                 // border_radius on the gradient rect itself.
                 let needs_clip = positioned_rect.x < container.x
                     || positioned_rect.y < container.y
-                    || positioned_rect.x + positioned_rect.width
-                        > container.x + container.width
-                    || positioned_rect.y + positioned_rect.height
-                        > container.y + container.height;
+                    || positioned_rect.x + positioned_rect.width > container.x + container.width
+                    || positioned_rect.y + positioned_rect.height > container.y + container.height;
                 if needs_clip {
                     self.commands.push(DisplayCommand::PushClip(container));
                 }
@@ -5910,7 +5967,6 @@ impl DisplayList {
             // CSS line-height creates extra space above and below the text content
             // The half-leading is split evenly above and below the text
             // (must resolve `normal` exactly as layout did, or the baseline moves)
-            let line_height = resolve_line_height(style, font_size);
 
             // Get font metrics for accurate baseline calculation
             let metrics = measure_text_advanced(
@@ -5920,6 +5976,7 @@ impl DisplayList {
                 style.font_weight,
                 style.font_style,
             );
+            let line_height = run_line_height(style, font_size, &metrics);
 
             // Content height is ascent + descent (the actual rendered text height)
             let content_height = metrics.ascent + metrics.descent;
@@ -5951,7 +6008,13 @@ impl DisplayList {
                         )
                     })
                     .collect(),
-                None => vec![(text.clone(), x, content_y + half_leading, text_width, content_y)],
+                None => vec![(
+                    text.clone(),
+                    x,
+                    content_y + half_leading,
+                    text_width,
+                    content_y,
+                )],
             };
 
             // PAINT-0 seating probe (RUSTKIT_PAINT_PROBE=1): log the layout
@@ -6596,15 +6659,34 @@ mod tests {
                 rustkit_css::LinearGradient {
                     direction: rustkit_css::GradientDirection::Angle(-45.0),
                     stops: vec![
-                        rustkit_css::ColorStop { color: Color { r: 238, g: 119, b: 82, a: 1.0 }, position: None },
-                        rustkit_css::ColorStop { color: Color { r: 35, g: 213, b: 171, a: 1.0 }, position: None },
+                        rustkit_css::ColorStop {
+                            color: Color {
+                                r: 238,
+                                g: 119,
+                                b: 82,
+                                a: 1.0,
+                            },
+                            position: None,
+                        },
+                        rustkit_css::ColorStop {
+                            color: Color {
+                                r: 35,
+                                g: 213,
+                                b: 171,
+                                a: 1.0,
+                            },
+                            position: None,
+                        },
                     ],
                     repeating: false,
                 },
             )),
             // Percentages ride the Explicit variant as negative values:
             // -400.0 => container * 4.0 (see calculate_background_rect).
-            size: rustkit_css::BackgroundSize::Explicit { width: Some(-400.0), height: Some(-400.0) },
+            size: rustkit_css::BackgroundSize::Explicit {
+                width: Some(-400.0),
+                height: Some(-400.0),
+            },
             ..Default::default()
         }];
 
@@ -6615,15 +6697,23 @@ mod tests {
         let container = card.dimensions.border_box();
 
         let push = list.commands.iter().position(|c| matches!(c, DisplayCommand::PushClip(r) if (r.x - container.x).abs() < 0.5 && (r.width - container.width).abs() < 0.5));
-        let grad = list.commands.iter().position(|c| matches!(c, DisplayCommand::LinearGradient { rect, .. } if rect.width > 900.0));
-        let pop = list.commands.iter().position(|c| matches!(c, DisplayCommand::PopClip));
+        let grad = list.commands.iter().position(
+            |c| matches!(c, DisplayCommand::LinearGradient { rect, .. } if rect.width > 900.0),
+        );
+        let pop = list
+            .commands
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::PopClip));
 
         let (push, grad, pop) = (
             push.expect("oversized gradient must push a clip at its own box"),
             grad.expect("gradient must still paint at the scaled 4x rect (the zoomed slice)"),
             pop.expect("clip must be popped"),
         );
-        assert!(push < grad && grad < pop, "order must be PushClip < gradient < PopClip, got {push}/{grad}/{pop}");
+        assert!(
+            push < grad && grad < pop,
+            "order must be PushClip < gradient < PopClip, got {push}/{grad}/{pop}"
+        );
     }
 
     #[test]
@@ -6637,8 +6727,24 @@ mod tests {
                 rustkit_css::LinearGradient {
                     direction: rustkit_css::GradientDirection::ToBottom,
                     stops: vec![
-                        rustkit_css::ColorStop { color: Color { r: 0, g: 0, b: 0, a: 1.0 }, position: None },
-                        rustkit_css::ColorStop { color: Color { r: 255, g: 255, b: 255, a: 1.0 }, position: None },
+                        rustkit_css::ColorStop {
+                            color: Color {
+                                r: 0,
+                                g: 0,
+                                b: 0,
+                                a: 1.0,
+                            },
+                            position: None,
+                        },
+                        rustkit_css::ColorStop {
+                            color: Color {
+                                r: 255,
+                                g: 255,
+                                b: 255,
+                                a: 1.0,
+                            },
+                            position: None,
+                        },
                     ],
                     repeating: false,
                 },
@@ -6650,7 +6756,10 @@ mod tests {
 
         let list = DisplayList::build(&card);
         assert!(
-            !list.commands.iter().any(|c| matches!(c, DisplayCommand::PushClip(_))),
+            !list
+                .commands
+                .iter()
+                .any(|c| matches!(c, DisplayCommand::PushClip(_))),
             "a gradient that fits its box must not push a clip"
         );
     }
@@ -6723,21 +6832,28 @@ mod tests {
         let texts = text_commands(&DisplayList::build(&root));
         assert_eq!(texts.len(), 1, "one run paints: {texts:?}");
         let (text, x, advances) = &texts[0];
-        assert!(text.ends_with('\u{2026}'), "run must end in U+2026, got {text:?}");
+        assert!(
+            text.ends_with('\u{2026}'),
+            "run must end in U+2026, got {text:?}"
+        );
         assert!(
             text.chars().count() > 3 && text.chars().count() < ELLIPSIS_TEXT.chars().count(),
             "some but not all characters survive the cut: {text:?}"
         );
         let advances = advances.as_ref().expect("cut run carries advances");
-        assert_eq!(advances.len(), text.chars().count(), "one advance per char incl. the ellipsis");
+        assert_eq!(
+            advances.len(),
+            text.chars().count(),
+            "one advance per char incl. the ellipsis"
+        );
         let width: f32 = advances.iter().sum();
         assert!(
             *x + width <= 10.0 + 100.0 + 0.01,
             "ink (x={x}, w={width}) must end inside the content edge 110"
         );
         // The cut is tight: the next original character would not have fit.
-        let full = shape_line_advances(ELLIPSIS_TEXT, &root.children[0].style, 16.0)
-            .expect("shape");
+        let full =
+            shape_line_advances(ELLIPSIS_TEXT, &root.children[0].style, 16.0).expect("shape");
         let kept = text.chars().count() - 1;
         let next_width: f32 = full[..kept + 1].iter().sum::<f32>() + advances[kept];
         assert!(
@@ -6757,7 +6873,10 @@ mod tests {
         );
         let texts = text_commands(&DisplayList::build(&root));
         assert_eq!(texts.len(), 1);
-        assert_eq!(texts[0].0, ELLIPSIS_TEXT, "a run that fits is painted whole");
+        assert_eq!(
+            texts[0].0, ELLIPSIS_TEXT,
+            "a run that fits is painted whole"
+        );
     }
 
     #[test]
@@ -6783,8 +6902,14 @@ mod tests {
             false,
         );
         let texts = text_commands(&DisplayList::build(&root));
-        assert_eq!(texts[0].0, ELLIPSIS_TEXT, "text-overflow: clip — the clip alone applies");
-        assert_eq!(rustkit_css::TextOverflow::default(), rustkit_css::TextOverflow::Clip);
+        assert_eq!(
+            texts[0].0, ELLIPSIS_TEXT,
+            "text-overflow: clip — the clip alone applies"
+        );
+        assert_eq!(
+            rustkit_css::TextOverflow::default(),
+            rustkit_css::TextOverflow::Clip
+        );
     }
 
     #[test]
@@ -6799,7 +6924,11 @@ mod tests {
         );
         let texts = text_commands(&DisplayList::build(&root));
         assert_eq!(texts.len(), 1);
-        assert!(texts[0].0.ends_with('\u{2026}'), "inline child is cut: {:?}", texts[0].0);
+        assert!(
+            texts[0].0.ends_with('\u{2026}'),
+            "inline child is cut: {:?}",
+            texts[0].0
+        );
     }
 
     #[test]
@@ -6820,7 +6949,10 @@ mod tests {
 
         let texts = text_commands(&DisplayList::build(&root));
         assert_eq!(texts.len(), 1);
-        assert_eq!(texts[0].0, ELLIPSIS_TEXT, "nested block container: no ellipsis from the outer one");
+        assert_eq!(
+            texts[0].0, ELLIPSIS_TEXT,
+            "nested block container: no ellipsis from the outer one"
+        );
     }
 
     #[test]
@@ -6868,7 +7000,11 @@ mod tests {
         second.dimensions.content = Rect::new(10.0, 30.0, 30.0, 20.0);
         root.children[0].children.push(second);
         let texts = text_commands(&DisplayList::build(&root));
-        assert_eq!(texts.len(), 2, "a run on the next line is its own line: {texts:?}");
+        assert_eq!(
+            texts.len(),
+            2,
+            "a run on the next line is its own line: {texts:?}"
+        );
         assert_eq!(texts[1].0, "tail");
     }
 
@@ -6891,7 +7027,12 @@ mod tests {
         }
 
         let mut child_style = ComputedStyle::new();
-        child_style.background_color = Color { r: 102, g: 126, b: 234, a: 1.0 };
+        child_style.background_color = Color {
+            r: 102,
+            g: 126,
+            b: 234,
+            a: 1.0,
+        };
         let mut child = LayoutBox::new(BoxType::Block, child_style);
         child.dimensions.content = Rect::new(0.0, 0.0, 227.0, 180.0);
 
@@ -6949,7 +7090,12 @@ mod tests {
         let mut parent = rounded_overflow_parent(12.0, true);
         parent.position = Position::Relative;
         let mut overlay_style = ComputedStyle::new();
-        overlay_style.background_color = Color { r: 0, g: 0, b: 0, a: 0.7 };
+        overlay_style.background_color = Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0.7,
+        };
         let mut overlay = LayoutBox::new(BoxType::Block, overlay_style);
         overlay.position = Position::Absolute;
         overlay.dimensions.content = Rect::new(0.0, 120.0, 227.0, 60.0);
@@ -7090,14 +7236,24 @@ mod tests {
         // clip, and the clip is back in force for the sibling after it.
         let mut parent = rounded_overflow_parent(0.0, true); // position: static
         let mut overlay_style = ComputedStyle::new();
-        overlay_style.background_color = Color { r: 0, g: 0, b: 0, a: 0.7 };
+        overlay_style.background_color = Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0.7,
+        };
         let mut overlay = LayoutBox::new(BoxType::Block, overlay_style);
         overlay.position = Position::Absolute;
         overlay.dimensions.content = Rect::new(0.0, 120.0, 227.0, 60.0);
         parent.children.push(overlay);
 
         let mut later_style = ComputedStyle::new();
-        later_style.background_color = Color { r: 9, g: 9, b: 9, a: 1.0 };
+        later_style.background_color = Color {
+            r: 9,
+            g: 9,
+            b: 9,
+            a: 1.0,
+        };
         let mut later = LayoutBox::new(BoxType::Block, later_style);
         later.float = Float::Left; // paints in the positioned pass, after the overlay
         later.dimensions.content = Rect::new(0.0, 0.0, 10.0, 10.0);
@@ -7122,8 +7278,16 @@ mod tests {
                 _ => d,
             })
         };
-        assert_eq!(depth_at(overlay_bg), 0, "the absolute child must paint with the static clip popped");
-        assert_eq!(depth_at(later_bg), 1, "the clip must be re-pushed for the next sibling");
+        assert_eq!(
+            depth_at(overlay_bg),
+            0,
+            "the absolute child must paint with the static clip popped"
+        );
+        assert_eq!(
+            depth_at(later_bg),
+            1,
+            "the clip must be re-pushed for the next sibling"
+        );
         assert_eq!(depth_at(cmds.len()), 0, "the list must end balanced");
     }
 
@@ -7139,7 +7303,12 @@ mod tests {
         let mut parent = rounded_overflow_parent(12.0, true);
         parent.style.position = rustkit_css::Position::Relative; // layout position stays Static
         let mut overlay_style = ComputedStyle::new();
-        overlay_style.background_color = Color { r: 0, g: 0, b: 0, a: 0.7 };
+        overlay_style.background_color = Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0.7,
+        };
         let mut overlay = LayoutBox::new(BoxType::Block, overlay_style);
         overlay.position = Position::Absolute;
         overlay.dimensions.content = Rect::new(0.0, 120.0, 227.0, 60.0);
@@ -7156,7 +7325,10 @@ mod tests {
             DisplayCommand::PopClip => d - 1,
             _ => d,
         });
-        assert_eq!(depth, 1, "a style-relative clipper clips its absolute children");
+        assert_eq!(
+            depth, 1,
+            "a style-relative clipper clips its absolute children"
+        );
     }
 
     #[test]
@@ -7165,7 +7337,12 @@ mod tests {
         let mut parent = rounded_overflow_parent(0.0, true);
         parent.position = Position::Relative;
         let mut overlay_style = ComputedStyle::new();
-        overlay_style.background_color = Color { r: 0, g: 0, b: 0, a: 0.7 };
+        overlay_style.background_color = Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0.7,
+        };
         let mut overlay = LayoutBox::new(BoxType::Block, overlay_style);
         overlay.position = Position::Absolute;
         overlay.dimensions.content = Rect::new(0.0, 120.0, 227.0, 60.0);
@@ -7191,14 +7368,22 @@ mod tests {
         // leave a child's paint sitting on top of the border it should be
         // behind, and the arc would be the outer one, a border-width off.
         let mut parent = rounded_overflow_parent(12.0, true);
-        parent.dimensions.border = EdgeSizes { top: 4.0, right: 4.0, bottom: 4.0, left: 4.0 };
+        parent.dimensions.border = EdgeSizes {
+            top: 4.0,
+            right: 4.0,
+            bottom: 4.0,
+            left: 4.0,
+        };
         let border_box = parent.dimensions.border_box();
 
         let list = DisplayList::build(&under_root(parent));
         let (rect, radius) = rounded_clip(&list).expect("must still clip");
         assert_eq!(rect.x, border_box.x + 4.0);
         assert_eq!(rect.width, border_box.width - 8.0);
-        assert_eq!(radius.top_left, 8.0, "12px radius inside a 4px border is 8px");
+        assert_eq!(
+            radius.top_left, 8.0,
+            "12px radius inside a 4px border is 8px"
+        );
     }
 
     #[test]
@@ -7207,12 +7392,23 @@ mod tests {
         // with no rounding left is a square clip at the padding box — the
         // border has eaten the arc, so there is nothing round left to clip to.
         let mut parent = rounded_overflow_parent(4.0, true);
-        parent.dimensions.border = EdgeSizes { top: 6.0, right: 6.0, bottom: 6.0, left: 6.0 };
+        parent.dimensions.border = EdgeSizes {
+            top: 6.0,
+            right: 6.0,
+            bottom: 6.0,
+            left: 6.0,
+        };
 
         let list = DisplayList::build(&under_root(parent));
-        assert!(rounded_clip(&list).is_none(), "no rounding survives a thicker border");
+        assert!(
+            rounded_clip(&list).is_none(),
+            "no rounding survives a thicker border"
+        );
         let rect = square_clip(&list).expect("the padding box still clips, square");
-        assert_eq!(rect.width, 227.0, "the padding box is the content box here (no padding)");
+        assert_eq!(
+            rect.width, 227.0,
+            "the padding box is the content box here (no padding)"
+        );
     }
 
     #[test]
@@ -7226,7 +7422,12 @@ mod tests {
         // with no background, so the assertion never ran and moving the
         // content emission inside the clip left it green.
         let mut parent = rounded_overflow_parent(12.0, true);
-        parent.style.background_color = Color { r: 45, g: 45, b: 68, a: 1.0 };
+        parent.style.background_color = Color {
+            r: 45,
+            g: 45,
+            b: 68,
+            a: 1.0,
+        };
 
         let list = DisplayList::build(&under_root(parent));
         let push = list
@@ -7264,8 +7465,8 @@ mod tests {
         style.font_size = Length::Px(16.0);
         style.letter_spacing = Length::Px(2.0);
         let text = "Spaced advance parity";
-        let advances = shape_line_advances(text, &style, 16.0)
-            .expect("plain Latin text must shape");
+        let advances =
+            shape_line_advances(text, &style, 16.0).expect("plain Latin text must shape");
         let measured = measure_text_with_spacing(
             text,
             &style.font_family,
@@ -7539,9 +7740,10 @@ mod tests {
         let mut text_style = ComputedStyle::new();
         text_style.text_align = TextAlign::Center; // inherited, but leaf must ignore it
         text_style.font_size = Length::Px(32.0);
-        parent
-            .children
-            .push(LayoutBox::new(BoxType::Text("Hello".to_string()), text_style));
+        parent.children.push(LayoutBox::new(
+            BoxType::Text("Hello".to_string()),
+            text_style,
+        ));
 
         parent.layout_block_children();
 
@@ -7571,12 +7773,15 @@ mod tests {
         b_style.display = rustkit_css::Display::Inline;
         b_style.font_weight = rustkit_css::FontWeight(700);
         let mut b = LayoutBox::new(BoxType::Inline, b_style);
-        b.children
-            .push(LayoutBox::new(BoxType::Text("bold".to_string()), ComputedStyle::new()));
+        b.children.push(LayoutBox::new(
+            BoxType::Text("bold".to_string()),
+            ComputedStyle::new(),
+        ));
         parent.children.push(b);
-        parent
-            .children
-            .push(LayoutBox::new(BoxType::Text(" world".to_string()), ComputedStyle::new()));
+        parent.children.push(LayoutBox::new(
+            BoxType::Text(" world".to_string()),
+            ComputedStyle::new(),
+        ));
 
         parent.layout_block_children();
 
@@ -7612,12 +7817,14 @@ mod tests {
         parent_style.text_align = text_align;
         let mut parent = LayoutBox::new(BoxType::Block, parent_style);
         parent.dimensions.content = Rect::new(0.0, 0.0, 200.0, 0.0);
-        parent
-            .children
-            .push(LayoutBox::new(BoxType::Text("Hi".to_string()), ComputedStyle::new()));
-        parent
-            .children
-            .push(LayoutBox::new(BoxType::Text(LONG_TEXT.to_string()), ComputedStyle::new()));
+        parent.children.push(LayoutBox::new(
+            BoxType::Text("Hi".to_string()),
+            ComputedStyle::new(),
+        ));
+        parent.children.push(LayoutBox::new(
+            BoxType::Text(LONG_TEXT.to_string()),
+            ComputedStyle::new(),
+        ));
         parent.layout_block_children();
         parent
     }
@@ -7633,12 +7840,25 @@ mod tests {
         let flow0 = t
             .text_flow_first_offset
             .expect("long run must be laid out mid-line (phase-5 split)");
-        assert!((flow0 - hi_w).abs() < 0.5, "FLOW offset must be the cursor at entry");
-        let tls = t.text_lines.as_ref().expect("split run must have visual lines");
-        assert!(tls.len() >= 2, "run must span multiple lines, got {}", tls.len());
+        assert!(
+            (flow0 - hi_w).abs() < 0.5,
+            "FLOW offset must be the cursor at entry"
+        );
+        let tls = t
+            .text_lines
+            .as_ref()
+            .expect("split run must have visual lines");
+        assert!(
+            tls.len() >= 2,
+            "run must span multiple lines, got {}",
+            tls.len()
+        );
         let line0_w = flow0 + tls[0].width;
         let o0 = ((200.0 - line0_w) / 2.0).max(0.0);
-        assert!(o0 > 1.0, "fixture must leave real centering slack (o0={o0})");
+        assert!(
+            o0 > 1.0,
+            "fixture must leave real centering slack (o0={o0})"
+        );
         assert!(
             (parent.children[0].dimensions.content.x - o0).abs() < 0.5,
             "prior sibling must shift by O0={o0}, got x={}",
@@ -8352,7 +8572,8 @@ mod tests {
             "content rect must sit border-width inside the margin-box cursor"
         );
         assert!(
-            (first.border_box().x - 10.0).abs() < 0.01 && (first.border_box().y - 10.0).abs() < 0.01,
+            (first.border_box().x - 10.0).abs() < 0.01
+                && (first.border_box().y - 10.0).abs() < 0.01,
             "border box must start at the margin offset, got ({}, {})",
             first.border_box().x,
             first.border_box().y
@@ -8399,7 +8620,9 @@ mod tests {
         let mut inner_style = ComputedStyle::new();
         inner_style.width = Length::Px(80.0);
         inner_style.height = Length::Px(17.0);
-        badge.children.push(LayoutBox::new(BoxType::Block, inner_style));
+        badge
+            .children
+            .push(LayoutBox::new(BoxType::Block, inner_style));
         parent.children.push(badge);
 
         parent.layout(&cb);
@@ -8439,7 +8662,9 @@ mod tests {
         let mut badge = LayoutBox::new(BoxType::Block, badge_style);
         let mut inner_style = ComputedStyle::new();
         inner_style.width = Length::Px(80.0);
-        badge.children.push(LayoutBox::new(BoxType::Block, inner_style));
+        badge
+            .children
+            .push(LayoutBox::new(BoxType::Block, inner_style));
 
         let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
         parent.children.push(badge);
@@ -8787,7 +9012,10 @@ mod tests {
         a_style.width = Length::Px(50.0);
         let mut a = LayoutBox::new(BoxType::Inline, a_style);
         let (content, half) = a.inline_content_area();
-        assert!(content < 24.0 * 0.9, "content area must be font-based, got {content}");
+        assert!(
+            content < 24.0 * 0.9,
+            "content area must be font-based, got {content}"
+        );
         parent.children.push(a);
 
         let cb = Dimensions {
@@ -9477,12 +9705,13 @@ mod tests {
         let mut parent_style = ComputedStyle::new();
         parent_style.width = Length::Px(100.0);
         parent_style.height = Length::Px(100.0);
-        let mut parent =
-            LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
+        let mut parent = LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
 
         let mut flow_style = ComputedStyle::new();
         flow_style.height = Length::Px(54.0);
-        parent.children.push(LayoutBox::new(BoxType::Block, flow_style));
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, flow_style));
 
         let mut cover =
             LayoutBox::with_position(BoxType::Block, ComputedStyle::new(), Position::Absolute);
@@ -9511,11 +9740,12 @@ mod tests {
     fn abspos_reanchor_leaves_auto_height_parents_alone() {
         let mut parent_style = ComputedStyle::new();
         parent_style.width = Length::Px(100.0);
-        let mut parent =
-            LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
+        let mut parent = LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
         let mut flow_style = ComputedStyle::new();
         flow_style.height = Length::Px(30.0);
-        parent.children.push(LayoutBox::new(BoxType::Block, flow_style));
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, flow_style));
         let mut cover =
             LayoutBox::with_position(BoxType::Block, ComputedStyle::new(), Position::Absolute);
         cover.set_offsets(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
@@ -9784,7 +10014,12 @@ mod w3_zero_width_wrap_tests {
     /// with `div { white-space: DIV_WS; word-break: DIV_WB }` and
     /// `span { white-space: SPAN_WS; word-break: SPAN_WB }` (text nodes carry
     /// their parent's computed values, as the engine's cascade would set).
-    fn fixture(div_ws: WhiteSpace, div_wb: WordBreak, span_ws: WhiteSpace, span_wb: WordBreak) -> LayoutBox {
+    fn fixture(
+        div_ws: WhiteSpace,
+        div_wb: WordBreak,
+        span_ws: WhiteSpace,
+        span_wb: WordBreak,
+    ) -> LayoutBox {
         let mut s = ComputedStyle::new();
         s.display = Display::InlineBlock;
         s.font_size = Length::Px(32.0);
@@ -9821,10 +10056,19 @@ mod w3_zero_width_wrap_tests {
         // ANCESTOR of two characters governs the opportunity between them.
         // div (normal, break-all) governs a|b|c, c|x, z|d, d|e|f; the span
         // (pre) governs x|y|z. Ref: a / b / c / xyz / d / e / f.
-        let div = fixture(WhiteSpace::Normal, WordBreak::BreakAll, WhiteSpace::Pre, WordBreak::BreakAll);
+        let div = fixture(
+            WhiteSpace::Normal,
+            WordBreak::BreakAll,
+            WhiteSpace::Pre,
+            WordBreak::BreakAll,
+        );
         let lh = div.children[0].get_line_height();
 
-        assert_eq!(line_texts(&div.children[0]), ["a", "b", "c"], "abc wraps per grapheme at width 0");
+        assert_eq!(
+            line_texts(&div.children[0]),
+            ["a", "b", "c"],
+            "abc wraps per grapheme at width 0"
+        );
         assert!(
             div.children[1].children[0].text_lines.is_none(),
             "xyz is one run: the span is white-space: pre"
@@ -9833,9 +10077,15 @@ mod w3_zero_width_wrap_tests {
         // room: an empty first line closes that line box, then d / e / f.
         let def = &div.children[2];
         assert_eq!(line_texts(def), ["", "d", "e", "f"]);
-        assert!((def.dimensions.content.y - 3.0 * lh).abs() < 0.01, "def's line 0 is the xyz line");
-        assert!((div.dimensions.content.height - 7.0 * lh).abs() < 0.01,
-            "seven line boxes, got {} line-heights", div.dimensions.content.height / lh);
+        assert!(
+            (def.dimensions.content.y - 3.0 * lh).abs() < 0.01,
+            "def's line 0 is the xyz line"
+        );
+        assert!(
+            (div.dimensions.content.height - 7.0 * lh).abs() < 0.01,
+            "seven line boxes, got {} line-heights",
+            div.dimensions.content.height / lh
+        );
     }
 
     #[test]
@@ -9845,10 +10095,19 @@ mod w3_zero_width_wrap_tests {
         for div_ws in [WhiteSpace::Pre, WhiteSpace::Nowrap] {
             let div = fixture(div_ws, WordBreak::Normal, div_ws, WordBreak::BreakAll);
             let lh = div.children[0].get_line_height();
-            assert!(div.children[0].text_lines.is_none(), "{div_ws:?}: abc must not wrap");
-            assert!(div.children[2].text_lines.is_none(), "{div_ws:?}: def must not wrap");
-            assert!((div.dimensions.content.height - lh).abs() < 0.01,
-                "{div_ws:?}: one line box, got {}", div.dimensions.content.height / lh);
+            assert!(
+                div.children[0].text_lines.is_none(),
+                "{div_ws:?}: abc must not wrap"
+            );
+            assert!(
+                div.children[2].text_lines.is_none(),
+                "{div_ws:?}: def must not wrap"
+            );
+            assert!(
+                (div.dimensions.content.height - lh).abs() < 0.01,
+                "{div_ws:?}: one line box, got {}",
+                div.dimensions.content.height / lh
+            );
         }
     }
 
@@ -9861,7 +10120,10 @@ mod w3_zero_width_wrap_tests {
         cb.content = Rect::new(0.0, 0.0, 0.0, 0.0);
         let mut guarded = text("abc", WhiteSpace::Normal, WordBreak::BreakAll);
         guarded.layout_text("abc".into(), &cb);
-        assert!(guarded.text_lines.is_none(), "bare 0 must not wrap (intrinsic pass)");
+        assert!(
+            guarded.text_lines.is_none(),
+            "bare 0 must not wrap (intrinsic pass)"
+        );
         let mut definite = text("abc", WhiteSpace::Normal, WordBreak::BreakAll);
         definite.layout_text_with_zero_wrap("abc".into(), &cb, true);
         assert_eq!(line_texts(&definite), ["a", "b", "c"]);

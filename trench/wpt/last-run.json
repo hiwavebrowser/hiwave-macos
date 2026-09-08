@@ -1,14 +1,14 @@
 {
   "schema": 1,
   "wpt_pin": "a6f29b0bedaf3f1edba7b6739127fe8e713bfcb3",
-  "hiwave_git_sha": "5b89ed85c29e660c4975861f332ce4450569ae5c",
+  "hiwave_git_sha": "de1ff02ef3e43ac238d15cc8ce037dc023606528",
   "runner": "scripts/wpt_tier1.py",
   "viewport": {
     "width": 800,
     "height": 600
   },
   "wpt_max_diff_pct": 0.0,
-  "ts": "2026-09-04T06:36:06.578763+00:00",
+  "ts": "2026-09-02T06:07:19.473914+00:00",
   "n": 30,
   "pass": 24,
   "fail": 2,
@@ -187,8 +187,8 @@
       "id": "css-text/line-break/line-break-anywhere-001",
       "status": "FAIL",
       "reason": null,
-      "diff_pct": 0.0173,
-      "diff_pixels": 83,
+      "diff_pct": 0.0246,
+      "diff_pixels": 118,
       "rel_match": "ok",
       "blocked_by": null,
       "maps_to": "slice-0"

@@ -1092,13 +1092,46 @@ impl TextShaper {
             let mut char_idx = 0;
             let mut utf16_idx = 0;
 
+            // Fallback faces this run actually used, lazily created, and
+            // the union of their extents (ascent, descent, leading).
+            let mut fallback_fonts: Vec<(&'static str, Option<core_text::font::CTFont>)> =
+                Vec::new();
+            let mut used_fallback_extents: Option<(f32, f32, f32)> = None;
+
             while utf16_idx < char_count && char_idx < text_chars.len() {
                 let c = text_chars[char_idx];
                 let advance = glyph_advances[utf16_idx].width as f32;
 
-                // Handle missing glyphs (glyph ID 0)
-                let final_advance = if glyph_ids[utf16_idx] == 0 && advance == 0.0 {
-                    size * 0.5 // Fallback advance
+                // A character the chosen face has no glyph for is shaped by
+                // the SAME fallback face paint will draw it with (rustkit-text
+                // `GLYPH_FALLBACK_FAMILIES`): its real advance, and its face's
+                // extents folded into the run's — Blink unites every used
+                // fallback face into the line box under `line-height: normal`
+                // (NGInlineBoxState::AccumulateUsedFonts). Before: the
+                // primary face's .notdef advance and extents, so "☕ coffee"
+                // drew the emoji over the "c" and the line stayed 18px
+                // (Chrome 26). Glyph 0 is .notdef and CARRIES an advance —
+                // 15.69px on SF at 16px — so the miss is the id, never a
+                // zero advance.
+                let notdef_advance = if advance == 0.0 { size * 0.5 } else { advance };
+                let final_advance = if glyph_ids[utf16_idx] == 0 {
+                    if c.is_whitespace() || c.is_control() {
+                        notdef_advance
+                    } else {
+                        match Self::fallback_glyph_advance(c, size, &mut fallback_fonts) {
+                            Some((adv, asc, desc, lead)) => {
+                                used_fallback_extents = Some(match used_fallback_extents {
+                                    Some((a, d, l)) => (a.max(asc), d.max(desc), l.max(lead)),
+                                    None => (asc, desc, lead),
+                                });
+                                adv
+                            }
+                            // Variation selectors / joiners are zero-width
+                            // wherever they land (they modify a neighbour).
+                            None if is_default_ignorable(c) => 0.0,
+                            None => notdef_advance, // tofu
+                        }
+                    }
                 } else {
                     advance
                 };
@@ -1119,10 +1152,24 @@ impl TextShaper {
                 char_idx += 1;
             }
 
-            // Get font metrics from Core Text
-            let ascent = ct_font.ascent() as f32;
-            let descent = ct_font.descent() as f32;
-            let leading = ct_font.leading() as f32;
+            // Get font metrics from Core Text — united with the fallback
+            // faces this run used (see `final_advance` above).
+            let mut ascent = ct_font.ascent() as f32;
+            let mut descent = ct_font.descent() as f32;
+            let mut leading = ct_font.leading() as f32;
+            if let Some((fb_ascent, fb_descent, fb_leading)) = used_fallback_extents {
+                // Blink gives each face ITS OWN half-leading (half its rounded
+                // line gap) before uniting, so a primary face's gap never
+                // rides on top of a taller fallback face: Arial 16px
+                // (14.48 + 3.39, gap 0.52) with an emoji (20 + 6.25, gap 0)
+                // is max(14.5, 20) + max(3.5, 6.25) = 26 in Chrome, not 27.
+                // The run then carries no gap of its own.
+                let primary_half = leading.round() / 2.0;
+                let fallback_half = fb_leading.round() / 2.0;
+                ascent = (ascent + primary_half).max(fb_ascent + fallback_half);
+                descent = (descent + primary_half).max(fb_descent + fallback_half);
+                leading = 0.0;
+            }
             let underline_position = ct_font.underline_position() as f32;
             let underline_thickness = ct_font.underline_thickness() as f32;
 
@@ -1155,6 +1202,82 @@ impl TextShaper {
                 direction: TextDirection::Ltr,
             })
         }
+    }
+
+    /// Advance and face extents for a character the primary face lacks,
+    /// from the first of rustkit-text's `GLYPH_FALLBACK_FAMILIES` that has
+    /// a glyph for it. Faces are created once per run and kept in `fonts`.
+    /// Returns `(advance, ascent, descent, leading)`.
+    #[cfg(target_os = "macos")]
+    fn fallback_glyph_advance(
+        c: char,
+        size: f32,
+        fonts: &mut Vec<(&'static str, Option<core_text::font::CTFont>)>,
+    ) -> Option<(f32, f32, f32, f32)> {
+        extern "C" {
+            fn CTFontGetGlyphsForCharacters(
+                font: core_text::font::CTFontRef,
+                characters: *const u16,
+                glyphs: *mut u16,
+                count: isize,
+            ) -> bool;
+
+            fn CTFontGetAdvancesForGlyphs(
+                font: core_text::font::CTFontRef,
+                orientation: u32,
+                glyphs: *const u16,
+                advances: *mut CGSize,
+                count: isize,
+            ) -> f64;
+        }
+
+        let mut units = [0u16; 2];
+        let unit_count = c.encode_utf16(&mut units).len();
+
+        for family in rustkit_text::macos::GLYPH_FALLBACK_FAMILIES {
+            let slot = match fonts.iter().position(|(name, _)| name == family) {
+                Some(i) => i,
+                None => {
+                    // Same lookup as the painter's `rasterize_fallback`, so
+                    // measure and draw agree on the face.
+                    fonts.push((family, ct_font::new_from_name(family, size as f64).ok()));
+                    fonts.len() - 1
+                }
+            };
+            let Some(font) = fonts[slot].1.as_ref() else {
+                continue;
+            };
+
+            let mut glyph_ids = [0u16; 2];
+            unsafe {
+                // The bool is false when ANY unit lacks a glyph — a surrogate
+                // pair's trailing unit always does — so read the first slot.
+                let _ = CTFontGetGlyphsForCharacters(
+                    font.as_concrete_TypeRef(),
+                    units.as_ptr(),
+                    glyph_ids.as_mut_ptr(),
+                    unit_count as isize,
+                );
+                if glyph_ids[0] == 0 {
+                    continue;
+                }
+                let mut advance = CGSize::new(0.0, 0.0);
+                CTFontGetAdvancesForGlyphs(
+                    font.as_concrete_TypeRef(),
+                    0, // kCTFontOrientationHorizontal
+                    glyph_ids.as_ptr(),
+                    &mut advance,
+                    1,
+                );
+                return Some((
+                    advance.width as f32,
+                    font.ascent() as f32,
+                    font.descent() as f32,
+                    font.leading() as f32,
+                ));
+            }
+        }
+        None
     }
 
     /// Create a Core Text font with specific traits.
@@ -1905,6 +2028,20 @@ impl TextShaper {
 /// "XXXX&nbsp;XXXX X X" lost its nbsp and re-flowed every later line).
 fn is_collapsible_space(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c')
+}
+
+/// Default-ignorable code points that modify a neighbouring character and
+/// take no space of their own when no face maps them: variation selectors
+/// (U+FE00–FE0F, U+E0100–E01EF), ZWSP/ZWNJ/ZWJ, word joiner, BOM.
+fn is_default_ignorable(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'..='\u{200D}'
+            | '\u{2060}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{E0100}'..='\u{E01EF}'
+    )
 }
 
 /// A wrapped line of text.
