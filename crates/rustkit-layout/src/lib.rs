@@ -143,6 +143,38 @@ pub fn normal_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
     px
 }
 
+/// The CONTENT height a non-`auto` `aspect-ratio` implies for a box whose
+/// block size is `auto`, given its resolved content width. `None` when the box
+/// has no usable ratio or no inline size to derive from.
+///
+/// css-sizing-4 §4: the ratio applies to the box named by `box-sizing`, not
+/// always to the content box. Measured against Chrome 141, a 400px-wide box
+/// with `padding: 20px` and `aspect-ratio: 2 / 1`:
+///
+/// | box-sizing | Chrome border box | via content box |
+/// |---|---|---|
+/// | `border-box`  | **200** (= 400/2)          | 220 — wrong by the padding |
+/// | `content-box` | **220** (= 360/2 + 40)     | 220 — same |
+///
+/// So a content-box derivation is right only under `content-box`, and every
+/// corpus page opens with `* { box-sizing: border-box }`.
+pub(crate) fn aspect_ratio_content_height(
+    style: &ComputedStyle,
+    content_width: f32,
+    padding_border_w: f32,
+    padding_border_h: f32,
+) -> Option<f32> {
+    let ratio = style.aspect_ratio?;
+    if !(ratio > 0.0) || !ratio.is_finite() || !(content_width > 0.0) {
+        return None;
+    }
+    Some(if style.box_sizing == BoxSizing::BorderBox {
+        (((content_width + padding_border_w) / ratio) - padding_border_h).max(0.0)
+    } else {
+        content_width / ratio
+    })
+}
+
 /// Resolve a box's `line-height` to px, consulting font metrics for `normal`.
 pub fn resolve_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
     match style.line_height {
@@ -3489,10 +3521,17 @@ impl LayoutBox {
             _ => {
                 // Auto or Zero - content.height was set by layout_block_children
                 // But if aspect-ratio is set and we have a width, calculate height from it
-                if let Some(ratio) = self.style.aspect_ratio {
-                    if self.dimensions.content.width > 0.0 && ratio > 0.0 {
-                        self.dimensions.content.height = self.dimensions.content.width / ratio;
-                    }
+                let padding_border_width = self.dimensions.padding.left
+                    + self.dimensions.padding.right
+                    + self.dimensions.border.left
+                    + self.dimensions.border.right;
+                if let Some(h) = aspect_ratio_content_height(
+                    &self.style,
+                    self.dimensions.content.width,
+                    padding_border_width,
+                    padding_border_height,
+                ) {
+                    self.dimensions.content.height = h;
                 }
             }
         }
