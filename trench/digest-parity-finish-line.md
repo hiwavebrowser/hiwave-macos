@@ -1925,3 +1925,49 @@ Both readings are Linux/SwiftShader. Neither is a receipt.
 **Status of the 09-03 pair, unchanged otherwise:** #180 and #181 both open and
 green, heads `2f60f2a` / `144e80c`, no reviews, base `develop` still `5b89ed8`
 — nothing has merged repo-wide since 08-31.
+
+---
+
+## 2026-09-08 — the 09-03 night's PRs are merged; this watch closes
+
+**Both landed**, merged by Pete: **#180** (`atlas/abspos-shrink-to-fit`) and
+**#181** (`atlas/n41-grid-fit-content`). The check-in loop that had been
+carrying them is stopped — its terminal condition was merge or close.
+
+**The pile drained around them.** `develop` went `5b89ed8` → `d94c99e`,
+absorbing #170, #175, #176, #177, #183, #185, #186, #187 alongside these two.
+The 09-03 digest's decision 1 — *"seven green PRs open and none merged since
+08-31; is the campaign review-bound?"* — is answered by events rather than by a
+reply: it was, and it no longer is.
+
+**#181 was restacked before merge and the resolution is worth recording.**
+#187 added a *Phase 9.6* for `aspect-ratio` grid items in exactly the spot this
+PR added its *Phase 9.6* for `fit-content` items. The two name disjoint items —
+#187's pass `continue`s on any non-`auto` height, this one fires only on
+`Length::FitContent` — so they compose as two passes rather than compete.
+Develop keeps #187's as 9.6; this one became **Phase 9.7** immediately after,
+expression untouched. Verified on `d94c99e`: both passes present in that order,
+all three fit-content guards intact, `cargo test -p rustkit-layout --lib` 360
+passed. The M5 survivor reported on the PR is unchanged by the merge.
+
+**The #180 flag, resolved by measurement, did not block it.** The n45 board's
+`sticky-scroll` regression was branch age — 27 commits behind develop, missing
+#168 — and merged onto develop the branch moves one box and improves. It landed
+on that reading.
+
+**What is still open from these nights, for whoever picks the thread up:**
+
+- The night order still opens at P0a-0 and this file's own entries jump from
+  2026-08-12 to 2026-09-03, because nights 10–40 were recorded in
+  `trench/forensics/` instead. A seat told to read the digest first still reads
+  a stale state.
+- `estimate_content_height` omits the element's border — measured as **not
+  observable** on any corpus shape, since Phase 9.5 repairs it for every
+  instance the corpus has. A null result, recorded so it is not re-derived.
+- A definite-height grid container with `align-content: start` gives its one
+  auto row the whole container height (600px where the content is 57px).
+  Unmeasurable on the corpus — `align-content` defaults to `stretch` for grid,
+  so Chrome and RustKit agree on every page in it. Recorded, not worked.
+
+No `N/26` is claimed here. Everything this seat measured was
+Linux/SwiftShader; the macOS runs on `effcaec` and on develop are the receipts.
