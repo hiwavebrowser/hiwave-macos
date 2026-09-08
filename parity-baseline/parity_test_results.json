@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-30T01:51:28.713319",
+  "timestamp": "2026-08-31T02:10:36.365122",
   "scope": "all",
   "iterations": 1,
   "max_variance": 0.1,
@@ -2957,9 +2957,9 @@
       "type": "builtins",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 7995,
+        "diffPixels": 8053,
         "totalPixels": 153600,
-        "diffPercent": 5.205078125,
+        "diffPercent": 5.242838541666667,
         "width": 1280,
         "height": 120,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/shelf/run-1/diff.png",
@@ -3291,15 +3291,15 @@
       },
       "passed": true,
       "pixel_runs": [
-        5.205078125
+        5.242838541666667
       ],
-      "diff_pct_median": 5.205078125,
-      "diff_pct_min": 5.205078125,
-      "diff_pct_max": 5.205078125,
+      "diff_pct_median": 5.242838541666667,
+      "diff_pct_min": 5.242838541666667,
+      "diff_pct_max": 5.242838541666667,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 5.205078125
+      "diff_pct": 5.242838541666667
     },
     {
       "case_id": "article-typography",
