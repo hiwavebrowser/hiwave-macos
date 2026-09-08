@@ -1638,6 +1638,20 @@ impl Overflow {
     }
 }
 
+/// `text-overflow` (css-overflow-3 §5.1): how inline content that overflows
+/// its line box in the inline direction is rendered, on a block container
+/// whose `overflow` is other than `visible`. Not inherited — the block
+/// owns its line boxes, so the block owns the ellipsis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextOverflow {
+    /// Overflowing content is simply clipped (initial value).
+    #[default]
+    Clip,
+    /// Overflowing content is cut and `U+2026 …` is painted at the line
+    /// box's end edge in its place.
+    Ellipsis,
+}
+
 /// Scroll behavior for smooth scrolling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScrollBehavior {
@@ -2162,6 +2176,8 @@ pub struct ComputedStyle {
     pub opacity: f32,
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
+    /// css-overflow-3 §5.1; only meaningful when the overflow above clips.
+    pub text_overflow: TextOverflow,
 
     // Box shadows (multiple shadows supported)
     pub box_shadows: Vec<BoxShadow>,

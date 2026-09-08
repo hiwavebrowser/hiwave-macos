@@ -143,12 +143,194 @@ pub fn normal_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
     px
 }
 
+/// The CONTENT height a non-`auto` `aspect-ratio` implies for a box whose
+/// block size is `auto`, given its resolved content width. `None` when the box
+/// has no usable ratio or no inline size to derive from.
+///
+/// css-sizing-4 §4: the ratio applies to the box named by `box-sizing`, not
+/// always to the content box. Measured against Chrome 141, a 400px-wide box
+/// with `padding: 20px` and `aspect-ratio: 2 / 1`:
+///
+/// | box-sizing | Chrome border box | via content box |
+/// |---|---|---|
+/// | `border-box`  | **200** (= 400/2)          | 220 — wrong by the padding |
+/// | `content-box` | **220** (= 360/2 + 40)     | 220 — same |
+///
+/// So a content-box derivation is right only under `content-box`, and every
+/// corpus page opens with `* { box-sizing: border-box }`.
+pub(crate) fn aspect_ratio_content_height(
+    style: &ComputedStyle,
+    content_width: f32,
+    padding_border_w: f32,
+    padding_border_h: f32,
+) -> Option<f32> {
+    let ratio = style.aspect_ratio?;
+    if !(ratio > 0.0) || !ratio.is_finite() || !(content_width > 0.0) {
+        return None;
+    }
+    Some(if style.box_sizing == BoxSizing::BorderBox {
+        (((content_width + padding_border_w) / ratio) - padding_border_h).max(0.0)
+    } else {
+        content_width / ratio
+    })
+}
+
 /// Resolve a box's `line-height` to px, consulting font metrics for `normal`.
 pub fn resolve_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
     match style.line_height {
         // Only `normal` needs the font; skip shaping entirely otherwise.
         rustkit_css::LineHeight::Normal => normal_line_height(style, font_size),
         other => other.to_px(font_size),
+    }
+}
+
+/// Convert a specified size on a replaced element to a CONTENT size.
+///
+/// css-sizing-3 §3.1: under `box-sizing: border-box` a specified `width`,
+/// `height`, `max-width` or `max-height` names the BORDER box, so the
+/// element's own border and padding come out of it; under `content-box` (the
+/// initial value) it names the content box already. `None` — an `auto` size —
+/// stays `None`: the intrinsic size is a content size in both modes, and the
+/// decoration adds OUTSIDE it. That asymmetry is the whole defect this
+/// function exists for; a border-box image at its natural size is 102px wide
+/// where a border-box image at `width: 102px` has a 100px content box.
+///
+/// A free function rather than a method so the arithmetic is testable without
+/// a `LayoutBox`, and so that `layout_image` calling it is the only wiring a
+/// mutation has to break.
+pub fn replaced_content_size(
+    specified: Option<f32>,
+    decoration: f32,
+    border_box_sizing: bool,
+) -> Option<f32> {
+    specified.map(|size| {
+        if border_box_sizing {
+            (size - decoration).max(0.0)
+        } else {
+            size
+        }
+    })
+}
+
+/// Cross a known CONTENT size to the other axis through a preferred aspect
+/// ratio, honouring the box the ratio spans.
+///
+/// css-sizing-4 §4: `aspect-ratio` applies to the box named by `box-sizing`,
+/// so under `border-box` the ratio spans the element's own decoration and the
+/// derived axis has to give its decoration back. MEASURED against Chrome 148
+/// on a 1px-bordered 100x100 image with `aspect-ratio: 16/9`:
+///
+/// ```text
+/// box-sizing: border-box ; width: 160px  ->  border box 160.0000 x 90.0000
+/// box-sizing: content-box; width: 160px  ->  border box 162.0000 x 92.0000
+/// ```
+///
+/// If the ratio spanned the content box in both modes the border-box case
+/// would build 90.875 tall, which is what makes this branch load-bearing
+/// rather than cosmetic.
+pub fn ratio_cross_content_size(
+    known_content: f32,
+    known_decoration: f32,
+    derived_decoration: f32,
+    ratio: f32,
+    known_is_width: bool,
+    border_box_sizing: bool,
+) -> f32 {
+    let known_ratio_box = if border_box_sizing {
+        known_content + known_decoration
+    } else {
+        known_content
+    };
+    let derived_ratio_box = if known_is_width {
+        known_ratio_box / ratio
+    } else {
+        known_ratio_box * ratio
+    };
+    if border_box_sizing {
+        (derived_ratio_box - derived_decoration).max(0.0)
+    } else {
+        derived_ratio_box.max(0.0)
+    }
+}
+
+/// Resolve a replaced element's specified sizes against a preferred aspect
+/// ratio, returning CONTENT sizes.
+///
+/// css-sizing-4 §4/§5.1: a specified `aspect-ratio` REPLACES the element's
+/// natural ratio. Until 2026-08-23 `style.aspect_ratio` was consulted only on
+/// the block-height path, so it never reached a replaced element at all and
+/// images-intrinsic test11 (`width: 160px; aspect-ratio: 16/9`) built 160x160
+/// where Chrome builds 160x90.
+///
+/// The four cases, each MEASURED against Chrome 148 rather than derived
+/// (100x100 natural image, `border: 1px solid red`, `aspect-ratio: 16/9`):
+///
+/// ```text
+/// width and height both set   border-box   160x200   ratio ignored
+/// width set, height auto      border-box   160x90    height from the ratio
+/// height set, width auto      border-box   160x90    width from the ratio
+/// both auto                   border-box   102x57.375
+///                             content-box  102x58.25 natural width, then ratio
+/// ```
+///
+/// A free function for the same reason as `replaced_content_size`: the case
+/// analysis is the part that can be wrong, and `layout_image` calling it is
+/// the only wiring a mutation has to break.
+pub fn preferred_ratio_sizes(
+    explicit_width: Option<f32>,
+    explicit_height: Option<f32>,
+    natural_width: Option<f32>,
+    ratio: Option<f32>,
+    horizontal_decoration: f32,
+    vertical_decoration: f32,
+    border_box_sizing: bool,
+) -> (Option<f32>, Option<f32>) {
+    let ratio = match ratio {
+        Some(r) if r > 0.0 && r.is_finite() => r,
+        _ => return (explicit_width, explicit_height),
+    };
+    match (explicit_width, explicit_height) {
+        // Both specified: the ratio does not get a vote.
+        (Some(_), Some(_)) => (explicit_width, explicit_height),
+        (Some(w), None) => (
+            Some(w),
+            Some(ratio_cross_content_size(
+                w,
+                horizontal_decoration,
+                vertical_decoration,
+                ratio,
+                true,
+                border_box_sizing,
+            )),
+        ),
+        (None, Some(h)) => (
+            Some(ratio_cross_content_size(
+                h,
+                vertical_decoration,
+                horizontal_decoration,
+                ratio,
+                false,
+                border_box_sizing,
+            )),
+            Some(h),
+        ),
+        // Both auto: the natural width is the used width and the ratio names
+        // the height. The natural HEIGHT is discarded — that is what "replaces
+        // the natural ratio" means.
+        (None, None) => match natural_width {
+            Some(nw) if nw > 0.0 => (
+                Some(nw),
+                Some(ratio_cross_content_size(
+                    nw,
+                    horizontal_decoration,
+                    vertical_decoration,
+                    ratio,
+                    true,
+                    border_box_sizing,
+                )),
+            ),
+            _ => (None, None),
+        },
     }
 }
 
@@ -605,12 +787,35 @@ pub struct MarginCollapseContext {
     pub positive_margin: f32,
     /// Pending negative margin.
     pub negative_margin: f32,
+    /// The boxes laid out against this context are formatting roots (flex /
+    /// grid items, the root element): their own margins never collapse
+    /// through them with their children's (CSS 2.1 §8.3.1, css-flexbox-1
+    /// §4). The container that owns the context sets this.
+    pub children_are_formatting_roots: bool,
+    /// The owner already adjoined its first in-flow block child's top-margin
+    /// chain into ITS OWN context (parent/first-child through-collapse). The
+    /// first in-flow block child takes this flag and contributes no top
+    /// margin of its own — that margin sits above the parent's border box.
+    pub first_child_top_adjoined: bool,
+    /// The owner's bottom edge is open (no border/padding-bottom, auto
+    /// height, no BFC): the last in-flow child's bottom margin stays pending
+    /// in the context on return so the owner can adjoin it to its own bottom
+    /// margin, instead of being materialized into the content height.
+    pub last_child_collapses_through: bool,
 }
 
 impl MarginCollapseContext {
     /// Create a new margin collapse context.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Adjoin another context's pending margins into this one (positive and
+    /// negative parts kept separate, as §8.3.1's max-positive + min-negative
+    /// rule requires).
+    pub fn absorb(&mut self, other: &MarginCollapseContext) {
+        self.add_margin(other.positive_margin);
+        self.add_margin(other.negative_margin);
     }
 
     /// Add a margin to the collapse context.
@@ -1395,7 +1600,7 @@ impl LayoutBox {
         if can_wrap && width_is_resolved && text_width > container_width {
             let shaper = TextShaper::new();
             let chain = FontFamilyChain::from_css_value(&self.style.font_family);
-            if let Ok(lines) = shaper.wrap_text(
+            if let Ok(lines) = shaper.wrap_text_white_space(
                 &text,
                 &chain,
                 self.style.font_weight,
@@ -1405,6 +1610,7 @@ impl LayoutBox {
                 container_width,
                 effective_word_break(&self.style),
                 self.style.overflow_wrap,
+                self.style.white_space,
             ) {
                 if lines.len() > 1 {
                     // Known phase-1 gap: wrap_text shapes without letter/word-
@@ -1503,7 +1709,7 @@ impl LayoutBox {
         // cursor_x > 0), so say so: with a zero-wide container the first and
         // full budgets are both 0 and the shaper's `first < max` proxy can
         // no longer tell — it glued the first grapheme onto the open line.
-        let lines = match shaper.wrap_text_mid_line(
+        let lines = match shaper.wrap_text_mid_line_white_space(
             &text,
             &chain,
             self.style.font_weight,
@@ -1514,6 +1720,7 @@ impl LayoutBox {
             container_width,
             effective_word_break(&self.style),
             self.style.overflow_wrap,
+            self.style.white_space,
         ) {
             Ok(lines) if !lines.is_empty() => lines,
             _ => {
@@ -1550,18 +1757,81 @@ impl LayoutBox {
         natural_height: f32,
         containing_block: &Dimensions,
     ) {
-        // Calculate explicit dimensions from style
-        let explicit_width = match self.style.width {
-            Length::Px(px) => Some(px),
-            Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.width),
-            _ => None,
-        };
+        // A replaced element carries its own box decoration. Until 2026-08-22
+        // this function left margin/border/padding at zero, so `border_box()`
+        // WAS the content box and an image at its natural size never gained
+        // its border: images-intrinsic test1 (100x100 natural,
+        // `border: 1px solid red`) measured 100 where Chrome builds 102.
+        // The eleven sized tests on that page hid it — under the corpus's
+        // `box-sizing: border-box` a specified size IS the border box, so a
+        // renderer that ignores the border and one that subtracts it agree
+        // on every box except the `auto` one.
+        let cb_width = containing_block.content.width;
+        {
+            let d = &mut self.dimensions;
+            d.margin.left = self.style.margin_left.to_px(16.0, 16.0, cb_width);
+            d.margin.right = self.style.margin_right.to_px(16.0, 16.0, cb_width);
+            d.margin.top = self.style.margin_top.to_px(16.0, 16.0, cb_width);
+            d.margin.bottom = self.style.margin_bottom.to_px(16.0, 16.0, cb_width);
+            d.border.left = self.style.border_left_width.to_px(16.0, 16.0, cb_width);
+            d.border.right = self.style.border_right_width.to_px(16.0, 16.0, cb_width);
+            d.border.top = self.style.border_top_width.to_px(16.0, 16.0, cb_width);
+            d.border.bottom = self.style.border_bottom_width.to_px(16.0, 16.0, cb_width);
+            d.padding.left = self.style.padding_left.to_px(16.0, 16.0, cb_width);
+            d.padding.right = self.style.padding_right.to_px(16.0, 16.0, cb_width);
+            d.padding.top = self.style.padding_top.to_px(16.0, 16.0, cb_width);
+            d.padding.bottom = self.style.padding_bottom.to_px(16.0, 16.0, cb_width);
+        }
+        let horizontal_decoration = self.dimensions.border.left
+            + self.dimensions.border.right
+            + self.dimensions.padding.left
+            + self.dimensions.padding.right;
+        let vertical_decoration = self.dimensions.border.top
+            + self.dimensions.border.bottom
+            + self.dimensions.padding.top
+            + self.dimensions.padding.bottom;
+        let border_box_sizing = self.style.box_sizing == BoxSizing::BorderBox;
 
-        let explicit_height = match self.style.height {
-            Length::Px(px) => Some(px),
-            Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.height),
-            _ => None,
-        };
+        // Calculate explicit dimensions from style. Every specified size below
+        // (width/height and the maxima) is converted to a CONTENT size, since
+        // that is what the intrinsic-sizing rules and `dimensions.content` are
+        // expressed in; `auto` stays absent and takes the natural size.
+        let explicit_width = replaced_content_size(
+            match self.style.width {
+                Length::Px(px) => Some(px),
+                Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.width),
+                _ => None,
+            },
+            horizontal_decoration,
+            border_box_sizing,
+        );
+
+        let explicit_height = replaced_content_size(
+            match self.style.height {
+                Length::Px(px) => Some(px),
+                Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.height),
+                _ => None,
+            },
+            vertical_decoration,
+            border_box_sizing,
+        );
+
+        // A specified `aspect-ratio` replaces the natural ratio before the
+        // intrinsic-sizing rules run, so a missing axis is derived from the
+        // ratio rather than from the image's own proportions.
+        let (explicit_width, explicit_height) = preferred_ratio_sizes(
+            explicit_width,
+            explicit_height,
+            if natural_width > 0.0 {
+                Some(natural_width)
+            } else {
+                None
+            },
+            self.style.aspect_ratio,
+            horizontal_decoration,
+            vertical_decoration,
+            border_box_sizing,
+        );
 
         // Determine final dimensions using intrinsic size calculation
         let (mut width, mut height) = crate::images::calculate_intrinsic_size(
@@ -1583,16 +1853,24 @@ impl LayoutBox {
         // CSS 2.1 §10.4: max-width/max-height constrain replaced elements while
         // preserving the aspect ratio (max-width applied first, then max-height,
         // matching the constraint-violation table for the common cases).
-        let max_width = match self.style.max_width {
-            Length::Px(px) => Some(px),
-            Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.width),
-            _ => None,
-        };
-        let max_height = match self.style.max_height {
-            Length::Px(px) => Some(px),
-            Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.height),
-            _ => None,
-        };
+        let max_width = replaced_content_size(
+            match self.style.max_width {
+                Length::Px(px) => Some(px),
+                Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.width),
+                _ => None,
+            },
+            horizontal_decoration,
+            border_box_sizing,
+        );
+        let max_height = replaced_content_size(
+            match self.style.max_height {
+                Length::Px(px) => Some(px),
+                Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.height),
+                _ => None,
+            },
+            vertical_decoration,
+            border_box_sizing,
+        );
         if let Some(mw) = max_width {
             if width > mw && width > 0.0 {
                 height = if height > 0.0 {
@@ -1614,9 +1892,19 @@ impl LayoutBox {
             }
         }
 
-        // Position within containing block
-        self.dimensions.content.x = containing_block.content.x;
-        self.dimensions.content.y = containing_block.content.y + containing_block.content.height;
+        // Position within containing block. The CONTENT box sits inside this
+        // element's own margin/border/padding, so the BORDER box starts at the
+        // containing block's content edge — the same offsets
+        // `calculate_block_position` applies to a block box.
+        self.dimensions.content.x = containing_block.content.x
+            + self.dimensions.margin.left
+            + self.dimensions.border.left
+            + self.dimensions.padding.left;
+        self.dimensions.content.y = containing_block.content.y
+            + containing_block.content.height
+            + self.dimensions.margin.top
+            + self.dimensions.border.top
+            + self.dimensions.padding.top;
         self.dimensions.content.width = width;
         self.dimensions.content.height = height;
     }
@@ -1759,9 +2047,24 @@ impl LayoutBox {
             _ => intrinsic_height,
         };
 
-        // Position within containing block
-        self.dimensions.content.x = containing_block.content.x;
-        self.dimensions.content.y = containing_block.content.y + containing_block.content.height;
+        // Author margins are part of the control's margin box: the line box
+        // advances by them and its height counts them (css-selectors §4/§6:
+        // `input{margin:4px 0}` / `button{margin:4px}` rows built 37.5/33.5
+        // where Chrome builds 43/39 — the margins were never resolved, so
+        // margin_box() was the bare rect). The blob/composed height above is
+        // the BORDER box, so padding/border stay folded into content here.
+        let cw = containing_block.content.width;
+        self.dimensions.margin.top = self.length_to_px(&self.style.margin_top, cw);
+        self.dimensions.margin.bottom = self.length_to_px(&self.style.margin_bottom, cw);
+        self.dimensions.margin.left = self.length_to_px(&self.style.margin_left, cw);
+        self.dimensions.margin.right = self.length_to_px(&self.style.margin_right, cw);
+
+        // Position within containing block (the inline path re-places the
+        // box from its margin edge; the block path lands here).
+        self.dimensions.content.x = containing_block.content.x + self.dimensions.margin.left;
+        self.dimensions.content.y = containing_block.content.y
+            + containing_block.content.height
+            + self.dimensions.margin.top;
         self.dimensions.content.width = width;
         self.dimensions.content.height = height;
     }
@@ -1789,20 +2092,23 @@ impl LayoutBox {
         // extend the strut descent under them: bottom-edge treatment made
         // every control line strut_descent too tall (input rows 25 vs Chrome
         // 24, a fixed 50px button line 56 vs Chrome 50), compounding per row.
-        // AUTHOR-PADDED controls keep the bottom-edge model: it measures
-        // closer to Chrome there (css-selectors §6 pad-8 buttons: line 39;
-        // hang model under-built it 30.3, bottom-edge builds ~35) — same
-        // bare-vs-compose split as the DIG-1/DIG-2 height contract.
-        if matches!(self.box_type, BoxType::FormControl(_)) {
-            let px = |l: &Length| match l {
-                Length::Px(v) => *v,
-                _ => 0.0,
-            };
-            let author_pb_v = px(&self.style.padding_top)
-                + px(&self.style.padding_bottom)
-                + px(&self.style.border_top_width)
-                + px(&self.style.border_bottom_width);
-            return author_pb_v > 0.0;
+        // Checkbox / radio have no inner text line: their baseline is the
+        // bottom margin edge (Blink), so the strut hangs below them and a
+        // sibling label's text drops to that baseline — css-selectors §4:
+        // 20px checkbox + "Checkbox" label is a 23px line with the label's
+        // top at +6 in Chrome.
+        // Every other control (bare OR author-padded) uses the hang model.
+        // Author-padded controls used to keep the bottom-edge model because
+        // it "measured closer" (line 39 vs 30.3 for the pad-8 buttons) —
+        // that calibration was made while the controls' MARGINS were never
+        // resolved (n43); with the 4px margins in the margin box, the hang
+        // model builds Chrome's 39 and the bottom-edge model overshoots to
+        // 41.5 (margin box + strut descent).
+        if let BoxType::FormControl(control) = &self.box_type {
+            return matches!(
+                control,
+                FormControlType::Checkbox { .. } | FormControlType::Radio { .. }
+            );
         }
         self.style.display.is_atomic_inline() && self.children.is_empty()
     }
@@ -1995,8 +2301,35 @@ impl LayoutBox {
         // Calculate margin/padding/border
         self.calculate_block_vertical_box_model(containing_block);
 
-        // Handle margin collapse with previous sibling
-        margin_context.add_margin(self.dimensions.margin.top);
+        // CSS 2.1 §8.3.1 parent/first-child through-collapse. A box whose top
+        // edge is open (no border-top, no padding-top, not a formatting root)
+        // adjoins its first in-flow block child's top margin — recursively,
+        // down the chain of open first children — with its own top margin
+        // and the previous sibling's bottom margin, ABOVE its border box.
+        // Before this, `.title{margin-bottom:10px}` followed by a plain
+        // wrapper whose first child had `margin-top:4px` laid the wrapper's
+        // child at 10 + 4 where Chrome puts it at max(10, 4): every
+        // unpadded wrapper on css-selectors carried a +4 (and +8 for the
+        // wrapper-in-wrapper), and every later section rode on it.
+        let in_flow = !matches!(self.position, Position::Absolute | Position::Fixed)
+            && self.float == Float::None;
+        let is_formatting_root = margin_context.children_are_formatting_roots
+            || establishes_bfc(&self.style, self.float);
+        let top_chain = if is_formatting_root {
+            Vec::new()
+        } else {
+            self.first_child_top_margin_chain()
+        };
+        // The parent already adjoined this box's whole chain (its own top
+        // margin included) into the parent's context: contribute nothing.
+        let top_adjoined_by_parent =
+            in_flow && std::mem::take(&mut margin_context.first_child_top_adjoined);
+        if !top_adjoined_by_parent {
+            margin_context.add_margin(self.dimensions.margin.top);
+            for m in &top_chain {
+                margin_context.add_margin(*m);
+            }
+        }
         let collapsed_margin = margin_context.resolve();
 
         // Position the box with collapsed margin
@@ -2011,13 +2344,24 @@ impl LayoutBox {
             + self.dimensions.border.top
             + self.dimensions.padding.top;
 
-        // Children always start with a fresh margin context: this box consumed
-        // the pending margin when it positioned itself above, so passing the
-        // parent context down would re-apply an already-materialized margin to
-        // the first child (double count). The cost is that parent/first-child
-        // edge collapse (CSS 2.1 §8.3.1 through-collapse) is not performed —
-        // sibling collapse within each child list is what this path provides.
+        // Children start with a fresh margin context: this box consumed the
+        // pending margin when it positioned itself above, so passing the
+        // parent context down would re-apply an already-materialized margin
+        // to the first child (double count). The through-collapse edges ride
+        // on the flags instead: the first in-flow block child skips its top
+        // margin when it was adjoined above, and the last child's bottom
+        // margin stays pending when this box's bottom edge is open.
         let mut child_margin_context = MarginCollapseContext::new();
+        child_margin_context.children_are_formatting_roots =
+            self.style.display.is_flex() || self.style.display.is_grid();
+        child_margin_context.first_child_top_adjoined = !top_chain.is_empty();
+        child_margin_context.last_child_collapses_through = !is_formatting_root
+            && should_collapse_with_last_child(
+                &self.style,
+                self.float,
+                self.dimensions.border.bottom,
+                self.dimensions.padding.bottom,
+            );
 
         // Check for flex or grid container - these have special child layout
         if self.style.display.is_flex() {
@@ -2042,9 +2386,54 @@ impl LayoutBox {
         // Height depends on children
         self.calculate_block_height(containing_block.content.height);
 
-        // Reset margin context for next sibling, add bottom margin
+        // Reset margin context for next sibling, add bottom margin — and the
+        // last child's bottom margin that collapsed through our open bottom
+        // edge (it was left pending by layout_block_children_with_collapse).
         margin_context.reset();
         margin_context.add_margin(self.dimensions.margin.bottom);
+        if child_margin_context.last_child_collapses_through {
+            margin_context.absorb(&child_margin_context);
+        }
+    }
+
+    /// CSS 2.1 §8.3.1: the top margins that collapse THROUGH this box's top
+    /// edge — its first in-flow block child's top margin, then that child's
+    /// first in-flow block child's, ... — as long as each edge on the way is
+    /// open (no border-top / padding-top, not a formatting root) and no line
+    /// box or float intervenes. Empty when this box's own top edge is closed.
+    /// Percentage margins resolve against this box's content width (the
+    /// deeper widths are not laid out yet — ledgered approximation).
+    fn first_child_top_margin_chain(&self) -> Vec<f32> {
+        let width = self.dimensions.content.width;
+        let mut chain = Vec::new();
+        let mut node = self;
+        loop {
+            let border_top = node.length_to_px(&node.style.border_top_width, width);
+            let padding_top = node.length_to_px(&node.style.padding_top, width);
+            if !should_collapse_with_first_child(&node.style, node.float, border_top, padding_top) {
+                break;
+            }
+            // First in-flow child: out-of-flow boxes are skipped; anything
+            // inline-level opens a line box and ends the chain.
+            let first = node.children.iter().find(|c| {
+                !matches!(c.position, Position::Absolute | Position::Fixed)
+                    && c.float == Float::None
+            });
+            let Some(child) = first else { break };
+            if !matches!(child.box_type, BoxType::Block | BoxType::AnonymousBlock)
+                || child.style.display.is_atomic_inline()
+            {
+                break;
+            }
+            chain.push(child.length_to_px(&child.style.margin_top, width));
+            // A child that is itself a formatting root still adjoins its own
+            // margin, but nothing collapses through IT.
+            if establishes_bfc(&child.style, child.float) {
+                break;
+            }
+            node = child;
+        }
+        chain
     }
 
     /// Calculate vertical box model values (margin, border, padding).
@@ -2223,6 +2612,57 @@ impl LayoutBox {
         }
     }
 
+    /// This box's content height when it is definite BEFORE its children
+    /// lay out (an absolute `height`), else `None`. Percentages are left
+    /// out: they need the grandparent's definite height, which this box
+    /// does not hold. Mirrors the absolute arms of calculate_block_height.
+    fn definite_content_height(&self) -> Option<f32> {
+        let padding_border = self.dimensions.padding.top
+            + self.dimensions.padding.bottom
+            + self.dimensions.border.top
+            + self.dimensions.border.bottom;
+        let specified = match self.style.height {
+            Length::Px(h) => h,
+            Length::Em(em) => {
+                em * match self.style.font_size {
+                    Length::Px(px) => px,
+                    _ => 16.0,
+                }
+            }
+            Length::Rem(rem) => rem * 16.0,
+            Length::Vh(vh) if self.viewport.1 > 0.0 => vh / 100.0 * self.viewport.1,
+            _ => return None,
+        };
+        Some(if self.style.box_sizing == BoxSizing::BorderBox {
+            (specified - padding_border).max(0.0)
+        } else {
+            specified
+        })
+    }
+
+    /// Re-resolve an absolutely positioned box's offsets against its REAL
+    /// containing block, carrying the already-laid-out subtree with it. The
+    /// first pass positioned it against a stand-in whose height was the
+    /// parent's flow cursor (static position); only `bottom`-anchored and
+    /// `inset`-stretched boxes move here. `position: fixed` is untouched —
+    /// its containing block is the viewport, not this parent.
+    fn reanchor_absolute(&mut self, containing_block: &Dimensions) {
+        if self.position != Position::Absolute {
+            return;
+        }
+        let (origin_x, origin_y) = (self.dimensions.content.x, self.dimensions.content.y);
+        self.apply_position_offsets_absolute(containing_block);
+        let (dx, dy) = (
+            self.dimensions.content.x - origin_x,
+            self.dimensions.content.y - origin_y,
+        );
+        if dx != 0.0 || dy != 0.0 {
+            for child in &mut self.children {
+                crate::flex::translate_subtree(child, dx, dy);
+            }
+        }
+    }
+
     /// Apply absolute positioning offsets.
     fn apply_position_offsets_absolute(&mut self, containing_block: &Dimensions) {
         let offsets = self.resolved_offsets(containing_block);
@@ -2334,29 +2774,43 @@ impl LayoutBox {
         // Calculate content width
         let content_width = match style.width {
             Length::Auto => {
-                // Fill available space (CSS 2.1 §10.3.3) — unless the box is
-                // out of flow, where §10.3.7 makes `width: auto` shrink-to-fit
-                // instead. `.footer { position: fixed; bottom: 1rem }` on
-                // new_tab is the corpus's clearest case: Chrome sizes it to its
-                // text at 137.59px, RustKit stretched it across the whole
-                // 1280px viewport.
                 let available =
                     (containing_block.content.width - total_margin_border_padding).max(0.0);
-                // Presence of left/right is read through `resolved_offsets` —
-                // the same accessor `apply_position_offsets_absolute` uses to
-                // decide the very same stretch-vs-solve question — so the two
-                // cannot disagree about whether an offset was specified.
-                //
-                // Known limit, stated rather than hidden: for `position:
-                // fixed` the containing block is the viewport, and this
-                // function is handed the flow parent. That only matters when
-                // it clamps, i.e. when max-content exceeds `available`.
-                if auto_width_shrinks_to_fit(
+                if style.display.is_atomic_inline() {
+                    // CSS2 §10.3.9: an atomic inline (inline-block/-flex/
+                    // -grid) with width:auto shrinks to fit —
+                    // min(max(preferred_min, available), preferred) — it
+                    // never fills the containing block. The estimators
+                    // return border-box widths, so strip this box's own
+                    // padding+border to compare in content space.
+                    let pb = border_left + border_right + padding_left + padding_right;
+                    let preferred = (crate::grid::estimate_max_content_width(self) - pb).max(0.0);
+                    let preferred_min =
+                        (crate::grid::estimate_min_content_width(self) - pb).max(0.0);
+                    preferred_min.max(available.min(preferred))
+                } else if auto_width_shrinks_to_fit(
                     self.position,
                     &self.resolved_offsets(containing_block),
                 ) {
+                    // Out of flow: CSS 2.1 §10.3.7 makes `width: auto`
+                    // shrink-to-fit rather than fill. `.footer { position:
+                    // fixed; bottom: 1rem }` on new_tab is the corpus's
+                    // clearest case: Chrome sizes it to its text at 137.59px,
+                    // RustKit stretched it across the whole 1280px viewport.
+                    //
+                    // Presence of left/right is read through `resolved_offsets`
+                    // — the same accessor `apply_position_offsets_absolute`
+                    // uses to decide the very same stretch-vs-solve question —
+                    // so the two cannot disagree about whether an offset was
+                    // specified.
+                    //
+                    // Known limit, stated rather than hidden: for `position:
+                    // fixed` the containing block is the viewport, and this
+                    // function is handed the flow parent. That only matters
+                    // when it clamps, i.e. when max-content exceeds `available`.
                     shrink_to_fit_content_width(self, available)
                 } else {
+                    // Fill available space (CSS 2.1 §10.3.3)
                     available
                 }
             }
@@ -2525,12 +2979,21 @@ impl LayoutBox {
         // + middles) need alignment after the loop: (line_start, text_index).
         let mut split_records: Vec<(usize, usize)> = Vec::new();
 
+        // See layout_block_children_with_collapse: the real containing-block
+        // height an abspos child's `bottom`/`inset` resolve against.
+        let definite_height = self.definite_content_height();
+
         for (i, child) in self.children.iter_mut().enumerate() {
             // Skip absolutely/fixed positioned children for flow layout
             if child.position == Position::Absolute || child.position == Position::Fixed {
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y;
                 child.layout(&cb);
+                if let Some(height) = definite_height {
+                    let mut real_cb = self.dimensions.clone();
+                    real_cb.content.height = height;
+                    child.reanchor_absolute(&real_cb);
+                }
                 continue;
             }
 
@@ -3094,6 +3557,17 @@ impl LayoutBox {
         // + middles) need alignment after the loop: (line_start, text_index).
         let mut split_records: Vec<(usize, usize)> = Vec::new();
 
+        // `cb.content.height = cursor_y` below is the STATIC POSITION trick
+        // (calculate_block_position stacks a box at cb.y + cb.height), not
+        // the containing block's height — so `bottom: 0` / `inset: 0` on an
+        // abspos child resolved against "content laid out so far". A
+        // `::after { inset: 0 }` cover on a `height: 100px` div holding two
+        // 27px lines came out 54px tall (WPT overflow-wrap-anywhere-001).
+        // When this box's height is definite before its children lay out,
+        // the child is re-anchored against it afterwards (CSS 2.1 §10.1:
+        // the containing block is the positioned ancestor's padding box).
+        let definite_height = self.definite_content_height();
+
         for (i, child) in self.children.iter_mut().enumerate() {
             // Skip absolutely/fixed positioned children for flow layout
             if child.position == Position::Absolute || child.position == Position::Fixed {
@@ -3108,6 +3582,11 @@ impl LayoutBox {
                 // swallow the margin between them).
                 let mut oof_margin_context = margin_context.clone();
                 child.layout_with_collapse(&cb, &mut oof_margin_context, float_context);
+                if let Some(height) = definite_height {
+                    let mut real_cb = self.dimensions.clone();
+                    real_cb.content.height = height;
+                    child.reanchor_absolute(&real_cb);
+                }
                 continue;
             }
 
@@ -3393,15 +3872,14 @@ impl LayoutBox {
         // height. (Every padded container was measuring 10px short: the
         // pending margin was silently dropped on return, and the form-control
         // bare-height blobs had calibrated themselves against the deficit.)
-        // When collapse-through is allowed, keep today's behavior (pending
-        // margin dropped rather than adjoined to the parent's own bottom
-        // margin) — ledgered as a smaller residual, not chased here.
-        if !should_collapse_with_last_child(
-            &self.style,
-            self.float,
-            self.dimensions.border.bottom,
-            self.dimensions.padding.bottom,
-        ) {
+        // When collapse-through is allowed (the owner set the flag), the
+        // margin stays pending: layout_block_with_collapse adjoins it to the
+        // owner's own bottom margin. (It used to be silently dropped here —
+        // `ul > li:last-child{margin-bottom:2px}` lost its 2px, and a plain
+        // wrapper's last child lost its 4px on css-selectors.) Contexts
+        // without the flag — flex/grid item re-layouts, closed bottom edges —
+        // keep the margin inside the box, as a formatting root must.
+        if !margin_context.last_child_collapses_through {
             cursor_y += margin_context.resolve();
             margin_context.reset();
         }
@@ -3482,10 +3960,17 @@ impl LayoutBox {
             _ => {
                 // Auto or Zero - content.height was set by layout_block_children
                 // But if aspect-ratio is set and we have a width, calculate height from it
-                if let Some(ratio) = self.style.aspect_ratio {
-                    if self.dimensions.content.width > 0.0 && ratio > 0.0 {
-                        self.dimensions.content.height = self.dimensions.content.width / ratio;
-                    }
+                let padding_border_width = self.dimensions.padding.left
+                    + self.dimensions.padding.right
+                    + self.dimensions.border.left
+                    + self.dimensions.border.right;
+                if let Some(h) = aspect_ratio_content_height(
+                    &self.style,
+                    self.dimensions.content.width,
+                    padding_border_width,
+                    padding_border_height,
+                ) {
+                    self.dimensions.content.height = h;
                 }
             }
         }
@@ -4360,14 +4845,113 @@ pub struct DisplayList {
     pub commands: Vec<DisplayCommand>,
     /// Root element font size for rem unit calculations
     root_font_size: f32,
+    /// Tree depth of the box being rendered (root = 0). The root's overflow
+    /// propagates to the viewport, so the root box itself never clips.
+    depth: u32,
+    /// Whether the ROOT box's overflow is `visible`. When it is, `body`'s
+    /// overflow propagates to the viewport instead (CSS 2.1 §11.1.1 /
+    /// css-overflow-3 §3.3) and body does not clip either.
+    root_overflow_visible: bool,
+    /// Overflow clips pushed by NON-positioned boxes since the nearest
+    /// positioned ancestor, outermost first. `overflow` only clips descendants
+    /// whose containing block is the clipping box or lies inside it; an
+    /// absolutely positioned box whose containing block is ABOVE a static
+    /// clipper is not clipped by it (css-overflow-3 §3.1 — the classic
+    /// dropdown escaping an `overflow: hidden` wrapper). Such a box pops
+    /// exactly these clips before painting and re-pushes them after.
+    escapable_clips: Vec<(Rect, BorderRadius)>,
+    /// `text-overflow: ellipsis` scope of the nearest block container being
+    /// painted (css-overflow-3 §5.1). Inline boxes, anonymous blocks and
+    /// text runs paint inside it; a nested block container replaces it with
+    /// its own (or none) for the duration of its subtree.
+    ellipsis: Option<EllipsisScope>,
+}
+
+/// One block container's `text-overflow: ellipsis` state while its subtree
+/// paints.
+#[derive(Debug, Clone)]
+struct EllipsisScope {
+    /// End edge of the block's CONTENT box — the line box edge the
+    /// ellipsis sits against. (The clip is at the padding edge; the
+    /// ellipsis is not: css-overflow-3 §5.1 places it "at the end of the
+    /// line box".)
+    limit_x: f32,
+    /// Line boxes (keyed by top) that already carry an ellipsis. Runs paint
+    /// in inline order, so every run reaching a cut line AFTER the cut is
+    /// past the ellipsis and does not paint — judged by order, not by x:
+    /// a nowrap run's laid-out width is clamped to its container, so the
+    /// sibling after an overflowing `<span>` is placed at the clamped end,
+    /// short of where its content really is (repro: `Inline <b>bold run
+    /// that overflows</b> the box` painted " th…" over the span's
+    /// ellipsis when x decided).
+    lines: Vec<f32>,
+}
+
+/// What `text-overflow` does to one painted run.
+#[derive(Debug, Clone, PartialEq)]
+enum TextOverflowCut {
+    /// Fits (or cannot be measured): paint as laid out.
+    Keep,
+    /// Starts at or past an ellipsis already painted on this line.
+    Hide,
+    /// Cut so that `…` fits inside the block's content edge.
+    Cut {
+        text: String,
+        advances: Vec<f32>,
+        width: f32,
+    },
+}
+
+impl EllipsisScope {
+    /// css-overflow-3 §5.1 for one run painted at (`x`, line top
+    /// `line_top`) with per-char `advances`: a run ending past the block's
+    /// content edge is cut so that `…` (advance `ellipsis_advance`) fits;
+    /// if not even the ellipsis fits, the ellipsis alone is painted (the
+    /// clip cuts it — the spec says clip the ellipsis, not skip it). A run
+    /// that fits is kept; a run reaching a line that already carries an
+    /// ellipsis is hidden.
+    fn cut(
+        &mut self,
+        text: &str,
+        x: f32,
+        line_top: f32,
+        advances: &[f32],
+        ellipsis_advance: f32,
+    ) -> TextOverflowCut {
+        const EPS: f32 = 0.01;
+        if self.lines.iter().any(|&top| (top - line_top).abs() < 0.5) {
+            return TextOverflowCut::Hide;
+        }
+        let total: f32 = advances.iter().sum();
+        if x + total <= self.limit_x + EPS {
+            return TextOverflowCut::Keep;
+        }
+        let available = self.limit_x - x - ellipsis_advance;
+        let mut kept = 0usize;
+        let mut kept_width = 0.0f32;
+        for &adv in advances {
+            if kept_width + adv > available + EPS {
+                break;
+            }
+            kept_width += adv;
+            kept += 1;
+        }
+        let mut cut: String = text.chars().take(kept).collect();
+        cut.push('\u{2026}');
+        let mut cut_advances: Vec<f32> = advances[..kept].to_vec();
+        cut_advances.push(ellipsis_advance);
+        self.lines.push(line_top);
+        TextOverflowCut::Cut {
+            text: cut,
+            advances: cut_advances,
+            width: kept_width + ellipsis_advance,
+        }
+    }
 }
 
 impl Default for DisplayList {
     fn default() -> Self {
-        Self {
-            commands: Vec::new(),
-            root_font_size: 16.0,
-        }
+        Self::new()
     }
 }
 
@@ -4377,11 +4961,14 @@ impl DisplayList {
         Self {
             commands: Vec::new(),
             root_font_size: 16.0,
+            depth: 0,
+            root_overflow_visible: true,
+            escapable_clips: Vec::new(),
+            ellipsis: None,
         }
     }
 
-    /// Build display list from a layout box with proper stacking order.
-    pub fn build(root: &LayoutBox) -> Self {
+    fn for_root(root: &LayoutBox) -> Self {
         // Extract root font size from root element
         let root_font_size = match root.style.font_size {
             Length::Px(px) => px,
@@ -4389,11 +4976,20 @@ impl DisplayList {
             Length::Rem(rem) => rem * 16.0, // Relative to browser default
             _ => 16.0,
         };
-
-        let mut list = DisplayList {
+        DisplayList {
             commands: Vec::new(),
             root_font_size,
-        };
+            depth: 0,
+            root_overflow_visible: root.style.overflow_x == rustkit_css::Overflow::Visible
+                && root.style.overflow_y == rustkit_css::Overflow::Visible,
+            escapable_clips: Vec::new(),
+            ellipsis: None,
+        }
+    }
+
+    /// Build display list from a layout box with proper stacking order.
+    pub fn build(root: &LayoutBox) -> Self {
+        let mut list = DisplayList::for_root(root);
         list.render_stacking_context(root, 0, &mut 0);
         list
     }
@@ -4412,19 +5008,8 @@ impl DisplayList {
         // Update sticky positions based on scroll
         root.update_sticky_positions(scroll_x, scroll_y, viewport);
 
-        // Extract root font size from root element
-        let root_font_size = match root.style.font_size {
-            Length::Px(px) => px,
-            Length::Em(em) => em * 16.0,
-            Length::Rem(rem) => rem * 16.0,
-            _ => 16.0,
-        };
-
         // Build the display list
-        let mut list = DisplayList {
-            commands: Vec::new(),
-            root_font_size,
-        };
+        let mut list = DisplayList::for_root(root);
         list.render_stacking_context(root, 0, &mut 0);
         list
     }
@@ -4435,6 +5020,34 @@ impl DisplayList {
             layout_box.z_index
         } else {
             parent_z
+        };
+
+        // A positioned box is the containing block for the absolutely
+        // positioned boxes inside it, so clips pushed by static boxes ABOVE it
+        // are not escapable from within its subtree: scope them out for the
+        // duration. An absolutely/fixed positioned box additionally escapes
+        // those clips itself — its containing block is above them.
+        //
+        // "Positioned" is read from the COMPUTED STYLE, not `LayoutBox::position`:
+        // the engine deliberately transfers `position: relative` as
+        // `Position::Static` (its paint-side stacking path is not ready for
+        // relative boxes), but a relative box is still the containing block of
+        // its absolute children — image-gallery's `.gallery-item { position:
+        // relative; overflow: hidden }` must keep its `.image-overlay` inside
+        // the clip. `LayoutBox::position` alone would let the overlay escape.
+        let positioned = layout_box.position != Position::Static
+            || layout_box.style.position != rustkit_css::Position::Static;
+        let escapes = matches!(layout_box.position, Position::Absolute | Position::Fixed);
+        let outer_escapable = if positioned {
+            let outer = std::mem::take(&mut self.escapable_clips);
+            if escapes {
+                for _ in &outer {
+                    self.commands.push(DisplayCommand::PopClip);
+                }
+            }
+            Some(outer)
+        } else {
+            None
         };
 
         // Check if this creates a new stacking context
@@ -4482,16 +5095,31 @@ impl DisplayList {
         // Render this box
         self.render_box_content(layout_box);
 
-        // A box that clips its overflow under a border radius rounds its
-        // DESCENDANTS too. Pushed after the box's own content — the background
-        // rounds itself via BorderRadius on its own commands and must not be
-        // clipped twice — and popped after every child, including positioned
-        // ones, because `overflow` clips them all.
+        // A block container starts (or ends) the `text-overflow: ellipsis`
+        // scope its line boxes paint under; restored after its subtree.
+        let outer_ellipsis = self.enter_ellipsis_scope(layout_box);
+
+        // A box that clips its overflow clips its DESCENDANTS to its padding
+        // box (rounded when it has a radius). Pushed after the box's own
+        // content — the background rounds itself via BorderRadius on its own
+        // commands and must not be clipped twice — and popped after every
+        // child. Positioned children are inside the clip too, EXCEPT an
+        // absolutely positioned descendant whose containing block is above a
+        // static clipper: that one escapes via `escapable_clips` when it is
+        // rendered (see the top of this function).
         let overflow_clip = self.overflow_clip(layout_box);
         if let Some((rect, radius)) = overflow_clip {
-            self.commands
-                .push(DisplayCommand::PushClipRounded { rect, radius });
+            if radius.is_zero() {
+                self.commands.push(DisplayCommand::PushClip(rect));
+            } else {
+                self.commands
+                    .push(DisplayCommand::PushClipRounded { rect, radius });
+            }
+            if !positioned {
+                self.escapable_clips.push((rect, radius));
+            }
         }
+        self.depth += 1;
 
         // Collect children grouped by paint order
         let mut negative_z: Vec<(&LayoutBox, u32)> = Vec::new();
@@ -4550,8 +5178,15 @@ impl DisplayList {
             self.render_stacking_context(child, z_index, layer);
         }
 
+        self.depth -= 1;
         if overflow_clip.is_some() {
             self.commands.push(DisplayCommand::PopClip);
+            if !positioned {
+                self.escapable_clips.pop();
+            }
+        }
+        if let Some(outer) = outer_ellipsis {
+            self.ellipsis = outer;
         }
 
         // Pop transform if we pushed one
@@ -4562,6 +5197,49 @@ impl DisplayList {
         if creates_context {
             self.commands.push(DisplayCommand::PopStackingContext);
         }
+
+        // Restore the clips this box's subtree was scoped out of; an escaping
+        // box re-pushes the ones it popped so its later siblings are clipped
+        // exactly as before.
+        if let Some(outer) = outer_escapable {
+            if escapes {
+                for &(rect, radius) in &outer {
+                    if radius.is_zero() {
+                        self.commands.push(DisplayCommand::PushClip(rect));
+                    } else {
+                        self.commands
+                            .push(DisplayCommand::PushClipRounded { rect, radius });
+                    }
+                }
+            }
+            self.escapable_clips = outer;
+        }
+    }
+
+    /// css-overflow-3 §5.1: `text-overflow` applies to block containers
+    /// whose `overflow` is other than `visible`, and governs THEIR line
+    /// boxes only. Entering a block container therefore replaces the
+    /// current scope — with an ellipsis scope at the block's content edge,
+    /// or with none — and returns the outer scope for the caller to
+    /// restore. Inline-level and anonymous boxes return `None`: they paint
+    /// inside the nearest block container's scope.
+    fn enter_ellipsis_scope(&mut self, layout_box: &LayoutBox) -> Option<Option<EllipsisScope>> {
+        if !matches!(layout_box.box_type, BoxType::Block) {
+            return None;
+        }
+        let s = &layout_box.style;
+        let clips = s.overflow_x != rustkit_css::Overflow::Visible
+            || s.overflow_y != rustkit_css::Overflow::Visible;
+        let scope = if clips && s.text_overflow == rustkit_css::TextOverflow::Ellipsis {
+            let c = &layout_box.dimensions.content;
+            Some(EllipsisScope {
+                limit_x: c.x + c.width,
+                lines: Vec::new(),
+            })
+        } else {
+            None
+        };
+        Some(std::mem::replace(&mut self.ellipsis, scope))
     }
 
     /// Render a layout box's own content (shadows, background, borders, text, images).
@@ -4680,13 +5358,15 @@ impl DisplayList {
 
     /// The rounded clip a box imposes on its descendants, if any.
     ///
-    /// `None` unless the box both clips its overflow AND has a corner radius.
-    /// The square half of overflow clipping is deliberately NOT implemented
-    /// here: RustKit has never clipped overflow at all, so turning it on for
-    /// every `overflow: hidden` box is a separate change with its own blast
-    /// radius, and mixing the two would make neither attributable. What this
-    /// closes is the discrete `missing_clip` class Gate B reports — a child
-    /// painting square into a rounded parent's corner notch.
+    /// The clip a box imposes on its descendants: `None` unless `overflow`
+    /// is anything but `visible` on either axis (a single non-visible axis
+    /// computes the other to `auto`, css-overflow-3 §3.1, so both clip). The
+    /// rect is the padding box; the radius is zero for square corners.
+    ///
+    /// The root box never clips — its overflow propagates to the viewport —
+    /// and neither does `body` while the root's overflow is `visible`, because
+    /// then body's is what propagates (CSS 2.1 §11.1.1). Clipping either to its
+    /// own padding box would cut the page at the first screen of content.
     fn overflow_clip(&self, layout_box: &LayoutBox) -> Option<(Rect, BorderRadius)> {
         let s = &layout_box.style;
         let clips = s.overflow_x != rustkit_css::Overflow::Visible
@@ -4695,10 +5375,19 @@ impl DisplayList {
             return None;
         }
 
-        let radius = self.border_radius_px(layout_box);
-        if radius.is_zero() {
+        if self.depth == 0 {
             return None;
         }
+        let is_body = layout_box
+            .identity
+            .as_ref()
+            .map(|id| id.tag == "body")
+            .unwrap_or(false);
+        if is_body && self.root_overflow_visible {
+            return None;
+        }
+
+        let radius = self.border_radius_px(layout_box);
 
         // Overflow clips to the PADDING box, and the clip's radius is the
         // border radius shrunk inward by the border it sits inside.
@@ -4727,9 +5416,6 @@ impl DisplayList {
             bottom_right: inset(radius.bottom_right, d.border.right, d.border.bottom),
             bottom_left: inset(radius.bottom_left, d.border.left, d.border.bottom),
         };
-        if inner.is_zero() {
-            return None;
-        }
 
         Some((padding_rect, inner))
     }
@@ -5244,30 +5930,35 @@ impl DisplayList {
             // Build the list of lines to emit: wrapped text boxes carry
             // per-line fragments (see LayoutBox::text_lines); single-run
             // boxes emit exactly one line, positioned as before.
-            // Tuple: (text, x, y, width) — shadowing the outer names inside
-            // the loop keeps the emission code identical for both cases.
-            let render_lines: Vec<(String, f32, f32, f32)> = match &layout_box.text_lines {
+            // Tuple: (text, x, y, width, line_top) — shadowing the outer
+            // names inside the loop keeps the emission code identical for
+            // both cases. `line_top` is the line box's top (y minus the
+            // half-leading), the key runs on one line share regardless of
+            // their own font's leading.
+            let render_lines: Vec<(String, f32, f32, f32, f32)> = match &layout_box.text_lines {
                 Some(lines) => lines
                     .iter()
                     .enumerate()
                     .filter(|(_, l)| !l.text.is_empty())
                     .map(|(i, l)| {
+                        let top = content_y + i as f32 * line_height;
                         (
                             apply_text_transform(&l.text, style.text_transform),
                             x + l.x_offset,
-                            content_y + i as f32 * line_height + half_leading,
+                            top + half_leading,
                             l.width,
+                            top,
                         )
                     })
                     .collect(),
-                None => vec![(text.clone(), x, content_y + half_leading, text_width)],
+                None => vec![(text.clone(), x, content_y + half_leading, text_width, content_y)],
             };
 
             // PAINT-0 seating probe (RUSTKIT_PAINT_PROBE=1): log the layout
             // half of the glyph seating chain so flat-1.2 vs metrics-normal
             // builds can be diffed line-by-line (forensics 2026-07-16 §4.2).
             if paint0_probe() {
-                for (t, _lx, ly, _lw) in &render_lines {
+                for (t, _lx, ly, _lw, _top) in &render_lines {
                     eprintln!(
                         "PAINT0 layout text={:?} fs={} lh={} asc={} desc={} half={} content_y={} y_cmd={}",
                         t.chars().take(16).collect::<String>(),
@@ -5282,7 +5973,7 @@ impl DisplayList {
                 }
             }
 
-            for (text, x, y, text_width) in render_lines {
+            for (text, x, y, text_width, line_top) in render_lines {
                 // ADVANCE CONTRACT: ONE shape call feeds BOTH command types —
                 // layout's per-char advances and ascent ride the command so
                 // paint places glyphs exactly where layout measured them.
@@ -5290,6 +5981,40 @@ impl DisplayList {
                 // and re-owned pitch + baseline in paint — the last dual
                 // text path.)
                 let advances = shape_line_advances(&text, style, font_size);
+
+                // `text-overflow: ellipsis` on the enclosing block container
+                // (css-overflow-3 §5.1): cut the run at the block's content
+                // edge and paint `…` in the run's own font. Without per-char
+                // advances there is nothing to cut against — the run paints
+                // as laid out and the clip alone applies.
+                let (text, advances, text_width) = match (self.ellipsis.as_mut(), &advances) {
+                    (Some(scope), Some(adv)) => {
+                        let ellipsis_advance = shape_line_advances("\u{2026}", style, font_size)
+                            .and_then(|a| a.first().copied())
+                            .unwrap_or_else(|| {
+                                measure_text_with_spacing(
+                                    "\u{2026}",
+                                    &style.font_family,
+                                    font_size,
+                                    style.font_weight,
+                                    style.font_style,
+                                    0.0,
+                                    0.0,
+                                )
+                                .width
+                            });
+                        match scope.cut(&text, x, line_top, adv, ellipsis_advance) {
+                            TextOverflowCut::Keep => (text, advances, text_width),
+                            TextOverflowCut::Hide => continue,
+                            TextOverflowCut::Cut {
+                                text,
+                                advances,
+                                width,
+                            } => (text, Some(advances), width),
+                        }
+                    }
+                    _ => (text, advances, text_width),
+                };
 
                 // Check if this is gradient text (background-clip: text with gradient and transparent fill)
                 let is_gradient_text = style.background_clip == rustkit_css::BackgroundClip::Text
@@ -5930,6 +6655,223 @@ mod tests {
         );
     }
 
+    // ==================== text-overflow: ellipsis ====================
+    //
+    // css-overflow-3 §5.1. The chrome's `.tab-title` / `.url-text`, the
+    // shelf's `.command-item-name`, settings' `.cellar-item-*`: `white-space:
+    // nowrap; overflow: hidden; text-overflow: ellipsis`. n35 made the clip
+    // real, which cut those titles hard; the ellipsis is the visible half.
+
+    const ELLIPSIS_TEXT: &str = "The quick brown fox jumps over the lazy dog";
+
+    /// root → block(`width` wide, at x=10) → text. The block is NOT the root
+    /// (the root never clips, §11.1.1).
+    fn ellipsis_tree(
+        width: f32,
+        text_overflow: rustkit_css::TextOverflow,
+        overflow: rustkit_css::Overflow,
+        wrap_in_inline: bool,
+    ) -> LayoutBox {
+        let mut style = ComputedStyle::new();
+        style.white_space = rustkit_css::WhiteSpace::Nowrap;
+        let mut root = LayoutBox::new(BoxType::Block, style.clone());
+        root.dimensions.content = Rect::new(0.0, 0.0, 800.0, 600.0);
+
+        let mut block_style = style.clone();
+        block_style.overflow_x = overflow;
+        block_style.overflow_y = overflow;
+        block_style.text_overflow = text_overflow;
+        let mut block = LayoutBox::new(BoxType::Block, block_style);
+        block.dimensions.content = Rect::new(10.0, 10.0, width, 20.0);
+
+        let mut text = LayoutBox::new(BoxType::Text(ELLIPSIS_TEXT.to_string()), style.clone());
+        text.dimensions.content = Rect::new(10.0, 10.0, width, 20.0);
+
+        if wrap_in_inline {
+            let mut inline = LayoutBox::new(BoxType::Inline, style);
+            inline.dimensions.content = Rect::new(10.0, 10.0, width, 20.0);
+            inline.children.push(text);
+            block.children.push(inline);
+        } else {
+            block.children.push(text);
+        }
+        root.children.push(block);
+        root
+    }
+
+    /// (text, x, advances) of every Text command.
+    fn text_commands(list: &DisplayList) -> Vec<(String, f32, Option<Vec<f32>>)> {
+        list.commands
+            .iter()
+            .filter_map(|c| match c {
+                DisplayCommand::Text {
+                    text, x, advances, ..
+                } => Some((text.clone(), *x, advances.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_text_overflow_ellipsis_cuts_overflowing_run_inside_content_edge() {
+        let root = ellipsis_tree(
+            100.0,
+            rustkit_css::TextOverflow::Ellipsis,
+            rustkit_css::Overflow::Hidden,
+            false,
+        );
+        let texts = text_commands(&DisplayList::build(&root));
+        assert_eq!(texts.len(), 1, "one run paints: {texts:?}");
+        let (text, x, advances) = &texts[0];
+        assert!(text.ends_with('\u{2026}'), "run must end in U+2026, got {text:?}");
+        assert!(
+            text.chars().count() > 3 && text.chars().count() < ELLIPSIS_TEXT.chars().count(),
+            "some but not all characters survive the cut: {text:?}"
+        );
+        let advances = advances.as_ref().expect("cut run carries advances");
+        assert_eq!(advances.len(), text.chars().count(), "one advance per char incl. the ellipsis");
+        let width: f32 = advances.iter().sum();
+        assert!(
+            *x + width <= 10.0 + 100.0 + 0.01,
+            "ink (x={x}, w={width}) must end inside the content edge 110"
+        );
+        // The cut is tight: the next original character would not have fit.
+        let full = shape_line_advances(ELLIPSIS_TEXT, &root.children[0].style, 16.0)
+            .expect("shape");
+        let kept = text.chars().count() - 1;
+        let next_width: f32 = full[..kept + 1].iter().sum::<f32>() + advances[kept];
+        assert!(
+            *x + next_width > 110.0,
+            "keeping one more char ({}) would still have fit: {next_width}",
+            kept + 1
+        );
+    }
+
+    #[test]
+    fn test_text_overflow_ellipsis_leaves_a_fitting_run_alone() {
+        let root = ellipsis_tree(
+            1000.0,
+            rustkit_css::TextOverflow::Ellipsis,
+            rustkit_css::Overflow::Hidden,
+            false,
+        );
+        let texts = text_commands(&DisplayList::build(&root));
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].0, ELLIPSIS_TEXT, "a run that fits is painted whole");
+    }
+
+    #[test]
+    fn test_text_overflow_needs_overflow_other_than_visible() {
+        // §5.1: applies to block containers with overflow other than
+        // visible. `text-overflow: ellipsis` alone does nothing.
+        let root = ellipsis_tree(
+            100.0,
+            rustkit_css::TextOverflow::Ellipsis,
+            rustkit_css::Overflow::Visible,
+            false,
+        );
+        let texts = text_commands(&DisplayList::build(&root));
+        assert_eq!(texts[0].0, ELLIPSIS_TEXT, "overflow: visible — no ellipsis");
+    }
+
+    #[test]
+    fn test_text_overflow_clip_is_the_initial_value_and_cuts_nothing() {
+        let root = ellipsis_tree(
+            100.0,
+            rustkit_css::TextOverflow::Clip,
+            rustkit_css::Overflow::Hidden,
+            false,
+        );
+        let texts = text_commands(&DisplayList::build(&root));
+        assert_eq!(texts[0].0, ELLIPSIS_TEXT, "text-overflow: clip — the clip alone applies");
+        assert_eq!(rustkit_css::TextOverflow::default(), rustkit_css::TextOverflow::Clip);
+    }
+
+    #[test]
+    fn test_text_overflow_scope_reaches_through_inline_boxes() {
+        // The block owns its line boxes; a `<span>` inside it paints its
+        // text under the block's ellipsis.
+        let root = ellipsis_tree(
+            100.0,
+            rustkit_css::TextOverflow::Ellipsis,
+            rustkit_css::Overflow::Hidden,
+            true,
+        );
+        let texts = text_commands(&DisplayList::build(&root));
+        assert_eq!(texts.len(), 1);
+        assert!(texts[0].0.ends_with('\u{2026}'), "inline child is cut: {:?}", texts[0].0);
+    }
+
+    #[test]
+    fn test_text_overflow_does_not_leak_into_a_nested_block_container() {
+        // A nested block container establishes its own line boxes and has
+        // its own (initial: clip) text-overflow.
+        let mut root = ellipsis_tree(
+            100.0,
+            rustkit_css::TextOverflow::Ellipsis,
+            rustkit_css::Overflow::Hidden,
+            false,
+        );
+        let text = root.children[0].children.pop().expect("text child");
+        let mut inner = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        inner.dimensions.content = Rect::new(10.0, 10.0, 100.0, 20.0);
+        inner.children.push(text);
+        root.children[0].children.push(inner);
+
+        let texts = text_commands(&DisplayList::build(&root));
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].0, ELLIPSIS_TEXT, "nested block container: no ellipsis from the outer one");
+    }
+
+    #[test]
+    fn test_text_overflow_hides_a_later_run_behind_the_ellipsis() {
+        // Two runs on one line: the first is cut and carries the ellipsis;
+        // the second follows it in inline order and must not paint over it —
+        // wherever layout put it. `x = 300` is the honest position; `x = 60`
+        // is the engine-real one (the first run's laid-out width is clamped
+        // to the 100px container, so its sibling starts short of the edge,
+        // and short of the ellipsis).
+        for second_x in [300.0_f32, 60.0] {
+            let mut root = ellipsis_tree(
+                100.0,
+                rustkit_css::TextOverflow::Ellipsis,
+                rustkit_css::Overflow::Hidden,
+                false,
+            );
+            let mut second = LayoutBox::new(
+                BoxType::Text("tail".to_string()),
+                root.children[0].children[0].style.clone(),
+            );
+            second.dimensions.content = Rect::new(second_x, 10.0, 30.0, 20.0);
+            root.children[0].children.push(second);
+
+            let texts = text_commands(&DisplayList::build(&root));
+            assert_eq!(
+                texts.len(),
+                1,
+                "the second run (x={second_x}) is behind the ellipsis: {texts:?}"
+            );
+            assert!(texts[0].0.ends_with('\u{2026}'));
+        }
+
+        // Control: the same second run on ANOTHER line paints (it fits).
+        let mut root = ellipsis_tree(
+            100.0,
+            rustkit_css::TextOverflow::Ellipsis,
+            rustkit_css::Overflow::Hidden,
+            false,
+        );
+        let mut second = LayoutBox::new(
+            BoxType::Text("tail".to_string()),
+            root.children[0].children[0].style.clone(),
+        );
+        second.dimensions.content = Rect::new(10.0, 30.0, 30.0, 20.0);
+        root.children[0].children.push(second);
+        let texts = text_commands(&DisplayList::build(&root));
+        assert_eq!(texts.len(), 2, "a run on the next line is its own line: {texts:?}");
+        assert_eq!(texts[1].0, "tail");
+    }
+
     // ==================== Overflow rounded clip ====================
     //
     // image-gallery's shape, which Gate B reported 17 times on 2026-08-08 as
@@ -5968,7 +6910,7 @@ mod tests {
 
     #[test]
     fn overflow_hidden_under_a_radius_pushes_a_rounded_clip_around_its_children() {
-        let list = DisplayList::build(&rounded_overflow_parent(12.0, true));
+        let list = DisplayList::build(&under_root(rounded_overflow_parent(12.0, true)));
         let (rect, radius) = rounded_clip(&list).expect(
             "a rounded box that clips its overflow must push a rounded clip for its children",
         );
@@ -5998,12 +6940,14 @@ mod tests {
 
     #[test]
     fn positioned_children_are_inside_the_clip_too() {
-        // `overflow` clips EVERY descendant, not just the in-flow ones, so the
-        // pop belongs after the positioned pass. image-gallery's
-        // `.image-overlay` is `position: absolute` and sits on the parent's
-        // bottom corners — pop it early and the overlay paints square into
-        // exactly the notches this change exists to clear.
+        // `overflow` clips EVERY descendant it contains, not just the in-flow
+        // ones, so the pop belongs after the positioned pass. image-gallery's
+        // `.image-overlay` is `position: absolute` inside a `position: relative`
+        // item and sits on its bottom corners — pop it early and the overlay
+        // paints square into exactly the notches this change exists to clear.
+        // (A STATIC clipper is a different case: see the escape tests below.)
         let mut parent = rounded_overflow_parent(12.0, true);
+        parent.position = Position::Relative;
         let mut overlay_style = ComputedStyle::new();
         overlay_style.background_color = Color { r: 0, g: 0, b: 0, a: 0.7 };
         let mut overlay = LayoutBox::new(BoxType::Block, overlay_style);
@@ -6011,7 +6955,7 @@ mod tests {
         overlay.dimensions.content = Rect::new(0.0, 120.0, 227.0, 60.0);
         parent.children.push(overlay);
 
-        let list = DisplayList::build(&parent);
+        let list = DisplayList::build(&under_root(parent));
         let push = list
             .commands
             .iter()
@@ -6044,22 +6988,201 @@ mod tests {
         );
     }
 
+    /// Wrap `inner` in a root box so the unit under test is not itself the
+    /// root (the root's overflow propagates to the viewport and never clips).
+    fn under_root(inner: LayoutBox) -> LayoutBox {
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.dimensions.content = Rect::new(0.0, 0.0, 800.0, 600.0);
+        root.children.push(inner);
+        root
+    }
+
+    fn square_clip(list: &DisplayList) -> Option<Rect> {
+        list.commands.iter().find_map(|c| match c {
+            DisplayCommand::PushClip(rect) => Some(*rect),
+            _ => None,
+        })
+    }
+
     #[test]
-    fn overflow_hidden_with_square_corners_pushes_no_clip() {
-        // Deliberate scope line, not an oversight: RustKit has never clipped
-        // overflow at all, and turning that on for every `overflow: hidden` box
-        // is a separate change with its own blast radius. This unit closes the
-        // rounded-corner half only. If square overflow clipping is added later
-        // this test is the one that should change.
-        let list = DisplayList::build(&rounded_overflow_parent(0.0, true));
+    fn overflow_hidden_with_square_corners_pushes_a_square_clip_around_its_children() {
+        // The square half of overflow clipping (n35): `overflow: hidden` on a
+        // box with no radius clips its descendants to its padding box. WPT
+        // overflow-wrap-anywhere-002/003 are the exact-match probes — a
+        // `height: 1em; overflow: hidden` div whose second line must not paint.
+        let list = DisplayList::build(&under_root(rounded_overflow_parent(0.0, true)));
         assert!(
             rounded_clip(&list).is_none(),
-            "square overflow clipping is out of scope for this unit"
+            "no radius means no rounded clip"
         );
+        let rect = square_clip(&list).expect("a square overflow clip must be pushed");
+        assert_eq!((rect.width, rect.height), (227.0, 180.0));
+
+        let push = list
+            .commands
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::PushClip(_)))
+            .unwrap();
+        let child_bg = list
+            .commands
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::SolidColor(color, _) if color.b == 234))
+            .expect("the child's background must be in the list");
+        let pop = list
+            .commands
+            .iter()
+            .rposition(|c| matches!(c, DisplayCommand::PopClip))
+            .expect("the clip must be popped");
         assert!(
-            !list.commands.iter().any(|c| matches!(c, DisplayCommand::PushClip(_))),
-            "and it must not fall back to a square PushClip either"
+            push < child_bg && child_bg < pop,
+            "the child must paint INSIDE the clip, got push={push} child={child_bg} pop={pop}"
         );
+    }
+
+    #[test]
+    fn the_root_never_clips_its_overflow_propagates_to_the_viewport() {
+        let list = DisplayList::build(&rounded_overflow_parent(0.0, true));
+        assert!(
+            square_clip(&list).is_none() && rounded_clip(&list).is_none(),
+            "the root box's overflow belongs to the viewport, not to a clip"
+        );
+    }
+
+    #[test]
+    fn body_does_not_clip_while_the_root_overflow_is_visible() {
+        // CSS 2.1 §11.1.1: when the root's overflow is visible, body's
+        // propagates to the viewport instead — `body { overflow: hidden }`
+        // must not cut the page at body's padding box.
+        let mut body = rounded_overflow_parent(0.0, true);
+        body.identity = Some(Box::new(ElementIdentity {
+            element_id: 1,
+            tag: "body".to_string(),
+            selector: "body".to_string(),
+        }));
+        let list = DisplayList::build(&under_root(body));
+        assert!(
+            square_clip(&list).is_none(),
+            "body's overflow propagates to the viewport when the root's is visible"
+        );
+
+        // But with the root's overflow non-visible, body keeps its own.
+        let mut body = rounded_overflow_parent(0.0, true);
+        body.identity = Some(Box::new(ElementIdentity {
+            element_id: 1,
+            tag: "body".to_string(),
+            selector: "body".to_string(),
+        }));
+        let mut root = under_root(body);
+        root.style.overflow_y = rustkit_css::Overflow::Auto;
+        let list = DisplayList::build(&root);
+        assert!(
+            square_clip(&list).is_some(),
+            "body clips when the root's overflow is already non-visible"
+        );
+    }
+
+    #[test]
+    fn an_absolute_child_of_a_static_clipper_escapes_the_clip() {
+        // css-overflow-3 §3.1: overflow clips descendants whose containing
+        // block is the box or inside it. A static `overflow: hidden` wrapper is
+        // NOT the containing block of an absolutely positioned child — the
+        // dropdown-escapes-its-wrapper case — so that child paints outside the
+        // clip, and the clip is back in force for the sibling after it.
+        let mut parent = rounded_overflow_parent(0.0, true); // position: static
+        let mut overlay_style = ComputedStyle::new();
+        overlay_style.background_color = Color { r: 0, g: 0, b: 0, a: 0.7 };
+        let mut overlay = LayoutBox::new(BoxType::Block, overlay_style);
+        overlay.position = Position::Absolute;
+        overlay.dimensions.content = Rect::new(0.0, 120.0, 227.0, 60.0);
+        parent.children.push(overlay);
+
+        let mut later_style = ComputedStyle::new();
+        later_style.background_color = Color { r: 9, g: 9, b: 9, a: 1.0 };
+        let mut later = LayoutBox::new(BoxType::Block, later_style);
+        later.float = Float::Left; // paints in the positioned pass, after the overlay
+        later.dimensions.content = Rect::new(0.0, 0.0, 10.0, 10.0);
+        parent.children.push(later);
+
+        let list = DisplayList::build(&under_root(parent));
+        let cmds = &list.commands;
+        let overlay_bg = cmds
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::SolidColor(color, _) if color.a == 0.7))
+            .expect("the overlay's background must be in the list");
+        let later_bg = cmds
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::SolidColor(color, _) if color.r == 9))
+            .expect("the later sibling's background must be in the list");
+
+        // Clip depth at a command index: pushes minus pops before it.
+        let depth_at = |i: usize| {
+            cmds[..i].iter().fold(0i32, |d, c| match c {
+                DisplayCommand::PushClip(_) | DisplayCommand::PushClipRounded { .. } => d + 1,
+                DisplayCommand::PopClip => d - 1,
+                _ => d,
+            })
+        };
+        assert_eq!(depth_at(overlay_bg), 0, "the absolute child must paint with the static clip popped");
+        assert_eq!(depth_at(later_bg), 1, "the clip must be re-pushed for the next sibling");
+        assert_eq!(depth_at(cmds.len()), 0, "the list must end balanced");
+    }
+
+    #[test]
+    fn a_style_relative_clipper_is_a_containing_block_even_when_laid_out_static() {
+        // The engine transfers `position: relative` onto the layout box as
+        // `Position::Static` (transfer_positioning: the paint-side stacking
+        // path is not ready for relative boxes). The containing-block rule
+        // must read the computed style, or image-gallery's `.gallery-item {
+        // position: relative; overflow: hidden }` lets its absolute overlay
+        // paint square into the corner notch — measured as +74 px on the
+        // campaign board the first time this lane ran.
+        let mut parent = rounded_overflow_parent(12.0, true);
+        parent.style.position = rustkit_css::Position::Relative; // layout position stays Static
+        let mut overlay_style = ComputedStyle::new();
+        overlay_style.background_color = Color { r: 0, g: 0, b: 0, a: 0.7 };
+        let mut overlay = LayoutBox::new(BoxType::Block, overlay_style);
+        overlay.position = Position::Absolute;
+        overlay.dimensions.content = Rect::new(0.0, 120.0, 227.0, 60.0);
+        parent.children.push(overlay);
+
+        let list = DisplayList::build(&under_root(parent));
+        let cmds = &list.commands;
+        let overlay_bg = cmds
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::SolidColor(color, _) if color.a == 0.7))
+            .unwrap();
+        let depth = cmds[..overlay_bg].iter().fold(0i32, |d, c| match c {
+            DisplayCommand::PushClip(_) | DisplayCommand::PushClipRounded { .. } => d + 1,
+            DisplayCommand::PopClip => d - 1,
+            _ => d,
+        });
+        assert_eq!(depth, 1, "a style-relative clipper clips its absolute children");
+    }
+
+    #[test]
+    fn an_absolute_child_of_a_positioned_clipper_stays_inside_the_clip() {
+        // The mirror image: a positioned clipper IS the containing block.
+        let mut parent = rounded_overflow_parent(0.0, true);
+        parent.position = Position::Relative;
+        let mut overlay_style = ComputedStyle::new();
+        overlay_style.background_color = Color { r: 0, g: 0, b: 0, a: 0.7 };
+        let mut overlay = LayoutBox::new(BoxType::Block, overlay_style);
+        overlay.position = Position::Absolute;
+        overlay.dimensions.content = Rect::new(0.0, 120.0, 227.0, 60.0);
+        parent.children.push(overlay);
+
+        let list = DisplayList::build(&under_root(parent));
+        let cmds = &list.commands;
+        let overlay_bg = cmds
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::SolidColor(color, _) if color.a == 0.7))
+            .unwrap();
+        let depth = cmds[..overlay_bg].iter().fold(0i32, |d, c| match c {
+            DisplayCommand::PushClip(_) | DisplayCommand::PushClipRounded { .. } => d + 1,
+            DisplayCommand::PopClip => d - 1,
+            _ => d,
+        });
+        assert_eq!(depth, 1, "a positioned clipper clips its absolute children");
     }
 
     #[test]
@@ -6069,25 +7192,27 @@ mod tests {
         // behind, and the arc would be the outer one, a border-width off.
         let mut parent = rounded_overflow_parent(12.0, true);
         parent.dimensions.border = EdgeSizes { top: 4.0, right: 4.0, bottom: 4.0, left: 4.0 };
-
-        let list = DisplayList::build(&parent);
-        let (rect, radius) = rounded_clip(&list).expect("must still clip");
         let border_box = parent.dimensions.border_box();
+
+        let list = DisplayList::build(&under_root(parent));
+        let (rect, radius) = rounded_clip(&list).expect("must still clip");
         assert_eq!(rect.x, border_box.x + 4.0);
         assert_eq!(rect.width, border_box.width - 8.0);
         assert_eq!(radius.top_left, 8.0, "12px radius inside a 4px border is 8px");
     }
 
     #[test]
-    fn a_radius_swallowed_entirely_by_its_border_pushes_no_clip() {
+    fn a_radius_swallowed_entirely_by_its_border_is_a_square_clip() {
         // Inner radius floors at zero rather than going negative, and a clip
-        // with no rounding left is a square clip — out of scope above, so it
-        // must not be emitted here by the back door.
+        // with no rounding left is a square clip at the padding box — the
+        // border has eaten the arc, so there is nothing round left to clip to.
         let mut parent = rounded_overflow_parent(4.0, true);
         parent.dimensions.border = EdgeSizes { top: 6.0, right: 6.0, bottom: 6.0, left: 6.0 };
 
-        let list = DisplayList::build(&parent);
-        assert!(rounded_clip(&list).is_none());
+        let list = DisplayList::build(&under_root(parent));
+        assert!(rounded_clip(&list).is_none(), "no rounding survives a thicker border");
+        let rect = square_clip(&list).expect("the padding box still clips, square");
+        assert_eq!(rect.width, 227.0, "the padding box is the content box here (no padding)");
     }
 
     #[test]
@@ -6103,7 +7228,7 @@ mod tests {
         let mut parent = rounded_overflow_parent(12.0, true);
         parent.style.background_color = Color { r: 45, g: 45, b: 68, a: 1.0 };
 
-        let list = DisplayList::build(&parent);
+        let list = DisplayList::build(&under_root(parent));
         let push = list
             .commands
             .iter()
@@ -6668,6 +7793,341 @@ mod tests {
         assert_eq!(layout_box.dimensions.content.height, 100.0);
     }
 
+    /// A `.test-img` from `websuite/micro/images-intrinsic`: 1px border, and
+    /// the page's `* { box-sizing: border-box }`.
+    fn bordered_image_style(box_sizing: BoxSizing) -> ComputedStyle {
+        let mut style = ComputedStyle::new();
+        style.box_sizing = box_sizing;
+        style.border_top_width = Length::Px(1.0);
+        style.border_right_width = Length::Px(1.0);
+        style.border_bottom_width = Length::Px(1.0);
+        style.border_left_width = Length::Px(1.0);
+        style
+    }
+
+    fn image_box(style: ComputedStyle) -> LayoutBox {
+        LayoutBox::new(
+            BoxType::Image {
+                url: String::new(),
+                natural_width: 100.0,
+                natural_height: 100.0,
+            },
+            style,
+        )
+    }
+
+    #[test]
+    fn an_image_at_its_natural_size_gains_its_border() {
+        // images-intrinsic test1: 100x100 natural, `border: 1px solid red`,
+        // no specified size. Chrome's border box is 102x102 — an `auto` size
+        // is the intrinsic CONTENT size and the border adds outside it, in
+        // border-box mode too.
+        let mut layout_box = image_box(bordered_image_style(BoxSizing::BorderBox));
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 100.0);
+        assert_eq!(layout_box.dimensions.content.height, 100.0);
+        assert_eq!(layout_box.dimensions.border_box().width, 102.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 102.0);
+    }
+
+    #[test]
+    fn a_border_box_image_takes_its_border_out_of_a_specified_size() {
+        // images-intrinsic test4: `width: 150px; height: 75px` under
+        // border-box. Chrome's border box is 150x75, content 148x73.
+        let mut style = bordered_image_style(BoxSizing::BorderBox);
+        style.width = Length::Px(150.0);
+        style.height = Length::Px(75.0);
+        let mut layout_box = image_box(style);
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 148.0);
+        assert_eq!(layout_box.dimensions.content.height, 73.0);
+        assert_eq!(layout_box.dimensions.border_box().width, 150.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 75.0);
+    }
+
+    #[test]
+    fn the_horizontal_and_vertical_decorations_are_not_interchangeable() {
+        // Every other fixture here is symmetric, so a version of this code
+        // that took the border out of the wrong axis would pass all of them.
+        // 4px of horizontal border, 6px of vertical: `width: 150px` leaves a
+        // 146px content box and `height: 75px` a 69px one.
+        let mut style = ComputedStyle::new();
+        style.box_sizing = BoxSizing::BorderBox;
+        style.border_left_width = Length::Px(1.0);
+        style.border_right_width = Length::Px(3.0);
+        style.border_top_width = Length::Px(2.0);
+        style.border_bottom_width = Length::Px(4.0);
+        style.width = Length::Px(150.0);
+        style.height = Length::Px(75.0);
+        let mut layout_box = image_box(style);
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 146.0);
+        assert_eq!(layout_box.dimensions.content.height, 69.0);
+        assert_eq!(layout_box.dimensions.border_box().width, 150.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 75.0);
+        // …and the content box sits inside the LEFT/TOP border, not the mean.
+        // `containing_1000()` carries a 600px flow cursor, so y is 600 + 2.
+        assert_eq!(layout_box.dimensions.content.x, 1.0);
+        assert_eq!(layout_box.dimensions.content.y, 602.0);
+    }
+
+    #[test]
+    fn a_content_box_image_keeps_its_border_outside_a_specified_size() {
+        // The other half of the same rule: under the initial `content-box`,
+        // `width: 150px` IS the content box and the border box is 152.
+        let mut style = bordered_image_style(BoxSizing::ContentBox);
+        style.width = Length::Px(150.0);
+        style.height = Length::Px(75.0);
+        let mut layout_box = image_box(style);
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 150.0);
+        assert_eq!(layout_box.dimensions.content.height, 75.0);
+        assert_eq!(layout_box.dimensions.border_box().width, 152.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 77.0);
+    }
+
+    #[test]
+    fn a_border_box_image_max_width_names_the_border_box() {
+        // images-intrinsic test5: `max-width: 80px` on a 100x100 natural
+        // image under border-box. Chrome clamps the BORDER box to 80, so the
+        // content box is 78 and the aspect ratio holds on 78, not 80.
+        let mut style = bordered_image_style(BoxSizing::BorderBox);
+        style.max_width = Length::Px(80.0);
+        let mut layout_box = image_box(style);
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 78.0);
+        assert_eq!(layout_box.dimensions.content.height, 78.0);
+        assert_eq!(layout_box.dimensions.border_box().width, 80.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 80.0);
+    }
+
+    #[test]
+    fn an_images_border_box_starts_at_the_containing_blocks_content_edge() {
+        // The border box is what Chrome's rects are keyed on, so the offsets
+        // matter as much as the sizes: with 1px border and 4px padding the
+        // content box sits 5px in, and the BORDER box still starts where the
+        // containing block's content does.
+        let mut style = bordered_image_style(BoxSizing::BorderBox);
+        style.padding_left = Length::Px(4.0);
+        style.padding_top = Length::Px(4.0);
+        style.padding_right = Length::Px(4.0);
+        style.padding_bottom = Length::Px(4.0);
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(32.0, 40.0, 1000.0, 0.0);
+        let mut layout_box = image_box(style);
+        layout_box.layout_image(100.0, 100.0, &cb);
+        assert_eq!(layout_box.dimensions.content.x, 37.0);
+        assert_eq!(layout_box.dimensions.content.y, 45.0);
+        assert_eq!(layout_box.dimensions.border_box().x, 32.0);
+        assert_eq!(layout_box.dimensions.border_box().y, 40.0);
+        assert_eq!(layout_box.dimensions.border_box().width, 110.0);
+    }
+
+    #[test]
+    fn an_undecorated_image_is_unchanged_by_the_border_box_rule() {
+        // The overwhelming majority of images in the corpus carry no border
+        // or padding at all; for them content box and border box coincide and
+        // nothing about this path may move.
+        let mut style = ComputedStyle::new();
+        style.box_sizing = BoxSizing::BorderBox;
+        style.width = Length::Px(200.0);
+        let mut layout_box = image_box(style);
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 200.0);
+        assert_eq!(layout_box.dimensions.border_box().width, 200.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 200.0);
+    }
+
+    /// Every expected number in the `aspect_ratio` tests below was MEASURED
+    /// against Chrome 148 on this seat (bundled chromium-1194), not derived:
+    /// a 100x100 natural image with `border: 1px solid red` unless the test
+    /// says otherwise. Chrome's rows are quoted in each test.
+    fn ratio_image_box(box_sizing: BoxSizing, ratio: f32) -> LayoutBox {
+        let mut style = bordered_image_style(box_sizing);
+        style.aspect_ratio = Some(ratio);
+        image_box(style)
+    }
+
+    /// 3px left/right and 5px top/bottom borders. Night 19's M5 survived every
+    /// symmetric fixture in this file, so at least one aspect-ratio fixture
+    /// has to be able to tell the two axes' decoration apart.
+    fn asymmetric_ratio_style(box_sizing: BoxSizing, ratio: f32) -> ComputedStyle {
+        let mut style = ComputedStyle::new();
+        style.box_sizing = box_sizing;
+        style.aspect_ratio = Some(ratio);
+        style.border_left_width = Length::Px(3.0);
+        style.border_right_width = Length::Px(3.0);
+        style.border_top_width = Length::Px(5.0);
+        style.border_bottom_width = Length::Px(5.0);
+        style
+    }
+
+    #[test]
+    fn a_specified_aspect_ratio_replaces_the_natural_one() {
+        // images-intrinsic test11: `width: 160px; aspect-ratio: 16/9` on a
+        // square image. Chrome: border box 160.0000 x 90.0000.
+        // Before 2026-08-23 this built 160x160 — `style.aspect_ratio` was
+        // parsed and never reached a replaced element.
+        let mut layout_box = ratio_image_box(BoxSizing::BorderBox, 16.0 / 9.0);
+        layout_box.style.width = Length::Px(160.0);
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.border_box().width, 160.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 90.0);
+        assert_eq!(layout_box.dimensions.content.width, 158.0);
+        assert_eq!(layout_box.dimensions.content.height, 88.0);
+    }
+
+    #[test]
+    fn the_ratio_spans_the_box_named_by_box_sizing() {
+        // Same declaration under `content-box`. Chrome: border box
+        // 162.0000 x 92.0000 — the ratio spans the CONTENT box here, so the
+        // border adds outside it. A ratio that always spanned the content box
+        // would build the border-box case above 90.875 tall instead of 90.
+        let mut layout_box = ratio_image_box(BoxSizing::ContentBox, 16.0 / 9.0);
+        layout_box.style.width = Length::Px(160.0);
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.content.width, 160.0);
+        assert_eq!(layout_box.dimensions.content.height, 90.0);
+        assert_eq!(layout_box.dimensions.border_box().width, 162.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 92.0);
+    }
+
+    #[test]
+    fn a_specified_height_derives_the_width_across_the_ratio() {
+        // `height: 90px; aspect-ratio: 16/9`, border-box. Chrome: 160 x 90.
+        // The ratio has to work in both directions, not just width -> height.
+        let mut layout_box = ratio_image_box(BoxSizing::BorderBox, 16.0 / 9.0);
+        layout_box.style.height = Length::Px(90.0);
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.border_box().width, 160.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 90.0);
+    }
+
+    #[test]
+    fn two_specified_sizes_outrank_the_aspect_ratio() {
+        // `width: 160px; height: 200px; aspect-ratio: 16/9`, border-box.
+        // Chrome: 160 x 200 — the ratio does not get a vote.
+        let mut layout_box = ratio_image_box(BoxSizing::BorderBox, 16.0 / 9.0);
+        layout_box.style.width = Length::Px(160.0);
+        layout_box.style.height = Length::Px(200.0);
+        layout_box.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(layout_box.dimensions.border_box().width, 160.0);
+        assert_eq!(layout_box.dimensions.border_box().height, 200.0);
+    }
+
+    #[test]
+    fn an_auto_sized_image_keeps_its_natural_width_and_takes_the_ratio_height() {
+        // `aspect-ratio: 16/9` with no specified size at all. Chrome:
+        // border-box  102.0000 x 57.3750   (ratio spans the border box)
+        // content-box 102.0000 x 58.2500   (ratio spans the content box)
+        // The natural HEIGHT is discarded in both — that is what "replaces the
+        // natural ratio" means, and it is the branch that separates this from
+        // a rule that only fires when a size is specified.
+        let mut bb = ratio_image_box(BoxSizing::BorderBox, 16.0 / 9.0);
+        bb.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(bb.dimensions.border_box().width, 102.0);
+        assert_eq!(bb.dimensions.border_box().height, 57.375);
+
+        let mut cb = ratio_image_box(BoxSizing::ContentBox, 16.0 / 9.0);
+        cb.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(cb.dimensions.border_box().width, 102.0);
+        assert_eq!(cb.dimensions.border_box().height, 58.25);
+    }
+
+    #[test]
+    fn the_ratio_takes_each_axis_own_decoration() {
+        // 3px horizontal and 5px vertical borders, `aspect-ratio: 2/1`.
+        // Chrome, all three specified/auto combinations:
+        //   border-box  width:160px  -> 160 x 80   (content 154 x 70)
+        //   content-box width:160px  -> 166 x 90   (content 160 x 80)
+        //   border-box  height:80px  -> 160 x 80   (content 154 x 70)
+        //   border-box  auto         -> 106 x 53   (content 100 x 43)
+        // Swapping the two decorations passes every symmetric fixture above
+        // and fails all four of these.
+        let mut w_bb = image_box(asymmetric_ratio_style(BoxSizing::BorderBox, 2.0));
+        w_bb.style.width = Length::Px(160.0);
+        w_bb.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(w_bb.dimensions.content.width, 154.0);
+        assert_eq!(w_bb.dimensions.content.height, 70.0);
+
+        let mut w_cb = image_box(asymmetric_ratio_style(BoxSizing::ContentBox, 2.0));
+        w_cb.style.width = Length::Px(160.0);
+        w_cb.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(w_cb.dimensions.content.width, 160.0);
+        assert_eq!(w_cb.dimensions.content.height, 80.0);
+
+        let mut h_bb = image_box(asymmetric_ratio_style(BoxSizing::BorderBox, 2.0));
+        h_bb.style.height = Length::Px(80.0);
+        h_bb.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(h_bb.dimensions.content.width, 154.0);
+        assert_eq!(h_bb.dimensions.content.height, 70.0);
+
+        let mut auto_bb = image_box(asymmetric_ratio_style(BoxSizing::BorderBox, 2.0));
+        auto_bb.layout_image(100.0, 100.0, &containing_1000());
+        assert_eq!(auto_bb.dimensions.content.width, 100.0);
+        assert_eq!(auto_bb.dimensions.content.height, 43.0);
+    }
+
+    #[test]
+    fn an_absent_or_degenerate_ratio_leaves_the_natural_one_alone() {
+        // The eleven sized tests on images-intrinsic and every other image in
+        // the corpus have no `aspect-ratio` at all; none of them may move.
+        assert_eq!(
+            preferred_ratio_sizes(Some(158.0), None, Some(100.0), None, 2.0, 2.0, true),
+            (Some(158.0), None)
+        );
+        // A ratio that cannot be divided by is not a ratio. `auto` already
+        // parses to `None`; these are the values a bad declaration can reach.
+        for bad in [0.0, -2.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                preferred_ratio_sizes(Some(158.0), None, Some(100.0), Some(bad), 2.0, 2.0, true),
+                (Some(158.0), None),
+                "ratio {bad} must be ignored, not divided by"
+            );
+        }
+        // No specified size and no natural width: nothing to cross the ratio
+        // from, so both stay absent rather than becoming zero.
+        assert_eq!(
+            preferred_ratio_sizes(None, None, None, Some(2.0), 2.0, 2.0, true),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn a_ratio_narrower_than_its_own_decoration_floors_at_zero() {
+        // 6px border box, 20px of vertical decoration, ratio 1: the derived
+        // border box is 6px and giving 20px back is -14. `replaced_content_size`
+        // floors the same way for the same reason — a negative content box is
+        // read as a size by everything downstream.
+        assert_eq!(
+            ratio_cross_content_size(2.0, 4.0, 20.0, 1.0, true, true),
+            0.0
+        );
+        // Nothing to floor in the ordinary case, and content-box never
+        // subtracts at all.
+        assert_eq!(
+            ratio_cross_content_size(158.0, 2.0, 2.0, 16.0 / 9.0, true, true),
+            88.0
+        );
+        assert_eq!(
+            ratio_cross_content_size(160.0, 2.0, 2.0, 16.0 / 9.0, true, false),
+            90.0
+        );
+    }
+
+    #[test]
+    fn an_auto_size_is_never_reduced_by_the_decoration() {
+        // `replaced_content_size` must leave `None` alone: an absent size is
+        // the intrinsic one, and subtracting the border from it is exactly
+        // the mirror-image bug (an image at natural size measuring 98).
+        assert_eq!(replaced_content_size(None, 2.0, true), None);
+        assert_eq!(replaced_content_size(Some(200.0), 2.0, true), Some(198.0));
+        assert_eq!(replaced_content_size(Some(200.0), 2.0, false), Some(200.0));
+        // Decoration wider than the specified border box floors at zero
+        // rather than producing a negative content box.
+        assert_eq!(replaced_content_size(Some(1.0), 4.0, true), Some(0.0));
+    }
+
     #[test]
     fn test_auto_margins_center_max_width_clamped() {
         // width: auto; max-width: 600px; margin: 0 auto → clamped then centered
@@ -6908,6 +8368,88 @@ mod tests {
             (second_row.content.y - expected_y).abs() < 0.5,
             "wrapped row must advance by line height incl. strut descent; expected content.y {expected_y}, got {}",
             second_row.content.y
+        );
+    }
+
+    #[test]
+    fn test_inline_block_auto_width_shrinks_to_fit() {
+        // CSS2 §10.3.9: an atomic inline with width:auto shrinks to its
+        // content, it does not fill the containing block. Found on the
+        // about page (n39): span#versionBadge (inline-block, padding 4/12,
+        // border 1) measured 672px wide vs Chrome's 104.6 — width:auto took
+        // the block fill path, and text-align:center then centered the text
+        // INSIDE the full-width badge instead of the badge itself.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 672.0, 0.0);
+
+        let mut parent_style = ComputedStyle::new();
+        parent_style.text_align = TextAlign::Center;
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut badge_style = ComputedStyle::new();
+        badge_style.display = rustkit_css::Display::InlineBlock;
+        badge_style.padding_left = Length::Px(12.0);
+        badge_style.padding_right = Length::Px(12.0);
+        badge_style.border_left_width = Length::Px(1.0);
+        badge_style.border_right_width = Length::Px(1.0);
+        let mut badge = LayoutBox::new(BoxType::Block, badge_style);
+
+        // Content stands in for a text run via an explicit-width block:
+        // preferred (max-content) = 80.
+        let mut inner_style = ComputedStyle::new();
+        inner_style.width = Length::Px(80.0);
+        inner_style.height = Length::Px(17.0);
+        badge.children.push(LayoutBox::new(BoxType::Block, inner_style));
+        parent.children.push(badge);
+
+        parent.layout(&cb);
+
+        let d = &parent.children[0].dimensions;
+        assert!(
+            (d.content.width - 80.0).abs() < 0.01,
+            "auto-width inline-block must shrink to content (80), got {}",
+            d.content.width
+        );
+        // Border box = 80 + 24 padding + 2 border = 106; text-align:center
+        // on the parent centers the BOX: x = (672 - 106) / 2 = 283.
+        let bb = d.border_box();
+        assert!(
+            (bb.width - 106.0).abs() < 0.01,
+            "border box must be 106, got {}",
+            bb.width
+        );
+        assert!(
+            (bb.x - 283.0).abs() < 0.5,
+            "centered inline-block border box must sit at x=283, got {}",
+            bb.x
+        );
+    }
+
+    #[test]
+    fn test_inline_block_auto_width_floors_at_min_content() {
+        // Shrink-to-fit = min(max(preferred_min, available), preferred):
+        // a container narrower than min-content does not crush the box.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 50.0, 0.0);
+
+        let mut badge_style = ComputedStyle::new();
+        badge_style.display = rustkit_css::Display::InlineBlock;
+        badge_style.padding_left = Length::Px(12.0);
+        badge_style.padding_right = Length::Px(12.0);
+        let mut badge = LayoutBox::new(BoxType::Block, badge_style);
+        let mut inner_style = ComputedStyle::new();
+        inner_style.width = Length::Px(80.0);
+        badge.children.push(LayoutBox::new(BoxType::Block, inner_style));
+
+        let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        parent.children.push(badge);
+        parent.layout(&cb);
+
+        let d = &parent.children[0].dimensions;
+        assert!(
+            (d.content.width - 80.0).abs() < 0.01,
+            "inline-block must not shrink below min-content (80), got {}",
+            d.content.width
         );
     }
 
@@ -7394,6 +8936,250 @@ mod tests {
         );
     }
 
+    // ---- CSS 2.1 §8.3.1 parent/child through-collapse (n43) ----
+    // Shapes are css-selectors §1: `.section-title{margin-bottom:10px}`
+    // followed by an unpadded `.test-child` whose first child has
+    // `margin-top:4px` — Chrome lays that child at max(10, 4) below the
+    // title, RustKit laid it at 10 + 4.
+
+    fn n43_block(height: Option<f32>, mt: f32, mb: f32) -> LayoutBox {
+        let mut s = ComputedStyle::new();
+        if let Some(h) = height {
+            s.height = Length::Px(h);
+        }
+        s.margin_top = Length::Px(mt);
+        s.margin_bottom = Length::Px(mb);
+        LayoutBox::new(BoxType::Block, s)
+    }
+
+    fn n43_layout(root: &mut LayoutBox) {
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 0.0),
+            ..Default::default()
+        };
+        let mut mc = MarginCollapseContext::new();
+        let mut fc = FloatContext::new();
+        root.layout_with_collapse(&cb, &mut mc, &mut fc);
+    }
+
+    #[test]
+    fn a_first_childs_top_margin_collapses_through_an_open_parent() {
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.children.push(n43_block(Some(20.0), 0.0, 10.0)); // title
+        let mut wrapper = n43_block(None, 0.0, 0.0);
+        wrapper.children.push(n43_block(Some(30.0), 4.0, 0.0));
+        root.children.push(wrapper);
+        n43_layout(&mut root);
+
+        let wrapper = &root.children[1];
+        let child = &wrapper.children[0];
+        assert!(
+            (wrapper.dimensions.content.y - 30.0).abs() < 0.1,
+            "wrapper sits at title bottom + max(10, 4) = 30, got {}",
+            wrapper.dimensions.content.y
+        );
+        assert!(
+            (child.dimensions.content.y - 30.0).abs() < 0.1,
+            "first child's 4px collapsed through the wrapper: y must be 30, got {} (34 = summed)",
+            child.dimensions.content.y
+        );
+        assert!(
+            (wrapper.dimensions.content.height - 30.0).abs() < 0.1,
+            "the collapsed margin is outside the wrapper: height 30, got {}",
+            wrapper.dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn the_chain_collapses_through_two_open_wrappers() {
+        // section-title (mb 10) / wrapper / wrapper / nested-child (mt 4)
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.children.push(n43_block(Some(20.0), 0.0, 10.0));
+        let mut outer = n43_block(None, 0.0, 0.0);
+        let mut inner = n43_block(None, 0.0, 0.0);
+        inner.children.push(n43_block(Some(30.0), 4.0, 0.0));
+        outer.children.push(inner);
+        root.children.push(outer);
+        n43_layout(&mut root);
+
+        let leaf = &root.children[1].children[0].children[0];
+        assert!(
+            (leaf.dimensions.content.y - 30.0).abs() < 0.1,
+            "4px collapses through both wrappers to max(10, 4): y 30, got {}",
+            leaf.dimensions.content.y
+        );
+        assert!(
+            (root.children[1].dimensions.content.height - 30.0).abs() < 0.1,
+            "neither wrapper grows by the escaped margin, got {}",
+            root.children[1].dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn a_last_childs_bottom_margin_collapses_through_and_adjoins_the_next_sibling() {
+        // wrapper > child (h 30, mb 4), then next (mt 2): Chrome puts next at
+        // 30 + max(4, 2) = 34 and the wrapper stays 30 tall.
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut wrapper = n43_block(None, 0.0, 0.0);
+        wrapper.children.push(n43_block(Some(30.0), 0.0, 4.0));
+        root.children.push(wrapper);
+        root.children.push(n43_block(Some(10.0), 2.0, 0.0));
+        n43_layout(&mut root);
+
+        let wrapper = &root.children[0];
+        let next = &root.children[1];
+        assert!(
+            (wrapper.dimensions.content.height - 30.0).abs() < 0.1,
+            "wrapper height excludes the through-collapsed margin: 30, got {}",
+            wrapper.dimensions.content.height
+        );
+        assert!(
+            (next.dimensions.content.y - 34.0).abs() < 0.1,
+            "next sibling at 30 + max(4, 2) = 34, got {} (32 = the 4px was dropped)",
+            next.dimensions.content.y
+        );
+        // The ul case: two escaped margins (first + last) around a stack of items
+        // must not inflate the parent — css-selectors §5 `.list-items` was +2.
+        assert!(
+            (root.dimensions.content.height - 44.0).abs() < 0.1,
+            "root content = 34 + 10 = 44, got {}",
+            root.dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn a_padded_parent_keeps_its_first_childs_margin_inside() {
+        // NEGATIVE CONTROL: padding-top closes the edge (§8.3.1).
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.children.push(n43_block(Some(20.0), 0.0, 10.0));
+        let mut wrapper = n43_block(None, 0.0, 0.0);
+        wrapper.style.padding_top = Length::Px(15.0);
+        wrapper.children.push(n43_block(Some(30.0), 4.0, 0.0));
+        root.children.push(wrapper);
+        n43_layout(&mut root);
+
+        let wrapper = &root.children[1];
+        let child = &wrapper.children[0];
+        assert!(
+            (wrapper.dimensions.content.y - 45.0).abs() < 0.1,
+            "wrapper content at 20 + 10 + 15 = 45, got {}",
+            wrapper.dimensions.content.y
+        );
+        assert!(
+            (child.dimensions.content.y - 49.0).abs() < 0.1,
+            "child keeps its 4px inside the padded wrapper: 49, got {}",
+            child.dimensions.content.y
+        );
+    }
+
+    #[test]
+    fn a_flex_item_keeps_both_edge_margins_inside() {
+        // A flex item is a formatting root: its children's margins never
+        // escape it (css-flexbox-1 §4), in the pre-pass or the real pass.
+        let mut root_style = ComputedStyle::new();
+        root_style.display = rustkit_css::Display::Flex;
+        let mut root = LayoutBox::new(BoxType::Block, root_style);
+        let mut item = n43_block(None, 0.0, 0.0);
+        item.children.push(n43_block(Some(20.0), 10.0, 6.0));
+        root.children.push(item);
+        n43_layout(&mut root);
+
+        let item = &root.children[0];
+        let child = &item.children[0];
+        assert!(
+            (item.dimensions.content.height - 36.0).abs() < 0.1,
+            "flex item content = 10 + 20 + 6 = 36, got {}",
+            item.dimensions.content.height
+        );
+        assert!(
+            (child.dimensions.content.y - item.dimensions.content.y - 10.0).abs() < 0.1,
+            "child sits 10px inside the item, got offset {}",
+            child.dimensions.content.y - item.dimensions.content.y
+        );
+    }
+
+    #[test]
+    fn the_root_element_does_not_collapse_with_body() {
+        // html > body(mt 8) > h1(mt 21.44): the engine marks html a
+        // formatting root, so body sits at 21.44 under html's top edge and
+        // html stays at 0 (Chrome: body.getBoundingClientRect().top = 21.44).
+        let mut html = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut body = n43_block(None, 8.0, 8.0);
+        body.children.push(n43_block(Some(30.0), 21.44, 0.0));
+        html.children.push(body);
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 0.0),
+            ..Default::default()
+        };
+        let mut mc = MarginCollapseContext::new();
+        mc.children_are_formatting_roots = true;
+        let mut fc = FloatContext::new();
+        html.layout_with_collapse(&cb, &mut mc, &mut fc);
+
+        assert!(
+            (html.dimensions.content.y).abs() < 0.1,
+            "html at 0, got {}",
+            html.dimensions.content.y
+        );
+        let body = &html.children[0];
+        assert!(
+            (body.dimensions.content.y - 21.44).abs() < 0.1,
+            "body's 8 and h1's 21.44 collapse to 21.44, got {}",
+            body.dimensions.content.y
+        );
+        assert!(
+            (body.children[0].dimensions.content.y - 21.44).abs() < 0.1,
+            "h1 shares body's top edge, got {}",
+            body.children[0].dimensions.content.y
+        );
+    }
+
+    #[test]
+    fn a_form_control_carries_its_author_margins_in_the_line() {
+        // css-selectors §6: `button{padding:8px 16px; margin:4px}` — Chrome's
+        // row is 4 + 31 + 4 = 39; the margins were never resolved (row 33.5).
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut s = ComputedStyle::new();
+        s.display = rustkit_css::Display::InlineBlock;
+        s.margin_top = Length::Px(4.0);
+        s.margin_bottom = Length::Px(4.0);
+        s.margin_left = Length::Px(4.0);
+        s.margin_right = Length::Px(4.0);
+        s.padding_top = Length::Px(8.0);
+        s.padding_bottom = Length::Px(8.0);
+        let button = LayoutBox::new(
+            BoxType::FormControl(FormControlType::Button {
+                label: "Active".to_string(),
+                button_type: "button".to_string(),
+            }),
+            s,
+        );
+        root.children.push(button);
+        n43_layout(&mut root);
+
+        let b = &root.children[0];
+        assert!(
+            (b.dimensions.margin.top - 4.0).abs() < 0.01
+                && (b.dimensions.margin.left - 4.0).abs() < 0.01,
+            "margins resolved from style, got {:?}",
+            b.dimensions.margin
+        );
+        assert!(
+            (b.dimensions.content.y - 4.0).abs() < 0.1
+                && (b.dimensions.content.x - 4.0).abs() < 0.1,
+            "the control sits inside its margins, got ({}, {})",
+            b.dimensions.content.x,
+            b.dimensions.content.y
+        );
+        let control_h = b.dimensions.content.height;
+        assert!(
+            root.dimensions.content.height >= control_h + 8.0 - 0.1,
+            "the line counts both vertical margins: >= {} + 8, got {}",
+            control_h,
+            root.dimensions.content.height
+        );
+    }
+
     #[test]
     fn test_margin_collapse_positive() {
         let mut ctx = MarginCollapseContext::new();
@@ -7679,6 +9465,68 @@ mod tests {
         assert_eq!(layout_box.offsets.left, Some(20.0));
         assert_eq!(layout_box.offsets.right, None);
         assert_eq!(layout_box.offsets.bottom, None);
+    }
+
+    /// WPT overflow-wrap-anywhere-001: `::after { position:absolute; inset:0 }`
+    /// on a `height: 100px` div holding 54px of flow content was 54px tall —
+    /// the abspos child resolved `bottom` against the parent's flow cursor
+    /// (the static-position stand-in), not the parent's definite height.
+    /// T-RED without `reanchor_absolute`: height reads 54, not 100.
+    #[test]
+    fn abspos_inset_fills_parents_definite_height_not_its_flow_cursor() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(100.0);
+        parent_style.height = Length::Px(100.0);
+        let mut parent =
+            LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
+
+        let mut flow_style = ComputedStyle::new();
+        flow_style.height = Length::Px(54.0);
+        parent.children.push(LayoutBox::new(BoxType::Block, flow_style));
+
+        let mut cover =
+            LayoutBox::with_position(BoxType::Block, ComputedStyle::new(), Position::Absolute);
+        cover.set_offsets(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
+        parent.children.push(cover);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+
+        let cover = &parent.children[1];
+        assert_eq!(
+            cover.dimensions.content.height, 100.0,
+            "inset:0 must stretch to the containing block's definite height"
+        );
+        assert_eq!(cover.dimensions.content.y, parent.dimensions.content.y);
+        assert_eq!(cover.dimensions.content.width, 100.0);
+    }
+
+    /// The re-anchor must not touch `position: fixed` (viewport containing
+    /// block) or a parent whose height is auto (nothing definite to anchor
+    /// to — the flow-cursor stand-in stays the best available answer).
+    #[test]
+    fn abspos_reanchor_leaves_auto_height_parents_alone() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(100.0);
+        let mut parent =
+            LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
+        let mut flow_style = ComputedStyle::new();
+        flow_style.height = Length::Px(30.0);
+        parent.children.push(LayoutBox::new(BoxType::Block, flow_style));
+        let mut cover =
+            LayoutBox::with_position(BoxType::Block, ComputedStyle::new(), Position::Absolute);
+        cover.set_offsets(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
+        parent.children.push(cover);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+        assert_eq!(parent.children[1].dimensions.content.height, 30.0);
     }
 
     #[test]

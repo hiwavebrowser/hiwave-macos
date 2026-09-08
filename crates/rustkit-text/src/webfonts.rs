@@ -181,17 +181,25 @@ mod tests {
         }
     }
 
-    // The slot is process-wide and cargo runs tests on parallel threads, so
-    // every test installs ONE set holding every family it will ask about,
-    // under a tag of its own, and asserts only about its own families. An
-    // interleaved install from another test can replace the set between two
-    // statements; the assertions below are chosen so that any test's set
-    // satisfies the *negative* assertions and only the positive ones need
-    // the installer's own set — which is why every family name is unique to
-    // its test and every test re-installs before its positive checks.
+    // The slot is process-wide and cargo runs tests on parallel threads.
+    // "Re-install before every positive check" was not enough: another
+    // test's install() can land BETWEEN this test's install() and its
+    // lookup(), replacing the set, and the positive assertion fails — seen
+    // as `an_installed_face_resolves_by_family_case_insensitively` going red
+    // about one full-suite run in eight on #163/#164 while passing alone and
+    // under --test-threads=1. Every test that touches the slot holds this
+    // guard for its whole body, so the slot is single-writer per test.
+    use std::sync::{Mutex, MutexGuard};
+
+    fn slot_guard() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        // A panicking test must not poison the rest of the suite.
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn an_installed_face_resolves_by_family_case_insensitively() {
+        let _slot = slot_guard();
         let faces = [ahem_face("WebfontsTestAhem", 400, false)];
         let n = install("t1", &faces);
         assert_eq!(n, 1, "Core Graphics accepts the TrueType Ahem");
@@ -207,6 +215,7 @@ mod tests {
 
     #[test]
     fn a_family_nobody_declared_does_not_resolve() {
+        let _slot = slot_guard();
         install("t2", &[ahem_face("WebfontsTestOther", 400, false)]);
         assert!(lookup("WebfontsTestNeverDeclared", 400, false).is_none());
         assert!(!is_installed("Helvetica"), "system fonts are not web fonts");
@@ -214,6 +223,7 @@ mod tests {
 
     #[test]
     fn garbage_bytes_are_rejected_not_registered() {
+        let _slot = slot_guard();
         let junk = WebFontFace {
             family: "WebfontsTestJunk".to_string(),
             weight: 400,
@@ -237,6 +247,7 @@ mod tests {
         // ink on the WPT board: a ~30% fringe one column either side of every
         // Ahem square and ~60% on the row above, which is exactly the
         // difference between a reftest PASS and FAIL for every overlap case.
+        let _slot = slot_guard();
         let faces = [ahem_face("WebfontsRasterProbe", 400, false)];
         install("t5", &faces);
         let r = crate::macos::GlyphRasterizer::new("WebfontsRasterProbe", 20.0)
@@ -278,6 +289,7 @@ mod tests {
 
     #[test]
     fn the_nearest_style_wins_and_italic_outranks_weight() {
+        let _slot = slot_guard();
         let faces = [
             ahem_face("WebfontsTestStyled", 400, false),
             ahem_face("WebfontsTestStyled", 700, true),

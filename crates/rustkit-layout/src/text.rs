@@ -132,10 +132,15 @@ impl FontFamilyChain {
     }
 
     /// Create default font chain for monospace.
+    /// Menlo first: it is Chrome's default `monospace` on macOS and ships
+    /// with the OS. SF Mono is an Xcode/Terminal bundle font — leading with
+    /// it measured a Core Text substitute on stock machines (see
+    /// rustkit-text `named_font`) and would measure a different face from
+    /// Chrome's on machines that have it.
     #[cfg(target_os = "macos")]
     pub fn monospace() -> Self {
-        Self::new("SF Mono")
-            .with_fallback("Menlo")
+        Self::new("Menlo")
+            .with_fallback("SF Mono")
             .with_fallback("Monaco")
             .with_fallback("Courier New")
             .with_fallback("monospace")
@@ -1206,8 +1211,14 @@ impl TextShaper {
             variants_to_try.push(format!("{}Italic", family));
         }
 
+        // `CTFontCreateWithName` never fails: an uninstalled name comes back
+        // as a substitute (Helvetica), so trusting `Ok` here stopped the
+        // chain walk at the first MISSING family and MEASURED the substitute
+        // while paint (which already walked, via `named_font`) drew the next
+        // real family. Same accept/reject as paint: the face must be the
+        // one asked for, or this family is a miss and the caller walks on.
         for variant in &variants_to_try {
-            if let Ok(font) = ct_font::new_from_name(variant, size as f64) {
+            if let Some(font) = rustkit_text::macos::named_font(variant, size as f64) {
                 return Ok(font);
             }
         }
@@ -1462,6 +1473,78 @@ impl TextShaper {
             word_break,
             overflow_wrap,
             first_line_max_width < max_width,
+            WhiteSpace::Normal,
+        )
+    }
+
+    /// `wrap_text` for a run whose `white-space` is known. The wrapper's
+    /// legacy entries assume collapsible white space: a space at a soft
+    /// break is DROPPED so the next line starts on ink. Under
+    /// `white-space: break-spaces` (css-text-3 §4.1.1) preserved spaces are
+    /// content — they take up space, never hang, and a break before one
+    /// leaves it at the START of the next line. Dropping it re-flowed every
+    /// later line (WPT line-break-anywhere-005: `X XX` / ` XX ` / `X XX` /
+    /// ` X` came out `X XX` / `XX X` / `XX X`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn wrap_text_white_space(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        max_width: f32,
+        word_break: CssWordBreak,
+        overflow_wrap: CssOverflowWrap,
+        white_space: WhiteSpace,
+    ) -> Result<Vec<WrappedLine>, TextError> {
+        self.wrap_text_lines(
+            text,
+            font_chain,
+            weight,
+            style,
+            stretch,
+            size,
+            max_width,
+            max_width,
+            word_break,
+            overflow_wrap,
+            false,
+            white_space,
+        )
+    }
+
+    /// `wrap_text_mid_line` with the run's `white-space` (see
+    /// `wrap_text_white_space`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn wrap_text_mid_line_white_space(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        first_line_max_width: f32,
+        max_width: f32,
+        word_break: CssWordBreak,
+        overflow_wrap: CssOverflowWrap,
+        white_space: WhiteSpace,
+    ) -> Result<Vec<WrappedLine>, TextError> {
+        self.wrap_text_lines(
+            text,
+            font_chain,
+            weight,
+            style,
+            stretch,
+            size,
+            first_line_max_width,
+            max_width,
+            word_break,
+            overflow_wrap,
+            true,
+            white_space,
         )
     }
 
@@ -1499,6 +1582,7 @@ impl TextShaper {
             word_break,
             overflow_wrap,
             true,
+            WhiteSpace::Normal,
         )
     }
 
@@ -1516,10 +1600,15 @@ impl TextShaper {
         word_break: CssWordBreak,
         overflow_wrap: CssOverflowWrap,
         starts_mid_line: bool,
+        white_space: WhiteSpace,
     ) -> Result<Vec<WrappedLine>, TextError> {
         if text.is_empty() {
             return Ok(vec![]);
         }
+        // Only break-spaces keeps a space that lands at a soft break: under
+        // pre-wrap the trailing spaces HANG off the previous line (§4.1.3),
+        // which dropping them from the next line already approximates.
+        let preserve_spaces = matches!(white_space, WhiteSpace::BreakSpaces);
 
         // Convert CSS word-break to our line breaking enum
         let lb_word_break = match word_break {
@@ -1574,6 +1663,7 @@ impl TextShaper {
                 &breaker,
                 segment.start,
                 starts_mid_line && lines.is_empty(),
+                preserve_spaces,
             )?;
 
             lines.extend(segment_lines);
@@ -1593,6 +1683,7 @@ impl TextShaper {
                 &breaker,
                 0,
                 starts_mid_line,
+                preserve_spaces,
             )?;
         }
 
@@ -1617,6 +1708,7 @@ impl TextShaper {
         breaker: &LineBreaker,
         base_offset: usize,
         starts_mid_line: bool,
+        preserve_spaces: bool,
     ) -> Result<Vec<WrappedLine>, TextError> {
         if text.is_empty() {
             return Ok(vec![]);
@@ -1624,6 +1716,22 @@ impl TextShaper {
 
         let mut lines = Vec::new();
         let mut line_start = 0;
+        // Collapsible white space at a break point is consumed by the
+        // break; a PRESERVED space (break-spaces) is content on the next
+        // line and stays.
+        let skip_break_spaces = |line_start: &mut usize| {
+            if preserve_spaces {
+                return;
+            }
+            while *line_start < text.len() && text[*line_start..].starts_with(is_collapsible_space)
+            {
+                *line_start += text[*line_start..]
+                    .chars()
+                    .next()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(1);
+            }
+        };
 
         while line_start < text.len() {
             // The first rendered line may have a narrower budget (a run
@@ -1730,17 +1838,8 @@ impl TextShaper {
                     end_offset: base_offset + line_start + line_end,
                 });
 
-                // Skip collapsible white space at the break point
                 line_start += line_end;
-                while line_start < text.len()
-                    && text[line_start..].starts_with(is_collapsible_space)
-                {
-                    line_start += text[line_start..]
-                        .chars()
-                        .next()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(1);
-                }
+                skip_break_spaces(&mut line_start);
             } else {
                 let line_text = &remaining[..break_offset];
                 let shaped_line =
@@ -1753,17 +1852,8 @@ impl TextShaper {
                     end_offset: base_offset + line_start + break_offset,
                 });
 
-                // Skip collapsible white space at the break point
                 line_start += break_offset;
-                while line_start < text.len()
-                    && text[line_start..].starts_with(is_collapsible_space)
-                {
-                    line_start += text[line_start..]
-                        .chars()
-                        .next()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(1);
-                }
+                skip_break_spaces(&mut line_start);
             }
         }
 
@@ -2143,7 +2233,7 @@ mod tests {
 
         let mono = FontFamilyChain::from_css_value("monospace");
         #[cfg(target_os = "macos")]
-        assert_eq!(mono.primary, "SF Mono");
+        assert_eq!(mono.primary, "Menlo");
         #[cfg(not(target_os = "macos"))]
         assert_eq!(mono.primary, "Cascadia Code");
 
@@ -2622,6 +2712,59 @@ mod tests {
         assert!(result.unwrap().is_empty());
     }
 
+    /// WPT line-break-anywhere-005: under `white-space: break-spaces` a
+    /// preserved space at a soft break starts the next line (`X XX` /
+    /// ` XX ` / `X XX` / ` X`); the collapsible-white-space rule that eats
+    /// it re-flows every later line (`X XX` / `XX X` / `XX X`). Monospace so
+    /// every 4-character line has the same advance; `break-all` stands in
+    /// for `line-break: anywhere` (the layout crate maps it the same way).
+    #[test]
+    fn test_wrap_break_spaces_keeps_the_space_at_a_soft_break() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::monospace();
+        let four_chars = shaper
+            .shape(
+                "X XX",
+                &chain,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                FontStretch::Normal,
+                20.0,
+            )
+            .expect("shape")
+            .metrics
+            .width;
+        let wrap = |white_space: rustkit_css::WhiteSpace| -> Vec<String> {
+            shaper
+                .wrap_text_white_space(
+                    "X XX XX X XX X",
+                    &chain,
+                    FontWeight::NORMAL,
+                    FontStyle::Normal,
+                    FontStretch::Normal,
+                    20.0,
+                    four_chars * 1.01,
+                    CssWordBreak::BreakAll,
+                    CssOverflowWrap::Normal,
+                    white_space,
+                )
+                .expect("wrap")
+                .iter()
+                .map(|l| l.text())
+                .collect()
+        };
+        assert_eq!(
+            wrap(rustkit_css::WhiteSpace::BreakSpaces),
+            ["X XX", " XX ", "X XX", " X"]
+        );
+        // The collapsible default still consumes the space at the break —
+        // this is the legacy behaviour every other white-space value keeps.
+        assert_eq!(
+            wrap(rustkit_css::WhiteSpace::Normal),
+            ["X XX", "XX X", "XX X"]
+        );
+    }
+
     #[test]
     fn test_wrap_text_single_line() {
         let shaper = TextShaper::new();
@@ -2789,5 +2932,35 @@ mod mid_line_zero_width_tests {
         // Callers that do not know the cursor position keep the old reading:
         // equal budgets mean "not mid-line", so no empty leading line.
         assert_eq!(wrap(false), ["d", "e", "f"]);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod measure_side_font_chain_tests {
+    use super::*;
+
+    fn width(chain_css: &str) -> f32 {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::from_css_value(chain_css);
+        shaper
+            .shape("0000", &chain, FontWeight::NORMAL, FontStyle::Normal, FontStretch::Normal, 16.0)
+            .expect("shapes")
+            .metrics
+            .width
+    }
+
+    /// Core Text hands back a substitute for a name it does not have. Paint
+    /// (`named_font`, #164) walks past it; MEASURE must too, or a page
+    /// naming a missing family ahead of Menlo lays text out at Helvetica's
+    /// advances and paints it in Menlo. T-RED: with `new_from_name` trusted
+    /// as installed, the first width is Helvetica's "0000" (≈35.6px), not
+    /// Menlo's (≈38.5px).
+    #[test]
+    fn measure_walks_past_an_uninstalled_family_like_paint_does() {
+        let walked = width("No Such Face n34, Menlo");
+        let menlo = width("Menlo");
+        let helvetica = width("Helvetica");
+        assert_ne!(menlo, helvetica, "probe fonts must differ for this test to discriminate");
+        assert_eq!(walked, menlo, "missing family must be skipped at measure time");
     }
 }

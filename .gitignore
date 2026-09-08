@@ -72,3 +72,7 @@ third_party/wpt/
 # this rule stops new ones, it does not untrack those. They need `git rm --cached`, which is not on the
 # trench seat's allowlist.
 scripts/tests/__pycache__/
+# Seat-control baselines are a per-machine DIAGNOSTIC, never a receipt.
+# They must not be committed and mistaken for the pinned macOS set.
+# See tools/parity_oracle/capture_seat_control.mjs.
+baselines/seat-control/
