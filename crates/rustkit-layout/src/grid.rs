@@ -2197,9 +2197,7 @@ pub fn layout_grid_container(
                 if child.style.display == Display::None {
                     continue;
                 }
-                if let (Some(Some(real_h)), Some(&(r0, r1))) =
-                    (real_heights.get(idx), row_spans.get(idx))
-                {
+                if let Some(&(r0, r1)) = row_spans.get(idx) {
                     // Single-row items only; multi-span distribution is a
                     // separate (rarer) problem.
                     if r1 <= r0 + 1 && r0 < grid.rows.len() {
@@ -2207,14 +2205,58 @@ pub fn layout_grid_container(
                             + child.dimensions.padding.bottom
                             + child.dimensions.border.top
                             + child.dimensions.border.bottom;
+
                         // `real_h + pb` is a BORDER box; the row is a margin
                         // box. Comparing them directly makes an item with
                         // margins look like it already fits, so this pass
                         // stops repairing it.
-                        let vm = vertical_margins(&child.style);
-                        let grow = (real_h + pb) - (grid.rows[r0].size - vm);
-                        if grow > 0.5 {
-                            row_growth[r0] = row_growth[r0].max(grow);
+                        let mut wanted: Option<f32> = match real_heights.get(idx) {
+                            Some(Some(real_h)) => Some(real_h + pb),
+                            _ => None,
+                        };
+
+                        // css-sizing-4 §4: an `aspect-ratio` item whose block
+                        // size is `auto` derives it from its (now definite)
+                        // inline size. Track sizing could not: it runs before
+                        // the columns are resolved, so `get_height_contribution`
+                        // sees no inline size to derive from and falls through
+                        // to the content estimate. Every `aspect-ratio` grid
+                        // item therefore sized to its content alone —
+                        // `image-gallery`'s four `.aspect-box`es collapsed from
+                        // 288/216/192/162 to 32, taking `.aspect-section` from
+                        // 332 to 73 and shifting the 85 boxes below it 272px up
+                        // the page.
+                        //
+                        // Grow-only, like the rest of this pass, and that is
+                        // also what Chrome does here: measured, a `4 / 1` item
+                        // 400px wide holding a 300px-tall child is 300 tall,
+                        // not the ratio's 100. Content wins where it is taller;
+                        // the ratio wins where the box would otherwise collapse.
+                        if matches!(child.style.height, Length::Auto) {
+                            let pb_w = child.dimensions.padding.left
+                                + child.dimensions.padding.right
+                                + child.dimensions.border.left
+                                + child.dimensions.border.right;
+                            if let Some(ar_h) = crate::aspect_ratio_content_height(
+                                &child.style,
+                                child.dimensions.content.width,
+                                pb_w,
+                                pb,
+                            ) {
+                                let ar_border_box = ar_h + pb;
+                                wanted = Some(match wanted {
+                                    Some(w) => w.max(ar_border_box),
+                                    None => ar_border_box,
+                                });
+                            }
+                        }
+
+                        if let Some(wanted) = wanted {
+                            let vm = vertical_margins(&child.style);
+                            let grow = wanted - (grid.rows[r0].size - vm);
+                            if grow > 0.5 {
+                                row_growth[r0] = row_growth[r0].max(grow);
+                            }
                         }
                     }
                 }
@@ -2273,6 +2315,61 @@ pub fn layout_grid_container(
             let total_gaps = non_collapsed.saturating_sub(1) as f32 * row_gap;
             container.dimensions.content.height =
                 grid.rows.iter().map(|t| t.size).sum::<f32>() + total_gaps;
+        }
+    }
+
+    // Phase 9.6: an `aspect-ratio` item keeps its ratio instead of stretching.
+    //
+    // `align-self: stretch` is the grid default, so every auto-height item is
+    // grown to its row. An item with a non-`auto` `aspect-ratio` must not be:
+    // measured against Chrome, `image-gallery`'s four `.aspect-box`es share one
+    // 288px row (the `1 / 1` box sets it) and Chrome still lays them out
+    // 288 / 216 / 192 / 162 — each keeps its own ratio and the shorter three
+    // simply do not fill the row. Stretching them made the three non-tallest
+    // boxes 288 apiece.
+    //
+    // Deliberately outside the `!has_definite_height` block above: the ratio
+    // holds whether or not any row happened to grow, and gating it on that
+    // would make an item's height depend on its neighbours' content.
+    //
+    // The ratio replaces the STRETCH, never the item's own content: Chrome,
+    // measured, gives a 400px-wide `4 / 1` item holding a 300px-tall child a
+    // height of 300, not the ratio's 100. So the item's real flowed height —
+    // the same figure Phase 9.5 grew its row from — is the floor. Writing the
+    // ratio unconditionally here was the first draft, and it shrank exactly
+    // that case; `content_taller_than_the_ratio_keeps_its_own_height` is the
+    // guard that caught it.
+    {
+        let mut idx = 0usize;
+        for child in container.children.iter_mut() {
+            if child.style.display == Display::None {
+                continue;
+            }
+            let item_idx = idx;
+            idx += 1;
+            if !matches!(child.style.height, Length::Auto) {
+                continue;
+            }
+            let pb_v = child.dimensions.padding.top
+                + child.dimensions.padding.bottom
+                + child.dimensions.border.top
+                + child.dimensions.border.bottom;
+            let pb_w = child.dimensions.padding.left
+                + child.dimensions.padding.right
+                + child.dimensions.border.left
+                + child.dimensions.border.right;
+            if let Some(ar_h) = crate::aspect_ratio_content_height(
+                &child.style,
+                child.dimensions.content.width,
+                pb_w,
+                pb_v,
+            ) {
+                let content_floor = match real_heights.get(item_idx) {
+                    Some(Some(real_h)) => *real_h,
+                    _ => 0.0,
+                };
+                child.dimensions.content.height = ar_h.max(content_floor);
+            }
         }
     }
 
@@ -5759,6 +5856,197 @@ mod tests {
              {CARD_HEIGHT}, got {card_height} ({INNER_HEIGHT} is the flowed \
              extent of its children -- the re-flow ran after the height \
              resolution and overwrote it)"
+        );
+    }
+
+    // ---- aspect-ratio on grid items (css-sizing-4 §4) --------------------
+    //
+    // Every expectation below is a MEASURED Chrome 141 value, captured on this
+    // seat through the same launch options the pinned baseline set uses, not a
+    // reading of the spec. The probe fixtures are recorded in the night's
+    // digest entry.
+
+    /// Build a 1-column auto-height grid holding one item.
+    fn ratio_grid(item_style: ComputedStyle, container_width: f32) -> LayoutBox {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Fr(1.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, item_style));
+        layout_grid_container(&mut container, container_width, 0.0);
+        container
+    }
+
+    /// The defect this pass exists for: track sizing runs before the columns
+    /// are resolved, so `get_height_contribution` has no inline size to derive
+    /// a ratio from and falls through to the content estimate. An empty
+    /// `aspect-ratio` item therefore collapsed to zero, and `image-gallery`'s
+    /// four `.aspect-box`es went 288/216/192/162 -> 32 apiece.
+    ///
+    /// Chrome, measured: a 400px-wide `16 / 9` grid item is 225 tall.
+    #[test]
+    fn an_aspect_ratio_grid_item_sizes_its_auto_row_from_its_inline_size() {
+        let mut item_style = ComputedStyle::new();
+        item_style.aspect_ratio = Some(16.0 / 9.0);
+        let container = ratio_grid(item_style, 400.0);
+
+        let b = container.children[0].dimensions.border_box();
+        assert!(
+            (b.height - 225.0).abs() < 0.01,
+            "a 400px-wide `16 / 9` item should be 225 tall (Chrome: 225), got {}",
+            b.height
+        );
+        assert!(
+            (container.dimensions.content.height - 225.0).abs() < 0.01,
+            "the auto row -- and so the container -- should be 225 tall, got {}",
+            container.dimensions.content.height
+        );
+    }
+
+    /// css-sizing-4 §4: the ratio applies to the box named by `box-sizing`.
+    /// Chrome, measured, for a 400px-wide `2 / 1` item with `padding: 20px`:
+    /// `border-box` -> 200 tall, `content-box` -> 220. Deriving the CONTENT
+    /// height as `content_width / ratio` gives 220 in both cases, so the
+    /// border-box reading is wrong by exactly the padding -- and every corpus
+    /// page opens with `* { box-sizing: border-box }`.
+    #[test]
+    fn the_ratio_applies_to_the_box_named_by_box_sizing() {
+        let mut border_box_style = ComputedStyle::new();
+        border_box_style.aspect_ratio = Some(2.0);
+        border_box_style.box_sizing = BoxSizing::BorderBox;
+        border_box_style.padding_top = Length::Px(20.0);
+        border_box_style.padding_bottom = Length::Px(20.0);
+        border_box_style.padding_left = Length::Px(20.0);
+        border_box_style.padding_right = Length::Px(20.0);
+        let container = ratio_grid(border_box_style, 400.0);
+        let b = container.children[0].dimensions.border_box();
+        assert!(
+            (b.height - 200.0).abs() < 0.01,
+            "under border-box the ratio is the BORDER box: 400/2 = 200 (Chrome: 200), got {}",
+            b.height
+        );
+
+        let mut content_box_style = ComputedStyle::new();
+        content_box_style.aspect_ratio = Some(2.0);
+        content_box_style.box_sizing = BoxSizing::ContentBox;
+        content_box_style.padding_top = Length::Px(20.0);
+        content_box_style.padding_bottom = Length::Px(20.0);
+        let content_h = crate::aspect_ratio_content_height(&content_box_style, 360.0, 40.0, 40.0)
+            .expect("a content-box item with a ratio has a derived height");
+        assert!(
+            (content_h - 180.0).abs() < 0.01,
+            "under content-box the ratio is the CONTENT box: 360/2 = 180 \
+             (Chrome's 220 border box less its 40px padding), got {content_h}"
+        );
+    }
+
+    /// The ratio must not be treated as a floor that content can never beat.
+    /// Chrome, measured: a 400px-wide `4 / 1` item holding a 300px-tall child
+    /// is **300** tall, not the ratio's 100. Content wins where it is taller;
+    /// the ratio wins where the box would otherwise collapse.
+    #[test]
+    fn content_taller_than_the_ratio_keeps_its_own_height() {
+        let mut item_style = ComputedStyle::new();
+        item_style.aspect_ratio = Some(4.0);
+        let mut item = LayoutBox::new(BoxType::Block, item_style);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.height = Length::Px(300.0);
+        item.children
+            .push(LayoutBox::new(BoxType::Block, child_style));
+
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Fr(1.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+        container.children.push(item);
+        layout_grid_container(&mut container, 400.0, 0.0);
+
+        let b = container.children[0].dimensions.border_box();
+        assert!(
+            b.height >= 299.99,
+            "a `4 / 1` item holding a 300px child should be 300 tall, not the \
+             ratio's 100 (Chrome: 300), got {}",
+            b.height
+        );
+    }
+
+    /// `align-self: stretch` is the grid default and it must NOT override a
+    /// ratio. Chrome, measured: `image-gallery`'s four `.aspect-box`es share
+    /// one 288px row -- the `1 / 1` box sets it -- and Chrome still lays them
+    /// out 288 / 216 / 192 / 162. Stretching made the three shorter boxes 288
+    /// apiece, so this is the half of the fix that the row contribution alone
+    /// does not buy.
+    #[test]
+    fn an_aspect_ratio_item_is_not_stretched_to_a_taller_row() {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Fr(1.0), TrackSize::Fr(1.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        for ratio in [1.0f32, 16.0 / 9.0] {
+            let mut s = ComputedStyle::new();
+            s.aspect_ratio = Some(ratio);
+            container.children.push(LayoutBox::new(BoxType::Block, s));
+        }
+        // Two 200px columns; the 1/1 item makes the shared row 200 tall.
+        layout_grid_container(&mut container, 400.0, 0.0);
+
+        let square = container.children[0].dimensions.border_box();
+        let wide = container.children[1].dimensions.border_box();
+        assert!(
+            (square.height - 200.0).abs() < 0.01,
+            "the `1 / 1` item sets the row at 200, got {}",
+            square.height
+        );
+        assert!(
+            (wide.height - 112.5).abs() < 0.01,
+            "the `16 / 9` item keeps its own ratio (200*9/16 = 112.5) instead of \
+             stretching to the 200px row, got {}",
+            wide.height
+        );
+    }
+
+    /// An explicit height is not a ratio-derived one; the ratio may not touch
+    /// it. Without this the new pass would overwrite every sized item that
+    /// happens to carry an `aspect-ratio`.
+    #[test]
+    fn an_explicit_height_beats_the_ratio() {
+        let mut item_style = ComputedStyle::new();
+        item_style.aspect_ratio = Some(1.0);
+        item_style.height = Length::Px(50.0);
+        let container = ratio_grid(item_style, 400.0);
+        let b = container.children[0].dimensions.border_box();
+        assert!(
+            (b.height - 50.0).abs() < 0.01,
+            "an explicit `height: 50px` wins over `aspect-ratio: 1 / 1` on a \
+             400px-wide item, got {}",
+            b.height
+        );
+    }
+
+    /// A degenerate ratio must not produce a NaN or an infinite row.
+    #[test]
+    fn a_zero_or_negative_ratio_is_ignored_rather_than_dividing() {
+        let style = ComputedStyle::new();
+        for bad in [0.0f32, -2.0, f32::NAN, f32::INFINITY] {
+            let mut s = style.clone();
+            s.aspect_ratio = Some(bad);
+            assert!(
+                crate::aspect_ratio_content_height(&s, 400.0, 0.0, 0.0).is_none(),
+                "ratio {bad} should be refused, not divided by"
+            );
+        }
+        let mut s = style.clone();
+        s.aspect_ratio = Some(2.0);
+        assert!(
+            crate::aspect_ratio_content_height(&s, 0.0, 0.0, 0.0).is_none(),
+            "a box with no inline size has nothing to derive a block size from"
         );
     }
 }
