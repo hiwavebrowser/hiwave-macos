@@ -5628,17 +5628,43 @@ impl DisplayList {
                 // the container but each intersecting tile painted full-size.
                 // One clip closes every path.
                 //
-                // Residual, stated: PushClip is a plain rect, so a scaled
-                // gradient under border-radius paints square into the corner
-                // notches (~0.05% of a 227x180 card at 16px radius). The
-                // normal-size path keeps its rounded clipping via
-                // border_radius on the gradient rect itself.
+                // The clip carries the box's radius. A plain `PushClip` cuts
+                // the oversized rect to a SQUARE container, so a scaled
+                // gradient under `border-radius` paints its own fill into the
+                // corner notches — the part of the border box the arc cuts
+                // away, where Chrome shows what is behind. That is P1's named
+                // residual, and Gate B reports it as `missing_clip`:
+                // gradient-backgrounds' `.linear-6` (`background-size: 400%
+                // 400%`, `border-radius: 16px`) auto-failed on three corners,
+                // 36 notch px, on the macOS board of 2026-09-08 — the first
+                // board on which the element's geometry was exact enough for
+                // the discrete detector to be allowed to speak about it.
+                //
+                // The unscaled path needs no clip and keeps its rounding via
+                // `border_radius` on the gradient rect itself; this is the
+                // same radius, applied to the container the scaled rect is
+                // being cut to.
+                //
+                // Limit, stated: `border_radius` is the border-box radius. On
+                // a `background-clip` of padding-box or content-box the
+                // container is inset and the exact answer is the inner
+                // radius, which nothing on this path computes — the solid
+                // fill above drops the radius entirely in that case. This
+                // change makes the scaled gradient agree with the unscaled
+                // one; it does not close the inner-radius gap.
                 let needs_clip = positioned_rect.x < container.x
                     || positioned_rect.y < container.y
                     || positioned_rect.x + positioned_rect.width > container.x + container.width
                     || positioned_rect.y + positioned_rect.height > container.y + container.height;
                 if needs_clip {
-                    self.commands.push(DisplayCommand::PushClip(container));
+                    if border_radius.is_zero() {
+                        self.commands.push(DisplayCommand::PushClip(container));
+                    } else {
+                        self.commands.push(DisplayCommand::PushClipRounded {
+                            rect: container,
+                            radius: border_radius,
+                        });
+                    }
                 }
 
                 // Handle background-repeat for gradients
@@ -6761,6 +6787,158 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, DisplayCommand::PushClip(_))),
             "a gradient that fits its box must not push a clip"
+        );
+    }
+
+    // ---------- P1's residual: the scaled gradient's clip carries the radius ----------
+    //
+    // gradient-backgrounds' `.linear-6`: `background-size: 400% 400%` on a
+    // `.gradient-box { border-radius: 16px }`. The clip that stops the 4x rect
+    // bleeding over its neighbours was a plain rect, so the card painted its
+    // own fill square into the four corner notches where Chrome shows the page
+    // behind. Gate B auto-failed three of those corners as `missing_clip` on
+    // the macOS board of 2026-09-08 — 36 notch px, the whole board's only
+    // discrete failure.
+
+    /// A `.gradient-box`-shaped card: `background-size: 400% 400%`, optionally
+    /// under a uniform `border-radius`.
+    fn scaled_gradient_card(radius_px: f32) -> LayoutBox {
+        let mut style = ComputedStyle::new();
+        if radius_px > 0.0 {
+            style.border_top_left_radius = Length::Px(radius_px);
+            style.border_top_right_radius = Length::Px(radius_px);
+            style.border_bottom_right_radius = Length::Px(radius_px);
+            style.border_bottom_left_radius = Length::Px(radius_px);
+        }
+        style.background_layers = vec![rustkit_css::BackgroundLayer {
+            image: rustkit_css::BackgroundImage::Gradient(rustkit_css::Gradient::Linear(
+                rustkit_css::LinearGradient {
+                    direction: rustkit_css::GradientDirection::Angle(-45.0),
+                    stops: vec![
+                        rustkit_css::ColorStop {
+                            color: Color {
+                                r: 238,
+                                g: 119,
+                                b: 82,
+                                a: 1.0,
+                            },
+                            position: None,
+                        },
+                        rustkit_css::ColorStop {
+                            color: Color {
+                                r: 35,
+                                g: 213,
+                                b: 171,
+                                a: 1.0,
+                            },
+                            position: None,
+                        },
+                    ],
+                    repeating: false,
+                },
+            )),
+            // Percentages ride Explicit as negatives: -400.0 => container * 4.
+            size: rustkit_css::BackgroundSize::Explicit {
+                width: Some(-400.0),
+                height: Some(-400.0),
+            },
+            ..Default::default()
+        }];
+
+        let mut card = LayoutBox::new(BoxType::Block, style);
+        card.dimensions.content = Rect::new(533.0, 400.0, 227.0, 180.0);
+        card
+    }
+
+    #[test]
+    fn a_scaled_gradient_under_a_radius_is_clipped_at_that_radius() {
+        let card = scaled_gradient_card(16.0);
+        let container = card.dimensions.border_box();
+        let list = DisplayList::build(&card);
+
+        let rounded = list.commands.iter().find_map(|c| match c {
+            DisplayCommand::PushClipRounded { rect, radius } => Some((*rect, *radius)),
+            _ => None,
+        });
+        let (rect, radius) =
+            rounded.expect("a scaled gradient under a radius must push a ROUNDED clip");
+
+        assert!(
+            (rect.x - container.x).abs() < 0.5
+                && (rect.y - container.y).abs() < 0.5
+                && (rect.width - container.width).abs() < 0.5
+                && (rect.height - container.height).abs() < 0.5,
+            "the clip is the box, not the 4x rect: {rect:?} vs {container:?}"
+        );
+        // Every corner, not just the one a single notch happens to expose.
+        assert_eq!(
+            (
+                radius.top_left,
+                radius.top_right,
+                radius.bottom_right,
+                radius.bottom_left
+            ),
+            (16.0, 16.0, 16.0, 16.0),
+            "the clip must carry the box's own radius on all four corners"
+        );
+        assert!(
+            !list
+                .commands
+                .iter()
+                .any(|c| matches!(c, DisplayCommand::PushClip(_))),
+            "a square clip at the same box would cut the notches back off"
+        );
+    }
+
+    #[test]
+    fn a_scaled_gradient_under_a_radius_still_paints_the_zoomed_slice() {
+        // The clip must not become the paint rect: `background-size: 400%`
+        // shows a 4x-zoomed slice, and a gradient re-fitted to the container
+        // would be a different image that happens to have round corners.
+        let card = scaled_gradient_card(16.0);
+        let list = DisplayList::build(&card);
+
+        let push = list
+            .commands
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::PushClipRounded { .. }))
+            .expect("rounded clip");
+        let grad = list
+            .commands
+            .iter()
+            .position(
+                |c| matches!(c, DisplayCommand::LinearGradient { rect, .. } if rect.width > 900.0),
+            )
+            .expect("gradient must still paint at the scaled 4x rect");
+        let pop = list
+            .commands
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::PopClip))
+            .expect("clip must be popped");
+        assert!(
+            push < grad && grad < pop,
+            "order must be PushClipRounded < gradient < PopClip, got {push}/{grad}/{pop}"
+        );
+    }
+
+    #[test]
+    fn a_scaled_gradient_with_square_corners_keeps_its_square_clip() {
+        // Control: the radius is what makes the clip rounded. A square card
+        // must not start paying for a rounded clip it has no corners for.
+        let card = scaled_gradient_card(0.0);
+        let list = DisplayList::build(&card);
+        assert!(
+            list.commands
+                .iter()
+                .any(|c| matches!(c, DisplayCommand::PushClip(_))),
+            "a scaled gradient with no radius still needs its square clip"
+        );
+        assert!(
+            !list
+                .commands
+                .iter()
+                .any(|c| matches!(c, DisplayCommand::PushClipRounded { .. })),
+            "no radius, no rounded clip"
         );
     }
 
