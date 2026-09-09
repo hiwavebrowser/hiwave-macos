@@ -7940,3 +7940,60 @@ something tonight's change introduced.
   four digests old and I still had to relearn it.
 - The stored night order still opens with P0a-0, finished 36 nights ago, and
   still costs the first hour of every session that reads it literally.
+
+### Addendum, same night — the macOS receipt, and the column moved
+
+Run [34315430600](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/34315430600),
+`macos-14`, on `ccc742f`. 12 checks: 9 success, 3 skipped by design, zero failures.
+
+```
+metric:     2/26 cases pass all four conditions
+measured:   26/26 scored on all four  (0 not fully measured)
+  geometry   5/26 green, 26/26 measured
+  paint      3/26 green, 26/26 measured
+  stability 26/26 green, 26/26 measured
+  discrete  26/26 green, 26/26 measured
+```
+
+Against night 30's `df7fa26` receipt — the closest prior basis, geometry 5/26 ·
+paint 3/26 · stability 26/26 · discrete **25/26** · metric 2/26 — **the only
+column that moved is discrete, 25/26 → 26/26.** Gate B reports 0 structural
+auto-fails across all 26 cases, and the ratchet independently flags
+`gradient-backgrounds` **tighten-eligible**: improved past its committed floor.
+
+**The metric prediction held. So did the reason, which mattered more.**
+"Discrete went green" has two causes and only one is a fix. The other is that
+the element stopped being *looked at* — Gate B withholds anything not within
+0.5px, so a displacement introduced by any of the six PRs that merged between
+`df7fa26` and this base would have cleared the same three auto-fails by
+silencing the detector. That is the failure this campaign exists to catch, and
+it is the reading I would have shipped if I had only differenced the column.
+
+Gate A on this run says it did not happen:
+
+```
+RED gradient-backgrounds: 42/42 boxes compared, 5 geometry, 0 join
+    all five are `span` WIDTH — text advance widths, i.e. P4
+    `.linear-6` is not among them
+```
+
+42 of 42 compared, zero join failures, `.linear-6` absent from the failure list —
+so it is still within 0.5px on every axis and still admitted to the discrete
+detectors. The detector looked and found nothing.
+
+**The Linux regression did not survive the platform change.** This seat read
+`gradient-backgrounds` at 84.3971% within tolerance and the change costing 47 net
+pixels, because the card sits at `y=392` here against Chrome's `y=400`. macOS
+reads **98.2885%** (8215/480000 px outside) with the card exact. So decision 1
+above is substantially defused: on the receipt platform this is an improvement,
+and the 47 pixels were an artefact of a displacement macOS does not have. Left in
+the list rather than deleted, because the stop-rule question it raises is still
+Pete's to answer in general.
+
+**What this does NOT claim.** No `develop`-basis receipt exists at `afd73ab` —
+the workflow runs only on `pull_request` — so geometry 5/26 and paint 3/26
+matching `df7fa26` is consistent with this PR changing neither but is not an
+isolated measurement of it. The discrete claim is not a differenced column: it is
+direct evidence from this run.
+
+PR **#191** open against `develop`, CI green, subscribed, check-in armed.
