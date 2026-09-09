@@ -16,6 +16,20 @@ env:
   UMBRELLA_PAT: ${{ secrets.UMBRELLA_PAT }}
 
 jobs:
+
+  # F1 — dual-build falsifier (banked after Linux #59, missed on the #110
+  # merge): an auto-merge can resurrect a deleted cfg(test) shape without
+  # conflict markers, and the lib build alone is blind to it. --no-run
+  # compiles every test target without executing the suite.
+  f1-test-compile:
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: All test targets must COMPILE (F1)
+        run: cargo test --workspace --no-run
   # ===========================================================================
   # Join-key contract (~1m). Cheap, corpus-wide, no Rust and no swarm.
   # ===========================================================================

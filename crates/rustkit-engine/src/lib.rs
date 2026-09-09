@@ -217,6 +217,188 @@ impl EngineConfig {
     }
 }
 
+/// css-text §4.1 "document white space": the characters that collapse under
+/// `white-space: normal`. NOT `char::is_whitespace` — that also says yes to
+/// U+00A0 NO-BREAK SPACE, a rendered, non-collapsible character.
+fn is_document_white_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c')
+}
+
+/// The pieces of a `font` shorthand value, as longhand-ready strings.
+#[derive(Debug, PartialEq)]
+struct FontShorthand {
+    /// Tokens before the size: style / variant / weight / stretch keywords.
+    prefix: Vec<String>,
+    /// The size, as a length string (`20px`, `1.5em`; keywords mapped to px).
+    size: String,
+    /// The `/line-height` part, if given.
+    line_height: Option<String>,
+    /// Everything after the size, verbatim: the family list.
+    family: String,
+}
+
+/// Split a `font` shorthand into its longhands. `None` for the system-font
+/// keywords (caption, menu, ...) and for values with no size or no family —
+/// an invalid shorthand must not partially apply.
+fn split_font_shorthand(value: &str) -> Option<FontShorthand> {
+    let value = value.trim();
+    if matches!(
+        value.to_ascii_lowercase().as_str(),
+        "caption" | "icon" | "menu" | "message-box" | "small-caption" | "status-bar"
+    ) {
+        return None;
+    }
+    let tokens: Vec<&str> = value.split_whitespace().collect();
+    // The size is the first token that is a length, a size keyword, or a
+    // `size/line-height` pair. Everything before is prefix, after is family.
+    let size_keyword = |t: &str| -> Option<&'static str> {
+        Some(match t {
+            "xx-small" => "9px",
+            "x-small" => "10px",
+            "small" => "13px",
+            "medium" => "16px",
+            "large" => "18px",
+            "x-large" => "24px",
+            "xx-large" => "32px",
+            "xxx-large" => "48px",
+            _ => return None,
+        })
+    };
+    let is_length = |t: &str| {
+        t.starts_with(|c: char| c.is_ascii_digit() || c == '.') && parse_length(t).is_some()
+    };
+    let idx = tokens.iter().position(|t| {
+        let (size, _) = t.split_once('/').unwrap_or((t, ""));
+        let lower = size.to_ascii_lowercase();
+        size_keyword(&lower).is_some() || is_length(size)
+    })?;
+    let (size_part, lh_part) = match tokens[idx].split_once('/') {
+        Some((s, lh)) => (s, Some(lh)),
+        None => (tokens[idx], None),
+    };
+    let lower = size_part.to_ascii_lowercase();
+    let size = size_keyword(&lower)
+        .map(str::to_string)
+        .unwrap_or_else(|| size_part.to_string());
+    // `20px / 1.5` with spaces around the slash also occurs in the wild.
+    let mut rest = idx + 1;
+    let mut line_height = lh_part.filter(|s| !s.is_empty()).map(str::to_string);
+    if line_height.is_none() && lh_part == Some("") && rest < tokens.len() {
+        line_height = Some(tokens[rest].to_string());
+        rest += 1;
+    } else if line_height.is_none() && tokens.get(rest) == Some(&"/") {
+        line_height = tokens.get(rest + 1).map(|s| s.to_string());
+        rest += 2;
+    }
+    let family = tokens.get(rest..)?.join(" ");
+    if family.is_empty() {
+        return None;
+    }
+    Some(FontShorthand {
+        prefix: tokens[..idx].iter().map(|s| s.to_string()).collect(),
+        size,
+        line_height,
+        family,
+    })
+}
+
+/// Where a `@font-face` `src` resolves to, given the document it came from.
+#[derive(Debug)]
+enum FontSource {
+    /// Decoded `data:` payload — nothing to fetch.
+    Data(Vec<u8>),
+    /// A local file. Only reachable from about:/file: documents.
+    File(std::path::PathBuf),
+    /// Needs the network.
+    Remote(Url),
+    /// Refused, with the reason for the log line.
+    Blocked(&'static str),
+}
+
+/// Resolve a `@font-face` `src` against the document's base URL.
+///
+/// The one security rule: a remote (http/https) document never reads the
+/// local filesystem, whatever its stylesheet says. Local documents (inline
+/// content via `load_html`, whose base is about:blank; and file: documents)
+/// may — that is how parity-capture and the WPT runner hand the engine a
+/// font file the way wptserve would have served it.
+fn resolve_font_source(base: Option<&Url>, src: &str) -> FontSource {
+    let src = src.trim();
+    if src.len() >= 5 && src[..5].eq_ignore_ascii_case("data:") {
+        return match decode_data_url(src) {
+            Some(bytes) => FontSource::Data(bytes),
+            None => FontSource::Blocked("undecodable data: URI"),
+        };
+    }
+    let document_is_local = base
+        .map(|b| matches!(b.scheme(), "about" | "file"))
+        .unwrap_or(true);
+    if let Ok(url) = Url::parse(src) {
+        return match url.scheme() {
+            "http" | "https" => FontSource::Remote(url),
+            "file" if document_is_local => url
+                .to_file_path()
+                .map(FontSource::File)
+                .unwrap_or(FontSource::Blocked("file: URL is not a local path")),
+            "file" => FontSource::Blocked("a remote document may not load file: fonts"),
+            _ => FontSource::Blocked("unsupported URL scheme"),
+        };
+    }
+    match base {
+        Some(b) if matches!(b.scheme(), "http" | "https") => b
+            .join(src)
+            .map(FontSource::Remote)
+            .unwrap_or(FontSource::Blocked("unresolvable relative URL")),
+        Some(b) if b.scheme() == "file" => b
+            .join(src)
+            .ok()
+            .and_then(|u| u.to_file_path().ok())
+            .map(FontSource::File)
+            .unwrap_or(FontSource::Blocked("unresolvable relative file path")),
+        _ => {
+            let path = std::path::Path::new(src);
+            if path.is_absolute() {
+                FontSource::File(path.to_path_buf())
+            } else {
+                FontSource::Blocked("relative source with no document base (inline content)")
+            }
+        }
+    }
+}
+
+/// `data:[<mediatype>][;base64],<payload>` → bytes. Fonts ship base64; the
+/// percent-encoded form is decoded too so a valid URI never fails here.
+fn decode_data_url(src: &str) -> Option<Vec<u8>> {
+    let rest = src.get(5..)?;
+    let (meta, payload) = rest.split_once(',')?;
+    if meta.to_ascii_lowercase().contains(";base64") {
+        use base64::Engine as _;
+        let compact: String = payload.chars().filter(|c| !c.is_whitespace()).collect();
+        base64::engine::general_purpose::STANDARD.decode(compact).ok()
+    } else {
+        Some(percent_decode(payload))
+    }
+}
+
+fn percent_decode(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
 /// The main browser engine.
 pub struct Engine {
     config: EngineConfig,
@@ -1240,7 +1422,9 @@ impl Engine {
             view.bindings = Some(bindings);
         }
 
-        // Initial layout and render
+        // Initial layout and render (inline data:-sourced faces first; the
+        // remote ones arrive with the other subresources below)
+        self.load_local_web_fonts(id);
         self.relayout(id)?;
 
         // Load external resources (stylesheets, images)
@@ -1386,6 +1570,11 @@ impl Engine {
             view.bindings = Some(bindings);
         }
 
+        // Fonts the document declares inline (data:/file:/local paths) must
+        // be in place BEFORE the first layout, or text is measured in the
+        // fallback face and only repainted right on a later relayout.
+        self.load_local_web_fonts(id);
+
         // Layout and render
         self.relayout(id)?;
 
@@ -1427,6 +1616,10 @@ impl Engine {
 
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
+        // Text measurement below resolves family names; make THIS view's
+        // declared faces the ones that resolve.
+        self.install_web_fonts(id);
+
         let document = view
             .document
             .as_ref()
@@ -1463,6 +1656,10 @@ impl Engine {
             "Created containing block"
         );
 
+        // Inline <svg> subtrees parse into svg_cache before the tree build:
+        // the build runs with &self and can only look the documents up.
+        self.cache_inline_svgs(&document);
+
         // Get external stylesheets from view state
         let external_stylesheets = self
             .views
@@ -1489,6 +1686,10 @@ impl Engine {
             // layout() path stacks margins additively (gap = bottom + top), which
             // ran every text page taller than Chrome.
             let mut margin_context = rustkit_layout::MarginCollapseContext::new();
+            // The root element's margins never collapse with its children's
+            // (CSS 2.1 §8.3.1): body's top margin (and the h1 chain under it)
+            // collapses with body's siblings and stays under html's top edge.
+            margin_context.children_are_formatting_roots = true;
             let mut float_context = rustkit_layout::FloatContext::new();
             root_box.layout_with_collapse(
                 &containing_block,
@@ -1701,6 +1902,59 @@ impl Engine {
             || b.style.display.is_atomic_inline()
     }
 
+    /// Push a built child, hoisting any `<br>` out of an INLINE child into
+    /// this box's child list (the continuation split of CSS 2.1 §9.2.1.1).
+    ///
+    /// The inline flow only closes a line for its DIRECT `LineBreak`
+    /// children, so `<span>XX<br></span>` laid its break out as a 0×0
+    /// nothing inside the span and the text after it stayed on the same
+    /// line (WPT overflow-wrap-anywhere-005: a five-row red fixture came
+    /// out as two 300px rows). `<span>a<br>b</span>` becomes
+    /// `[span(a)] [br] [span(b)]`; each piece re-derives its positioning
+    /// from the same computed style, and only the first keeps the element
+    /// identity so the geometry oracle joins one Chrome rect to one box.
+    /// Deeper nesting splits level by level: an inline parent that just
+    /// received a hoisted `<br>` is itself split when ITS parent pushes it.
+    fn push_child_hoisting_line_breaks(children: &mut Vec<LayoutBox>, child: LayoutBox) {
+        let has_break = matches!(child.box_type, BoxType::Inline)
+            && child
+                .children
+                .iter()
+                .any(|c| matches!(c.box_type, BoxType::LineBreak));
+        if !has_break {
+            children.push(child);
+            return;
+        }
+
+        let mut current = child;
+        let grandchildren = std::mem::take(&mut current.children);
+        let style = current.style.clone();
+        let node_id = current.node_id;
+        let link_href = current.link_href.clone();
+        let keep = |piece: &LayoutBox| {
+            !piece.children.is_empty() || Self::has_visible_styling(&piece.style)
+        };
+
+        for grandchild in grandchildren {
+            if matches!(grandchild.box_type, BoxType::LineBreak) {
+                if keep(&current) {
+                    children.push(current);
+                }
+                children.push(grandchild);
+                let mut piece = LayoutBox::new(BoxType::Inline, style.clone());
+                Self::transfer_positioning(&mut piece, &style);
+                piece.node_id = node_id;
+                piece.link_href = link_href.clone();
+                current = piece;
+            } else {
+                current.children.push(grandchild);
+            }
+        }
+        if keep(&current) {
+            children.push(current);
+        }
+    }
+
     /// Check if a layout box has content children (text, images, form controls).
     /// This is used to determine if an inline wrapper should be included.
     fn has_content_children(layout_box: &LayoutBox) -> bool {
@@ -1711,7 +1965,7 @@ impl Engine {
                         return true;
                     }
                 }
-                BoxType::Image { .. } | BoxType::FormControl(_) => {
+                BoxType::Image { .. } | BoxType::FormControl(_) | BoxType::LineBreak => {
                     return true;
                 }
                 BoxType::Inline | BoxType::Block | BoxType::AnonymousBlock => {
@@ -1762,6 +2016,15 @@ impl Engine {
                 _ => None,
             };
             layout_box.set_offsets(px(&style.top), px(&style.right), px(&style.bottom), px(&style.left));
+            // z-index was parsed into the computed style and never copied
+            // here, so every positioned box painted at z 0: a `z-index: -1`
+            // overlay (the WPT css-text "red under green" idiom) painted ON
+            // TOP of the in-flow text it was meant to sit beneath. The
+            // display-list builder already groups negative-z children
+            // before normal flow — it only ever saw zeros. Field only, no
+            // stacking-context push: the builder's grouping is what CSS 2.1
+            // App. E needs here, and the context pipeline is still gated.
+            layout_box.z_index = style.z_index;
         }
     }
 
@@ -1978,6 +2241,39 @@ impl Engine {
         }
 
         segment
+    }
+
+    /// Attach element identity so the geometry oracle can join this box to
+    /// Chrome's selector-keyed rects.
+    ///
+    /// One implementation for every box built from an element, because the
+    /// branches that build REPLACED and FORM-CONTROL boxes return before the
+    /// generic path and so carried no identity at all: every `<img>` and every
+    /// `<input>`/`<select>`/`<textarea>`/leaf `<button>` in the corpus reached
+    /// Gate A as a `missing_box` join failure and was never compared (measured
+    /// 2026-08-22 — all 14 of images-intrinsic's join failures are its images).
+    ///
+    /// Anonymous, text and pseudo-element boxes are built elsewhere and
+    /// correctly keep `identity: None`; the `Option` is what stops the oracle
+    /// pairing them positionally with real Chrome elements.
+    fn attach_identity(
+        layout_box: &mut LayoutBox,
+        selector_path: &str,
+        attributes: &HashMap<String, String>,
+        tag_lower: &str,
+        element_ids: &Cell<usize>,
+    ) {
+        if selector_path.is_empty() {
+            return;
+        }
+        let reported = Self::reported_selector(selector_path, attributes);
+        let next_id = element_ids.get() + 1;
+        element_ids.set(next_id);
+        layout_box.set_identity(ElementIdentity {
+            element_id: next_id,
+            tag: tag_lower.to_string(),
+            selector: reported,
+        });
     }
 
     /// The selector Chrome REPORTS for an element, given its structural path.
@@ -2265,7 +2561,7 @@ impl Engine {
                         },
                     };
 
-                    return LayoutBox::new(
+                    let mut b = LayoutBox::new(
                         BoxType::Image {
                             url: src,
                             natural_width,
@@ -2273,6 +2569,64 @@ impl Engine {
                         },
                         style,
                     );
+                    Self::attach_identity(
+                        &mut b,
+                        selector_path,
+                        attributes,
+                        &tag_lower,
+                        element_ids,
+                    );
+                    return b;
+                }
+
+                // Inline <svg> is a replaced element: it is sized by its own
+                // width=/height= presentational hints (author CSS wins; the
+                // CSS replaced-element fallback is 300×150 without them)
+                // and its SVG children never generate CSS boxes.
+                //
+                // Paint rides the <img src=*.svg> lane: relayout's pre-pass
+                // serialized this subtree and parsed it into svg_cache under
+                // a content-hash key, so an Image box under the same key
+                // routes through the display-list vector splice. The build
+                // runs with &self, which is why the cache insert cannot
+                // happen here; on a cache miss (pre-pass not run, or the
+                // subtree failed to parse) the box stays the unpainted
+                // replaced block it was before paint existed.
+                if tag_lower == "svg" {
+                    let attr_px = |name: &str| {
+                        attributes
+                            .get(name)
+                            .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+                    };
+                    if matches!(style.width, rustkit_css::Length::Auto) {
+                        style.width = rustkit_css::Length::Px(attr_px("width").unwrap_or(300.0));
+                    }
+                    if matches!(style.height, rustkit_css::Length::Auto) {
+                        style.height = rustkit_css::Length::Px(attr_px("height").unwrap_or(150.0));
+                    }
+                    if style.display == rustkit_css::Display::Inline {
+                        style.display = rustkit_css::Display::InlineBlock;
+                    }
+                    let key = Self::inline_svg_key(&Self::serialize_svg_subtree(node));
+                    if let Some(svg) = self.svg_cache.get(&key) {
+                        let (natural_width, natural_height) = svg.get_size(
+                            attr_px("width").unwrap_or(300.0),
+                            attr_px("height").unwrap_or(150.0),
+                        );
+                        let mut svg_box = LayoutBox::new(
+                            BoxType::Image {
+                                url: key,
+                                natural_width,
+                                natural_height,
+                            },
+                            style.clone(),
+                        );
+                        Self::transfer_positioning(&mut svg_box, &style);
+                        return svg_box;
+                    }
+                    let mut svg_box = LayoutBox::new(BoxType::Block, style.clone());
+                    Self::transfer_positioning(&mut svg_box, &style);
+                    return svg_box;
                 }
 
                 // Handle form controls
@@ -2324,6 +2678,13 @@ impl Engine {
                     // unit tests missed it by hand-building boxes; only the
                     // production path exercises this.
                     let mut b = LayoutBox::new(BoxType::FormControl(control), style);
+                    Self::attach_identity(
+                        &mut b,
+                        selector_path,
+                        attributes,
+                        &tag_lower,
+                        element_ids,
+                    );
                     b.node_id = Some(node.id.raw());
                     if self.building_focus.get() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
@@ -2358,13 +2719,21 @@ impl Engine {
                             .cloned()
                             .unwrap_or_else(|| "button".to_string());
 
-                        return LayoutBox::new(
+                        let mut b = LayoutBox::new(
                             BoxType::FormControl(rustkit_layout::FormControlType::Button {
                                 label,
                                 button_type,
                             }),
                             style,
                         );
+                        Self::attach_identity(
+                            &mut b,
+                            selector_path,
+                            attributes,
+                            &tag_lower,
+                            element_ids,
+                        );
+                        return b;
                     }
                     // Element children present: fall through to normal box
                     // construction so the children lay out inside the button.
@@ -2395,6 +2764,13 @@ impl Engine {
                             cols,
                         }),
                         style,
+                    );
+                    Self::attach_identity(
+                        &mut b,
+                        selector_path,
+                        attributes,
+                        &tag_lower,
+                        element_ids,
                     );
                     b.node_id = Some(node.id.raw());
                     if self.building_focus.get() == Some(node.id) {
@@ -2440,6 +2816,13 @@ impl Engine {
                         }),
                         style,
                     );
+                    Self::attach_identity(
+                        &mut b,
+                        selector_path,
+                        attributes,
+                        &tag_lower,
+                        element_ids,
+                    );
                     b.node_id = Some(node.id.raw());
                     if self.building_focus.get() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
@@ -2456,32 +2839,33 @@ impl Engine {
                 // (one term of the page-wide vertical drift). UA defaults
                 // have already stamped display for every known tag by this
                 // point, so style is authoritative here.
-                let box_type = match style.display {
-                    rustkit_css::Display::Inline => BoxType::Inline,
-                    // Atomic inlines (inline-block/-flex/-grid) lay out their
-                    // CONTENTS as blocks; inline-level placement is handled by
-                    // the block child loop via display, not box type.
-                    _ => BoxType::Block,
+                let box_type = if tag_lower == "br" {
+                    // A forced line break, not an empty inline: as an empty
+                    // inline it had no content children and was filtered
+                    // out of the tree, so "a<br>b" rendered on one line.
+                    BoxType::LineBreak
+                } else {
+                    match style.display {
+                        rustkit_css::Display::Inline => BoxType::Inline,
+                        // Atomic inlines (inline-block/-flex/-grid) lay out
+                        // their CONTENTS as blocks; inline-level placement is
+                        // handled by the block child loop via display, not
+                        // box type.
+                        _ => BoxType::Block,
+                    }
                 };
 
                 let mut layout_box = LayoutBox::new(box_type, style.clone());
 
                 Self::transfer_positioning(&mut layout_box, &style);
 
-                // Attach element identity so the geometry oracle can join this
-                // box to Chrome's selector-keyed rects. Only ELEMENT boxes reach
-                // here; anonymous, text and pseudo-element boxes are built
-                // elsewhere and correctly keep `identity: None`.
-                if !selector_path.is_empty() {
-                    let reported = Self::reported_selector(selector_path, attributes);
-                    let next_id = element_ids.get() + 1;
-                    element_ids.set(next_id);
-                    layout_box.set_identity(ElementIdentity {
-                        element_id: next_id,
-                        tag: tag_lower.clone(),
-                        selector: reported,
-                    });
-                }
+                Self::attach_identity(
+                    &mut layout_box,
+                    selector_path,
+                    attributes,
+                    &tag_lower,
+                    element_ids,
+                );
 
                 // Every element box remembers which DOM node it came from.
                 // This is what lets a click resolve to an element (focus,
@@ -2599,11 +2983,14 @@ impl Engine {
                             Self::has_content_children(&child_box)
                                 || Self::has_visible_styling(&child_box.style)
                         }
-                        BoxType::Text(_) | BoxType::Image { .. } | BoxType::FormControl(_) => true,
+                        BoxType::Text(_)
+                        | BoxType::Image { .. }
+                        | BoxType::FormControl(_)
+                        | BoxType::LineBreak => true,
                     };
 
                     if should_include {
-                        layout_box.children.push(child_box);
+                        Self::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
                     }
                 }
 
@@ -2619,6 +3006,54 @@ impl Engine {
                     layout_box.children.push(after_box);
                 }
 
+                // css-text §4.1.1: collapsible spaces collapse ACROSS text
+                // node boundaries within one inline formatting context —
+                // "any collapsible space immediately following another
+                // collapsible space ... is collapsed", even when a comment,
+                // a display:none element or a hidden element sits between
+                // the two text nodes. The DOM keeps them as separate nodes
+                // (`</h1> <!-- c --> <!-- d --> <h2>` is THREE
+                // whitespace-only text nodes) and the boundary strip below
+                // reads only the immediate siblings, so the middle run saw a
+                // text box on each side, called both inline-level, and
+                // survived as a 24px line box between two blocks
+                // (images-intrinsic: every block after the <h1> sat 24px
+                // low; a second and third space also survived between two
+                // inline siblings). Join adjacent text boxes first — bare
+                // text siblings of one element always share the parent's
+                // computed style (pseudo-element text lives inside its own
+                // Inline wrapper), so the join loses nothing — and let the
+                // strip run on the joined run. Pre-family runs are joined
+                // verbatim: nothing collapses there.
+                let mut joined: Vec<LayoutBox> = Vec::with_capacity(layout_box.children.len());
+                for child in layout_box.children.drain(..) {
+                    let joins_previous = matches!(child.box_type, BoxType::Text(_))
+                        && matches!(joined.last().map(|b| &b.box_type), Some(BoxType::Text(_)));
+                    if !joins_previous {
+                        joined.push(child);
+                        continue;
+                    }
+                    let BoxType::Text(next) = child.box_type else {
+                        unreachable!("joins_previous requires a text box");
+                    };
+                    let last = joined.last_mut().expect("joins_previous requires a previous box");
+                    let collapsible = !matches!(
+                        last.style.white_space,
+                        rustkit_css::WhiteSpace::Pre
+                            | rustkit_css::WhiteSpace::PreWrap
+                            | rustkit_css::WhiteSpace::PreLine
+                            | rustkit_css::WhiteSpace::BreakSpaces
+                    );
+                    if let BoxType::Text(ref mut run) = last.box_type {
+                        if collapsible && run.ends_with(' ') && next.starts_with(' ') {
+                            run.push_str(&next[1..]);
+                        } else {
+                            run.push_str(&next);
+                        }
+                    }
+                }
+                layout_box.children = joined;
+
                 // css-text §4.2 phase 2: collapsed spaces at segment
                 // boundaries do not render. A text child's leading space is
                 // stripped unless the previous sibling is inline-level; its
@@ -2631,12 +3066,30 @@ impl Engine {
                         i > 0 && Self::is_inline_level_box(&layout_box.children[i - 1]);
                     let next_inline =
                         i + 1 < n && Self::is_inline_level_box(&layout_box.children[i + 1]);
+                    // Phase 2 only applies to COLLAPSIBLE spaces. Under
+                    // pre/pre-wrap/break-spaces every space is preserved
+                    // and renders (css-text §4.1.1): " XX" in a pre-wrap
+                    // box starts with a space-wide gap, and a
+                    // whitespace-only line is a line. Stripping here made
+                    // WPT word-break-break-all-011's " <br>X<br>X" lose
+                    // its first line entirely.
+                    let preserved = matches!(
+                        layout_box.children[i].style.white_space,
+                        rustkit_css::WhiteSpace::Pre
+                            | rustkit_css::WhiteSpace::PreWrap
+                            | rustkit_css::WhiteSpace::BreakSpaces
+                    );
+                    if preserved {
+                        continue;
+                    }
                     if let BoxType::Text(ref mut t) = layout_box.children[i].box_type {
+                        // Strip the collapsed SPACE only: `trim_start()` also
+                        // eats a following nbsp, which is content.
                         if !prev_inline && t.starts_with(' ') {
-                            *t = t.trim_start().to_string();
+                            *t = t.trim_start_matches(' ').to_string();
                         }
                         if !next_inline && t.ends_with(' ') {
-                            *t = t.trim_end().to_string();
+                            *t = t.trim_end_matches(' ').to_string();
                         }
                     }
                 }
@@ -2664,22 +3117,30 @@ impl Engine {
                         | rustkit_css::WhiteSpace::BreakSpaces
                 );
                 let content = if collapsible {
+                    // Only DOCUMENT white space collapses (css-text §4.1:
+                    // space, tab, and the line-ending characters).
+                    // `split_whitespace`/`char::is_whitespace` also match
+                    // U+00A0 NO-BREAK SPACE, which turned "XXXX&nbsp;XXXX"
+                    // into "XXXX XXXX" here — a rendered character silently
+                    // rewritten into a collapsible one before layout ever
+                    // saw it (WPT line-break-anywhere-006).
                     let mut s = String::new();
-                    if text.starts_with(char::is_whitespace) {
-                        s.push(' ');
-                    }
-                    let mut first = true;
-                    for w in text.split_whitespace() {
-                        if !first {
-                            s.push(' ');
+                    let mut in_ws = false;
+                    for c in text.chars() {
+                        if is_document_white_space(c) {
+                            in_ws = true;
+                        } else {
+                            if in_ws {
+                                s.push(' ');
+                                in_ws = false;
+                            }
+                            s.push(c);
                         }
-                        s.push_str(w);
-                        first = false;
                     }
-                    if !first && text.ends_with(char::is_whitespace) {
+                    if in_ws {
                         s.push(' ');
                     }
-                    s // whitespace-only input -> " " (leading-ws branch only)
+                    s // whitespace-only input -> " "
                 } else {
                     text.clone()
                 };
@@ -2707,6 +3168,8 @@ impl Engine {
                         // nowrap/pre parent's text still wrapped (shelf bug).
                         s.white_space = parent.white_space;
                         s.word_break = parent.word_break;
+                        s.overflow_wrap = parent.overflow_wrap;
+                        s.line_break = parent.line_break;
                         s.font_stretch = parent.font_stretch;
                         // NOT CSS inheritance — feature plumbing: gradient
                         // text (background-clip:text + transparent fill) is
@@ -2849,8 +3312,18 @@ impl Engine {
         // +29px by the page bottom). font-size seeds the parent's already-
         // absolutized px; a relative author value (em/%) still resolves
         // against the parent right after cascade in the build walk.
-        // white-space / line-height are NOT seeded here: line-height has its
-        // own inheritance pass, and white-space is handled separately.
+        // line-height is NOT seeded here: it has its own inheritance pass.
+        //
+        // white-space / word-break / overflow-wrap / line-break /
+        // text-transform ARE seeded (css-text-3: all five inherit). Until
+        // n36 this comment said white-space was "handled separately" — it
+        // was not: only TEXT nodes copied it, from their own element, which
+        // had never received it. So `.title { white-space: nowrap }` reached
+        // the title's bare text but not `<span>` inside it: the span's text
+        // wrapped onto a second (clipped) line, and the run after the span
+        // painted on line one where the ellipsis belonged
+        // (parity-tests/repro/nowrap-span-probe.html: every span variant
+        // wrapped unless it restated nowrap itself).
         //
         // text-align IS seeded (it is a genuinely inherited CSS property).
         // The old "double-shift" fear was a PRE-Slice-A artifact: back then
@@ -2872,6 +3345,11 @@ impl Engine {
             style.letter_spacing = parent.letter_spacing.clone();
             style.word_spacing = parent.word_spacing.clone();
             style.text_align = parent.text_align;
+            style.white_space = parent.white_space;
+            style.word_break = parent.word_break;
+            style.overflow_wrap = parent.overflow_wrap;
+            style.line_break = parent.line_break;
+            style.text_transform = parent.text_transform;
         }
 
         // Apply tag-specific default styles (user-agent stylesheet)
@@ -3164,6 +3642,14 @@ impl Engine {
             "canvas" => {
                 style.display = rustkit_css::Display::Inline;
             }
+            // Chrome's UA sheet has no display rule for <svg>: an inline
+            // svg is an inline-level replaced element. The `_ => {}`
+            // fallback below leaves ComputedStyle's default (Block), which
+            // made every inline svg a block — and, being childless with no
+            // visible styling, a dropped one.
+            "svg" => {
+                style.display = rustkit_css::Display::Inline;
+            }
             "iframe" => {
                 style.display = rustkit_css::Display::Inline;
             }
@@ -3226,6 +3712,9 @@ impl Engine {
         let recording = self.style_trace.borrow().is_some();
         let mut records: Vec<DeclarationRecord> = Vec::new();
         let mut order = 0usize;
+        // `ch` resolves against this element's own font, which is not final
+        // until the whole cascade has run — collect, then replay below.
+        let mut ch_pending = ChPending::default();
 
         // Apply matching rules in order
         for (rule, specificity, _) in matching_rules {
@@ -3245,6 +3734,7 @@ impl Engine {
                         "Resolved CSS variable"
                     );
                 }
+                ch_pending.note(&decl.property, &resolved_value);
                 self.apply_style_property(&mut style, &decl.property, &resolved_value);
                 if recording {
                     records.push(DeclarationRecord {
@@ -3263,11 +3753,15 @@ impl Engine {
 
         // Parse inline style attribute if present (highest specificity)
         if let Some(style_attr) = attributes.get("style") {
-            self.apply_inline_style(&mut style, style_attr, css_vars);
+            self.apply_inline_style(&mut style, style_attr, css_vars, &mut ch_pending);
             if recording {
                 self.record_inline_style(style_attr, css_vars, &mut records, &mut order);
             }
         }
+
+        // The font is final now; `ch` lengths that the cascade dropped for
+        // want of a font can finally be applied.
+        self.resolve_ch_lengths(&mut style, &ch_pending);
 
         if recording {
             let id = attributes.get("id").cloned();
@@ -3393,6 +3887,7 @@ impl Engine {
         style: &mut ComputedStyle,
         style_attr: &str,
         css_vars: &HashMap<String, String>,
+        ch_pending: &mut ChPending,
     ) {
         for declaration in style_attr.split(';') {
             let declaration = declaration.trim();
@@ -3404,8 +3899,38 @@ impl Engine {
                 let value = value.trim();
                 // Resolve CSS variables in the value
                 let resolved_value = self.resolve_css_variables(value, css_vars);
+                ch_pending.note(&property, &resolved_value);
                 self.apply_style_property(style, &property, &resolved_value);
             }
+        }
+    }
+
+    /// Re-apply the cascade's `ch`-bearing winners now that the font is known.
+    ///
+    /// CSS Values 3 §5.1.1: `1ch` is the advance of the "0" glyph in the
+    /// ELEMENT'S OWN font, so it cannot be resolved while declarations are
+    /// still being applied — font-family and font-size may not have landed
+    /// yet. `parse_length` has no font context, returns None for "1ch", and
+    /// the caller's `if let Some(length)` then drops the ENTIRE declaration
+    /// on the floor: `width: 1ch` silently computed to `auto`.
+    ///
+    /// So resolve it in a second pass over the winners only, substituting
+    /// `<n>ch` -> `<n * advance>px` and re-applying through the same funnel,
+    /// which makes every length property support `ch` at once rather than
+    /// one arm at a time.
+    ///
+    /// Ledgered limitation: the winner is tracked per property NAME, so a
+    /// `margin: 1ch` followed by a later `margin-left: 2px` re-applies the
+    /// shorthand and clobbers the longhand. Both are dropped entirely today,
+    /// so this is strictly less wrong — but it is not the cascade.
+    fn resolve_ch_lengths(&self, style: &mut ComputedStyle, ch_pending: &ChPending) {
+        if ch_pending.is_empty() {
+            return;
+        }
+        let advance = ch_advance_px(style);
+        for (property, value) in ch_pending.winners() {
+            let substituted = substitute_ch_units(value, advance);
+            self.apply_style_property(style, property, &substituted);
         }
     }
 
@@ -3535,6 +4060,40 @@ impl Engine {
                     if layer_idx < num_layers {
                         style.background_layers[layer_idx].origin = origin;
                     }
+                }
+            }
+            // `font` shorthand (css-fonts-4 §3.9):
+            //   [ <style> || <variant> || <weight> || <stretch> ]? <size> [ / <line-height> ]? <family>
+            // Never parsed before this: `font: 20px/1 Ahem` set NOTHING, so a
+            // page (or every WPT css-text test written with the shorthand)
+            // rendered in the inherited 16px fallback face. A shorthand resets
+            // every longhand it covers before applying what was given.
+            "font" => {
+                if let Some(parts) = split_font_shorthand(value) {
+                    self.apply_style_property(style, "font-style", "normal");
+                    self.apply_style_property(style, "font-weight", "normal");
+                    self.apply_style_property(style, "line-height", "normal");
+                    for tok in &parts.prefix {
+                        match tok.as_str() {
+                            "italic" | "oblique" => {
+                                self.apply_style_property(style, "font-style", "italic")
+                            }
+                            "bold" | "bolder" | "lighter" => {
+                                self.apply_style_property(style, "font-weight", tok)
+                            }
+                            t if t.parse::<f32>().is_ok() => {
+                                self.apply_style_property(style, "font-weight", tok)
+                            }
+                            // normal / small-caps / stretch keywords: no
+                            // computed representation to set.
+                            _ => {}
+                        }
+                    }
+                    self.apply_style_property(style, "font-size", &parts.size);
+                    if let Some(lh) = &parts.line_height {
+                        self.apply_style_property(style, "line-height", lh);
+                    }
+                    self.apply_style_property(style, "font-family", &parts.family);
                 }
             }
             "font-size" => {
@@ -4081,6 +4640,19 @@ impl Engine {
             "overflow-y" => {
                 style.overflow_y = parse_overflow(value);
             }
+            // css-overflow-3 §5.1. Not inherited (a block owns its line
+            // boxes). The two-value form and `<string>` fallback are
+            // unparsed: `ellipsis` anywhere in the value is the ellipsis.
+            "text-overflow" => {
+                style.text_overflow = if value
+                    .split_whitespace()
+                    .any(|v| v.eq_ignore_ascii_case("ellipsis"))
+                {
+                    rustkit_css::TextOverflow::Ellipsis
+                } else {
+                    rustkit_css::TextOverflow::Clip
+                };
+            }
             "z-index" => {
                 if let Ok(z) = value.parse::<i32>() {
                     style.z_index = z;
@@ -4152,7 +4724,59 @@ impl Engine {
                     "nowrap" => rustkit_css::WhiteSpace::Nowrap,
                     "pre-wrap" => rustkit_css::WhiteSpace::PreWrap,
                     "pre-line" => rustkit_css::WhiteSpace::PreLine,
+                    // css-text-3 §3: preserved spaces that also wrap and
+                    // never hang. Unparsed, it fell to `normal` and the
+                    // leading space of WPT word-break-break-all-012's
+                    // " XXXXX" collapsed away.
+                    "break-spaces" => rustkit_css::WhiteSpace::BreakSpaces,
                     _ => rustkit_css::WhiteSpace::Normal,
+                };
+            }
+            // `word-break` had a full implementation and no producer: the
+            // enum, the ComputedStyle field, the CSS->LineBreaker conversion
+            // in rustkit-layout and the break-all algorithm in rustkit-text
+            // all existed, but no declaration ever set the field, so it was
+            // permanently Normal (inherited from a root that never changed).
+            // CSS Text 3 §5.2.
+            "word-break" => {
+                style.word_break = match value.trim().to_lowercase().as_str() {
+                    "break-all" => rustkit_css::WordBreak::BreakAll,
+                    "keep-all" => rustkit_css::WordBreak::KeepAll,
+                    // Legacy alias, per §5.2's note: behaves like
+                    // overflow-wrap: anywhere for line breaking, but must
+                    // survive a later `overflow-wrap` declaration (WPT
+                    // word-break-break-word-overflow-wrap-interactions), so
+                    // it computes as its own word-break value instead of
+                    // writing overflow_wrap.
+                    "break-word" => rustkit_css::WordBreak::BreakWord,
+                    _ => rustkit_css::WordBreak::Normal,
+                };
+            }
+            // `overflow-wrap` (and its `word-wrap` legacy alias) had no
+            // computed-style representation at all before this. CSS Text 3
+            // §5.5.
+            "overflow-wrap" | "word-wrap" => {
+                style.overflow_wrap = match value.trim().to_lowercase().as_str() {
+                    "break-word" => rustkit_css::OverflowWrap::BreakWord,
+                    "anywhere" => rustkit_css::OverflowWrap::Anywhere,
+                    _ => rustkit_css::OverflowWrap::Normal,
+                };
+            }
+            // `line-break` is the strictness axis (CSS Text 3 §5.3). It used
+            // to be written INTO overflow_wrap as Anywhere, which is a
+            // different property: overflow-wrap only breaks a word that
+            // overflows, so "XX XXX" in a 4ch box still broke at the space
+            // ("XX" / "XXX") where `line-break: anywhere` must fill the line
+            // ("XX X" / "XX", WPT line-break-anywhere-004). It now computes
+            // as its own value; layout maps Anywhere onto break-everywhere
+            // opportunities (see rustkit_layout::effective_word_break).
+            "line-break" => {
+                style.line_break = match value.trim().to_lowercase().as_str() {
+                    "anywhere" => rustkit_css::LineBreak::Anywhere,
+                    "loose" => rustkit_css::LineBreak::Loose,
+                    "normal" => rustkit_css::LineBreak::Normal,
+                    "strict" => rustkit_css::LineBreak::Strict,
+                    _ => rustkit_css::LineBreak::Auto,
                 };
             }
             "border-top-width" => {
@@ -4642,6 +5266,87 @@ impl Engine {
             .or(bare)
     }
 
+    /// Serialize an inline `<svg>` element subtree back to markup for
+    /// rustkit-svg's parser. Attributes are emitted in sorted order because
+    /// the same subtree is serialized twice per layout (cache insert in the
+    /// relayout pre-pass, key lookup at box build) and HashMap iteration
+    /// order is not a contract between two maps. Attribute values are
+    /// emitted verbatim except for `"` — rustkit-svg reads them literally
+    /// and does not decode entities.
+    fn serialize_svg_subtree(node: &Node) -> String {
+        fn walk(node: &Node, out: &mut String) {
+            match &node.node_type {
+                NodeType::Element {
+                    tag_name,
+                    attributes,
+                    ..
+                } => {
+                    out.push('<');
+                    out.push_str(tag_name);
+                    let mut keys: Vec<&String> = attributes.keys().collect();
+                    keys.sort();
+                    for k in keys {
+                        out.push(' ');
+                        out.push_str(k);
+                        out.push_str("=\"");
+                        out.push_str(&attributes[k].replace('"', "&quot;"));
+                        out.push('"');
+                    }
+                    out.push('>');
+                    for child in node.children() {
+                        walk(&child, out);
+                    }
+                    out.push_str("</");
+                    out.push_str(tag_name);
+                    out.push('>');
+                }
+                NodeType::Text(text) => out.push_str(text),
+                _ => {}
+            }
+        }
+        let mut out = String::new();
+        walk(node, &mut out);
+        out
+    }
+
+    /// Cache key for an inline SVG: content-addressed so identical icons
+    /// (repeated list markers, nav glyphs) share one parsed document, and
+    /// deterministic across the two serializations of one layout pass.
+    /// FNV-1a rather than DefaultHasher because the latter's stability is
+    /// unspecified. The `inline-svg:` scheme survives the display-list URL
+    /// normalization: joining an absolute URL against any base returns it
+    /// unchanged.
+    fn inline_svg_key(xml: &str) -> String {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in xml.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("inline-svg:{:016x}", hash)
+    }
+
+    /// Parse every inline `<svg>` subtree in the document into svg_cache so
+    /// the box build (which runs with `&self`) can size them and the
+    /// display-list splice can paint them. Runs per relayout; already-cached
+    /// keys are skipped, so steady-state cost is one serialize per svg.
+    fn cache_inline_svgs(&mut self, document: &Document) {
+        for svg_el in document.get_elements_by_tag_name("svg") {
+            let xml = Self::serialize_svg_subtree(&svg_el);
+            let key = Self::inline_svg_key(&xml);
+            if self.svg_cache.contains_key(&key) {
+                continue;
+            }
+            match rustkit_svg::SvgDocument::parse(&xml) {
+                Ok(doc) => {
+                    self.svg_cache.insert(key, doc);
+                }
+                Err(e) => {
+                    debug!(?e, "Inline SVG failed to parse; box stays unpainted");
+                }
+            }
+        }
+    }
+
     fn discover_images(&self, document: &Document, base_url: Option<&Url>) -> Vec<(String, Url)> {
         let mut images = Vec::new();
 
@@ -4894,7 +5599,14 @@ impl Engine {
             info!("No external stylesheets on this document — cleared the previous document's");
         }
 
-        if count > 0 || had_previous {
+        // Web fonts: faces declared in the external sheets that just arrived
+        // (plus any inline data: faces not yet loaded), then the network ones.
+        let fonts_loaded = self.load_local_web_fonts(id) + self.load_remote_web_fonts(id).await;
+        if fonts_loaded > 0 {
+            info!(count = fonts_loaded, "Loaded web fonts");
+        }
+
+        if count > 0 || had_previous || fonts_loaded > 0 {
             self.relayout(id)?;
         }
 
@@ -4907,6 +5619,189 @@ impl Engine {
         }
 
         Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // Web fonts (@font-face)
+    //
+    // The parse (#124) and the partitioned loader (#128/#129) landed with
+    // no caller: `FontLoader::load_font` tracked rules and fetched nothing,
+    // so every `@font-face` family fell through to the platform fallback.
+    // This is the missing middle: collect the document's rules, fetch the
+    // bytes (local sources synchronously, remote ones with the other
+    // subresources), file them in the view's partition, and hand that
+    // partition's faces to the text stack before each layout and paint.
+    // -----------------------------------------------------------------
+
+    /// The font-cache partition a document belongs to: its host for
+    /// http(s), the opaque bucket for inline/about:/file: content.
+    fn font_partition(url: Option<&Url>) -> rustkit_layout::TopLevelSite {
+        match url {
+            Some(u) if matches!(u.scheme(), "http" | "https") => u
+                .host_str()
+                .map(rustkit_layout::TopLevelSite::from_host)
+                .unwrap_or_else(rustkit_layout::TopLevelSite::opaque),
+            _ => rustkit_layout::TopLevelSite::opaque(),
+        }
+    }
+
+    fn layout_font_face(rule: &rustkit_css::FontFaceRule) -> rustkit_layout::FontFaceRule {
+        use rustkit_css::FontDisplayValue as D;
+        use rustkit_layout::FontDisplay as L;
+        rustkit_layout::FontFaceRule {
+            family: rule.family.clone(),
+            src: rule.src.clone(),
+            weight: rule.weight,
+            style: rule.style,
+            stretch: rule.stretch,
+            unicode_range: rule.unicode_range.clone(),
+            display: match rule.display {
+                D::Auto => L::Auto,
+                D::Block => L::Block,
+                D::Swap => L::Swap,
+                D::Fallback => L::Fallback,
+                D::Optional => L::Optional,
+            },
+        }
+    }
+
+    /// Every `@font-face` a view's document declares, in cascade order:
+    /// inline `<style>` sheets, then the loaded external sheets.
+    fn view_font_face_rules(&self, id: EngineViewId) -> Vec<rustkit_css::FontFaceRule> {
+        let Some(view) = self.views.get(&id) else {
+            return Vec::new();
+        };
+        let Some(document) = view.document.as_ref() else {
+            return Vec::new();
+        };
+        let mut rules = Vec::new();
+        for sheet in self.extract_stylesheets(document) {
+            rules.extend(sheet.font_face_rules());
+        }
+        for sheet in &view.external_stylesheets {
+            rules.extend(sheet.font_face_rules());
+        }
+        rules
+    }
+
+    /// Load every face reachable WITHOUT the network — `data:` payloads,
+    /// `file:` URLs and (for local documents) filesystem paths — into the
+    /// partition for `base`. Returns how many faces newly loaded; remote
+    /// sources are left for [`load_remote_web_fonts`](Self::load_remote_web_fonts).
+    fn load_local_web_fonts_from(
+        &self,
+        base: Option<&Url>,
+        rules: &[rustkit_css::FontFaceRule],
+    ) -> usize {
+        let partition = Self::font_partition(base);
+        let mut loaded = 0;
+        for rule in rules {
+            let face = Self::layout_font_face(rule);
+            let key = rustkit_layout::FontCacheKey::new(partition.clone(), &face);
+            if self.font_loader.is_loaded_key(&key) || self.font_loader.is_failed(&key) {
+                continue;
+            }
+            match resolve_font_source(base, &rule.src) {
+                FontSource::Data(bytes) => {
+                    self.font_loader.insert_loaded(key, bytes);
+                    loaded += 1;
+                }
+                FontSource::File(path) => match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        debug!(family = %rule.family, ?path, len = bytes.len(), "@font-face: loaded local font");
+                        self.font_loader.insert_loaded(key, bytes);
+                        loaded += 1;
+                    }
+                    Err(e) => {
+                        warn!(family = %rule.family, ?path, ?e, "@font-face: could not read local font file");
+                        self.font_loader.mark_failed(key);
+                    }
+                },
+                FontSource::Remote(_) => {}
+                FontSource::Blocked(reason) => {
+                    warn!(family = %rule.family, src = %rule.src, reason, "@font-face: source not loadable");
+                    self.font_loader.mark_failed(key);
+                }
+            }
+        }
+        loaded
+    }
+
+    /// [`load_local_web_fonts_from`](Self::load_local_web_fonts_from) for a view's own document.
+    fn load_local_web_fonts(&self, id: EngineViewId) -> usize {
+        let base = self.views.get(&id).and_then(|v| v.url.clone());
+        let rules = self.view_font_face_rules(id);
+        let n = self.load_local_web_fonts_from(base.as_ref(), &rules);
+        if n > 0 {
+            info!(?id, count = n, "Loaded local web fonts");
+        }
+        n
+    }
+
+    /// Fetch the view's http(s)-sourced faces. Returns how many newly loaded.
+    async fn load_remote_web_fonts(&mut self, id: EngineViewId) -> usize {
+        let base = self.views.get(&id).and_then(|v| v.url.clone());
+        let partition = Self::font_partition(base.as_ref());
+        let mut targets = Vec::new();
+        for rule in self.view_font_face_rules(id) {
+            let face = Self::layout_font_face(&rule);
+            let key = rustkit_layout::FontCacheKey::new(partition.clone(), &face);
+            if self.font_loader.is_loaded_key(&key) || self.font_loader.is_failed(&key) {
+                continue;
+            }
+            if let FontSource::Remote(url) = resolve_font_source(base.as_ref(), &rule.src) {
+                targets.push((key, rule.family.clone(), url));
+            }
+        }
+
+        let mut loaded = 0;
+        for (key, family, url) in targets {
+            info!(%family, %url, "Loading web font");
+            match self.loader.fetch(Request::get(url.clone())).await {
+                Ok(response) if response.ok() => match response.bytes().await {
+                    Ok(bytes) => {
+                        self.font_loader.insert_loaded(key, bytes.to_vec());
+                        loaded += 1;
+                    }
+                    Err(e) => {
+                        warn!(%family, %url, ?e, "Failed to read web font body");
+                        self.font_loader.mark_failed(key);
+                    }
+                },
+                Ok(response) => {
+                    warn!(%family, %url, status = %response.status, "Failed to fetch web font");
+                    self.font_loader.mark_failed(key);
+                }
+                Err(e) => {
+                    warn!(%family, %url, ?e, "Failed to fetch web font");
+                    self.font_loader.mark_failed(key);
+                }
+            }
+        }
+        loaded
+    }
+
+    /// Point the text stack at ONE partition's faces. Called before every
+    /// layout and paint of a view, so a view only ever sees its own site's
+    /// fonts — the registry is a slot the engine swaps, not a shared cache.
+    fn install_web_fonts_for(&self, partition: &rustkit_layout::TopLevelSite) {
+        let faces = self.font_loader.faces_for(partition);
+        // The tag names the installed set; the loader only ever grows a
+        // partition, so partition + count identifies it exactly.
+        let tag = format!("{}#{}", partition.as_str(), faces.len());
+        let accepted = rustkit_layout::webfonts::install(&tag, &faces);
+        if accepted < faces.len() {
+            debug!(
+                partition = partition.as_str(),
+                rejected = faces.len() - accepted,
+                "web font face(s) rejected by the platform (unsupported container or bad data)"
+            );
+        }
+    }
+
+    fn install_web_fonts(&self, id: EngineViewId) {
+        let base = self.views.get(&id).and_then(|v| v.url.as_ref());
+        self.install_web_fonts_for(&Self::font_partition(base));
     }
 
     /// Extract CSS variables from :root rules.
@@ -6190,6 +7085,11 @@ impl Engine {
                 Cmd::PushClip(r) => serde_json::json!({
                     "op": "push_clip", "rect": rect(r)
                 }),
+                Cmd::PushClipRounded { rect: r, radius: rad } => serde_json::json!({
+                    "op": "push_clip_rounded",
+                    "rect": rect(r),
+                    "border_radius": radius(rad)
+                }),
                 Cmd::PopClip => serde_json::json!({ "op": "pop_clip" }),
                 Cmd::PushStackingContext { z_index, rect: r } => serde_json::json!({
                     "op": "push_stacking_context", "z_index": z_index, "rect": rect(r)
@@ -6458,6 +7358,10 @@ impl Engine {
     #[tracing::instrument(skip(self), fields(view_id = ?id))]
     fn render(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         let _span = tracing::info_span!("render", ?id).entered();
+
+        // Glyph rasterization resolves family names too; another view may
+        // have laid out since this one did.
+        self.install_web_fonts(id);
 
         // Extract needed values from view, avoiding long-lived borrows
         let (viewhost_id, has_display_list, cmd_count, is_headless) = {
@@ -7860,6 +8764,135 @@ fn parse_length(value: &str) -> Option<rustkit_css::Length> {
     rustkit_css::parse_length(value)
 }
 
+/// The `ch`-bearing declarations that won their property in the cascade.
+///
+/// Recorded during style application and replayed by `resolve_ch_lengths`
+/// once the element's font is final. A later non-`ch` declaration for the
+/// same property REMOVES the entry — otherwise `width: 5ch; width: 100px`
+/// would replay the loser and undo the winner.
+#[derive(Default)]
+pub(crate) struct ChPending {
+    /// (property, value) in application order; at most one entry per property.
+    entries: Vec<(String, String)>,
+}
+
+impl ChPending {
+    fn note(&mut self, property: &str, value: &str) {
+        self.entries.retain(|(p, _)| p != property);
+        if has_ch_unit(value) {
+            self.entries.push((property.to_string(), value.to_string()));
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn winners(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.entries.iter().map(|(p, v)| (p.as_str(), v.as_str()))
+    }
+}
+
+/// Does this value contain a `<number>ch` token?
+///
+/// Deliberately narrow: only a `ch` immediately after a digit-ish run and not
+/// glued to more letters, so identifiers and functions that merely contain the
+/// letters (`inch`, `search`, a font named "Chalkboard") never trip it.
+fn has_ch_unit(value: &str) -> bool {
+    ch_unit_spans(value).next().is_some()
+}
+
+/// Byte spans of `<number>ch` tokens, as (start, end, numeric value).
+fn ch_unit_spans(value: &str) -> impl Iterator<Item = (usize, usize, f32)> + '_ {
+    let bytes = value.as_bytes();
+    let mut i = 0usize;
+    std::iter::from_fn(move || {
+        while i < bytes.len() {
+            let start = i;
+            // A number: optional sign, digits with at most one dot.
+            let mut j = i;
+            if bytes[j] == b'-' || bytes[j] == b'+' {
+                j += 1;
+            }
+            let digits_start = j;
+            let mut saw_dot = false;
+            while j < bytes.len()
+                && (bytes[j].is_ascii_digit() || (bytes[j] == b'.' && !saw_dot))
+            {
+                saw_dot |= bytes[j] == b'.';
+                j += 1;
+            }
+            if j == digits_start {
+                i += 1;
+                continue;
+            }
+            // Preceded by an identifier character? Then this is not a length.
+            if start > 0 {
+                let prev = bytes[start - 1];
+                if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'-' {
+                    i = j.max(start + 1);
+                    continue;
+                }
+            }
+            let unit_start = j;
+            if bytes[j..].starts_with(b"ch") || bytes[j..].starts_with(b"CH") {
+                let after = unit_start + 2;
+                let glued = after < bytes.len()
+                    && (bytes[after].is_ascii_alphanumeric()
+                        || bytes[after] == b'_'
+                        || bytes[after] == b'-'
+                        || bytes[after] == b'%');
+                if !glued {
+                    if let Ok(num) = value[start..unit_start].parse::<f32>() {
+                        i = after;
+                        return Some((start, after, num));
+                    }
+                }
+            }
+            i = j.max(start + 1);
+        }
+        None
+    })
+}
+
+/// Rewrite every `<n>ch` token in `value` as the equivalent px length.
+fn substitute_ch_units(value: &str, advance: f32) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut last = 0usize;
+    for (start, end, num) in ch_unit_spans(value) {
+        out.push_str(&value[last..start]);
+        out.push_str(&format!("{}px", num * advance));
+        last = end;
+    }
+    out.push_str(&value[last..]);
+    out
+}
+
+/// The advance width of "0" in this style's font (CSS Values 3 §5.1.1).
+///
+/// The spec's fallback when the font has no "0" glyph is 0.5em; we use the
+/// same fallback if measurement returns nothing, so a missing font degrades
+/// to a defined value instead of collapsing the length to zero.
+fn ch_advance_px(style: &ComputedStyle) -> f32 {
+    let font_size = match style.font_size {
+        rustkit_css::Length::Px(px) => px,
+        _ => 16.0,
+    };
+    let measured = rustkit_layout::measure_text_advanced(
+        "0",
+        &style.font_family,
+        font_size,
+        style.font_weight,
+        style.font_style,
+    )
+    .width;
+    if measured > 0.0 {
+        measured
+    } else {
+        font_size * 0.5
+    }
+}
+
 
 /// Parse a shorthand value with 1-4 parts (like margin, padding).
 /// Returns (top, right, bottom, left).
@@ -8314,8 +9347,72 @@ fn parse_transform_origin(value: &str) -> Option<rustkit_css::TransformOrigin> {
     }
 }
 
+/// Split a track-list value at top-level whitespace, keeping function
+/// arguments (`minmax(150px, 1fr)`, `repeat(auto-fit, ...)`) and bracketed
+/// line names (`[full-start]`) together as single tokens.
+fn split_track_list(value: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut depth = 0i32;
+    let mut start: Option<usize> = None;
+    for (i, ch) in value.char_indices() {
+        match ch {
+            '(' | '[' => {
+                depth += 1;
+                if start.is_none() {
+                    start = Some(i);
+                }
+            }
+            ')' | ']' => {
+                depth -= 1;
+            }
+            c if c.is_whitespace() && depth <= 0 => {
+                if let Some(s) = start.take() {
+                    tokens.push(&value[s..i]);
+                }
+            }
+            _ => {
+                if start.is_none() {
+                    start = Some(i);
+                }
+            }
+        }
+    }
+    if let Some(s) = start {
+        tokens.push(&value[s..]);
+    }
+    tokens
+}
+
+/// Parse a space-separated list of track sizes with optional `[line names]`
+/// before each track (css-grid-1 §7.2.1). Line names attach to the next
+/// track; a trailing group is returned separately.
+fn parse_track_list(value: &str) -> (Vec<rustkit_css::TrackDefinition>, Vec<String>) {
+    let mut tracks = Vec::new();
+    let mut pending_names: Vec<String> = Vec::new();
+    for token in split_track_list(value) {
+        if let Some(names) = token.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
+            pending_names.extend(names.split_whitespace().map(|n| n.to_string()));
+            continue;
+        }
+        if let Some(size) = parse_track_size(token) {
+            tracks.push(rustkit_css::TrackDefinition {
+                size,
+                line_names: std::mem::take(&mut pending_names),
+            });
+        }
+    }
+    (tracks, pending_names)
+}
+
 /// Parse a grid-template-columns or grid-template-rows value.
-/// Supports: repeat(N, 1fr), explicit track sizes, and combinations.
+///
+/// Supports explicit track sizes, `[line names]`, `repeat(N, <tracks>)`
+/// (expanded inline) and `repeat(auto-fill | auto-fit, <tracks>)`, which is
+/// handed to layout as a `TrackRepeat` so the repetition count is computed
+/// against the container's actual size (css-grid-1 §7.2.3.2). It used to be
+/// hardcoded to 4 repetitions regardless of width, which is why
+/// `repeat(auto-fit, minmax(150px, 1fr))` in a 622px container produced four
+/// 150px columns (Chrome: three of 199.3px).
 fn parse_grid_template(value: &str) -> Option<rustkit_css::GridTemplate> {
     let value = value.trim();
 
@@ -8323,51 +9420,80 @@ fn parse_grid_template(value: &str) -> Option<rustkit_css::GridTemplate> {
         return Some(rustkit_css::GridTemplate::none());
     }
 
-    let mut tracks = Vec::new();
+    let mut tracks: Vec<rustkit_css::TrackDefinition> = Vec::new();
+    let mut repeats: Vec<(usize, rustkit_css::TrackRepeat)> = Vec::new();
+    let mut pending_names: Vec<String> = Vec::new();
 
-    // Check for repeat() function
-    if let Some(repeat_start) = value.find("repeat(") {
-        let after_repeat = &value[repeat_start + 7..];
-        if let Some(close_paren) = find_matching_paren(after_repeat) {
+    for token in split_track_list(value) {
+        if let Some(names) = token.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
+            pending_names.extend(names.split_whitespace().map(|n| n.to_string()));
+            continue;
+        }
+
+        if let Some(after_repeat) = token.strip_prefix("repeat(") {
+            let Some(close_paren) = find_matching_paren(after_repeat) else {
+                continue;
+            };
             let repeat_content = &after_repeat[..close_paren];
+            let Some(comma_pos) = repeat_content.find(',') else {
+                continue;
+            };
+            let count_str = repeat_content[..comma_pos].trim();
+            let track_str = repeat_content[comma_pos + 1..].trim();
 
-            // Parse repeat(count, track-size)
-            if let Some(comma_pos) = repeat_content.find(',') {
-                let count_str = repeat_content[..comma_pos].trim();
-                let track_str = repeat_content[comma_pos + 1..].trim();
+            let (mut repeat_tracks, trailing) = parse_track_list(track_str);
+            if repeat_tracks.is_empty() {
+                continue;
+            }
+            // Names pending before the repeat() lead its first track.
+            if !pending_names.is_empty() {
+                let mut names = std::mem::take(&mut pending_names);
+                names.append(&mut repeat_tracks[0].line_names);
+                repeat_tracks[0].line_names = names;
+            }
+            // A trailing name group inside the repeat leads whatever follows.
+            pending_names = trailing;
 
-                // Parse count (could be number, auto-fill, auto-fit)
-                let count: Option<u32> = if count_str == "auto-fill" || count_str == "auto-fit" {
-                    // For now, default to a reasonable number
-                    Some(4)
-                } else {
-                    count_str.parse().ok()
-                };
-
-                if let (Some(count), Some(track_size)) = (count, parse_track_size(track_str)) {
-                    for _ in 0..count {
-                        tracks.push(rustkit_css::TrackDefinition::simple(track_size.clone()));
+            match count_str {
+                "auto-fill" => {
+                    repeats.push((
+                        tracks.len(),
+                        rustkit_css::TrackRepeat::AutoFill(repeat_tracks),
+                    ));
+                }
+                "auto-fit" => {
+                    repeats.push((
+                        tracks.len(),
+                        rustkit_css::TrackRepeat::AutoFit(repeat_tracks),
+                    ));
+                }
+                _ => {
+                    if let Ok(count) = count_str.parse::<u32>() {
+                        for _ in 0..count {
+                            tracks.extend(repeat_tracks.iter().cloned());
+                        }
                     }
                 }
             }
+            continue;
         }
-    } else {
-        // Parse space-separated track sizes
-        for part in value.split_whitespace() {
-            if let Some(track_size) = parse_track_size(part) {
-                tracks.push(rustkit_css::TrackDefinition::simple(track_size));
-            }
+
+        if let Some(track_size) = parse_track_size(token) {
+            tracks.push(rustkit_css::TrackDefinition {
+                size: track_size,
+                line_names: std::mem::take(&mut pending_names),
+            });
         }
     }
 
-    if tracks.is_empty() {
+    if tracks.is_empty() && repeats.is_empty() {
         return None;
     }
 
     Some(rustkit_css::GridTemplate {
         tracks,
-        repeats: Vec::new(),
-        final_line_names: Vec::new(),
+        repeats,
+        final_line_names: pending_names,
     })
 }
 
@@ -8504,6 +9630,70 @@ fn parse_grid_line_shorthand(
     Some((start, rustkit_css::GridLine::Auto))
 }
 
+/// Compose two page-space affines: `outer ∘ inner`.
+///
+/// Same [a, b, c, d, e, f] convention as `TransformList::to_matrix` — a point
+/// maps to `(a·x + c·y + e, b·x + d·y + f)`.
+fn compose_affine(outer: [f32; 6], inner: [f32; 6]) -> [f32; 6] {
+    [
+        outer[0] * inner[0] + outer[2] * inner[1],
+        outer[1] * inner[0] + outer[3] * inner[1],
+        outer[0] * inner[2] + outer[2] * inner[3],
+        outer[1] * inner[2] + outer[3] * inner[3],
+        outer[0] * inner[4] + outer[2] * inner[5] + outer[4],
+        outer[1] * inner[4] + outer[3] * inner[5] + outer[5],
+    ]
+}
+
+/// The page-space affine this box's own `transform` contributes, or `None`
+/// when it has none.
+///
+/// This MIRRORS the painter (`DisplayCommand::PushTransform` in
+/// rustkit-layout): the same `to_matrix(border_box.width, border_box.height)`
+/// and the same origin resolution. The exported visual rect and the painted
+/// pixels must not be able to disagree — if this drifts from the painter, the
+/// oracle starts scoring a box the renderer never drew.
+///
+/// A transform applies about its origin, so the page-space affine is
+/// `T(origin) · M · T(-origin)`.
+fn own_transform_affine(layout_box: &LayoutBox) -> Option<[f32; 6]> {
+    if layout_box.style.transform.is_identity() {
+        return None;
+    }
+    let border_box = layout_box.dimensions.border_box();
+    let m = layout_box
+        .style
+        .transform
+        .to_matrix(border_box.width, border_box.height);
+    let ox = border_box.x
+        + layout_box
+            .style
+            .transform_origin
+            .x
+            .to_px(16.0, 16.0, border_box.width);
+    let oy = border_box.y
+        + layout_box
+            .style
+            .transform_origin
+            .y
+            .to_px(16.0, 16.0, border_box.height);
+    let to_origin = [1.0, 0.0, 0.0, 1.0, -ox, -oy];
+    let from_origin = [1.0, 0.0, 0.0, 1.0, ox, oy];
+    Some(compose_affine(from_origin, compose_affine(m, to_origin)))
+}
+
+/// Axis-aligned bounding box of a rect under an affine — what
+/// `getBoundingClientRect()` returns, which is the geometry oracle's baseline.
+fn transformed_bounds(m: [f32; 6], x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
+    let map = |px: f32, py: f32| (m[0] * px + m[2] * py + m[4], m[1] * px + m[3] * py + m[5]);
+    let corners = [map(x, y), map(x + w, y), map(x, y + h), map(x + w, y + h)];
+    let min_x = corners.iter().map(|c| c.0).fold(f32::INFINITY, f32::min);
+    let max_x = corners.iter().map(|c| c.0).fold(f32::NEG_INFINITY, f32::max);
+    let min_y = corners.iter().map(|c| c.1).fold(f32::INFINITY, f32::min);
+    let max_y = corners.iter().map(|c| c.1).fold(f32::NEG_INFINITY, f32::max);
+    (min_x, min_y, max_x - min_x, max_y - min_y)
+}
+
 /// Convert one layout box to its JSON form for `export_layout_json`.
 ///
 /// Module-level rather than nested so it can be tested directly: the engine
@@ -8511,11 +9701,28 @@ fn parse_grid_line_shorthand(
 /// SKIP when none is present, which would make an identity test vacuous on any
 /// machine without a GPU adapter.
 fn layout_box_to_json(layout_box: &LayoutBox) -> serde_json::Value {
+    layout_box_to_json_under(layout_box, None)
+}
+
+/// `ancestor` is the composed transform of everything above this box, in page
+/// space. `None` means no transform is in effect and the layout rect IS the
+/// visual rect, so nothing extra is emitted.
+fn layout_box_to_json_under(
+    layout_box: &LayoutBox,
+    ancestor: Option<[f32; 6]>,
+) -> serde_json::Value {
+    let effective = match (ancestor, own_transform_affine(layout_box)) {
+        (None, None) => None,
+        (Some(a), None) => Some(a),
+        (None, Some(o)) => Some(o),
+        (Some(a), Some(o)) => Some(compose_affine(a, o)),
+    };
+
     // Element identity, when this box came from a DOM element. Absent
     // on anonymous and text boxes — the geometry oracle must SKIP
     // those rather than pair them positionally with Chrome elements.
     // Emitting a placeholder here would manufacture geometry failures.
-    let mut value = layout_box_body_to_json(layout_box);
+    let mut value = layout_box_body_to_json(layout_box, effective);
     if let (Some(identity), Some(object)) = (layout_box.identity(), value.as_object_mut()) {
         object.insert("element_id".into(), identity.element_id.into());
         object.insert("tag".into(), identity.tag.clone().into());
@@ -8524,7 +9731,19 @@ fn layout_box_to_json(layout_box: &LayoutBox) -> serde_json::Value {
     value
 }
 
-fn layout_box_body_to_json(layout_box: &LayoutBox) -> serde_json::Value {
+fn rect_to_json(rect: &rustkit_layout::Rect) -> serde_json::Value {
+    serde_json::json!({
+        "x": rect.x,
+        "y": rect.y,
+        "width": rect.width,
+        "height": rect.height,
+    })
+}
+
+fn layout_box_body_to_json(
+    layout_box: &LayoutBox,
+    effective_transform: Option<[f32; 6]>,
+) -> serde_json::Value {
     let dims = &layout_box.dimensions;
     let content = &dims.content;
     let margin_box = dims.margin_box();
@@ -8535,6 +9754,7 @@ fn layout_box_body_to_json(layout_box: &LayoutBox) -> serde_json::Value {
         BoxType::Block => "block",
         BoxType::Inline => "inline",
         BoxType::AnonymousBlock => "anonymous_block",
+        BoxType::LineBreak => "line_break",
         BoxType::Text(t) => {
             return serde_json::json!({
                 "type": "text",
@@ -8547,6 +9767,13 @@ fn layout_box_body_to_json(layout_box: &LayoutBox) -> serde_json::Value {
                 }
             })
         }
+        // Replaced elements and form controls carry the four box-model rects
+        // like any other element box. `rect` (the CONTENT rect) stays for
+        // existing consumers, but it must not be the only rect: Chrome's
+        // baseline is `getBoundingClientRect`, i.e. the BORDER box, and the
+        // geometry oracle falls back to `rect` when `border_box` is absent —
+        // so a bordered image was set up to be compared content-box against
+        // border-box and to read a constant deficit as a layout defect.
         BoxType::Image {
             natural_width,
             natural_height,
@@ -8556,32 +9783,33 @@ fn layout_box_body_to_json(layout_box: &LayoutBox) -> serde_json::Value {
                 "type": "image",
                 "natural_width": natural_width,
                 "natural_height": natural_height,
-                "rect": {
-                    "x": content.x,
-                    "y": content.y,
-                    "width": content.width,
-                    "height": content.height
-                }
+                "rect": rect_to_json(content),
+                "content_rect": rect_to_json(content),
+                "padding_box": rect_to_json(&padding_box),
+                "border_box": rect_to_json(&border_box),
+                "margin_box": rect_to_json(&margin_box),
             })
         }
         BoxType::FormControl(ctrl) => {
             return serde_json::json!({
                 "type": "form_control",
                 "control_type": format!("{:?}", ctrl),
-                "rect": {
-                    "x": content.x,
-                    "y": content.y,
-                    "width": content.width,
-                    "height": content.height
-                }
+                "rect": rect_to_json(content),
+                "content_rect": rect_to_json(content),
+                "padding_box": rect_to_json(&padding_box),
+                "border_box": rect_to_json(&border_box),
+                "margin_box": rect_to_json(&margin_box),
             })
         }
     };
 
-    let children: Vec<serde_json::Value> =
-        layout_box.children.iter().map(layout_box_to_json).collect();
+    let children: Vec<serde_json::Value> = layout_box
+        .children
+        .iter()
+        .map(|child| layout_box_to_json_under(child, effective_transform))
+        .collect();
 
-    serde_json::json!({
+    let mut json = serde_json::json!({
         "type": box_type,
         "content_rect": {
             "x": content.x,
@@ -8626,7 +9854,34 @@ fn layout_box_body_to_json(layout_box: &LayoutBox) -> serde_json::Value {
             "left": dims.border.left
         },
         "children": children
-    })
+    });
+
+    // CSS transforms do not change layout, so `border_box` above stays the
+    // LAYOUT rect — Gate B's attributable join and the scroll-extent readers
+    // want that box, and quietly redefining it would move them all.
+    //
+    // Chrome's committed baselines are `getBoundingClientRect()`, which is
+    // post-transform. Comparing a layout rect against it reports the
+    // renderer's own translate as a layout defect: sticky-scroll's
+    // `.overflow-content` (`translate(-50%, -50%)`) read 139.53px out of
+    // place while its layout position was correct. So the visual rect is
+    // emitted ALONGSIDE, and only where a transform is actually in effect —
+    // an untransformed box has no second rect to disagree about.
+    if let (Some(m), Some(object)) = (effective_transform, json.as_object_mut()) {
+        let (vx, vy, vw, vh) = transformed_bounds(
+            m,
+            border_box.x,
+            border_box.y,
+            border_box.width,
+            border_box.height,
+        );
+        object.insert(
+            "visual_border_box".into(),
+            serde_json::json!({ "x": vx, "y": vy, "width": vw, "height": vh }),
+        );
+    }
+
+    json
 }
 
 #[cfg(test)]
@@ -8767,6 +10022,148 @@ mod tests {
         );
     }
 
+    /// An engine with nothing but what layout needs.
+    ///
+    /// `None` means this machine has no GPU adapter. Callers must NOT treat
+    /// that as a pass on a platform where an adapter is guaranteed — see
+    /// `a_replaced_element_is_built_with_its_element_identity`.
+    fn layout_only_engine() -> Option<Engine> {
+        let compositor = Compositor::new().ok()?;
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        Some(Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(
+                ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
+            ),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        })
+    }
+
+    /// Replaced elements and form controls are built by branches that return
+    /// BEFORE the general element path, so they carried no identity: every
+    /// `<img>` and `<input>` in the corpus reached the geometry oracle as a
+    /// `missing_box` join failure and was never compared at all.
+    ///
+    /// The export-side tests above did not catch it — they hand-set an
+    /// identity and asserted the JSON carries it, which it always did. Only
+    /// the production build path can say whether one is ever set.
+    ///
+    /// A GPU-less machine cannot build a layout tree, so this returns early
+    /// there rather than pretending. On macOS — the platform this campaign
+    /// measures, and the one the parity swarm runs on in CI — a missing
+    /// adapter FAILS: a guard that skips itself is not a pass.
+    ///
+    /// The skip is LOUD, and that is the point rather than politeness. A
+    /// mutation sweep on 2026-09-01 recorded this guard as a SURVIVOR —
+    /// deleting the `attach_identity` call on the `<img>` build path left the
+    /// whole suite green — and the survival was an artefact of the runner:
+    /// the trench seat has a software Vulkan adapter (SwiftShader, shipped
+    /// with the bundled Playwright Chromium) that `cargo test` does not see
+    /// unless `VK_ICD_FILENAMES` points at it. With
+    ///
+    /// ```sh
+    /// VK_ICD_FILENAMES=/opt/pw-browsers/chromium-1194/chrome-linux/vk_swiftshader_icd.json \
+    ///     cargo test -p rustkit-engine --lib
+    /// ```
+    ///
+    /// the same probe is RED. A silently-skipped guard and a passing guard
+    /// print the same word, so the run says which one it was.
+    #[test]
+    fn a_replaced_element_is_built_with_its_element_identity() {
+        let engine = match layout_only_engine() {
+            Some(engine) => engine,
+            None => {
+                if cfg!(target_os = "macos") {
+                    panic!(
+                        "no GPU adapter on a macOS runner — this guard cannot \
+                         report a pass without building a layout tree"
+                    );
+                }
+                eprintln!(
+                    "SKIPPED a_replaced_element_is_built_with_its_element_identity: \
+                     no GPU adapter, so no layout tree was built and NOTHING was \
+                     asserted. Re-run with VK_ICD_FILENAMES set to a software \
+                     Vulkan ICD to make this guard actually execute."
+                );
+                return;
+            }
+        };
+
+        let html = r#"<!DOCTYPE html><html><body>
+            <div class="container">
+              <img class="test-img" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">
+            </div>
+            <input type="text" name="q">
+            <button>Go</button>
+            <select><option>a</option></select>
+            <textarea>t</textarea>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        let mut found: Vec<(String, String)> = Vec::new();
+        fn collect(b: &LayoutBox, out: &mut Vec<(String, String)>) {
+            if matches!(
+                b.box_type,
+                BoxType::Image { .. } | BoxType::FormControl(_)
+            ) {
+                let identity = b
+                    .identity()
+                    .unwrap_or_else(|| panic!("replaced/form-control box built with no identity — the geometry oracle cannot join it"));
+                out.push((identity.tag.clone(), identity.selector.clone()));
+            }
+            for c in &b.children {
+                collect(c, out);
+            }
+        }
+        collect(&layout, &mut found);
+
+        // An identity with an EMPTY selector is worse than none: it joins
+        // nothing, and the box is then reported as a phantom Chrome collapsed
+        // rather than excluded. Boxes above `body` have no Chrome-side path.
+        fn assert_no_empty_key(b: &LayoutBox) {
+            if let Some(identity) = b.identity() {
+                assert!(
+                    !identity.selector.is_empty(),
+                    "a box was stamped with an empty join key (tag {:?})",
+                    identity.tag
+                );
+            }
+            for c in &b.children {
+                assert_no_empty_key(c);
+            }
+        }
+        assert_no_empty_key(&layout);
+
+        let tags: Vec<&str> = found.iter().map(|(t, _)| t.as_str()).collect();
+        for expected in ["img", "input", "button", "select", "textarea"] {
+            assert!(
+                tags.contains(&expected),
+                "<{expected}> produced no identified box; found {found:?}"
+            );
+        }
+        let img = found
+            .iter()
+            .find(|(t, _)| t == "img")
+            .expect("img identity");
+        assert_eq!(
+            img.1, "body > div.container > img.test-img",
+            "the image's join key must be the selector Chrome's capture reports"
+        );
+    }
+
     #[test]
     fn test_layout_tree_from_document() {
         // Parse a simple HTML document
@@ -8846,6 +10243,87 @@ mod tests {
             "Should have at least 2 text boxes (h1 and p content), got {}",
             text_count
         );
+    }
+
+    /// WPT overflow-wrap-anywhere-005: `<span>XX<br></span>` — the break
+    /// sat INSIDE the span, where no inline flow closes a line, so the text
+    /// after it stayed on the same line. The builder now splits the inline
+    /// around the break (`[span(a)] [br] [span(b)]`), keeping the element
+    /// identity on the first piece only. T-RED before the split: the div
+    /// had one inline child holding a LineBreak.
+    #[test]
+    fn br_inside_an_inline_is_hoisted_to_the_block_flow() {
+        let html = r#"<!DOCTYPE html>
+            <html><body><div><span>a<br>b</span>c</div></body></html>"#;
+        let document = Document::parse_html(html).expect("Failed to parse HTML");
+        let document = Rc::new(document);
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(
+                ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
+            ),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        };
+
+        let layout = engine.build_layout_from_document(&document, &[]);
+        let div = &layout.children[0].children[0];
+
+        fn text_of(b: &LayoutBox) -> String {
+            match &b.box_type {
+                BoxType::Text(t) => t.clone(),
+                _ => b.children.iter().map(text_of).collect(),
+            }
+        }
+        let shape: Vec<(&str, String)> = div
+            .children
+            .iter()
+            .map(|c| {
+                let kind = match c.box_type {
+                    BoxType::Inline => "inline",
+                    BoxType::LineBreak => "br",
+                    BoxType::Text(_) => "text",
+                    _ => "other",
+                };
+                (kind, text_of(c))
+            })
+            .collect();
+        let expected: Vec<(&str, String)> = vec![
+            ("inline", "a".into()),
+            ("br", String::new()),
+            ("inline", "b".into()),
+            ("text", "c".into()),
+        ];
+        assert_eq!(shape, expected, "the <br> must become a sibling of the split span");
+        assert!(
+            div.children[0].identity.is_some(),
+            "first piece keeps the element identity"
+        );
+        assert!(
+            div.children[2].identity.is_none(),
+            "continuation pieces must not duplicate the element identity"
+        );
+        assert_eq!(div.children[0].node_id, div.children[2].node_id);
     }
 
     #[test]
@@ -9406,6 +10884,215 @@ mod tests {
     }
 
     #[test]
+    fn test_ch_unit_tokenizer_is_narrow() {
+        // The substitution must fire on lengths and nothing else — a font
+        // name or an identifier that merely contains "ch" is not a length.
+        assert!(has_ch_unit("1ch"));
+        assert!(has_ch_unit("margin-right: 5ch"));
+        assert!(has_ch_unit("calc(2.5ch + 1px)"));
+        assert!(!has_ch_unit("1em"));
+        assert!(!has_ch_unit("Chalkboard"));
+        assert!(!has_ch_unit("2chx"));
+        assert!(!has_ch_unit("var(--x1ch)"));
+
+        // 1ch at an 8px advance.
+        assert_eq!(substitute_ch_units("1ch", 8.0), "8px");
+        assert_eq!(substitute_ch_units("0 5ch", 9.6), "0 48px");
+        assert_eq!(substitute_ch_units("10px", 8.0), "10px");
+    }
+
+    #[test]
+    fn test_word_break_and_line_break_reach_the_line_breaker() {
+        // `word-break` was a consumer with no producer: the enum, the
+        // ComputedStyle field, the CSS->LineBreaker conversion in
+        // rustkit-layout and the break-all algorithm in rustkit-text all
+        // existed and were unit-tested, but no declaration ever assigned the
+        // field — so it was permanently Normal. `overflow-wrap` / `line-break`
+        // had no computed representation at all and LineBreaker's
+        // OverflowWrap was hardcoded Normal.
+        //
+        // Drive the real engine: one long unbreakable word in a narrow block.
+        // Under `normal` there is no soft wrap opportunity, so it stays on one
+        // line; under break-all / anywhere / break-word it must wrap. Chrome
+        // FILLS each line before breaking, so the 34-char word in a 40px box
+        // at a ~8-10px monospace advance yields roughly 7-9 lines. Asserting
+        // only "taller" cannot fail for the right reason — one-char-per-line
+        // (34 lines) is maximally taller — so the test also asserts a line-
+        // count ceiling via the height ratio (normal == exactly one line).
+        let case = |decl: &str| -> f32 {
+            let html = format!(
+                r#"<!DOCTYPE html>
+                <html><body>
+                  <div id="probe" style="width: 40px; font-family: monospace; font-size: 16px; {decl}">Supercalifragilisticexpialidocious</div>
+                </body></html>"#
+            );
+            let document = Rc::new(Document::parse_html(&html).expect("Failed to parse HTML"));
+            let compositor = Compositor::new().expect("compositor");
+            let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let engine = Engine {
+                config: EngineConfig::default(),
+                views: HashMap::new(),
+                font_loader: Arc::new(FontLoader::new()),
+                viewhost: ViewHost::new(),
+                compositor,
+                renderer: None,
+                loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+                image_manager: Arc::new(ImageManager::new()),
+                event_tx,
+                event_rx: Some(event_rx),
+                style_trace: std::cell::RefCell::new(None),
+                render_failing: std::collections::HashSet::new(),
+                svg_cache: std::collections::HashMap::new(),
+                building_focus: std::cell::Cell::new(None),
+                building_view: std::cell::Cell::new(None),
+            };
+            let mut layout = engine.build_layout_from_document(&document, &[]);
+            let containing_block = Dimensions {
+                content: Rect::new(0.0, 0.0, 800.0, 600.0),
+                ..Default::default()
+            };
+            layout.layout(&containing_block);
+
+            fn tallest_40px_box(b: &LayoutBox, out: &mut f32) {
+                if (b.dimensions.content.width - 40.0).abs() < 0.5 {
+                    *out = out.max(b.dimensions.content.height);
+                }
+                for c in &b.children {
+                    tallest_40px_box(c, out);
+                }
+            }
+            let mut h = 0.0f32;
+            tallest_40px_box(&layout, &mut h);
+            h
+        };
+
+        if Compositor::new().is_err() {
+            eprintln!("Skipping test: GPU not available");
+            return;
+        }
+
+        let normal = case("");
+        assert!(
+            normal > 0.0,
+            "setup failed: no 40px-wide box was found, so this test cannot detect anything"
+        );
+        for decl in [
+            "word-break: break-all;",
+            "line-break: anywhere;",
+            "overflow-wrap: anywhere;",
+            "overflow-wrap: break-word;",
+            "word-wrap: break-word;",
+        ] {
+            let wrapped = case(decl);
+            assert!(
+                wrapped > normal,
+                "`{decl}` did not wrap the word: height {wrapped} vs normal {normal} — \
+                 the property never reached the line breaker"
+            );
+            // normal is exactly one line, so wrapped/normal is the line count.
+            // 34 chars / 40px: filling the line gives <= 12 lines even at a
+            // 12px advance; one-grapheme-per-line gives 34. The ceiling is
+            // what distinguishes "wraps like Chrome" from "wraps maximally".
+            let lines = wrapped / normal;
+            assert!(
+                (4.0..=12.0).contains(&lines),
+                "`{decl}` wrapped to {lines:.1} lines (height {wrapped} vs line \
+                 height {normal}) — expected ~7-9: >12 means the emergency arm \
+                 is breaking after one grapheme instead of filling the line, \
+                 <4 means the 40px width is not being respected"
+            );
+        }
+
+        // keep-all must NOT introduce opportunities in a word that has none.
+        assert_eq!(
+            case("word-break: keep-all;"),
+            normal,
+            "word-break: keep-all changed wrapping of an unbreakable word"
+        );
+    }
+
+    #[test]
+    fn test_ch_width_resolves_against_the_zero_glyph() {
+        // CSS Values 3 §5.1.1. parse_length has no font context and returns
+        // None for "1ch", so `if let Some(length)` dropped the declaration
+        // whole: `width: 1ch` computed to auto and the box filled its
+        // container. WPT css-text/line-break/line-break-anywhere-001 styles
+        // #test `width: 1ch` and hides it under a 1ch green box — with the
+        // width dropped, the text ran on one full-width line and the red
+        // showed. Drive the real engine: the box must be about one "0" wide,
+        // not the containing block.
+        let html = r#"<!DOCTYPE html>
+            <html><body>
+              <div id="probe" style="width: 1ch; font-family: monospace; font-size: 16px;">x</div>
+            </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        };
+
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        let containing_block = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        layout.layout(&containing_block);
+
+        // The expected width is whatever this platform's monospace "0"
+        // advances — assert against the same measurement the engine uses, so
+        // the test states the RULE and not a font-specific pixel count.
+        let expected = rustkit_layout::measure_text_advanced(
+            "0",
+            "monospace",
+            16.0,
+            rustkit_css::FontWeight::NORMAL,
+            rustkit_css::FontStyle::Normal,
+        )
+        .width;
+        assert!(
+            expected > 0.0,
+            "setup failed: monospace \"0\" measured 0px, so this test cannot detect anything"
+        );
+
+        fn widths(b: &LayoutBox, out: &mut Vec<f32>) {
+            if matches!(b.style.width, rustkit_css::Length::Px(_)) {
+                out.push(b.dimensions.content.width);
+            }
+            for c in &b.children {
+                widths(c, out);
+            }
+        }
+        let mut found = Vec::new();
+        widths(&layout, &mut found);
+        assert!(
+            found.iter().any(|w| (w - expected).abs() < 0.5),
+            "no box is one ch ({expected}px) wide — ch was dropped again; widths {found:?}"
+        );
+    }
+
+    #[test]
     fn test_bare_form_control_heights_match_chrome() {
         // form-controls t8 dig (2026-07-17): Chrome CfT-148 builds bare
         // single-line controls as a ~19px border-box (input/button/select at
@@ -9480,6 +11167,260 @@ mod tests {
                 (got - want).abs() <= *tol,
                 "{name}: height {got} not within {tol} of Chrome's {want} (all: {heights:?})"
             );
+        }
+    }
+
+    #[test]
+    fn test_collapsible_space_collapses_across_text_node_boundaries() {
+        // css-text §4.1.1: a collapsible space following another collapsible
+        // space collapses even across text-node boundaries. Comments (and
+        // display:none / hidden elements) split one whitespace run into
+        // several DOM text nodes; the boundary strip only looked at the
+        // immediate siblings, so `</h1> <!-- --> <!-- --> <h2>` kept its
+        // MIDDLE run as a whitespace-only text box between two blocks — a
+        // 24px line box that pushed every following block down
+        // (images-intrinsic). Between two inline siblings the same shape
+        // produced three spaces where Chrome renders one; inside a run,
+        // "a <!-- --> b" became "a " + " b".
+        let html = r#"<!DOCTYPE html>
+            <html><body>
+              <h1>Head</h1>
+
+              <!-- first comment -->
+              <!-- second comment -->
+
+              <h2>Sub</h2>
+              <p>alpha <!-- c --> beta</p>
+              <div><span>x</span> <!-- c --> <span>y</span></div>
+              <pre style="white-space: pre">one <!-- c --> two</pre>
+            </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        };
+
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        // Every text box with the box types of its immediate siblings.
+        fn collect(b: &LayoutBox, out: &mut Vec<(String, bool, bool)>) {
+            for (i, c) in b.children.iter().enumerate() {
+                if let BoxType::Text(t) = &c.box_type {
+                    let prev_block = i > 0
+                        && matches!(b.children[i - 1].box_type, BoxType::Block | BoxType::AnonymousBlock);
+                    let next_block = i + 1 < b.children.len()
+                        && matches!(b.children[i + 1].box_type, BoxType::Block | BoxType::AnonymousBlock);
+                    out.push((t.clone(), prev_block, next_block));
+                }
+                collect(c, out);
+            }
+        }
+        let mut texts = Vec::new();
+        collect(&layout, &mut texts);
+        let all: Vec<&str> = texts.iter().map(|(t, _, _)| t.as_str()).collect();
+
+        // No whitespace-only text box may sit next to a block sibling: that
+        // is the phantom line box. (The one between the two spans is real —
+        // css-text §4.1.3 keeps a single collapsed space between inlines.)
+        let phantom: Vec<&(String, bool, bool)> = texts
+            .iter()
+            .filter(|(t, p, n)| t.trim().is_empty() && (*p || *n))
+            .collect();
+        assert!(phantom.is_empty(), "whitespace-only text next to a block: {:?} (all: {:?})", phantom, all);
+        let ws_only = texts.iter().filter(|(t, _, _)| t.trim().is_empty()).count();
+        assert_eq!(ws_only, 1, "exactly one collapsed space (between the spans): {:?}", all);
+
+        // Inside a run the comment must not split (or double) the space.
+        assert!(all.contains(&"alpha beta"), "comment inside a run splits it: {:?}", all);
+        assert!(!all.iter().any(|t| *t == "alpha " || *t == " beta"), "{:?}", all);
+
+        // Pre-family runs join verbatim — both spaces around the comment stay.
+        assert!(all.contains(&"one  two"), "pre run must join verbatim: {:?}", all);
+    }
+
+    #[test]
+    fn test_inline_svg_is_a_sized_replaced_box_without_child_boxes() {
+        // An inline <svg> generated no box of its own: an empty block with
+        // no visible styling is dropped, and the shelf's 14×14 search icon
+        // existed only as the phantom whitespace line between its <circle>
+        // and <path>. A replaced element is sized by its own width=/height=
+        // (CSS fallback 300×150), author CSS wins, and its SVG children
+        // produce no CSS boxes.
+        let html = r#"<!DOCTYPE html>
+            <html><body>
+              <div style="display: flex">
+                <svg width="14" height="14" viewBox="0 0 24 24">
+                  <circle cx="11" cy="11" r="8"/>
+                  <path d="M21 21l-4.35-4.35"/>
+                </svg>
+                <input type="text">
+              </div>
+              <p><svg></svg></p>
+              <p><svg width="40" height="40" style="width: 20px"></svg></p>
+            </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        };
+
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        // Every childless, sized block box: (width, height, display).
+        fn collect(b: &LayoutBox, out: &mut Vec<(rustkit_css::Length, rustkit_css::Length, rustkit_css::Display)>) {
+            if matches!(b.box_type, BoxType::Block) && b.children.is_empty() {
+                out.push((b.style.width.clone(), b.style.height.clone(), b.style.display));
+            }
+            for c in &b.children {
+                collect(c, out);
+            }
+        }
+        let mut boxes = Vec::new();
+        collect(&layout, &mut boxes);
+        let px = |w: f32, h: f32| (rustkit_css::Length::Px(w), rustkit_css::Length::Px(h), rustkit_css::Display::InlineBlock);
+        assert!(boxes.contains(&px(14.0, 14.0)), "svg width=/height= box missing: {:?}", boxes);
+        assert!(boxes.contains(&px(300.0, 150.0)), "attribute-less svg must fall back to 300x150: {:?}", boxes);
+        assert!(boxes.contains(&px(20.0, 40.0)), "author CSS width must win over width=: {:?}", boxes);
+
+        // No <circle>/<path> box, and no whitespace text box, under the svg.
+        fn any_text(b: &LayoutBox) -> bool {
+            b.children.iter().any(|c| matches!(c.box_type, BoxType::Text(_)) || any_text(c))
+        }
+        fn svg_like(b: &LayoutBox) -> Option<&LayoutBox> {
+            if matches!(b.style.width, rustkit_css::Length::Px(w) if (w - 14.0).abs() < 0.01) {
+                return Some(b);
+            }
+            b.children.iter().find_map(svg_like)
+        }
+        let svg = svg_like(&layout).expect("svg box");
+        assert!(svg.children.is_empty() && !any_text(svg), "svg children must not generate boxes");
+    }
+
+    #[test]
+    fn test_inline_svg_paints_through_the_svg_cache() {
+        // n37 gave the inline <svg> a correctly sized box but nothing ever
+        // painted into it: only <img src=*.svg> went through svg_cache. The
+        // pre-pass serializes the subtree into the cache under a
+        // content-hash key and the box becomes an Image box under the same
+        // key, so the existing display-list splice paints the vector
+        // commands. Identical svgs must share one cache entry, and a
+        // cache miss must leave the n37 unpainted block behavior.
+        let html = r##"<!DOCTYPE html>
+            <html><body>
+              <svg class="a" width="200" height="150" viewBox="0 0 200 150">
+                <rect fill="#4a90d9" width="200" height="150"/>
+              </svg>
+              <svg class="a" width="200" height="150" viewBox="0 0 200 150">
+                <rect fill="#4a90d9" width="200" height="150"/>
+              </svg>
+            </body></html>"##;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        };
+
+        engine.cache_inline_svgs(&document);
+        // Two identical svgs, one content-addressed entry.
+        assert_eq!(engine.svg_cache.len(), 1, "identical svgs must share a cache entry");
+        let (key, doc) = engine.svg_cache.iter().next().unwrap();
+        assert!(key.starts_with("inline-svg:"), "cache key must carry the inline-svg scheme: {key}");
+        // The parsed document carries the svg's own sizing and its rect.
+        assert_eq!(doc.get_size(300.0, 150.0), (200.0, 150.0));
+        assert!(
+            !doc.render(0.0, 0.0, 200.0, 150.0).is_empty(),
+            "parsed inline svg must produce display commands"
+        );
+
+        let layout = engine.build_layout_from_document(&document, &[]);
+        fn image_boxes<'a>(b: &'a LayoutBox, out: &mut Vec<&'a LayoutBox>) {
+            if matches!(b.box_type, BoxType::Image { .. }) {
+                out.push(b);
+            }
+            for c in &b.children {
+                image_boxes(c, out);
+            }
+        }
+        let mut found = Vec::new();
+        image_boxes(&layout, &mut found);
+        assert_eq!(found.len(), 2, "both inline svgs must build Image boxes");
+        for b in &found {
+            if let BoxType::Image {
+                url,
+                natural_width,
+                natural_height,
+            } = &b.box_type
+            {
+                assert!(engine.svg_cache.contains_key(url), "Image box key must hit the cache: {url}");
+                assert_eq!((*natural_width, *natural_height), (200.0, 150.0));
+            }
+            assert!(b.children.is_empty(), "svg children must not generate boxes");
         }
     }
 
@@ -9568,6 +11509,60 @@ mod tests {
         assert_eq!(
             parse_length("50%"),
             Some(rustkit_css::Length::Percent(50.0))
+        );
+    }
+
+    #[test]
+    fn test_parse_grid_template_auto_repeat_is_not_hardcoded() {
+        use rustkit_css::{TrackRepeat, TrackSize};
+
+        // auto-fit / auto-fill are handed to layout as a repeat pattern, never
+        // pre-expanded to a fixed count (the old parser emitted 4 tracks).
+        let t = parse_grid_template("repeat(auto-fit, minmax(150px, 1fr))").unwrap();
+        assert!(t.tracks.is_empty());
+        assert_eq!(t.repeats.len(), 1);
+        match &t.repeats[0] {
+            (0, TrackRepeat::AutoFit(defs)) => {
+                assert_eq!(defs.len(), 1);
+                assert_eq!(
+                    defs[0].size,
+                    TrackSize::MinMax(Box::new(TrackSize::Px(150.0)), Box::new(TrackSize::Fr(1.0)))
+                );
+            }
+            other => panic!("expected auto-fit repeat at 0, got {other:?}"),
+        }
+
+        let t = parse_grid_template("repeat(auto-fill, 100px)").unwrap();
+        assert!(matches!(t.repeats[0], (0, TrackRepeat::AutoFill(_))));
+
+        // Fixed counts still expand inline, with tracks around them kept in order.
+        let t = parse_grid_template("200px repeat(2, 1fr 2fr) auto").unwrap();
+        let sizes: Vec<_> = t.tracks.iter().map(|d| d.size.clone()).collect();
+        assert_eq!(
+            sizes,
+            vec![
+                TrackSize::Px(200.0),
+                TrackSize::Fr(1.0),
+                TrackSize::Fr(2.0),
+                TrackSize::Fr(1.0),
+                TrackSize::Fr(2.0),
+                TrackSize::Auto,
+            ]
+        );
+        assert!(t.repeats.is_empty());
+
+        // An auto repeat after explicit tracks records its insert position.
+        let t = parse_grid_template("100px repeat(auto-fill, 50px) 100px").unwrap();
+        assert_eq!(t.tracks.len(), 2);
+        assert_eq!(t.repeats[0].0, 1);
+
+        // Line names attach to the following track; a trailing group is final.
+        let t = parse_grid_template("[full-start] 1fr [content-start] 2fr [content-end full-end]").unwrap();
+        assert_eq!(t.tracks[0].line_names, vec!["full-start".to_string()]);
+        assert_eq!(t.tracks[1].line_names, vec!["content-start".to_string()]);
+        assert_eq!(
+            t.final_line_names,
+            vec!["content-end".to_string(), "full-end".to_string()]
         );
     }
 
@@ -10208,6 +12203,80 @@ mod element_identity_tests {
         assert_eq!(json["element_id"], 3);
     }
 
+    /// Chrome's baseline is `getBoundingClientRect` — the BORDER box — and the
+    /// geometry gate falls back to a node's flat `rect` when `border_box` is
+    /// absent. A replaced element that exports only its CONTENT rect is
+    /// therefore compared against the wrong box, and reports its own border as
+    /// a layout defect. Both rects must be present and must differ when the
+    /// element has a border.
+    #[test]
+    fn a_replaced_element_exports_its_border_box_and_not_only_its_content_rect() {
+        use rustkit_css::ComputedStyle;
+
+        let mut image = LayoutBox::new(
+            BoxType::Image {
+                url: String::new(),
+                natural_width: 100.0,
+                natural_height: 100.0,
+            },
+            ComputedStyle::new(),
+        );
+        image.dimensions.content = Rect::new(11.0, 21.0, 100.0, 100.0);
+        image.dimensions.border.left = 1.0;
+        image.dimensions.border.right = 1.0;
+        image.dimensions.border.top = 1.0;
+        image.dimensions.border.bottom = 1.0;
+
+        let json = layout_box_to_json(&image);
+        assert_eq!(json["rect"]["width"], 100.0, "rect stays the content rect");
+        assert_eq!(json["content_rect"]["width"], 100.0);
+        assert_eq!(
+            json["border_box"]["width"], 102.0,
+            "image exported no border box, so the oracle would compare its \
+             content rect against Chrome's border box"
+        );
+        assert_eq!(json["border_box"]["x"], 10.0);
+        assert_eq!(json["border_box"]["y"], 20.0);
+        assert_eq!(json["margin_box"]["width"], 102.0);
+
+        let mut control = LayoutBox::new(
+            BoxType::FormControl(rustkit_layout::FormControlType::Button {
+                label: "Go".into(),
+                button_type: "button".into(),
+            }),
+            ComputedStyle::new(),
+        );
+        control.dimensions.content = Rect::new(5.0, 5.0, 40.0, 20.0);
+        control.dimensions.border.left = 2.0;
+        control.dimensions.border.right = 2.0;
+        let json = layout_box_to_json(&control);
+        assert_eq!(json["border_box"]["width"], 44.0);
+        assert_eq!(json["rect"]["width"], 40.0);
+    }
+
+    /// An empty selector path means "identity not tracked" — the box is above
+    /// or outside what Chrome's capture keys (html, head, foreign content).
+    /// Stamping it anyway produces an identity whose join key is the empty
+    /// string, which joins nothing and turns the box into a reported phantom
+    /// instead of an excluded one. It must also not consume an element id.
+    #[test]
+    fn an_untracked_path_stamps_no_identity_and_burns_no_id() {
+        use rustkit_css::ComputedStyle;
+
+        let ids = Cell::new(7);
+        let mut b = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        Engine::attach_identity(&mut b, "", &HashMap::new(), "html", &ids);
+        assert!(
+            b.identity().is_none(),
+            "a box with no Chrome-side path was stamped with a join key"
+        );
+        assert_eq!(ids.get(), 7, "an untracked box consumed an element id");
+
+        Engine::attach_identity(&mut b, "body > div", &HashMap::new(), "div", &ids);
+        assert_eq!(b.identity().map(|i| i.selector.clone()), Some("body > div".into()));
+        assert_eq!(ids.get(), 8);
+    }
+
     /// `set_identity` is the only way in, so `element_id` and `identity` can
     /// never disagree — a box either joins or is excluded, never half of each.
     #[test]
@@ -10651,6 +12720,499 @@ mod link_click_tests {
             Some("https://example.com/target")
         );
         assert_eq!(engine.link_at_point(id, 10.0, 505.0), None);
+    }
+}
+
+#[cfg(test)]
+mod web_font_tests {
+    use super::*;
+
+    const AHEM: &[u8] = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.ttf");
+
+    fn ahem_data_uri() -> String {
+        use base64::Engine as _;
+        format!(
+            "data:font/ttf;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(AHEM)
+        )
+    }
+
+    #[test]
+    fn a_remote_document_never_reads_the_local_filesystem() {
+        let http = Url::parse("https://example.com/page.html").unwrap();
+        assert!(matches!(
+            resolve_font_source(Some(&http), "file:///etc/hosts"),
+            FontSource::Blocked(_)
+        ));
+        assert!(matches!(
+            resolve_font_source(Some(&http), "/fonts/a.ttf"),
+            FontSource::Remote(u) if u.as_str() == "https://example.com/fonts/a.ttf"
+        ));
+        assert!(matches!(
+            resolve_font_source(Some(&http), "../x.woff2"),
+            FontSource::Remote(_)
+        ));
+    }
+
+    #[test]
+    fn a_local_document_may_read_local_font_files() {
+        // about:blank is what load_html uses; parity-capture and the WPT
+        // runner hand us absolute paths that way (staged from /fonts/...).
+        let about = Url::parse("about:blank").unwrap();
+        assert!(matches!(
+            resolve_font_source(Some(&about), "/tmp/Ahem.ttf"),
+            FontSource::File(p) if p == std::path::Path::new("/tmp/Ahem.ttf")
+        ));
+        assert!(matches!(
+            resolve_font_source(Some(&about), "fonts/Ahem.ttf"),
+            FontSource::Blocked(_)
+        ), "a relative path has nothing to resolve against for inline content");
+        let file = Url::parse("file:///srv/site/index.html").unwrap();
+        assert!(matches!(
+            resolve_font_source(Some(&file), "fonts/Ahem.ttf"),
+            FontSource::File(p) if p == std::path::Path::new("/srv/site/fonts/Ahem.ttf")
+        ));
+    }
+
+    #[test]
+    fn data_uris_decode_in_both_encodings() {
+        assert_eq!(
+            decode_data_url("data:font/ttf;base64,AAEC").as_deref(),
+            Some(&[0u8, 1, 2][..])
+        );
+        assert_eq!(
+            decode_data_url("data:,%00%01x").as_deref(),
+            Some(&[0u8, 1, b'x'][..])
+        );
+        assert!(decode_data_url("data:font/ttf;base64,!!!").is_none());
+        assert!(matches!(
+            resolve_font_source(None, &ahem_data_uri()),
+            FontSource::Data(b) if b == AHEM
+        ));
+    }
+
+    /// The laid-out advance of the probe text run "XXXX".
+    fn widest_inline_block(b: &LayoutBox, out: &mut f32) {
+        if matches!(&b.box_type, BoxType::Text(t) if t.trim() == "XXXX") {
+            *out = out.max(b.dimensions.content.width);
+        }
+        for c in &b.children {
+            widest_inline_block(c, out);
+        }
+    }
+
+    fn probe_width(engine: &Engine, html: &str) -> f32 {
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        // The path load_html takes, minus the view: rules out of the sheets,
+        // local sources into the opaque partition, partition installed.
+        let rules: Vec<rustkit_css::FontFaceRule> = engine
+            .extract_stylesheets(&document)
+            .iter()
+            .flat_map(|s| s.font_face_rules())
+            .collect();
+        engine.load_local_web_fonts_from(None, &rules);
+        engine.install_web_fonts_for(&rustkit_layout::TopLevelSite::opaque());
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        let containing_block = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        layout.layout(&containing_block);
+        let mut w = 0.0f32;
+        widest_inline_block(&layout, &mut w);
+        w
+    }
+
+    fn test_engine() -> Option<Engine> {
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return None;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        Some(Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        })
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn line_break_anywhere_fills_the_line_even_under_keep_all() {
+        // WPT line-break-anywhere-004: "XX XXX" in a 4ch Ahem box with
+        // `word-break: keep-all; line-break: anywhere` must render as
+        // "XX X" / "XX" — the line is filled to the last character that
+        // fits. Mapping `line-break: anywhere` onto overflow-wrap's
+        // emergency arm gave "XX" / "XXX": "XXX" fits a line by itself, so
+        // no emergency ever fired and the space was the only opportunity.
+        let Some(engine) = test_engine() else { return };
+        let html = format!(
+            r#"<!DOCTYPE html><html><head><style>
+            @font-face {{ font-family: "EngineTestAhem"; src: url({}); }}
+            #probe {{ font-family: EngineTestAhem; font-size: 25px; line-height: 1;
+                      width: 100px; word-break: keep-all; line-break: anywhere; }}
+            </style></head><body><div id="probe">XX XXX</div></body></html>"#,
+            ahem_data_uri()
+        );
+        let document = Rc::new(Document::parse_html(&html).expect("parse"));
+        let rules: Vec<rustkit_css::FontFaceRule> = engine
+            .extract_stylesheets(&document)
+            .iter()
+            .flat_map(|s| s.font_face_rules())
+            .collect();
+        engine.load_local_web_fonts_from(None, &rules);
+        engine.install_web_fonts_for(&rustkit_layout::TopLevelSite::opaque());
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        layout.layout(&Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        });
+
+        fn lines_of(b: &LayoutBox, out: &mut Vec<Vec<String>>) {
+            if let Some(lines) = &b.text_lines {
+                out.push(lines.iter().map(|l| l.text.trim_end().to_string()).collect());
+            }
+            for c in &b.children {
+                lines_of(c, out);
+            }
+        }
+        let mut found = Vec::new();
+        lines_of(&layout, &mut found);
+        let probe = found
+            .iter()
+            .find(|ls| ls.concat().replace(' ', "").starts_with("XXXXX"))
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            probe,
+            vec!["XX X".to_string(), "XX".to_string()],
+            "line-break: anywhere must fill the first line (all line records: {found:?})"
+        );
+    }
+
+    #[test]
+    fn preserved_white_space_keeps_its_edge_spaces_through_box_assembly() {
+        // css-text §4.1.1: under pre/pre-wrap every space renders. The
+        // child-assembly post-pass stripped edge spaces regardless of
+        // white-space, so " XX" in a pre-wrap box lost its leading space
+        // (WPT word-break-break-all-011: the first line of " <br>X<br>X" is
+        // a space-only line, and it vanished).
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <div id="a" style="white-space: pre-wrap"> XX </div>
+            <div id="b" style="white-space: pre"> </div>
+            <div id="c"> XX </div>
+            <div id="d" style="white-space: break-spaces"> Z </div>
+            <div id="e">  a&nbsp; b &nbsp;</div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        fn texts(b: &LayoutBox, out: &mut Vec<String>) {
+            if let BoxType::Text(t) = &b.box_type {
+                out.push(t.clone());
+            }
+            for c in &b.children {
+                texts(c, out);
+            }
+        }
+        let mut found = Vec::new();
+        texts(&layout, &mut found);
+        assert_eq!(
+            found,
+            vec![
+                " XX ".to_string(),
+                " ".to_string(),
+                "XX".to_string(),
+                " Z ".to_string(),
+                // nbsp is content: it neither collapses nor gets trimmed at
+                // the edges; the collapsible spaces around it still do.
+                "a\u{a0} b \u{a0}".to_string(),
+            ],
+            "pre-wrap keeps both edge spaces, pre keeps a space-only run, normal collapses, \
+             break-spaces (previously unparsed) preserves, nbsp survives collapsing"
+        );
+    }
+
+    #[test]
+    fn inherited_text_properties_reach_inline_children() {
+        // css-text-3: white-space, word-break, overflow-wrap, line-break and
+        // text-transform inherit. The element cascade seeded font/color/
+        // spacing/text-align from the parent and stopped there, so a
+        // `<span>` inside a nowrap block was `normal` — and its TEXT copied
+        // `normal` from the span. Pins the element AND its text box.
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <div style="white-space: nowrap; word-break: break-all; overflow-wrap: anywhere; line-break: anywhere; text-transform: uppercase"><span>a b</span></div>
+            <div style="white-space: nowrap"><span style="white-space: normal">a b</span></div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        fn spans<'a>(b: &'a LayoutBox, out: &mut Vec<&'a LayoutBox>) {
+            if b.identity.as_ref().map(|id| id.tag == "span").unwrap_or(false) {
+                out.push(b);
+            }
+            for c in &b.children {
+                spans(c, out);
+            }
+        }
+        let mut found = Vec::new();
+        spans(&layout, &mut found);
+        assert_eq!(found.len(), 2, "two spans");
+
+        let s = &found[0].style;
+        assert_eq!(s.white_space, rustkit_css::WhiteSpace::Nowrap);
+        assert_eq!(s.word_break, rustkit_css::WordBreak::BreakAll);
+        assert_eq!(s.overflow_wrap, rustkit_css::OverflowWrap::Anywhere);
+        assert_eq!(s.line_break, rustkit_css::LineBreak::Anywhere);
+        assert_eq!(s.text_transform, rustkit_css::TextTransform::Uppercase);
+        let text = found[0]
+            .children
+            .iter()
+            .find(|c| matches!(c.box_type, BoxType::Text(_)))
+            .expect("span text box");
+        assert_eq!(text.style.white_space, rustkit_css::WhiteSpace::Nowrap, "the text inside inherits via the span");
+        assert_eq!(text.style.text_transform, rustkit_css::TextTransform::Uppercase);
+
+        // An author value on the child still wins over the inherited one.
+        assert_eq!(found[1].style.white_space, rustkit_css::WhiteSpace::Normal);
+    }
+
+    #[test]
+    fn text_overflow_parses_and_is_not_inherited() {
+        // css-overflow-3 §5.1: `text-overflow` was unparsed (every value fell
+        // through), so the chrome's `.tab-title { text-overflow: ellipsis }`
+        // family never reached paint. The property is NOT inherited — the
+        // block owns its line boxes — so the span inside stays `clip`.
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <div style="text-overflow: ellipsis; overflow: hidden; white-space: nowrap"><span>XX</span></div>
+            <div style="text-overflow: clip">XX</div>
+            <div style="text-overflow: ELLIPSIS">XX</div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        fn collect(b: &LayoutBox, out: &mut Vec<(String, rustkit_css::TextOverflow)>) {
+            if let Some(id) = &b.identity {
+                if id.tag == "div" || id.tag == "span" {
+                    out.push((id.tag.clone(), b.style.text_overflow));
+                }
+            }
+            for c in &b.children {
+                collect(c, out);
+            }
+        }
+        let mut found = Vec::new();
+        collect(&layout, &mut found);
+        assert_eq!(
+            found,
+            vec![
+                ("div".to_string(), rustkit_css::TextOverflow::Ellipsis),
+                ("span".to_string(), rustkit_css::TextOverflow::Clip),
+                ("div".to_string(), rustkit_css::TextOverflow::Clip),
+                ("div".to_string(), rustkit_css::TextOverflow::Ellipsis),
+            ],
+            "ellipsis parses (case-insensitively), clip is the initial value, the span does not inherit"
+        );
+    }
+
+    #[test]
+    fn br_is_a_forced_line_break_and_an_empty_br_line_has_height() {
+        // `<br>` was an empty inline with no content children, so the tree
+        // builder dropped it: "a<br>b" laid out on ONE line on every page.
+        // It only ever "worked" where the preceding text happened to fill
+        // the container exactly (the WPT .red overlay idiom).
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <div id="a" style="width: 400px; font-size: 16px; line-height: 20px">ab<br>cd</div>
+            <div id="b" style="width: 400px; font-size: 16px; line-height: 20px">x<br><br>y</div>
+            <div id="c" style="width: 400px; white-space: pre; font-size: 16px; line-height: 20px">p<br>q</div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        layout.layout(&Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        });
+
+        fn text_y(b: &LayoutBox, out: &mut Vec<(String, f32)>) {
+            if let BoxType::Text(t) = &b.box_type {
+                out.push((t.clone(), b.dimensions.content.y));
+            }
+            for c in &b.children {
+                text_y(c, out);
+            }
+        }
+        let mut ys = Vec::new();
+        text_y(&layout, &mut ys);
+        let y = |s: &str| {
+            ys.iter()
+                .find(|(t, _)| t == s)
+                .map(|(_, y)| *y)
+                .unwrap_or_else(|| panic!("no text run {s:?} in {ys:?}"))
+        };
+        assert!(
+            (y("cd") - y("ab") - 20.0).abs() < 0.5,
+            "cd must sit one 20px line below ab: ab@{} cd@{}",
+            y("ab"),
+            y("cd")
+        );
+        assert!(
+            (y("y") - y("x") - 40.0).abs() < 0.5,
+            "<br><br> must leave one EMPTY 20px line between x and y: x@{} y@{}",
+            y("x"),
+            y("y")
+        );
+        assert!(
+            (y("q") - y("p") - 20.0).abs() < 0.5,
+            "a br breaks under white-space: pre too: p@{} q@{}",
+            y("p"),
+            y("q")
+        );
+    }
+
+    #[test]
+    fn the_font_shorthand_sets_every_longhand_it_names() {
+        assert_eq!(
+            split_font_shorthand("italic bold 20px/1.5 'Foo Bar', serif"),
+            Some(FontShorthand {
+                prefix: vec!["italic".into(), "bold".into()],
+                size: "20px".into(),
+                line_height: Some("1.5".into()),
+                family: "'Foo Bar', serif".into(),
+            })
+        );
+        assert_eq!(
+            split_font_shorthand("20px/1 Ahem").map(|p| (p.size, p.line_height, p.family)),
+            Some(("20px".into(), Some("1".into()), "Ahem".into()))
+        );
+        assert_eq!(
+            split_font_shorthand("large Georgia").map(|p| p.size),
+            Some("18px".into())
+        );
+        assert_eq!(split_font_shorthand("menu"), None, "system fonts are not parsed");
+        assert_eq!(split_font_shorthand("20px"), None, "a size with no family is invalid");
+
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <p style="font-weight: 700; line-height: 3; font: italic 20px/1.5 Ahem, serif">x</p>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+        fn style_of_x(b: &LayoutBox) -> Option<ComputedStyle> {
+            if matches!(&b.box_type, BoxType::Text(t) if t == "x") {
+                return Some(b.style.clone());
+            }
+            b.children.iter().find_map(style_of_x)
+        }
+        let s = style_of_x(&layout).expect("text run");
+        assert_eq!(s.font_size, rustkit_css::Length::Px(20.0));
+        assert_eq!(s.line_height, rustkit_css::LineHeight::Number(1.5));
+        assert_eq!(s.font_style, rustkit_css::FontStyle::Italic);
+        assert_eq!(s.font_family, "Ahem, serif");
+        assert_eq!(
+            s.font_weight,
+            rustkit_css::FontWeight(400),
+            "the shorthand resets an earlier font-weight it does not name"
+        );
+    }
+
+    #[test]
+    fn z_index_reaches_the_layout_box_of_a_positioned_element() {
+        // Found under Ahem: the WPT css-text idiom puts red text in an
+        // absolutely positioned `z-index: -1` box and green in-flow text
+        // over it. The value was parsed into ComputedStyle and never copied
+        // to the LayoutBox, so the overlay painted at z 0 — after the
+        // in-flow text — and every such test showed red.
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <div style="position: absolute; z-index: -1; color: red">under</div>
+            <div style="color: green">over</div>
+            <div style="position: absolute; z-index: 7">seven</div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+
+        fn positioned_z(b: &LayoutBox, out: &mut Vec<i32>) {
+            if b.position == Position::Absolute {
+                out.push(b.z_index);
+            }
+            for c in &b.children {
+                positioned_z(c, out);
+            }
+        }
+        let mut zs = Vec::new();
+        positioned_z(&layout, &mut zs);
+        assert_eq!(zs, vec![-1, 7], "positioned boxes must carry their computed z-index");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_declared_web_font_is_the_face_the_text_is_measured_in() {
+        // Ahem: every glyph is exactly 1em wide, so "XXXX" at 25px is 100px
+        // in Ahem and something else in any fallback face. The family name
+        // exists nowhere on the system; if the text measures 100px, the
+        // bytes the stylesheet declared are what shaped it.
+        let Some(engine) = test_engine() else { return };
+        let styled = |font_face: &str| {
+            format!(
+                r#"<!DOCTYPE html><html><head><style>
+                {font_face}
+                #probe {{ font-family: EngineTestAhem; font-size: 25px; line-height: 1; display: inline-block; }}
+                </style></head><body><span id="probe">XXXX</span></body></html>"#
+            )
+        };
+
+        let control = probe_width(&engine, &styled(""));
+        assert!(
+            control > 0.0 && (control - 100.0).abs() > 2.0,
+            "setup failed: without @font-face the fallback face already measures {control}px, \
+             so a 100px reading could not prove the web font loaded"
+        );
+
+        let via_data = probe_width(
+            &engine,
+            &styled(&format!(
+                r#"@font-face {{ font-family: "EngineTestAhem"; src: url({}); }}"#,
+                ahem_data_uri()
+            )),
+        );
+        assert!(
+            (via_data - 100.0).abs() < 0.5,
+            "data: @font-face did not reach the shaper: XXXX measured {via_data}px, expected 100"
+        );
+
+        // Same face via a filesystem path — the WPT runner's shape. A fresh
+        // engine so the data: load above cannot be what satisfies this.
+        let Some(engine) = test_engine() else { return };
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../rustkit-text/tests/fixtures/Ahem.ttf");
+        let via_file = probe_width(
+            &engine,
+            &styled(&format!(
+                r#"@font-face {{ font-family: EngineTestAhem; src: url("{path}"); }}"#
+            )),
+        );
+        assert!(
+            (via_file - 100.0).abs() < 0.5,
+            "file-path @font-face did not reach the shaper: XXXX measured {via_file}px, expected 100"
+        );
     }
 }
 
@@ -11261,6 +13823,166 @@ mod srcset_tests {
         assert_eq!(
             url, "https://example.com/b.png",
             "layout must resolve the WIDEST srcset candidate, absolutely"
+        );
+    }
+}
+
+#[cfg(test)]
+mod visual_rect_tests {
+    use super::*;
+
+    // ---------------------------------------------------------------
+    // The visual rect, for the geometry oracle's join.
+    //
+    // CSS transforms do not change layout, but `getBoundingClientRect()` — the
+    // whole of Chrome's committed baseline — is POST-transform. Exporting only
+    // the layout rect made the oracle report the renderer's own translate as a
+    // layout defect: sticky-scroll's `.overflow-content`
+    // (`translate(-50%, -50%)`) read 139.53px out of place while its layout
+    // position was correct, and correcting that position made the reported
+    // delta LARGER.
+    // ---------------------------------------------------------------
+
+    fn boxed(x: f32, y: f32, w: f32, h: f32, style: rustkit_css::ComputedStyle) -> LayoutBox {
+        let mut b = LayoutBox::new(BoxType::Block, style);
+        b.dimensions.content = rustkit_layout::Rect::new(x, y, w, h);
+        b
+    }
+
+    fn visual(value: &serde_json::Value) -> Option<(f32, f32, f32, f32)> {
+        let v = value.get("visual_border_box")?;
+        Some((
+            v["x"].as_f64()? as f32,
+            v["y"].as_f64()? as f32,
+            v["width"].as_f64()? as f32,
+            v["height"].as_f64()? as f32,
+        ))
+    }
+
+    /// T-RED. Without the visual rect the oracle scores 987.97 against
+    /// Chrome's 837.97 and calls a correctly-placed box 150px wrong.
+    #[test]
+    fn a_translated_box_exports_the_rect_chrome_measures() {
+        let mut style = rustkit_css::ComputedStyle::new();
+        style.transform = rustkit_css::TransformList {
+            ops: vec![rustkit_css::TransformOp::Translate(
+                rustkit_css::Length::Percent(-50.0),
+                rustkit_css::Length::Percent(-50.0),
+            )],
+        };
+        let json = layout_box_to_json(&boxed(987.96875, 1201.25, 300.0, 300.0, style));
+        let (x, y, w, h) = visual(&json).expect("a transformed box must export a visual rect");
+        assert!(
+            (x - 837.96875).abs() < 0.01 && (y - 1051.25).abs() < 0.01,
+            "translate(-50%,-50%) must move the visual rect by half the box: got ({x}, {y})"
+        );
+        assert!(
+            (w - 300.0).abs() < 0.01 && (h - 300.0).abs() < 0.01,
+            "a pure translate must not resize: got {w}x{h}"
+        );
+        let bb = &json["border_box"];
+        assert!(
+            (bb["x"].as_f64().unwrap() - 987.96875).abs() < 0.01,
+            "border_box must stay the LAYOUT rect — Gate B's attributable join \
+             and the scroll-extent readers want that box"
+        );
+    }
+
+    /// The field exists only where a transform is actually in effect. An
+    /// untransformed box has no second rect to disagree about, and emitting
+    /// one everywhere would double the size of every dump.
+    #[test]
+    fn an_untransformed_box_exports_no_visual_rect() {
+        let json = layout_box_to_json(&boxed(
+            10.0,
+            20.0,
+            30.0,
+            40.0,
+            rustkit_css::ComputedStyle::new(),
+        ));
+        assert!(
+            visual(&json).is_none(),
+            "no transform means the layout rect IS the visual rect"
+        );
+    }
+
+    /// A transform applies to the whole subtree, so a child of a transformed
+    /// box is displaced even with no transform of its own. Chrome's rect for
+    /// that child is displaced too.
+    #[test]
+    fn a_child_inherits_its_ancestors_transform() {
+        let mut style = rustkit_css::ComputedStyle::new();
+        style.transform = rustkit_css::TransformList {
+            ops: vec![rustkit_css::TransformOp::TranslateX(rustkit_css::Length::Px(100.0))],
+        };
+        let mut parent = boxed(0.0, 0.0, 200.0, 200.0, style);
+        parent.children.push(boxed(
+            10.0,
+            10.0,
+            20.0,
+            20.0,
+            rustkit_css::ComputedStyle::new(),
+        ));
+        let json = layout_box_to_json(&parent);
+        let (cx, _, _, _) = visual(&json["children"][0])
+            .expect("a child under a transform must export a visual rect");
+        assert!(
+            (cx - 110.0).abs() < 0.01,
+            "the child must carry its ancestor's +100 translate: got {cx}"
+        );
+    }
+
+    /// A scale is measured about `transform-origin`, which defaults to the
+    /// box's centre — the same origin the painter uses. Getting the origin
+    /// wrong moves the box while leaving its size right, which is exactly the
+    /// error a size-only assertion cannot see.
+    #[test]
+    fn a_scale_is_taken_about_the_transform_origin() {
+        let mut style = rustkit_css::ComputedStyle::new();
+        style.transform = rustkit_css::TransformList {
+            ops: vec![rustkit_css::TransformOp::Scale(2.0, 2.0)],
+        };
+        let json = layout_box_to_json(&boxed(100.0, 100.0, 50.0, 50.0, style));
+        let (x, y, w, h) = visual(&json).expect("a scaled box must export a visual rect");
+        assert!(
+            (w - 100.0).abs() < 0.01 && (h - 100.0).abs() < 0.01,
+            "scale(2) must double the box: got {w}x{h}"
+        );
+        assert!(
+            (x - 75.0).abs() < 0.01 && (y - 75.0).abs() < 0.01,
+            "scaling about the centre grows the box both ways: expected \
+             (75, 75), got ({x}, {y})"
+        );
+    }
+
+    /// The bound is taken from all FOUR corners, and rotation is the only
+    /// thing that says so. Under translate and scale the two ends of one
+    /// diagonal already span the box, so a two-corner bound stays right by
+    /// accident on every other test in this module — it was the survivor of
+    /// this port's mutation sweep.
+    ///
+    /// A 100x40 box turned 45deg about its centre bounds to 98.99 square:
+    /// `(100 + 40) / sqrt(2)`. Read from the main diagonal alone the width
+    /// comes out 42.43, so the width assertion is the one doing the work.
+    /// 90deg would NOT catch it — a quarter turn maps the rect back onto an
+    /// axis-aligned rect, and then either diagonal spans it.
+    #[test]
+    fn a_rotated_box_is_bounded_by_all_four_corners() {
+        let mut style = rustkit_css::ComputedStyle::new();
+        style.transform = rustkit_css::TransformList {
+            ops: vec![rustkit_css::TransformOp::Rotate(45.0)],
+        };
+        let json = layout_box_to_json(&boxed(100.0, 100.0, 100.0, 40.0, style));
+        let (x, y, w, h) = visual(&json).expect("a rotated box must export a visual rect");
+        assert!(
+            (w - 98.9949).abs() < 0.01 && (h - 98.9949).abs() < 0.01,
+            "a 45deg turn bounds a 100x40 box to 98.99 square, not to one of \
+             its diagonals: got {w}x{h}"
+        );
+        assert!(
+            (x - 100.5025).abs() < 0.01 && (y - 70.5025).abs() < 0.01,
+            "the bound stays centred on the box's centre (150, 120): expected \
+             (100.50, 70.50), got ({x}, {y})"
         );
     }
 }

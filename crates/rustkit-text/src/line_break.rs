@@ -116,27 +116,39 @@ impl LineBreaker {
     /// Returns an iterator over `BreakOpportunity` structs indicating where
     /// line breaks can occur.
     pub fn break_opportunities<'a>(&self, text: &'a str) -> impl Iterator<Item = BreakOpportunity> + 'a {
-        let word_break = self.word_break;
-        let _overflow_wrap = self.overflow_wrap; // Reserved for future use
+        // UAX #14 break opportunities. In keep-all mode a complete
+        // implementation would suppress breaks within CJK; for now all
+        // UAX #14 breaks are allowed there (pre-existing simplification).
+        let mut ops: Vec<BreakOpportunity> = linebreaks(text)
+            .map(|(offset, break_op)| BreakOpportunity {
+                offset,
+                kind: match break_op {
+                    UnicodeBreakOp::Mandatory => BreakKind::Mandatory,
+                    UnicodeBreakOp::Allowed => BreakKind::Allowed,
+                },
+            })
+            .collect();
 
-        // Get UAX #14 break opportunities
-        linebreaks(text).filter_map(move |(offset, break_op)| {
-            let kind = match break_op {
-                UnicodeBreakOp::Mandatory => BreakKind::Mandatory,
-                UnicodeBreakOp::Allowed => {
-                    // Check if this break is allowed by word-break property
-                    if word_break == WordBreak::KeepAll {
-                        // In keep-all mode, check if we're breaking within CJK
-                        // For simplicity, we allow all UAX #14 breaks but a more
-                        // complete implementation would check character classes
-                        BreakKind::Allowed
-                    } else {
-                        BreakKind::Allowed
-                    }
+        // css-text-3 §4.2 `word-break: break-all`: breaking is allowed
+        // between any two typographic character units, so every grapheme
+        // boundary UAX #14 did not already surface is a REAL soft wrap
+        // opportunity (used in normal line filling), not an emergency one.
+        if self.word_break == WordBreak::BreakAll {
+            use crate::segmentation::grapheme_boundaries;
+            let existing: std::collections::HashSet<usize> =
+                ops.iter().map(|op| op.offset).collect();
+            for offset in grapheme_boundaries(text).into_iter().skip(1) {
+                if !existing.contains(&offset) {
+                    ops.push(BreakOpportunity {
+                        offset,
+                        kind: BreakKind::Allowed,
+                    });
                 }
-            };
-            Some(BreakOpportunity { offset, kind })
-        })
+            }
+            ops.sort_by_key(|op| op.offset);
+        }
+
+        ops.into_iter()
     }
 
     /// Get break opportunities as byte offsets.

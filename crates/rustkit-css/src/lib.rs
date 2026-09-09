@@ -329,6 +329,19 @@ pub enum Length {
     Vmax(f32),
     /// Auto.
     Auto,
+    /// `fit-content` — css-sizing-3 §4.1.
+    ///
+    /// Content-sized like `auto`, but it is NOT `auto`, and that distinction is
+    /// the whole reason the keyword exists: a grid or flex item only stretches
+    /// to its area when its size is `auto`, so `height: fit-content` is how a
+    /// page opts one item out of stretching. Parsing it away as `auto` (which
+    /// is what happened before this variant existed — `parse_length` returned
+    /// `None` and the declaration was dropped) makes the item stretch, which is
+    /// the opposite of what it asks for.
+    ///
+    /// Everywhere that sizes content it behaves exactly as `auto`; only the
+    /// stretch decision may tell the two apart.
+    FitContent,
     /// Zero.
     #[default]
     Zero,
@@ -367,6 +380,7 @@ impl Length {
             Length::Vmin(vmin) => vmin / 100.0 * viewport_width.min(viewport_height),
             Length::Vmax(vmax) => vmax / 100.0 * viewport_width.max(viewport_height),
             Length::Auto => 0.0, // Context-dependent
+            Length::FitContent => 0.0, // Context-dependent, exactly as Auto
             Length::Zero => 0.0,
             Length::Min(pair) => {
                 let a = pair.0.to_px_with_viewport(
@@ -1638,6 +1652,20 @@ impl Overflow {
     }
 }
 
+/// `text-overflow` (css-overflow-3 §5.1): how inline content that overflows
+/// its line box in the inline direction is rendered, on a block container
+/// whose `overflow` is other than `visible`. Not inherited — the block
+/// owns its line boxes, so the block owns the ellipsis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextOverflow {
+    /// Overflowing content is simply clipped (initial value).
+    #[default]
+    Clip,
+    /// Overflowing content is cut and `U+2026 …` is painted at the line
+    /// box's end edge in its place.
+    Ellipsis,
+}
+
 /// Scroll behavior for smooth scrolling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScrollBehavior {
@@ -1770,6 +1798,39 @@ pub enum WordBreak {
     BreakAll,
     KeepAll,
     BreakWord,
+}
+
+/// Overflow-wrap behavior (CSS Text 3 §5.5).
+///
+/// Distinct from [`WordBreak`]: `word-break` changes where soft wrap
+/// opportunities exist in normal text, while `overflow-wrap` only adds
+/// last-resort opportunities for words that would otherwise overflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OverflowWrap {
+    #[default]
+    Normal,
+    BreakWord,
+    Anywhere,
+}
+
+/// Line-break strictness (CSS Text 3 §5.3).
+///
+/// Only `anywhere` changes where opportunities exist in a way the line
+/// breaker models: a soft wrap opportunity around EVERY typographic
+/// character unit, disregarding every prohibition — including
+/// `word-break: keep-all`. It is NOT `overflow-wrap: anywhere`: that only
+/// breaks a word that would otherwise overflow, whereas `line-break:
+/// anywhere` fills each line to the last character that fits (WPT
+/// line-break-anywhere-004: "XX XXX" in a 4ch box is "XX X" / "XX", not
+/// "XX" / "XXX"). loose/normal/strict are recorded, not distinguished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineBreak {
+    #[default]
+    Auto,
+    Loose,
+    Normal,
+    Strict,
+    Anywhere,
 }
 
 /// Vertical alignment.
@@ -2089,6 +2150,8 @@ pub struct ComputedStyle {
     pub text_transform: TextTransform,
     pub white_space: WhiteSpace,
     pub word_break: WordBreak,
+    pub overflow_wrap: OverflowWrap,
+    pub line_break: LineBreak,
     pub vertical_align: VerticalAlign,
     pub writing_mode: WritingMode,
     pub direction: Direction,
@@ -2127,6 +2190,8 @@ pub struct ComputedStyle {
     pub opacity: f32,
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
+    /// css-overflow-3 §5.1; only meaningful when the overflow above clips.
+    pub text_overflow: TextOverflow,
 
     // Box shadows (multiple shadows supported)
     pub box_shadows: Vec<BoxShadow>,
@@ -2255,6 +2320,8 @@ impl ComputedStyle {
             text_transform: parent.text_transform,
             white_space: parent.white_space,
             word_break: parent.word_break,
+            overflow_wrap: parent.overflow_wrap,
+            line_break: parent.line_break,
             direction: parent.direction,
             writing_mode: parent.writing_mode,
 
@@ -2627,6 +2694,9 @@ pub fn parse_length(value: &str) -> Option<Length> {
     if value == "auto" {
         return Some(Length::Auto);
     }
+    if value == "fit-content" {
+        return Some(Length::FitContent);
+    }
     if value == "0" {
         return Some(Length::Zero);
     }
@@ -2832,6 +2902,23 @@ mod tests {
         assert_eq!(parse_length("1.5em"), Some(Length::Em(1.5)));
         assert_eq!(parse_length("50%"), Some(Length::Percent(50.0)));
         assert_eq!(parse_length("auto"), Some(Length::Auto));
+    }
+
+    /// `fit-content` must parse, and it must NOT parse as `auto`.
+    ///
+    /// Returning `None` here is what shipped: the declaration was dropped and
+    /// `height` kept its `auto` initial value, so `height: fit-content` made a
+    /// grid item stretch — the one thing the keyword is written to prevent.
+    /// Mapping it to `Length::Auto` would be the same defect with a parse
+    /// result attached, which is why this asserts the variant and not just
+    /// `is_some()`.
+    #[test]
+    fn fit_content_parses_and_is_not_auto() {
+        assert_eq!(parse_length("fit-content"), Some(Length::FitContent));
+        assert_eq!(parse_length("  fit-content  "), Some(Length::FitContent));
+        assert_ne!(parse_length("fit-content"), Some(Length::Auto));
+        // Content-sized like auto everywhere that resolves a used value.
+        assert_eq!(Length::FitContent.to_px(16.0, 16.0, 500.0), 0.0);
     }
 
     #[test]

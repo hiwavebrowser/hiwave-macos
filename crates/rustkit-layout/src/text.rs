@@ -16,7 +16,8 @@
 
 use rustkit_css::{
     Color, Direction as CssDirection, FontStretch, FontStyle, FontWeight, Length,
-    TextDecorationLine, TextDecorationStyle, TextTransform, WhiteSpace, WordBreak as CssWordBreak,
+    OverflowWrap as CssOverflowWrap, TextDecorationLine, TextDecorationStyle, TextTransform,
+    WhiteSpace, WordBreak as CssWordBreak,
 };
 use rustkit_text::bidi::{BidiInfo, Direction as BidiDirection};
 use rustkit_text::line_break::{LineBreaker, OverflowWrap, WordBreak as LineBreakWordBreak};
@@ -131,10 +132,15 @@ impl FontFamilyChain {
     }
 
     /// Create default font chain for monospace.
+    /// Menlo first: it is Chrome's default `monospace` on macOS and ships
+    /// with the OS. SF Mono is an Xcode/Terminal bundle font — leading with
+    /// it measured a Core Text substitute on stock machines (see
+    /// rustkit-text `named_font`) and would measure a different face from
+    /// Chrome's on machines that have it.
     #[cfg(target_os = "macos")]
     pub fn monospace() -> Self {
-        Self::new("SF Mono")
-            .with_fallback("Menlo")
+        Self::new("Menlo")
+            .with_fallback("SF Mono")
             .with_fallback("Monaco")
             .with_fallback("Courier New")
             .with_fallback("monospace")
@@ -1086,13 +1092,46 @@ impl TextShaper {
             let mut char_idx = 0;
             let mut utf16_idx = 0;
 
+            // Fallback faces this run actually used, lazily created, and
+            // the union of their extents (ascent, descent, leading).
+            let mut fallback_fonts: Vec<(&'static str, Option<core_text::font::CTFont>)> =
+                Vec::new();
+            let mut used_fallback_extents: Option<(f32, f32, f32)> = None;
+
             while utf16_idx < char_count && char_idx < text_chars.len() {
                 let c = text_chars[char_idx];
                 let advance = glyph_advances[utf16_idx].width as f32;
 
-                // Handle missing glyphs (glyph ID 0)
-                let final_advance = if glyph_ids[utf16_idx] == 0 && advance == 0.0 {
-                    size * 0.5 // Fallback advance
+                // A character the chosen face has no glyph for is shaped by
+                // the SAME fallback face paint will draw it with (rustkit-text
+                // `GLYPH_FALLBACK_FAMILIES`): its real advance, and its face's
+                // extents folded into the run's — Blink unites every used
+                // fallback face into the line box under `line-height: normal`
+                // (NGInlineBoxState::AccumulateUsedFonts). Before: the
+                // primary face's .notdef advance and extents, so "☕ coffee"
+                // drew the emoji over the "c" and the line stayed 18px
+                // (Chrome 26). Glyph 0 is .notdef and CARRIES an advance —
+                // 15.69px on SF at 16px — so the miss is the id, never a
+                // zero advance.
+                let notdef_advance = if advance == 0.0 { size * 0.5 } else { advance };
+                let final_advance = if glyph_ids[utf16_idx] == 0 {
+                    if c.is_whitespace() || c.is_control() {
+                        notdef_advance
+                    } else {
+                        match Self::fallback_glyph_advance(c, size, &mut fallback_fonts) {
+                            Some((adv, asc, desc, lead)) => {
+                                used_fallback_extents = Some(match used_fallback_extents {
+                                    Some((a, d, l)) => (a.max(asc), d.max(desc), l.max(lead)),
+                                    None => (asc, desc, lead),
+                                });
+                                adv
+                            }
+                            // Variation selectors / joiners are zero-width
+                            // wherever they land (they modify a neighbour).
+                            None if is_default_ignorable(c) => 0.0,
+                            None => notdef_advance, // tofu
+                        }
+                    }
                 } else {
                     advance
                 };
@@ -1113,10 +1152,24 @@ impl TextShaper {
                 char_idx += 1;
             }
 
-            // Get font metrics from Core Text
-            let ascent = ct_font.ascent() as f32;
-            let descent = ct_font.descent() as f32;
-            let leading = ct_font.leading() as f32;
+            // Get font metrics from Core Text — united with the fallback
+            // faces this run used (see `final_advance` above).
+            let mut ascent = ct_font.ascent() as f32;
+            let mut descent = ct_font.descent() as f32;
+            let mut leading = ct_font.leading() as f32;
+            if let Some((fb_ascent, fb_descent, fb_leading)) = used_fallback_extents {
+                // Blink gives each face ITS OWN half-leading (half its rounded
+                // line gap) before uniting, so a primary face's gap never
+                // rides on top of a taller fallback face: Arial 16px
+                // (14.48 + 3.39, gap 0.52) with an emoji (20 + 6.25, gap 0)
+                // is max(14.5, 20) + max(3.5, 6.25) = 26 in Chrome, not 27.
+                // The run then carries no gap of its own.
+                let primary_half = leading.round() / 2.0;
+                let fallback_half = fb_leading.round() / 2.0;
+                ascent = (ascent + primary_half).max(fb_ascent + fallback_half);
+                descent = (descent + primary_half).max(fb_descent + fallback_half);
+                leading = 0.0;
+            }
             let underline_position = ct_font.underline_position() as f32;
             let underline_thickness = ct_font.underline_thickness() as f32;
 
@@ -1151,6 +1204,82 @@ impl TextShaper {
         }
     }
 
+    /// Advance and face extents for a character the primary face lacks,
+    /// from the first of rustkit-text's `GLYPH_FALLBACK_FAMILIES` that has
+    /// a glyph for it. Faces are created once per run and kept in `fonts`.
+    /// Returns `(advance, ascent, descent, leading)`.
+    #[cfg(target_os = "macos")]
+    fn fallback_glyph_advance(
+        c: char,
+        size: f32,
+        fonts: &mut Vec<(&'static str, Option<core_text::font::CTFont>)>,
+    ) -> Option<(f32, f32, f32, f32)> {
+        extern "C" {
+            fn CTFontGetGlyphsForCharacters(
+                font: core_text::font::CTFontRef,
+                characters: *const u16,
+                glyphs: *mut u16,
+                count: isize,
+            ) -> bool;
+
+            fn CTFontGetAdvancesForGlyphs(
+                font: core_text::font::CTFontRef,
+                orientation: u32,
+                glyphs: *const u16,
+                advances: *mut CGSize,
+                count: isize,
+            ) -> f64;
+        }
+
+        let mut units = [0u16; 2];
+        let unit_count = c.encode_utf16(&mut units).len();
+
+        for family in rustkit_text::macos::GLYPH_FALLBACK_FAMILIES {
+            let slot = match fonts.iter().position(|(name, _)| name == family) {
+                Some(i) => i,
+                None => {
+                    // Same lookup as the painter's `rasterize_fallback`, so
+                    // measure and draw agree on the face.
+                    fonts.push((family, ct_font::new_from_name(family, size as f64).ok()));
+                    fonts.len() - 1
+                }
+            };
+            let Some(font) = fonts[slot].1.as_ref() else {
+                continue;
+            };
+
+            let mut glyph_ids = [0u16; 2];
+            unsafe {
+                // The bool is false when ANY unit lacks a glyph — a surrogate
+                // pair's trailing unit always does — so read the first slot.
+                let _ = CTFontGetGlyphsForCharacters(
+                    font.as_concrete_TypeRef(),
+                    units.as_ptr(),
+                    glyph_ids.as_mut_ptr(),
+                    unit_count as isize,
+                );
+                if glyph_ids[0] == 0 {
+                    continue;
+                }
+                let mut advance = CGSize::new(0.0, 0.0);
+                CTFontGetAdvancesForGlyphs(
+                    font.as_concrete_TypeRef(),
+                    0, // kCTFontOrientationHorizontal
+                    glyph_ids.as_ptr(),
+                    &mut advance,
+                    1,
+                );
+                return Some((
+                    advance.width as f32,
+                    font.ascent() as f32,
+                    font.descent() as f32,
+                    font.leading() as f32,
+                ));
+            }
+        }
+        None
+    }
+
     /// Create a Core Text font with specific traits.
     #[cfg(target_os = "macos")]
     fn create_ct_font_with_traits(
@@ -1159,6 +1288,13 @@ impl TextShaper {
         weight: u16,
         italic: bool,
     ) -> Result<core_text::font::CTFont, TextError> {
+        // A face the document registered via @font-face outranks every
+        // platform lookup — the family may exist nowhere else. The engine
+        // installs the current view's faces before each layout.
+        if let Some(cg) = rustkit_text::webfonts::lookup(family, weight, italic) {
+            return Ok(ct_font::new_from_CGFont(&cg, size as f64));
+        }
+
         // The macOS system font has no by-name trait variants
         // (".AppleSystemUIFont-Bold" does not exist), so bold system-ui text
         // silently shaped with the REGULAR face — every bold heading
@@ -1198,8 +1334,14 @@ impl TextShaper {
             variants_to_try.push(format!("{}Italic", family));
         }
 
+        // `CTFontCreateWithName` never fails: an uninstalled name comes back
+        // as a substitute (Helvetica), so trusting `Ok` here stopped the
+        // chain walk at the first MISSING family and MEASURED the substitute
+        // while paint (which already walked, via `named_font`) drew the next
+        // real family. Same accept/reject as paint: the face must be the
+        // one asked for, or this family is a miss and the caller walks on.
         for variant in &variants_to_try {
-            if let Ok(font) = ct_font::new_from_name(variant, size as f64) {
+            if let Some(font) = rustkit_text::macos::named_font(variant, size as f64) {
                 return Ok(font);
             }
         }
@@ -1386,9 +1528,12 @@ impl TextShaper {
     /// * `size` - Font size in pixels
     /// * `max_width` - Maximum line width in pixels
     /// * `word_break` - CSS word-break property value
+    /// * `overflow_wrap` - CSS overflow-wrap value (`line-break: anywhere`
+    ///   also arrives here; see `rustkit_css::OverflowWrap`)
     ///
     /// # Returns
     /// A vector of `WrappedLine` structs, each containing shaped runs for one line.
+    #[allow(clippy::too_many_arguments)]
     pub fn wrap_text(
         &self,
         text: &str,
@@ -1399,9 +1544,19 @@ impl TextShaper {
         size: f32,
         max_width: f32,
         word_break: CssWordBreak,
+        overflow_wrap: CssOverflowWrap,
     ) -> Result<Vec<WrappedLine>, TextError> {
         self.wrap_text_with_first_line(
-            text, font_chain, weight, style, stretch, size, max_width, max_width, word_break,
+            text,
+            font_chain,
+            weight,
+            style,
+            stretch,
+            size,
+            max_width,
+            max_width,
+            word_break,
+            overflow_wrap,
         )
     }
 
@@ -1426,10 +1581,157 @@ impl TextShaper {
         first_line_max_width: f32,
         max_width: f32,
         word_break: CssWordBreak,
+        overflow_wrap: CssOverflowWrap,
+    ) -> Result<Vec<WrappedLine>, TextError> {
+        // Legacy proxy: a narrower first line IS the mid-line signal here.
+        self.wrap_text_lines(
+            text,
+            font_chain,
+            weight,
+            style,
+            stretch,
+            size,
+            first_line_max_width,
+            max_width,
+            word_break,
+            overflow_wrap,
+            first_line_max_width < max_width,
+            WhiteSpace::Normal,
+        )
+    }
+
+    /// `wrap_text` for a run whose `white-space` is known. The wrapper's
+    /// legacy entries assume collapsible white space: a space at a soft
+    /// break is DROPPED so the next line starts on ink. Under
+    /// `white-space: break-spaces` (css-text-3 §4.1.1) preserved spaces are
+    /// content — they take up space, never hang, and a break before one
+    /// leaves it at the START of the next line. Dropping it re-flowed every
+    /// later line (WPT line-break-anywhere-005: `X XX` / ` XX ` / `X XX` /
+    /// ` X` came out `X XX` / `XX X` / `XX X`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn wrap_text_white_space(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        max_width: f32,
+        word_break: CssWordBreak,
+        overflow_wrap: CssOverflowWrap,
+        white_space: WhiteSpace,
+    ) -> Result<Vec<WrappedLine>, TextError> {
+        self.wrap_text_lines(
+            text,
+            font_chain,
+            weight,
+            style,
+            stretch,
+            size,
+            max_width,
+            max_width,
+            word_break,
+            overflow_wrap,
+            false,
+            white_space,
+        )
+    }
+
+    /// `wrap_text_mid_line` with the run's `white-space` (see
+    /// `wrap_text_white_space`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn wrap_text_mid_line_white_space(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        first_line_max_width: f32,
+        max_width: f32,
+        word_break: CssWordBreak,
+        overflow_wrap: CssOverflowWrap,
+        white_space: WhiteSpace,
+    ) -> Result<Vec<WrappedLine>, TextError> {
+        self.wrap_text_lines(
+            text,
+            font_chain,
+            weight,
+            style,
+            stretch,
+            size,
+            first_line_max_width,
+            max_width,
+            word_break,
+            overflow_wrap,
+            true,
+            white_space,
+        )
+    }
+
+    /// `wrap_text_with_first_line` for a run that is KNOWN to start mid-line.
+    ///
+    /// The legacy entry infers "starts mid-line" from `first < max`, which is
+    /// blind when the container is zero-wide: `first == max == 0`, so a run
+    /// that cannot fit the remainder of a line it is not alone on used to
+    /// glue its first grapheme onto that line (`xyz` + `d` on WPT
+    /// break-boundary-2-chars-001) instead of starting on the next line box.
+    /// Callers that know the cursor is past the line start say so explicitly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn wrap_text_mid_line(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        first_line_max_width: f32,
+        max_width: f32,
+        word_break: CssWordBreak,
+        overflow_wrap: CssOverflowWrap,
+    ) -> Result<Vec<WrappedLine>, TextError> {
+        self.wrap_text_lines(
+            text,
+            font_chain,
+            weight,
+            style,
+            stretch,
+            size,
+            first_line_max_width,
+            max_width,
+            word_break,
+            overflow_wrap,
+            true,
+            WhiteSpace::Normal,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn wrap_text_lines(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        first_line_max_width: f32,
+        max_width: f32,
+        word_break: CssWordBreak,
+        overflow_wrap: CssOverflowWrap,
+        starts_mid_line: bool,
+        white_space: WhiteSpace,
     ) -> Result<Vec<WrappedLine>, TextError> {
         if text.is_empty() {
             return Ok(vec![]);
         }
+        // Only break-spaces keeps a space that lands at a soft break: under
+        // pre-wrap the trailing spaces HANG off the previous line (§4.1.3),
+        // which dropping them from the next line already approximates.
+        let preserve_spaces = matches!(white_space, WhiteSpace::BreakSpaces);
 
         // Convert CSS word-break to our line breaking enum
         let lb_word_break = match word_break {
@@ -1438,8 +1740,15 @@ impl TextShaper {
             CssWordBreak::KeepAll => LineBreakWordBreak::KeepAll,
             CssWordBreak::BreakWord => LineBreakWordBreak::BreakWord,
         };
+        // Was hardcoded to Normal: the breaker's break-word/anywhere arms
+        // could never be reached from CSS.
+        let lb_overflow_wrap = match overflow_wrap {
+            CssOverflowWrap::Normal => OverflowWrap::Normal,
+            CssOverflowWrap::BreakWord => OverflowWrap::BreakWord,
+            CssOverflowWrap::Anywhere => OverflowWrap::Anywhere,
+        };
 
-        let breaker = LineBreaker::new(lb_word_break, OverflowWrap::Normal);
+        let breaker = LineBreaker::new(lb_word_break, lb_overflow_wrap);
         let mut lines = Vec::new();
 
         // First, handle mandatory line breaks
@@ -1476,6 +1785,8 @@ impl TextShaper {
                 max_width,
                 &breaker,
                 segment.start,
+                starts_mid_line && lines.is_empty(),
+                preserve_spaces,
             )?;
 
             lines.extend(segment_lines);
@@ -1494,6 +1805,8 @@ impl TextShaper {
                 max_width,
                 &breaker,
                 0,
+                starts_mid_line,
+                preserve_spaces,
             )?;
         }
 
@@ -1501,6 +1814,10 @@ impl TextShaper {
     }
 
     /// Internal helper to wrap a single segment (no mandatory breaks).
+    /// `starts_mid_line`: the segment's first line begins at an inline
+    /// cursor past the line start, so "nothing fits" means "start on the
+    /// next line box", never "overflow the partially-filled line".
+    #[allow(clippy::too_many_arguments)]
     fn wrap_segment(
         &self,
         text: &str,
@@ -1513,6 +1830,8 @@ impl TextShaper {
         max_width: f32,
         breaker: &LineBreaker,
         base_offset: usize,
+        starts_mid_line: bool,
+        preserve_spaces: bool,
     ) -> Result<Vec<WrappedLine>, TextError> {
         if text.is_empty() {
             return Ok(vec![]);
@@ -1520,6 +1839,22 @@ impl TextShaper {
 
         let mut lines = Vec::new();
         let mut line_start = 0;
+        // Collapsible white space at a break point is consumed by the
+        // break; a PRESERVED space (break-spaces) is content on the next
+        // line and stays.
+        let skip_break_spaces = |line_start: &mut usize| {
+            if preserve_spaces {
+                return;
+            }
+            while *line_start < text.len() && text[*line_start..].starts_with(is_collapsible_space)
+            {
+                *line_start += text[*line_start..]
+                    .chars()
+                    .next()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(1);
+            }
+        };
 
         while line_start < text.len() {
             // The first rendered line may have a narrower budget (a run
@@ -1553,10 +1888,12 @@ impl TextShaper {
             )?;
 
             if break_offset == 0 {
-                // Nothing fits on a NARROWED first line: start the run on
-                // the next (full-width) line box instead of overflowing a
-                // partially-filled line.
-                if lines.is_empty() && first_line_max_width < max_width {
+                // Nothing fits on a first line that begins MID-LINE: start
+                // the run on the next (full-width) line box instead of
+                // overflowing a partially-filled line. `starts_mid_line`, not
+                // `first < max`: at container width 0 both budgets are 0 and
+                // the proxy went blind (WPT break-boundary-2-chars-001).
+                if lines.is_empty() && starts_mid_line {
                     lines.push(WrappedLine {
                         runs: vec![],
                         width: 0.0,
@@ -1573,11 +1910,33 @@ impl TextShaper {
                     );
                 let line_end = if may_break_mid_word {
                     // overflow-wrap: anywhere/break-word or word-break:
-                    // break-all — force break at the first grapheme boundary.
-                    rustkit_text::segmentation::grapheme_boundaries(remaining)
-                        .get(1)
-                        .copied()
-                        .unwrap_or(remaining.len())
+                    // break-all — emergency-break the word, taking as many
+                    // graphemes as FIT the line (Chrome fills the line; it
+                    // does not break after the first character). Minimum one
+                    // grapheme so the loop always advances.
+                    let boundaries =
+                        rustkit_text::segmentation::grapheme_boundaries(remaining);
+                    let mut fitted = 0usize;
+                    for &offset in boundaries.iter().skip(1) {
+                        let shaped_prefix = self.shape(
+                            &remaining[..offset],
+                            font_chain,
+                            weight,
+                            style,
+                            stretch,
+                            size,
+                        )?;
+                        if shaped_prefix.metrics.width <= cur_max {
+                            fitted = offset;
+                        } else {
+                            break;
+                        }
+                    }
+                    if fitted > 0 {
+                        fitted
+                    } else {
+                        boundaries.get(1).copied().unwrap_or(remaining.len())
+                    }
                 } else {
                     // css-text-3 §5.2: when no break opportunity exists on the
                     // line, the unbreakable unit stays on it and OVERFLOWS —
@@ -1602,16 +1961,8 @@ impl TextShaper {
                     end_offset: base_offset + line_start + line_end,
                 });
 
-                // Skip whitespace at the break point
                 line_start += line_end;
-                while line_start < text.len() && text[line_start..].starts_with(char::is_whitespace)
-                {
-                    line_start += text[line_start..]
-                        .chars()
-                        .next()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(1);
-                }
+                skip_break_spaces(&mut line_start);
             } else {
                 let line_text = &remaining[..break_offset];
                 let shaped_line =
@@ -1624,16 +1975,8 @@ impl TextShaper {
                     end_offset: base_offset + line_start + break_offset,
                 });
 
-                // Skip whitespace at the break point
                 line_start += break_offset;
-                while line_start < text.len() && text[line_start..].starts_with(char::is_whitespace)
-                {
-                    line_start += text[line_start..]
-                        .chars()
-                        .next()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(1);
-                }
+                skip_break_spaces(&mut line_start);
             }
         }
 
@@ -1675,6 +2018,30 @@ impl TextShaper {
 
         Ok(best_break)
     }
+}
+
+/// css-text-3 §4.1: the white space that COLLAPSES (and is removed at a
+/// line's edges) is document white space — space, tab, and the line-ending
+/// characters. `char::is_whitespace` also says yes to U+00A0 NO-BREAK SPACE,
+/// which is a rendered, non-collapsible character: skipping it at a break
+/// point deleted it from the next line (WPT line-break-anywhere-006:
+/// "XXXX&nbsp;XXXX X X" lost its nbsp and re-flowed every later line).
+fn is_collapsible_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c')
+}
+
+/// Default-ignorable code points that modify a neighbouring character and
+/// take no space of their own when no face maps them: variation selectors
+/// (U+FE00–FE0F, U+E0100–E01EF), ZWSP/ZWNJ/ZWJ, word joiner, BOM.
+fn is_default_ignorable(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'..='\u{200D}'
+            | '\u{2060}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{E0100}'..='\u{E01EF}'
+    )
 }
 
 /// A wrapped line of text.
@@ -1846,14 +2213,20 @@ impl FontCacheKey {
 pub struct FontLoader {
     /// Loaded font faces, keyed by (partition, face identity).
     loaded: RwLock<HashMap<FontCacheKey, LoadedFont>>,
+    /// Faces whose source could not be fetched or read. Remembered so a
+    /// relayout does not retry (and re-log) the same dead URL every frame.
+    failed: RwLock<std::collections::HashSet<FontCacheKey>>,
     /// Queued loads, each carrying the partition it was requested in.
     pending: RwLock<Vec<(FontCacheKey, FontFaceRule)>>,
 }
 
-#[allow(dead_code)]
+/// The bytes of one fetched face plus the descriptors its rule declared.
+/// The bytes are shared, not copied, into the platform registry on install.
 struct LoadedFont {
     family: String,
-    data: Vec<u8>,
+    weight: u16,
+    italic: bool,
+    data: std::sync::Arc<Vec<u8>>,
 }
 
 impl FontLoader {
@@ -1861,6 +2234,7 @@ impl FontLoader {
     pub fn new() -> Self {
         Self {
             loaded: RwLock::new(HashMap::new()),
+            failed: RwLock::new(std::collections::HashSet::new()),
             pending: RwLock::new(Vec::new()),
         }
     }
@@ -1882,44 +2256,67 @@ impl FontLoader {
         self.pending.read().unwrap().len()
     }
 
-    /// Load all pending fonts (call from network thread).
-    #[allow(unused)]
-    pub async fn load_pending(&self) -> Vec<Result<String, TextError>> {
-        let rules = {
-            let mut pending = self.pending.write().unwrap();
-            std::mem::take(&mut *pending)
-        };
-
-        let mut results = Vec::with_capacity(rules.len());
-        for (key, rule) in rules {
-            results.push(self.load_font(key, rule).await);
-        }
-        results
+    /// Hand the queued rules to whoever owns the network. The loader has no
+    /// fetch path of its own — the engine resolves and fetches, then calls
+    /// [`insert_loaded`](Self::insert_loaded) with the bytes.
+    pub fn take_pending(&self) -> Vec<(FontCacheKey, FontFaceRule)> {
+        let mut pending = self.pending.write().unwrap();
+        std::mem::take(&mut *pending)
     }
 
-    /// Load a single font.
-    async fn load_font(
-        &self,
-        key: FontCacheKey,
-        rule: FontFaceRule,
-    ) -> Result<String, TextError> {
-        // In a full implementation, this would:
-        // 1. Fetch the font file from rule.src
-        // 2. Parse the font data
-        // 3. Register with DirectWrite
-        // For now, we just track the rule
+    /// Record a fetched face. The family/weight/style come from the key, so
+    /// the bytes can never be filed under a different identity than the rule
+    /// that asked for them.
+    pub fn insert_loaded(&self, key: FontCacheKey, data: Vec<u8>) {
+        let entry = LoadedFont {
+            family: key.family.clone(),
+            weight: key.weight,
+            italic: key.style != "Normal",
+            data: std::sync::Arc::new(data),
+        };
+        self.failed.write().unwrap().remove(&key);
+        self.loaded.write().unwrap().insert(key, entry);
+    }
 
-        let family = rule.family.clone();
-        let mut loaded = self.loaded.write().unwrap();
-        loaded.insert(
-            key,
-            LoadedFont {
-                family: rule.family,
-                data: Vec::new(),
-            },
-        );
+    /// Record that this face's source is dead, so relayouts stop retrying it.
+    pub fn mark_failed(&self, key: FontCacheKey) {
+        self.failed.write().unwrap().insert(key);
+    }
 
-        Ok(family)
+    pub fn is_failed(&self, key: &FontCacheKey) -> bool {
+        self.failed.read().unwrap().contains(key)
+    }
+
+    /// Is this exact face (partition + identity) loaded?
+    pub fn is_loaded_key(&self, key: &FontCacheKey) -> bool {
+        self.loaded.read().unwrap().contains_key(key)
+    }
+
+    /// Every loaded face of ONE partition, in a deterministic order, ready
+    /// for the platform registry. Only the requested partition's faces are
+    /// ever returned — this is the slice the engine installs before laying
+    /// out a view of that site, and it is the only way faces leave here.
+    pub fn faces_for(&self, partition: &TopLevelSite) -> Vec<rustkit_text::webfonts::WebFontFace> {
+        let loaded = self.loaded.read().unwrap();
+        let mut faces: Vec<(&FontCacheKey, &LoadedFont)> = loaded
+            .iter()
+            .filter(|(k, _)| k.partition == *partition)
+            .collect();
+        // HashMap order is arbitrary; a stable order keeps the installed set
+        // (and its identity tag) the same across relayouts.
+        faces.sort_by(|(a, _), (b, _)| {
+            (&a.family, a.weight, &a.style, &a.stretch, &a.src)
+                .cmp(&(&b.family, b.weight, &b.style, &b.stretch, &b.src))
+        });
+        faces
+            .into_iter()
+            .map(|(_, f)| rustkit_text::webfonts::WebFontFace {
+                family: f.family.clone(),
+                weight: f.weight,
+                italic: f.italic,
+                data: f.data.clone(),
+            })
+            .collect()
     }
 
     /// Is this face loaded IN THIS PARTITION?
@@ -1973,7 +2370,7 @@ mod tests {
 
         let mono = FontFamilyChain::from_css_value("monospace");
         #[cfg(target_os = "macos")]
-        assert_eq!(mono.primary, "SF Mono");
+        assert_eq!(mono.primary, "Menlo");
         #[cfg(not(target_os = "macos"))]
         assert_eq!(mono.primary, "Cascadia Code");
 
@@ -2083,6 +2480,48 @@ mod tests {
         assert!(!run.glyphs.is_empty());
     }
 
+    #[test]
+    fn nbsp_survives_a_break_point() {
+        // U+00A0 is White_Space to `char::is_whitespace` but NOT collapsible
+        // document white space (css-text §4.1): the break-point skip must not
+        // eat it. WPT line-break-anywhere-006 wraps "XXXX&nbsp;XXXX X X" in a
+        // 4ch box as "XXXX" / "&nbsp;XXX" / ...; skipping the nbsp gave
+        // "XXXX" / "XXXX" and re-flowed every later line.
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::new("monospace");
+        let cell = |s: &str| {
+            shaper
+                .shape(s, &chain, FontWeight::NORMAL, FontStyle::Normal, FontStretch::Normal, 16.0)
+                .unwrap()
+                .metrics
+                .width
+        };
+        let four = cell("XXXX");
+        assert!(four > 0.0 && cell("XXXX\u{a0}") > four + 0.5, "monospace nbsp has an advance");
+        let lines = shaper
+            .wrap_text(
+                "XXXX\u{a0}XXXX X X",
+                &chain,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                FontStretch::Normal,
+                16.0,
+                four + 0.5,
+                CssWordBreak::BreakAll,
+                CssOverflowWrap::Normal,
+            )
+            .unwrap();
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|l| l.runs.iter().map(|r| r.text.as_str()).collect::<String>())
+            .collect();
+        assert_eq!(texts.first().map(String::as_str), Some("XXXX"), "{texts:?}");
+        assert!(
+            texts.get(1).map_or(false, |t| t.starts_with('\u{a0}')),
+            "the nbsp must start line 2, not vanish at the break: {texts:?}"
+        );
+    }
+
     fn face(family: &str, src: &str) -> FontFaceRule {
         FontFaceRule {
             family: family.to_string(),
@@ -2102,6 +2541,56 @@ mod tests {
         assert!(!loader.is_loaded(&site, "TestFont"));
         loader.queue_font_face(site, face("TestFont", "url(test.woff2)"));
         assert_eq!(loader.pending_count(), 1);
+        assert_eq!(loader.take_pending().len(), 1);
+        assert_eq!(loader.pending_count(), 0, "take_pending drains the queue");
+    }
+
+    #[test]
+    fn a_loaded_face_is_visible_only_in_its_own_partition() {
+        // THE PRIVACY PROPERTY on the read side: the slice handed to the
+        // platform registry for site A must never carry a face site B loaded.
+        let loader = FontLoader::new();
+        let a = TopLevelSite::from_host("a.test");
+        let b = TopLevelSite::from_host("b.test");
+        let key = FontCacheKey::new(a.clone(), &face("Inter", "/i.woff2"));
+        assert!(!loader.is_loaded_key(&key));
+        loader.insert_loaded(key.clone(), vec![1, 2, 3]);
+        assert!(loader.is_loaded_key(&key));
+        assert!(loader.is_loaded(&a, "Inter"));
+        assert!(!loader.is_loaded(&b, "Inter"));
+        let faces_a = loader.faces_for(&a);
+        assert_eq!(faces_a.len(), 1);
+        assert_eq!(faces_a[0].family, "Inter");
+        assert_eq!(faces_a[0].weight, 400);
+        assert!(!faces_a[0].italic);
+        assert_eq!(*faces_a[0].data, vec![1, 2, 3]);
+        assert!(loader.faces_for(&b).is_empty());
+    }
+
+    #[test]
+    fn a_failed_face_stays_failed_until_it_loads() {
+        let loader = FontLoader::new();
+        let site = TopLevelSite::from_host("example.com");
+        let key = FontCacheKey::new(site, &face("Dead", "/dead.ttf"));
+        assert!(!loader.is_failed(&key));
+        loader.mark_failed(key.clone());
+        assert!(loader.is_failed(&key), "a dead source is remembered, not retried every relayout");
+        loader.insert_loaded(key.clone(), vec![0]);
+        assert!(!loader.is_failed(&key), "a later successful load clears the failure");
+    }
+
+    #[test]
+    fn faces_for_is_deterministically_ordered() {
+        // The engine tags the installed set by partition + count; if the
+        // order wandered between calls the registry would re-parse every
+        // font file on every relayout.
+        let loader = FontLoader::new();
+        let site = TopLevelSite::from_host("example.com");
+        for name in ["Zeta", "Alpha", "Mid"] {
+            loader.insert_loaded(FontCacheKey::new(site.clone(), &face(name, "/x.ttf")), vec![]);
+        }
+        let names: Vec<String> = loader.faces_for(&site).into_iter().map(|f| f.family).collect();
+        assert_eq!(names, vec!["Alpha", "Mid", "Zeta"]);
     }
 
     #[test]
@@ -2354,9 +2843,63 @@ mod tests {
             16.0,
             200.0,
             CssWordBreak::Normal,
+            CssOverflowWrap::Normal,
         );
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    /// WPT line-break-anywhere-005: under `white-space: break-spaces` a
+    /// preserved space at a soft break starts the next line (`X XX` /
+    /// ` XX ` / `X XX` / ` X`); the collapsible-white-space rule that eats
+    /// it re-flows every later line (`X XX` / `XX X` / `XX X`). Monospace so
+    /// every 4-character line has the same advance; `break-all` stands in
+    /// for `line-break: anywhere` (the layout crate maps it the same way).
+    #[test]
+    fn test_wrap_break_spaces_keeps_the_space_at_a_soft_break() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::monospace();
+        let four_chars = shaper
+            .shape(
+                "X XX",
+                &chain,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                FontStretch::Normal,
+                20.0,
+            )
+            .expect("shape")
+            .metrics
+            .width;
+        let wrap = |white_space: rustkit_css::WhiteSpace| -> Vec<String> {
+            shaper
+                .wrap_text_white_space(
+                    "X XX XX X XX X",
+                    &chain,
+                    FontWeight::NORMAL,
+                    FontStyle::Normal,
+                    FontStretch::Normal,
+                    20.0,
+                    four_chars * 1.01,
+                    CssWordBreak::BreakAll,
+                    CssOverflowWrap::Normal,
+                    white_space,
+                )
+                .expect("wrap")
+                .iter()
+                .map(|l| l.text())
+                .collect()
+        };
+        assert_eq!(
+            wrap(rustkit_css::WhiteSpace::BreakSpaces),
+            ["X XX", " XX ", "X XX", " X"]
+        );
+        // The collapsible default still consumes the space at the break —
+        // this is the legacy behaviour every other white-space value keeps.
+        assert_eq!(
+            wrap(rustkit_css::WhiteSpace::Normal),
+            ["X XX", "XX X", "XX X"]
+        );
     }
 
     #[test]
@@ -2372,6 +2915,7 @@ mod tests {
             16.0,
             1000.0, // Very wide, should fit on one line
             CssWordBreak::Normal,
+            CssOverflowWrap::Normal,
         );
         assert!(result.is_ok());
         let lines = result.unwrap();
@@ -2392,6 +2936,7 @@ mod tests {
             16.0,
             80.0, // Narrow width to force wrapping
             CssWordBreak::Normal,
+            CssOverflowWrap::Normal,
         );
         assert!(result.is_ok());
         let lines = result.unwrap();
@@ -2416,6 +2961,7 @@ mod tests {
             16.0,
             1000.0,
             CssWordBreak::Normal,
+            CssOverflowWrap::Normal,
         );
         assert!(result.is_ok());
         let lines = result.unwrap();
@@ -2440,6 +2986,7 @@ mod tests {
             16.0,
             50.0, // Very narrow
             CssWordBreak::BreakAll,
+            CssOverflowWrap::Normal,
         );
         assert!(result.is_ok());
         let lines = result.unwrap();
@@ -2460,6 +3007,7 @@ mod tests {
             16.0,
             1000.0,
             CssWordBreak::Normal,
+            CssOverflowWrap::Normal,
         );
         assert!(result.is_ok());
         let lines = result.unwrap();
@@ -2472,5 +3020,84 @@ mod tests {
         assert!(!line.is_empty());
         assert_eq!(line.start_offset, 0);
         assert_eq!(line.end_offset, 4);
+    }
+}
+
+#[cfg(test)]
+mod mid_line_zero_width_tests {
+    use super::*;
+
+    fn wrap(mid_line: bool) -> Vec<String> {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::sans_serif();
+        let f = if mid_line {
+            TextShaper::wrap_text_mid_line
+        } else {
+            TextShaper::wrap_text_with_first_line
+        };
+        f(
+            &shaper,
+            "def",
+            &chain,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+            FontStretch::Normal,
+            32.0,
+            0.0,
+            0.0,
+            CssWordBreak::BreakAll,
+            CssOverflowWrap::Normal,
+        )
+        .expect("wraps")
+        .iter()
+        .map(|l| l.text())
+        .collect()
+    }
+
+    #[test]
+    fn a_mid_line_run_with_no_room_starts_on_the_next_line_box() {
+        // WPT break-boundary-2-chars-001: `def` follows a `pre` span on a
+        // zero-wide line. Nothing fits the remainder, so the run's first line
+        // is EMPTY (closes the open line) and the graphemes go one per line.
+        // The old `first < max` proxy saw 0 < 0 == false and glued `d` onto
+        // the span's line.
+        assert_eq!(wrap(true), ["", "d", "e", "f"]);
+    }
+
+    #[test]
+    fn the_legacy_entry_keeps_its_first_lt_max_proxy() {
+        // Callers that do not know the cursor position keep the old reading:
+        // equal budgets mean "not mid-line", so no empty leading line.
+        assert_eq!(wrap(false), ["d", "e", "f"]);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod measure_side_font_chain_tests {
+    use super::*;
+
+    fn width(chain_css: &str) -> f32 {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::from_css_value(chain_css);
+        shaper
+            .shape("0000", &chain, FontWeight::NORMAL, FontStyle::Normal, FontStretch::Normal, 16.0)
+            .expect("shapes")
+            .metrics
+            .width
+    }
+
+    /// Core Text hands back a substitute for a name it does not have. Paint
+    /// (`named_font`, #164) walks past it; MEASURE must too, or a page
+    /// naming a missing family ahead of Menlo lays text out at Helvetica's
+    /// advances and paints it in Menlo. T-RED: with `new_from_name` trusted
+    /// as installed, the first width is Helvetica's "0000" (≈35.6px), not
+    /// Menlo's (≈38.5px).
+    #[test]
+    fn measure_walks_past_an_uninstalled_family_like_paint_does() {
+        let walked = width("No Such Face n34, Menlo");
+        let menlo = width("Menlo");
+        let helvetica = width("Helvetica");
+        assert_ne!(menlo, helvetica, "probe fonts must differ for this test to discriminate");
+        assert_eq!(walked, menlo, "missing family must be skipped at measure time");
     }
 }

@@ -34,6 +34,9 @@ futures = "0.3"
 # URL handling
 url = "2.5"
 
+# data: URI payloads (@font-face src)
+base64 = "0.22"
+
 # Error handling
 thiserror = "1.0"
 

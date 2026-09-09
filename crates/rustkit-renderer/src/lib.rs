@@ -352,7 +352,10 @@ pub struct Renderer {
     conic_gradient_queue: Vec<QueuedConicGradient>,
 
     // State stacks
-    clip_stack: Vec<Rect>,
+    clip_stack: Vec<ClipEntry>,
+    /// Scratch buffer for `draw_clipped_quad`. Lives on the renderer so the
+    /// hot path allocates once, not once per quad.
+    clip_pieces: Vec<(Rect, f32)>,
     stacking_contexts: Vec<StackingContext>,
     /// Stack of 2D transform matrices and their origins.
     /// Each entry is (matrix [a,b,c,d,e,f], origin (x,y)).
@@ -612,6 +615,7 @@ impl Renderer {
             radial_gradient_queue: Vec::with_capacity(16),
             conic_gradient_queue: Vec::with_capacity(16),
             clip_stack: Vec::new(),
+            clip_pieces: Vec::new(),
             stacking_contexts: Vec::new(),
             transform_stack: Vec::new(),
             texture_cache,
@@ -720,6 +724,7 @@ impl Renderer {
         if self.color_vertices.is_empty()
             && self.texture_vertices.is_empty()
             && self.image_vertices.is_empty()
+            && self.color_glyph_vertices.is_empty()
         {
             return Ok(());
         }
@@ -1243,14 +1248,66 @@ impl Renderer {
             // Use GPU gradient path - flush batches before each gradient for correct z-order
             self.execute_with_gpu_gradients(commands, target)?;
         } else {
-            // Fast path - no backdrop blur or GPU gradients, process normally
+            // Fast path - no backdrop blur or GPU gradients, process normally.
+            // One z-order hazard remains: the batch flush draws ALL color
+            // quads before ALL glyph quads, so a solid fill that arrives
+            // AFTER glyphs are batched — e.g. a positioned box's background
+            // painting above in-flow text per CSS 2.1 Appendix E — would be
+            // drawn UNDER that text. Flush first so paint follows command
+            // order (same discipline as the GPU-gradient path).
+            let mut flushed_mid_stream = false;
             for cmd in commands {
+                if self.solid_fill_occludes_batched_glyphs(cmd) {
+                    self.flush_batches_to(target, !flushed_mid_stream)?;
+                    flushed_mid_stream = true;
+                }
                 self.process_command(cmd);
             }
-            self.flush_to(target)?;
+            if flushed_mid_stream {
+                self.flush_batches_to(target, false)?;
+            } else {
+                self.flush_to(target)?;
+            }
         }
 
         Ok(())
+    }
+
+    /// True when `cmd` is a solid fill whose rect overlaps a glyph quad
+    /// already sitting in the batch — the case where flush order (colors
+    /// before glyphs) would contradict command order. Batched glyph
+    /// positions are already transformed, so the rect's corners get the
+    /// same transform before the overlap test.
+    fn solid_fill_occludes_batched_glyphs(&self, cmd: &DisplayCommand) -> bool {
+        if self.texture_vertices.is_empty() && self.color_glyph_vertices.is_empty() {
+            return false;
+        }
+        let rect = match cmd {
+            DisplayCommand::SolidColor(color, rect) if color.a > 0.0 => rect,
+            DisplayCommand::RoundedRect { color, rect, .. } if color.a > 0.0 => rect,
+            _ => return false,
+        };
+        let (ax, ay) = self.transform_point(rect.x, rect.y);
+        let (bx, by) = self.transform_point(rect.x + rect.width, rect.y + rect.height);
+        let (rx0, rx1) = (ax.min(bx), ax.max(bx));
+        let (ry0, ry1) = (ay.min(by), ay.max(by));
+
+        let overlaps = |verts: &[TextureVertex]| {
+            verts.chunks_exact(4).any(|quad| {
+                let mut qx0 = f32::MAX;
+                let mut qy0 = f32::MAX;
+                let mut qx1 = f32::MIN;
+                let mut qy1 = f32::MIN;
+                for v in quad {
+                    qx0 = qx0.min(v.position[0]);
+                    qy0 = qy0.min(v.position[1]);
+                    qx1 = qx1.max(v.position[0]);
+                    qy1 = qy1.max(v.position[1]);
+                }
+                rx0 < qx1 && rx1 > qx0 && ry0 < qy1 && ry1 > qy0
+            })
+        };
+        overlaps(&self.texture_vertices) || overlaps(&self.color_glyph_vertices)
     }
 
     /// Execute commands with GPU blur support for backdrop filters.
@@ -1974,6 +2031,9 @@ impl Renderer {
                 border_width,
                 focused,
                 caret_position,
+                font_family,
+                font_weight,
+                padding,
             } => {
                 self.draw_text_input(
                     *rect,
@@ -1987,6 +2047,9 @@ impl Renderer {
                     *border_width,
                     *focused,
                     *caret_position,
+                    font_family,
+                    *font_weight,
+                    *padding,
                 );
             }
 
@@ -2001,6 +2064,9 @@ impl Renderer {
                 border_radius,
                 pressed,
                 focused,
+                font_family,
+                font_weight,
+                padding,
             } => {
                 self.draw_button(
                     *rect,
@@ -2013,6 +2079,9 @@ impl Renderer {
                     *border_radius,
                     *pressed,
                     *focused,
+                    font_family,
+                    *font_weight,
+                    *padding,
                 );
             }
 
@@ -2026,6 +2095,10 @@ impl Renderer {
 
             DisplayCommand::PushClip(rect) => {
                 self.push_clip(*rect);
+            }
+
+            DisplayCommand::PushClipRounded { rect, radius } => {
+                self.push_clip_rounded(*rect, *radius);
             }
 
             DisplayCommand::PopClip => {
@@ -2208,61 +2281,51 @@ impl Renderer {
 
     /// Draw a solid color rectangle.
     fn draw_solid_rect(&mut self, rect: Rect, color: Color) {
-        // Apply clipping
-        let rect = if let Some(clip) = self.current_clip() {
-            if let Some(clipped) = rect.intersect(&clip) {
-                clipped
-            } else {
-                return; // Fully clipped
-            }
-        } else {
-            rect
-        };
-
         let c = [
             color.r as f32 / 255.0,
             color.g as f32 / 255.0,
             color.b as f32 / 255.0,
             color.a,
         ];
-
-        let base = self.color_vertices.len() as u32;
-
-        // Apply transform to corners
-        let (x0, y0) = self.transform_point(rect.x, rect.y);
-        let (x1, y1) = self.transform_point(rect.x + rect.width, rect.y);
-        let (x2, y2) = self.transform_point(rect.x + rect.width, rect.y + rect.height);
-        let (x3, y3) = self.transform_point(rect.x, rect.y + rect.height);
-
-        self.color_vertices.extend_from_slice(&[
-            ColorVertex { position: [x0, y0], color: c },
-            ColorVertex { position: [x1, y1], color: c },
-            ColorVertex { position: [x2, y2], color: c },
-            ColorVertex { position: [x3, y3], color: c },
-        ]);
-
-        self.color_indices.extend_from_slice(&[
-            base, base + 1, base + 2,
-            base, base + 2, base + 3,
-        ]);
+        self.draw_clipped_quad(rect, c);
     }
 
     /// Draw a solid color rectangle using high-precision color.
     /// This is the preferred internal method for gradient rendering.
     fn draw_solid_rect_f32(&mut self, rect: Rect, color: rustkit_css::ColorF32) {
-        // Apply clipping
-        let rect = if let Some(clip) = self.current_clip() {
-            if let Some(clipped) = rect.intersect(&clip) {
-                clipped
-            } else {
-                return; // Fully clipped
-            }
-        } else {
-            rect
-        };
-
         // Color already in normalized f32 format - no conversion needed
-        let c = color.to_array();
+        self.draw_clipped_quad(rect, color.to_array());
+    }
+
+    /// Clip a quad against the current clip and emit what survives.
+    ///
+    /// The rectangular half is unchanged from before rounded clips existed. The
+    /// rounded half only runs when a rounded clip is actually on the stack, so
+    /// a page without one emits exactly the vertices it always did.
+    fn draw_clipped_quad(&mut self, rect: Rect, color: [f32; 4]) {
+        // Borrowed out and put back so the immutable borrow of `clip_stack`
+        // inside `collect_clipped_pieces` does not collide with the mutable
+        // borrow the emit loop needs. Reused rather than freshly allocated
+        // because gradients call this once per cell — up to 100k times a frame.
+        let mut pieces = std::mem::take(&mut self.clip_pieces);
+        pieces.clear();
+        collect_clipped_pieces(self.clip_stack.last(), rect, &mut pieces);
+
+        for &(piece, coverage) in &pieces {
+            let mut faded = color;
+            faded[3] *= coverage;
+            self.push_color_quad(piece, faded);
+        }
+
+        self.clip_pieces = pieces;
+    }
+
+    /// Append one transformed quad to the color batch. No clipping — callers
+    /// have already done it.
+    fn push_color_quad(&mut self, rect: Rect, c: [f32; 4]) {
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
 
         let base = self.color_vertices.len() as u32;
 
@@ -3548,8 +3611,12 @@ impl Renderer {
             let center_x = rect.x + half_width;
             let center_y = rect.y + half_height;
 
-            for row in 0..rows {
-                for col in 0..cols {
+            let (vp_w, vp_h) = (self.viewport_size.0 as f32, self.viewport_size.1 as f32);
+            let (row_first, row_last) = self.visible_cell_range(rect.y, rect.height, cell_size, rows, vp_h);
+            let (col_first, col_last) = self.visible_cell_range(rect.x, rect.width, cell_size, cols, vp_w);
+
+            for row in row_first..row_last {
+                for col in col_first..col_last {
                     let cell_x = rect.x + col as f32 * cell_size;
                     let cell_y = rect.y + row as f32 * cell_size;
                     let cell_center_x = cell_x + cell_size * 0.5;
@@ -3756,11 +3823,18 @@ impl Renderer {
         } else {
             1.0
         };
-        let mut y = rect.y;
-        while y < rect.y + rect.height {
+        let (vp_w, vp_h) = (self.viewport_size.0 as f32, self.viewport_size.1 as f32);
+        let rows = (rect.height / step_size).ceil().max(1.0) as usize;
+        let cols = (rect.width / step_size).ceil().max(1.0) as usize;
+        let (row_first, row_last) = self.visible_cell_range(rect.y, rect.height, step_size, rows, vp_h);
+        let (col_first, col_last) = self.visible_cell_range(rect.x, rect.width, step_size, cols, vp_w);
+        let y_end = (rect.y + row_last as f32 * step_size).min(rect.y + rect.height);
+        let x_end = (rect.x + col_last as f32 * step_size).min(rect.x + rect.width);
+        let mut y = rect.y + row_first as f32 * step_size;
+        while y < y_end {
             let row_height = step_size.min(rect.y + rect.height - y);
-            let mut x = rect.x;
-            while x < rect.x + rect.width {
+            let mut x = rect.x + col_first as f32 * step_size;
+            while x < x_end {
                 let col_width = step_size.min(rect.x + rect.width - x);
                 let cell_center_x = x + col_width / 2.0;
                 let cell_center_y = y + row_height / 2.0;
@@ -3888,11 +3962,18 @@ impl Renderer {
             1.0
         };
 
-        let mut y = rect.y;
-        while y < rect.y + rect.height {
+        let (vp_w, vp_h) = (self.viewport_size.0 as f32, self.viewport_size.1 as f32);
+        let rows = (rect.height / step_size).ceil().max(1.0) as usize;
+        let cols = (rect.width / step_size).ceil().max(1.0) as usize;
+        let (row_first, row_last) = self.visible_cell_range(rect.y, rect.height, step_size, rows, vp_h);
+        let (col_first, col_last) = self.visible_cell_range(rect.x, rect.width, step_size, cols, vp_w);
+        let y_end = (rect.y + row_last as f32 * step_size).min(rect.y + rect.height);
+        let x_end = (rect.x + col_last as f32 * step_size).min(rect.x + rect.width);
+        let mut y = rect.y + row_first as f32 * step_size;
+        while y < y_end {
             let row_height = step_size.min(rect.y + rect.height - y);
-            let mut x = rect.x;
-            while x < rect.x + rect.width {
+            let mut x = rect.x + col_first as f32 * step_size;
+            while x < x_end {
                 let col_width = step_size.min(rect.x + rect.width - x);
                 let cell_center_x = x + col_width / 2.0;
                 let cell_center_y = y + row_height / 2.0;
@@ -4109,10 +4190,13 @@ impl Renderer {
         border_width: f32,
         focused: bool,
         caret_position: Option<usize>,
+        font_family: &str,
+        font_weight: u16,
+        padding: [f32; 4],
     ) {
         // Draw background
         self.draw_solid_rect(rect, background_color);
-        
+
         // Draw border
         let border_rect = rect;
         self.draw_solid_rect(
@@ -4132,31 +4216,44 @@ impl Renderer {
             border_color,
         );
         
-        // Draw text or placeholder
-        let padding = 6.0;
-        let text_x = rect.x + padding;
-        let text_y = rect.y + (rect.height + font_size) / 2.0 - font_size * 0.2;
-        
+        // Draw text or placeholder, seated like Chrome's inner editor (see
+        // form_text_seat for what the old formula got wrong).
+        let (text_x, text_top, ascent, descent) =
+            Self::form_text_seat(rect, border_width, padding, font_family, font_size);
+
         let (display_text, display_color) = if value.is_empty() {
             (placeholder, placeholder_color)
         } else {
             (value, text_color)
         };
-        
+
         if !display_text.is_empty() {
-            self.draw_text(display_text, text_x, text_y, display_color, font_size, "sans-serif", 400, 0);
+            self.draw_text_with_metrics(
+                display_text,
+                text_x,
+                text_top,
+                display_color,
+                font_size,
+                font_family,
+                font_weight,
+                0,
+                None,
+                Some(ascent),
+            );
         }
-        
+
         // Draw focus ring if focused
         if focused {
             self.draw_focus_ring(border_rect, Color::new(0, 122, 255, 1.0), 2.0, 2.0);
         }
-        
-        // Draw caret if focused and position is set
+
+        // Draw caret if focused and position is set: after the measured
+        // width of the value's first `pos` chars, spanning the text line.
         if focused {
             if let Some(pos) = caret_position {
-                let caret_x = text_x + (pos as f32 * font_size * 0.5);
-                self.draw_caret(caret_x, rect.y + 4.0, rect.height - 8.0, text_color);
+                let prefix: String = value.chars().take(pos).collect();
+                let caret_x = text_x + Self::measure_run_width(&prefix, font_family, font_size);
+                self.draw_caret(caret_x, text_top, ascent + descent, text_color);
             }
         }
     }
@@ -4175,6 +4272,9 @@ impl Renderer {
         _border_radius: f32,
         pressed: bool,
         focused: bool,
+        font_family: &str,
+        font_weight: u16,
+        padding: [f32; 4],
     ) {
         // Adjust colors for pressed state
         let bg = if pressed {
@@ -4209,12 +4309,28 @@ impl Renderer {
             border_color,
         );
         
-        // Draw label (centered)
+        // Draw label: measured width centred in the content box, line box
+        // centred vertically (form_text_seat — the old seat painted ~0.8em
+        // low and centred a `bytes * 0.5em` guess of the width).
         if !label.is_empty() {
-            let label_width = label.len() as f32 * font_size * 0.5;
-            let text_x = rect.x + (rect.width - label_width) / 2.0;
-            let text_y = rect.y + (rect.height + font_size) / 2.0 - font_size * 0.2;
-            self.draw_text(label, text_x, text_y, text_color, font_size, "sans-serif", 400, 0);
+            let (_left, text_top, ascent, _descent) =
+                Self::form_text_seat(rect, border_width, padding, font_family, font_size);
+            let label_width = Self::measure_run_width(label, font_family, font_size);
+            let inner_x = rect.x + border_width + padding[3];
+            let inner_w = (rect.width - 2.0 * border_width - padding[1] - padding[3]).max(0.0);
+            let text_x = inner_x + (inner_w - label_width) / 2.0;
+            self.draw_text_with_metrics(
+                label,
+                text_x,
+                text_top,
+                text_color,
+                font_size,
+                font_family,
+                font_weight,
+                0,
+                None,
+                Some(ascent),
+            );
         }
         
         // Draw focus ring if focused
@@ -4426,34 +4542,69 @@ impl Renderer {
 
     /// One-per-run ascent fallback for legacy callers that ship no layout
     /// ascent — same metric source the deleted per-glyph lookup used.
-    #[cfg(target_os = "macos")]
     fn fallback_run_ascent(font_family: &str, font_size: f32) -> f32 {
-        let family = if font_family.is_empty() { "Helvetica" } else { font_family };
-        rustkit_text::macos::TextShaper::new(family, font_size as f64)
-            .unwrap_or_else(|_| rustkit_text::macos::TextShaper::with_system_font(font_size as f64))
-            .get_metrics()
-            .ascent
+        Self::fallback_run_metrics(font_family, font_size).0
+    }
+
+    /// `(ascent, descent)` of the run font — the renderer-side metric source
+    /// for callers that ship no layout metrics (form-control text).
+    #[cfg(target_os = "macos")]
+    fn fallback_run_metrics(font_family: &str, font_size: f32) -> (f32, f32) {
+        let m = Self::run_shaper(font_family, font_size).get_metrics();
+        (m.ascent, m.descent)
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn fallback_run_ascent(_font_family: &str, font_size: f32) -> f32 {
-        font_size * 0.8
+    fn fallback_run_metrics(_font_family: &str, font_size: f32) -> (f32, f32) {
+        (font_size * 0.8, font_size * 0.2)
     }
 
-    fn draw_text(
-        &mut self,
-        text: &str,
-        x: f32,
-        y: f32,
-        color: Color,
-        font_size: f32,
+    /// Advance width of `text` in the run font. Form-control callers use it
+    /// to centre a button label / place a caret; the old code guessed
+    /// `chars * 0.5em`.
+    #[cfg(target_os = "macos")]
+    fn measure_run_width(text: &str, font_family: &str, font_size: f32) -> f32 {
+        Self::run_shaper(font_family, font_size)
+            .shape(text)
+            .map(|shaped| shaped.advances.iter().sum())
+            .unwrap_or_else(|_| text.chars().count() as f32 * font_size * 0.5)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn measure_run_width(text: &str, _font_family: &str, font_size: f32) -> f32 {
+        text.chars().count() as f32 * font_size * 0.5
+    }
+
+    #[cfg(target_os = "macos")]
+    fn run_shaper(font_family: &str, font_size: f32) -> rustkit_text::macos::TextShaper {
+        let family = if font_family.is_empty() { "Helvetica" } else { font_family };
+        rustkit_text::macos::TextShaper::new(family, font_size as f64)
+            .unwrap_or_else(|_| rustkit_text::macos::TextShaper::with_system_font(font_size as f64))
+    }
+
+    /// Where a form control's text line goes. Chrome centres the inner
+    /// editor's line box inside the control's CONTENT box (border-box minus
+    /// border and padding); returns `(text_x, text_top, ascent, descent)` so
+    /// the caller hands `text_top` + `Some(ascent)` to draw_text_with_metrics.
+    ///
+    /// The old seat was `rect.y + (h + fs)/2 - 0.2fs` — a BASELINE formula —
+    /// handed to draw_text, which treats y as the line TOP and adds the
+    /// ascent AGAIN: every input/button label painted ~0.8em too low (a bare
+    /// 19px control drew its text below its own bottom border), 6px from the
+    /// left regardless of border/padding, in a hardcoded sans-serif.
+    fn form_text_seat(
+        rect: Rect,
+        border_width: f32,
+        padding: [f32; 4],
         font_family: &str,
-        font_weight: u16,
-        font_style: u8,
-    ) {
-        self.draw_text_with_metrics(
-            text, x, y, color, font_size, font_family, font_weight, font_style, None, None,
-        );
+        font_size: f32,
+    ) -> (f32, f32, f32, f32) {
+        let (ascent, descent) = Self::fallback_run_metrics(font_family, font_size);
+        let inner_top = rect.y + border_width + padding[0];
+        let inner_h = (rect.height - 2.0 * border_width - padding[0] - padding[2]).max(0.0);
+        let text_top = inner_top + (inner_h - (ascent + descent)) / 2.0;
+        let text_x = rect.x + border_width + padding[3];
+        (text_x, text_top, ascent, descent)
     }
 
     /// Draw text honoring the ADVANCE CONTRACT: when layout ships per-char
@@ -4486,8 +4637,17 @@ impl Renderer {
         // Baseline: layout's ascent when the command carries one (ADVANCE
         // CONTRACT), else ONE per-run fallback from the same source the old
         // per-glyph lookup used. Glyph entries are baseline-relative.
-        let baseline =
-            y + layout_ascent.unwrap_or_else(|| Self::fallback_run_ascent(font_family, font_size));
+        //
+        // SNAPPED TO A WHOLE DEVICE ROW (INTEGER-BASELINE CONTRACT, pairs
+        // with rustkit_text::macos::baseline_seat): the atlas bitmaps are
+        // rasterized with their baseline on an integer row and report an
+        // integer bearing_y, so a whole-row baseline here means every glyph
+        // on the line lands pixel-aligned with NO vertical resampling. This
+        // is what Skia does for horizontal text (subpixel x, rounded y);
+        // a fractional baseline smeared every glyph across two rows.
+        let baseline = (y
+            + layout_ascent.unwrap_or_else(|| Self::fallback_run_ascent(font_family, font_size)))
+        .round();
 
         // PAINT-0 seating probe (RUSTKIT_PAINT_PROBE=1): paint half of the
         // seating chain — pairs with the layout-side y_cmd log so a flat vs
@@ -4538,10 +4698,24 @@ impl Renderer {
                     let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
                     let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
 
-                    let (x0, y0) = self.transform_point(glyph_x, glyph_y);
-                    let (x1, y1) = self.transform_point(glyph_x + glyph_w, glyph_y);
-                    let (x2, y2) = self.transform_point(glyph_x + glyph_w, glyph_y + glyph_h);
-                    let (x3, y3) = self.transform_point(glyph_x, glyph_y + glyph_h);
+                    // The advance is owed whether or not the glyph survives
+                    // the clip — a clipped-away glyph still occupies its run.
+                    cursor_x += layout_advances
+                        .and_then(|a| a.get(char_idx).copied())
+                        .unwrap_or(entry.advance);
+
+                    let Some((g, tex)) = clip_textured_rect(
+                        self.current_clip(),
+                        Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
+                        entry.tex_coords,
+                    ) else {
+                        continue;
+                    };
+
+                    let (x0, y0) = self.transform_point(g.x, g.y);
+                    let (x1, y1) = self.transform_point(g.x + g.width, g.y);
+                    let (x2, y2) = self.transform_point(g.x + g.width, g.y + g.height);
+                    let (x3, y3) = self.transform_point(g.x, g.y + g.height);
 
                     // White vertex color: the blit pipeline multiplies, so this
                     // passes the emoji's own colors through untinted. Preserve
@@ -4549,19 +4723,15 @@ impl Renderer {
                     let cw = [1.0, 1.0, 1.0, color.a];
                     let base = self.color_glyph_vertices.len() as u32;
                     self.color_glyph_vertices.extend_from_slice(&[
-                        TextureVertex { position: [x0, y0], tex_coords: [entry.tex_coords[0], entry.tex_coords[1]], color: cw },
-                        TextureVertex { position: [x1, y1], tex_coords: [entry.tex_coords[2], entry.tex_coords[1]], color: cw },
-                        TextureVertex { position: [x2, y2], tex_coords: [entry.tex_coords[2], entry.tex_coords[3]], color: cw },
-                        TextureVertex { position: [x3, y3], tex_coords: [entry.tex_coords[0], entry.tex_coords[3]], color: cw },
+                        TextureVertex { position: [x0, y0], tex_coords: [tex[0], tex[1]], color: cw },
+                        TextureVertex { position: [x1, y1], tex_coords: [tex[2], tex[1]], color: cw },
+                        TextureVertex { position: [x2, y2], tex_coords: [tex[2], tex[3]], color: cw },
+                        TextureVertex { position: [x3, y3], tex_coords: [tex[0], tex[3]], color: cw },
                     ]);
                     self.color_glyph_indices.extend_from_slice(&[
                         base, base + 1, base + 2,
                         base, base + 2, base + 3,
                     ]);
-
-                    cursor_x += layout_advances
-                        .and_then(|a| a.get(char_idx).copied())
-                        .unwrap_or(entry.advance);
                     continue;
                 }
             }
@@ -4586,33 +4756,50 @@ impl Renderer {
                 let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
                 let glyph_h = (entry.tex_coords[3] - entry.tex_coords[1]) * atlas_size;
 
+                // ADVANCE CONTRACT: layout's advance wins when present so
+                // painted ink tracks measured width 1:1; the atlas advance
+                // is the fallback for legacy callers. Owed before the clip
+                // check — a clipped-away glyph still occupies its run.
+                cursor_x += layout_advances
+                    .and_then(|a| a.get(char_idx).copied())
+                    .unwrap_or(entry.advance);
+
+                // `overflow: hidden` clips glyphs like everything else.
+                let Some((g, tex)) = clip_textured_rect(
+                    self.current_clip(),
+                    Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
+                    entry.tex_coords,
+                ) else {
+                    continue;
+                };
+
                 // Apply transform to glyph corners
-                let (x0, y0) = self.transform_point(glyph_x, glyph_y);
-                let (x1, y1) = self.transform_point(glyph_x + glyph_w, glyph_y);
-                let (x2, y2) = self.transform_point(glyph_x + glyph_w, glyph_y + glyph_h);
-                let (x3, y3) = self.transform_point(glyph_x, glyph_y + glyph_h);
+                let (x0, y0) = self.transform_point(g.x, g.y);
+                let (x1, y1) = self.transform_point(g.x + g.width, g.y);
+                let (x2, y2) = self.transform_point(g.x + g.width, g.y + g.height);
+                let (x3, y3) = self.transform_point(g.x, g.y + g.height);
 
                 let base = self.texture_vertices.len() as u32;
 
                 self.texture_vertices.extend_from_slice(&[
                     TextureVertex {
                         position: [x0, y0],
-                        tex_coords: [entry.tex_coords[0], entry.tex_coords[1]],
+                        tex_coords: [tex[0], tex[1]],
                         color: c,
                     },
                     TextureVertex {
                         position: [x1, y1],
-                        tex_coords: [entry.tex_coords[2], entry.tex_coords[1]],
+                        tex_coords: [tex[2], tex[1]],
                         color: c,
                     },
                     TextureVertex {
                         position: [x2, y2],
-                        tex_coords: [entry.tex_coords[2], entry.tex_coords[3]],
+                        tex_coords: [tex[2], tex[3]],
                         color: c,
                     },
                     TextureVertex {
                         position: [x3, y3],
-                        tex_coords: [entry.tex_coords[0], entry.tex_coords[3]],
+                        tex_coords: [tex[0], tex[3]],
                         color: c,
                     },
                 ]);
@@ -4621,13 +4808,6 @@ impl Renderer {
                     base, base + 1, base + 2,
                     base, base + 2, base + 3,
                 ]);
-
-                // ADVANCE CONTRACT: layout's advance wins when present so
-                // painted ink tracks measured width 1:1; the atlas advance
-                // is the fallback for legacy callers.
-                cursor_x += layout_advances
-                    .and_then(|a| a.get(char_idx).copied())
-                    .unwrap_or(entry.advance);
             } else {
                 // Fallback: advance by estimated width (or layout's, if given)
                 cursor_x += layout_advances
@@ -4640,6 +4820,13 @@ impl Renderer {
     /// Draw an image.
     fn draw_image(&mut self, url: &str, rect: Rect) {
         if self.texture_cache.contains(url) {
+            // `overflow: hidden` clips replaced content like everything else.
+            let Some((rect, tex)) =
+                clip_textured_rect(self.current_clip(), rect, [0.0, 0.0, 1.0, 1.0])
+            else {
+                return;
+            };
+
             // Apply transform to image corners
             let (x0, y0) = self.transform_point(rect.x, rect.y);
             let (x1, y1) = self.transform_point(rect.x + rect.width, rect.y);
@@ -4651,22 +4838,22 @@ impl Renderer {
                 [
                     TextureVertex {
                         position: [x0, y0],
-                        tex_coords: [0.0, 0.0],
+                        tex_coords: [tex[0], tex[1]],
                         color: [1.0, 1.0, 1.0, 1.0],
                     },
                     TextureVertex {
                         position: [x1, y1],
-                        tex_coords: [1.0, 0.0],
+                        tex_coords: [tex[2], tex[1]],
                         color: [1.0, 1.0, 1.0, 1.0],
                     },
                     TextureVertex {
                         position: [x2, y2],
-                        tex_coords: [1.0, 1.0],
+                        tex_coords: [tex[2], tex[3]],
                         color: [1.0, 1.0, 1.0, 1.0],
                     },
                     TextureVertex {
                         position: [x3, y3],
-                        tex_coords: [0.0, 1.0],
+                        tex_coords: [tex[0], tex[3]],
                         color: [1.0, 1.0, 1.0, 1.0],
                     },
                 ],
@@ -4869,6 +5056,15 @@ impl Renderer {
         let tex_right = 1.0 - clip_right / tile_rect.width;
         let tex_bottom = 1.0 - clip_bottom / tile_rect.height;
 
+        // Then the overflow clip on top of the container clip.
+        let Some((draw_rect, [tex_left, tex_top, tex_right, tex_bottom])) = clip_textured_rect(
+            self.current_clip(),
+            draw_rect,
+            [tex_left, tex_top, tex_right, tex_bottom],
+        ) else {
+            return;
+        };
+
         // Apply transform to image corners
         let (x0, y0) = self.transform_point(draw_rect.x, draw_rect.y);
         let (x1, y1) = self.transform_point(draw_rect.x + draw_rect.width, draw_rect.y);
@@ -4946,16 +5142,17 @@ impl Renderer {
 
     /// Push a clipping rectangle.
     fn push_clip(&mut self, rect: Rect) {
-        let clip = if let Some(current) = self.clip_stack.last() {
-            if let Some(intersected) = current.intersect(&rect) {
-                intersected
-            } else {
-                Rect::new(0.0, 0.0, 0.0, 0.0) // Empty clip
-            }
-        } else {
-            rect
-        };
-        self.clip_stack.push(clip);
+        self.push_clip_rounded(rect, rustkit_layout::BorderRadius::default());
+    }
+
+    /// Push a clipping rectangle whose corners may be rounded.
+    ///
+    /// The rect half intersects as it always did. The rounded half accumulates:
+    /// a nested rounded clip does not replace its parent, because a point has to
+    /// be inside both.
+    fn push_clip_rounded(&mut self, rect: Rect, radius: rustkit_layout::BorderRadius) {
+        let entry = clip_entry_for(self.clip_stack.last(), rect, radius);
+        self.clip_stack.push(entry);
     }
 
     /// Pop the current clipping rectangle.
@@ -4965,8 +5162,9 @@ impl Renderer {
 
     /// Get the current clip rectangle.
     fn current_clip(&self) -> Option<Rect> {
-        self.clip_stack.last().copied()
+        self.clip_stack.last().map(|entry| entry.rect)
     }
+
 
     /// Push a 2D transform matrix onto the stack.
     fn push_transform(&mut self, matrix: [f32; 6], origin: (f32, f32)) {
@@ -5017,6 +5215,36 @@ impl Renderer {
     /// the strip's document position no longer predicts its screen position,
     /// so we fall back to the full range rather than wrongly cull content a
     /// transform moves into view. Cap stays either way as the last line.
+    /// The index range of gradient CELLS (row or column) that can reach the
+    /// viewport along one axis, on the same law as `visible_strip_range`: a
+    /// cell's document position predicts its screen position only while no
+    /// transform is active, so with a transform on the stack the full range
+    /// comes back. Indices stay grid-aligned (floor/ceil of the viewport
+    /// bounds in cell units), so a culled render paints the identical pixels
+    /// for every cell that survives.
+    ///
+    /// Without this, the cell paths (linear-with-radius/diagonal, radial,
+    /// conic) emit up to `max_cells` quads per gradient over the element's
+    /// FULL rect — a per-element cap that composes into millions of quads on
+    /// a long page of offscreen gradient cards, dying with BufferTooLarge
+    /// every frame (2026-09-08, autotrader smoke).
+    fn visible_cell_range(
+        &self,
+        axis_start: f32,
+        _axis_len: f32,
+        cell_size: f32,
+        count: usize,
+        viewport_extent: f32,
+    ) -> (usize, usize) {
+        cell_range_for_viewport(
+            axis_start,
+            cell_size,
+            count,
+            viewport_extent,
+            !self.transform_stack.is_empty(),
+        )
+    }
+
     fn visible_strip_range(
         &self,
         axis_start: f32,
@@ -5291,6 +5519,311 @@ impl RectExt for Rect {
     }
 }
 
+// ==================== Rounded clipping ====================
+
+/// One entry on the clip stack.
+///
+/// `rect` is the intersection of every clip pushed so far, exactly as the old
+/// `Vec<Rect>` stack held it. `rounded` carries the clips that also round their
+/// corners, each with its OWN rect — a rounded corner is a property of the box
+/// that pushed it, so intersecting the rects would move the arc centres and
+/// round the wrong place.
+///
+/// Both are needed. `rect` alone is what shipped before this: `overflow: hidden`
+/// on a 12px-radius card clipped nothing at the corners, so a child's background
+/// painted square into the notch. Gate B named 51 of those as `missing_clip`
+/// discrete structural failures on 2026-08-08 (image-gallery 17, sticky-scroll
+/// 12, new_tab 10).
+#[derive(Debug, Clone, Default)]
+struct ClipEntry {
+    rect: Rect,
+    /// Rounded constraints still in force, outermost first. A point must be
+    /// inside every one of them.
+    rounded: Vec<(Rect, rustkit_layout::BorderRadius)>,
+}
+
+/// The clip entry a `PushClip`/`PushClipRounded` produces on top of `current`.
+///
+/// Pure so it can be tested: the stack lives on `Renderer`, which needs a wgpu
+/// device, and a device is not available on every machine that runs these
+/// tests. Keeping the rule here rather than in the method means a mutation to
+/// the rule is caught rather than merely compiled.
+fn clip_entry_for(
+    current: Option<&ClipEntry>,
+    rect: Rect,
+    radius: rustkit_layout::BorderRadius,
+) -> ClipEntry {
+    let (clip, mut rounded) = match current {
+        Some(current) => (
+            current
+                .rect
+                .intersect(&rect)
+                .unwrap_or_else(|| Rect::new(0.0, 0.0, 0.0, 0.0)), // Empty clip
+            current.rounded.clone(),
+        ),
+        None => (rect, Vec::new()),
+    };
+    // Accumulate, never replace: a point under two rounded clips has to be
+    // inside both, and the outer arc does not stop existing because an inner
+    // box pushed its own.
+    if !radius.is_zero() {
+        rounded.push((rect, radius));
+    }
+    ClipEntry {
+        rect: clip,
+        rounded,
+    }
+}
+
+/// A textured quad (glyph, image tile) cut to the rectangular part of the
+/// current clip: the surviving rect and its texture coordinates, scaled so the
+/// texels stay where they were. `None` when nothing survives.
+///
+/// Textured quads used to bypass the clip stack entirely — only color quads
+/// went through `collect_clipped_pieces` — so `overflow: hidden` clipped a
+/// box's background but never its text (n35). The rounded part of the clip
+/// is NOT applied to textured quads: a glyph straddling a rounded corner's
+/// arc keeps its square corner. That is a ledgered residual, not a rule.
+fn clip_textured_rect(
+    clip: Option<Rect>,
+    rect: Rect,
+    tex: [f32; 4],
+) -> Option<(Rect, [f32; 4])> {
+    let clip = match clip {
+        Some(clip) => clip,
+        None => return Some((rect, tex)),
+    };
+    if rect.width <= 0.0 || rect.height <= 0.0 {
+        return None;
+    }
+    let clipped = rect.intersect(&clip)?;
+    if clipped.width <= 0.0 || clipped.height <= 0.0 {
+        return None;
+    }
+    let u_per_px = (tex[2] - tex[0]) / rect.width;
+    let v_per_px = (tex[3] - tex[1]) / rect.height;
+    let u0 = tex[0] + (clipped.x - rect.x) * u_per_px;
+    let v0 = tex[1] + (clipped.y - rect.y) * v_per_px;
+    let u1 = u0 + clipped.width * u_per_px;
+    let v1 = v0 + clipped.height * v_per_px;
+    Some((clipped, [u0, v0, u1, v1]))
+}
+
+/// Everything `rect` becomes under `clip`, appended to `out` as
+/// `(piece, coverage)`.
+///
+/// The whole clipping decision lives here — rectangular intersection, the
+/// no-rounding fast path, and the rounded decomposition — for the same reason
+/// as `clip_entry_for`: a rule inside a `Renderer` method cannot be
+/// mutation-checked on a machine without a GPU, and a guard that cannot fail is
+/// not a guard.
+fn collect_clipped_pieces(clip: Option<&ClipEntry>, rect: Rect, out: &mut Vec<(Rect, f32)>) {
+    let rect = match clip {
+        Some(entry) => match rect.intersect(&entry.rect) {
+            Some(clipped) => clipped,
+            None => return, // Fully clipped
+        },
+        None => rect,
+    };
+
+    let rounded = clip.map(|entry| entry.rounded.as_slice()).unwrap_or(&[]);
+    if rounded.is_empty() {
+        out.push((rect, 1.0));
+        return;
+    }
+    out.extend(clip_quad_to_rounded(rect, rounded));
+}
+
+/// Radii clamped so opposite corners cannot overlap, matching
+/// `point_in_rounded_rect` and `draw_rounded_rect`.
+fn clamped_radii(rect: Rect, radius: rustkit_layout::BorderRadius) -> (f32, f32, f32, f32) {
+    let max_r = (rect.width / 2.0).min(rect.height / 2.0).max(0.0);
+    (
+        radius.top_left.min(max_r).max(0.0),
+        radius.top_right.min(max_r).max(0.0),
+        radius.bottom_right.min(max_r).max(0.0),
+        radius.bottom_left.min(max_r).max(0.0),
+    )
+}
+
+/// The horizontal span of a rounded rect at height `y`, or `None` when the row
+/// is outside it entirely.
+///
+/// Analytic rather than sampled: for a row crossing a corner, the arc gives
+/// `dx = sqrt(r^2 - dy^2)` and the span shrinks by exactly that much. The left
+/// bound takes the tighter of the two left corners and the right bound the
+/// tighter of the two right ones, so a row crossing both a top-left and a
+/// bottom-left arc is handled without special-casing.
+fn rounded_row_span(rect: Rect, radius: rustkit_layout::BorderRadius, y: f32) -> Option<(f32, f32)> {
+    if y < rect.y || y > rect.bottom() {
+        return None;
+    }
+    let (tl, tr, br, bl) = clamped_radii(rect, radius);
+    let mut left = rect.x;
+    let mut right = rect.right();
+
+    if tl > 0.0 && y < rect.y + tl {
+        let dy = (rect.y + tl) - y;
+        let dx = (tl * tl - dy * dy).max(0.0).sqrt();
+        left = left.max(rect.x + tl - dx);
+    }
+    if bl > 0.0 && y > rect.bottom() - bl {
+        let dy = y - (rect.bottom() - bl);
+        let dx = (bl * bl - dy * dy).max(0.0).sqrt();
+        left = left.max(rect.x + bl - dx);
+    }
+    if tr > 0.0 && y < rect.y + tr {
+        let dy = (rect.y + tr) - y;
+        let dx = (tr * tr - dy * dy).max(0.0).sqrt();
+        right = right.min(rect.right() - tr + dx);
+    }
+    if br > 0.0 && y > rect.bottom() - br {
+        let dy = y - (rect.bottom() - br);
+        let dx = (br * br - dy * dy).max(0.0).sqrt();
+        right = right.min(rect.right() - br + dx);
+    }
+
+    if right > left {
+        Some((left, right))
+    } else {
+        None
+    }
+}
+
+/// Push one row's span as up to three pieces: a fully covered interior and an
+/// antialiased cell at each fractional end.
+///
+/// The partial cells are what keep a clipped corner from reading as a hard
+/// staircase. They use the same "coverage multiplies alpha" convention as
+/// `draw_rounded_corner`, so a clipped corner and a painted rounded corner
+/// antialias the same way.
+fn push_row_pieces(out: &mut Vec<(Rect, f32)>, left: f32, right: f32, y: f32, height: f32) {
+    if height <= 0.0 || right <= left {
+        return;
+    }
+    let inner_left = left.ceil();
+    let inner_right = right.floor();
+
+    if inner_right <= inner_left {
+        // Span narrower than one pixel column: one cell carrying its coverage.
+        out.push((Rect::new(left, y, right - left, height), (right - left).min(1.0)));
+        return;
+    }
+    if inner_left > left {
+        out.push((
+            Rect::new(left.floor(), y, 1.0, height),
+            (inner_left - left).min(1.0),
+        ));
+    }
+    out.push((
+        Rect::new(inner_left, y, inner_right - inner_left, height),
+        1.0,
+    ));
+    if right > inner_right {
+        out.push((
+            Rect::new(inner_right, y, 1.0, height),
+            (right - inner_right).min(1.0),
+        ));
+    }
+}
+
+/// Decompose `quad` into the pieces of it that survive every rounded clip.
+///
+/// Returns `(piece, coverage)` pairs; coverage multiplies the quad's alpha.
+/// `quad` must already be intersected with the clip stack's rectangle — this
+/// function only removes the corner notches.
+///
+/// Pure on purpose. Every other clipping path in this renderer lives on
+/// `Renderer`, which needs a wgpu device, so it can only be exercised on a
+/// machine with an adapter. This one is a free function over plain geometry and
+/// its tests run anywhere.
+/// Grid-aligned cell-index window along one axis that can reach the viewport
+/// `[0, viewport_extent)`. Free function so the math is testable without a GPU
+/// device; `Renderer::visible_cell_range` supplies the transform guard.
+fn cell_range_for_viewport(
+    axis_start: f32,
+    cell_size: f32,
+    count: usize,
+    viewport_extent: f32,
+    transform_active: bool,
+) -> (usize, usize) {
+    if transform_active {
+        return (0, count);
+    }
+    let first = (((0.0 - axis_start) / cell_size).floor().max(0.0) as usize).min(count);
+    let last = ((((viewport_extent - axis_start) / cell_size).ceil()).max(0.0) as usize).min(count);
+    (first.min(last), last)
+}
+
+fn clip_quad_to_rounded(
+    quad: Rect,
+    rounded: &[(Rect, rustkit_layout::BorderRadius)],
+) -> Vec<(Rect, f32)> {
+    if quad.width <= 0.0 || quad.height <= 0.0 {
+        return Vec::new();
+    }
+    if rounded.is_empty() {
+        return vec![(quad, 1.0)];
+    }
+
+    // Below `top_limit` and above `bottom_limit` no corner of any constraint is
+    // active, so that band passes through whole. Without this a full-page
+    // rounded container would emit one quad per scanline for its entire height.
+    let mut top_limit = f32::NEG_INFINITY;
+    let mut bottom_limit = f32::INFINITY;
+    for (rect, radius) in rounded {
+        let (tl, tr, br, bl) = clamped_radii(*rect, *radius);
+        top_limit = top_limit.max(rect.y + tl.max(tr));
+        bottom_limit = bottom_limit.min(rect.bottom() - bl.max(br));
+    }
+    if quad.y >= top_limit && quad.bottom() <= bottom_limit {
+        return vec![(quad, 1.0)];
+    }
+
+    let mut out = Vec::new();
+    let mut emit_rows = |out: &mut Vec<(Rect, f32)>, from: f32, to: f32| {
+        let mut y = from;
+        while y < to {
+            let height = 1.0_f32.min(to - y);
+            let centre = y + height * 0.5;
+            let mut left = quad.x;
+            let mut right = quad.right();
+            let mut inside = true;
+            for (rect, radius) in rounded {
+                match rounded_row_span(*rect, *radius, centre) {
+                    Some((l, r)) => {
+                        left = left.max(l);
+                        right = right.min(r);
+                    }
+                    None => {
+                        inside = false;
+                        break;
+                    }
+                }
+            }
+            if inside {
+                push_row_pieces(out, left, right, y, height);
+            }
+            y += height;
+        }
+    };
+
+    let top_end = quad.bottom().min(top_limit.max(quad.y));
+    emit_rows(&mut out, quad.y, top_end);
+
+    let middle_start = top_end.max(quad.y);
+    let middle_end = quad.bottom().min(bottom_limit.max(middle_start));
+    if middle_end > middle_start {
+        out.push((
+            Rect::new(quad.x, middle_start, quad.width, middle_end - middle_start),
+            1.0,
+        ));
+    }
+
+    emit_rows(&mut out, middle_end.max(quad.y), quad.bottom());
+    out
+}
+
 // ==================== Transform Helpers ====================
 
 /// Multiply two 2D affine matrices.
@@ -5312,6 +5845,49 @@ fn multiply_matrices_2d(a: [f32; 6], b: [f32; 6]) -> [f32; 6] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ==================== Textured-quad clipping (n35) ====================
+
+    #[test]
+    fn no_clip_leaves_a_textured_quad_untouched() {
+        let rect = Rect::new(10.0, 20.0, 30.0, 40.0);
+        let tex = [0.1, 0.2, 0.3, 0.4];
+        let (r, t) = clip_textured_rect(None, rect, tex).unwrap();
+        assert_eq!((r.x, r.y, r.width, r.height), (10.0, 20.0, 30.0, 40.0));
+        assert_eq!(t, tex);
+    }
+
+    #[test]
+    fn a_glyph_below_an_overflow_hidden_box_is_dropped_entirely() {
+        // overflow-wrap-anywhere-002's shape: a 1em-tall clipper, the second
+        // line's glyphs start at its bottom edge.
+        let clip = Rect::new(8.0, 60.0, 40.0, 16.0);
+        let glyph = Rect::new(8.0, 76.0, 10.0, 14.0);
+        assert!(clip_textured_rect(Some(clip), glyph, [0.0, 0.0, 1.0, 1.0]).is_none());
+    }
+
+    #[test]
+    fn a_glyph_straddling_the_clip_edge_keeps_only_the_inside_and_its_texels() {
+        // Clip cuts the glyph's lower half: the surviving quad is the top
+        // half and its v range is the top half of the original, so the atlas
+        // texels do not stretch to fill the smaller quad.
+        let clip = Rect::new(0.0, 0.0, 100.0, 20.0);
+        let glyph = Rect::new(4.0, 10.0, 10.0, 20.0);
+        let tex = [0.5, 0.0, 0.6, 0.4];
+        let (r, t) = clip_textured_rect(Some(clip), glyph, tex).unwrap();
+        assert_eq!((r.x, r.y, r.width, r.height), (4.0, 10.0, 10.0, 10.0));
+        assert!((t[0] - 0.5).abs() < 1e-6 && (t[2] - 0.6).abs() < 1e-6, "u untouched: {t:?}");
+        assert!((t[1] - 0.0).abs() < 1e-6 && (t[3] - 0.2).abs() < 1e-6, "v halved: {t:?}");
+    }
+
+    #[test]
+    fn a_left_cut_shifts_the_u_origin() {
+        let clip = Rect::new(5.0, 0.0, 100.0, 100.0);
+        let glyph = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let (r, t) = clip_textured_rect(Some(clip), glyph, [0.0, 0.0, 1.0, 1.0]).unwrap();
+        assert_eq!((r.x, r.width), (5.0, 5.0));
+        assert!((t[0] - 0.5).abs() < 1e-6 && (t[2] - 1.0).abs() < 1e-6, "{t:?}");
+    }
 
     #[test]
     fn test_color_vertex_size() {
@@ -5346,6 +5922,291 @@ mod tests {
         let b = Rect::new(100.0, 100.0, 50.0, 50.0);
 
         assert!(a.intersect(&b).is_none());
+    }
+
+    // ==================== Rounded clip ====================
+    //
+    // These exercise `clip_quad_to_rounded` directly. It is a free function
+    // over geometry precisely so these run without a wgpu adapter — every
+    // other clipping path needs a `Renderer`, which needs a device, which this
+    // runner does not have.
+
+    fn radius(r: f32) -> rustkit_layout::BorderRadius {
+        rustkit_layout::BorderRadius::uniform(r)
+    }
+
+    /// Total area the pieces cover, weighted by coverage.
+    fn covered_area(pieces: &[(Rect, f32)]) -> f32 {
+        pieces
+            .iter()
+            .map(|(r, cov)| r.width * r.height * cov)
+            .sum()
+    }
+
+    /// Does any piece put paint at (x, y) with coverage above `floor`?
+    fn painted_at(pieces: &[(Rect, f32)], x: f32, y: f32, floor: f32) -> bool {
+        pieces
+            .iter()
+            .any(|(r, cov)| *cov > floor && r.contains(x, y))
+    }
+
+    fn pieces_under(clip: Option<&ClipEntry>, rect: Rect) -> Vec<(Rect, f32)> {
+        let mut out = Vec::new();
+        collect_clipped_pieces(clip, rect, &mut out);
+        out
+    }
+
+    #[test]
+    fn a_rounded_clip_reaches_the_quads_drawn_under_it() {
+        // The wiring, not the geometry. Before this, `overflow: hidden` pushed
+        // nothing and every quad under a rounded box came out square; a
+        // decomposition nobody calls fixes nothing.
+        let box_rect = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let entry = clip_entry_for(None, box_rect, radius(12.0));
+        let pieces = pieces_under(Some(&entry), box_rect);
+        assert!(
+            !painted_at(&pieces, 1.0, 1.0, 0.0),
+            "a quad drawn under a rounded clip must lose its corner"
+        );
+        assert!(
+            pieces.len() > 1,
+            "a rounded clip must decompose the quad, got {} piece(s)",
+            pieces.len()
+        );
+    }
+
+    #[test]
+    fn a_square_clip_leaves_the_quad_whole() {
+        // The fast path has to stay a fast path: one piece, full coverage, the
+        // same vertices the renderer emitted before rounded clips existed.
+        let entry = clip_entry_for(None, Rect::new(0.0, 0.0, 200.0, 200.0), radius(0.0));
+        let pieces = pieces_under(Some(&entry), Rect::new(10.0, 10.0, 50.0, 50.0));
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(pieces[0].1, 1.0);
+        assert_eq!(pieces[0].0.width, 50.0);
+    }
+
+    #[test]
+    fn a_quad_outside_the_clip_rect_emits_nothing() {
+        let entry = clip_entry_for(None, Rect::new(0.0, 0.0, 100.0, 100.0), radius(0.0));
+        assert!(pieces_under(Some(&entry), Rect::new(200.0, 200.0, 10.0, 10.0)).is_empty());
+    }
+
+    #[test]
+    fn no_clip_at_all_emits_the_quad_unchanged() {
+        let pieces = pieces_under(None, Rect::new(5.0, 6.0, 7.0, 8.0));
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(pieces[0].0.x, 5.0);
+        assert_eq!(pieces[0].1, 1.0);
+    }
+
+    #[test]
+    fn pushing_a_clip_intersects_the_rect_and_keeps_the_outer_arc() {
+        // Both halves of the stack rule at once: rects intersect, rounded
+        // constraints accumulate. Dropping the outer arc is invisible in the
+        // rect and shows up only at the corner.
+        let outer = clip_entry_for(None, Rect::new(0.0, 0.0, 200.0, 200.0), radius(20.0));
+        let inner = clip_entry_for(Some(&outer), Rect::new(0.0, 0.0, 100.0, 100.0), radius(0.0));
+
+        assert_eq!(inner.rect.width, 100.0, "rects must intersect");
+        assert_eq!(
+            inner.rounded.len(),
+            1,
+            "the outer arc must survive an inner square clip"
+        );
+
+        let pieces = pieces_under(Some(&inner), Rect::new(0.0, 0.0, 100.0, 100.0));
+        assert!(
+            !painted_at(&pieces, 1.0, 1.0, 0.0),
+            "the outer box's corner must still cut quads drawn under the inner clip"
+        );
+    }
+
+    #[test]
+    fn a_square_clip_records_no_rounded_constraint() {
+        // Control for the accumulation rule: pushing squares must not grow the
+        // rounded list, or every clip in the corpus would take the slow path.
+        let entry = clip_entry_for(None, Rect::new(0.0, 0.0, 200.0, 200.0), radius(0.0));
+        assert!(entry.rounded.is_empty());
+    }
+
+    #[test]
+    fn a_clip_that_intersects_to_nothing_clips_everything_away() {
+        let outer = clip_entry_for(None, Rect::new(0.0, 0.0, 50.0, 50.0), radius(0.0));
+        let inner = clip_entry_for(Some(&outer), Rect::new(500.0, 500.0, 50.0, 50.0), radius(0.0));
+        assert_eq!(inner.rect.width, 0.0);
+        assert!(pieces_under(Some(&inner), Rect::new(0.0, 0.0, 50.0, 50.0)).is_empty());
+    }
+
+    #[test]
+    fn no_rounded_constraint_passes_the_quad_through_untouched() {
+        let quad = Rect::new(10.0, 10.0, 100.0, 50.0);
+        let pieces = clip_quad_to_rounded(quad, &[]);
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(pieces[0].1, 1.0);
+        assert_eq!(pieces[0].0.width, 100.0);
+        assert_eq!(pieces[0].0.height, 50.0);
+    }
+
+    #[test]
+    fn the_corner_notch_is_not_painted() {
+        // image-gallery's shape: a 12px-radius box whose child fills it exactly.
+        // Before rounded clipping the child painted the full square and the
+        // notch carried the child's fill — Gate B's `missing_clip`.
+        let clip = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let pieces = clip_quad_to_rounded(clip, &[(clip, radius(12.0))]);
+
+        // (1,1) is deep inside the top-left arc: 12 - sqrt(12^2 - 11^2) ~= 7.2,
+        // so x must be >= ~7.2 at that row. Nothing may paint there.
+        assert!(
+            !painted_at(&pieces, 1.0, 1.0, 0.0),
+            "top-left notch was painted"
+        );
+        assert!(
+            !painted_at(&pieces, 198.5, 1.0, 0.0),
+            "top-right notch was painted"
+        );
+        assert!(
+            !painted_at(&pieces, 1.0, 198.5, 0.0),
+            "bottom-left notch was painted"
+        );
+        assert!(
+            !painted_at(&pieces, 198.5, 198.5, 0.0),
+            "bottom-right notch was painted"
+        );
+    }
+
+    #[test]
+    fn the_interior_is_still_fully_painted() {
+        // The other half of the failure mode: a clip that eats paint it should
+        // have kept is worse than no clip at all.
+        let clip = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let pieces = clip_quad_to_rounded(clip, &[(clip, radius(12.0))]);
+
+        for (x, y) in [
+            (100.0, 100.0), // centre
+            (0.5, 100.0),   // left edge, no corner active
+            (199.5, 100.0), // right edge
+            (100.0, 0.5),   // top edge between the corners
+            (100.0, 199.5), // bottom edge
+            (12.5, 12.5),   // just inside the top-left arc
+        ] {
+            assert!(
+                painted_at(&pieces, x, y, 0.999),
+                "({x}, {y}) should be fully painted"
+            );
+        }
+    }
+
+    #[test]
+    fn the_clipped_area_matches_the_rounded_rect_area() {
+        // A rounded rect loses (4 - pi) * r^2 to its corners. If the
+        // decomposition drifts from that, it is either eating paint or leaking
+        // it, and the notch tests alone would not say which.
+        let clip = Rect::new(0.0, 0.0, 200.0, 120.0);
+        let r = 20.0_f32;
+        let pieces = clip_quad_to_rounded(clip, &[(clip, radius(r))]);
+
+        let expected = 200.0 * 120.0 - (4.0 - std::f32::consts::PI) * r * r;
+        let actual = covered_area(&pieces);
+        assert!(
+            (actual - expected).abs() < 2.0,
+            "area {actual} should be within 2px^2 of the rounded-rect area {expected}"
+        );
+    }
+
+    #[test]
+    fn offscreen_gradient_cells_are_culled_to_the_viewport() {
+        // The 2026-09-08 autotrader kill: a gradient card at y=20_000 on an
+        // 800px viewport must contribute ZERO cells, not its full per-element
+        // cell budget — per-element caps compose into BufferTooLarge.
+        let (first, last) = cell_range_for_viewport(20_000.0, 1.0, 180, 800.0, false);
+        assert_eq!(first, last, "fully offscreen rect must yield an empty range");
+        // A rect straddling the viewport bottom keeps only the visible rows,
+        // grid-aligned so the surviving cells paint identical pixels.
+        let (first, last) = cell_range_for_viewport(700.0, 2.0, 180, 800.0, false);
+        assert_eq!(first, 0);
+        assert_eq!(last, 50, "(800-700)/2 = 50 cells remain");
+        // A transform on the stack disables the cull rather than wrongly
+        // dropping content the transform moves into view.
+        let (first, last) = cell_range_for_viewport(20_000.0, 1.0, 180, 800.0, true);
+        assert_eq!((first, last), (0, 180));
+    }
+
+    #[test]
+    fn a_quad_clear_of_every_corner_is_not_split_into_rows() {
+        // The band optimisation. Without it a full-page rounded container emits
+        // one quad per scanline for its whole height.
+        let clip = Rect::new(0.0, 0.0, 200.0, 600.0);
+        let quad = Rect::new(0.0, 100.0, 200.0, 400.0);
+        let pieces = clip_quad_to_rounded(quad, &[(clip, radius(12.0))]);
+        assert_eq!(
+            pieces.len(),
+            1,
+            "a quad between the corner bands must stay one quad, got {}",
+            pieces.len()
+        );
+    }
+
+    #[test]
+    fn nested_rounded_clips_both_apply() {
+        // A rounded clip inside another does not replace it — a point has to be
+        // inside both. The inner box's own top-left is square here, so if the
+        // outer constraint were dropped the notch would come back.
+        let outer = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let inner = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let pieces = clip_quad_to_rounded(
+            inner,
+            &[(outer, radius(20.0)), (inner, radius(0.0))],
+        );
+        assert!(
+            !painted_at(&pieces, 1.0, 1.0, 0.0),
+            "the outer clip's corner must still cut the inner box"
+        );
+    }
+
+    #[test]
+    fn a_quad_outside_the_rounded_shape_entirely_yields_nothing() {
+        // A row that clears no span must emit no pieces, not a zero-width one.
+        let clip = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let quad = Rect::new(0.0, 0.0, 2.0, 2.0);
+        let pieces = clip_quad_to_rounded(quad, &[(clip, radius(20.0))]);
+        assert!(
+            covered_area(&pieces) < 0.5,
+            "the corner of a pill should be empty, covered {}",
+            covered_area(&pieces)
+        );
+    }
+
+    #[test]
+    fn radii_are_clamped_so_opposite_corners_cannot_overlap() {
+        // 100px radius on a 40px-tall box is a pill, not a negative span.
+        let clip = Rect::new(0.0, 0.0, 200.0, 40.0);
+        let pieces = clip_quad_to_rounded(clip, &[(clip, radius(100.0))]);
+        assert!(
+            painted_at(&pieces, 100.0, 20.0, 0.999),
+            "the middle of a pill must still be painted"
+        );
+        let expected = 200.0 * 40.0 - (4.0 - std::f32::consts::PI) * 20.0 * 20.0;
+        assert!(
+            (covered_area(&pieces) - expected).abs() < 2.0,
+            "clamped radius should give a 20px pill, covered {}",
+            covered_area(&pieces)
+        );
+    }
+
+    #[test]
+    fn the_corner_edge_is_antialiased_rather_than_a_staircase() {
+        // Partial coverage at the arc boundary. Without it the clipped corner
+        // is a hard staircase while a painted rounded corner next to it is
+        // smooth, and the two disagree along every shared edge.
+        let clip = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let pieces = clip_quad_to_rounded(clip, &[(clip, radius(12.0))]);
+        let partial = pieces.iter().filter(|(_, c)| *c > 0.0 && *c < 1.0).count();
+        assert!(
+            partial >= 8,
+            "expected antialiased cells along the arcs, found {partial}"
+        );
     }
 
     // ==================== Gradient Coordinate Tests ====================
@@ -5828,3 +6689,58 @@ pub(crate) fn paint0_probe() -> bool {
     *ON.get_or_init(|| std::env::var("RUSTKIT_PAINT_PROBE").as_deref() == Ok("1"))
 }
 
+
+#[cfg(test)]
+mod form_text_seat_tests {
+    use super::*;
+
+    /// Chrome centres the inner editor's line box in the CONTENT box. On the
+    /// form-controls Chrome baseline a bare input is Arial 13.333px, padding
+    /// 0, border 2px, 19px border-box: content 15px, Arial line box ~14.9px,
+    /// so the text top sits ~2px below the border-box top and the baseline
+    /// ~2 + ascent. The old seat put the baseline at
+    /// rect.y + (h+fs)/2 - 0.2fs + ascent ≈ rect.y + 23.8 — under the box.
+    #[test]
+    fn bare_input_text_line_is_centred_in_the_content_box() {
+        let rect = Rect::new(156.0, 145.0, 149.0, 19.0);
+        let (text_x, text_top, ascent, descent) =
+            Renderer::form_text_seat(rect, 2.0, [0.0; 4], "Arial", 13.333);
+        assert!(ascent > 0.0 && descent > 0.0);
+        let line = ascent + descent;
+        let content_top = rect.y + 2.0;
+        let content_h = rect.height - 4.0;
+        // Centred: equal slack above and below the line box.
+        let slack_above = text_top - content_top;
+        let slack_below = (content_top + content_h) - (text_top + line);
+        assert!(
+            (slack_above - slack_below).abs() < 1e-3,
+            "line box not centred: above {slack_above}, below {slack_below}"
+        );
+        // Baseline lands INSIDE the box, not under its bottom border.
+        let baseline = text_top + ascent;
+        assert!(baseline < rect.y + rect.height - 2.0, "baseline {baseline} is under the box");
+        assert!(baseline > rect.y + 2.0);
+        // Text starts after the border (padding 0), not at a hardcoded 6px.
+        assert_eq!(text_x, rect.x + 2.0);
+    }
+
+    #[test]
+    fn author_padding_moves_the_seat_and_the_box_agrees() {
+        // input { padding: 8px 16px; border: 2px } → Chrome builds
+        // (fs+1) + 16 + 4 = 35 tall (layout_form_control's DIG-1 compose).
+        let fs = 14.0;
+        let rect = Rect::new(0.0, 0.0, 200.0, (fs + 1.0) + 16.0 + 4.0);
+        let padding = [8.0, 16.0, 8.0, 16.0];
+        let (text_x, text_top, ascent, descent) =
+            Renderer::form_text_seat(rect, 2.0, padding, "Arial", fs);
+        assert_eq!(text_x, 2.0 + 16.0);
+        let content_top = 2.0 + 8.0;
+        let content_h = rect.height - 4.0 - 16.0;
+        let centred_top = content_top + (content_h - (ascent + descent)) / 2.0;
+        assert!((text_top - centred_top).abs() < 1e-3);
+        // Compose says the content is fs+1 tall; the font's line box must
+        // fit within ~a pixel of that or the two formulas disagree.
+        assert!(((ascent + descent) - content_h).abs() <= 1.5,
+            "line box {} vs composed content {}", ascent + descent, content_h);
+    }
+}

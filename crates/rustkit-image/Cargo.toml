@@ -46,5 +46,6 @@ base64 = "0.22"
 urlencoding = "2.1"
 
 [dev-dependencies]
+rustkit-image = { path = ".", features = ["test-hooks"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 

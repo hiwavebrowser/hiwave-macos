@@ -294,6 +294,59 @@ fn apply_weight_trait(base: &CTFont, size: f64, css_weight: u16) -> Option<CTFon
     Some(font::new_from_descriptor(&desc, size))
 }
 
+/// `CTFontCreateWithName` never fails: an UNINSTALLED name comes back as a
+/// substitute face (Helvetica here), so a chain walk that trusts `Ok` stops
+/// at its first missing family. The layout crate's monospace chain led with
+/// "SF Mono" (not on a stock Mac): `1ch` measured Helvetica's "0" (8.896px
+/// at 16px = 0.556em) while the painter, given the bare generic, drew Menlo
+/// — WPT overflow-wrap-anywhere-003 laid `PASS` out as `PAS` / `S`. Any
+/// page naming a font the machine lacks ahead of its generic fallback hit
+/// the same substitute. A face is accepted only when its family or
+/// PostScript name is the one asked for (names compared without case,
+/// spaces or hyphens; a PostScript prefix match admits "Menlo-Regular" for
+/// "Menlo" and "ArialMT" for "Arial").
+///
+/// `pub` so the LAYOUT side's chain walk (rustkit-layout
+/// `create_ct_font_with_traits`) rejects substitutes the same way — until it
+/// did, paint walked the chain but measure did not, and `"Missing", Menlo`
+/// measured Helvetica while drawing Menlo.
+/// Faces tried, in order, for a character the requested face has no glyph
+/// for. ONE list for paint (`GlyphRasterizer::rasterize_fallback`) and
+/// layout (rustkit-layout `TextShaper::shape`): layout used to shape such a
+/// character as glyph 0 of the primary face — a .notdef advance and the
+/// primary face's extents — while paint drew it from Apple Color Emoji, so
+/// an emoji overlapped the letter after it and its line box came out the
+/// primary face's height (16px system-ui: 18px; Chrome, which unites the
+/// used fallback face's extents under `line-height: normal`, 26px).
+pub const GLYPH_FALLBACK_FAMILIES: &[&str] = &[
+    "Apple Color Emoji", // emoji — Chrome/Skia's macOS emoji fallback too
+    "Apple Symbols",     // symbols
+    "Arial Unicode MS",  // wide Unicode coverage
+    "Helvetica Neue",    // general fallback
+    "Menlo",             // code/math symbols
+];
+
+pub fn named_font(name: &str, size: f64) -> Option<CTFont> {
+    let norm = |s: &str| -> String {
+        s.chars()
+            .filter(|c| !matches!(c, ' ' | '-' | '_'))
+            .collect::<String>()
+            .to_ascii_lowercase()
+    };
+    let font = font::new_from_name(name, size).ok()?;
+    let want = norm(name);
+    if want.is_empty() {
+        return None;
+    }
+    let family = norm(&font.family_name());
+    let postscript = norm(&font.postscript_name());
+    if family == want || postscript == want || postscript.starts_with(&want) {
+        Some(font)
+    } else {
+        None
+    }
+}
+
 /// Create a CTFont with the specified family and size.
 ///
 /// `family` may be a raw CSS font-family LIST ("system-ui, -apple-system,
@@ -307,6 +360,11 @@ pub fn create_font(family: &str, size: f64) -> Result<CTFont, TextError> {
         if fam.is_empty() {
             continue;
         }
+        // A face the document itself registered (@font-face) outranks every
+        // platform lookup: the family name may exist nowhere else.
+        if let Some(cg) = crate::webfonts::lookup(fam, 400, false) {
+            return Ok(font::new_from_CGFont(&cg, size));
+        }
         let lower = fam.to_ascii_lowercase();
         if is_system_family(&lower) {
             return Ok(font::new_ui_font_for_language(
@@ -317,10 +375,12 @@ pub fn create_font(family: &str, size: f64) -> Result<CTFont, TextError> {
         }
         let mapped = map_generic(&lower, fam);
         let name = if mapped.is_empty() { fam } else { mapped };
-        if let Ok(f) = font::new_from_name(name, size) {
+        if let Some(f) = named_font(name, size) {
             return Ok(f);
         }
     }
+    // Nothing in the list exists here: take Core Text's substitute rather
+    // than no font at all.
     font::new_from_name(family, size).map_err(|_| TextError::FontNotFound(family.to_string()))
 }
 
@@ -335,6 +395,11 @@ fn create_font_with_traits(
         let fam = fam.trim().trim_matches('"').trim_matches('\'');
         if fam.is_empty() {
             continue;
+        }
+        // Document-registered face first (see create_font); the registry
+        // picks the nearest declared weight/style itself.
+        if let Some(cg) = crate::webfonts::lookup(fam, weight, italic) {
+            return Ok(font::new_from_CGFont(&cg, size));
         }
         let lower = fam.to_ascii_lowercase();
 
@@ -364,7 +429,7 @@ fn create_font_with_traits(
         variants.push(base.to_string());
 
         for v in &variants {
-            if let Ok(f) = font::new_from_name(v, size) {
+            if let Some(f) = named_font(v, size) {
                 return Ok(f);
             }
         }
@@ -432,7 +497,11 @@ impl GlyphRasterizer {
     
     /// Rasterize a character to an alpha bitmap using Core Graphics
     ///
-    /// Returns (bitmap, width, height, advance, bearing_x, bearing_y)
+    /// Returns (bitmap, width, height, advance, bearing_x, bearing_y).
+    /// BITMAP-EDGE CONTRACT: `bearing_x`/`bearing_y` position the returned
+    /// bitmap's top-left corner relative to (pen, baseline) — the bitmap's
+    /// 2px AA padding is already folded in, so a caller places the bitmap at
+    /// `(pen + bearing_x, baseline - bearing_y)` with no further adjustment.
     /// Rasterize `ch` with its ink shifted right by `subpixel_x` of a pixel.
     ///
     /// FRACTION OWNERSHIP (load-bearing — see PR body): the horizontal
@@ -517,7 +586,7 @@ impl GlyphRasterizer {
                 );
                 fn CGContextSetShouldSubpixelQuantizeFonts(c: *mut c_void, should: bool);
             }
-            
+
             let success = CTFontGetGlyphsForCharacters(
                 font_ref,
                 chars.as_ptr(),
@@ -557,8 +626,8 @@ impl GlyphRasterizer {
             let shift_pad = if subpixel_x > 0.0 { 1 } else { 0 };
             let width =
                 (bounds.size.width.ceil() + padding * 2.0).max(4.0) as u32 + shift_pad;
-            let height = (bounds.size.height.ceil() + padding * 2.0).max(4.0) as u32;
-            
+            let (draw_y, height, bearing_y) = baseline_seat(&bounds, padding);
+
             // Create grayscale bitmap context
             let color_space = CGColorSpace::create_device_gray();
             let mut context = CGContext::create_bitmap_context(
@@ -580,6 +649,14 @@ impl GlyphRasterizer {
             CGContextSetShouldSubpixelPositionFonts(ctx_ptr, true);
             CGContextSetAllowsFontSubpixelQuantization(ctx_ptr, false);
             CGContextSetShouldSubpixelQuantizeFonts(ctx_ptr, false);
+            // Font smoothing DILATES the outline (~0.3px per side, ~0.6px
+            // on top) — measured n33 on Ahem: an integer-aligned 20px em
+            // square rasterized 22 columns wide with a 60%-coverage row
+            // above it, so every Ahem overlap reftest read a fringe where
+            // Chrome reads a hard edge. Skia/Chrome disable smoothing for
+            // grayscale AA; coverage must come from the outline alone.
+            context.set_allows_font_smoothing(false);
+            context.set_should_smooth_fonts(false);
 
             // Set up drawing context
             // Fill with black (transparent in our alpha usage)
@@ -588,15 +665,17 @@ impl GlyphRasterizer {
                 &CGPoint::new(0.0, 0.0),
                 &CGSize::new(width as CGFloat, height as CGFloat),
             ));
-            
+
             // Set text color to white (opaque)
             context.set_rgb_fill_color(1.0, 1.0, 1.0, 1.0);
-            
+
             // Calculate position to draw glyph
             // Origin is at bottom-left, glyph origin needs adjustment
             let x = padding - bounds.origin.x + subpixel_x as f64;
-            let y = padding - bounds.origin.y;
-            
+            // INTEGER-BASELINE CONTRACT: `draw_y` is a whole CG row (see
+            // baseline_seat) so the outline is rasterized at vertical phase 0.
+            let y = draw_y;
+
             let positions = [CGPoint::new(x, y)];
             
             // Draw the glyph
@@ -611,27 +690,28 @@ impl GlyphRasterizer {
             // Extract bitmap data
             let data = context.data();
             let bitmap: Vec<u8> = data.to_vec();
-            
+
             let advance = advance_size.width as f32;
-            let bearing_x = bounds.origin.x as f32;
-            let bearing_y = (bounds.origin.y + bounds.size.height) as f32;
-            
+            // BITMAP-EDGE CONTRACT: the returned bearings position the padded
+            // bitmap's top-left corner relative to (pen, baseline) — the ink
+            // sits `padding` inside the bitmap, so the padding must be folded
+            // in HERE. Returning the outline's bounds while shipping a padded
+            // bitmap seated every glyph on every page (+2,+2)px (n30: 'a' ink
+            // at x=11 for pen x=8, poking past lba001's 1ch cover).
+            // `bearing_y` comes from baseline_seat: the exact integer row
+            // count from the bitmap top to the baseline row it was drawn on
+            // (INTEGER-BASELINE CONTRACT).
+            let bearing_x = (bounds.origin.x - padding) as f32;
+
             Some((bitmap, width, height, advance, bearing_x, bearing_y))
         }
     }
-    
+
     /// Fallback rasterization for characters without glyphs
     fn rasterize_fallback(&self, ch: char) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
-        // Try fallback fonts for the character
-        let fallback_fonts = [
-            "Apple Color Emoji",  // For emoji
-            "Apple Symbols",       // For symbols
-            "Arial Unicode MS",    // Wide Unicode coverage
-            "Helvetica Neue",      // Good general fallback
-            "Menlo",               // For code/math symbols
-        ];
-        
-        for font_name in &fallback_fonts {
+        // Try fallback fonts for the character — the same faces, in the same
+        // order, that layout shapes such characters with.
+        for font_name in GLYPH_FALLBACK_FAMILIES {
             if let Ok(fallback_font) = font::new_from_name(font_name, self.font_size as f64) {
                 // Try to get glyph with this fallback font
                 let chars: [u16; 1] = [ch as u16];
@@ -759,8 +839,8 @@ impl GlyphRasterizer {
             
             let padding = 2.0;
             let width = (bounds.size.width.ceil() + padding * 2.0).max(4.0) as u32;
-            let height = (bounds.size.height.ceil() + padding * 2.0).max(4.0) as u32;
-            
+            let (draw_y, height, bearing_y) = baseline_seat(&bounds, padding);
+
             let color_space = CGColorSpace::create_device_gray();
             let mut context = CGContext::create_bitmap_context(
                 None,
@@ -774,12 +854,14 @@ impl GlyphRasterizer {
             
             context.set_allows_antialiasing(true);
             context.set_should_antialias(true);
-            context.set_should_smooth_fonts(true);
+            // Same contract as rasterize_char: no smoothing dilation, the
+            // fallback face must not paint heavier than the primary one.
+            context.set_allows_font_smoothing(false);
+            context.set_should_smooth_fonts(false);
             context.set_gray_fill_color(1.0, 1.0);
             
             let draw_x = padding - bounds.origin.x;
-            let draw_y = padding - bounds.origin.y;
-            
+
             let position = CGPoint::new(draw_x, draw_y);
             CTFontDrawGlyphs(
                 font_ref,
@@ -788,21 +870,23 @@ impl GlyphRasterizer {
                 1,
                 context.as_ptr() as *mut c_void,
             );
-            
+
             let data = context.data();
             let bitmap: Vec<u8> = std::slice::from_raw_parts(
                 data.as_ptr() as *const u8,
                 (width * height) as usize,
             ).to_vec();
-            
+
             let advance = advance_size.width as f32;
-            let bearing_x = bounds.origin.x as f32;
-            let bearing_y = (bounds.origin.y + bounds.size.height) as f32;
-            
+            // BITMAP-EDGE CONTRACT (see rasterize_char): bearings place the
+            // padded bitmap, not the outline. bearing_y is baseline_seat's
+            // integer row count (INTEGER-BASELINE CONTRACT).
+            let bearing_x = (bounds.origin.x - padding) as f32;
+
             Some((bitmap, width, height, advance, bearing_x, bearing_y))
         }
     }
-    
+
     /// Rasterize a color glyph (emoji) to a premultiplied **RGBA** bitmap.
     ///
     /// The grayscale path (`rasterize_char`) draws into a device-gray context
@@ -891,7 +975,7 @@ impl GlyphRasterizer {
 
             let padding = 2.0;
             let width = (bounds.size.width.ceil() + padding * 2.0).max(4.0) as u32;
-            let height = (bounds.size.height.ceil() + padding * 2.0).max(4.0) as u32;
+            let (draw_y, height, bearing_y) = baseline_seat(&bounds, padding);
 
             // Device-RGB, premultiplied-last (RGBA). CTFontDrawGlyphs renders
             // the color-bitmap artwork here instead of a coverage mask.
@@ -911,7 +995,6 @@ impl GlyphRasterizer {
             context.set_should_antialias(true);
 
             let draw_x = padding - bounds.origin.x;
-            let draw_y = padding - bounds.origin.y;
             let position = CGPoint::new(draw_x, draw_y);
             CTFontDrawGlyphs(font_ref, glyphs.as_ptr(), &position, 1, context.as_ptr() as *mut c_void);
 
@@ -923,8 +1006,10 @@ impl GlyphRasterizer {
             .to_vec();
 
             let advance = advance_size.width as f32;
-            let bearing_x = bounds.origin.x as f32;
-            let bearing_y = (bounds.origin.y + bounds.size.height) as f32;
+            // BITMAP-EDGE CONTRACT (see rasterize_char): bearings place the
+            // padded bitmap, not the outline. bearing_y is baseline_seat's
+            // integer row count (INTEGER-BASELINE CONTRACT).
+            let bearing_x = (bounds.origin.x - padding) as f32;
 
             Some((rgba, width, height, advance, bearing_x, bearing_y))
         }
@@ -943,6 +1028,38 @@ impl GlyphRasterizer {
             None
         }
     }
+}
+
+/// Vertical seat of a padded glyph bitmap — the INTEGER-BASELINE CONTRACT.
+///
+/// Returns `(draw_y, height, bearing_y)`: the CG y at which to draw the glyph
+/// origin, the bitmap height, and the exact number of rows from the bitmap's
+/// TOP edge down to the baseline row.
+///
+/// WHY (the intra-word "wave", 2026-08-26): a CoreGraphics bitmap context has
+/// its origin at the BOTTOM-left, so the baseline is anchored from the
+/// bitmap's bottom — but `bearing_y` is consumed from the TOP. The previous
+/// seat drew the baseline at the fractional CG row `padding - origin.y` in a
+/// bitmap `ceil(h) + 2*padding` tall and reported `bearing_y = origin.y + h +
+/// padding`, i.e. where the ink top is. The bitmap TOP is `ceil(h) - h`
+/// higher than that. So every glyph seated `ceil(h) - h` px LOW — a 0..1px
+/// error keyed to each glyph's OWN ink height. 'l', 'o' and 'g' on one line
+/// each landed on a different fraction and were then bilinearly resampled
+/// at that fraction: that is the wave. Capitals share a height, which is why
+/// a line of initials looks straight and the wave grows with a word's
+/// letter variety.
+///
+/// FIX: put the baseline on a WHOLE CG row (so CoreText rasterizes the
+/// outline at vertical phase 0 — what Skia does for horizontal text), size
+/// the bitmap from that row, and report the bearing as the exact integer row
+/// count from the top. A caller that snaps its baseline to a device row then
+/// paints every glyph on the line pixel-aligned, with no vertical resampling.
+fn baseline_seat(bounds: &CGRect, padding: f64) -> (f64, u32, f32) {
+    let draw_y = (padding - bounds.origin.y).ceil().max(0.0);
+    let ink_top = draw_y + bounds.origin.y + bounds.size.height;
+    let height = (ink_top + padding).ceil().max(4.0) as u32;
+    let bearing_y = (height as f64 - draw_y) as f32;
+    (draw_y, height, bearing_y)
 }
 
 /// Estimate glyph size based on character and font size
@@ -1044,6 +1161,22 @@ mod tests {
     fn test_create_font() {
         let font = create_font("Helvetica", 16.0);
         assert!(font.is_ok(), "Should create Helvetica font");
+    }
+
+    /// Core Text hands back a substitute for a name it does not have, so
+    /// the chain must keep walking past it. T-RED before `named_font`: the
+    /// first, nonexistent family "won" as Helvetica and Menlo was never
+    /// reached (WPT overflow-wrap-anywhere-003's `4ch` measured a
+    /// proportional "0").
+    #[test]
+    fn test_chain_walks_past_an_uninstalled_family() {
+        let font = create_font("No Such Face n34, Menlo, monospace", 16.0).expect("font");
+        assert_eq!(font.family_name(), "Menlo");
+        let weighted = create_font_with_traits("No Such Face n34, Menlo", 16.0, 700, false)
+            .expect("font");
+        assert_eq!(weighted.family_name(), "Menlo");
+        // A bare generic still maps straight to its platform face.
+        assert_eq!(create_font("monospace", 16.0).expect("font").family_name(), "Menlo");
     }
 
     #[test]
@@ -1196,6 +1329,112 @@ mod tests {
         assert!(has_content, "Bitmap should have visible content");
     }
     
+    #[test]
+    fn test_bearing_places_padded_bitmap_ink_at_metrics() {
+        // BITMAP-EDGE CONTRACT: a caller places the returned bitmap at
+        // (pen + bearing_x, baseline - bearing_y). The ink inside must then
+        // land where the font's metrics say — LSB right of the pen, bottom on
+        // the baseline. The old code returned OUTLINE bounds for a PADDED
+        // bitmap, seating every glyph (+2,+2)px: 'H' ink began ~2.8px right
+        // of the pen (true Menlo LSB ~0.8) and ended ~2px below the baseline.
+        let rasterizer = GlyphRasterizer::with_style("Menlo", 16.0, 400, false);
+        let (bitmap, width, height, advance, bearing_x, bearing_y) =
+            rasterizer.rasterize_char('H', 0.0).expect("rasterizes");
+
+        // Ink extents in the bitmap (threshold cuts the AA fringe).
+        let mut first_col = None;
+        let mut last_row = None;
+        for y in 0..height {
+            for x in 0..width {
+                if bitmap[(y * width + x) as usize] >= 64 {
+                    first_col = Some(first_col.map_or(x, |c: u32| c.min(x)));
+                    last_row = Some(last_row.map_or(y, |r: u32| r.max(y)));
+                }
+            }
+        }
+        let first_col = first_col.expect("H has ink") as f32;
+        let last_row = last_row.expect("H has ink") as f32;
+
+        // Placed ink left edge = pen + bearing_x + first_col; Menlo 'H' has a
+        // small positive LSB, so this must sit in [-1, 2] px of the pen.
+        let ink_left = bearing_x + first_col;
+        assert!(
+            (-1.0..=2.0).contains(&ink_left),
+            "ink left edge {ink_left} px from pen — glyph is mis-seated \
+             horizontally (padding not folded into bearing_x?)"
+        );
+
+        // 'H' sits ON the baseline: bitmap row `bearing_y` below the bitmap
+        // top IS the baseline, so the last ink row must be just above it.
+        let baseline_residual = bearing_y - (last_row + 1.0);
+        assert!(
+            baseline_residual.abs() <= 1.0,
+            "ink bottom is {baseline_residual} px from the baseline — glyph \
+             is mis-seated vertically (padding not folded into bearing_y?)"
+        );
+
+        assert!(advance > 0.0);
+    }
+
+    /// Last row (from the top) holding ink at or above `threshold`.
+    fn last_ink_row(bitmap: &[u8], width: u32, height: u32, threshold: u8) -> Option<u32> {
+        (0..height)
+            .rev()
+            .find(|&y| (0..width).any(|x| bitmap[(y * width + x) as usize] >= threshold))
+    }
+
+    #[test]
+    fn integer_baseline_contract_seats_every_flat_glyph_on_the_same_row() {
+        // THE WAVE DISCRIMINATOR. Flat-bottomed glyphs of one font at one
+        // size all sit ON the baseline, so `bearing_y - (last_ink_row + 1)`
+        // must be the SAME number — zero — for every one of them, and
+        // `bearing_y` must be a whole row. The old seat reported
+        // `origin.y + h + padding` for a bitmap whose top was `ceil(h) - h`
+        // higher: 'x' (short) and 'l' (tall) got different fractional
+        // bearings and painted on different fractional rows. That per-glyph
+        // 0..1px spread IS the intra-word wave; this test fails on it.
+        let r = GlyphRasterizer::with_style("Helvetica", 16.0, 400, false);
+        let mut residuals = Vec::new();
+        for ch in ['H', 'x', 'l', 'n', 'm', 'E', 'z'] {
+            let (bitmap, w, h, _adv, _bx, by) = r.rasterize_char(ch, 0.0).expect("rasterizes");
+            assert_eq!(by.fract(), 0.0, "{ch:?}: bearing_y {by} is not a whole row");
+            // Full-coverage rows only: the AA fringe below a flat bottom is
+            // the vertical-phase leak this contract removes, so a fringe row
+            // at >=64 would itself be the bug.
+            let last = last_ink_row(&bitmap, w, h, 128).expect("has ink") as f32;
+            residuals.push((ch, by - (last + 1.0)));
+        }
+        for (ch, res) in &residuals {
+            assert_eq!(
+                *res, 0.0,
+                "{ch:?}: ink bottom is {res} rows off the baseline row (all: {residuals:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn integer_baseline_contract_holds_for_descenders_and_fallback_paths() {
+        // Descenders hang BELOW the baseline; the contract still says the
+        // bitmap's baseline row is exactly `bearing_y` from the top, so the
+        // ink top of 'g' must sit above it by its outline height, whole rows.
+        let r = GlyphRasterizer::with_style("Helvetica", 16.0, 400, false);
+        // Primary path: descenders and a glyph that floats above the baseline.
+        // Fallback path (rasterize_char_with_font): a CJK ideograph Helvetica
+        // has no glyph for, so rasterize_char routes through rasterize_fallback.
+        for ch in ['g', 'p', 'y', '_', '\u{00B0}', '\u{6F22}'] {
+            let (bitmap, w, h, _adv, _bx, by) = r.rasterize_char(ch, 0.0).expect("rasterizes");
+            assert!(bitmap.iter().any(|&v| v > 0), "{ch:?}: no ink — fallback font missing?");
+            assert_eq!(by.fract(), 0.0, "{ch:?}: bearing_y {by} is not a whole row");
+            assert!(by <= h as f32, "{ch:?}: baseline row {by} is below the bitmap ({h})");
+            assert_eq!(bitmap.len(), (w * h) as usize);
+        }
+        // Color path (emoji) shares the seat.
+        let (_rgba, _w, h, _adv, _bx, by) =
+            r.rasterize_char_color('\u{1F3D4}').expect("color emoji rasterizes");
+        assert_eq!(by.fract(), 0.0, "color path bearing_y {by} is not a whole row");
+        assert!(by <= h as f32, "color path baseline row {by} is below the bitmap ({h})");
+    }
+
     #[test]
     fn test_whitespace_transparent() {
         let rasterizer = GlyphRasterizer::with_size(16.0);

@@ -1,30 +1,36 @@
 {
   "schema": 1,
   "wpt_pin": "a6f29b0bedaf3f1edba7b6739127fe8e713bfcb3",
-  "hiwave_git_sha": "da8f0fc12d3d3c297713b20ad8652201dc4153d5",
+  "hiwave_git_sha": "ff0b43faaaf1d5a133e8d59617d6a1a6be949652",
   "runner": "scripts/wpt_tier1.py",
   "viewport": {
     "width": 800,
     "height": 600
   },
   "wpt_max_diff_pct": 0.0,
-  "ts": "2026-08-07T05:31:43.125248+00:00",
+  "ts": "2026-09-08T21:50:09.659474+00:00",
   "n": 30,
-  "pass": 7,
-  "fail": 18,
+  "pass": 24,
+  "fail": 2,
   "skip": 4,
-  "error": 1,
-  "rate": 0.28,
+  "error": 0,
+  "rate": 0.9231,
   "attribution": {
     "_comment": "Fails grouped by a named engine capability gap. Attribution only \u2014 these cases stay in the denominator. A gap here is a lane, not an excuse.",
-    "blocked_fails": {
-      "@font-face unimplemented (rustkit-layout FontLoader is dead code)": [
+    "blocked_fails": {},
+    "suspect_passes": {
+      "_comment": "PASSes on tests that declare a web font. Before n33 the font never loaded, so these were the dangerous direction (a green case not measuring its own assertion); since n33 the face loads (TTF/OTF) and a PASS here is measured in the declared font. Kept as the same field for trendline continuity.",
+      "ids": [
+        "css-flexbox/align-items-baseline-overflow-non-visible",
+        "css-inline/br-font-size",
+        "css-inline/br-line-height",
         "css-text/line-break/line-break-anywhere-004",
         "css-text/line-break/line-break-anywhere-005",
         "css-text/line-break/line-break-anywhere-006",
         "css-text/line-break/line-break-anywhere-007",
         "css-text/overflow-wrap/overflow-wrap-001",
         "css-text/overflow-wrap/overflow-wrap-002",
+        "css-text/overflow-wrap/overflow-wrap-004",
         "css-text/overflow-wrap/overflow-wrap-anywhere-001",
         "css-text/overflow-wrap/overflow-wrap-anywhere-002",
         "css-text/overflow-wrap/overflow-wrap-anywhere-003",
@@ -34,35 +40,27 @@
         "css-text/word-break/word-break-break-all-011",
         "css-text/word-break/word-break-break-all-012"
       ]
-    },
-    "suspect_passes": {
-      "_comment": "PASSes on tests whose declared web font never loaded. The more dangerous direction: a green case that is not measuring its own assertion. Read these before quoting the rate.",
-      "ids": [
-        "css-inline/br-font-size",
-        "css-inline/br-line-height",
-        "css-text/overflow-wrap/overflow-wrap-004"
-      ]
     }
   },
   "cases": [
     {
       "id": "css-text/overflow-wrap/overflow-wrap-001",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 0.7054,
-      "diff_pixels": 3386,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
-      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
     },
     {
       "id": "css-text/overflow-wrap/overflow-wrap-002",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 2.495,
-      "diff_pixels": 11976,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
-      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
     },
     {
@@ -72,7 +70,7 @@
       "diff_pct": 0.0,
       "diff_pixels": 0,
       "rel_match": "ok",
-      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
     },
     {
@@ -102,7 +100,7 @@
       "diff_pct": 0.0,
       "diff_pixels": 0,
       "rel_match": "ok",
-      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "A"
     },
     {
@@ -112,7 +110,7 @@
       "diff_pct": 0.0,
       "diff_pixels": 0,
       "rel_match": "ok",
-      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "A"
     },
     {
@@ -149,8 +147,8 @@
       "id": "css-inline/empty-span-size-002",
       "status": "FAIL",
       "reason": null,
-      "diff_pct": 0.6658,
-      "diff_pixels": 3196,
+      "diff_pct": 0.0121,
+      "diff_pixels": 58,
       "rel_match": "ok",
       "blocked_by": null,
       "maps_to": "B"
@@ -177,62 +175,62 @@
     },
     {
       "id": "css-flexbox/align-items-baseline-overflow-non-visible",
-      "status": "ERROR",
-      "reason": "blank frame (test+ref) \u2014 render refusal, not a match",
-      "diff_pct": null,
-      "diff_pixels": null,
+      "status": "PASS",
+      "reason": null,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
-      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "flex"
     },
     {
       "id": "css-text/line-break/line-break-anywhere-001",
       "status": "FAIL",
       "reason": null,
-      "diff_pct": 0.274,
-      "diff_pixels": 1315,
+      "diff_pct": 0.0246,
+      "diff_pixels": 118,
       "rel_match": "ok",
       "blocked_by": null,
       "maps_to": "slice-0"
     },
     {
       "id": "css-text/overflow-wrap/overflow-wrap-anywhere-001",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 2.0833,
-      "diff_pixels": 10000,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
-      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
     },
     {
       "id": "css-text/word-break/break-boundary-2-chars-001",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 0.6169,
-      "diff_pixels": 2961,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
       "blocked_by": null,
       "maps_to": "slice-0"
     },
     {
       "id": "css-text/line-break/line-break-anywhere-002",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 0.2312,
-      "diff_pixels": 1110,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
       "blocked_by": null,
       "maps_to": "slice-0"
     },
     {
       "id": "css-text/overflow-wrap/overflow-wrap-anywhere-002",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 0.0644,
-      "diff_pixels": 309,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
-      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
     },
     {
@@ -247,102 +245,102 @@
     },
     {
       "id": "css-text/line-break/line-break-anywhere-004",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 0.4154,
-      "diff_pixels": 1994,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
-      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
     },
     {
       "id": "css-text/overflow-wrap/overflow-wrap-anywhere-003",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 0.0648,
-      "diff_pixels": 311,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
-      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
     },
     {
       "id": "css-text/word-break/word-break-break-all-010",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 0.3031,
-      "diff_pixels": 1455,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
-      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
     },
     {
       "id": "css-text/line-break/line-break-anywhere-005",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 4.4321,
-      "diff_pixels": 21274,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
-      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
     },
     {
       "id": "css-text/overflow-wrap/overflow-wrap-anywhere-004",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 0.3031,
-      "diff_pixels": 1455,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
-      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
     },
     {
       "id": "css-text/word-break/word-break-break-all-011",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 0.1229,
-      "diff_pixels": 590,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
-      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
     },
     {
       "id": "css-text/line-break/line-break-anywhere-006",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 0.9023,
-      "diff_pixels": 4331,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
-      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
     },
     {
       "id": "css-text/overflow-wrap/overflow-wrap-anywhere-005",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 3.0185,
-      "diff_pixels": 14489,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
-      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
     },
     {
       "id": "css-text/word-break/word-break-break-all-012",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 0.3031,
-      "diff_pixels": 1455,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
-      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
     },
     {
       "id": "css-text/line-break/line-break-anywhere-007",
-      "status": "FAIL",
+      "status": "PASS",
       "reason": null,
-      "diff_pct": 0.2877,
-      "diff_pixels": 1381,
+      "diff_pct": 0.0,
+      "diff_pixels": 0,
       "rel_match": "ok",
-      "blocked_by": "@font-face unimplemented (rustkit-layout FontLoader is dead code)",
+      "blocked_by": "declares a web font (loads since n33: TTF/OTF; WOFF/WOFF2 not yet)",
       "maps_to": "slice-0"
     }
   ],
@@ -350,6 +348,6 @@
     "all_green": false,
     "all_green_suspect": false,
     "negative_control": "FAIL as required (checked every run; run aborts otherwise)",
-    "note": "Not suspect: this run contains red (18 FAIL, 1 ERROR), so the oracle demonstrably distinguishes pass from fail on real cases. A run with pass==n and fail==0 and error==0 would flip this field."
+    "note": "Not suspect: this run contains red (2 FAIL, 0 ERROR), so the oracle demonstrably distinguishes pass from fail on real cases. A run with pass==n and fail==0 and error==0 would flip this field."
   }
 }
