@@ -4424,6 +4424,10 @@ pub enum DisplayCommand {
         object_fit: ObjectFit,
         /// Opacity (0.0 - 1.0)
         opacity: f32,
+        /// The box's computed CSS `color` — what `currentColor` resolves to
+        /// when the image is a vector document painted in place (an inline
+        /// `<svg>` icon). Raster images ignore it.
+        current_color: Color,
     },
     /// Draw a background image.
     BackgroundImage {
@@ -6278,6 +6282,7 @@ impl DisplayList {
                     object_fit,
                     (pos_x, pos_y),
                     layout_box.style.opacity,
+                    layout_box.style.color,
                 );
 
                 self.commands.push(cmd);

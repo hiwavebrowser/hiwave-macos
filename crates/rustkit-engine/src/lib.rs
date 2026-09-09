@@ -1781,13 +1781,23 @@ impl Engine {
                     _ => {}
                 }
                 match &cmd {
-                    rustkit_layout::DisplayCommand::Image { url, dest_rect, .. } => {
+                    rustkit_layout::DisplayCommand::Image {
+                        url,
+                        dest_rect,
+                        current_color,
+                        ..
+                    } => {
                         if let Some(svg) = self.svg_cache.get(url) {
-                            expanded.extend(svg.render(
+                            // The box's CSS color is what `currentColor`
+                            // resolves to inside an inline <svg>; an <img>'s
+                            // color is the initial black either way, so the
+                            // raster lane is unaffected by passing it through.
+                            expanded.extend(svg.render_with_color(
                                 dest_rect.x,
                                 dest_rect.y,
                                 dest_rect.width,
                                 dest_rect.height,
+                                *current_color,
                             ));
                             continue;
                         }
@@ -6332,6 +6342,25 @@ impl Engine {
         }
     }
 
+    /// Pseudo-classes that are false for every element of the first static
+    /// frame: nothing is hovered, pressed, focused, or fragment-targeted,
+    /// and no link has been visited. Shared by the subject matcher and the
+    /// ancestor/sibling matcher so a compound like `.card:hover` fails in
+    /// either position.
+    fn pseudo_class_is_static_false(name: &str) -> bool {
+        matches!(
+            name,
+            "hover"
+                | "focus"
+                | "focus-within"
+                | "focus-visible"
+                | "active"
+                | "visited"
+                | "target"
+                | "target-within"
+        )
+    }
+
     /// Match a pseudo-class.
     fn match_pseudo_class(
         &self,
@@ -6377,10 +6406,12 @@ impl Engine {
                     true
                 }
             }
-            "hover" | "focus" | "active" | "visited" => {
-                // Dynamic pseudo-classes - always false in static rendering
-                false
-            }
+            // User-action and target pseudo-classes: nothing is hovered,
+            // focused, or targeted in the first static frame. `focus-within`
+            // and `focus-visible` used to fall to the catch-all below and
+            // MATCH EVERYTHING, so `.wrapper:focus-within .icon { color }`
+            // styled every icon as if its input were focused.
+            n if Self::pseudo_class_is_static_false(n) => false,
             "disabled" => attributes.contains_key("disabled"),
             "enabled" => !attributes.contains_key("disabled"),
             "checked" => attributes.contains_key("checked"),
@@ -6517,8 +6548,28 @@ impl Engine {
                         }
                         current_start = i;
                         continue;
-                    } else if chars[i] == ':' || chars[i] == '[' {
-                        // Skip pseudo-classes and attribute selectors for ancestor matching
+                    } else if chars[i] == ':' {
+                        // Structural pseudo-classes need sibling context the
+                        // ancestor tuple does not carry, so they stay
+                        // permissive. User-action / target pseudo-classes
+                        // are decidable here — nothing is hovered, focused
+                        // or targeted in the static frame — and used to be
+                        // skipped along with them, so `.card:hover .title`
+                        // and `.wrapper:focus-within .icon` styled every
+                        // descendant as if the state were on.
+                        let start = i + 1;
+                        let mut end = start;
+                        while end < chars.len()
+                            && (chars[end].is_alphanumeric() || chars[end] == '-')
+                        {
+                            end += 1;
+                        }
+                        if Self::pseudo_class_is_static_false(&selector[start..end]) {
+                            return false;
+                        }
+                        break;
+                    } else if chars[i] == '[' {
+                        // Skip attribute selectors for ancestor matching
                         break;
                     }
                 }
@@ -6994,13 +7045,15 @@ impl Engine {
                     dest_rect,
                     object_fit,
                     opacity,
+                    current_color,
                 } => serde_json::json!({
                     "op": "image",
                     "url": url,
                     "src_rect": src_rect.as_ref().map(rect),
                     "dest_rect": rect(dest_rect),
                     "object_fit": format!("{:?}", object_fit),
-                    "opacity": opacity
+                    "opacity": opacity,
+                    "current_color": color(current_color)
                 }),
                 Cmd::BackgroundImage {
                     url,
@@ -10324,6 +10377,83 @@ mod tests {
             "continuation pieces must not duplicate the element identity"
         );
         assert_eq!(div.children[0].node_id, div.children[2].node_id);
+    }
+
+    #[test]
+    fn test_focus_within_does_not_match_in_the_static_frame() {
+        // The shelf's search icon: `.wrapper:focus-within .icon { color: accent }`.
+        // Nothing is focused when the frame is captured, so the icon keeps
+        // its resting color. `:focus-within` fell through the matcher's
+        // unknown-pseudo-class arm, which returns true, and every such icon
+        // took its focused color.
+        let html = r#"<!DOCTYPE html>
+            <html>
+            <head><style>
+                .icon { color: rgb(148, 163, 184); }
+                .wrap:focus-within .icon { color: rgb(34, 211, 238); }
+                .wrap:focus-visible { background: rgb(1, 2, 3); }
+                .card:hover .title { color: rgb(9, 9, 9); }
+                .title { color: rgb(10, 20, 30); }
+            </style></head>
+            <body>
+                <div class="wrap"><input><span class="icon">i</span></div>
+                <div class="card"><span class="title">t</span></div>
+            </body>
+            </html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        };
+
+        let layout = engine.build_layout_from_document(&document, &[]);
+        let wrap = &layout.children[0].children[0];
+        let icon = wrap.children.last().expect("icon box");
+        let c = icon.style.color;
+        assert_eq!(
+            (c.r, c.g, c.b),
+            (148, 163, 184),
+            ":focus-within must not match an unfocused wrapper"
+        );
+        let bg = wrap.style.background_color;
+        assert_ne!(
+            (bg.r, bg.g, bg.b),
+            (1, 2, 3),
+            ":focus-visible must not match in the static frame"
+        );
+
+        // The ancestor matcher used to skip every pseudo-class on an
+        // ancestor compound, so `.card:hover .title` matched unhovered.
+        let card = &layout.children[0].children[1];
+        let title = card.children.last().expect("title box");
+        let t = title.style.color;
+        assert_eq!(
+            (t.r, t.g, t.b),
+            (10, 20, 30),
+            ".card:hover .title must not match an unhovered card"
+        );
     }
 
     #[test]
