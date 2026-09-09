@@ -7773,3 +7773,170 @@ What this means for the next night, stated once:
   Pete's and still open.
 - #179 and #180 both merged; the mutual-restack surprise above resolved as
   predicted (one more `lib.rs`-free restack on `last-run.json`).
+
+---
+
+## 2026-09-09
+
+**Metric: `2/26` → `2/26` on the standing macOS receipt, and unmoved on this
+seat.** No case crossed the conjunction. `gradient-backgrounds` is geometry-red
+on both platforms, so the case tonight's work is about could not have flipped
+whatever the paint did — stated up front so the write-up is not read as a near
+miss. What is expected to move is one column on the receipt platform: the macOS
+board's **only** discrete failure is the three corners this change clips.
+
+**P-item: P1's named residual — "rounded clip for scaled gradients (corner
+notches)". The unit is complete.** It is a paint item taken under the ratified
+geometry-first order because geometry finally unlocked its measurement: night
+46's macOS board is the first on which `.linear-6` passes Gate A's attribution
+filter, so the discrete detector is allowed to speak about it. The plan named
+this residual on 2026-08-04 and it has been unmeasurable ever since.
+
+### Commits — branch `atlas/n47-scaled-gradient-rounded-clip`, cut from `develop`/`master` `afd73ab`
+
+- `30145a3` — renderer: an end the rounded clip's arc did not cut keeps the
+  quad's own edge. Behaviour-neutral alone (26/26 captures byte-identical,
+  verified by building this commit on its own).
+- `6a3de44` — layout: a scaled gradient's clip carries the box's border radius.
+- `ccc742f` — test-only: the arc-cut antialiasing guard asserts both ends.
+
+### The defect, and the second one under it
+
+`.gradient-box { border-radius: 16px; overflow: hidden }` with
+`background-size: 400% 400%`. `overflow` clips DESCENDANTS and is pushed after
+the box's own content, so the box's own background was never under it; the only
+thing holding the 4x gradient inside the card was a plain `PushClip`, which is
+square. The four corner notches painted the card's own fill where Chrome shows
+the page behind.
+
+Making that clip rounded is three lines. It made things **worse**, and the
+measurement is the point of the night:
+
+| | outside tolerance, `gradient-backgrounds` |
+|---|---:|
+| before | 74894 px |
+| rounded clip alone | **76313 px** (+1419) |
+| rounded clip + renderer fix | 74941 px (+47) |
+
+Classifying every changed pixel against the box's own arc said why. The rounded
+clip alone moved **2517** pixels, of which **2164 were in the box INTERIOR** —
+a stipple every third pixel across the rows the arc band covers — against 353 in
+the notches the clip exists to cut.
+
+`push_row_pieces` snapped **both** ends of every row to the pixel grid and
+re-emitted each as a partial-coverage sliver, whether or not the arc had cut
+that end. On a quad whose edge is a real edge that is invisible. A gradient
+paints as a grid of cells, and there it is not: two neighbouring cells' slivers
+each blend against what is under them instead of summing to one. An uncut end
+now passes through exactly as the no-clip path emits it, which is what
+`collect_clipped_pieces` already does when there is no rounding at all.
+
+With both halves in, the same capture moves **220 pixels, all of them in the
+notch band, zero in the interior, zero outside the border box.**
+
+### Measured — Linux/SwiftShader, 26 cases. MECHANICS, NOT A RECEIPT
+
+| Oracle | before | after |
+|---|---:|---:|
+| Gate A geometry / join failures | 2609 / 16 | **2609 / 16 — identical** |
+| Gate A green | 3/26 | 3/26 |
+| Gate B paint-green | 1/26 | 1/26 |
+| Gate B discrete failures | 0 | 0 |
+| frames changed | — | 1 of 26 |
+
+Gate A reading identical is the check that the display-list half is
+display-list-only, rather than my word for it. 25 of 26 frames are byte-identical.
+
+### The +47, and why I did not revert
+
+Of the 220 pixels, **65 crossed INTO tolerance and 112 crossed OUT**, all of one
+shape: RustKit puts this card at `y=392` where Chrome puts it at `y=400`. Cutting
+the bottom notches correctly removes pixels that were matching Chrome's card
+*interior* by accident, because Chrome's card is 8px lower. The accidental match
+is what is being removed — plan §1's failure mode in miniature, and the third
+time this campaign has hit it (night 7's `sticky-scroll`, night 12's retraction).
+
+The stop rule's premise is absent: the metric did not improve, so there is no
+"improved the metric while an oracle regressed" trade to revert. What there is
+is a 47-pixel regression of 480000 on one case, bought by a clip that is now
+provably exact — **zero interior pixels touched** is the claim the earlier nights
+could not make, and it is measured rather than argued.
+
+On the receipt platform the element passes Gate A's attribution filter, i.e. its
+geometry is exact there, so the same 220 pixels should move the other way and
+the three `missing_clip` auto-fails should clear. **That is a prediction, not a
+result.** The PR lane makes it; nothing on this seat can.
+
+### Mutation-check results
+
+**12 probes, 11 RED, 1 GREEN-and-not-a-guard, NULL probe GREEN, control green
+before and after.** The harness aborts a probe whose edit leaves
+`git diff --quiet` true, compiles the mutant, and distinguishes NO-COMPILE from
+RED.
+
+| probe | result |
+|---|---|
+| M1 clip back to a plain rect (the fix itself) | RED |
+| M2 rounded clip made unconditional | RED |
+| M3 clip takes the 4x rect instead of the container | RED |
+| M4b gradient re-fitted to the container, on the arm the corpus takes | RED |
+| M4c same, on the `NoRepeat` arm | **GREEN — see below** |
+| M5 `needs_clip` predicate made unconditional | RED |
+| M6 both row ends snapped again (the seam defect, restored) | RED |
+| M7 left end alone snapped unconditionally | RED |
+| M8 right end alone snapped unconditionally | RED |
+| M9 `left_cut` never set | RED |
+| M10 `right_cut` never set | RED |
+| M11 cut flags always true | RED |
+| NULL comment-only edit | GREEN, as required |
+
+**Three survivors on the first pass; two were real and one was a bad probe.**
+
+M9 and M10 were real and are the same shape this campaign keeps producing: my
+antialiasing control asserted that *some* piece carried partial coverage, and a
+row crossing both top arcs is cut twice, so deleting either end's antialiasing
+left the other end satisfying it. Closed by asserting per end. Fifth sweep in a
+row whose survivor is *the guard written against the example, not the rule*.
+
+M4's first form was a bad probe rather than a gap, and finding out why exposed a
+real coverage hole. `BackgroundLayer::default()` has `repeat: Repeat`, and CSS's
+initial `background-repeat` is `repeat`, so both the corpus and every test go
+through the tiling arm's "tile larger than the container in both dimensions →
+render once" branch. My probe mutated the `NoRepeat` arm, which nothing reaches.
+Re-probed on the arm actually taken: RED. **M4c stays GREEN and is recorded as
+an uncovered path, not as a passing guard** — the `NoRepeat` arm of
+`render_background_layer` has no test in this crate. It is pre-existing and not
+something tonight's change introduced.
+
+### Decisions needed from Pete
+
+1. **The +47-pixel trade above** — keep the exact clip (my reading: the 112 lost
+   pixels are an 8px layout displacement Gate A already fails, and the clip
+   itself touches nothing but the notches), or revert it literally? This is the
+   third night carrying a version of this question; nights 7 and 12 left it open.
+2. **The square half of overflow clipping is still unimplemented** (night 7's
+   decision 2, unanswered), and the `NoRepeat` background arm has no test —
+   should either become its own unit, or do they wait for a gate to report them?
+3. None beyond those two.
+
+### Surprises
+
+- **The fix made the number worse, and the number was right.** I would have
+  taken "correct clip, percentage regressed 1419 px" as the displacement story
+  again — night 7's precedent is exactly that, and it was sitting there ready to
+  be reused. Classifying the pixels against the arc instead of against Chrome is
+  what separated 353 real notch pixels from 2164 pixels of renderer damage. The
+  displacement story was true of the residual 47 and false of the other 1372, and
+  the two are indistinguishable from the case-level percentage.
+- **A renderer path that has shipped since night 7 stipples any tiled source
+  under a rounded clip**, and nothing found it because nothing tiled under one
+  until tonight. It is behaviour-neutral on all 26 captures in isolation —
+  verified by building that commit alone — which is another way of saying the
+  corpus could never have caught it.
+- **I walked into the trap night 8 wrote down.** The sweep harness restores with
+  `git checkout -- crates/`, my strengthened guard was uncommitted, and the final
+  restore deleted it. The verdicts are unaffected (the guard was present for every
+  probe; the wipe is the last step) but "commit before mutation-checking" is now
+  four digests old and I still had to relearn it.
+- The stored night order still opens with P0a-0, finished 36 nights ago, and
+  still costs the first hour of every session that reads it literally.
