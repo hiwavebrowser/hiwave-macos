@@ -3611,8 +3611,12 @@ impl Renderer {
             let center_x = rect.x + half_width;
             let center_y = rect.y + half_height;
 
-            for row in 0..rows {
-                for col in 0..cols {
+            let (vp_w, vp_h) = (self.viewport_size.0 as f32, self.viewport_size.1 as f32);
+            let (row_first, row_last) = self.visible_cell_range(rect.y, rect.height, cell_size, rows, vp_h);
+            let (col_first, col_last) = self.visible_cell_range(rect.x, rect.width, cell_size, cols, vp_w);
+
+            for row in row_first..row_last {
+                for col in col_first..col_last {
                     let cell_x = rect.x + col as f32 * cell_size;
                     let cell_y = rect.y + row as f32 * cell_size;
                     let cell_center_x = cell_x + cell_size * 0.5;
@@ -3819,11 +3823,18 @@ impl Renderer {
         } else {
             1.0
         };
-        let mut y = rect.y;
-        while y < rect.y + rect.height {
+        let (vp_w, vp_h) = (self.viewport_size.0 as f32, self.viewport_size.1 as f32);
+        let rows = (rect.height / step_size).ceil().max(1.0) as usize;
+        let cols = (rect.width / step_size).ceil().max(1.0) as usize;
+        let (row_first, row_last) = self.visible_cell_range(rect.y, rect.height, step_size, rows, vp_h);
+        let (col_first, col_last) = self.visible_cell_range(rect.x, rect.width, step_size, cols, vp_w);
+        let y_end = (rect.y + row_last as f32 * step_size).min(rect.y + rect.height);
+        let x_end = (rect.x + col_last as f32 * step_size).min(rect.x + rect.width);
+        let mut y = rect.y + row_first as f32 * step_size;
+        while y < y_end {
             let row_height = step_size.min(rect.y + rect.height - y);
-            let mut x = rect.x;
-            while x < rect.x + rect.width {
+            let mut x = rect.x + col_first as f32 * step_size;
+            while x < x_end {
                 let col_width = step_size.min(rect.x + rect.width - x);
                 let cell_center_x = x + col_width / 2.0;
                 let cell_center_y = y + row_height / 2.0;
@@ -3951,11 +3962,18 @@ impl Renderer {
             1.0
         };
 
-        let mut y = rect.y;
-        while y < rect.y + rect.height {
+        let (vp_w, vp_h) = (self.viewport_size.0 as f32, self.viewport_size.1 as f32);
+        let rows = (rect.height / step_size).ceil().max(1.0) as usize;
+        let cols = (rect.width / step_size).ceil().max(1.0) as usize;
+        let (row_first, row_last) = self.visible_cell_range(rect.y, rect.height, step_size, rows, vp_h);
+        let (col_first, col_last) = self.visible_cell_range(rect.x, rect.width, step_size, cols, vp_w);
+        let y_end = (rect.y + row_last as f32 * step_size).min(rect.y + rect.height);
+        let x_end = (rect.x + col_last as f32 * step_size).min(rect.x + rect.width);
+        let mut y = rect.y + row_first as f32 * step_size;
+        while y < y_end {
             let row_height = step_size.min(rect.y + rect.height - y);
-            let mut x = rect.x;
-            while x < rect.x + rect.width {
+            let mut x = rect.x + col_first as f32 * step_size;
+            while x < x_end {
                 let col_width = step_size.min(rect.x + rect.width - x);
                 let cell_center_x = x + col_width / 2.0;
                 let cell_center_y = y + row_height / 2.0;
@@ -5197,6 +5215,36 @@ impl Renderer {
     /// the strip's document position no longer predicts its screen position,
     /// so we fall back to the full range rather than wrongly cull content a
     /// transform moves into view. Cap stays either way as the last line.
+    /// The index range of gradient CELLS (row or column) that can reach the
+    /// viewport along one axis, on the same law as `visible_strip_range`: a
+    /// cell's document position predicts its screen position only while no
+    /// transform is active, so with a transform on the stack the full range
+    /// comes back. Indices stay grid-aligned (floor/ceil of the viewport
+    /// bounds in cell units), so a culled render paints the identical pixels
+    /// for every cell that survives.
+    ///
+    /// Without this, the cell paths (linear-with-radius/diagonal, radial,
+    /// conic) emit up to `max_cells` quads per gradient over the element's
+    /// FULL rect — a per-element cap that composes into millions of quads on
+    /// a long page of offscreen gradient cards, dying with BufferTooLarge
+    /// every frame (2026-09-08, autotrader smoke).
+    fn visible_cell_range(
+        &self,
+        axis_start: f32,
+        _axis_len: f32,
+        cell_size: f32,
+        count: usize,
+        viewport_extent: f32,
+    ) -> (usize, usize) {
+        cell_range_for_viewport(
+            axis_start,
+            cell_size,
+            count,
+            viewport_extent,
+            !self.transform_stack.is_empty(),
+        )
+    }
+
     fn visible_strip_range(
         &self,
         axis_start: f32,
@@ -5689,6 +5737,24 @@ fn push_row_pieces(out: &mut Vec<(Rect, f32)>, left: f32, right: f32, y: f32, he
 /// `Renderer`, which needs a wgpu device, so it can only be exercised on a
 /// machine with an adapter. This one is a free function over plain geometry and
 /// its tests run anywhere.
+/// Grid-aligned cell-index window along one axis that can reach the viewport
+/// `[0, viewport_extent)`. Free function so the math is testable without a GPU
+/// device; `Renderer::visible_cell_range` supplies the transform guard.
+fn cell_range_for_viewport(
+    axis_start: f32,
+    cell_size: f32,
+    count: usize,
+    viewport_extent: f32,
+    transform_active: bool,
+) -> (usize, usize) {
+    if transform_active {
+        return (0, count);
+    }
+    let first = (((0.0 - axis_start) / cell_size).floor().max(0.0) as usize).min(count);
+    let last = ((((viewport_extent - axis_start) / cell_size).ceil()).max(0.0) as usize).min(count);
+    (first.min(last), last)
+}
+
 fn clip_quad_to_rounded(
     quad: Rect,
     rounded: &[(Rect, rustkit_layout::BorderRadius)],
@@ -6047,6 +6113,24 @@ mod tests {
             (actual - expected).abs() < 2.0,
             "area {actual} should be within 2px^2 of the rounded-rect area {expected}"
         );
+    }
+
+    #[test]
+    fn offscreen_gradient_cells_are_culled_to_the_viewport() {
+        // The 2026-09-08 autotrader kill: a gradient card at y=20_000 on an
+        // 800px viewport must contribute ZERO cells, not its full per-element
+        // cell budget — per-element caps compose into BufferTooLarge.
+        let (first, last) = cell_range_for_viewport(20_000.0, 1.0, 180, 800.0, false);
+        assert_eq!(first, last, "fully offscreen rect must yield an empty range");
+        // A rect straddling the viewport bottom keeps only the visible rows,
+        // grid-aligned so the surviving cells paint identical pixels.
+        let (first, last) = cell_range_for_viewport(700.0, 2.0, 180, 800.0, false);
+        assert_eq!(first, 0);
+        assert_eq!(last, 50, "(800-700)/2 = 50 cells remain");
+        // A transform on the stack disables the cull rather than wrongly
+        // dropping content the transform moves into view.
+        let (first, last) = cell_range_for_viewport(20_000.0, 1.0, 180, 800.0, true);
+        assert_eq!((first, last), (0, 180));
     }
 
     #[test]
