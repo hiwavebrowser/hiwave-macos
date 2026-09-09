@@ -35,6 +35,7 @@ from paint_oracle_gate import (  # noqa: E402
     PAINT_PASS_FRACTION,
     PolicyError,
     compare_case,
+    unmeasured_case,
     corners,
     count_outside_tolerance,
     flat_color,
@@ -753,6 +754,51 @@ def test_the_holdout_scope_does_not_gate():
         with_holdout = run_gate(Path(empty), include_non_gating=True)
     assert gating["summary"]["total_cases"] == 26
     assert with_holdout["summary"]["total_cases"] == 32
+
+
+def test_the_withheld_SET_is_published_not_just_its_size():
+    """A count cannot answer "was THIS element withheld".
+
+    The ratchet has to tell a newly BROKEN element from a newly MEASURABLE
+    one, and the only evidence that distinguishes them is which selectors this
+    run declined to speak about. `discrete_unattributable` is a number; two
+    runs with the same number can have withheld disjoint sets.
+    """
+    chrome, elements, styles = load_case("card-grid")
+    displaced = score(
+        "card-grid", chrome, chrome, elements, styles,
+        attributable=attributable_selectors(
+            elements, layout_tree(elements, offset=(0.0, 21.0))
+        ),
+    )
+    every_selector = sorted({e["selector"] for e in elements if e.get("selector")})
+    assert displaced["discrete_withheld_selectors"] == every_selector
+    assert displaced["discrete_unattributable"] == len(
+        [e for e in elements if e.get("selector")]
+    )
+
+    exact = score("card-grid", chrome, chrome, elements, styles,
+                  attributable=attributable_selectors(elements, layout_tree(elements)))
+    assert exact["discrete_withheld_selectors"] == []
+
+
+def test_a_case_the_gate_never_opened_reports_UNKNOWN_not_an_empty_set():
+    """None and [] are different facts and must not be collapsed.
+
+    [] asserts "every element was examined and none was withheld". For a case
+    that never rendered, or whose frames are different sizes so attribution
+    never ran, that assertion is false — and downstream it converts every
+    future discrete failure here into a confident regression report.
+    """
+    assert unmeasured_case("x", "no frame")["discrete_withheld_selectors"] is None
+
+    chrome, elements, styles = load_case("card-grid")
+    smaller = Image(chrome.width - 1, chrome.height, bytearray(
+        (chrome.width - 1) * chrome.height * 3))
+    mismatch = compare_case("card-grid", chrome, smaller, elements, styles,
+                            TOLERANCE, set())
+    assert mismatch["failures"][0]["kind"] == "size_mismatch"
+    assert mismatch["discrete_withheld_selectors"] is None
 
 
 if __name__ == "__main__":
