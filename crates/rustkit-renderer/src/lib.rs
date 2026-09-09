@@ -5691,18 +5691,40 @@ fn rounded_row_span(rect: Rect, radius: rustkit_layout::BorderRadius, y: f32) ->
 }
 
 /// Push one row's span as up to three pieces: a fully covered interior and an
-/// antialiased cell at each fractional end.
+/// antialiased cell at each end THE ARC ACTUALLY CUT.
 ///
 /// The partial cells are what keep a clipped corner from reading as a hard
 /// staircase. They use the same "coverage multiplies alpha" convention as
 /// `draw_rounded_corner`, so a clipped corner and a painted rounded corner
 /// antialias the same way.
-fn push_row_pieces(out: &mut Vec<(Rect, f32)>, left: f32, right: f32, y: f32, height: f32) {
+///
+/// `left_cut`/`right_cut` say whether that end came from an arc or is the
+/// quad's own edge, and only a cut end is snapped. An uncut end must pass
+/// through exactly as the no-clip path would emit it — `collect_clipped_pieces`
+/// returns `(rect, 1.0)` when there is no rounding at all, and a rounded clip
+/// somewhere else on the box is not a reason for this edge to move.
+///
+/// Snapping an uncut end is invisible on a quad whose edge is a real edge, and
+/// wrong on a quad that TILES: a gradient paints as a grid of cells, and two
+/// neighbouring cells' partial-coverage slivers each blend against what is
+/// under them instead of summing to one. Measured on gradient-backgrounds'
+/// `.linear-6`, that seamed 2164 interior pixels of a 227x180 card — a stipple
+/// every cell across the rows the arc band covers, 1309 of them out of Gate B's
+/// tolerance — while the corner notches the clip exists to cut were 353.
+fn push_row_pieces(
+    out: &mut Vec<(Rect, f32)>,
+    left: f32,
+    right: f32,
+    y: f32,
+    height: f32,
+    left_cut: bool,
+    right_cut: bool,
+) {
     if height <= 0.0 || right <= left {
         return;
     }
-    let inner_left = left.ceil();
-    let inner_right = right.floor();
+    let inner_left = if left_cut { left.ceil() } else { left };
+    let inner_right = if right_cut { right.floor() } else { right };
 
     if inner_right <= inner_left {
         // Span narrower than one pixel column: one cell carrying its coverage.
@@ -5788,12 +5810,19 @@ fn clip_quad_to_rounded(
             let centre = y + height * 0.5;
             let mut left = quad.x;
             let mut right = quad.right();
+            let (mut left_cut, mut right_cut) = (false, false);
             let mut inside = true;
             for (rect, radius) in rounded {
                 match rounded_row_span(*rect, *radius, centre) {
                     Some((l, r)) => {
-                        left = left.max(l);
-                        right = right.min(r);
+                        if l > left {
+                            left = l;
+                            left_cut = true;
+                        }
+                        if r < right {
+                            right = r;
+                            right_cut = true;
+                        }
                     }
                     None => {
                         inside = false;
@@ -5802,7 +5831,7 @@ fn clip_quad_to_rounded(
                 }
             }
             if inside {
-                push_row_pieces(out, left, right, y, height);
+                push_row_pieces(out, left, right, y, height, left_cut, right_cut);
             }
             y += height;
         }
@@ -6096,6 +6125,78 @@ mod tests {
                 "({x}, {y}) should be fully painted"
             );
         }
+    }
+
+    // ---------- an end the arc did not cut is not the arc's to move ----------
+    //
+    // A gradient paints as a grid of cells. Put a rounded clip over one and
+    // every cell inside the arc band got both its ends snapped to the pixel
+    // grid and re-emitted as partial-coverage slivers — so two neighbours'
+    // slivers each blended against what was under them instead of summing to
+    // one, and the card stippled every cell. On gradient-backgrounds'
+    // `.linear-6` that was 2164 interior pixels against 353 in the notches the
+    // clip exists to cut.
+
+    /// One cell of a tiled paint source, sitting well inside the arc's span.
+    const TILE_W: f32 = 3.0;
+
+    #[test]
+    fn an_end_the_arc_did_not_cut_keeps_the_quads_own_edge() {
+        let clip = Rect::new(0.0, 0.0, 200.0, 200.0);
+        // A row inside the top arc band (y < 20), but an x-span the arc at
+        // that row does not reach: the corner only bites the first ~20px.
+        let tile = Rect::new(100.3, 4.0, TILE_W, 1.0);
+        let pieces = clip_quad_to_rounded(tile, &[(clip, radius(20.0))]);
+
+        assert_eq!(
+            pieces.len(),
+            1,
+            "an uncut row must emit ONE piece, not a snapped interior plus two \
+             slivers: {pieces:?}"
+        );
+        let (rect, cov) = pieces[0];
+        assert_eq!(cov, 1.0, "an uncut row is fully covered");
+        assert!(
+            (rect.x - tile.x).abs() < 1e-4 && (rect.width - tile.width).abs() < 1e-4,
+            "the quad's own fractional edges must survive: {rect:?} vs {tile:?}"
+        );
+    }
+
+    #[test]
+    fn neighbouring_tiles_under_a_rounded_clip_do_not_seam() {
+        // The defect in the form it shipped: adjacent cells must tile exactly,
+        // with no partial-coverage pixel between them. Their pieces sum to the
+        // full area of both, and nothing lands at less than full coverage.
+        let clip = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let a = Rect::new(100.3, 4.0, TILE_W, 1.0);
+        let b = Rect::new(100.3 + TILE_W, 4.0, TILE_W, 1.0);
+
+        let mut pieces = clip_quad_to_rounded(a, &[(clip, radius(20.0))]);
+        pieces.extend(clip_quad_to_rounded(b, &[(clip, radius(20.0))]));
+
+        assert!(
+            pieces.iter().all(|(_, cov)| *cov == 1.0),
+            "no cell of an uncut row may carry partial coverage: {pieces:?}"
+        );
+        let area: f32 = pieces.iter().map(|(r, cov)| r.width * r.height * cov).sum();
+        assert!(
+            (area - 2.0 * TILE_W).abs() < 1e-3,
+            "the two tiles must cover exactly their own area, got {area}"
+        );
+    }
+
+    #[test]
+    fn a_cut_end_is_still_antialiased() {
+        // The control the fix must not buy its way out of: where the arc DOES
+        // cut the row, the sliver stays, or a clipped corner reads as a
+        // staircase again.
+        let clip = Rect::new(0.0, 0.0, 200.0, 200.0);
+        // A full-width row at y=4 crosses both top arcs.
+        let pieces = clip_quad_to_rounded(Rect::new(0.0, 4.0, 200.0, 1.0), &[(clip, radius(20.0))]);
+        assert!(
+            pieces.iter().any(|(_, cov)| *cov > 0.0 && *cov < 1.0),
+            "a row the arc cuts must keep its antialiased end: {pieces:?}"
+        );
     }
 
     #[test]
