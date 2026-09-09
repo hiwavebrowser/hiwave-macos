@@ -6186,16 +6186,34 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_end_is_still_antialiased() {
+    fn a_cut_end_is_still_antialiased_at_both_ends() {
         // The control the fix must not buy its way out of: where the arc DOES
         // cut the row, the sliver stays, or a clipped corner reads as a
         // staircase again.
+        //
+        // Asserted per END, not "some piece is partial". A row crossing both
+        // top arcs is cut twice, so a check that only asks whether ANY partial
+        // piece exists is satisfied by whichever end still works — and it
+        // passed with the left end's antialiasing deleted, and again with the
+        // right end's. This campaign's recurring survivor shape: the guard
+        // written against the example rather than against the rule.
         let clip = Rect::new(0.0, 0.0, 200.0, 200.0);
-        // A full-width row at y=4 crosses both top arcs.
         let pieces = clip_quad_to_rounded(Rect::new(0.0, 4.0, 200.0, 1.0), &[(clip, radius(20.0))]);
+
+        let (left, right) =
+            rounded_row_span(clip, radius(20.0), 4.5).expect("row crosses the rounded rect");
+        let partial_at = |x: f32| {
+            pieces
+                .iter()
+                .any(|(r, cov)| *cov > 0.0 && *cov < 1.0 && r.contains(x, 4.5))
+        };
         assert!(
-            pieces.iter().any(|(_, cov)| *cov > 0.0 && *cov < 1.0),
-            "a row the arc cuts must keep its antialiased end: {pieces:?}"
+            partial_at(left + 0.01),
+            "the arc-cut LEFT end must stay antialiased: {pieces:?}"
+        );
+        assert!(
+            partial_at(right - 0.01),
+            "the arc-cut RIGHT end must stay antialiased: {pieces:?}"
         );
     }
 
