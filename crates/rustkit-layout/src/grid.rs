@@ -3559,10 +3559,17 @@ mod tests {
             !is_collapsible_whitespace_only(&nbsp),
             "U+00A0 was classified as collapsible white space"
         );
-        let spaces = LayoutBox::new(BoxType::Text(" \n\t".to_string()), s);
+        let spaces = LayoutBox::new(BoxType::Text(" \n\t".to_string()), s.clone());
         assert!(
             is_collapsible_whitespace_only(&spaces),
             "space/newline/tab was not classified as collapsible white space"
+        );
+        // `"".chars().all(..)` is vacuously true, so an empty text node would
+        // be charged a space it does not contain.
+        let empty = LayoutBox::new(BoxType::Text(String::new()), s);
+        assert!(
+            !is_collapsible_whitespace_only(&empty),
+            "an empty text node was classified as collapsible white space"
         );
     }
 
