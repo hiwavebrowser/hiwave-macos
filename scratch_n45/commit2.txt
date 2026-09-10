@@ -1,0 +1,21 @@
+test(parity): n45 board receipts — campaign 26/26 avg 2.6245 -> 2.6279 (settings +0.09 is a revealed abspos-bottom bug on the toggle knob, 25/26 byte-flat), WPT 24/26 flat, honest last-run pin
+
+Basis: develop da8f413 (#191 + #192 merged), fresh clean-tree capture,
+avg 2.6245. With the matcher fix: 2.6279. The one mover is settings:
+`.toggle input:checked + .toggle-slider::before { translateX(22px);
+background: white }` never matched before (pseudo-element base selectors
+were matched with an empty sibling list) and now does, as Chrome does —
+RustKit paints that knob 21px above its slider because an absolutely
+positioned pseudo box's `bottom: 2px` resolves against the containing
+block's TOP (layout dump: knob y 289.19 for a slider at 310.19, before
+AND after the fix). Ledgered for the layout lane. The census
+(scratch_n45/census.py) shows no board case uses any pseudo-class the
+fix adds — the meter is blind to the fix itself; the repro is the receipt.
+
+WPT Tier-1 24/26, same two fails, pinned on this tip.
+
+Tools: scratch_n45/{census,swatches,framediff,crop,pngcrop,pseudo_rules,
+find,fmt_check}.py, board jsons/logs, repro before/after PNGs, Chrome
+repro capture, settings crops.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>

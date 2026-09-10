@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-09-10T01:41:49.430690",
+  "timestamp": "2026-09-10T01:22:37.474285",
   "scope": "all",
   "iterations": 1,
   "max_variance": 0.1,
@@ -1533,9 +1533,9 @@
       "type": "builtins",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 28547,
+        "diffPixels": 27843,
         "totalPixels": 786432,
-        "diffPercent": 3.629938761393229,
+        "diffPercent": 3.5404205322265625,
         "width": 1024,
         "height": 768,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/settings/run-1/diff.png",
@@ -2454,15 +2454,15 @@
       },
       "passed": true,
       "pixel_runs": [
-        3.629938761393229
+        3.5404205322265625
       ],
-      "diff_pct_median": 3.629938761393229,
-      "diff_pct_min": 3.629938761393229,
-      "diff_pct_max": 3.629938761393229,
+      "diff_pct_median": 3.5404205322265625,
+      "diff_pct_min": 3.5404205322265625,
+      "diff_pct_max": 3.5404205322265625,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 3.629938761393229
+      "diff_pct": 3.5404205322265625
     },
     {
       "case_id": "chrome_rustkit",
