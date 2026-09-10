@@ -8208,3 +8208,67 @@ The corpus's largest geometry roots are unchanged and none is P2: `settings`
 434 failures / `sum|Δ|` 27549, `new_tab` 223 / 8786, `about` 382 / 5064,
 `form-elements` 125 / 3818, `css-selectors` 122 / 3221, `image-gallery` 148 /
 2533, `flex-positioning` 174 / 1700 — the last of those is P3, the next item.
+
+### Addendum, same night — the macOS receipt, and the prediction is checked
+
+Run [34441488713](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/34441488713),
+`macos-14` (CoreText and Metal), on `22f3202`. **12 checks: 9 success, 3 skipped
+by design, zero failures.**
+
+```
+metric:     2/26 cases pass all four conditions
+measured:   26/26 scored on all four  (0 not fully measured)
+  geometry   5/26 green, 26/26 measured
+  paint      3/26 green, 26/26 measured
+  stability 26/26 green, 26/26 measured
+  discrete  26/26 green, 26/26 measured
+```
+
+Every column identical to night 47's, and the metric unmoved at 2/26 —
+`bg-pure` and `bg-solid`. That is what the write-up above predicted.
+
+**The 48 axes cleared, and the number is exact.** Against `sticky-scroll`'s
+**committed ratchet floor** — a stored figure, so this is not a diff across two
+bases:
+
+| | floor | this run |
+|---|---:|---:|
+| geometry failures | **68** | **20** |
+| paint within tolerance | 0.968260 | **0.969500** |
+| discrete | 0 | 0 |
+
+68 − 20 = **48**, the exact count of axes the trench seat showed moving. The
+ratchet flags `sticky-scroll` **tighten-eligible**.
+
+**The mechanism is confirmed, not just the count.** All 20 survivors are
+sub-pixel text advances on the header:
+
+```
+sticky-scroll · div.logo · width · 85.125 · 87.2509 · +2.1259
+sticky-scroll · nav      · x     · 835.8438 · 835.115 · -0.7288
+sticky-scroll · nav      · width · 384.1562 · 384.885 · +0.7288
+sticky-scroll · nav > a:nth-of-type(1) · x · 835.8438 · 835.115 · -0.7288
+```
+
+`main`, every `article-card`, `horizontal-scroll`, both `h3`s, `overflow-demo`
+and `aside.sidebar-right` are **absent from the failure list entirely**. The
+whole `1fr` column is gone. There is no 19.0625 bucket and no space-advance
+residual at all, which answers the open question the write-up left: **RustKit's
+macOS space advance matches Chrome's 4.1875px to within 0.5px.** The
+seat's +19.0625 was entirely the missing font stack.
+
+A second, independent confirmation sits in the floor file: `sticky-scroll`'s
+`discrete_withheld` list is `main`, all four `article-card`s and their children,
+`horizontal-scroll`, both `h3`s, `overflow-demo`, `sidebar-right`, `logo`, `nav`
+and its first two `a`s — **exactly the set this fix moved**. They were withheld
+from Gate B's discrete detectors because their geometry was not within 0.5px.
+Gate B on this run reads 879 elements examined against 714 withheld.
+
+**What this does NOT claim.** No `develop`-basis receipt exists at `da8f413` —
+the parity workflow runs only on `pull_request` — so the columns matching night
+47's is consistent with this PR changing none of them but is not an isolated
+measurement of that. The `68 → 20` claim does not depend on it: the 68 is a
+committed floor, and the survivors were read directly from this run's Gate A.
+
+CI is green and the PR is mergeable; #193 waits on review. The check-in loop is
+armed until it merges or closes.
