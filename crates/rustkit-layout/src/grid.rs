@@ -2560,7 +2560,10 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
 fn is_collapsible_whitespace_only(child: &LayoutBox) -> bool {
     match &child.box_type {
         BoxType::Text(text) => {
-            !text.is_empty() && text.chars().all(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c'))
+            !text.is_empty()
+                && text
+                    .chars()
+                    .all(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c'))
         }
         _ => false,
     }
