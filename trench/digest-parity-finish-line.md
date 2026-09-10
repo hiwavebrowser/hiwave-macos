@@ -8019,3 +8019,192 @@ which is now `develop`'s content): `settings` 371 geometry failures, `new_tab`
 `sticky-scroll` 68. `gradient-backgrounds` is down to 5 and all five are `span`
 widths — text advances, i.e. P4, which needs CoreText on both sides and cannot
 be worked from the Linux trench seat.
+
+---
+
+## 2026-09-10
+
+**Metric: `2/26` → `2/26`, and this is a proof rather than a re-run.** Exactly
+one case changed on either oracle — `sticky-scroll` — and it is geometry-red
+before and after, with 114 failing axes either way. The two green cases
+(`bg-pure`, `bg-solid`) are bit-identical on both oracles, so no case can have
+crossed the conjunction or fallen off it. No macOS run tonight; PR #193's lane
+makes that measurement.
+
+**P-item: P2 (grid/sticky). The named `1fr` min-content floor root is
+complete.** The plan's §4 text for P2 is *"the `1fr` min-content floor diagnosis
+from 07-08 gets finished, not re-theorized"*, and that is what this is. What
+remains on both of P2's cases after it is P4 — see the hand-off below.
+
+### Commits — branch `atlas/n48-nowrap-min-content-space`, cut from `develop da8f413`
+
+- `25cb140` — white space between inline boxes counts in a nowrap min-content.
+- `08a22dc` — test-only: an empty text node is not a collapsed space.
+- `60363a2` — test-only: the space held before a block does not leak into the
+  run after it (the M4 survivor).
+- `22f3202` — style-only: the one added line wrapped to rustfmt's shape.
+
+PR **#193** into `develop`, subscribed.
+
+### The defect
+
+css-text-3 §4.1: inside a run that cannot wrap, the document white space
+BETWEEN two inline-level boxes collapses to one space and is **rendered**. It is
+not a break opportunity, so min-content has to carry it. `own_min_content_width`
+dropped it — a text child of pure white space answers 0 from
+`text_min_content_width` — so the intrinsic size and the laid-out line
+disagreed about the same characters.
+
+`sticky-scroll`'s `.horizontal-scroll { white-space: nowrap }` holds six 200px
+inline-blocks with `margin-right: 15px`, one per source line, and it floors the
+`1fr` column of the page's grid:
+
+```
+Chrome    main width 1295.9375 = 6*200 + 5*15 + 5 spaces (4.1875 each)
+RustKit   main width 1275.00   = 6*200 + 5*15 + 0
+RustKit's own line put the items 223px apart, i.e. 215 + one 8px space
+```
+
+The track was floored at a min-content the engine's own inline layout then
+overflowed by five spaces. **47 of the case's 114 failing axes, and 984.06 of
+its 1453.06 `sum|Δ|`, were that one −20.9375px root** propagating down the
+column.
+
+### Measured — Linux/SwiftShader, 26 cases. MECHANICS, NOT A RECEIPT
+
+| Oracle | develop `da8f413` | after |
+|---|---:|---:|
+| Gate A geometry failures / joins | 2646 / 16 | **2646 / 16 — identical** |
+| Gate A geometry-green | 3/26 | 3/26 |
+| Gate A `sticky-scroll` `sum\|Δ\|` | 1453.06 | **1364.00** (−6.1%) |
+| Gate B paint-green | 1/26 | 1/26 |
+| Gate B `sticky-scroll` outside tolerance | 58512 px | **58389 px** (−123) |
+| Gate B discrete auto-fails / examined | 0 / 260 | 0 / 260 |
+| Gate B measured | 26/26 | 26/26 |
+
+25 of 26 cases bit-identical on **both** oracles. `measured` was checked per
+case rather than inferred from equal outputs — night 46's trap, where two gates'
+worth of unmeasured printed as two gates' worth of agreement.
+
+### Stop rule
+
+Checked **per box and per axis**, not per case: **48 axes improved, zero
+worsened, zero new failures, zero cleared-then-reappearing**, no case lost its
+green, no case gained a discrete failure. The rule did not fire. This is the
+first night in a while where it did not need arguing about.
+
+### The residual is one number, and the invariant is the honest claim
+
+All 48 axes move from −20.9375 to **+19.0625 = 5 × (8.0 − 4.1875)** — five
+spaces at this seat's advance against Chrome's. The sign flips; the magnitude
+improves by 1.875px per axis. Reporting that as the win would be thin, so the
+claim I am actually making is the invariant, measured on the real capture:
+
+```
+before   box width 1275.00, its own inline content occupied 1315.00
+after    box width 1315.00, its own inline content occupies  1315.00
+```
+
+The track floor and the line the engine actually lays out now agree. What is
+left between RustKit and Chrome on those axes is the advance of one space,
+five times.
+
+**Whether that clears on macOS is a PREDICTION, not a result.** It holds iff
+RustKit's macOS space advance is within tolerance of Chrome's 4.1875px, and
+night 47's board says macOS advances are close but not exact (`gradient-
+backgrounds`' five surviving failures are all `span` widths). The direction is
+safe — |5s − 20.9375| < 20.9375 for any s below 8.375 — but green is not
+promised. #193's lane decides.
+
+### Mutation-check results
+
+**10 probes, 10 RED. NULL comment-only probe GREEN; control GREEN before and
+after.** The harness aborts a probe whose edit leaves `git diff --quiet` true,
+compiles the mutant, and distinguishes NO-COMPILE from RED.
+
+| probe | result |
+|---|---|
+| M1 the white-space branch deleted (the fix itself) | RED |
+| M2 consecutive white space accumulates instead of collapsing | RED |
+| M3 leading white space counted (`run_has_content` guard dropped) | RED |
+| M4 a block child does not drop the pending space | RED *(survivor; see below)* |
+| M5 the space is not cleared once consumed | RED |
+| M6 the rule extended to `pre` as well as `nowrap` | RED |
+| M7 the collapsed space measures the empty string | RED |
+| M8 the predicate goes trim-based, so NBSP counts as collapsible | RED |
+| M9 the empty-string guard dropped from the predicate | RED |
+| M10 the run is never marked as having content | RED |
+
+**M4 survived the first sweep and the gap was real.** My block-interrupt guard
+put the block LAST, so a leaked space had nowhere to land and the mutant scored
+identically. Closed with a shape that starts a second run after the block.
+That is the **sixth sweep in a row** whose survivor is *the guard written
+against the example, not the rule* — night 8 named the pattern, night 11 said
+naming it had not stopped it, night 11 proposed a checklist item, and I did not
+run the checklist. I am recording it a sixth time with no new insight, which is
+itself the finding: this is not going to be fixed by another paragraph in a
+digest.
+
+I did commit before mutating, which is the trap four earlier nights fell into.
+That one has stuck.
+
+### Decisions needed from Pete
+
+1. **Is P2 done?** Its named root is fixed and both its cases' remaining error
+   is text advances — which by the campaign's own reading needs CoreText on both
+   sides and cannot be worked from this seat. If P2 is closed on that basis the
+   queue moves to P3 (flex residual); if not, P2 blocks until a macOS seat
+   exists.
+2. Still open since 2026-09-09 and unanswered: the stop-rule reading (a
+   correctness fix that costs pixels on a displaced element), the square half of
+   overflow clipping, and the untested `NoRepeat` background arm.
+3. The stored night order still opens with P0a-0, finished 37 nights ago, and
+   cost this seat its first hour again. Only you can rewrite it. Fourth night
+   carrying this.
+
+### Surprises
+
+- **The engine's own line layout was right and its intrinsic size was wrong, and
+  the case was scored on the wrong one.** I expected a grid track-sizing bug.
+  The track sizing is fine; it was fed a min-content that the same engine's
+  inline layout then overflowed by 40px. Two subsystems in one crate disagreeing
+  about the width of five space characters, invisible because only one of them
+  is what the box reports.
+- **This seat has no fonts at all, and it took a two-line arithmetic check to
+  notice.** `measure_text_advanced` returns half an em per character for
+  everything: `"a"` is 8px at 16px, `.logo`'s "HiWave" is 72px at 24px.
+  Every earlier digest's phrase for this was "the Linux font stack", which
+  implies DejaVu metrics. It is not DejaVu — there is no face, only the
+  fallback. That makes the P4 caveat stronger than it has been written: P4
+  numbers from this seat are not *substituted* metrics, they are *absent* ones.
+- **`tools/parity_oracle/capture_seat_control.mjs` no longer runs here.**
+  Playwright 1.57.0 wants `chromium-1200` and this container ships
+  `chromium-1194`, so the launch fails with "npx playwright install". Night 44's
+  confound board cannot be reproduced on this seat as it stands. I did not
+  chase it — the arithmetic decomposition above is a better answer for this
+  particular case than a control would have been — but the tool is dark and
+  nobody would find out until they needed it.
+- **`estimate_max_content_width` has the identical omission** and is untouched
+  so tonight's change stays attributable. Under `white-space: normal` a
+  max-content run never breaks, so inter-box spaces contribute there
+  unconditionally — a wider rule than tonight's, on the path flex-basis:auto
+  uses. Recorded, not half-landed.
+- Pre-existing and not mine: `rustkit-layout`'s `normal_line_height_probe`
+  integration test fails on `develop` at this seat too, and `cargo test
+  --workspace` cannot build at all here (`gdk-sys`, missing GTK system
+  libraries). Neither is a change from tonight; both are worth knowing before
+  someone reads a red suite as a regression.
+
+### Hand-off — what is left on P2's two cases, from tonight's Gate A
+
+`sticky-scroll`, after the fix: 114 failing axes and **every one of them is a
+text advance or a line-height**. 48 × 19.0625 (the space, five times), 9 × 1.55
+`y` on `li > a` (leading), and the rest `span`/`a` widths and their knock-on
+`x`. Nothing structural remains visible on this seat. `card-grid`'s residual was
+ruled P4 by night 45 and re-derived by night 46. **P2's measurable-from-here
+surface is exhausted**, which is what decision 1 above is asking about.
+
+The corpus's largest geometry roots are unchanged and none is P2: `settings`
+434 failures / `sum|Δ|` 27549, `new_tab` 223 / 8786, `about` 382 / 5064,
+`form-elements` 125 / 3818, `css-selectors` 122 / 3221, `image-gallery` 148 /
+2533, `flex-positioning` 174 / 1700 — the last of those is P3, the next item.
