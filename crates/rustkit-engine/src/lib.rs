@@ -399,6 +399,36 @@ fn percent_decode(s: &str) -> Vec<u8> {
     out
 }
 
+/// Where an element sits among its siblings, for the tree-structural
+/// pseudo-classes (Selectors 4 §14): `index`/`count` among all element
+/// siblings, `type_index`/`type_count` among siblings sharing its tag, and
+/// whether it has any element or text child (`:empty`). Counts DOM elements,
+/// not layout boxes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SiblingContext {
+    pub index: usize,
+    pub count: usize,
+    pub type_index: usize,
+    pub type_count: usize,
+    pub has_children: bool,
+}
+
+impl SiblingContext {
+    /// An element with no siblings and no children (roots, ad-hoc builds).
+    pub const SOLE: SiblingContext = SiblingContext {
+        index: 0,
+        count: 1,
+        type_index: 0,
+        type_count: 1,
+        has_children: false,
+    };
+
+    pub fn with_children(mut self, has_children: bool) -> Self {
+        self.has_children = has_children;
+        self
+    }
+}
+
 /// The main browser engine.
 pub struct Engine {
     config: EngineConfig,
@@ -2113,8 +2143,7 @@ impl Engine {
                     &css_vars,
                     &[],
                     &[],
-                    0,
-                    1,
+                    SiblingContext::SOLE.with_children(true),
                     None,
                 ))
             } else {
@@ -2135,8 +2164,7 @@ impl Engine {
                 &[],
                 html_style.as_ref(),
                 &[],
-                0,
-                1,
+                SiblingContext::SOLE.with_children(Self::node_has_children(&body)),
                 "body",
                 &element_ids,
                 false,
@@ -2379,12 +2407,22 @@ impl Engine {
             ancestors,
             None,
             &[],
-            0,
-            1,
+            SiblingContext::SOLE.with_children(Self::node_has_children(node)),
             "",
             &Cell::new(0),
             false,
         )
+    }
+
+    /// `:empty` input: any element or text child (whitespace included —
+    /// Selectors 4 §14.5 counts it); comments do not count.
+    fn node_has_children(node: &Rc<Node>) -> bool {
+        node.children().iter().any(|c| {
+            matches!(
+                c.node_type,
+                NodeType::Element { .. } | NodeType::Text(_)
+            )
+        })
     }
 
     /// Build a layout box, additionally threading the element-identity context
@@ -2407,8 +2445,7 @@ impl Engine {
         ancestors: &[(String, Vec<String>, Option<String>)],
         parent_style: Option<&ComputedStyle>,
         siblings_before: &[(String, Vec<String>, Option<String>)],
-        element_index: usize,
-        sibling_count: usize,
+        sib: SiblingContext,
         selector_path: &str,
         element_ids: &Cell<usize>,
         in_foreign_content: bool,
@@ -2440,8 +2477,7 @@ impl Engine {
                     css_vars,
                     ancestors,
                     siblings_before,
-                    element_index,
-                    sibling_count,
+                    sib,
                     parent_style,
                 );
 
@@ -2923,6 +2959,8 @@ impl Engine {
                     stylesheets,
                     css_vars,
                     ancestors,
+                    siblings_before,
+                    sib,
                     "::before",
                 ) {
                     layout_box.children.push(before_box);
@@ -2945,11 +2983,33 @@ impl Engine {
                     in_foreign_content || Self::enters_foreign_content(&tag_lower);
                 let child_segments =
                     Self::child_selector_segments(&child_nodes, children_are_foreign);
+                // Same-tag totals feed the `-of-type` pseudo-classes.
+                let mut type_totals: HashMap<String, usize> = HashMap::new();
+                for c in child_nodes.iter() {
+                    if let NodeType::Element { tag_name, .. } = &c.node_type {
+                        *type_totals.entry(tag_name.to_lowercase()).or_insert(0) += 1;
+                    }
+                }
+                let mut type_seen: HashMap<String, usize> = HashMap::new();
                 for (child_index, child) in child_nodes.iter().enumerate() {
                     let child_path = Self::child_selector_path(
                         selector_path,
                         child_segments.get(child_index).and_then(|s| s.as_deref()),
                     );
+                    let child_sib = match &child.node_type {
+                        NodeType::Element { tag_name, .. } => {
+                            let t = tag_name.to_lowercase();
+                            let type_index = *type_seen.get(&t).unwrap_or(&0);
+                            SiblingContext {
+                                index: preceding_siblings.len(),
+                                count: child_element_count,
+                                type_index,
+                                type_count: type_totals.get(&t).copied().unwrap_or(1),
+                                has_children: Self::node_has_children(child),
+                            }
+                        }
+                        _ => SiblingContext::SOLE,
+                    };
                     let child_box = self.build_layout_from_parent_style_and_path(
                         child,
                         stylesheets,
@@ -2957,8 +3017,7 @@ impl Engine {
                         &child_ancestors,
                         Some(&style),
                         &preceding_siblings,
-                        preceding_siblings.len(),
-                        child_element_count,
+                        child_sib,
                         &child_path,
                         element_ids,
                         children_are_foreign,
@@ -2973,11 +3032,9 @@ impl Engine {
                             .get("class")
                             .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
                             .unwrap_or_default();
-                        preceding_siblings.push((
-                            tag_name.to_lowercase(),
-                            child_classes,
-                            attributes.get("id").cloned(),
-                        ));
+                        let t = tag_name.to_lowercase();
+                        *type_seen.entry(t.clone()).or_insert(0) += 1;
+                        preceding_siblings.push((t, child_classes, attributes.get("id").cloned()));
                     }
 
                     // Determine if box should be included in layout tree
@@ -3011,6 +3068,8 @@ impl Engine {
                     stylesheets,
                     css_vars,
                     ancestors,
+                    siblings_before,
+                    sib,
                     "::after",
                 ) {
                     layout_box.children.push(after_box);
@@ -3212,6 +3271,7 @@ impl Engine {
     }
 
     /// Create a pseudo-element (::before or ::after) if applicable.
+    #[allow(clippy::too_many_arguments)]
     fn create_pseudo_element(
         &self,
         tag_name: &str,
@@ -3219,6 +3279,8 @@ impl Engine {
         stylesheets: &[Stylesheet],
         _css_vars: &HashMap<String, String>,
         ancestors: &[(String, Vec<String>, Option<String>)],
+        siblings_before: &[(String, Vec<String>, Option<String>)],
+        sib: SiblingContext,
         pseudo: &str,
     ) -> Option<LayoutBox> {
         // Compute style for the pseudo-element by matching selectors with the pseudo suffix
@@ -3239,16 +3301,16 @@ impl Engine {
                         .trim_end_matches(pseudo)
                         .trim_end_matches(&pseudo.replace("::", ":"));
 
-                    // Check if base selector matches this element
-                    // Use 0, 1 for element_index, sibling_count since we don't need sibling selectors for pseudo-elements
+                    // Check if base selector matches this element, with the
+                    // host's real sibling context (`li:first-child::before`,
+                    // `.slot:empty::before { content: "…" }`).
                     if self.selector_matches(
                         base_selector.trim(),
                         tag_name,
                         attributes,
                         ancestors,
-                        &[],
-                        0,
-                        1,
+                        siblings_before,
+                        sib,
                     ) {
                         let specificity = self.selector_specificity(selector);
                         matching_rules.push((specificity, rule));
@@ -3306,8 +3368,7 @@ impl Engine {
         css_vars: &HashMap<String, String>,
         ancestors: &[(String, Vec<String>, Option<String>)],
         siblings_before: &[(String, Vec<String>, Option<String>)],
-        element_index: usize,
-        sibling_count: usize,
+        sib: SiblingContext,
         parent_style: Option<&ComputedStyle>,
     ) -> ComputedStyle {
         let mut style = ComputedStyle::new();
@@ -3698,8 +3759,7 @@ impl Engine {
                     attributes,
                     ancestors,
                     siblings_before,
-                    element_index,
-                    sibling_count,
+                    sib,
                 ) {
                     let specificity = self.selector_specificity(&rule.selector);
                     matching_rules.push((rule, specificity, rule_index));
@@ -5888,8 +5948,8 @@ impl Engine {
     ///
     /// `ancestors` is a list of (tag_name, classes, id) tuples from parent to root.
     /// `siblings_before` is a list of (tag_name, classes, id) tuples for preceding siblings.
-    /// `element_index` is the 0-based index of this element among its siblings.
-    /// `sibling_count` is the total number of siblings.
+    /// `sib` carries the element's position among its siblings (see
+    /// [`SiblingContext`]).
     fn selector_matches(
         &self,
         selector: &str,
@@ -5897,24 +5957,27 @@ impl Engine {
         attributes: &HashMap<String, String>,
         ancestors: &[(String, Vec<String>, Option<String>)],
         siblings_before: &[(String, Vec<String>, Option<String>)],
-        element_index: usize,
-        sibling_count: usize,
+        sib: SiblingContext,
     ) -> bool {
         let selector = selector.trim();
 
-        // Handle multiple selectors (comma-separated)
+        // Selectors 4 §3.9: a selector list containing an invalid selector is
+        // invalid as a whole and the rule is dropped — `.a:frobnicate, .b {}`
+        // styles NOTHING, not `.b`. An unknown pseudo-class used to fall to
+        // the matcher's `_ => true` arm and match every element instead.
+        if !Self::selector_list_is_valid(selector) {
+            return false;
+        }
+
+        // Handle multiple selectors (comma-separated at the top level —
+        // `:is(a, b)` is one member).
         if selector.contains(',') {
-            return selector.split(',').any(|s| {
-                self.selector_matches(
-                    s.trim(),
-                    tag_name,
-                    attributes,
-                    ancestors,
-                    siblings_before,
-                    element_index,
-                    sibling_count,
-                )
-            });
+            let members = Self::split_top_level_commas(selector);
+            if members.len() != 1 || members[0] != selector {
+                return members.into_iter().any(|s| {
+                    self.selector_matches(s, tag_name, attributes, ancestors, siblings_before, sib)
+                });
+            }
         }
 
         // A pseudo-ELEMENT selector styles a generated box, never its host:
@@ -5948,13 +6011,7 @@ impl Engine {
             return false; // Simplified - we'll handle this below
         }
 
-        if !self.simple_selector_matches_with_pseudo(
-            &last_token.0,
-            tag_name,
-            attributes,
-            element_index,
-            sibling_count,
-        ) {
+        if !self.simple_selector_matches_with_pseudo(&last_token.0, tag_name, attributes, sib) {
             return false;
         }
 
@@ -6064,6 +6121,10 @@ impl Engine {
         let mut in_brackets = false;
         let mut in_quotes = false;
         let mut quote_char = ' ';
+        // Functional pseudo-class arguments (`:is(a, b)`, `:not(.x > .y)`)
+        // are part of the compound: whitespace and combinator characters
+        // inside parentheses must not split the token.
+        let mut paren_depth = 0usize;
 
         while let Some(c) = chars.next() {
             if in_quotes {
@@ -6094,6 +6155,23 @@ impl Engine {
             }
 
             if in_brackets {
+                current.push(c);
+                continue;
+            }
+
+            if c == '(' {
+                paren_depth += 1;
+                current.push(c);
+                continue;
+            }
+
+            if c == ')' {
+                paren_depth = paren_depth.saturating_sub(1);
+                current.push(c);
+                continue;
+            }
+
+            if paren_depth > 0 {
                 current.push(c);
                 continue;
             }
@@ -6152,8 +6230,7 @@ impl Engine {
         selector: &str,
         tag_name: &str,
         attributes: &HashMap<String, String>,
-        element_index: usize,
-        sibling_count: usize,
+        sib: SiblingContext,
     ) -> bool {
         // Universal selector
         if selector == "*" {
@@ -6249,8 +6326,7 @@ impl Engine {
                     &pseudo_name,
                     pseudo_arg.as_deref(),
                     tag_name,
-                    element_index,
-                    sibling_count,
+                    sib,
                     attributes,
                 ) {
                     return false;
@@ -6361,63 +6437,353 @@ impl Engine {
         )
     }
 
+    /// Pseudo-classes the matcher can decide. Anything else makes the
+    /// selector invalid (see `selector_list_is_valid`).
+    fn pseudo_class_is_supported(name: &str) -> bool {
+        Self::pseudo_class_is_static_false(name)
+            || matches!(
+                name,
+                "root"
+                    | "scope"
+                    | "first-child"
+                    | "last-child"
+                    | "only-child"
+                    | "nth-child"
+                    | "nth-last-child"
+                    | "first-of-type"
+                    | "last-of-type"
+                    | "only-of-type"
+                    | "nth-of-type"
+                    | "nth-last-of-type"
+                    | "empty"
+                    | "not"
+                    | "is"
+                    | "where"
+                    | "matches"
+                    | "-webkit-any"
+                    | "has"
+                    | "link"
+                    | "any-link"
+                    | "disabled"
+                    | "enabled"
+                    | "checked"
+                    | "indeterminate"
+                    | "default"
+                    | "required"
+                    | "optional"
+                    | "read-only"
+                    | "read-write"
+                    | "placeholder-shown"
+                    | "valid"
+                    | "invalid"
+                    | "user-valid"
+                    | "user-invalid"
+                    | "in-range"
+                    | "out-of-range"
+                    | "autofill"
+                    | "defined"
+                    | "lang"
+                    | "dir"
+                    | "fullscreen"
+                    | "modal"
+                    | "popover-open"
+                    | "picture-in-picture"
+                    | "playing"
+                    | "paused"
+                    | "muted"
+                    | "host"
+                    | "host-context"
+                    | "first-line"
+                    | "first-letter"
+            )
+    }
+
+    /// Selectors 4 §3.9 validity, restricted to what the matcher decides
+    /// here: every pseudo-class in the list (outside `:is()`/`:where()`,
+    /// which are forgiving) must be one the engine knows. Pseudo-elements
+    /// (`::x`) and attribute/quoted content are skipped. Chrome drops a rule
+    /// whose selector list carries an unknown pseudo-class, including a
+    /// vendor-prefixed one from another engine (`:-moz-focusring`).
+    fn selector_list_is_valid(selector: &str) -> bool {
+        let chars: Vec<char> = selector.chars().collect();
+        let mut i = 0;
+        let mut in_brackets = false;
+        let mut quote: Option<char> = None;
+        // Depth inside a forgiving selector list (`:is(...)`/`:where(...)`),
+        // where unknown names are ignored rather than fatal.
+        let mut forgiving_depth = 0usize;
+        let mut paren_depth: Vec<bool> = Vec::new(); // true = this paren is forgiving
+        while i < chars.len() {
+            let c = chars[i];
+            if let Some(q) = quote {
+                if c == q {
+                    quote = None;
+                }
+                i += 1;
+                continue;
+            }
+            match c {
+                '"' | '\'' => quote = Some(c),
+                '[' => in_brackets = true,
+                ']' => in_brackets = false,
+                '(' => paren_depth.push(false),
+                ')' => {
+                    if paren_depth.pop() == Some(true) {
+                        forgiving_depth -= 1;
+                    }
+                }
+                ':' if !in_brackets => {
+                    if chars.get(i + 1) == Some(&':') {
+                        // Pseudo-element: skip its name.
+                        i += 2;
+                        while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '-') {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    let start = i + 1;
+                    let mut end = start;
+                    while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '-')
+                    {
+                        end += 1;
+                    }
+                    let name: String = chars[start..end].iter().collect();
+                    let functional = chars.get(end) == Some(&'(');
+                    let name_l = name.to_ascii_lowercase();
+                    // Legacy single-colon pseudo-elements are valid selectors
+                    // (they style a generated box; the host guard above
+                    // keeps them off the element itself).
+                    let known = Self::pseudo_class_is_supported(&name_l)
+                        || matches!(name_l.as_str(), "before" | "after");
+                    if !known && forgiving_depth == 0 {
+                        return false;
+                    }
+                    if functional {
+                        let forgiving = matches!(
+                            name_l.as_str(),
+                            "is" | "where" | "matches" | "-webkit-any"
+                        );
+                        if forgiving {
+                            forgiving_depth += 1;
+                        }
+                        paren_depth.push(forgiving);
+                        i = end + 1;
+                        continue;
+                    }
+                    i = end;
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        true
+    }
+
+    /// Split a selector list on the commas that are not inside parentheses,
+    /// brackets, or quotes — `:is(a, b), c` is two members, not three.
+    fn split_top_level_commas(selector: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        let mut depth = 0i32;
+        let mut in_brackets = false;
+        let mut quote: Option<char> = None;
+        let mut start = 0;
+        for (i, c) in selector.char_indices() {
+            if let Some(q) = quote {
+                if c == q {
+                    quote = None;
+                }
+                continue;
+            }
+            match c {
+                '"' | '\'' => quote = Some(c),
+                '[' => in_brackets = true,
+                ']' => in_brackets = false,
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 && !in_brackets => {
+                    let part = selector[start..i].trim();
+                    if !part.is_empty() {
+                        out.push(part);
+                    }
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        let part = selector[start..].trim();
+        if !part.is_empty() {
+            out.push(part);
+        }
+        out
+    }
+
+    /// `:is()`/`:where()`/`:not()` argument: a selector list of compound
+    /// selectors, evaluated against the subject. A member with a combinator
+    /// needs the ancestor chain this matcher does not carry and counts as
+    /// not matching (under-match, ledgered) rather than matching everything.
+    fn any_compound_in_list_matches(
+        &self,
+        list: &str,
+        tag_name: &str,
+        attributes: &HashMap<String, String>,
+        sib: SiblingContext,
+    ) -> bool {
+        Self::split_top_level_commas(list).into_iter().any(|member| {
+            if Self::selector_has_combinator(member) {
+                return false;
+            }
+            self.simple_selector_matches_with_pseudo(member, tag_name, attributes, sib)
+        })
+    }
+
+    /// True when a selector has a descendant/child/sibling combinator
+    /// outside parentheses and brackets.
+    fn selector_has_combinator(selector: &str) -> bool {
+        let mut depth = 0i32;
+        let mut in_brackets = false;
+        for c in selector.trim().chars() {
+            match c {
+                '[' => in_brackets = true,
+                ']' => in_brackets = false,
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ' ' | '>' | '+' | '~' if depth == 0 && !in_brackets => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn is_form_control_tag(tag_name: &str) -> bool {
+        matches!(tag_name, "input" | "textarea" | "select" | "button")
+    }
+
     /// Match a pseudo-class.
     fn match_pseudo_class(
         &self,
         name: &str,
         arg: Option<&str>,
         tag_name: &str,
-        element_index: usize,
-        sibling_count: usize,
+        sib: SiblingContext,
         attributes: &HashMap<String, String>,
     ) -> bool {
+        let tag = tag_name.to_ascii_lowercase();
+        let tag = tag.as_str();
+        let input_type = attributes
+            .get("type")
+            .map(|t| t.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        let is_control = Self::is_form_control_tag(tag);
+        let value_is_empty = attributes.get("value").map_or(true, |v| v.is_empty());
         match name {
-            "first-child" => element_index == 0,
-            "last-child" => element_index == sibling_count.saturating_sub(1),
-            "only-child" => sibling_count == 1,
-            "nth-child" => {
-                if let Some(arg) = arg {
-                    self.match_nth(arg, element_index + 1) // nth-child is 1-indexed
-                } else {
-                    false
-                }
+            "first-child" => sib.index == 0,
+            "last-child" => sib.index == sib.count.saturating_sub(1),
+            "only-child" => sib.count == 1,
+            "nth-child" => arg.is_some_and(|a| self.match_nth(a, sib.index + 1)),
+            "nth-last-child" => arg.is_some_and(|a| self.match_nth(a, sib.count - sib.index)),
+            // Typed variants (Selectors 4 §14.4): position among siblings
+            // that share the element's tag. These used to fall to the
+            // catch-all and match EVERY element — `h2:first-of-type` styled
+            // every h2, `li:nth-of-type(2n)` every li.
+            "first-of-type" => sib.type_index == 0,
+            "last-of-type" => sib.type_index == sib.type_count.saturating_sub(1),
+            "only-of-type" => sib.type_count == 1,
+            "nth-of-type" => arg.is_some_and(|a| self.match_nth(a, sib.type_index + 1)),
+            "nth-last-of-type" => {
+                arg.is_some_and(|a| self.match_nth(a, sib.type_count - sib.type_index))
             }
-            "nth-last-child" => {
-                if let Some(arg) = arg {
-                    let from_end = sibling_count - element_index;
-                    self.match_nth(arg, from_end)
-                } else {
-                    false
-                }
-            }
-            "not" => {
-                if let Some(arg) = arg {
-                    // :not() negates the inner selector
-                    // Pass element_index and sibling_count for pseudo-class support inside :not()
-                    // This enables :not(:first-child), :not(:nth-child(2)), etc.
-                    !self.simple_selector_matches_with_pseudo(
-                        arg,
-                        tag_name,
-                        attributes,
-                        element_index,
-                        sibling_count,
-                    )
-                } else {
-                    true
-                }
-            }
+            // :not() takes a selector list; none of the members may match.
+            "not" => arg.map_or(true, |a| {
+                !self.any_compound_in_list_matches(a, tag_name, attributes, sib)
+            }),
+            // :is()/:where() select exactly their arguments. They used to
+            // match everything, so `:where(ul, ol) { padding: 0 }` (every
+            // modern reset) zeroed padding on every element.
+            "is" | "where" | "matches" | "-webkit-any" => arg.is_some_and(|a| {
+                self.any_compound_in_list_matches(a, tag_name, attributes, sib)
+            }),
+            // Relational: needs the subtree; under-match rather than style
+            // every element. Ledgered.
+            "has" => false,
             // User-action and target pseudo-classes: nothing is hovered,
             // focused, or targeted in the first static frame. `focus-within`
             // and `focus-visible` used to fall to the catch-all below and
             // MATCH EVERYTHING, so `.wrapper:focus-within .icon { color }`
             // styled every icon as if its input were focused.
             n if Self::pseudo_class_is_static_false(n) => false,
-            "disabled" => attributes.contains_key("disabled"),
-            "enabled" => !attributes.contains_key("disabled"),
-            "checked" => attributes.contains_key("checked"),
-            "empty" => false, // Would need DOM context
-            "root" => false,  // Handled separately
-            _ => true,        // Unknown pseudo-classes pass through
+            // Link pseudo-classes: an <a>/<area> with an href.
+            "link" | "any-link" => matches!(tag, "a" | "area") && attributes.contains_key("href"),
+            "disabled" => is_control && attributes.contains_key("disabled"),
+            "enabled" => is_control && !attributes.contains_key("disabled"),
+            "checked" => {
+                (tag == "input"
+                    && matches!(input_type.as_str(), "checkbox" | "radio")
+                    && attributes.contains_key("checked"))
+                    || (tag == "option" && attributes.contains_key("selected"))
+            }
+            "indeterminate" | "default" | "autofill" | "user-valid" | "user-invalid" => false,
+            "required" => is_control && attributes.contains_key("required"),
+            "optional" => is_control && !attributes.contains_key("required"),
+            "read-write" => {
+                (matches!(tag, "input" | "textarea")
+                    && !attributes.contains_key("readonly")
+                    && !attributes.contains_key("disabled"))
+                    || attributes
+                        .get("contenteditable")
+                        .is_some_and(|v| v.is_empty() || v.eq_ignore_ascii_case("true"))
+            }
+            "read-only" => !self.match_pseudo_class("read-write", None, tag_name, sib, attributes),
+            // A text control showing its placeholder: has one and no value.
+            "placeholder-shown" => {
+                attributes.get("placeholder").is_some_and(|p| !p.is_empty())
+                    && ((tag == "input" && value_is_empty)
+                        || (tag == "textarea" && !sib.has_children))
+            }
+            // Constraint validation on the static frame: the only constraint
+            // the parser sees is `required` on an empty control.
+            "invalid" => is_control && attributes.contains_key("required") && value_is_empty,
+            "valid" => is_control && !(attributes.contains_key("required") && value_is_empty),
+            "in-range" => {
+                tag == "input" && (attributes.contains_key("min") || attributes.contains_key("max"))
+            }
+            "out-of-range" => false,
+            // Selectors 4 §14.5: no children at all (whitespace text counts
+            // as a child; comments do not).
+            "empty" => !sib.has_children,
+            // Custom elements are undefined until script upgrades them;
+            // every built-in element is defined.
+            "defined" => !tag.contains('-'),
+            "lang" => arg.is_some_and(|a| {
+                let want = a
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_ascii_lowercase();
+                attributes.get("lang").is_some_and(|l| {
+                    let l = l.to_ascii_lowercase();
+                    l == want || l.starts_with(&format!("{want}-"))
+                })
+            }),
+            "dir" => arg.is_some_and(|a| {
+                let want = a.trim().to_ascii_lowercase();
+                let own = attributes
+                    .get("dir")
+                    .map(|d| d.to_ascii_lowercase())
+                    .unwrap_or_else(|| "ltr".to_string());
+                own == want
+            }),
+            "fullscreen" | "modal" | "popover-open" | "picture-in-picture" | "playing"
+            | "muted" | "host" | "host-context" => false,
+            "paused" => matches!(tag, "audio" | "video"),
+            // Legacy single-colon pseudo-elements style a generated box, not
+            // the host (`p:first-line { color }` must not recolor the p).
+            "first-line" | "first-letter" => false,
+            "root" | "scope" => tag == "html",
+            // Unknown pseudo-classes never reach here: the selector list is
+            // rejected as invalid up front (Selectors 4 §3.9), which is what
+            // Chrome does with the rule.
+            _ => false,
         }
     }
 
@@ -10456,6 +10822,103 @@ mod tests {
         );
     }
 
+    /// Build `<body><div id="row">…</div></body>` from `css` + `row_html`
+    /// (no whitespace between children) and return the row's child boxes'
+    /// (r, g, b) background colours in order.
+    fn swatch_backgrounds(css: &str, row_html: &str) -> Vec<(u8, u8, u8)> {
+        let html = format!(
+            "<!DOCTYPE html><html><head><style>\
+             .sw {{ display: inline-block; width: 40px; height: 40px; background: rgb(0, 0, 255); }}\
+             {css}</style></head><body><div id=\"row\">{row_html}</div></body></html>"
+        );
+        let document = Rc::new(Document::parse_html(&html).expect("parse"));
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let layout = engine.build_layout_from_document(&document, &[]);
+        let row = &layout.children[0].children[0];
+        row.children
+            .iter()
+            .map(|b| {
+                let c = b.style.background_color;
+                (c.r, c.g, c.b)
+            })
+            .collect()
+    }
+
+    const RED: (u8, u8, u8) = (255, 0, 0);
+    const BLUE: (u8, u8, u8) = (0, 0, 255);
+    const GREEN: (u8, u8, u8) = (0, 255, 0);
+
+    #[test]
+    fn test_unknown_pseudo_class_invalidates_the_whole_rule() {
+        // Selectors 4 §3.9: `.a:frobnicate, .keep {}` styles NOTHING in
+        // Chrome — the unknown pseudo-class invalidates the list. The
+        // matcher's `_ => true` arm used to make `.sw:frobnicate` match
+        // every element instead.
+        let got = swatch_backgrounds(
+            ".sw:frobnicate { background: rgb(255, 0, 0); }\
+             .sw:frobnicate, .keep { background: rgb(255, 0, 0); }\
+             .sw:-moz-focusring { background: rgb(255, 0, 0); }\
+             .sw:first-line { background: rgb(255, 0, 0); }",
+            r#"<span class="sw"></span><span class="sw keep"></span>"#,
+        );
+        assert_eq!(got, vec![BLUE, BLUE]);
+    }
+
+    #[test]
+    fn test_is_and_where_select_only_their_arguments() {
+        let got = swatch_backgrounds(
+            "#row :is(.pick, .other) { background: rgb(255, 0, 0); }\
+             #row :where(.two) { background: rgb(0, 255, 0); }\
+             .sw:not(.pick, .two) { background: rgb(9, 9, 9); }",
+            r#"<span class="sw pick"></span><span class="sw two"></span><span class="sw"></span>"#,
+        );
+        assert_eq!(got, vec![RED, GREEN, (9, 9, 9)]);
+    }
+
+    #[test]
+    fn test_of_type_pseudo_classes_use_the_typed_sibling_index() {
+        // `span:first-of-type` matched EVERY span (and `div:nth-of-type(2)`
+        // every div) before the typed index existed.
+        let got = swatch_backgrounds(
+            "#row span:first-of-type { background: rgb(255, 0, 0); }\
+             #row span:last-of-type { background: rgb(255, 0, 0); }\
+             #row div:nth-of-type(2) { background: rgb(0, 255, 0); }\
+             #row div:only-of-type { background: rgb(9, 9, 9); }",
+            r#"<span class="sw"></span><span class="sw"></span><span class="sw"></span><div class="sw"></div><div class="sw"></div>"#,
+        );
+        assert_eq!(got, vec![RED, BLUE, RED, BLUE, GREEN]);
+    }
+
+    #[test]
+    fn test_link_placeholder_shown_and_empty() {
+        let got = swatch_backgrounds(
+            ".sw:placeholder-shown { background: rgb(255, 0, 0); }\
+             .sw:link { background: rgb(255, 0, 0); }\
+             .sw:any-link { background: rgb(255, 0, 0); }\
+             .sw:empty { background: rgb(0, 255, 0); }",
+            r##"<span class="sw">x</span><a class="sw" href="#x">y</a><span class="sw"></span><span class="sw"> </span>"##,
+        );
+        // span with text: nothing; a[href]: link; empty span: :empty;
+        // whitespace-only span: NOT empty (Selectors 4 §14.5).
+        assert_eq!(got, vec![BLUE, RED, GREEN, BLUE]);
+    }
+
+    #[test]
+    fn test_selector_list_validity_and_top_level_commas() {
+        assert!(Engine::selector_list_is_valid(
+            ".a:hover, li:nth-child(2n+1) > a"
+        ));
+        assert!(Engine::selector_list_is_valid(":is(.a, :frobnicate) .b"));
+        assert!(Engine::selector_list_is_valid("a[title=\":x\"]::after"));
+        assert!(!Engine::selector_list_is_valid(".a:frobnicate, .b"));
+        assert!(!Engine::selector_list_is_valid(".a:not(:frobnicate)"));
+        assert!(!Engine::selector_list_is_valid("input:-moz-focusring"));
+        assert_eq!(
+            Engine::split_top_level_commas(":is(a, b) c, d[x=\"1,2\"], e"),
+            vec![":is(a, b) c", "d[x=\"1,2\"]", "e"]
+        );
+    }
+
     #[test]
     fn test_sibling_combinators_and_positional_pseudo_classes() {
         // `+`/`~` and :first-child/:last-child depend on the sibling context that
@@ -12181,7 +12644,16 @@ mod element_identity_tests {
         let empty = std::collections::HashMap::new();
         let vars = HashMap::new();
         let style_of = |tag: &str| {
-            engine.compute_style_for_element(tag, &empty, &[], &vars, &[], &[], 0, 1, None)
+            engine.compute_style_for_element(
+                tag,
+                &empty,
+                &[],
+                &vars,
+                &[],
+                &[],
+                SiblingContext::SOLE,
+                None,
+            )
         };
 
         let input = style_of("input");
@@ -12650,8 +13122,7 @@ mod button_children_tests {
             &[],
             None,
             &[],
-            0,
-            1,
+            SiblingContext::SOLE.with_children(true),
             "button",
             &Cell::new(0),
             false,
@@ -12742,8 +13213,7 @@ mod svg_image_tests {
             &[],
             None,
             &[],
-            0,
-            1,
+            SiblingContext::SOLE,
             "img",
             &Cell::new(0),
             false,
