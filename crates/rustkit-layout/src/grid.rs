@@ -3518,6 +3518,31 @@ mod tests {
         );
     }
 
+    /// The run the block ended is over, so its held space must not be charged
+    /// to the run that STARTS after the block. The test above cannot see this:
+    /// with nothing following the block there is nowhere for a leaked space to
+    /// land, so it passes either way. This shape is the rule; that one is the
+    /// example.
+    #[test]
+    fn white_space_held_before_a_block_does_not_leak_into_the_run_after_it() {
+        let b = nowrap_container(
+            WhiteSpace::Nowrap,
+            &[
+                Kid::B(200.0),
+                Kid::W,
+                Kid::Block(100.0),
+                Kid::B(200.0),
+                Kid::B(200.0),
+            ],
+        );
+        let got = estimate_min_content_width(&b);
+        assert!(
+            (got - 400.0).abs() < 0.01,
+            "min-content was {got}, expected 400 — the second run holds two \
+             200px boxes and no white space of its own"
+        );
+    }
+
     /// Where the run CAN wrap, white space is a break opportunity and
     /// contributes nothing: min-content is the widest single child.
     #[test]
