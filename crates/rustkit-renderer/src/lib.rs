@@ -1969,6 +1969,7 @@ impl Renderer {
                 dest_rect,
                 object_fit: _,
                 opacity: _,
+                current_color: _,
             } => {
                 self.draw_image(url, *dest_rect);
             }
@@ -2132,16 +2133,13 @@ impl Renderer {
             }
 
             DisplayCommand::StrokeCircle { cx, cy, radius, color, width } => {
-                // Draw stroked circle as two filled circles (outer and inner)
-                // Outer circle
-                self.draw_fill_circle(*cx, *cy, *radius, *color);
-                // Inner circle (background colored to create stroke effect)
-                // Note: This is a simplified approach; proper implementation would
-                // require a separate background color or compositing
-                if *radius > *width {
-                    let bg_color = Color::new(255, 255, 255, 1.0); // White background
-                    self.draw_fill_circle(*cx, *cy, radius - width, bg_color);
-                }
+                // A stroke is centred on the geometry (SVG 2 §13.4): the ring
+                // spans r ± w/2. Painted as an annulus so the interior stays
+                // whatever is underneath — the old two-disc trick filled it
+                // with opaque white, which put a white disc inside every
+                // `fill="none"` icon ring on a dark toolbar.
+                let half = width * 0.5;
+                self.draw_ring(*cx, *cy, radius + half, (radius - half).max(0.0), *color);
             }
 
             DisplayCommand::FillEllipse { rect, color } => {
@@ -2585,6 +2583,47 @@ impl Renderer {
                 base + i + 1, // Current point on circumference
                 base + i + 2, // Next point on circumference
             ]);
+        }
+    }
+
+    /// Draw an annulus between `outer` and `inner` radii as a triangle strip.
+    /// `inner` of zero degrades to a plain disc.
+    fn draw_ring(&mut self, cx: f32, cy: f32, outer: f32, inner: f32, color: Color) {
+        if outer <= 0.0 {
+            return;
+        }
+        if inner <= 0.0 {
+            self.draw_fill_circle(cx, cy, outer, color);
+            return;
+        }
+
+        let segments = ((outer / 2.0).sqrt() * 8.0).round().max(16.0).min(64.0) as u32;
+        let c = [
+            color.r as f32 / 255.0,
+            color.g as f32 / 255.0,
+            color.b as f32 / 255.0,
+            color.a,
+        ];
+        let base = self.color_vertices.len() as u32;
+
+        use std::f32::consts::PI;
+        // Vertex pairs (outer, inner) around the circumference, closed by
+        // repeating the first pair at i == segments.
+        for i in 0..=segments {
+            let angle = 2.0 * PI * (i as f32) / (segments as f32);
+            let (cos, sin) = (angle.cos(), angle.sin());
+            let (ox, oy) = self.transform_point(cx + outer * cos, cy + outer * sin);
+            let (ix, iy) = self.transform_point(cx + inner * cos, cy + inner * sin);
+            self.color_vertices.push(ColorVertex { position: [ox, oy], color: c });
+            self.color_vertices.push(ColorVertex { position: [ix, iy], color: c });
+        }
+        for i in 0..segments {
+            let o0 = base + 2 * i;
+            let i0 = o0 + 1;
+            let o1 = o0 + 2;
+            let i1 = o0 + 3;
+            self.color_indices
+                .extend_from_slice(&[o0, i0, o1, i0, i1, o1]);
         }
     }
 
