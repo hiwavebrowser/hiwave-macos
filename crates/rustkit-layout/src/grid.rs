@@ -2494,8 +2494,20 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
     // otherwise every child stands alone (max). A block-level child always
     // interrupts an inline run.
     let nowrap = matches!(style.white_space, WhiteSpace::Nowrap | WhiteSpace::Pre);
+    // css-text-3 §4.1 + §4.1.3: inside a run that cannot wrap, the document
+    // white space BETWEEN two inline-level boxes collapses to one space and is
+    // rendered — it is not a break opportunity, so min-content must carry it.
+    // Only under `nowrap`: `pre` preserves white space verbatim and breaks at
+    // its newlines, which this function does not model, so that arm keeps the
+    // behaviour it has rather than gaining a wrong one.
+    let collapses_to_one_space = matches!(style.white_space, WhiteSpace::Nowrap);
     let mut max_contribution = 0.0f32;
     let mut inline_run = 0.0f32;
+    let mut run_has_content = false;
+    // A collapsed space is only rendered between two inline contributions.
+    // Held here until the next one arrives; dropped if the run ends first,
+    // which is how white space at a line's edges is removed.
+    let mut pending_space = 0.0f32;
     for child in &layout_box.children {
         if child.style.display == Display::None {
             continue;
@@ -2506,22 +2518,73 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
         ) {
             continue;
         }
+        if collapses_to_one_space && is_collapsible_whitespace_only(child) {
+            if run_has_content {
+                // Consecutive white-space children collapse together, so this
+                // assigns rather than accumulates.
+                pending_space = collapsed_space_width(&child.style);
+            }
+            continue;
+        }
         let inline_level =
             child.style.display.is_inline_level() || matches!(child.box_type, BoxType::Text(_));
         let outer = estimate_min_content_width(child) + horizontal_margins(&child.style);
         if inline_level && nowrap {
-            inline_run += outer;
+            inline_run += pending_space + outer;
+            pending_space = 0.0;
+            run_has_content = true;
         } else {
             max_contribution = max_contribution.max(outer);
             if !inline_level {
                 max_contribution = max_contribution.max(inline_run);
                 inline_run = 0.0;
+                run_has_content = false;
+                pending_space = 0.0;
             }
         }
     }
     max_contribution = max_contribution.max(inline_run);
 
     max_contribution + padding_border
+}
+
+/// Is this child a text box made only of collapsible document white space?
+///
+/// css-text-3 §4.1 counts space, tab and the line endings as collapsible and
+/// deliberately excludes U+00A0, which is a rendered character. A text node of
+/// only NBSP is therefore NOT matched here and keeps the behaviour it has
+/// (`text_min_content_width` answers 0 for it, because `str::trim` follows the
+/// White_Space property and does trim NBSP). That is a separate defect from
+/// the one this predicate exists for, and it is left alone rather than
+/// half-fixed.
+fn is_collapsible_whitespace_only(child: &LayoutBox) -> bool {
+    match &child.box_type {
+        BoxType::Text(text) => {
+            !text.is_empty()
+                && text
+                    .chars()
+                    .all(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c'))
+        }
+        _ => false,
+    }
+}
+
+/// The advance of the single space that collapsible white space collapses to,
+/// measured with the shaper line layout uses so the intrinsic size and the
+/// laid-out line agree about the same character.
+fn collapsed_space_width(style: &ComputedStyle) -> f32 {
+    let font_size = match style.font_size {
+        Length::Px(px) => px,
+        _ => 16.0,
+    };
+    crate::measure_text_advanced(
+        " ",
+        &style.font_family,
+        font_size,
+        style.font_weight,
+        style.font_style,
+    )
+    .width
 }
 
 /// Min-content width of a text run: the widest unbreakable unit (word).
@@ -3302,6 +3365,267 @@ mod tests {
             (got - 40.0).abs() < 0.01,
             "em padding on a 20px font contributed {got}px, expected 40px — \
              em is resolving against the wrong font size (or being dropped)"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // White space inside a run that cannot wrap (css-text-3 §4.1).
+    //
+    // The corpus shape these exist for is `sticky-scroll`'s
+    // `.horizontal-scroll { white-space: nowrap }`, six 200px inline-blocks
+    // written on separate source lines. Chrome's committed rect for the `1fr`
+    // grid column it floors is 1295.9375 = 1275 + 5 spaces; RustKit answered
+    // 1275, because a text node of pure white space contributed nothing to
+    // min-content while the laid-out line rendered it. The intrinsic size and
+    // the line disagreed about the same characters.
+    //
+    // The space advance is measured independently in each test rather than
+    // taken from `collapsed_space_width`, so a mutation of that helper cannot
+    // move the expectation with it and stay green.
+    // ---------------------------------------------------------------
+
+    /// Build a nowrap container holding the given children in order.
+    /// `W` is a collapsible white-space text node; `B(px)` an inline-block.
+    #[cfg(test)]
+    enum Kid {
+        W,
+        B(f32),
+        BM(f32, f32),
+        Block(f32),
+    }
+
+    #[cfg(test)]
+    fn nowrap_container(white_space: WhiteSpace, kids: &[Kid]) -> LayoutBox {
+        let mut cs = ComputedStyle::new();
+        cs.font_size = Length::Px(16.0);
+        cs.white_space = white_space;
+        let mut container = LayoutBox::new(BoxType::Block, cs.clone());
+        for kid in kids {
+            let child = match kid {
+                Kid::W => {
+                    let mut ws = cs.clone();
+                    ws.display = Display::Inline;
+                    LayoutBox::new(BoxType::Text("\n            ".to_string()), ws)
+                }
+                Kid::B(w) | Kid::BM(w, _) => {
+                    let mut ib = cs.clone();
+                    ib.display = Display::InlineBlock;
+                    ib.width = Length::Px(*w);
+                    if let Kid::BM(_, m) = kid {
+                        ib.margin_right = Length::Px(*m);
+                    }
+                    LayoutBox::new(BoxType::Block, ib)
+                }
+                Kid::Block(w) => {
+                    let mut bs = cs.clone();
+                    bs.display = Display::Block;
+                    bs.width = Length::Px(*w);
+                    LayoutBox::new(BoxType::Block, bs)
+                }
+            };
+            container.children.push(child);
+        }
+        container
+    }
+
+    #[cfg(test)]
+    fn one_space() -> f32 {
+        let s = ComputedStyle::new();
+        crate::measure_text_advanced(" ", &s.font_family, 16.0, s.font_weight, s.font_style).width
+    }
+
+    /// T-RED without the white-space branch: 400 instead of 400 + a space.
+    #[test]
+    fn white_space_between_two_inline_boxes_is_part_of_an_unbreakable_run() {
+        let space = one_space();
+        assert!(
+            space > 0.0,
+            "setup failed: this seat measures a space as {space}px, so every \
+             assertion below would hold with the fix removed"
+        );
+        let b = nowrap_container(WhiteSpace::Nowrap, &[Kid::B(200.0), Kid::W, Kid::B(200.0)]);
+        let got = estimate_min_content_width(&b);
+        assert!(
+            (got - (400.0 + space)).abs() < 0.01,
+            "min-content was {got}, expected {} (two 200px boxes and the space \
+             between them, which nowrap cannot break at)",
+            400.0 + space
+        );
+    }
+
+    /// css-text-3 §4.1.3: white space at the edges of a line is removed. The
+    /// run below has three white-space children and renders exactly one space.
+    #[test]
+    fn white_space_at_the_edges_of_a_nowrap_run_is_removed() {
+        let space = one_space();
+        let b = nowrap_container(
+            WhiteSpace::Nowrap,
+            &[Kid::W, Kid::B(200.0), Kid::W, Kid::B(200.0), Kid::W],
+        );
+        let got = estimate_min_content_width(&b);
+        assert!(
+            (got - (400.0 + space)).abs() < 0.01,
+            "min-content was {got}, expected {} — leading and trailing white \
+             space must not be counted",
+            400.0 + space
+        );
+    }
+
+    #[test]
+    fn consecutive_white_space_children_collapse_to_one_space() {
+        let space = one_space();
+        let b = nowrap_container(
+            WhiteSpace::Nowrap,
+            &[Kid::B(200.0), Kid::W, Kid::W, Kid::W, Kid::B(200.0)],
+        );
+        let got = estimate_min_content_width(&b);
+        assert!(
+            (got - (400.0 + space)).abs() < 0.01,
+            "min-content was {got}, expected {} — three adjacent white-space \
+             nodes collapse to one space, they do not accumulate",
+            400.0 + space
+        );
+    }
+
+    /// One space is consumed once. Without clearing it after use, the second
+    /// gap — which has no white space in the source — would be charged one too.
+    #[test]
+    fn a_consumed_space_is_not_charged_to_the_next_box_as_well() {
+        let space = one_space();
+        let b = nowrap_container(
+            WhiteSpace::Nowrap,
+            &[Kid::B(200.0), Kid::W, Kid::B(200.0), Kid::B(200.0)],
+        );
+        let got = estimate_min_content_width(&b);
+        assert!(
+            (got - (600.0 + space)).abs() < 0.01,
+            "min-content was {got}, expected {} — only one gap in this run \
+             carries white space",
+            600.0 + space
+        );
+    }
+
+    /// A block-level child ends the run, so white space held from before it
+    /// belongs to a line that is already over and must be dropped.
+    #[test]
+    fn a_block_child_ends_the_run_and_drops_the_white_space_before_it() {
+        let b = nowrap_container(
+            WhiteSpace::Nowrap,
+            &[Kid::B(200.0), Kid::W, Kid::Block(300.0)],
+        );
+        let got = estimate_min_content_width(&b);
+        assert!(
+            (got - 300.0).abs() < 0.01,
+            "min-content was {got}, expected 300 — the block child stands \
+             alone and the pending space died with the run before it"
+        );
+    }
+
+    /// The run the block ended is over, so its held space must not be charged
+    /// to the run that STARTS after the block. The test above cannot see this:
+    /// with nothing following the block there is nowhere for a leaked space to
+    /// land, so it passes either way. This shape is the rule; that one is the
+    /// example.
+    #[test]
+    fn white_space_held_before_a_block_does_not_leak_into_the_run_after_it() {
+        let b = nowrap_container(
+            WhiteSpace::Nowrap,
+            &[
+                Kid::B(200.0),
+                Kid::W,
+                Kid::Block(100.0),
+                Kid::B(200.0),
+                Kid::B(200.0),
+            ],
+        );
+        let got = estimate_min_content_width(&b);
+        assert!(
+            (got - 400.0).abs() < 0.01,
+            "min-content was {got}, expected 400 — the second run holds two \
+             200px boxes and no white space of its own"
+        );
+    }
+
+    /// Where the run CAN wrap, white space is a break opportunity and
+    /// contributes nothing: min-content is the widest single child.
+    #[test]
+    fn white_space_in_a_wrapping_run_is_a_break_opportunity_not_a_width() {
+        let b = nowrap_container(WhiteSpace::Normal, &[Kid::B(200.0), Kid::W, Kid::B(200.0)]);
+        let got = estimate_min_content_width(&b);
+        assert!(
+            (got - 200.0).abs() < 0.01,
+            "min-content was {got}, expected 200 — under `normal` the run \
+             breaks at the space, so the boxes do not sum"
+        );
+    }
+
+    /// The scope line, pinned. `pre` preserves white space verbatim AND breaks
+    /// at its newlines; this function models neither, so it keeps the
+    /// behaviour it had rather than gaining the collapsed-space rule, which
+    /// would be wrong for a different reason.
+    #[test]
+    fn pre_does_not_get_the_collapsed_space_rule() {
+        let b = nowrap_container(WhiteSpace::Pre, &[Kid::B(200.0), Kid::W, Kid::B(200.0)]);
+        let got = estimate_min_content_width(&b);
+        assert!(
+            (got - 400.0).abs() < 0.01,
+            "min-content was {got}, expected 400 — `pre` is deliberately \
+             outside this rule"
+        );
+    }
+
+    /// U+00A0 is White_Space to `char::is_whitespace` and is NOT collapsible
+    /// document white space: it is a rendered character. Classifying it as a
+    /// collapsed space would answer one space's advance for a node that
+    /// should answer its own measured width.
+    #[test]
+    fn a_no_break_space_is_not_collapsible_white_space() {
+        let mut s = ComputedStyle::new();
+        s.font_size = Length::Px(16.0);
+        let nbsp = LayoutBox::new(BoxType::Text("\u{a0}".to_string()), s.clone());
+        assert!(
+            !is_collapsible_whitespace_only(&nbsp),
+            "U+00A0 was classified as collapsible white space"
+        );
+        let spaces = LayoutBox::new(BoxType::Text(" \n\t".to_string()), s.clone());
+        assert!(
+            is_collapsible_whitespace_only(&spaces),
+            "space/newline/tab was not classified as collapsible white space"
+        );
+        // `"".chars().all(..)` is vacuously true, so an empty text node would
+        // be charged a space it does not contain.
+        let empty = LayoutBox::new(BoxType::Text(String::new()), s);
+        assert!(
+            !is_collapsible_whitespace_only(&empty),
+            "an empty text node was classified as collapsible white space"
+        );
+    }
+
+    /// The corpus shape itself: `sticky-scroll`'s `.horizontal-scroll`, six
+    /// 200px items with `margin-right: 15px` on all but the last, written on
+    /// separate source lines. Chrome floors the `1fr` column at
+    /// 1275 + 5 spaces; the structure of that sum is what this asserts.
+    /// The space's own advance is a font metric and deliberately not pinned.
+    #[test]
+    fn the_horizontal_scroll_row_sums_six_items_five_margins_and_five_spaces() {
+        let space = one_space();
+        let mut kids = Vec::new();
+        for i in 0..6 {
+            if i > 0 {
+                kids.push(Kid::W);
+            }
+            kids.push(if i < 5 {
+                Kid::BM(200.0, 15.0)
+            } else {
+                Kid::B(200.0)
+            });
+        }
+        let b = nowrap_container(WhiteSpace::Nowrap, &kids);
+        let got = estimate_min_content_width(&b);
+        let want = 6.0 * 200.0 + 5.0 * 15.0 + 5.0 * space;
+        assert!(
+            (got - want).abs() < 0.01,
+            "min-content was {got}, expected {want} = 6*200 + 5*15 + 5 spaces"
         );
     }
 
