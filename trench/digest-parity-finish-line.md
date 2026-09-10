@@ -7996,4 +7996,26 @@ matching `df7fa26` is consistent with this PR changing neither but is not an
 isolated measurement of it. The discrete claim is not a differenced column: it is
 direct evidence from this run.
 
-PR **#191** open against `develop`, CI green, subscribed, check-in armed.
+PR **#191** merged into `develop` at 2026-09-10 01:49Z as `c762b47`. All three
+commits verified present in `origin/develop` by `git merge-base --is-ancestor`,
+not by the merge event alone. The check-in loop is cancelled; the night is closed.
+
+**What is now on `develop` that was not before:** the scaled gradient's clip
+carries the box's radius, and the renderer no longer seams a tiled paint source
+under a rounded clip. P1's named residual — open since 2026-08-04 — is closed.
+
+**Carried forward, unchanged by the merge.** The three decisions above are still
+Pete's, and the merge answers none of them: the stop-rule reading, the square
+half of overflow clipping, and the untested `NoRepeat` arm. Two older ones also
+stand — `master`'s Gate A still joins on `border_box` alone, so every `master`
+geometry receipt scores transformed boxes against a rect they are not comparable
+to; and no `develop`-basis receipt exists, because the parity workflow runs only
+on `pull_request`, so nothing this PR changed can be isolated from the next
+merge that lands beside it.
+
+**For the next night, from tonight's macOS Gate A** (the board on `ccc742f`,
+which is now `develop`'s content): `settings` 371 geometry failures, `new_tab`
+203, `about` 194, `form-elements` 92, `form-controls` 85, `flex-positioning` 75,
+`sticky-scroll` 68. `gradient-backgrounds` is down to 5 and all five are `span`
+widths — text advances, i.e. P4, which needs CoreText on both sides and cannot
+be worked from the Linux trench seat.
