@@ -330,7 +330,13 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
             }
         }
 
-        let item = create_flex_item(child, main_axis, container_main_size, container_cross_size);
+        let item = create_flex_item(
+            child,
+            main_axis,
+            container_main_size,
+            container_cross_size,
+            definite_inner_cross,
+        );
         items.push(item);
     }
 
@@ -789,6 +795,7 @@ fn create_flex_item<'a>(
     main_axis: Axis,
     container_main: f32,
     container_cross: f32,
+    definite_inner_cross: Option<f32>,
 ) -> FlexItem<'a> {
     // Extract all values from style first to avoid borrow conflicts
     let order = layout_box.style.order;
@@ -964,9 +971,21 @@ fn create_flex_item<'a>(
     };
     let explicit_cross_size = match explicit_cross_length {
         rustkit_css::Length::Auto => None,
-        // A percentage cross size may not be resolvable against an
-        // indefinite container; keep it on the content-measure path.
-        rustkit_css::Length::Percent(_) => None,
+        // css-sizing-3 §5.1: a percentage resolves against the containing
+        // block's corresponding size when that size is DEFINITE, and behaves
+        // as `auto` when it is not. The containing block here is the flex
+        // container, so the basis is its own definite inner cross size —
+        // never `container_cross`, which is the containing block's number one
+        // level further out. `.sidebar-toggle { height: 100% }` inside
+        // `.nav-bar { height: 44px }` resolved against the 100px viewport and
+        // came out 100 tall against Chrome's 43.
+        //
+        // With no definite basis the percentage stays on the content-measure
+        // path, which is what `auto` does, so an indefinite container keeps
+        // exactly the behaviour it had.
+        rustkit_css::Length::Percent(pct) => {
+            definite_inner_cross.map(|basis| spec_cross_to_border_box(pct / 100.0 * basis))
+        }
         l => Some(spec_cross_to_border_box(resolve_length(l, container_cross))),
     };
     let has_explicit_cross_size = !matches!(explicit_cross_length, rustkit_css::Length::Auto);
@@ -3397,6 +3416,93 @@ mod tests {
         assert!(
             (border_w - 464.0).abs() < 0.5,
             "column item width is its widest child + padding (400 + 64), got {border_w}"
+        );
+    }
+
+    /// The chrome strip's nav bar, reduced to the two boxes that matter.
+    ///
+    /// `.nav-bar { height: 44px; border-bottom: 1px }` holds
+    /// `.sidebar-toggle { width: 200px; height: 100% }`. The containing block
+    /// is the 100px-tall chrome viewport, which is the trap: a percentage that
+    /// resolves against IT instead of against the flex container comes out 100
+    /// against Chrome's 43.
+    fn nav_bar_with_percent_height_item(
+        container_height: Length,
+        item_height: Length,
+    ) -> LayoutBox {
+        let mut toggle_style = ComputedStyle::new();
+        toggle_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        toggle_style.width = Length::Px(200.0);
+        toggle_style.height = item_height;
+        let toggle = LayoutBox::new(BoxType::Block, toggle_style);
+
+        let mut btn_style = ComputedStyle::new();
+        btn_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        btn_style.width = Length::Px(32.0);
+        btn_style.height = Length::Px(32.0);
+        let btn = LayoutBox::new(BoxType::Block, btn_style);
+
+        let mut bar_style = ComputedStyle::new();
+        bar_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        bar_style.display = rustkit_css::Display::Flex;
+        bar_style.flex_direction = FlexDirection::Row;
+        bar_style.align_items = AlignItems::Center;
+        bar_style.height = container_height;
+        let mut bar = LayoutBox::new(BoxType::Block, bar_style);
+        // The block pre-pass resolves padding and border onto dimensions
+        // before flex runs; the inner cross size is 44 - 1 = 43.
+        bar.dimensions.border.bottom = 1.0;
+        bar.children.push(toggle);
+        bar.children.push(btn);
+        bar
+    }
+
+    fn laid_out_item_height(container_height: Length, item_height: Length) -> f32 {
+        let mut bar = nav_bar_with_percent_height_item(container_height, item_height);
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 100.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut bar, &containing);
+        bar.children[0].dimensions.content.height
+    }
+
+    #[test]
+    fn a_percentage_cross_size_resolves_against_the_flex_containers_definite_inner_size() {
+        let h = laid_out_item_height(Length::Px(44.0), Length::Percent(100.0));
+        assert!(
+            (h - 43.0).abs() < 0.5,
+            "height:100% of a 44px bar with a 1px bottom border is 43, got {h}"
+        );
+        assert!(
+            (h - 100.0).abs() > 0.5,
+            "the percentage must not resolve against the 100px containing block, got {h}"
+        );
+    }
+
+    #[test]
+    fn a_percentage_cross_size_behaves_as_auto_when_the_container_is_indefinite() {
+        // css-sizing-3 §5.1: with no definite basis the percentage behaves as
+        // `auto`, so the two trees must agree exactly. This is the half that
+        // stops the fix from reaching a container it cannot resolve against.
+        let percent = laid_out_item_height(Length::Auto, Length::Percent(100.0));
+        let auto = laid_out_item_height(Length::Auto, Length::Auto);
+        assert!(
+            (percent - auto).abs() < 0.001,
+            "an indefinite container must treat height:100% as auto: \
+             percent gave {percent}, auto gave {auto}"
+        );
+    }
+
+    #[test]
+    fn a_resolved_percentage_cross_size_is_not_stretched_or_floored_by_content() {
+        // The item is SHORTER than the line (the 32px button plus the bar's
+        // own 43px inner size), so a stretch or an intrinsic floor that still
+        // applied would show up as a taller box.
+        let h = laid_out_item_height(Length::Px(84.0), Length::Percent(50.0));
+        assert!(
+            (h - 41.5).abs() < 0.5,
+            "50% of an 83px inner size is 41.5, got {h}"
         );
     }
 }
