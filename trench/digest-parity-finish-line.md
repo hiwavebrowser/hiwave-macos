@@ -8272,3 +8272,205 @@ committed floor, and the survivors were read directly from this run's Gate A.
 
 CI is green and the PR is mergeable; #193 waits on review. The check-in loop is
 armed until it merges or closes.
+
+## 2026-09-11
+
+**Metric: `2/26` → `2/26`, and this is a proof rather than a re-run.** Exactly
+one case moved on either oracle — `chrome_rustkit` — and it is geometry-red
+(45 → 44 failures) and paint-red before and after. The two green cases
+(`bg-pure`, `bg-solid`) are bit-identical on both oracles, so no case can have
+crossed the conjunction or fallen off it. No macOS run tonight; nothing here is
+a receipt.
+
+**P-item: P3 (flex residual). NOT complete. One root landed, and the more
+useful half of the night is the measurement that made it findable.**
+
+### The problem P3 has had since 2026-08-20
+
+`flex-positioning`'s 174 failing axes contain **0** font-independent roots under
+`scripts/geometry_attribution.py`'s strict column, and night 20 concluded there
+is no version of P3 this seat can show working. I re-derived that on tonight's
+basis before doing anything else, and it still holds: every one of the case's
+failures decomposes into a `normal` line height (`.section-title` 17 → 14, seven
+times), a text advance, or propagation from one of those. Chrome's own numbers
+confirm the alignment arithmetic — `justify-end`'s last item lands on 755 in
+both engines, `space-between`'s outer edges on 45 and 755 in both, `align-center`
+and `align-end` are exact given the item heights.
+
+So the unit was the thing standing between P3 and any measurement.
+
+### The board — `trench/tools/n49_flex_invariants.py`
+
+It asks a question that does not depend on fonts: **given RustKit's own item
+sizes, does RustKit place those items where `justify-content` and `align-items`
+say it must?** It never reads Chrome's rects; Chrome's `computed-styles.json`
+supplies only what the author asked for. An item measured with no font still has
+to sit flush against the content edge under `flex-start`.
+
+```
+26 cases · flex containers measured 156 · skipped 159 · violations 13
+```
+
+Skips are itemised, never folded into the pass column: 110 containers whose only
+children are text runs, 23 where an anonymous box with area means the two
+engines disagree about the item set, 19 multi-line (needs `align-content`,
+out of scope), 7 with a child Chrome does not report.
+
+**`flex-positioning` itself: 15 containers measured, 0 violations.** P3's own
+case is clean on the part of flex that P3 is named after. Full board and its
+limits in `trench/forensics/2026-09-11-n49-flex-invariant-board.md`.
+
+### The defect the board found, and it is the biggest of the thirteen
+
+```
+chrome_rustkit  .nav-bar > .sidebar-toggle   align:center symmetry   -57.00
+```
+
+`.sidebar-toggle { width: 200px; height: 100% }` inside
+`.nav-bar { height: 44px; border-bottom: 1px }`. Chrome: 43 tall. RustKit: 100.
+
+`create_flex_item` answered `None` for **every** percentage cross length, with
+the comment *"a percentage cross size may not be resolvable against an
+indefinite container; keep it on the content-measure path"*. The premise is only
+half true — css-sizing-3 §5.1 resolves a percentage when the containing block's
+size is definite and treats it as `auto` when it is not — and here the container
+is `height: 44px`, as definite as it gets. Dropped onto the content-measure path
+with `has_explicit_cross_size` still true, the item inherited the block
+pre-pass's own bad answer: the 100px chrome viewport.
+
+The basis was already sitting in the caller. `definite_inner_cross` is computed
+twenty lines above the item loop and used for stretch and centring; it is the
+container's own inner cross size, resolved from style rather than from the
+stale `content.height`. It is now passed down and the percentage resolves
+against it. With no definite basis the arm still answers `None`, so an
+indefinite container keeps exactly the behaviour it had.
+
+### Commits — branch `atlas/n49-p3-flex`, cut from `develop da8f413`
+
+- `94fcc93` — a percentage cross size resolves against the flex container's
+  definite inner cross size.
+- `8054aad` — test-only: close the mutation survivor (the box-sizing
+  conversion).
+
+Pushed, **no PR**: P3 is not complete, and the Gate B reading below is a
+judgement I would rather Pete make than pre-empt.
+
+Instrument, on this branch: the board and its forensics note.
+
+### Measured — Linux/SwiftShader, 26 cases. MECHANICS, NOT A RECEIPT
+
+| Oracle | develop `da8f413` | after |
+|---|---:|---:|
+| Gate A geometry failures / joins | 2646 / 16 | **2645** / 16 |
+| Gate A geometry-green | 3/26 | 3/26 |
+| Gate B paint-green / measured | 1/26 · 26/26 | 1/26 · 26/26 |
+| Gate B discrete auto-fails / examined | 0 / 260 | 0 / **261** |
+| flex invariant violations | 13 | **12** |
+
+Per (case, selector, axis) across all 26 cases:
+**fixed 1 · newly failing 0 · improved 1 · WORSENED 0 · unchanged 2644.**
+
+```
+chrome_rustkit .sidebar-toggle          height  +57.0 -> FIXED
+chrome_rustkit .sidebar-toggle > span   y       +29.5 -> +1.0
+```
+
+The span's residual is this seat's 14px line box against Chrome's 16 — text
+metrics, not flex. 25 of 26 cases are bit-identical on Gate A.
+
+### The stop rule, and why I did not revert
+
+**Gate B regressed on the one case that moved:** `chrome_rustkit` 5411 → 5685
+pixels outside tolerance, `within_fraction` 0.95773 → 0.95559. I read the pixels
+back rather than arguing about the number. All 304 newly-outside pixels lie in
+`x 16–62, y 55–67` — the `.workspace-name` text box — and the rows print like
+this:
+
+```
+y=60  Chrome  ...##...###..#####.#####.######.###.###.##.#####
+      before  ................................................
+      after   ..####################################...#######
+```
+
+Chrome draws glyphs. RustKit draws **solid rectangles**, because this seat has
+no font backend. Before the fix that filled box sat at y≈83, underneath the
+sidebar's opaque background, and painted nothing visible; putting the box where
+it belongs moved the rectangles into the nav bar, where Chrome has text. The
+delta is the missing font stack becoming visible, not paint getting worse.
+
+The hard stop rule fires when a change **improves the metric** while an oracle
+regresses. `N/26` did not move and cannot have — `chrome_rustkit` is red on both
+oracles either side — so its antecedent is false. Night 28's stricter reading
+(revert when any oracle regresses at all) would revert this; night 29's (#175,
+keep when the old number depended on an error cancelling) would keep it. I kept
+it, did not open a PR, and made it decision 1, because only a seat with fonts
+can settle it and I would rather leave that open than quietly pick the answer
+that flatters the work.
+
+### Mutation-check results
+
+**6 probes, 6 RED, control green before and after.** Committed before mutating;
+each probe verified to be a real edit (`git diff --quiet` aborts a no-op) and
+graded NO-COMPILE separately from RED.
+
+| probe | result |
+|---|---|
+| M1 the Percent arm answers `None` again (the fix deleted) | RED |
+| M2 the naive fix: resolve against the containing block | RED |
+| M3 resolve even when the container is indefinite | RED |
+| M4 the resolved size skips the box-sizing conversion | RED *(survivor; see below)* |
+| M5 the percentage is not divided by 100 | RED |
+| M6 the plumbed basis is dropped at the call site | RED |
+
+**M4 survived the first sweep, 5/6.** Every fixture I wrote used the corpus's
+`box-sizing: border-box` with no vertical padding on the item, which makes
+`spec_cross_to_border_box` the identity — so no assertion could see whether the
+conversion happened. Closed with a content-box item carrying 6px of vertical
+padding, where skipping it subtracts that padding twice (41.5 → 29.5).
+
+That is the **seventh sweep in a row** whose survivor is *the guard written
+against the example, not the rule*. I will not add another paragraph about it.
+What is new tonight is only that I predicted this specific survivor before
+running the sweep, from the shape of the fixtures, and wrote it down — and then
+ran the sweep anyway rather than pre-emptively fixing it, so the prediction was
+checked instead of assumed.
+
+### Decisions needed from Pete
+
+1. **Keep or revert tonight's fix under the stop rule** — Gate A strictly
+   improves, `N/26` does not move, and Gate B's 274-pixel regression is measured
+   to be this seat's glyph-less text becoming visible; a macOS lane would settle
+   it, which needs a PR.
+2. **Is P3 closable on this evidence?** Its own case is 15/15 clean on the flex
+   invariants and its 174 axes are text; the twelve remaining violations are on
+   other cases, so P3 as scoped (`flex-positioning` + siblings) may already be
+   done apart from P4.
+3. Still open since 2026-09-10: is P2 done, and the three from 09-09 (the
+   stop-rule reading, the square half of overflow clipping, the untested
+   `NoRepeat` background arm).
+
+### Surprises
+
+- **P3's own case is clean on the thing P3 is named after.** I expected
+  `flex-positioning`'s justify/align sections to hide a defect that the font
+  noise was covering. All 15 of its flex containers place every item exactly
+  right. The alignment arithmetic in `flex.rs` is not what is wrong with that
+  page; the strut and the advances are.
+- **The fix was in the file's own vocabulary, twenty lines up.**
+  `definite_inner_cross` exists, is documented, and is used for stretch and for
+  centring — three call sites away from the one function that needed a definite
+  cross basis and answered `None` instead. The comment explaining why the
+  percentage could not be resolved is correct about indefinite containers and
+  was never narrowed to them.
+- **A correct fix made the paint oracle worse, and the reason is the seat.**
+  I have written "SwiftShader numbers are mechanics" in this digest many times
+  as a caveat. Tonight is the first time it changed an outcome: a paint column
+  that would have vetoed a correct change on a literal reading of the stop rule.
+- **`.toggle-switch` on `form-elements` has an explicit `height: 26px` and comes
+  out 16.11.** It looked like the same defect from the board and is not one —
+  no percentage is involved. Recorded, not chased; it is the next readable entry
+  on the board.
+- Unchanged and still true: PR **#193** is green, mergeable and waiting on
+  review; the check-in loop stays armed until it merges or closes.
+- The stored night order still opens with P0a-0, finished 38 nights ago, and
+  cost this seat its first hour again. **Fifth night carrying this.**
