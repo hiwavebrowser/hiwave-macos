@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-09-09T02:19:32.744276",
+  "timestamp": "2026-09-11T02:09:20.482364",
   "scope": "all",
   "iterations": 1,
   "max_variance": 0.1,
@@ -1143,9 +1143,9 @@
       "type": "builtins",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 25182,
+        "diffPixels": 32511,
         "totalPixels": 480000,
-        "diffPercent": 5.24625,
+        "diffPercent": 6.773125,
         "width": 800,
         "height": 600,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/about/run-1/diff.png",
@@ -1518,15 +1518,15 @@
       },
       "passed": true,
       "pixel_runs": [
-        5.24625
+        6.773125
       ],
-      "diff_pct_median": 5.24625,
-      "diff_pct_min": 5.24625,
-      "diff_pct_max": 5.24625,
+      "diff_pct_median": 6.773125,
+      "diff_pct_min": 6.773125,
+      "diff_pct_max": 6.773125,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 5.24625
+      "diff_pct": 6.773125
     },
     {
       "case_id": "settings",
@@ -6989,9 +6989,9 @@
       "type": "websuite",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 5243,
+        "diffPixels": 5080,
         "totalPixels": 480000,
-        "diffPercent": 1.0922916666666667,
+        "diffPercent": 1.0583333333333333,
         "width": 800,
         "height": 600,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/gradient-backgrounds/run-1/diff.png",
@@ -7406,15 +7406,15 @@
       },
       "passed": true,
       "pixel_runs": [
-        1.0922916666666667
+        1.0583333333333333
       ],
-      "diff_pct_median": 1.0922916666666667,
-      "diff_pct_min": 1.0922916666666667,
-      "diff_pct_max": 1.0922916666666667,
+      "diff_pct_median": 1.0583333333333333,
+      "diff_pct_min": 1.0583333333333333,
+      "diff_pct_max": 1.0583333333333333,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 1.0922916666666667
+      "diff_pct": 1.0583333333333333
     },
     {
       "case_id": "image-gallery",
