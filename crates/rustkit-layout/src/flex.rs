@@ -3505,4 +3505,41 @@ mod tests {
             "50% of an 83px inner size is 41.5, got {h}"
         );
     }
+
+    #[test]
+    fn a_resolved_percentage_is_a_content_size_under_content_box_sizing() {
+        // The corpus is `* { box-sizing: border-box }`, so every fixture above
+        // makes `spec_cross_to_border_box` the identity and none of them can
+        // see whether the conversion is applied at all. Under content-box the
+        // resolved 41.5 is the CONTENT height and the item's own padding is
+        // added on top; skipping the conversion subtracts that padding twice.
+        let mut toggle_style = ComputedStyle::new();
+        toggle_style.width = Length::Px(200.0);
+        toggle_style.height = Length::Percent(50.0);
+        let mut toggle = LayoutBox::new(BoxType::Block, toggle_style);
+        toggle.dimensions.padding.top = 6.0;
+        toggle.dimensions.padding.bottom = 6.0;
+
+        let mut bar_style = ComputedStyle::new();
+        bar_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        bar_style.display = rustkit_css::Display::Flex;
+        bar_style.flex_direction = FlexDirection::Row;
+        bar_style.align_items = AlignItems::Center;
+        bar_style.height = Length::Px(84.0);
+        let mut bar = LayoutBox::new(BoxType::Block, bar_style);
+        bar.dimensions.border.bottom = 1.0;
+        bar.children.push(toggle);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 100.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut bar, &containing);
+
+        let h = bar.children[0].dimensions.content.height;
+        assert!(
+            (h - 41.5).abs() < 0.5,
+            "content-box: 50% of 83 is a 41.5 CONTENT height, got {h}"
+        );
+    }
 }
