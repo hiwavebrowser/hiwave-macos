@@ -8474,3 +8474,157 @@ checked instead of assumed.
   review; the check-in loop stays armed until it merges or closes.
 - The stored night order still opens with P0a-0, finished 38 nights ago, and
   cost this seat its first hour again. **Fifth night carrying this.**
+
+## 2026-09-12
+
+**Metric: `2/26` → `2/26`, and this is a proof rather than a re-run.** Exactly
+one case moved on either oracle — `form-elements` — and it is geometry-red
+(125 → 124 failing axes) and paint-red before and after. Both green cases
+(`bg-pure`, `bg-solid`) are bit-identical on **both** oracles, so no case can
+have crossed the conjunction or fallen off it. No macOS run tonight; #196's
+lane makes that measurement.
+
+**P-item: P3 (flex residual). NOT complete.** One more root off the n49
+invariant board, the largest readable one left. The board's remaining eleven
+violations are unworked.
+
+### The defect
+
+`form-elements`' `.toggle-label > .toggle-switch` has an explicit
+`height: 26px` and measured **16.11**. Night 49 read it off the board, saw the
+n49 percentage fix did not apply (`26px` is not a percentage) and left it
+unread. It is not a cross-size *resolution* bug at all — the size resolves
+correctly and is then overwritten.
+
+`layout_block_children_with_collapse` ends with
+`self.dimensions.content.height = cursor_y`. In ordinary block layout that is
+fine, because `calculate_block_height` runs afterwards and re-applies the
+specified height. Step 11 of `layout_flex_container` calls it **directly** on a
+block flex item whose height the flex algorithm already decided in step 10, and
+no such pass follows.
+
+The guard for exactly this rule is sitting eleven lines below, in 11b:
+
+> *"A DEFINITE cross size never grows to fit content — content overflows
+> instead (css-flexbox-1 §9.4)"* … `if item.has_explicit_cross_size { continue; }`
+
+11b is correct and it is too late: step 11 has already replaced the height, so
+11b's `continue` skips the repair rather than preventing the damage. Same shape
+as night 8's Gate B precondition — a rule written down in the right words, one
+step away from where it had to hold.
+
+### Commits — branch `atlas/n50-p3-flex-explicit-cross`, cut from `develop da8f413`
+
+- `9066f1e` — a flex item's definite cross size survives its children's flow
+  (fix + three guards, one commit).
+
+PR **#196** into `develop`, subscribed.
+
+### Measured — Linux/SwiftShader, 26 cases, 1 iteration. MECHANICS, NOT A RECEIPT
+
+| Oracle | develop `da8f413` | after |
+|---|---:|---:|
+| Gate A geometry failures / joins | 2646 / 16 | **2645** / 16 |
+| Gate A geometry-green | 3/26 | 3/26 |
+| Gate B paint-green / measured | 1/26 · 26/26 | 1/26 · 26/26 |
+| Gate B discrete auto-fails / examined | 0 / 260 | 0 / 260 |
+
+```
+form-elements · … > label.toggle-label > div.toggle-switch · height
+              · expected 26.0 · actual 16.1077 · Δ −9.8923   -> FIXED
+```
+
+### Stop rule
+
+Checked **per box and per axis**: **fixed 1 · newly failing 0 · improved 0 ·
+WORSENED 0 · unchanged 2661.** No case lost its green, none gained a discrete
+failure, Gate B's percentage half moved on nothing. The rule did not fire.
+
+**Gate B is bit-identical on all 26 cases, and that is the informative half.**
+A box that was 9.89px too short is now right and not one pixel changed colour.
+The pixels that draw this widget belong to `.toggle-slider`, an `inset: 0`
+absolute child laid out against the box's PRE-flex size — so correcting the box
+did not move them. That anchoring is PR #195's subject. Two nights' work meet on
+one 50×26 widget from opposite sides, and neither alone makes it paint right.
+
+### Mutation-check results
+
+**5 probes, 4 RED, 1 SURVIVOR**, control green before and after. Committed
+before mutating (night 8's lesson, and it cost me a rebuild tonight anyway —
+see below); each probe verified to be a real edit.
+
+| probe | result |
+|---|---|
+| M1 the restore deleted | RED |
+| M2 the axis guard dropped (freeze on both axes) | **SURVIVOR** |
+| M3 the explicitness guard dropped (freeze always) | RED |
+| M4 the guard inverted | RED |
+| M5 the height captured after the flow, not before | RED |
+
+**M2 is reported as a survivor rather than closed, on purpose: a guard that
+failed it would pin a bug.** Dropping the axis check widens the restore to a
+column item's MAIN size — and a definite main size takes the same clobber, with
+no 11b to skip it. Where that matters the mutant is *closer* to the spec than
+the shipped code. Writing an assertion that forbids it would be pinning the
+defect in place to make a sweep read clean, which is the Goodhart move one level
+down. Named as the next unit instead.
+
+Two of the three trees I built to make M2 observable showed no difference at
+all, and the reason is worth keeping: **step 11d re-derives a content-sized
+column item's main size from its children after step 11 and re-applies it**, so
+the freeze is overwritten. One narrow tree (a single 16px-tall child) did
+discriminate — 16 against 0 — and I could not explain the mechanism, so I did
+not ship a guard resting on it.
+
+**M2 and M3 both survived the first sweep**, for the reason the last seven
+sweeps have recorded: each guard asserted a number the pre-flex estimate already
+agreed with, so freezing a value to itself was invisible. Both tests now seed
+the height the block pre-pass leaves on the box — deliberately wrong, which is
+the real situation, since the pre-pass measures at the container's width and the
+flex algorithm then hands the item a different main size. Eighth sweep, same
+survivor shape. What is new is only that the fix this time is a *fixture*
+change, not an extra assertion: the guards were asking the right question of a
+tree that could not answer it.
+
+### Decisions needed from Pete
+
+1. **PR #195 is RED on the macOS lane and its own description does not know
+   it** — `pr-aggregate` fails the ratchet with `form-elements 92 → 93` and
+   `sticky-scroll 68 → 69` against the `6ff4eb5` floor, while every other check
+   is green; keep the abspos fix and re-cut the floor, or treat two +1s as the
+   stop rule firing?
+2. **Is P3 closable?** (carried from 09-11, unanswered) — its own case is 15/15
+   clean on the flex invariants and its 174 axes are text; tonight cleared the
+   largest of the twelve violations on *other* cases, and eleven remain
+   (`settings` −18.98, `image-gallery` ×4 +3.69, `about` ×6 +0.60).
+3. **Should the main-axis half of tonight's rule be the next unit?** A column
+   item with a definite main size takes the same clobber, and step 11d only
+   repairs the content-sized ones.
+
+### Surprises
+
+- **A correct geometry fix moved zero pixels.** I expected the toggle to look
+  different and it does not, because the part that paints is positioned by a
+  path this change does not touch. Gate B's percentage half being bit-identical
+  on 26 of 26 is the cleanest demonstration this campaign has produced that
+  geometry and paint are genuinely two oracles and not two readings of one.
+- **The rule was already written down, eleven lines from where it was needed.**
+  11b's comment is the §9.4 citation and the corpus example (the settings
+  toggles, `height: 26px`, ballooning to 40.4). It has been right since it was
+  written and has been skipping a repair for a clobber that happens upstream.
+- **`cargo fmt --all` is a trap on this tree.** It reformatted ~90 files across
+  the workspace and *then* failed on pre-existing trailing whitespace in
+  `hiwave-app/src/main.rs`, leaving the churn behind. `rustkit-layout` alone is
+  ~1000 lines from rustfmt-clean, so any fmt run buries a real diff. I lost the
+  first version of a strengthened test to this, and a second to my own mutation
+  harness: `mutate.py` restores with `git checkout --`, and the reshaped test
+  was still uncommitted, so the sweep re-ran against the blind version and
+  reported M2 green for a second time. Night 1 wrote "commit before
+  mutation-checking"; night 11 repeated it; this is the third time it has been
+  the same mistake, and the sweep *told* me by reporting an implausible result
+  rather than by failing.
+- The stored night order still opens with P0a-0, finished 39 nights ago.
+  **Sixth night carrying this.** It also says "do not open a PR unless the
+  P-item is complete"; the branch law (2026-08-12) says engine work goes on a
+  branch off develop and "opens its own PR", and nights 46–49 have all worked
+  that way. I followed the branch law.
