@@ -8628,3 +8628,40 @@ tree that could not answer it.
   P-item is complete"; the branch law (2026-08-12) says engine work goes on a
   branch off develop and "opens its own PR", and nights 46–49 have all worked
   that way. I followed the branch law.
+
+### Addendum — the macOS receipt for #196 (run 34675676217, `macos-14`)
+
+The PR lane came back green on `9066f1e`, all 12 checks, and it makes the
+measurement this seat cannot:
+
+```
+ratchet exit code: 2
+Ratchet holds — absolute red exists but nothing regressed
+
+Finish line — N/26 finish-line-green
+  metric:     2/26 cases pass all four conditions
+  measured:   26/26 scored on all four  (0 not fully measured)
+    geometry   5/26 green, 26/26 measured
+    paint      3/26 green, 26/26 measured
+    stability  26/26 green, 26/26 measured
+    discrete   26/26 green, 26/26 measured
+```
+
+**`2/26`, and every column identical to the one #195's lane printed yesterday.**
+The prediction made from the SwiftShader run — that `N/26` could not move and
+that nothing would regress — holds on CoreText and Metal too. The ratchet's
+exit 2 is the stronger half: it is the stop rule checked against the committed
+floor on the real platform, and it did not fire.
+
+What I could NOT read: the per-case geometry counts, so whether `form-elements`
+went 92 → 91 on macOS is unknown from here. The `parity-oracle` artifact holds
+`gate-a.json`, and artifact download is blocked from this seat by the egress
+policy (`productionresultssa17.blob.core.windows.net`, CONNECT 403). The job
+log prints only the first five failures per case. Stated rather than inferred:
+the fix is measured on this seat and *not contradicted* on macOS, which is less
+than measured on macOS.
+
+This is also the control that settles the shape of #195's failure. Two PRs cut
+from the same `da8f413` — mine and #193/#194 — pass the ratchet against the
+`6ff4eb5` floor; #195 does not. The floor being two merges stale does not
+explain #195's two rows.
