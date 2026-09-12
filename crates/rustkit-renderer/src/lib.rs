@@ -2300,6 +2300,14 @@ impl Renderer {
     /// The rectangular half is unchanged from before rounded clips existed. The
     /// rounded half only runs when a rounded clip is actually on the stack, so
     /// a page without one emits exactly the vertices it always did.
+    ///
+    /// The clip stack is in SCREEN space (see `push_clip_rounded`), so the quad
+    /// is taken to screen space first and clipped where it actually lands.
+    /// Until this, the quad was clipped in document space and transformed
+    /// afterwards, so a transformed descendant escaped its ancestor's
+    /// `overflow: hidden`: `.btn::before { inset: 0; transform:
+    /// translateX(-100%) }` painted as a shine bar LEFT of the button Chrome
+    /// clips it inside (about, n46).
     fn draw_clipped_quad(&mut self, rect: Rect, color: [f32; 4]) {
         // Borrowed out and put back so the immutable borrow of `clip_stack`
         // inside `collect_clipped_pieces` does not collide with the mutable
@@ -2307,12 +2315,20 @@ impl Renderer {
         // because gradients call this once per cell — up to 100k times a frame.
         let mut pieces = std::mem::take(&mut self.clip_pieces);
         pieces.clear();
-        collect_clipped_pieces(self.clip_stack.last(), rect, &mut pieces);
+        let space = clip_quad_under(
+            self.current_transform(),
+            self.clip_stack.last(),
+            rect,
+            &mut pieces,
+        );
 
         for &(piece, coverage) in &pieces {
             let mut faded = color;
             faded[3] *= coverage;
-            self.push_color_quad(piece, faded);
+            match space {
+                QuadSpace::Screen => self.push_screen_quad(piece, faded),
+                QuadSpace::Document => self.push_color_quad(piece, faded),
+            }
         }
 
         self.clip_pieces = pieces;
@@ -2325,13 +2341,28 @@ impl Renderer {
             return;
         }
 
-        let base = self.color_vertices.len() as u32;
-
         // Apply transform to corners
         let (x0, y0) = self.transform_point(rect.x, rect.y);
         let (x1, y1) = self.transform_point(rect.x + rect.width, rect.y);
         let (x2, y2) = self.transform_point(rect.x + rect.width, rect.y + rect.height);
         let (x3, y3) = self.transform_point(rect.x, rect.y + rect.height);
+        self.push_screen_corners([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], c);
+    }
+
+    /// Append one quad that is ALREADY in screen space — no transform, no
+    /// clipping.
+    fn push_screen_quad(&mut self, rect: Rect, c: [f32; 4]) {
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+        let (x0, y0) = (rect.x, rect.y);
+        let (x1, y1) = (rect.x + rect.width, rect.y + rect.height);
+        self.push_screen_corners([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], c);
+    }
+
+    fn push_screen_corners(&mut self, p: [[f32; 2]; 4], c: [f32; 4]) {
+        let base = self.color_vertices.len() as u32;
+        let [[x0, y0], [x1, y1], [x2, y2], [x3, y3]] = p;
 
         self.color_vertices.extend_from_slice(&[
             ColorVertex { position: [x0, y0], color: c },
@@ -4743,18 +4774,14 @@ impl Renderer {
                         .and_then(|a| a.get(char_idx).copied())
                         .unwrap_or(entry.advance);
 
-                    let Some((g, tex)) = clip_textured_rect(
-                        self.current_clip(),
-                        Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
-                        entry.tex_coords,
-                    ) else {
+                    let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex)) = self
+                        .textured_corners(
+                            Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
+                            entry.tex_coords,
+                        )
+                    else {
                         continue;
                     };
-
-                    let (x0, y0) = self.transform_point(g.x, g.y);
-                    let (x1, y1) = self.transform_point(g.x + g.width, g.y);
-                    let (x2, y2) = self.transform_point(g.x + g.width, g.y + g.height);
-                    let (x3, y3) = self.transform_point(g.x, g.y + g.height);
 
                     // White vertex color: the blit pipeline multiplies, so this
                     // passes the emoji's own colors through untinted. Preserve
@@ -4804,19 +4831,14 @@ impl Renderer {
                     .unwrap_or(entry.advance);
 
                 // `overflow: hidden` clips glyphs like everything else.
-                let Some((g, tex)) = clip_textured_rect(
-                    self.current_clip(),
-                    Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
-                    entry.tex_coords,
-                ) else {
+                let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex)) = self
+                    .textured_corners(
+                        Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
+                        entry.tex_coords,
+                    )
+                else {
                     continue;
                 };
-
-                // Apply transform to glyph corners
-                let (x0, y0) = self.transform_point(g.x, g.y);
-                let (x1, y1) = self.transform_point(g.x + g.width, g.y);
-                let (x2, y2) = self.transform_point(g.x + g.width, g.y + g.height);
-                let (x3, y3) = self.transform_point(g.x, g.y + g.height);
 
                 let base = self.texture_vertices.len() as u32;
 
@@ -4860,17 +4882,11 @@ impl Renderer {
     fn draw_image(&mut self, url: &str, rect: Rect) {
         if self.texture_cache.contains(url) {
             // `overflow: hidden` clips replaced content like everything else.
-            let Some((rect, tex)) =
-                clip_textured_rect(self.current_clip(), rect, [0.0, 0.0, 1.0, 1.0])
+            let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex)) =
+                self.textured_corners(rect, [0.0, 0.0, 1.0, 1.0])
             else {
                 return;
             };
-
-            // Apply transform to image corners
-            let (x0, y0) = self.transform_point(rect.x, rect.y);
-            let (x1, y1) = self.transform_point(rect.x + rect.width, rect.y);
-            let (x2, y2) = self.transform_point(rect.x + rect.width, rect.y + rect.height);
-            let (x3, y3) = self.transform_point(rect.x, rect.y + rect.height);
 
             self.push_image_quad(
                 url,
@@ -5096,19 +5112,11 @@ impl Renderer {
         let tex_bottom = 1.0 - clip_bottom / tile_rect.height;
 
         // Then the overflow clip on top of the container clip.
-        let Some((draw_rect, [tex_left, tex_top, tex_right, tex_bottom])) = clip_textured_rect(
-            self.current_clip(),
-            draw_rect,
-            [tex_left, tex_top, tex_right, tex_bottom],
-        ) else {
+        let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], [tex_left, tex_top, tex_right, tex_bottom])) =
+            self.textured_corners(draw_rect, [tex_left, tex_top, tex_right, tex_bottom])
+        else {
             return;
         };
-
-        // Apply transform to image corners
-        let (x0, y0) = self.transform_point(draw_rect.x, draw_rect.y);
-        let (x1, y1) = self.transform_point(draw_rect.x + draw_rect.width, draw_rect.y);
-        let (x2, y2) = self.transform_point(draw_rect.x + draw_rect.width, draw_rect.y + draw_rect.height);
-        let (x3, y3) = self.transform_point(draw_rect.x, draw_rect.y + draw_rect.height);
 
         self.push_image_quad(
             url,
@@ -5189,8 +5197,14 @@ impl Renderer {
     /// The rect half intersects as it always did. The rounded half accumulates:
     /// a nested rounded clip does not replace its parent, because a point has to
     /// be inside both.
+    ///
+    /// The entry is stored in SCREEN space: the command's rect is in document
+    /// space and is mapped through the transform in force when the clip is
+    /// pushed, so a clip inside a transformed box moves with the box, and a
+    /// descendant transformed AFTER the clip was pushed is clipped where it
+    /// lands rather than where it would have been without its transform.
     fn push_clip_rounded(&mut self, rect: Rect, radius: rustkit_layout::BorderRadius) {
-        let entry = clip_entry_for(self.clip_stack.last(), rect, radius);
+        let entry = clip_entry_under(self.clip_stack.last(), self.current_transform(), rect, radius);
         self.clip_stack.push(entry);
     }
 
@@ -5199,9 +5213,35 @@ impl Renderer {
         self.clip_stack.pop();
     }
 
-    /// Get the current clip rectangle.
+    /// Get the current clip rectangle (screen space).
     fn current_clip(&self) -> Option<Rect> {
         self.clip_stack.last().map(|entry| entry.rect)
+    }
+
+    /// A textured quad (glyph, image) cut to the current clip and taken to
+    /// screen space: the four corner positions in emit order (top-left,
+    /// top-right, bottom-right, bottom-left) and the texture coordinates of
+    /// the surviving part. `None` when nothing survives. One rule for every
+    /// textured site so text, images and tiles are clipped under a transform
+    /// exactly as color quads are.
+    fn textured_corners(&self, rect: Rect, tex: [f32; 4]) -> Option<([[f32; 2]; 4], [f32; 4])> {
+        let (g, tex, space) = clip_textured_under(self.current_transform(), self.current_clip(), rect, tex)?;
+        let corners = match space {
+            QuadSpace::Screen => [
+                [g.x, g.y],
+                [g.x + g.width, g.y],
+                [g.x + g.width, g.y + g.height],
+                [g.x, g.y + g.height],
+            ],
+            QuadSpace::Document => {
+                let (x0, y0) = self.transform_point(g.x, g.y);
+                let (x1, y1) = self.transform_point(g.x + g.width, g.y);
+                let (x2, y2) = self.transform_point(g.x + g.width, g.y + g.height);
+                let (x3, y3) = self.transform_point(g.x, g.y + g.height);
+                [[x0, y0], [x1, y1], [x2, y2], [x3, y3]]
+            }
+        };
+        Some((corners, tex))
     }
 
 
@@ -5612,6 +5652,172 @@ fn clip_entry_for(
         rect: clip,
         rounded,
     }
+}
+
+const IDENTITY_2D: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+/// Which space a clipped piece comes back in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuadSpace {
+    /// Already mapped through the transform; emit the corners as they are.
+    Screen,
+    /// Still in document space; the emitter applies the transform.
+    Document,
+}
+
+/// `rect` mapped through `m` when `m` has no rotation or skew — the mapped
+/// rect is still a rect, so it can be clipped exactly. `None` otherwise.
+fn map_rect_axis_aligned(m: [f32; 6], rect: Rect) -> Option<Rect> {
+    if m[1] != 0.0 || m[2] != 0.0 {
+        return None;
+    }
+    let x0 = m[0] * rect.x + m[4];
+    let x1 = m[0] * (rect.x + rect.width) + m[4];
+    let y0 = m[3] * rect.y + m[5];
+    let y1 = m[3] * (rect.y + rect.height) + m[5];
+    Some(Rect::new(x0.min(x1), y0.min(y1), (x1 - x0).abs(), (y1 - y0).abs()))
+}
+
+/// The bounding box of `rect`'s corners mapped through `m`.
+fn map_rect_bounds(m: [f32; 6], rect: Rect) -> Rect {
+    let corners = [
+        (rect.x, rect.y),
+        (rect.x + rect.width, rect.y),
+        (rect.x + rect.width, rect.y + rect.height),
+        (rect.x, rect.y + rect.height),
+    ];
+    let mut x0 = f32::MAX;
+    let mut y0 = f32::MAX;
+    let mut x1 = f32::MIN;
+    let mut y1 = f32::MIN;
+    for (x, y) in corners {
+        let px = m[0] * x + m[2] * y + m[4];
+        let py = m[1] * x + m[3] * y + m[5];
+        x0 = x0.min(px);
+        y0 = y0.min(py);
+        x1 = x1.max(px);
+        y1 = y1.max(py);
+    }
+    Rect::new(x0, y0, x1 - x0, y1 - y0)
+}
+
+/// Inverse of a 2D affine matrix, `None` when it is singular (a zero scale).
+fn invert_matrix_2d(m: [f32; 6]) -> Option<[f32; 6]> {
+    let det = m[0] * m[3] - m[1] * m[2];
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let inv_det = 1.0 / det;
+    let a = m[3] * inv_det;
+    let b = -m[1] * inv_det;
+    let c = -m[2] * inv_det;
+    let d = m[0] * inv_det;
+    Some([a, b, c, d, -(a * m[4] + c * m[5]), -(b * m[4] + d * m[5])])
+}
+
+/// The clip entry a `PushClip`/`PushClipRounded` issued under transform `m`
+/// produces on top of `current`. The command's `rect` is in document space;
+/// the entry is in screen space, so a clip and the quads drawn under it are
+/// compared where they both land.
+///
+/// Under a rotation or skew the clip's rounded part is kept only as a
+/// bounding box (a rotated rounded rect is not a rounded rect) — a ledgered
+/// approximation; no board case rotates an `overflow: hidden` box.
+fn clip_entry_under(
+    current: Option<&ClipEntry>,
+    m: [f32; 6],
+    rect: Rect,
+    radius: rustkit_layout::BorderRadius,
+) -> ClipEntry {
+    if m == IDENTITY_2D {
+        return clip_entry_for(current, rect, radius);
+    }
+    match map_rect_axis_aligned(m, rect) {
+        Some(screen) => {
+            let scale = (m[0] * m[3]).abs().sqrt();
+            let radius = rustkit_layout::BorderRadius {
+                top_left: radius.top_left * scale,
+                top_right: radius.top_right * scale,
+                bottom_right: radius.bottom_right * scale,
+                bottom_left: radius.bottom_left * scale,
+            };
+            clip_entry_for(current, screen, radius)
+        }
+        None => clip_entry_for(current, map_rect_bounds(m, rect), radius),
+    }
+}
+
+/// Everything a document-space `rect` drawn under transform `m` becomes under
+/// the screen-space `clip`, appended to `out` as `(piece, coverage)`; the
+/// return value says which space the pieces are in.
+///
+/// Without a transform this is `collect_clipped_pieces` and emits exactly the
+/// vertices it always did. With an axis-aligned transform the quad is mapped
+/// first and clipped where it lands. With a rotation or skew the quad cannot be
+/// clipped as a rect after mapping, so the clip's rectangular part is brought
+/// back to document space (as a bounding box) and the quad is clipped before
+/// the transform — the pre-existing behaviour, kept as the fallback.
+fn clip_quad_under(
+    m: [f32; 6],
+    clip: Option<&ClipEntry>,
+    rect: Rect,
+    out: &mut Vec<(Rect, f32)>,
+) -> QuadSpace {
+    if m == IDENTITY_2D {
+        collect_clipped_pieces(clip, rect, out);
+        return QuadSpace::Screen;
+    }
+    if let Some(screen) = map_rect_axis_aligned(m, rect) {
+        collect_clipped_pieces(clip, screen, out);
+        return QuadSpace::Screen;
+    }
+    match clip {
+        None => out.push((rect, 1.0)),
+        Some(entry) => {
+            if let Some(inv) = invert_matrix_2d(m) {
+                let fallback = ClipEntry {
+                    rect: map_rect_bounds(inv, entry.rect),
+                    rounded: Vec::new(),
+                };
+                collect_clipped_pieces(Some(&fallback), rect, out);
+            }
+            // A singular transform paints nothing visible.
+        }
+    }
+    QuadSpace::Document
+}
+
+/// `clip_textured_rect` under transform `m`, on the same law as
+/// `clip_quad_under`: the surviving rect, its texture coordinates, and the
+/// space the rect is in.
+fn clip_textured_under(
+    m: [f32; 6],
+    clip: Option<Rect>,
+    rect: Rect,
+    tex: [f32; 4],
+) -> Option<(Rect, [f32; 4], QuadSpace)> {
+    if m == IDENTITY_2D {
+        let (r, t) = clip_textured_rect(clip, rect, tex)?;
+        return Some((r, t, QuadSpace::Screen));
+    }
+    if let Some(screen) = map_rect_axis_aligned(m, rect) {
+        // A negative scale flips the texels; keep them in the same order as
+        // the mapped corners by flipping the coordinates too.
+        let tex = [
+            if m[0] < 0.0 { tex[2] } else { tex[0] },
+            if m[3] < 0.0 { tex[3] } else { tex[1] },
+            if m[0] < 0.0 { tex[0] } else { tex[2] },
+            if m[3] < 0.0 { tex[1] } else { tex[3] },
+        ];
+        let (r, t) = clip_textured_rect(clip, screen, tex)?;
+        return Some((r, t, QuadSpace::Screen));
+    }
+    let doc_clip = match clip {
+        None => None,
+        Some(c) => Some(map_rect_bounds(invert_matrix_2d(m)?, c)),
+    };
+    let (r, t) = clip_textured_rect(doc_clip, rect, tex)?;
+    Some((r, t, QuadSpace::Document))
 }
 
 /// A textured quad (glyph, image tile) cut to the rectangular part of the
@@ -6104,6 +6310,131 @@ mod tests {
         let inner = clip_entry_for(Some(&outer), Rect::new(500.0, 500.0, 50.0, 50.0), radius(0.0));
         assert_eq!(inner.rect.width, 0.0);
         assert!(pieces_under(Some(&inner), Rect::new(0.0, 0.0, 50.0, 50.0)).is_empty());
+    }
+
+    // ==================== Clip vs transform order ====================
+    //
+    // The clip stack is in screen space and quads are mapped before they are
+    // clipped. These pin the order with the about page's own idiom:
+    // `.sponsor-btn { overflow: hidden }` holding
+    // `::before { inset: 0; transform: translateX(-100%) }`.
+
+    fn translate(x: f32, y: f32) -> [f32; 6] {
+        [1.0, 0.0, 0.0, 1.0, x, y]
+    }
+
+    fn quad_pieces_under(m: [f32; 6], clip: Option<&ClipEntry>, rect: Rect) -> (Vec<(Rect, f32)>, QuadSpace) {
+        let mut out = Vec::new();
+        let space = clip_quad_under(m, clip, rect, &mut out);
+        (out, space)
+    }
+
+    #[test]
+    fn a_descendant_translated_out_of_its_clipper_paints_nothing() {
+        // The shine bar: the button clips to its own box under identity, the
+        // pseudo box is the button's size and translated a full width left.
+        // Before this it was clipped in document space (fully inside) and
+        // then moved — a 230x50 bar painted left of the button.
+        let button = Rect::new(300.0, 240.0, 230.0, 50.0);
+        let clip = clip_entry_under(None, IDENTITY_2D, button, radius(8.0));
+        let (pieces, _) = quad_pieces_under(translate(-230.0, 0.0), Some(&clip), button);
+        assert!(
+            pieces.is_empty(),
+            "a quad translated wholly outside its clipper must emit nothing, got {pieces:?}"
+        );
+    }
+
+    #[test]
+    fn a_partly_translated_descendant_keeps_only_the_part_inside_and_in_screen_space() {
+        let button = Rect::new(0.0, 0.0, 200.0, 50.0);
+        let clip = clip_entry_under(None, IDENTITY_2D, button, radius(0.0));
+        let (pieces, space) = quad_pieces_under(translate(-150.0, 0.0), Some(&clip), button);
+        assert_eq!(space, QuadSpace::Screen);
+        assert_eq!(pieces.len(), 1);
+        let (piece, cov) = pieces[0];
+        assert_eq!(cov, 1.0);
+        assert_eq!((piece.x, piece.width), (0.0, 50.0), "screen-space piece: the 50px that overlap");
+    }
+
+    #[test]
+    fn a_clip_pushed_under_a_transform_moves_with_it() {
+        // The other half of the rule: a transformed box that clips its own
+        // children clips them where the box is, not where it was laid out.
+        let entry = clip_entry_under(None, translate(100.0, 20.0), Rect::new(0.0, 0.0, 50.0, 50.0), radius(0.0));
+        assert_eq!((entry.rect.x, entry.rect.y), (100.0, 20.0));
+        // A child drawn under the same transform lands inside it.
+        let (pieces, _) = quad_pieces_under(translate(100.0, 20.0), Some(&entry), Rect::new(10.0, 10.0, 10.0, 10.0));
+        assert_eq!(pieces.len(), 1);
+        assert_eq!((pieces[0].0.x, pieces[0].0.y), (110.0, 30.0));
+    }
+
+    #[test]
+    fn a_scaled_clip_scales_its_corner_radius() {
+        let entry = clip_entry_under(None, [2.0, 0.0, 0.0, 2.0, 0.0, 0.0], Rect::new(0.0, 0.0, 50.0, 50.0), radius(10.0));
+        assert_eq!(entry.rect.width, 100.0);
+        assert_eq!(entry.rounded.len(), 1);
+        assert_eq!(entry.rounded[0].1.top_left, 20.0);
+    }
+
+    #[test]
+    fn without_a_transform_the_pieces_are_exactly_the_old_ones() {
+        // The no-transform page must emit the vertices it always did.
+        let clip = clip_entry_for(None, Rect::new(0.0, 0.0, 100.0, 100.0), radius(12.0));
+        let rect = Rect::new(-10.0, -10.0, 60.0, 60.0);
+        let old = pieces_under(Some(&clip), rect);
+        let (new, space) = quad_pieces_under(IDENTITY_2D, Some(&clip), rect);
+        assert_eq!(space, QuadSpace::Screen);
+        assert_eq!(old.len(), new.len());
+        for (a, b) in old.iter().zip(new.iter()) {
+            assert_eq!((a.0.x, a.0.y, a.0.width, a.0.height, a.1), (b.0.x, b.0.y, b.0.width, b.0.height, b.1));
+        }
+    }
+
+    #[test]
+    fn a_rotated_quad_falls_back_to_document_space_clipping() {
+        // 90 degrees about the origin: not axis-aligned, so the quad is
+        // clipped against the clip's document-space bounds and handed back for
+        // the emitter to transform — no worse than before this existed.
+        let rot = [0.0, 1.0, -1.0, 0.0, 0.0, 0.0];
+        let clip = clip_entry_under(None, IDENTITY_2D, Rect::new(-100.0, 0.0, 100.0, 100.0), radius(0.0));
+        // x' = -y, y' = x: the screen clip maps back to x in [0, 100],
+        // y in [0, 100]. A quad at y in [-200, -100] misses it entirely.
+        let (pieces, space) = quad_pieces_under(rot, Some(&clip), Rect::new(0.0, -200.0, 50.0, 100.0));
+        assert_eq!(space, QuadSpace::Document);
+        assert!(pieces.is_empty(), "{pieces:?}");
+        // A quad at y in [-50, 50] keeps its [0, 50] half.
+        let (pieces, _) = quad_pieces_under(rot, Some(&clip), Rect::new(0.0, -50.0, 50.0, 100.0));
+        assert_eq!(pieces.len(), 1);
+        assert_eq!((pieces[0].0.y, pieces[0].0.height), (0.0, 50.0));
+    }
+
+    #[test]
+    fn invert_matrix_2d_round_trips() {
+        let m = [2.0, 0.5, -0.25, 3.0, 40.0, -7.0];
+        let inv = invert_matrix_2d(m).unwrap();
+        let id = multiply_matrices_2d(m, inv);
+        for (a, b) in id.iter().zip(IDENTITY_2D.iter()) {
+            assert!((a - b).abs() < 1e-5, "{id:?}");
+        }
+        assert!(invert_matrix_2d([0.0, 0.0, 0.0, 0.0, 1.0, 1.0]).is_none());
+    }
+
+    #[test]
+    fn a_translated_glyph_is_clipped_where_it_lands() {
+        // Text under a transformed descendant follows the same law as color.
+        let clip = Some(Rect::new(0.0, 0.0, 100.0, 50.0));
+        let glyph = Rect::new(90.0, 10.0, 20.0, 20.0);
+        // Untransformed: half the glyph survives.
+        let (r, _, space) = clip_textured_under(IDENTITY_2D, clip, glyph, [0.0, 0.0, 1.0, 1.0]).unwrap();
+        assert_eq!(space, QuadSpace::Screen);
+        assert_eq!(r.width, 10.0);
+        // Moved 20px right: nothing does.
+        assert!(clip_textured_under(translate(20.0, 0.0), clip, glyph, [0.0, 0.0, 1.0, 1.0]).is_none());
+        // Moved 20px left: whole glyph, in screen space, texels intact.
+        let (r, t, space) = clip_textured_under(translate(-20.0, 0.0), clip, glyph, [0.0, 0.0, 1.0, 1.0]).unwrap();
+        assert_eq!(space, QuadSpace::Screen);
+        assert_eq!((r.x, r.width), (70.0, 20.0));
+        assert_eq!(t, [0.0, 0.0, 1.0, 1.0]);
     }
 
     #[test]
