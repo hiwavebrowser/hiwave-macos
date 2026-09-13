@@ -8665,3 +8665,233 @@ This is also the control that settles the shape of #195's failure. Two PRs cut
 from the same `da8f413` — mine and #193/#194 — pass the ratchet against the
 `6ff4eb5` floor; #195 does not. The floor being two merges stale does not
 explain #195's two rows.
+
+## 2026-09-13
+
+**Metric: `2/26` → `2/26` on macOS, unchanged and not re-run.** No case crossed
+the conjunction or fell off it: on this seat Gate A's green set is the same
+three cases, Gate B's is the same one, and the two macOS-green cases
+(`bg-pure`, `bg-solid`) are bit-identical on both oracles. No macOS run tonight
+— the branch is pushed and **unopened**, so nothing here is a receipt.
+
+**P-item: P3 (flex residual). NOT complete.** The largest remaining violation on
+the n49 invariant board, and the first one this campaign has fixed where the
+*geometry oracle got worse on the target case*. That is the whole entry.
+
+### The defect
+
+`settings`' `.setting-control.decay-control` is `display:flex;
+justify-content:flex-end`, 140px wide, holding 158.98px of unshrinkable input +
+6px gap + select. Chrome hangs the 18.98px of overflow off the **left** edge and
+puts the select's right edge flush on the content-end edge at x=842. RustKit hung
+it off the right, ending at 860.98.
+
+All three flex alignment sites clamped their free space at zero:
+
+```
+distribute_main_axis   justify-content
+distribute_lines       align-content
+align_cross_axis       align-items / align-self
+```
+
+so every overflowing line, item and line-stack was positioned at offset 0 —
+packed at the start, overflowing the end. css-align-3 §5.3 makes the default
+alignments **unsafe**: `flex-end` and `center` keep aligning when the subjects
+overflow, and the overflow lands on the start side.
+
+**I had the other half of the rule wrong, and a probe corrected me.** I read
+§5.3 as making `space-around`/`space-evenly` fall back to plain `center` under
+overflow, which would have meant removing the clamp everywhere. Chrome 148,
+measured on the bundled Chromium rather than assumed:
+
+```
+100px row, two unshrinkable 80px items
+  justify-content   flex-end lead -60 · center lead -30 · space-*  lead 0
+40px column, a 100px item / three 30px lines
+  align-items       flex-end lead -60 · center lead -30
+  align-content     flex-end lead -50 · center lead -25 · space-* [0,30,60]
+```
+
+The distribution values fall back to *safe* center, and safe alignment under
+overflow is start — so they keep the clamp. Had I shipped the reading I started
+with, three of the six arms would have been wrong in a way no case on this
+corpus would have caught.
+
+### Commits — branch `atlas/n51-p3-flex-justify-end`, cut from `develop da8f413`
+
+- `5b46d25` — overflowing flex items keep their alignment instead of packing at
+  the start (three sites, one rule).
+- `80ec5fc` — close the sweep's survivor: assert every line position, not just
+  the first.
+
+**Pushed, no PR.** Reasons under "the stop rule" below; it is decision 1.
+
+### Measured — Linux/SwiftShader, 26 cases, 1 iteration. MECHANICS, NOT A RECEIPT
+
+| Oracle | develop `da8f413` | after |
+|---|---:|---:|
+| Gate A geometry failures / joins | 2646 / 16 | **2647** / 16 |
+| Gate A geometry-green | 3/26 | 3/26 |
+| Gate B paint-green / measured | 1/26 · 26/26 | 1/26 · 26/26 |
+| Gate B discrete auto-fails / examined | 0 / 260 | 0 / 260 |
+| flex invariant violations | 13 | **11** |
+
+Per (case, selector, axis) across all 26 cases:
+**fixed 0 · newly failing 1 · improved 1 · WORSENED 2 · unchanged 2659.**
+
+```
+settings        #tabDecayValue            x  +7.00 -> -11.98   WORSENED
+settings        #tabDecayUnit             x  +7.00 -> -11.98   WORSENED
+chrome_rustkit  .sidebar-toggle           y   (none) -> -28.50 NEWLY FAILING
+chrome_rustkit  .sidebar-toggle > span    y  +29.50 ->  +1.00  improved
+```
+
+### The two worsened boxes are an error cancellation being removed
+
+The edge the rule owns is now **bit-exact**:
+
+```
+                container            #tabDecayValue        #tabDecayUnit
+Chrome     695.00 .. 842.00     695.00 .. 755.00      761.00 .. 842.00  (w 81)
+before     702.00 .. 842.00     702.00 .. 762.00      768.00 .. 860.98  (w 92.98)
+after      702.00 .. 842.00     683.02 .. 743.02      749.02 .. 842.00  (w 92.98)
+```
+
+RustKit's select is **11.98px too wide** — 92.98 against Chrome's 81 — because
+this seat has no font backend. Before the fix, the left-packing error (+18.98)
+and the width error (−11.98) partially cancelled and Gate A read +7.00. The fix
+removes the cancellation, so the residual is now the width error alone and Gate A
+reads −11.98. Nothing about the select's width changed.
+
+**Falsifiable prediction for the macOS lane.** If the select measures Chrome's
+81px under CoreText, the container is still 140 (its own sizing bug, below), the
+overflow is 7px, and this fix puts both boxes **exactly** on Chrome's x — `+7.00
+-> 0.00`, two geometry failures *fixed* rather than two worsened. If macOS
+instead prints −11.98, the select measures 92.98 there too and my reading of the
+residual is wrong. This is the whole reason to want a lane on it.
+
+### The newly-failing box is n49's defect, checked rather than argued
+
+`.sidebar-toggle { height: 100% }` measures **100** on develop against Chrome's
+43 — the percentage that `atlas/n49-p3-flex` resolves and which is not on
+develop. Centring a 100px item in a 44px line now correctly overflows both
+edges by 28.5, so the box moves off Chrome's y.
+
+I cherry-picked n49 onto tonight's branch and re-measured all 26 cases:
+
+```
+n51 alone        fixed 0 · newly failing 1 · improved 1 · worsened 2   (2647)
+n51 + n49        fixed 1 · newly failing 0 · improved 1 · worsened 2   (2645)
+n49 alone (9-11) fixed 1 · newly failing 0 · improved 1 · worsened 0   (2645)
+```
+
+The newly-failing row is gone when the item is the right size. Composed, tonight
+adds exactly the `settings` pair to n49's result and nothing else.
+
+### Gate B: one case moved, and it is the same 304 pixels as 09-11
+
+`chrome_rustkit` 0.95773 → 0.95559, 274 net pixels. Read back rather than
+explained away — 304 newly outside, all in `x 16–62, y 55–67`, the
+`.workspace-name` box, the identical bbox night 09-11 recorded for n49:
+
+```
+y=60  Chrome  .##...###..#####.#####.######.###.###.##.#####.
+      before  ...............................................
+      after   ####################################...########
+```
+
+Chrome draws glyphs; this seat draws a solid filled run because it has no font
+backend, and before the fix that run sat under the sidebar's opaque background
+where it painted nothing visible. **Two different fixes, n49's and tonight's,
+move the same box to the same place by different routes and produce a
+bit-identical 304-pixel delta.** The other 25 cases are bit-identical on Gate B.
+
+### The stop rule
+
+The hard rule fires when a change **improves the metric** while an oracle
+regresses. `N/26` did not move and cannot have: no case is geometry-green ∧
+paint-green ∧ discrete-green ∧ stable either side of this, and the three cases
+that moved are red on both oracles before and after. The antecedent is false, so
+the rule did not fire — but **Gate A's total went up by one and two boxes on the
+target case got worse, and I am not going to file that under a technicality.**
+Night 28's stricter reading (revert on any oracle regression) would revert this;
+night 29's (#175 — keep when the old number depended on an error cancelling)
+would keep it, and #175 is the closer precedent because the cancellation here is
+arithmetic I can print rather than infer.
+
+I kept it and did **not** open a PR, which is the same call night 09-11 made on
+n49 for a weaker reason. That is now the second fix held on the same unanswered
+decision, and the cost is concrete: n49 has sat unmeasured on macOS for two
+nights, so tonight's composition question had to be answered by cherry-pick
+instead of by a lane.
+
+### Mutation-check results
+
+**12 probes, 12 RED, control green before and after.** Committed before mutating
+(night 1's lesson, the fourth night it is being repeated back); each probe
+verified to be a real edit.
+
+| probe | result |
+|---|---|
+| M1 `distribute_main_axis` clamp restored | RED |
+| M2 justify space-around loses the clamp (over-removal) | RED |
+| M3 justify space-between loses the clamp | RED |
+| M4 `align_cross_axis` clamp restored | RED |
+| M5 `distribute_lines` clamp restored | RED |
+| M6 align-content stretch shrinks an overflowing line | RED |
+| M7 justify flex-end takes half the free space | RED |
+| M8 align-items center drops the halving | RED |
+| M9 justify space-evenly loses the clamp | RED |
+| M10 align-content space-between loses the clamp | **SURVIVOR**, then RED |
+| M11 align-content space-around loses the clamp | RED |
+| M12 align-content space-evenly loses the clamp | RED |
+
+**The first eight probes were all RED, and that is when the survivor was still
+there.** M10–M12 exist only because I stopped and asked 09-12's checklist
+question — which line of the change would no assertion miss — instead of
+reading 8/8 as done. M10 was the answer: under `space-between` the first line
+sits at 0 whatever the spacing is, so a guard reading `lines[0]` cannot see a
+negative gap stacking three lines on top of each other. Ninth sweep, and the
+survivor is the same shape as the last eight; the checklist question found it
+one step earlier than the sweep would have.
+
+### Decisions needed from Pete
+
+1. **Open `atlas/n51-p3-flex-justify-end` or revert it?** It is spec-literal and
+   Chrome-verified, its two worsened boxes are a measured error cancellation
+   that a macOS lane would turn into two *fixed* boxes if the prediction above
+   holds, and the stored night order says not to open a PR while the P-item is
+   incomplete — but only a lane can check the prediction.
+2. **Which stop-rule reading governs** (open since 09-11): revert on any oracle
+   regression, or keep when the regression is an error cancellation being
+   removed and the metric cannot move?
+3. **Is P3 closable?** (carried from 09-11 and 09-12) — `flex-positioning` is
+   15/15 clean on the flex invariants and its 174 axes are text; the board is
+   down to 11 violations, all on other cases, and the remaining ten are
+   `image-gallery ×4 +3.69` and `about ×6 +0.60`.
+
+### Surprises
+
+- **A correct fix made the target case's geometry worse, and both numbers are
+  right.** I expected `settings` to improve and it regressed 7.00 → 11.98 on two
+  boxes. The trailing edge the rule owns is now exactly Chrome's; what moved is
+  which of two errors is visible. This is the first night on this campaign where
+  the honest receipt for a correct change is a *worse* Gate A on the case that
+  motivated it.
+- **My reading of the spec was wrong in the direction that would have shipped
+  more code.** Removing the clamp everywhere was the change I started to write;
+  Chrome fell back to start on all three distribution values. Ten minutes of
+  probe beat a confident reading of §5.3.
+- **`.setting-control` is 140px wide because `min-width: 140px` is the only
+  thing sizing it.** Its own items measure 158.98 and Chrome's container is 147
+  — i.e. a flex container's max-content contribution does not include its
+  items, which is *why* there is any overflow on this case at all. Recorded, not
+  chased: it is a sizing root of its own and tonight's unit was the alignment.
+- **Two independent fixes produced a bit-identical 304-pixel Gate B delta.**
+  n49 fixes the toggle's size and tonight's fixes where an oversized item sits;
+  both land the `.workspace-name` box in the same place, and this seat's
+  font-less solid runs then paint over Chrome's glyphs identically. It is a
+  useful reminder that the paint column on this seat is measuring the seat.
+- The stored night order still opens with P0a-0, finished 40 nights ago.
+  **Seventh night carrying this**, and it still costs the first part of a night
+  to re-derive where the queue actually is.
