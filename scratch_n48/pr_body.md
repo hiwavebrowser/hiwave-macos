@@ -10,27 +10,27 @@ n47's screen-space clip path (`clip_entry_under` / `clip_quad_under`) is correct
 
 - `affine_about_origin(matrix, origin)` = `T(origin) · matrix · T(−origin)`, a free function so it is testable without a GPU.
 - `current_transform` folds the stack as `outer · inner` through it. No other line changes; the identity path, the clip path and every emitter are untouched.
-- rustkit-renderer 75 → 80 tests: scale about the top-left keeps the corner fixed and doubles the far corner (the repro's numbers); scale about the centre grows evenly; rotate(90deg) turns about its origin; translate ignores its origin (the campaign's translate pixels stay identical, pinned); nested translate-over-scale composes inner first. T-RED: with the old order restored, four of the five fail with the board's numbers.
+- rustkit-renderer 67 → 72 tests: scale about the top-left keeps the corner fixed and doubles the far corner (the repro's numbers); scale about the centre grows evenly; rotate(90deg) turns about its origin; translate ignores its origin (the campaign's translate pixels stay identical, pinned); nested translate-over-scale composes inner first. T-RED: with the old order restored, four of the five fail with the board's numbers.
 
 ## Receipts
 
 `parity-tests/repro/transform-origin.html` (400×500) vs pinned Chrome 148, seven rows: A scale(2) origin 0 0 · B scale(2) centre · C the n47 section-E shape · D rotate(90deg) · E scaleX(2) origin 100% 50% · F translate control with a non-default origin · G a translated shine child inside a scaled clipper.
 
-Ink by color (`scratch_n48/ink.py`):
+Ink by color (`scratch_n48/ink.py`), develop `da8f413` + this PR:
 
 | color | Chrome | before | after |
 |---|---|---|---|
-| `#aa33aa` fill | 11592 | 3285 (bbox x 150..399, y 60..499) | 11612 (bbox x 50..229, y 20..399 = Chrome) |
+| `#aa33aa` fill | 11592 | 3285 (bbox x 150..399, y 60..499) | 11568 (bbox x 50..227, y 20..399 = Chrome) |
 | `#33aa33` box | 9600 | 1000 (x 180..399) | 9600 (x 110..229 = Chrome) |
-| `#ffcc00` shine (G) | 2400 (x 110..169, y 440..479) | 0 | 2400 (same bbox) |
+| `#ffcc00` shine (G) | 2400 (x 110..169, y 440..479) | 0 | 4800 (x 50..169) — the extra 2400 left of the button is PR #197's clip-order bug, not this one |
 
-Pixels differing from Chrome per 70px row (`vs_chrome.py`): total **30850 → 5437**; row F (control) 785 → 785 flat; the residual on every row is the 12px label's antialiasing (the band F carries) plus corner/edge antialiasing on C and D.
+Pixels differing from Chrome per 70px row (`vs_chrome.py`): total **30850 → 7823**; rows A–E 6162/6106/5397/1979/3881 → 662/406/1112/779/781; row F (control) 785 → 785 flat; the residual on A–F is the 12px label's antialiasing (the band F carries) plus corner/edge antialiasing on C and D. Row G 5840 → 3298 is the un-clipped half of the shine bar.
 
-n47's `clip-transform-order.html` re-rendered on this branch: section E band **5209 → 897**; every other band byte-identical to n47's after-frame.
+**Stacked on #197** (the same fix applied on `atlas/n47-renderer-clip-transform`, local only, not pushed): total **30850 → 5437**, row G 5840 → 940, shine 2400 = Chrome; and n47's own `clip-transform-order.html` section E band **5209 → 897** with every other band byte-identical to n47's after-frame. The two PRs are independent (no shared helpers) and compose.
 
 **Campaign board** (develop `da8f413` + this PR): 26/26 **byte-flat**, avg 2.6245. By construction: a census of every `scale`/`rotate`/`skew`/`matrix` declaration in the 26 case sources (`scratch_n48/census.py`) finds them only in `@keyframes`, `:hover`, `:active`, or as `scaleY(0)` at rest (singular — paints nothing either way): new_tab (ripple keyframes, `.logo:hover`, `.shortcut:hover/:active`, `.shortcut::before { scaleY(0) }`), about (`.logo:hover`, `.feature::before { scaleY(0) }`), shelf (ripple keyframes, `.shelf-close:hover { rotate(90deg) }`). The meter cannot see this lane; the receipt is the repro.
 
-**WPT Tier-1** 24/26 (same two fails), last-run pinned on `faf1270`.
+**WPT Tier-1** 24/26 (same two fails), last-run pinned on `b32ef78`.
 
 ## Ledgered, not chased
 
