@@ -1538,7 +1538,13 @@ fn distribute_lines(
 
     let total_line_size: f32 = lines.iter().map(|l| l.cross_size).sum();
     let total_gaps = cross_gap * (lines.len().saturating_sub(1)) as f32;
-    let free_space = (container_cross - total_line_size - total_gaps).max(0.0);
+    // Signed, for the reason spelled out in `distribute_main_axis`: `flex-end`
+    // and `center` are unsafe alignments and keep aligning when the lines
+    // overflow. Distribution and stretch keep the clamp.
+    // Chrome 148, three 30px lines in a 40px column: align-content:flex-end
+    // lead −50 · center lead −25 · space-around lead 0.
+    let free_space = container_cross - total_line_size - total_gaps;
+    let distributable = free_space.max(0.0);
 
     let (initial_offset, spacing) = match align_content {
         AlignContent::FlexStart => (0.0, cross_gap),
@@ -1546,23 +1552,23 @@ fn distribute_lines(
         AlignContent::Center => (free_space / 2.0, cross_gap),
         AlignContent::SpaceBetween => {
             if lines.len() > 1 {
-                (0.0, free_space / (lines.len() - 1) as f32 + cross_gap)
+                (0.0, distributable / (lines.len() - 1) as f32 + cross_gap)
             } else {
                 (0.0, cross_gap)
             }
         }
         AlignContent::SpaceAround => {
-            let space = free_space / lines.len() as f32;
+            let space = distributable / lines.len() as f32;
             (space / 2.0, space + cross_gap)
         }
         AlignContent::SpaceEvenly => {
-            let space = free_space / (lines.len() + 1) as f32;
+            let space = distributable / (lines.len() + 1) as f32;
             (space, space + cross_gap)
         }
         AlignContent::Stretch => {
             // Distribute free space to lines
-            if free_space > 0.0 {
-                let extra_per_line = free_space / lines.len() as f32;
+            if distributable > 0.0 {
+                let extra_per_line = distributable / lines.len() as f32;
                 for line in lines.iter_mut() {
                     line.cross_size += extra_per_line;
                 }
@@ -1593,7 +1599,17 @@ fn distribute_main_axis(
 
     let total_item_size: f32 = line.items.iter().map(|i| i.outer_main_size()).sum();
     let total_gaps = main_gap * (line.items.len().saturating_sub(1)) as f32;
-    let free_space = (container_main - total_item_size - total_gaps).max(0.0);
+    // SIGNED on purpose. When the items overflow, the packing values must still
+    // see the negative free space: css-align-3 §5.3 makes the default alignments
+    // UNSAFE, so `flex-end` and `center` keep aligning and the overflow lands on
+    // the START side. The distribution values fall back to *safe* center, which
+    // under overflow is start — so they keep the clamp, via `distributable`.
+    //
+    // Measured on Chrome 148, a 100px row holding two unshrinkable 80px items:
+    //   flex-end  lead −60 trail 0 · center lead −30 trail −30
+    //   space-between / -around / -evenly  lead 0 trail −60
+    let free_space = container_main - total_item_size - total_gaps;
+    let distributable = free_space.max(0.0);
 
     let (initial_offset, spacing) = match justify_content {
         JustifyContent::FlexStart => (0.0, main_gap),
@@ -1601,17 +1617,17 @@ fn distribute_main_axis(
         JustifyContent::Center => (free_space / 2.0, main_gap),
         JustifyContent::SpaceBetween => {
             if line.items.len() > 1 {
-                (0.0, free_space / (line.items.len() - 1) as f32 + main_gap)
+                (0.0, distributable / (line.items.len() - 1) as f32 + main_gap)
             } else {
                 (0.0, main_gap)
             }
         }
         JustifyContent::SpaceAround => {
-            let space = free_space / line.items.len() as f32;
+            let space = distributable / line.items.len() as f32;
             (space / 2.0, space + main_gap)
         }
         JustifyContent::SpaceEvenly => {
-            let space = free_space / (line.items.len() + 1) as f32;
+            let space = distributable / (line.items.len() + 1) as f32;
             (space, space + main_gap)
         }
     };
@@ -1651,7 +1667,11 @@ fn align_cross_axis(line: &mut FlexLine, align_items: AlignItems) {
         };
 
         let outer_cross = item.cross_size + item.cross_margin_start + item.cross_margin_end;
-        let free_space = (line.cross_size - outer_cross).max(0.0);
+        // Signed, same rule as `distribute_main_axis`: an item taller than its
+        // line under `align-items: flex-end` sits flush with the cross-end edge
+        // and overflows the start. Chrome 148, a 100px item in a 40px line:
+        // flex-end lead −60 · center lead −30.
+        let free_space = line.cross_size - outer_cross;
 
         item.cross_position = match align {
             AlignItems::FlexStart => item.cross_margin_start,
@@ -3397,6 +3417,206 @@ mod tests {
         assert!(
             (border_w - 464.0).abs() < 0.5,
             "column item width is its widest child + padding (400 + 64), got {border_w}"
+        );
+    }
+
+    /// Overflowing items still align: `justify-content: flex-end` packs them
+    /// against the MAIN-END edge and the overflow lands on the start side.
+    ///
+    /// css-align-3 §5.3: the default alignments are *unsafe*, so they keep
+    /// aligning when the alignment subjects overflow. Only the distribution
+    /// values (`space-*`) fall back — to *safe* center, which under overflow
+    /// is start, so they stay pinned at the start edge.
+    ///
+    /// T-RED: `distribute_main_axis` clamped its free space with `.max(0.0)`,
+    /// so every overflowing line got offset 0 and packed at the START.
+    /// Measured on `settings`: `.setting-control.decay-control` is 140 wide
+    /// and holds 158.98 of unshrinkable input + gap + select, and RustKit hung
+    /// all 18.98px of overflow off the right edge where Chrome hangs it off
+    /// the left. Chrome 148 on the reduced case (100px row, two 80px items):
+    /// flex-end lead −60 · center lead −30 · space-between/-around/-evenly 0.
+    #[test]
+    fn overflowing_items_pack_against_the_end_edge_not_the_start() {
+        fn lay(justify: JustifyContent) -> Vec<f32> {
+            let mut style = ComputedStyle::new();
+            style.display = rustkit_css::Display::Flex;
+            style.justify_content = justify;
+            let mut container = LayoutBox::new(BoxType::Block, style);
+            for _ in 0..2 {
+                let mut item = ComputedStyle::new();
+                item.width = Length::Px(80.0);
+                item.min_width = Length::Px(80.0);
+                item.flex_basis = rustkit_css::FlexBasis::Length(80.0);
+                item.flex_shrink = 0.0;
+                container.children.push(LayoutBox::new(BoxType::Block, item));
+            }
+            let containing = Dimensions {
+                content: Rect::new(0.0, 0.0, 100.0, 50.0),
+                ..Default::default()
+            };
+            layout_flex_container(&mut container, &containing);
+            container
+                .children
+                .iter()
+                .map(|c| c.dimensions.content.x)
+                .collect()
+        }
+
+        // 100 - 160 = -60 of free space. flex-end puts the LAST item's right
+        // edge on the content-end edge, so the first item starts at -60.
+        let end = lay(JustifyContent::FlexEnd);
+        assert!(
+            (end[0] - -60.0).abs() < 0.5 && (end[1] - 20.0).abs() < 0.5,
+            "flex-end must overflow the start edge: expected [-60, 20], got {end:?}"
+        );
+
+        // center splits the overflow.
+        let center = lay(JustifyContent::Center);
+        assert!(
+            (center[0] - -30.0).abs() < 0.5 && (center[1] - 50.0).abs() < 0.5,
+            "center must split the overflow: expected [-30, 50], got {center:?}"
+        );
+
+        // The distribution values are the other half of the rule: their
+        // fallback is SAFE center, so under overflow they stay at the start.
+        for jc in [
+            JustifyContent::SpaceBetween,
+            JustifyContent::SpaceAround,
+            JustifyContent::SpaceEvenly,
+        ] {
+            let got = lay(jc);
+            assert!(
+                (got[0] - 0.0).abs() < 0.5 && (got[1] - 80.0).abs() < 0.5,
+                "{jc:?} falls back to safe center (= start) when it overflows: \
+                 expected [0, 80], got {got:?}"
+            );
+        }
+
+        // And the positive-free-space arms are unchanged: 100 - 160 flipped to
+        // a 300px container leaves 140 to distribute.
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.justify_content = JustifyContent::SpaceEvenly;
+        let mut container = LayoutBox::new(BoxType::Block, style);
+        for _ in 0..2 {
+            let mut item = ComputedStyle::new();
+            item.width = Length::Px(80.0);
+            item.min_width = Length::Px(80.0);
+            item.flex_basis = rustkit_css::FlexBasis::Length(80.0);
+            item.flex_shrink = 0.0;
+            container.children.push(LayoutBox::new(BoxType::Block, item));
+        }
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 300.0, 50.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+        let first = container.children[0].dimensions.content.x;
+        assert!(
+            (first - 140.0 / 3.0).abs() < 0.5,
+            "space-evenly with room still distributes: expected {}, got {first}",
+            140.0 / 3.0
+        );
+    }
+
+    /// The cross-axis half of the same rule: an item taller than its line under
+    /// `align-items: flex-end` sits flush with the cross-END edge.
+    ///
+    /// T-RED: `align_cross_axis` clamped its free space at 0, so an oversized
+    /// item was positioned at the cross-start edge under every alignment.
+    /// Chrome 148, a 100px item in a 40px line: flex-end lead −60, center −30.
+    #[test]
+    fn an_item_taller_than_its_line_aligns_against_the_cross_end_edge() {
+        fn lay(align: AlignItems) -> f32 {
+            let mut style = ComputedStyle::new();
+            style.display = rustkit_css::Display::Flex;
+            style.align_items = align;
+            style.height = Length::Px(40.0);
+            let mut container = LayoutBox::new(BoxType::Block, style);
+            let mut item = ComputedStyle::new();
+            item.width = Length::Px(30.0);
+            item.height = Length::Px(100.0);
+            item.min_height = Length::Px(100.0);
+            item.flex_shrink = 0.0;
+            container.children.push(LayoutBox::new(BoxType::Block, item));
+            let containing = Dimensions {
+                content: Rect::new(0.0, 0.0, 200.0, 400.0),
+                ..Default::default()
+            };
+            layout_flex_container(&mut container, &containing);
+            container.children[0].dimensions.content.y
+        }
+
+        let end = lay(AlignItems::FlexEnd);
+        assert!(
+            (end - -60.0).abs() < 0.5,
+            "align-items:flex-end on a 100px item in a 40px line must give y=-60, got {end}"
+        );
+        let center = lay(AlignItems::Center);
+        assert!(
+            (center - -30.0).abs() < 0.5,
+            "align-items:center must split the cross overflow: expected -30, got {center}"
+        );
+        let start = lay(AlignItems::FlexStart);
+        assert!(
+            start.abs() < 0.5,
+            "flex-start is unchanged by the sign of the free space: expected 0, got {start}"
+        );
+    }
+
+    /// And the line-stacking half: `align-content: flex-end` with more lines
+    /// than fit stacks them against the cross-end edge.
+    ///
+    /// T-RED: `distribute_lines` clamped the same way, so overflowing lines
+    /// started at the cross-start edge. Chrome 148, three 30px lines in a 40px
+    /// column: flex-end lead −50, center −25, space-around 0.
+    #[test]
+    fn overflowing_lines_stack_against_the_cross_end_edge() {
+        fn lay(align: AlignContent) -> f32 {
+            let mut lines: Vec<FlexLine> = (0..3)
+                .map(|_| FlexLine {
+                    cross_size: 30.0,
+                    ..Default::default()
+                })
+                .collect();
+            distribute_lines(&mut lines, 40.0, 90.0, 0.0, align);
+            lines[0].cross_position
+        }
+
+        assert!(
+            (lay(AlignContent::FlexEnd) - -50.0).abs() < 0.5,
+            "align-content:flex-end must overflow the cross-start edge: expected -50, got {}",
+            lay(AlignContent::FlexEnd)
+        );
+        assert!(
+            (lay(AlignContent::Center) - -25.0).abs() < 0.5,
+            "align-content:center must split the overflow: expected -25, got {}",
+            lay(AlignContent::Center)
+        );
+        // Safe-center fallback: the distribution values stay at the start.
+        for ac in [
+            AlignContent::SpaceBetween,
+            AlignContent::SpaceAround,
+            AlignContent::SpaceEvenly,
+        ] {
+            assert!(
+                lay(ac).abs() < 0.5,
+                "{ac:?} falls back to start when the lines overflow, got {}",
+                lay(ac)
+            );
+        }
+        // Stretch never shrinks a line to fit: 30px lines stay 30px.
+        let mut lines: Vec<FlexLine> = (0..3)
+            .map(|_| FlexLine {
+                cross_size: 30.0,
+                ..Default::default()
+            })
+            .collect();
+        distribute_lines(&mut lines, 40.0, 90.0, 0.0, AlignContent::Stretch);
+        assert!(
+            (lines[0].cross_size - 30.0).abs() < 0.5,
+            "stretch must not shrink an overflowing line, got {}",
+            lines[0].cross_size
         );
     }
 }
