@@ -3572,7 +3572,11 @@ mod tests {
     /// column: flex-end lead −50, center −25, space-around 0.
     #[test]
     fn overflowing_lines_stack_against_the_cross_end_edge() {
-        fn lay(align: AlignContent) -> f32 {
+        // Every line's position, not just the first: under `space-between` the
+        // first line sits at 0 whatever the spacing is, so a guard that reads
+        // only `lines[0]` cannot see a negative gap stacking them on top of
+        // each other. (That was this sweep's survivor, M10.)
+        fn lay_all(align: AlignContent) -> Vec<f32> {
             let mut lines: Vec<FlexLine> = (0..3)
                 .map(|_| FlexLine {
                     cross_size: 30.0,
@@ -3580,7 +3584,10 @@ mod tests {
                 })
                 .collect();
             distribute_lines(&mut lines, 40.0, 90.0, 0.0, align);
-            lines[0].cross_position
+            lines.iter().map(|l| l.cross_position).collect()
+        }
+        fn lay(align: AlignContent) -> f32 {
+            lay_all(align)[0]
         }
 
         assert!(
@@ -3593,16 +3600,20 @@ mod tests {
             "align-content:center must split the overflow: expected -25, got {}",
             lay(AlignContent::Center)
         );
-        // Safe-center fallback: the distribution values stay at the start.
+        // Safe-center fallback: the distribution values stay at the start AND
+        // keep the lines contiguous — Chrome 148 puts all three at [0, 30, 60].
         for ac in [
             AlignContent::SpaceBetween,
             AlignContent::SpaceAround,
             AlignContent::SpaceEvenly,
         ] {
+            let got = lay_all(ac);
             assert!(
-                lay(ac).abs() < 0.5,
-                "{ac:?} falls back to start when the lines overflow, got {}",
-                lay(ac)
+                got.iter()
+                    .zip([0.0, 30.0, 60.0])
+                    .all(|(a, b)| (a - b).abs() < 0.5),
+                "{ac:?} falls back to start when the lines overflow and must not \
+                 space them by a negative gap: expected [0, 30, 60], got {got:?}"
             );
         }
         // Stretch never shrinks a line to fit: 30px lines stay 30px.
