@@ -5222,21 +5222,13 @@ impl Renderer {
             return [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]; // Identity
         }
 
-        // Compose all transforms on the stack
+        // Compose all transforms on the stack: an outer (earlier) transform
+        // applies to what an inner one produces, so the page-space affine is
+        // `outer · inner` in the column-vector convention `multiply_matrices_2d`
+        // uses.
         let mut result = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
         for (matrix, origin) in &self.transform_stack {
-            // Apply origin offset: translate(-origin) * matrix * translate(origin)
-            // First, translate to origin
-            let t1 = [1.0, 0.0, 0.0, 1.0, -origin.0, -origin.1];
-            // Then the transform
-            let m = *matrix;
-            // Then translate back
-            let t2 = [1.0, 0.0, 0.0, 1.0, origin.0, origin.1];
-
-            // Compose: result = result * t1 * m * t2
-            let temp1 = multiply_matrices_2d(result, t1);
-            let temp2 = multiply_matrices_2d(temp1, m);
-            result = multiply_matrices_2d(temp2, t2);
+            result = multiply_matrices_2d(result, affine_about_origin(*matrix, *origin));
         }
         result
     }
@@ -5894,6 +5886,29 @@ fn clip_quad_to_rounded(
 
 // ==================== Transform Helpers ====================
 
+/// The page-space affine a `PushTransform { matrix, origin }` command means:
+/// `matrix` applied about `origin` (css-transforms-1 §6), which is
+/// `T(origin) · matrix · T(-origin)` — move the origin to (0,0), transform,
+/// move it back — in the column-vector convention `multiply_matrices_2d` uses
+/// (`a · b` applies `b` first). The origin is a fixed point of the result.
+///
+/// Until n48 the two translations were composed the other way round,
+/// `T(-origin) · matrix · T(origin)`, so a point went `p ↦ M·(p + o) − o`
+/// instead of `M·(p − o) + o`. Translations commute with each other, so every
+/// `translate()` on every board case was unaffected and the bug hid for the
+/// whole campaign; a `scale()` or `rotate()` landed its box at `M·o − o` away
+/// from where it belonged — a 60×20 card at (110, 20) with `scale(2);
+/// transform-origin: 0 0` painted at (330, 60), and n47's repro section E
+/// "painted nothing" because its box went to y = 900, off the frame. The
+/// engine's geometry oracle (`own_transform_affine`) had the right order all
+/// along, so the exported layout rect and the painted pixels disagreed for
+/// every scaled or rotated box.
+fn affine_about_origin(matrix: [f32; 6], origin: (f32, f32)) -> [f32; 6] {
+    let to_origin = [1.0, 0.0, 0.0, 1.0, -origin.0, -origin.1];
+    let from_origin = [1.0, 0.0, 0.0, 1.0, origin.0, origin.1];
+    multiply_matrices_2d(from_origin, multiply_matrices_2d(matrix, to_origin))
+}
+
 /// Multiply two 2D affine matrices.
 /// Matrix format: [a, b, c, d, e, f] representing:
 /// | a c e |
@@ -5913,6 +5928,71 @@ fn multiply_matrices_2d(a: [f32; 6], b: [f32; 6]) -> [f32; 6] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ==================== Transform origin (n48) ====================
+
+    fn map(m: [f32; 6], x: f32, y: f32) -> (f32, f32) {
+        (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
+    }
+
+    /// A rect's corners mapped through an axis-aligned affine, as
+    /// `(x, y, width, height)`.
+    fn map_box(m: [f32; 6], x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
+        let (x0, y0) = map(m, x, y);
+        let (x1, y1) = map(m, x + w, y + h);
+        (x0.min(x1), y0.min(y1), (x1 - x0).abs(), (y1 - y0).abs())
+    }
+
+    #[test]
+    fn a_scale_keeps_its_transform_origin_fixed() {
+        // A 60x20 card at (110, 20) with `scale(2); transform-origin: 0 0`
+        // (n47's repro section E, scale-variants row 1): the top-left corner
+        // is the origin and must not move; the far corner doubles away from
+        // it. The old order sent the box to (330, 60) — and section E to
+        // y = 900, off the frame.
+        let m = affine_about_origin([2.0, 0.0, 0.0, 2.0, 0.0, 0.0], (110.0, 20.0));
+        assert_eq!(map(m, 110.0, 20.0), (110.0, 20.0));
+        assert_eq!(map(m, 170.0, 40.0), (230.0, 60.0));
+        assert_eq!(map_box(m, 110.0, 20.0, 60.0, 20.0), (110.0, 20.0, 120.0, 40.0));
+    }
+
+    #[test]
+    fn a_scale_about_the_centre_grows_evenly() {
+        // `transform-origin: 50% 50%` (the default): the centre is fixed and
+        // the box grows the same amount on every side.
+        let m = affine_about_origin([2.0, 0.0, 0.0, 2.0, 0.0, 0.0], (140.0, 30.0));
+        assert_eq!(map_box(m, 110.0, 20.0, 60.0, 20.0), (80.0, 10.0, 120.0, 40.0));
+    }
+
+    #[test]
+    fn a_rotation_turns_about_its_origin() {
+        // rotate(90deg) about (100, 100): (100, 0) — straight above the
+        // origin — goes to (200, 100), straight to its right.
+        let m = affine_about_origin([0.0, 1.0, -1.0, 0.0, 0.0, 0.0], (100.0, 100.0));
+        let (x, y) = map(m, 100.0, 0.0);
+        assert!((x - 200.0).abs() < 1e-4 && (y - 100.0).abs() < 1e-4, "{x} {y}");
+    }
+
+    #[test]
+    fn a_translate_ignores_its_origin() {
+        // Translations commute, so the origin never mattered for them — the
+        // pixels every translate() board case emitted stay exactly the same.
+        let t = [1.0, 0.0, 0.0, 1.0, 40.0, -7.0];
+        assert_eq!(affine_about_origin(t, (0.0, 0.0)), t);
+        assert_eq!(affine_about_origin(t, (123.0, 456.0)), t);
+    }
+
+    #[test]
+    fn nested_transforms_apply_inner_first() {
+        // A scaled child inside a translated parent: the child scales about
+        // its own origin in page space, then the parent's translate moves the
+        // result — `outer · inner`, as `current_transform` composes the stack.
+        let outer = affine_about_origin([1.0, 0.0, 0.0, 1.0, 50.0, 0.0], (0.0, 0.0));
+        let inner = affine_about_origin([2.0, 0.0, 0.0, 2.0, 0.0, 0.0], (110.0, 20.0));
+        let m = multiply_matrices_2d(outer, inner);
+        assert_eq!(map(m, 110.0, 20.0), (160.0, 20.0));
+        assert_eq!(map(m, 170.0, 40.0), (280.0, 60.0));
+    }
 
     // ==================== Textured-quad clipping (n35) ====================
 
