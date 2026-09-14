@@ -8967,6 +8967,30 @@ mod tests {
     }
 
     #[test]
+    fn an_inset_stretch_never_overrides_a_specified_height() {
+        // CSS2 §10.6.4 stretches an out-of-flow box between `top` and
+        // `bottom` only where `height` is auto; with a height specified the
+        // constraint is over-determined and `bottom` is the one that gives.
+        // `inset_definite_content_height` is the single copy of that rule
+        // and BOTH its callers depend on the check: the positioning path
+        // would otherwise resize a 40px overlay to its containing block.
+        let mut style = ComputedStyle::new();
+        style.height = Length::Px(40.0);
+        let mut b = LayoutBox::with_position(BoxType::Block, style, Position::Absolute);
+        b.set_offsets(Some(0.0), None, Some(0.0), None);
+        b.dimensions.content.height = 40.0;
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 300.0, 200.0),
+            ..Default::default()
+        };
+        b.apply_position_offsets(&cb);
+        assert_eq!(
+            b.dimensions.content.height, 40.0,
+            "a specified height survives inset: 0"
+        );
+    }
+
+    #[test]
     fn an_out_of_flow_auto_width_box_shrinks_to_its_content() {
         // Room to spare: shrink-to-fit is the max-content width, NOT the
         // containing block. This is new_tab's footer defect in miniature.

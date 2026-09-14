@@ -3522,7 +3522,7 @@ mod tests {
     }
 
     #[test]
-    fn an_inset_definite_main_size_subtracts_the_insets_and_the_containers_own_padding() {
+    fn an_inset_definite_main_size_subtracts_the_insets_and_the_containers_own_edges() {
         // 200px containing block, inset 20 top / 30 bottom, 10px padding top
         // and bottom: the inner main size is 200-20-30-10-10 = 130, not 200
         // and not 150. Reading the containing block raw, or forgetting the
@@ -3540,11 +3540,18 @@ mod tests {
             left: 0.0,
             right: 0.0,
         };
+        c.dimensions.border = EdgeSizes {
+            top: 5.0,
+            bottom: 5.0,
+            left: 0.0,
+            right: 0.0,
+        };
         layout_flex_container(&mut c, &inset_cb(200.0));
-        let (lead, trail) = lead_and_trail(&c, 130.0);
+        let (lead, trail) = lead_and_trail(&c, 120.0);
         assert!(
-            (lead - 40.0).abs() < 0.5 && (trail - 40.0).abs() < 0.5,
-            "inner main is 130 (200-20-30-10-10), 50 of content -> 40 a side: got {lead} / {trail}"
+            (lead - 35.0).abs() < 0.5 && (trail - 35.0).abs() < 0.5,
+            "inner main is 120 (200-20-30-10-10-5-5), 50 of content -> 35 a side: \
+             got {lead} / {trail}"
         );
     }
 
