@@ -2696,6 +2696,47 @@ impl LayoutBox {
         })
     }
 
+    /// This box's inner (content-box) height when `height: auto` is made
+    /// DEFINITE by opposite insets on an out-of-flow box, else `None`.
+    ///
+    /// CSS2 §10.6.4: for an absolutely positioned box with `height: auto`
+    /// and neither `top` nor `bottom` auto, the used height is fixed by the
+    /// constraint equation — it is as definite as a specified `height`, and
+    /// it is the number every `inset: 0` overlay is built on. Nothing in the
+    /// style carries it: `style.height` reads `Auto`, so every consumer that
+    /// asks *style* whether the main size is definite answers "no" and falls
+    /// back to sizing by content.
+    ///
+    /// It lives here, beside `definite_content_height`, because the flex
+    /// container path and `apply_position_offsets_absolute` must agree on
+    /// the number to the last bit — two copies of this subtraction that
+    /// drift apart are the defect class night 8 recorded.
+    pub(crate) fn inset_definite_content_height(
+        &self,
+        containing_block: &Dimensions,
+    ) -> Option<f32> {
+        if !matches!(self.position, Position::Absolute | Position::Fixed) {
+            return None;
+        }
+        if !matches!(self.style.height, Length::Auto) {
+            return None;
+        }
+        let offsets = self.resolved_offsets(containing_block);
+        let (top, bottom) = (offsets.top?, offsets.bottom?);
+        Some(
+            (containing_block.content.height
+                - top
+                - bottom
+                - self.dimensions.margin.top
+                - self.dimensions.margin.bottom
+                - self.dimensions.border.top
+                - self.dimensions.border.bottom
+                - self.dimensions.padding.top
+                - self.dimensions.padding.bottom)
+                .max(0.0),
+        )
+    }
+
     /// Re-resolve an absolutely positioned box's offsets against its REAL
     /// containing block, carrying the already-laid-out subtree with it. The
     /// first pass positioned it against a stand-in whose height was the
@@ -2772,20 +2813,12 @@ impl LayoutBox {
         if has_top && has_bottom {
             // When both top and bottom are set with height: auto, stretch to fill
             let top = offsets.top.unwrap();
-            let bottom = offsets.bottom.unwrap();
 
-            // Calculate stretched height if height is auto
-            if matches!(self.style.height, Length::Auto) {
-                let available_height = containing_block.content.height
-                    - top
-                    - bottom
-                    - self.dimensions.margin.top
-                    - self.dimensions.margin.bottom
-                    - self.dimensions.border.top
-                    - self.dimensions.border.bottom
-                    - self.dimensions.padding.top
-                    - self.dimensions.padding.bottom;
-                self.dimensions.content.height = available_height.max(0.0);
+            // Calculate stretched height if height is auto. The subtraction
+            // lives in `inset_definite_content_height` so the flex container
+            // path resolves the identical number.
+            if let Some(available_height) = self.inset_definite_content_height(containing_block) {
+                self.dimensions.content.height = available_height;
             }
 
             // Position from top
