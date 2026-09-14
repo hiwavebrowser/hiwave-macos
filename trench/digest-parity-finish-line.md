@@ -8895,3 +8895,180 @@ one step earlier than the sweep would have.
 - The stored night order still opens with P0a-0, finished 40 nights ago.
   **Seventh night carrying this**, and it still costs the first part of a night
   to re-derive where the queue actually is.
+
+## 2026-09-14
+
+**Metric: `2/26` → `2/26` on macOS, unchanged and not re-run.** No macOS lane
+tonight, so nothing here is a receipt. On this seat the metric cannot have
+moved: the only case that changed is `image-gallery`, which is red on both
+oracles before and after (144 geometry failures remaining, paint 0.937), and
+the two macOS-green cases are bit-identical on both oracles.
+
+**P-item: P3 (flex residual). NOT complete.** I worked the largest remaining
+violation on the n49 invariant board and found that the board was measuring a
+shadow of a much larger defect one layer up. One of the two fixes moves the
+corpus; the other is correct, mutation-checked, and moves nothing — I am
+recording it as such rather than dressing it up.
+
+### The board was reading a shadow
+
+The target was `image-gallery ×4 · justify:center symmetry · +3.69 ·
+`.aspect-box > .content``. The real numbers:
+
+```
+                Chrome            RustKit (develop)
+.aspect-box     288 tall          288 tall
+.content        288 tall          32 tall      <- inset: 0 on a 288px card
+span            y=1234            y=1086.65
+```
+
+`.content` is `position:absolute; inset:0` and was coming out **256px short**
+on the 1:1 card, and short on all four. The board never saw that, for a
+mechanical reason worth writing down: it is blind to item *size* by design, and
+it is also blind to RustKit's **text** flex items — `export_layout_json` emits a
+text box as `{"type":"text","rect":…}` with no `border_box`, so the board's
+`anon_with_area` check reads `{}`, scores it as zero-area, and drops it from
+the item set. `.content` holds a raw text run plus a `<span>`; the board
+measured the span alone and reported the text run's height as an asymmetry.
+
+**+3.69 was never a defect magnitude.** The actual leading space was 0 where
+Chrome's is 6.17, inside a box that was itself 256px too short. Three nights of
+this campaign have now aimed at a board column that was describing something
+other than what it named (night 8's discrete detectors, night 11's correction,
+this). The pattern is the same one each time: *a diagnostic that cannot see a
+thing reports its absence as a smaller number rather than as a gap.*
+
+### The defect that was really there
+
+Grid Phase 9 builds an out-of-flow grandchild's containing block from
+`child.dimensions.content.height` — the grid-assigned height — and that read
+happens BEFORE the item's own `calculate_block_height` applies `aspect-ratio`.
+Instrumented on the real page:
+
+```
+GRIDABS item h=32  w=288 style_h=Auto ratio=Some(1.0)
+GRIDABS item h=32  w=288 style_h=Auto ratio=Some(1.7777778)
+GRIDABS item h=32  w=288 style_h=Auto ratio=Some(1.3333334)
+GRIDABS item h=32  w=288 style_h=Auto ratio=Some(1.5)
+```
+
+Width is already resolved at that point, so css-sizing-4 §4 makes the height
+definite and available; nothing asked for it. Phase 9.5, twenty lines below,
+already applies exactly this rule to repair the item itself — grow-only — so
+the fix is to ask the same question at the same strength in Phase 9.
+
+### Commits — branch `atlas/n52-p3-flex-column-center`, cut from `develop da8f413`
+
+- `626457c` — an inset-stretched flex container justifies in its used height
+  (CSS2 §10.6.4: `height: auto` is not indefinite when both insets are set).
+- `e8f0947` — close the sweep's two survivors.
+- `b9242dd` — an inset overlay fills a grid item sized by its `aspect-ratio`.
+
+**Pushed, no PR.** `b9242dd` is measured and clean and would stand on its own;
+`626457c` is not, and splitting them into two PRs tonight would have cost the
+measurement time I spent instead. It is decision 1.
+
+### Measured — Linux/SwiftShader, 26 cases, 1 iteration. MECHANICS, NOT A RECEIPT
+
+| Oracle | develop `da8f413` | after |
+|---|---:|---:|
+| Gate A geometry failures | 2662 | **2658** |
+| Gate A geometry-green | 3/26 | 3/26 |
+| Gate B measured / paint-green | 26/26 · 1/26 | 26/26 · 1/26 |
+| Gate B discrete auto-fails / examined | 0 / 260 | 0 / 260 |
+| flex invariant violations | 13 | 13 |
+
+Per (case, selector, axis) across all 26 cases:
+**fixed 4 · newly failing 0 · improved 0 · worsened 0 · unchanged 2658.**
+The four are `.content`'s height on the four aspect cards. `image-gallery`
+148 → 144. Gate B is **bit-identical on all 26 cases**, and the invariant board
+still reads 13 — it is blind to the thing that moved, which is the point above.
+
+### `626457c` moves nothing, and I am saying so plainly
+
+I found the 11d repass re-justifying a column against its content sum instead
+of its used height, built a unit repro that reproduced the capture's numbers
+exactly (items at y=1078, container 19.65), fixed it, mutation-checked it 8/8 —
+and **all 26 captures came back bit-identical**. The repro matched the symptom
+by a different route than the page takes: on the real page `.content`'s flex
+runs early against a 15px containing block and is never re-justified after the
+inset stretch, so 11d was never the binding constraint there.
+
+It is a real rule and the guards hold it, but it is unmeasured on this corpus
+and I would rather that be written down than inferred from a green sweep. The
+same night, I wrote and then **reverted** a `definite_content_height`
+aspect-ratio extension for the block path: correct by the same spec line, no
+case exercises it, so it is a finding and not a landing.
+
+### The residual, stated so the next night does not re-derive it
+
+`.content` is now the right height and its text is still at the top:
+`span y=1086.65` against Chrome's 1234. The flex line is justified before the
+inset stretch resizes the box, and nothing re-runs justification afterwards.
+That — not the ratio, not 11d — is what finishes this case.
+
+### Mutation-check results
+
+**Fix 1 (`626457c`): 8 probes, 8 RED after closing two survivors.**
+First sweep 6/8. Both survivors were the guard written against the example:
+
+| probe | result |
+|---|---|
+| M1 11d ignores the inset-definite size | RED |
+| M2 helper drops the position check | RED |
+| M3 helper drops the `height: auto` check | **SURVIVOR**, then RED |
+| M4 one inset is enough | RED |
+| M5 container's own padding not subtracted | RED |
+| M6 the insets themselves not subtracted | RED |
+| M7 fixed asks the passed block, not the viewport | RED |
+| M8 the border not subtracted | **SURVIVOR**, then RED |
+
+M3 survived because 11d matches `Length::Px` first and never consults the
+helper — every guard I had pointed at the flex caller, and the damage of that
+mutation is on the *other* caller (the positioning path would resize a 40px
+overlay to its containing block). M8 survived because the padding fixture had
+no border. Tenth sweep, same shape both times.
+
+**Fix 2 (`b9242dd`): 4 probes, 4 RED, no survivors.** N1 the fix reverted ·
+N2 ratio outranks a taller content height · N3 the `height: auto` scope
+dropped · N4 ratio measured against the item's height instead of its width.
+Control green before and after both sweeps.
+
+### Decisions needed from Pete
+
+1. **Six PRs (#193–#198) have been open against `develop da8f413` since
+   09-10, and nothing has merged since 09-08** — every night since has cut its
+   branch from the same stale base and two more branches (n49, n51) are pushed
+   unopened; is the queue blocked on review time, and should the trench keep
+   opening PRs into it?
+2. **Open `atlas/n52-p3-flex-column-center` as one PR, or split it** so
+   `b9242dd` (measured, 4 axes fixed, zero regressions) lands without
+   `626457c` (correct, mutation-checked, moves nothing on the corpus)?
+3. Still open from 09-11/09-12/09-13: which stop-rule reading governs when a
+   correct fix removes an error cancellation, and is P3 closable given
+   `flex-positioning` is 15/15 clean on the invariants?
+
+### Surprises
+
+- **The instrument was measuring a 3.69px asymmetry on a box that was 256px
+  too short.** Not because the board is wrong about flex, but because it cannot
+  see RustKit's text flex items at all — the exporter gives text boxes a bare
+  `rect` and no `border_box`, and the board's own anonymous-box guard reads
+  that as zero area. A skip would have been honest; a number was not. Worth a
+  one-line fix to the board before the next night reads it.
+- **The fix I diagnosed carefully and mutation-checked hardest is the one that
+  changed nothing.** My repro reproduced the capture's numbers to the decimal
+  and still had the wrong mechanism. Matching the output is not reproducing the
+  defect, and an eight-probe sweep on the wrong constraint is still eight
+  probes on the wrong constraint.
+- **Gate B has been silently unmeasured on every capture this seat's diagnostic
+  tool produces.** `trench/tools/n45_capture_all.py` writes `frame.png`;
+  `paint_oracle_gate.find_frame` looks for `frame.ppm` and answers
+  `no_rustkit_capture`. The files are already PPM — `--dump-frame` emits PPM
+  whatever the name — so renaming them is the whole fix, and Gate B then reads
+  26/26 measured. Any night that ran the paint gate off these captures got
+  `measured: false` on all 26 and would have had to notice the zero.
+- `develop` is not `cargo fmt`-clean: `cargo fmt --all` rewrites 94 files, and
+  `cargo fmt -p rustkit-layout` rewrites seven. Formatting has to be done by
+  hand on the touched hunks or the diff becomes unreviewable. Cost me a rebuild
+  of the branch tonight.
