@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>white-space: pre line boxes</title>
+<style>
+  body { margin: 0; padding: 10px; font-family: Georgia, serif; font-size: 16px; line-height: 1.5; background: #fff; color: #222; }
+  .row { margin: 0 0 10px 0; }
+  pre { margin: 0; background: #2d2d2d; color: #f8f8f2; padding: 10px; font-family: Menlo, monospace; font-size: 14px; line-height: 1.5; }
+  pre code { background: none; padding: 0; color: inherit; }
+  .pl { white-space: pre-line; background: #e8f0fe; width: 300px; padding: 6px; }
+  .pw { white-space: pre-wrap; background: #fde8e8; width: 300px; padding: 6px; }
+  .ctl { background: #e8fde8; width: 300px; padding: 6px; }
+  .label { font-size: 12px; color: #888; margin: 0 0 2px 0; }
+</style>
+</head>
+<body>
+<div class="row"><div class="label">A: pre > code, six lines (article-typography shape)</div>
+<pre><code>body {
+    font-family: Georgia, serif;
+    font-size: 1.1em;
+    line-height: 1.6;
+    letter-spacing: 0.01em;
+}</code></pre></div>
+
+<div class="row"><div class="label">B: pre with leading newline, blank line, trailing newline</div>
+<pre>
+first line
+
+third line
+</pre></div>
+
+<div class="row"><div class="label">C: pre-line, three source lines, second wraps</div>
+<div class="pl">alpha beta
+gamma delta epsilon zeta eta theta iota kappa lambda
+omega</div></div>
+
+<div class="row"><div class="label">D: pre-wrap, two source lines</div>
+<div class="pw">one two three
+four five six seven eight nine ten eleven twelve</div></div>
+
+<div class="row"><div class="label">E: control, normal white-space collapses newlines</div>
+<div class="ctl">line one
+line two
+line three</div></div>
+</body>
+</html>

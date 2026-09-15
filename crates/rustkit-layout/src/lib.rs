@@ -1624,7 +1624,29 @@ impl LayoutBox {
             rustkit_css::WhiteSpace::Nowrap | rustkit_css::WhiteSpace::Pre
         );
         let width_is_resolved = container_width > 0.0 || container_is_definite_zero;
-        if can_wrap && width_is_resolved && text_width > container_width {
+        let overflows = can_wrap && width_is_resolved && text_width > container_width;
+        // css-text-3 §4.1.1 / §5.1: under the pre family a preserved segment
+        // break is a FORCED line break, whatever the width. The wrapper has
+        // always split at mandatory breaks (`break_into_lines`), but nothing
+        // reached it: the `white-space: pre` gate above never called it, and
+        // the overflow test skipped it for any pre-wrap / pre-line run that
+        // fit its container — so `<pre>` laid every source line on ONE line
+        // box (article-typography's six-line code block: 65px vs 195).
+        let has_segment_breaks = matches!(
+            self.style.white_space,
+            rustkit_css::WhiteSpace::Pre
+                | rustkit_css::WhiteSpace::PreWrap
+                | rustkit_css::WhiteSpace::PreLine
+                | rustkit_css::WhiteSpace::BreakSpaces
+        ) && text.contains(|c| c == '\n' || c == '\r');
+        if overflows || has_segment_breaks {
+            // Soft wrapping off (`pre`) or no resolved width: each segment
+            // is one line however wide it is — only the forced breaks split.
+            let wrap_width = if can_wrap && width_is_resolved {
+                container_width
+            } else {
+                f32::INFINITY
+            };
             let shaper = TextShaper::new();
             let chain = FontFamilyChain::from_css_value(&self.style.font_family);
             if let Ok(lines) = shaper.wrap_text_white_space(
@@ -1634,12 +1656,15 @@ impl LayoutBox {
                 self.style.font_style,
                 self.style.font_stretch,
                 font_size,
-                container_width,
+                wrap_width,
                 effective_word_break(&self.style),
                 self.style.overflow_wrap,
                 self.style.white_space,
             ) {
-                if lines.len() > 1 {
+                // A single-segment run with a trailing newline ("abc\n") is
+                // still line-box text: the break character must not reach
+                // the single-line path's measurement.
+                if lines.len() > 1 || has_segment_breaks {
                     // Known phase-1 gap: wrap_text shapes without letter/word-
                     // spacing, so spaced text may break slightly late. Ledgered.
                     //
@@ -1663,7 +1688,13 @@ impl LayoutBox {
                     self.dimensions.content.x = containing_block.content.x;
                     self.dimensions.content.y =
                         containing_block.content.y + containing_block.content.height;
-                    self.dimensions.content.width = max_line_width.min(container_width);
+                    // Same clamp as the single-line path: an unresolved
+                    // (zero) container width must not zero the box.
+                    self.dimensions.content.width = if container_width > 0.0 {
+                        max_line_width.min(container_width)
+                    } else {
+                        max_line_width
+                    };
                     self.dimensions.content.height =
                         line_count as f32 * run_line_height(&self.style, font_size, &metrics);
                     return;
@@ -1694,6 +1725,28 @@ impl LayoutBox {
     /// closed lines get per-visual-line alignment (`align_split_close`),
     /// so "a run spanning several line boxes cannot be shifted as one
     /// child" no longer forces the block path.
+    /// A non-atomic inline child whose text wrapped onto several line boxes:
+    /// `(line count, end x of the last line relative to the container's
+    /// content left, that text's line height)`. `None` when every
+    /// descendant sits on one line. The last wrapped text descendant wins
+    /// (it is the one the flow continues after).
+    fn inline_wrapped_tail(inline: &LayoutBox, container_left: f32) -> Option<(usize, f32, f32)> {
+        fn walk(b: &LayoutBox, left: f32, out: &mut Option<(usize, f32, f32)>) {
+            if let (BoxType::Text(_), Some(lines)) = (&b.box_type, b.text_lines.as_ref()) {
+                if let Some(last) = lines.last().filter(|_| lines.len() > 1) {
+                    let end = b.dimensions.content.x - left + last.x_offset + last.width;
+                    *out = Some((lines.len(), end.max(0.0), b.get_line_height()));
+                }
+            }
+            for c in &b.children {
+                walk(c, left, out);
+            }
+        }
+        let mut out = None;
+        walk(inline, container_left, &mut out);
+        out
+    }
+
     fn text_splits_inline(child: &LayoutBox, cursor_x: f32) -> bool {
         cursor_x > 0.0
             && matches!(child.box_type, BoxType::Text(_))
@@ -3182,6 +3235,28 @@ impl LayoutBox {
                         }
                     }
                     line_height = line_height.max(child.get_line_height());
+                    // The inline's text wrapped onto several line boxes: the
+                    // flow must advance past ALL of them, exactly as the
+                    // phase-5 split below does for a bare text run. Before
+                    // n50 the line advanced by ONE line-height and the next
+                    // block sibling was laid over lines 2..n (`<p><span>long
+                    // text</span></p>` was one line tall; `<pre><code>` six
+                    // lines painted over the following paragraph).
+                    if let Some((n_lines, last_end, lh)) =
+                        Self::inline_wrapped_tail(child, self.dimensions.content.x)
+                    {
+                        if let Some(start) = line_start_index {
+                            lines.push((start, i + 1, line_width + child_width));
+                        }
+                        cursor_y += line_height.max(line_below_baseline).max(lh)
+                            + (n_lines as f32 - 2.0).max(0.0) * lh;
+                        cursor_x = last_end;
+                        line_width = last_end;
+                        line_height = lh;
+                        line_below_baseline = 0.0;
+                        line_start_index = Some(i);
+                        continue;
+                    }
                 } else {
                     line_height = line_height.max(child_height);
                 }
@@ -3793,6 +3868,28 @@ impl LayoutBox {
                         }
                     }
                     line_height = line_height.max(child.get_line_height());
+                    // The inline's text wrapped onto several line boxes: the
+                    // flow must advance past ALL of them, exactly as the
+                    // phase-5 split below does for a bare text run. Before
+                    // n50 the line advanced by ONE line-height and the next
+                    // block sibling was laid over lines 2..n (`<p><span>long
+                    // text</span></p>` was one line tall; `<pre><code>` six
+                    // lines painted over the following paragraph).
+                    if let Some((n_lines, last_end, lh)) =
+                        Self::inline_wrapped_tail(child, self.dimensions.content.x)
+                    {
+                        if let Some(start) = line_start_index {
+                            lines.push((start, i + 1, line_width + child_width));
+                        }
+                        cursor_y += line_height.max(line_below_baseline).max(lh)
+                            + (n_lines as f32 - 2.0).max(0.0) * lh;
+                        cursor_x = last_end;
+                        line_width = last_end;
+                        line_height = lh;
+                        line_below_baseline = 0.0;
+                        line_start_index = Some(i);
+                        continue;
+                    }
                 } else {
                     line_height = line_height.max(child_height);
                 }
@@ -10292,6 +10389,125 @@ mod w3_zero_width_wrap_tests {
                 div.dimensions.content.height / lh
             );
         }
+    }
+
+    /// `<pre>` text: a preserved newline is a forced line break even though
+    /// soft wrapping is off and the run fits its container (css-text-3
+    /// §4.1.1). Before: the `white-space: pre` gate skipped the wrapper, so
+    /// six source lines were one line box.
+    #[test]
+    fn pre_text_breaks_at_preserved_newlines_without_soft_wrapping() {
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 800.0, 0.0);
+        let src = "body {\n    font-family: Georgia;\n\n}";
+        let mut b = text(src, WhiteSpace::Pre, WordBreak::Normal);
+        b.layout_text(src.into(), &cb);
+        let lh = b.get_line_height();
+        assert_eq!(
+            line_texts(&b),
+            ["body {", "    font-family: Georgia;", "", "}"],
+            "one line box per segment, blank line kept, indentation kept"
+        );
+        assert!(
+            (b.dimensions.content.height - 4.0 * lh).abs() < 0.01,
+            "four line boxes, got {}",
+            b.dimensions.content.height / lh
+        );
+
+        // Soft wrapping stays OFF under pre: a segment wider than the
+        // container is still one line (overflow), never re-broken.
+        cb.content = Rect::new(0.0, 0.0, 40.0, 0.0);
+        let mut narrow = text(src, WhiteSpace::Pre, WordBreak::Normal);
+        narrow.layout_text(src.into(), &cb);
+        assert_eq!(line_texts(&narrow).len(), 4, "pre never soft-wraps");
+
+        // A trailing newline ends the last line; it is not a fifth line box.
+        let mut trailing = text("a\nb\n", WhiteSpace::Pre, WordBreak::Normal);
+        trailing.layout_text("a\nb\n".into(), &cb);
+        assert_eq!(line_texts(&trailing), ["a", "b"]);
+    }
+
+    /// `<p style="width:300px"><span>long…</span></p>` and
+    /// `<pre><code>a\nb\nc</code></pre>`: the block must be as tall as the
+    /// inline's wrapped lines, and a following sibling starts below them.
+    /// Before n50 the line advanced by ONE line-height for any inline child,
+    /// whatever its text had wrapped to.
+    #[test]
+    fn a_block_grows_past_an_inline_childs_wrapped_lines() {
+        let make = |ws: WhiteSpace, width: f32, run: &str| {
+            let mut ps = ComputedStyle::new();
+            ps.font_size = Length::Px(16.0);
+            ps.white_space = ws;
+            ps.width = Length::Px(width);
+            let mut p = LayoutBox::new(BoxType::Block, ps);
+            let mut ss = ComputedStyle::new();
+            ss.display = Display::Inline;
+            ss.font_size = Length::Px(16.0);
+            ss.white_space = ws;
+            let mut span = LayoutBox::new(BoxType::Inline, ss);
+            span.children.push(text(run, ws, WordBreak::Normal));
+            p.children.push(span);
+            let mut after = ComputedStyle::new();
+            after.font_size = Length::Px(16.0);
+            let mut sibling = LayoutBox::new(BoxType::Block, after);
+            sibling
+                .children
+                .push(text("after", WhiteSpace::Normal, WordBreak::Normal));
+            let mut body = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+            body.children.push(p);
+            body.children.push(sibling);
+            let mut cb = Dimensions::default();
+            cb.content = Rect::new(0.0, 0.0, 800.0, 0.0);
+            body.layout(&cb);
+            body
+        };
+        let long = "The quick brown fox jumps over the lazy dog again and again \
+                    until the line has no choice but to wrap around";
+        let body = make(WhiteSpace::Normal, 200.0, long);
+        let (p, sib) = (&body.children[0], &body.children[1]);
+        let n = p.children[0].children[0].text_lines.as_ref().unwrap().len();
+        let lh = p.children[0].children[0].get_line_height();
+        assert!(n > 1, "precondition: the span's text wrapped");
+        assert!(
+            (p.dimensions.content.height - n as f32 * lh).abs() < 0.01,
+            "p must be {n} lines tall, got {}",
+            p.dimensions.content.height / lh
+        );
+        assert!(
+            sib.dimensions.content.y >= p.dimensions.content.y + p.dimensions.content.height - 0.01,
+            "the sibling starts below the wrapped span"
+        );
+
+        let body = make(WhiteSpace::Pre, 800.0, "one\ntwo\nthree");
+        let p = &body.children[0];
+        let lh = p.children[0].children[0].get_line_height();
+        assert!(
+            (p.dimensions.content.height - 3.0 * lh).abs() < 0.01,
+            "pre > code with three source lines is three lines tall, got {}",
+            p.dimensions.content.height / lh
+        );
+    }
+
+    /// pre-line / pre-wrap: a newline breaks the line even when the whole
+    /// run would have fit (the old "only wrap what overflows" test).
+    #[test]
+    fn pre_line_and_pre_wrap_break_at_newlines_when_the_run_fits() {
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 800.0, 0.0);
+        for ws in [
+            WhiteSpace::PreLine,
+            WhiteSpace::PreWrap,
+            WhiteSpace::BreakSpaces,
+        ] {
+            let mut b = text("one two\nthree", ws, WordBreak::Normal);
+            b.layout_text("one two\nthree".into(), &cb);
+            assert_eq!(line_texts(&b), ["one two", "three"], "{ws:?}");
+        }
+        // And a control: normal white-space text with no newline (the
+        // engine has already collapsed them) still takes the old path.
+        let mut normal = text("one two three", WhiteSpace::Normal, WordBreak::Normal);
+        normal.layout_text("one two three".into(), &cb);
+        assert!(normal.text_lines.is_none());
     }
 
     #[test]
