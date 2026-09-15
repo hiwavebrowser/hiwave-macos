@@ -2089,6 +2089,15 @@ pub fn layout_grid_container(
                                 ..Default::default()
                             };
                             grandchild.layout(&item_cb);
+                            // `item_cb` is this grandchild's REAL containing
+                            // block, which `layout` above cannot know: the
+                            // generic path has to assume it may have been
+                            // handed a static-position stand-in. The re-anchor
+                            // is where that is asserted, and it is what
+                            // re-justifies an inset-stretched flex line in the
+                            // used height instead of in the flow cursor
+                            // (image-gallery's `.aspect-box > .content`).
+                            grandchild.reanchor_absolute(&item_cb);
                         } else {
                             trace!("Phase 9: abs/fixed grandchild, static grid item — skip");
                         }
@@ -3353,6 +3362,51 @@ mod tests {
         assert!(
             (h - 300.0).abs() < 0.5,
             "content taller than the ratio wins: expected 300, got {h}"
+        );
+    }
+
+    /// The other half of the same card, and the half that needed Phase 9 to
+    /// re-anchor: the overlay is the right SIZE (the test above) and its flex
+    /// line has to be justified in that size rather than in its own content.
+    ///
+    /// `LayoutBox::layout` cannot do this on its own, because on the plain
+    /// block path the box it is handed is the static-position stand-in — so
+    /// Phase 9 has to say "this one is real" by re-anchoring. Delete that call
+    /// and the caption goes back to the top edge of the card, which is
+    /// image-gallery's `.aspect-box > .content > span` at y=1086.65 against
+    /// Chrome's 1234.
+    ///
+    /// The overlay's items carry EXPLICIT heights so that step 11d never
+    /// fires: 11d's re-derivation must not be able to stand in for this.
+    #[test]
+    fn an_inset_overlay_justifies_its_flex_line_in_the_card_not_in_its_content() {
+        let mut grid = ratio_item_with_overlay(Some(1.0), Length::Auto, 10.0);
+        {
+            let overlay = &mut grid.children[0].children[1];
+            overlay.style.display = Display::Flex;
+            overlay.style.flex_direction = rustkit_css::FlexDirection::Column;
+            overlay.style.justify_content = rustkit_css::JustifyContent::Center;
+            for h in [30.0, 20.0] {
+                let mut item_style = ComputedStyle::new();
+                item_style.height = Length::Px(h);
+                overlay
+                    .children
+                    .push(LayoutBox::new(BoxType::Block, item_style));
+            }
+        }
+        layout_grid_container(&mut grid, 288.0, 0.0);
+
+        let overlay = &grid.children[0].children[1];
+        assert!(
+            (overlay.dimensions.content.height - 288.0).abs() < 0.5,
+            "the overlay fills the 288px card (the precondition), got {}",
+            overlay.dimensions.content.height
+        );
+        let lead = overlay.children[0].dimensions.content.y - overlay.dimensions.content.y;
+        assert!(
+            (lead - 119.0).abs() < 0.5,
+            "50 of content centred in 288 leaves 119 above, not {lead} — the line \
+             was justified in the overlay's own content"
         );
     }
 

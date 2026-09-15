@@ -263,7 +263,7 @@ pub fn layout_flex_container_in(
     // Get container dimensions
     let container_main_size = match main_axis {
         Axis::Horizontal => container_box.content.width,
-        Axis::Vertical => inset_used_main.unwrap_or(container_box.content.height),
+        Axis::Vertical => container_box.content.height,
     };
     // Deliberately NOT given the same treatment: the cross-axis analogue (an
     // inset-stretched ROW container centring items in a stale cursor) is the
