@@ -3524,7 +3524,19 @@ impl Engine {
                 style.font_family = "monospace".to_string();
                 style.margin_top = rustkit_css::Length::Px(16.0); // 1em
                 style.margin_bottom = rustkit_css::Length::Px(16.0);
-                // white-space: pre (not implemented)
+                // HTML §15.3.9 UA sheet: `pre { white-space: pre }`. This
+                // was "(not implemented)" — every `<pre>` block without an
+                // author white-space rule collapsed its newlines and
+                // indentation and wrapped like a paragraph (a six-line code
+                // block on article-typography laid out as one wrapped run).
+                style.white_space = rustkit_css::WhiteSpace::Pre;
+            }
+            "listing" | "xmp" | "plaintext" => {
+                style.display = rustkit_css::Display::Block;
+                style.font_family = "monospace".to_string();
+                style.margin_top = rustkit_css::Length::Px(16.0);
+                style.margin_bottom = rustkit_css::Length::Px(16.0);
+                style.white_space = rustkit_css::WhiteSpace::Pre;
             }
             "code" | "kbd" | "samp" | "tt" => {
                 style.display = rustkit_css::Display::Inline;

@@ -294,6 +294,109 @@ fn apply_weight_trait(base: &CTFont, size: f64, css_weight: u16) -> Option<CTFon
     Some(font::new_from_descriptor(&desc, size))
 }
 
+/// Font names compared without case, spaces, hyphens or underscores (the
+/// `named_font` accept test).
+fn normalize_name(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, ' ' | '-' | '_'))
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+/// The face of the installed family `family` that CSS font matching
+/// (css-fonts-4 §5.2) selects for `weight` / `italic`, or `None` when no
+/// family of that name is installed.
+///
+/// Resolution goes through a Core Text descriptor carrying the FAMILY name
+/// plus `kCTFontWeightTrait` (and the italic symbolic trait) — how
+/// Chrome/Skia pick a face — because PostScript-name guessing cannot see a
+/// family's faces: "Georgia-Bold" exists, but Arial's bold is
+/// "Arial-BoldMT", Times New Roman's "TimesNewRomanPS-BoldMT", and the
+/// weight ladders of Helvetica Neue / Avenir Next follow no `-Bold` suffix
+/// rule at all. Until n50 the LAYOUT resolver also tried the bare family
+/// name BEFORE its `-Bold` guesses, so every `font-weight: 700` run on a
+/// named family measured with the REGULAR face while paint (which guessed
+/// in the right order) drew bold glyphs at regular advances: h1 "The Art
+/// of Typography" 443px of overlapping bold ink vs Chrome's 508.
+///
+/// Core Text matches the NEAREST weight, which differs from CSS at two
+/// points, both corrected here: a desired weight ≤ 500 must not land on a
+/// bold face when a lighter one exists (Georgia 500: nearest is Bold; CSS
+/// walks 500 → 400 first), and a desired weight ≥ 600 takes the next
+/// HEAVIER face (Helvetica Neue 600: nearest is Medium; CSS walks upward
+/// → Bold, which is what Chrome draws).
+///
+/// A substitute (Core Text answers Helvetica for a family it lacks) is
+/// rejected by family name, as `named_font` does, so a chain walk goes on.
+pub fn family_face(family: &str, size: f64, weight: u16, italic: bool) -> Option<CTFont> {
+    use core_text::font_descriptor::kCTFontBoldTrait;
+
+    let wanted = normalize_name(family);
+    if wanted.is_empty() {
+        return None;
+    }
+    let lookup = |css_weight: u16| -> Option<CTFont> {
+        let f = family_descriptor_font(family, size, css_weight, italic);
+        (normalize_name(&f.family_name()) == wanted).then_some(f)
+    };
+    let is_bold = |f: &CTFont| f.symbolic_traits() & kCTFontBoldTrait != 0;
+
+    let face = lookup(weight)?;
+    if weight <= 500 && is_bold(&face) {
+        return Some(lookup(400).filter(|f| !is_bold(f)).unwrap_or(face));
+    }
+    if weight >= 600 && !is_bold(&face) {
+        if let Some(bold) = lookup(700).filter(is_bold) {
+            return Some(bold);
+        }
+    }
+    Some(face)
+}
+
+/// `CTFontCreateWithFontDescriptor` for `{ family, weight trait [, italic] }`.
+/// Never fails — Core Text substitutes — so the caller checks the family.
+fn family_descriptor_font(family: &str, size: f64, css_weight: u16, italic: bool) -> CTFont {
+    use core_foundation::base::CFType;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::{CFString, CFStringRef};
+    use core_text::font_descriptor;
+
+    // SAFETY: the four keys are Core Text's constant CFStrings, valid for
+    // the process lifetime; `wrap_under_get_rule` retains them.
+    let (weight_key, symbolic_key, family_key, traits_key): (
+        CFString,
+        CFString,
+        CFString,
+        CFString,
+    ) = unsafe {
+        let key = |k: CFStringRef| CFString::wrap_under_get_rule(k);
+        (
+            key(font_descriptor::kCTFontWeightTrait),
+            key(font_descriptor::kCTFontSymbolicTrait),
+            key(font_descriptor::kCTFontFamilyNameAttribute),
+            key(font_descriptor::kCTFontTraitsAttribute),
+        )
+    };
+    let mut trait_pairs: Vec<(CFString, CFType)> = vec![(
+        weight_key,
+        CFNumber::from(ct_weight_trait(css_weight)).as_CFType(),
+    )];
+    if italic {
+        trait_pairs.push((
+            symbolic_key,
+            CFNumber::from(font_descriptor::kCTFontItalicTrait as i32).as_CFType(),
+        ));
+    }
+    let traits: CFDictionary<CFString, CFType> = CFDictionary::from_CFType_pairs(&trait_pairs);
+    let attrs: CFDictionary<CFString, CFType> = CFDictionary::from_CFType_pairs(&[
+        (family_key, CFString::new(family).as_CFType()),
+        (traits_key, traits.as_CFType()),
+    ]);
+    let desc = font_descriptor::new_from_attributes(&attrs);
+    font::new_from_descriptor(&desc, size)
+}
+
 /// `CTFontCreateWithName` never fails: an UNINSTALLED name comes back as a
 /// substitute face (Helvetica here), so a chain walk that trusts `Ok` stops
 /// at its first missing family. The layout crate's monospace chain led with
@@ -327,19 +430,13 @@ pub const GLYPH_FALLBACK_FAMILIES: &[&str] = &[
 ];
 
 pub fn named_font(name: &str, size: f64) -> Option<CTFont> {
-    let norm = |s: &str| -> String {
-        s.chars()
-            .filter(|c| !matches!(c, ' ' | '-' | '_'))
-            .collect::<String>()
-            .to_ascii_lowercase()
-    };
     let font = font::new_from_name(name, size).ok()?;
-    let want = norm(name);
+    let want = normalize_name(name);
     if want.is_empty() {
         return None;
     }
-    let family = norm(&font.family_name());
-    let postscript = norm(&font.postscript_name());
+    let family = normalize_name(&font.family_name());
+    let postscript = normalize_name(&font.postscript_name());
     if family == want || postscript == want || postscript.starts_with(&want) {
         Some(font)
     } else {
@@ -413,6 +510,13 @@ fn create_font_with_traits(
 
         let mapped = map_generic(&lower, fam);
         let base = if mapped.is_empty() { fam } else { mapped };
+
+        // The family's own face for this weight/style (CSS matching over
+        // the installed faces); the name guesses below are the fallback
+        // for PostScript-name inputs ("HelveticaNeue-Light").
+        if let Some(f) = family_face(base, size, weight, italic) {
+            return Ok(f);
+        }
 
         let mut variants: Vec<String> = Vec::new();
         if weight >= 700 && italic {
@@ -1224,6 +1328,57 @@ mod tests {
         assert!(font.is_ok(), "CSS family list should resolve");
         let font = create_font("\"NoSuchFont-XYZ\", Arial", 16.0);
         assert!(font.is_ok(), "fallback within the list should resolve");
+    }
+
+    /// css-fonts-4 §5.2 over the installed faces of a named family, via the
+    /// descriptor path Chrome uses — not PostScript-name guessing. T-RED
+    /// before n50 on the layout side: `named_font("Georgia")` answered for
+    /// weight 700, so bold headings measured with the regular face.
+    #[test]
+    fn family_face_picks_the_css_weight_not_the_nearest() {
+        let bold =
+            |f: &CTFont| f.symbolic_traits() & core_text::font_descriptor::kCTFontBoldTrait != 0;
+        let georgia_700 = family_face("Georgia", 44.0, 700, false).expect("Georgia");
+        assert_eq!(georgia_700.postscript_name(), "Georgia-Bold");
+        assert!(bold(&georgia_700));
+        // 500 walks DOWN to 400 before it walks up: nearest-weight says Bold.
+        let georgia_500 = family_face("Georgia", 44.0, 500, false).expect("Georgia");
+        assert_eq!(georgia_500.postscript_name(), "Georgia");
+        // 600 walks UP: Georgia has no semibold, so Bold — as Chrome draws h2.
+        assert_eq!(
+            family_face("Georgia", 44.0, 600, false)
+                .unwrap()
+                .postscript_name(),
+            "Georgia-Bold"
+        );
+        // Helvetica Neue 600: nearest is Medium, CSS (and Chrome) take Bold.
+        let hn_600 = family_face("Helvetica Neue", 20.0, 600, false).expect("Helvetica Neue");
+        assert!(bold(&hn_600), "got {}", hn_600.postscript_name());
+        // Name guessing could never find these: the bold face has an "MT"
+        // suffix, not a "-Bold" one.
+        assert_eq!(
+            family_face("Arial", 20.0, 700, false)
+                .unwrap()
+                .postscript_name(),
+            "Arial-BoldMT"
+        );
+        assert_eq!(
+            family_face("Times New Roman", 20.0, 700, true)
+                .unwrap()
+                .postscript_name(),
+            "TimesNewRomanPS-BoldItalicMT"
+        );
+        assert_eq!(
+            family_face("Georgia", 20.0, 400, true)
+                .unwrap()
+                .postscript_name(),
+            "Georgia-Italic"
+        );
+        // A family the machine lacks is a miss, not Helvetica.
+        assert!(family_face("No Such Family n50", 20.0, 700, false).is_none());
+        // Paint's resolver goes through it for a CSS list.
+        let painted = create_font_with_traits("Georgia, serif", 44.0, 700, false).unwrap();
+        assert_eq!(painted.postscript_name(), "Georgia-Bold");
     }
 
     #[test]

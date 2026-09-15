@@ -1315,9 +1315,22 @@ impl TextShaper {
             ));
         }
 
-        // Try to find a font variant with the specified traits
-        // First try appending -Bold, -Italic, etc. to the family name
-        let mut variants_to_try = vec![family.to_string()];
+        // The family's own face for this weight/style, chosen the way paint
+        // (`GlyphRasterizer::with_style`) chooses it — ONE resolver for
+        // measure and draw. Until n50 the list below led with the BARE
+        // family name, so `named_font("Georgia")` answered first and every
+        // `font-weight: 700` run on a named family was measured with the
+        // regular face while paint drew Georgia-Bold at those advances:
+        // article-typography's h1 read 443px of overlapping bold ink where
+        // Chrome has 508 (every bold heading on every page using a named
+        // family; italic went the same way through `-Italic`).
+        if let Some(font) = rustkit_text::macos::family_face(family, size as f64, weight, italic) {
+            return Ok(font);
+        }
+
+        // Name guesses for PostScript-name inputs the family lookup cannot
+        // see ("HelveticaNeue-Light"): styled variants BEFORE the bare name.
+        let mut variants_to_try = Vec::new();
 
         if weight >= 700 {
             variants_to_try.push(format!("{}-Bold", family));
@@ -1333,6 +1346,7 @@ impl TextShaper {
             variants_to_try.push(format!("{}-Oblique", family));
             variants_to_try.push(format!("{}Italic", family));
         }
+        variants_to_try.push(family.to_string());
 
         // `CTFontCreateWithName` never fails: an uninstalled name comes back
         // as a substitute (Helvetica), so trusting `Ok` here stopped the
@@ -2460,6 +2474,46 @@ mod tests {
         assert!(decoration.has_decorations());
         assert!(decoration.lines.underline);
         assert!(!decoration.lines.line_through);
+    }
+
+    /// Layout must MEASURE with the face paint draws. T-RED before n50:
+    /// the resolver tried the bare family before "-Bold", so a 700 run on
+    /// Georgia shaped with the regular face (same width as 400) while paint
+    /// drew Georgia-Bold — the probe's h1 read 443px of overlapping ink vs
+    /// Chrome's 508 for the bold row and 440 for the regular one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bold_named_family_shapes_with_its_bold_face() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::from_css_value("Georgia, 'Times New Roman', serif");
+        let width = |w: FontWeight, s: FontStyle| {
+            shaper
+                .shape(
+                    "The Art of Typography",
+                    &chain,
+                    w,
+                    s,
+                    FontStretch::Normal,
+                    44.0,
+                )
+                .unwrap()
+                .metrics
+                .width
+        };
+        let regular = width(FontWeight::NORMAL, FontStyle::Normal);
+        let bold = width(FontWeight::BOLD, FontStyle::Normal);
+        let italic = width(FontWeight::NORMAL, FontStyle::Italic);
+        assert!(
+            bold > regular * 1.10,
+            "bold {bold} must be the wider face, regular {regular}"
+        );
+        assert!(
+            (italic - regular).abs() > 0.5,
+            "italic {italic} must be its own face, regular {regular}"
+        );
+        // The chain's face, not a substitute, on both sides.
+        let font = TextShaper::create_ct_font_with_traits("Georgia", 44.0, 700, false).unwrap();
+        assert_eq!(font.postscript_name(), "Georgia-Bold");
     }
 
     #[test]
