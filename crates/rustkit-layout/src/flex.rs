@@ -828,7 +828,16 @@ pub fn layout_flex_container_in(
             Axis::Horizontal => total_cross,
             Axis::Vertical => total_main,
         };
-        if matches!(container.style.height, rustkit_css::Length::Auto) {
+        if let Some(used_main) = inset_used_main {
+            // CSS2 §10.6.4, a third time and in the other direction: an
+            // inset-stretched box's `height: auto` does not mean "size me by
+            // my content". The constraint equation already fixed the used
+            // height, and the `Auto` arm below would overwrite it with the
+            // items' sum — shrinking a 288px card overlay back to the 19.65px
+            // of text it contains, which is exactly what happened when the
+            // re-anchor re-ran this pass to re-justify the line.
+            container.dimensions.content.height = used_main;
+        } else if matches!(container.style.height, rustkit_css::Length::Auto) {
             container.dimensions.content.height = content_size;
         } else if container.dimensions.content.height == 0.0 {
             let explicit = match container.style.height {

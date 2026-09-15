@@ -2763,6 +2763,7 @@ impl LayoutBox {
             return;
         }
         let (origin_x, origin_y) = (self.dimensions.content.x, self.dimensions.content.y);
+        let origin_height = self.dimensions.content.height;
         self.apply_position_offsets_absolute(containing_block);
         let (dx, dy) = (
             self.dimensions.content.x - origin_x,
@@ -2772,6 +2773,25 @@ impl LayoutBox {
             for child in &mut self.children {
                 crate::flex::translate_subtree(child, dx, dy);
             }
+        }
+        // On the block path this is where an inset-stretched box's used height
+        // FIRST becomes known: the child was laid out against a stand-in whose
+        // height is the parent's flow cursor (the static-position trick), so
+        // the containing block's real height was not available until now.
+        //
+        // A translate carries the subtree but does not re-justify it. A flex
+        // container whose main size just changed has to redistribute its free
+        // space, or `justify-content` keeps the answer it computed from the
+        // cursor — `center` in a stand-in the size of its own content means no
+        // free space at all, and every item stays packed against the start
+        // edge. Passing the containing block as well keeps step 11d's
+        // re-derivation on the same number.
+        if self.style.display.is_flex() && self.dimensions.content.height != origin_height {
+            crate::flex::layout_flex_container_in(
+                self,
+                &self.dimensions.clone(),
+                Some(containing_block),
+            );
         }
     }
 
@@ -9986,6 +10006,61 @@ mod tests {
         );
         assert_eq!(cover.dimensions.content.y, parent.dimensions.content.y);
         assert_eq!(cover.dimensions.content.width, 100.0);
+    }
+
+    /// image-gallery's `.aspect-box > .content`, driven through the REAL
+    /// entry point rather than through `layout_flex_container` directly.
+    ///
+    /// This guard exists because the flex-side guards cannot see the caller.
+    /// They call `layout_flex_container_in` and pass the containing block
+    /// themselves, so they hold the rule but not the wiring: a `lib.rs` call
+    /// site that hands over `None` puts every item back at the top edge and
+    /// leaves all six of them green. `LayoutBox::layout` is what grid Phase 9
+    /// uses for an out-of-flow grandchild, so this is the path the page takes.
+    ///
+    /// 100px card, `inset: 0` column flex container, `justify-content: center`,
+    /// two items summing 50: the free space is 50 and the stack starts at 25.
+    /// Justifying in the 50px flow cursor instead starts it at 0.
+    #[test]
+    fn an_inset_overlays_flex_line_centres_in_the_card_through_the_layout_entry_point() {
+        let mut card_style = ComputedStyle::new();
+        card_style.width = Length::Px(100.0);
+        card_style.height = Length::Px(100.0);
+        let mut card = LayoutBox::with_position(BoxType::Block, card_style, Position::Relative);
+
+        let mut overlay_style = ComputedStyle::new();
+        overlay_style.display = rustkit_css::Display::Flex;
+        overlay_style.flex_direction = rustkit_css::FlexDirection::Column;
+        overlay_style.justify_content = rustkit_css::JustifyContent::Center;
+        let mut overlay =
+            LayoutBox::with_position(BoxType::Block, overlay_style, Position::Absolute);
+        overlay.set_offsets(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
+        for h in [30.0, 20.0] {
+            let mut item_style = ComputedStyle::new();
+            item_style.height = Length::Px(h);
+            overlay
+                .children
+                .push(LayoutBox::new(BoxType::Block, item_style));
+        }
+        card.children.push(overlay);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        card.layout(&viewport);
+
+        let overlay = &card.children[0];
+        assert_eq!(
+            overlay.dimensions.content.height, 100.0,
+            "the overlay itself must stretch to the card (the precondition)"
+        );
+        let lead = overlay.children[0].dimensions.content.y - overlay.dimensions.content.y;
+        assert!(
+            (lead - 25.0).abs() < 0.01,
+            "50 of content centred in the card's 100 leaves 25 above, not {lead} \
+             — the flex line was justified in the flow cursor"
+        );
     }
 
     /// The re-anchor must not touch `position: fixed` (viewport containing
