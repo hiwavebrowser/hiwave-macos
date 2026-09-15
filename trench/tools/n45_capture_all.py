@@ -31,7 +31,11 @@ for cid, c in sorted(cases.items()):
         str(REPO / "target/release/parity-capture"),
         "--html-file", str(REPO / c["html"]),
         "--width", str(c["width"]), "--height", str(c["height"]),
-        "--dump-frame", str(d / "frame.png"),
+        # frame.PPM, not .png: `--dump-frame` emits PPM whatever the name, and
+        # `paint_oracle_gate.find_frame` looks for frame.ppm — so every capture
+        # this tool produced read as `no_rustkit_capture`, i.e. Gate B scored
+        # 0/26 measured on them and said so quietly (night 09-14 finding).
+        "--dump-frame", str(d / "frame.ppm"),
         "--dump-layout", str(d / "layout.json"),
     ]
     r = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=REPO, timeout=300)

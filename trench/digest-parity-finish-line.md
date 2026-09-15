@@ -9072,3 +9072,231 @@ Control green before and after both sweeps.
   `cargo fmt -p rustkit-layout` rewrites seven. Formatting has to be done by
   hand on the touched hunks or the diff becomes unreviewable. Cost me a rebuild
   of the branch tonight.
+
+## 2026-09-15
+
+**Metric: `2/26` → `2/26` on macOS, unchanged and not re-run.** No macOS lane
+tonight, so nothing here is a receipt. On this seat the metric cannot have
+moved: the only case that changed is `image-gallery`, red on both oracles
+before and after (144 geometry failures remaining, paint 0.7149 unchanged), and
+the two macOS-green cases are bit-identical on both oracles.
+
+**P-item: P3 (flex residual). NOT complete.** I worked the residual 09-14 left
+written down — `.content` the right height with its text still at the top — and
+found it, but the interesting part of the night is that **the fix I shipped is
+not the fix I first wrote, and a mutation probe is the only reason I know
+that.** Two of my own commits had to be corrected before the night ended.
+
+### The residual, and the defect under it
+
+`image-gallery`'s `.aspect-box > .content` is `position:absolute; inset:0;
+display:flex; flex-direction:column; justify-content:center`. After 09-14's
+`b9242dd` the box is the card's full 288 tall and its caption still sat at the
+top: `span y=1086.65` against Chrome's 1234, on all four cards.
+
+`layout_flex_container`'s second parameter was named `containing_block`, and
+**every production caller passes the container's OWN dimensions**:
+
+```
+grid.rs:1959   let child_containing = child.dimensions.clone();
+grid.rs:2220   let grandchild_containing = grandchild.dimensions.clone();
+lib.rs:1348    &self.dimensions.clone()
+lib.rs:2411    &self.dimensions.clone()
+flex.rs:444    let child_containing = item.layout_box.dimensions.clone();
+```
+
+One rule read it as a containing block: CSS2 §10.6.4's constraint equation,
+added last night as `inset_definite_inner_main`. Asked of the container's own
+box, "how tall are you minus your insets" answers with the block pre-pass's
+flow cursor — 19.65 inside a 288px card. Free space 0, so `center` packed both
+items against the top edge. The parameter is now `container_box`, and
+`layout_flex_container_in` takes the containing block separately.
+
+### 626457c's guards were shaped unlike every call site in the engine
+
+This is the part worth carrying forward. Last night's six guards passed
+`inset_cb(200.0)` — a *containing block* — as the container's own box, a shape
+no caller uses, and in that fixture `container.dimensions.content.height` is 0
+while the cb's is 200. So they handed the fix the number it was supposed to
+derive. All six were green before 626457c, after it, and before tonight.
+
+They now go through `layout_inset_column`, which gives flex a **resolved width
+and a flow-cursor height** — that asymmetry is the defect — and passes the cb
+separately. 09-14 wrote that `626457c` "moves nothing"; the sharper reading is
+that it moved nothing **and could not have**, and its sweep could not tell.
+
+### Then the sweep took two of tonight's commits apart
+
+First sweep: **9/14 RED, 5 survivors.** The survivors were not noise:
+
+- **M1** (`container_main_size` ignores the inset height) survived because that
+  arm is *unreachable*: every caller that supplies a real containing block also
+  supplies an own box whose height is already the used height. Deleted rather
+  than given a test.
+- **M3/M4** (either `lib.rs` call site hands over `None`) survived because no
+  unit test covered the grid Phase 9 path at all — my one new guard went
+  through `reanchor_absolute` instead, and my flex guards pass the cb
+  themselves, so none of them can see a caller.
+
+Chasing M3 turned up the thing I had wrong. I wrote a guard for an `inset: 0`
+flex container under an **auto-height** parent and it failed: height 40, the
+parent's flow cursor, not its content's 50. I assumed I had caused it and
+**went and measured the base commit `b9242dd`, which prints the same 40.**
+Pre-existing, a third instance of "`height: auto` is not indefinite", not mine.
+
+But it made the real point visible: on the block path the box handed to `layout`
+is the **static-position stand-in**, not a containing block, so passing it as
+one asserts something false. So the rule moved to the one place that always
+holds the real box — `reanchor_absolute`, whose two callers build it from the
+parent's definite height — and grid Phase 9 now re-anchors its out-of-flow
+grandchild against the item box it already built. That re-anchor call is what
+the corpus result depends on.
+
+**Stated precisely because the sweep is the only reason I know it: re-introducing
+the wrong parameter is UNOBSERVABLE** (M4 survived the second sweep too).
+`apply_position_offsets_absolute` overwrites the height a moment later either
+way. It is gone because it is wrong on its face, not because a test caught it,
+and I would rather write that down than imply a guard I do not have.
+
+### Commits — branch `atlas/n53-p3-content-justify`, cut from `atlas/n52-p3-flex-column-center`
+
+Cut from n52 and not from `develop`, because the residual only exists on top of
+`b9242dd`: without it `.content` is 256px short and there is nothing to justify.
+
+- `952f382` — an inset-stretched flex container justifies in its containing
+  block's height, not its own flow cursor; 626457c's six guards rewritten into
+  the production call shape.
+- `e34d470` — the re-anchor re-justifies the line when it reveals the used
+  height, and the height writeback stops `auto` shrinking the box back to its
+  content (a 288px overlay to its 19.65px of text).
+- `9e8c18e` — corrects the wiring of both: the re-anchor owns the rule, grid
+  Phase 9 asserts its item box is real, the unreachable `container_main_size`
+  arm is deleted.
+
+**Pushed, no PR.** P3 is not complete and the stored order says not to open one;
+it is also the third night in a row stacking on an unmerged branch. Decision 1.
+
+### Measured — Linux/SwiftShader, 26 cases. MECHANICS, NOT A RECEIPT
+
+Before = `atlas/n52-p3-flex-column-center` tip (`b9242dd`), after = `9e8c18e`.
+
+| Oracle | before | after |
+|---|---:|---:|
+| Gate A geometry failures | 2642 | **2642** |
+| Gate A join failures | 16 | 16 |
+| Gate A geometry-green / measured | 3/26 · 26/26 | 3/26 · 26/26 |
+| Gate B paint-green / measured | 1/26 · 26/26 | 1/26 · 26/26 |
+| Gate B discrete auto-fails / examined | 0 / 260 | 0 / 260 |
+
+Per (case, selector, axis) across all 26 cases:
+**fixed 0 · newly failing 0 · improved 4 · worsened 0 · unchanged 2654.**
+
+```
+image-gallery  .aspect-1-1  > .content > span  y  -147.35 -> -10.00
+image-gallery  .aspect-16-9 > .content > span  y   -84.35 -> -10.00
+image-gallery  .aspect-4-3  > .content > span  y  -111.35 -> -10.00
+image-gallery  .aspect-3-2  > .content > span  y   -99.35 -> -10.00
+```
+
+**Fixed 0, and the four that moved are better than the number looks.** All four
+land on exactly `-10.00`, which is their parent `.aspect-grid`'s own y delta —
+so the caption's offset *inside* the card is now bit-exact with Chrome (146px in
+both). The residual −10 is upstream and is this seat's font stack: the section's
+`h2` measures 21 against Chrome's 24. On a CoreText lane those four plausibly
+read 0.00 and become four *fixed* boxes; I am not claiming that without the
+lane.
+
+Gate A's total did not move because all four boxes were already failing and
+still are. Determinism checked: `image-gallery`'s `layout.json` is md5-identical
+across 3 captures.
+
+### Gate B is bit-identical on all 26, and the reason matters
+
+A caption moving ~140px changed **zero** pixels. The boxes sit at y=1086–1234 in
+an 800px viewport — **below the fold, never painted.** So Gate B cannot confirm
+or refute this fix on this corpus at all. That is a coverage gap in the corpus,
+not a quiet pass, and it is the mirror image of 09-14's finding: a diagnostic
+that cannot see a thing reports its absence as a number rather than as a gap.
+
+### Mutation-check results
+
+**Second sweep: 11/14 RED, 3 survivors. Control green before and after both
+sweeps.** Committed before mutating; each probe verified to be a real edit.
+
+| probe | 1st sweep | 2nd sweep |
+|---|---|---|
+| M1 Phase 9 does not re-anchor its grandchild | (arm deleted) | RED |
+| M2 11d re-derives from the container's own box | RED | RED |
+| M3 the re-anchor's re-justify gets no containing block | SURVIVOR | RED |
+| M4 a generic site treats the stand-in as a containing block | SURVIVOR | **SURVIVOR** |
+| M5 the re-anchor no longer re-justifies | RED | RED |
+| M6 the re-justify gate is dropped | SURVIVOR | **SURVIVOR** |
+| M7 the writeback lets `auto` clobber the used height | (bad probe) | RED |
+| M8 position check dropped | RED | RED |
+| M9 `height: auto` check dropped | RED | RED |
+| M10 one inset is enough | RED | RED |
+| M11 the insets are not subtracted | RED | RED |
+| M12 the container's own padding is not subtracted | RED | RED |
+| M13 a fixed container asks the passed block | RED | RED |
+| M14 `container_cross_size` also takes it | SURVIVOR | **SURVIVOR** |
+
+The three remaining survivors, each stated as what it is rather than excused:
+
+- **M4** and **M6** are **behaviourally unobservable** on every fixture I could
+  build. M4 because the offsets pass overwrites the height either way; M6
+  because re-running flex with unchanged inputs is idempotent, so the gate is
+  clarity and cost, not behaviour. Neither is guardable, and inventing a test
+  that passes for an unrelated reason would be decoration.
+- **M14** adds a change I deliberately did **not** land — the cross-axis arm
+  (an inset-stretched ROW container centring in a stale cursor, and its
+  writeback). Same spec line, no case on this corpus, and
+  `definite_inner_cross` would subtract the container's own edges a second
+  time. A test here would lock in current row behaviour I have not verified, so
+  it stays a finding.
+
+M7 was a compile error in the first sweep, which is not a RED; rewritten as a
+real behavioural mutation for the second.
+
+### Also landed here (instrument lane)
+
+- `trench/tools/n45_capture_all.py` writes `frame.ppm`, not `frame.png` —
+  09-14's finding. Every capture this tool made read as `no_rustkit_capture`,
+  so Gate B scored 0/26 *measured* on them and said so quietly. Tonight's own
+  Gate B numbers depend on it.
+
+### Decisions needed from Pete
+
+1. **Seven PRs (#193–#199) are open against `develop da8f413` and nothing has
+   merged since 09-08** — tonight is the third night stacking on an unmerged
+   branch (n53 on n52 on develop), and the stack is now deep enough that a
+   review of any one PR is a review of the base too; should the trench stop
+   opening PRs and batch, or is the queue simply waiting on review time?
+2. **Open `atlas/n53-p3-content-justify`?** Its three commits are one unit and
+   the corpus delta is 4 improved / 0 worsened, but it cannot land before n52.
+3. Still open from 09-11/09-12/09-13/09-14: which stop-rule reading governs
+   when a correct fix removes an error cancellation, and is P3 closable given
+   `flex-positioning` is 15/15 clean on the invariants?
+
+### Surprises
+
+- **A mutation sweep deleted a third of my own change and rewrote the rest.**
+  M1 was unreachable code; M3/M4 showed the parameter I had just added was
+  being handed a static-position stand-in. I have read nine of these sweeps in
+  the digest treated as a checkbox after the fix; tonight it was the design
+  review, and the version that shipped is materially different from the one
+  that was green and committed three hours earlier.
+- **I wrote a guard for a regression I had not caused.** It failed at 40 against
+  my expected 50, and the base commit prints the same 40. Checking the base
+  before believing my own test is what kept a pre-existing defect from being
+  logged as a stop-rule revert.
+- **The honest guard for tonight's fix reports `fixed 0`.** Four boxes improved
+  by 90–137px and none crossed 0.5px, because they all inherit a −10 the
+  seat's font stack owns. The conjunction is unmoved and the fix is still right.
+- **Gate B could not see a 140px move** — the boxes are below the 800px fold.
+  Any paint-side conclusion about the bottom two thirds of `image-gallery` is
+  unmeasured rather than green.
+- **Two guards shaped against the example, in two different commits, on the
+  same rule.** 626457c's fixture contradicted every production call site;
+  mine went through the wrong one of two entry points. The lesson that keeps
+  repeating is not "write a test", it is *check that the fixture has the shape
+  the engine actually calls*.
