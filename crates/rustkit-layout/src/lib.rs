@@ -1344,8 +1344,17 @@ impl LayoutBox {
                 // Check for flex or grid container
                 if self.style.display.is_flex() {
                     self.layout_block_with_definite_height(containing_block, definite_height);
-                    // Flex layout is applied to children
-                    flex::layout_flex_container(self, &self.dimensions.clone());
+                    // Flex layout is applied to children. The container's own
+                    // box and its containing block are handed over
+                    // separately: `apply_position_offsets` below is what
+                    // writes an inset-stretched box's used height, so until it
+                    // runs the only place that number can come from is the
+                    // containing block (CSS2 §10.6.4).
+                    flex::layout_flex_container_in(
+                        self,
+                        &self.dimensions.clone(),
+                        Some(containing_block),
+                    );
                 } else if self.style.display.is_grid() {
                     self.layout_block_with_definite_height(containing_block, definite_height);
                     // Grid layout is applied to children
@@ -2407,8 +2416,14 @@ impl LayoutBox {
         if self.style.display.is_flex() {
             // For flex containers, layout children normally first to get their intrinsic sizes
             self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
-            // Then apply flex layout algorithm
-            flex::layout_flex_container(self, &self.dimensions.clone());
+            // Then apply flex layout algorithm. See the sibling call in
+            // `layout_with_definite_height` for why the containing block goes
+            // over as well as the container's own box.
+            flex::layout_flex_container_in(
+                self,
+                &self.dimensions.clone(),
+                Some(containing_block),
+            );
         } else if self.style.display.is_grid() {
             // For grid containers, layout children normally first
             self.layout_block_children_with_collapse(&mut child_margin_context, float_context);

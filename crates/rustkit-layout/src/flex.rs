@@ -205,7 +205,40 @@ impl<'a> Default for FlexLine<'a> {
 }
 
 /// Layout a flex container and its children.
-pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimensions) {
+pub fn layout_flex_container(container: &mut LayoutBox, container_box: &Dimensions) {
+    layout_flex_container_in(container, container_box, None)
+}
+
+/// As [`layout_flex_container`], plus the container's REAL containing block
+/// where the caller has it.
+///
+/// The two are not the same box, and the old single parameter conflated them.
+/// `container_box` is the container's OWN content box: every production caller
+/// passes `container.dimensions.clone()`, and it is what the container's main
+/// and cross sizes, its items' percentage bases and its children's origin are
+/// read from. `positioning_cb` is the block the container is positioned
+/// against.
+///
+/// Exactly one rule needs the second one. CSS2 §10.6.4: an out-of-flow box
+/// with `height: auto` and both `top` and `bottom` set has a definite used
+/// height, and that height is a function of the CONTAINING BLOCK's height.
+/// Nothing in `container_box` carries it, because
+/// `apply_position_offsets_absolute` — the pass that writes it — does not run
+/// until after this call returns.
+///
+/// Asking `container_box` for it instead is the defect this parameter exists
+/// to close. On the block path `container_box` is the container's own box, so
+/// the question becomes "how tall are you, minus your insets", and the answer
+/// is the block pre-pass's flow cursor. image-gallery's
+/// `.aspect-box > .content` is the idiom in full — `position: absolute;
+/// inset: 0; display: flex; flex-direction: column; justify-content: center`
+/// — and it justified 19.65px of content in 19.65px of cursor inside a 288px
+/// card, leaving both items packed against the top edge.
+pub fn layout_flex_container_in(
+    container: &mut LayoutBox,
+    container_box: &Dimensions,
+    positioning_cb: Option<&Dimensions>,
+) {
     let style = &container.style;
 
     // 1. Determine main/cross axes
@@ -217,14 +250,29 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
     };
     let cross_axis = main_axis.cross();
 
+    // CSS2 §10.6.4, resolved before anything reads a main size: an
+    // out-of-flow box with both insets set is definite, and only the
+    // containing block knows the number. Resolved ONCE here so step 8
+    // (justify) and step 11d (the main-size re-derivation) cannot disagree —
+    // two derivations of this subtraction drifting apart is the defect class
+    // night 8 recorded, and re-deriving it from `container_box` would also
+    // subtract the insets a second time.
+    let inset_used_main =
+        positioning_cb.and_then(|cb| inset_definite_used_main(container, cb));
+
     // Get container dimensions
     let container_main_size = match main_axis {
-        Axis::Horizontal => containing_block.content.width,
-        Axis::Vertical => containing_block.content.height,
+        Axis::Horizontal => container_box.content.width,
+        Axis::Vertical => inset_used_main.unwrap_or(container_box.content.height),
     };
+    // Deliberately NOT given the same treatment: the cross-axis analogue (an
+    // inset-stretched ROW container centring items in a stale cursor) is the
+    // same spec line, but no case on this corpus exercises it and
+    // `definite_inner_cross` subtracts the container's own edges a second
+    // time from whatever lands here. Recorded as a finding, not half-landed.
     let container_cross_size = match cross_axis {
-        Axis::Horizontal => containing_block.content.width,
-        Axis::Vertical => containing_block.content.height,
+        Axis::Horizontal => container_box.content.width,
+        Axis::Vertical => container_box.content.height,
     };
 
     // Check if the flex container has a definite cross size
@@ -248,7 +296,7 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
     };
 
     // The definite inner cross size, resolved from STYLE rather than from
-    // containing_block: the block pre-pass can leave a stale
+    // container_box: the block pre-pass can leave a stale
     // children-stacked height in content.height (logo 38.4 + nav 25.6 = 64
     // inside a height:60px header), which would center every item 2px low.
     // Px lengths resolve here; anything else falls back to the passed size.
@@ -310,12 +358,11 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
         Axis::Vertical => resolve_length(&style.row_gap, container_cross_size),
     };
 
-    // Read before step 2 takes a mutable borrow of the children: the
-    // container's own inset-definite inner main size (see 11d). It depends
-    // only on style, offsets and the container's own edges, none of which
-    // the item passes touch.
+    // Step 11d re-derives the container's main size once the items are laid
+    // out. Hand it the number resolved at the top rather than deriving it a
+    // second time.
     let inset_inner_main = if main_axis == Axis::Vertical {
-        inset_definite_inner_main(container, containing_block)
+        inset_used_main
     } else {
         None
     };
@@ -424,7 +471,7 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
 
     // 10. Apply final positions to layout boxes
     // Pass the container's content origin so positions are absolute, not relative
-    let container_origin = (containing_block.content.x, containing_block.content.y);
+    let container_origin = (container_box.content.x, container_box.content.y);
     apply_positions(
         &mut lines,
         main_axis,
@@ -460,7 +507,7 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
                     // Block container: lay out children in normal flow.
                     // Cloning the item's FINAL dimensions per child would make every
                     // child position itself at content.y + content.height (block layout
-                    // treats containing_block.content.height as the flow cursor), i.e.
+                    // treats container_box.content.height as the flow cursor), i.e.
                     // stacked at the item's bottom edge. layout_block_children advances
                     // a real cursor from the item's content top instead.
                     //
@@ -786,8 +833,8 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
         } else if container.dimensions.content.height == 0.0 {
             let explicit = match container.style.height {
                 rustkit_css::Length::Px(px) => Some(px),
-                rustkit_css::Length::Percent(pct) if containing_block.content.height > 0.0 => {
-                    Some(pct / 100.0 * containing_block.content.height)
+                rustkit_css::Length::Percent(pct) if container_box.content.height > 0.0 => {
+                    Some(pct / 100.0 * container_box.content.height)
                 }
                 _ => None,
             };
@@ -1602,8 +1649,8 @@ fn distribute_lines(
 }
 
 /// Distribute items along main axis (justify-content).
-/// The container's own inner main size when `height: auto` is made definite
-/// by opposite insets (CSS2 §10.6.4), on the VERTICAL main axis only.
+/// The container's own used inner main size when `height: auto` is made
+/// definite by opposite insets (CSS2 §10.6.4).
 ///
 /// The arithmetic is `LayoutBox::inset_definite_content_height`, so this and
 /// `apply_position_offsets_absolute` cannot drift. What is decided here is
@@ -1613,7 +1660,7 @@ fn distribute_lines(
 /// fixed overlay its parent's height and centres its items in the wrong box.
 /// The bare-unit-tree fallback (no viewport set) is that same code's
 /// fallback, not a new rule.
-fn inset_definite_inner_main(container: &LayoutBox, containing_block: &Dimensions) -> Option<f32> {
+fn inset_definite_used_main(container: &LayoutBox, containing_block: &Dimensions) -> Option<f32> {
     if container.position == crate::Position::Fixed
         && container.viewport.0 > 0.0
         && container.viewport.1 > 0.0
@@ -3485,6 +3532,26 @@ mod tests {
         }
     }
 
+    /// The PRODUCTION call shape — and the reason the first version of these
+    /// guards could not fail.
+    ///
+    /// Flex is handed the container's OWN box, whose `content.width` is
+    /// already resolved (`calculate_block_width` runs first) but whose
+    /// `content.height` is still the block pre-pass's flow cursor: the content
+    /// sum, and the wrong answer. The containing block arrives separately.
+    /// That asymmetry is the whole defect.
+    ///
+    /// The original guards passed the containing block itself as the
+    /// container's own box — a shape no caller in the engine uses — so they
+    /// handed the fix the number it was supposed to derive and stayed green
+    /// while image-gallery stayed broken.
+    fn layout_inset_column(c: &mut LayoutBox, cb: &Dimensions, flow_cursor: f32) {
+        let mut own = c.dimensions.clone();
+        own.content.width = cb.content.width;
+        own.content.height = flow_cursor;
+        layout_flex_container_in(c, &own, Some(cb));
+    }
+
     /// Leading space above the first item and trailing space below the last,
     /// in the container's own content box. `justify-content: center` owes
     /// them equal halves of the free space.
@@ -3513,7 +3580,7 @@ mod tests {
             Length::Auto,
             &[8.653847, 11.0],
         );
-        layout_flex_container(&mut c, &inset_cb(32.0));
+        layout_inset_column(&mut c, &inset_cb(32.0), 19.653847);
         let (lead, trail) = lead_and_trail(&c, 32.0);
         assert!(
             (lead - 6.173).abs() < 0.5 && (trail - 6.173).abs() < 0.5,
@@ -3546,7 +3613,7 @@ mod tests {
             left: 0.0,
             right: 0.0,
         };
-        layout_flex_container(&mut c, &inset_cb(200.0));
+        layout_inset_column(&mut c, &inset_cb(200.0), 50.0);
         let (lead, trail) = lead_and_trail(&c, 120.0);
         assert!(
             (lead - 35.0).abs() < 0.5 && (trail - 35.0).abs() < 0.5,
@@ -3567,7 +3634,7 @@ mod tests {
             Length::Auto,
             &[30.0, 20.0],
         );
-        layout_flex_container(&mut c, &inset_cb(200.0));
+        layout_inset_column(&mut c, &inset_cb(200.0), 50.0);
         let (lead, _) = lead_and_trail(&c, 50.0);
         assert!(
             lead.abs() < 0.5,
@@ -3588,7 +3655,7 @@ mod tests {
             Length::Auto,
             &[30.0, 20.0],
         );
-        layout_flex_container(&mut c, &inset_cb(200.0));
+        layout_inset_column(&mut c, &inset_cb(200.0), 50.0);
         let (lead, _) = lead_and_trail(&c, 50.0);
         assert!(
             lead.abs() < 0.5,
@@ -3609,7 +3676,7 @@ mod tests {
             Length::Px(100.0),
             &[30.0, 20.0],
         );
-        layout_flex_container(&mut c, &inset_cb(200.0));
+        layout_inset_column(&mut c, &inset_cb(200.0), 50.0);
         let (lead, trail) = lead_and_trail(&c, 100.0);
         assert!(
             (lead - 25.0).abs() < 0.5 && (trail - 25.0).abs() < 0.5,
@@ -3631,7 +3698,7 @@ mod tests {
             &[30.0, 20.0],
         );
         c.set_viewport(288.0, 600.0);
-        layout_flex_container(&mut c, &inset_cb(200.0));
+        layout_inset_column(&mut c, &inset_cb(200.0), 50.0);
         let (lead, trail) = lead_and_trail(&c, 600.0);
         assert!(
             (lead - 275.0).abs() < 0.5 && (trail - 275.0).abs() < 0.5,
