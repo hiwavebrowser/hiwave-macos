@@ -2196,15 +2196,44 @@ pub fn layout_grid_container(
         }
     }
 
-    // Phase 9.5: grow AUTO rows to the items' REAL content heights.
+    // Phase 9.5: re-size AUTO rows to the items' REAL content heights.
     // Track sizing ran on estimate_content_height, which cannot see wrapped
     // text (holdout-grid-mosaic: tiles measured 110px — the banner only —
     // while their text put real height at 205px; row 2 was then placed at
     // the stale 110px pitch, overlapping row 1's content). Single-row items
     // grow their row to the real border-box height; later rows shift down
     // with their subtrees; the container's auto height is recomputed.
+    //
+    // n51: the same estimate also OVER-shoots, and this pass was grow-only.
+    // `count_text_lines` charges one line-height per text NODE, so a flex
+    // row holding `<kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>K</kbd> <span>…</span>`
+    // — seven text nodes on ONE line — was estimated at seven lines: new_tab's
+    // `.shortcuts` grid sized every row 143px for items that lay out 60px
+    // tall (Chrome's pitch 72, RustKit's 152), the grid ran 832px instead of
+    // 400, the page's flex-centred container overflowed the viewport, and
+    // every box from the search field down sat 63px above Chrome's. An
+    // `auto` track is minmax(min-content, max-content) — its size IS the
+    // items' real size — so a row of that kind now shrinks to the tallest
+    // single-row item's margin box, the same figure the grow path already
+    // computes. Rows a multi-row item spans, and rows with an item whose
+    // real height is unknown, keep the grow-only behaviour.
     if !has_definite_height && !grid.rows.is_empty() {
-        let mut row_growth: Vec<f32> = vec![0.0; grid.rows.len()];
+        // Per row: the tallest single-row item's margin box (`None` = no
+        // single-row item with a known height), and whether the row may
+        // shrink to it.
+        let mut row_real: Vec<Option<f32>> = vec![None; grid.rows.len()];
+        let mut row_shrinkable: Vec<bool> = grid
+            .rows
+            .iter()
+            .map(|t| {
+                t.is_min_content
+                    && t.is_max_content
+                    && !t.is_flexible
+                    && t.percent.is_none()
+                    && t.max_percent.is_none()
+                    && t.fit_content_limit.is_none()
+            })
+            .collect();
         {
             let mut idx = 0usize;
             for child in container.children.iter() {
@@ -2213,7 +2242,15 @@ pub fn layout_grid_container(
                 }
                 if let Some(&(r0, r1)) = row_spans.get(idx) {
                     // Single-row items only; multi-span distribution is a
-                    // separate (rarer) problem.
+                    // separate (rarer) problem. A spanning item's
+                    // contribution was spread over its rows by track sizing
+                    // and this pass cannot re-derive it, so those rows stay
+                    // grow-only.
+                    if r1 > r0 + 1 {
+                        for r in r0..r1.min(grid.rows.len()) {
+                            row_shrinkable[r] = false;
+                        }
+                    }
                     if r1 <= r0 + 1 && r0 < grid.rows.len() {
                         let pb = child.dimensions.padding.top
                             + child.dimensions.padding.bottom
@@ -2224,10 +2261,33 @@ pub fn layout_grid_container(
                         // box. Comparing them directly makes an item with
                         // margins look like it already fits, so this pass
                         // stops repairing it.
+                        //
+                        // A childless item flowed nothing: its real content
+                        // height is 0, not unknown. An explicit `height` is
+                        // its own answer (the estimate used it too), floored
+                        // by `min-height` like the rest.
                         let mut wanted: Option<f32> = match real_heights.get(idx) {
                             Some(Some(real_h)) => Some(real_h + pb),
+                            _ if child.children.is_empty() => Some(pb),
                             _ => None,
                         };
+                        let is_border_box = child.style.box_sizing == BoxSizing::BorderBox;
+                        if let Length::Px(h) = child.style.height {
+                            let border_box = if is_border_box { h } else { h + pb };
+                            wanted = Some(border_box.max(wanted.unwrap_or(0.0)));
+                        }
+                        if let Length::Px(min_h) = child.style.min_height {
+                            let floor = if is_border_box { min_h } else { min_h + pb };
+                            wanted = Some(floor.max(wanted.unwrap_or(0.0)));
+                        }
+                        if !matches!(child.style.height, Length::Px(_) | Length::Auto)
+                            || !matches!(child.style.min_height, Length::Px(_) | Length::Auto)
+                        {
+                            // A percentage or other relative block size: the
+                            // estimate and the flow disagree on what it
+                            // resolves against; do not shrink under it.
+                            row_shrinkable[r0] = false;
+                        }
 
                         // css-sizing-4 §4: an `aspect-ratio` item whose block
                         // size is `auto` derives it from its (now definite)
@@ -2265,12 +2325,13 @@ pub fn layout_grid_container(
                             }
                         }
 
-                        if let Some(wanted) = wanted {
-                            let vm = vertical_margins(&child.style);
-                            let grow = wanted - (grid.rows[r0].size - vm);
-                            if grow > 0.5 {
-                                row_growth[r0] = row_growth[r0].max(grow);
+                        match wanted {
+                            Some(wanted) => {
+                                let outer = wanted + vertical_margins(&child.style);
+                                row_real[r0] =
+                                    Some(row_real[r0].map_or(outer, |r: f32| r.max(outer)));
                             }
+                            None => row_shrinkable[r0] = false,
                         }
                     }
                 }
@@ -2278,10 +2339,30 @@ pub fn layout_grid_container(
             }
         }
 
-        if row_growth.iter().any(|g| *g > 0.0) {
+        // Per row: the change to apply. Growth wherever the items need
+        // more; shrinkage only where the track is intrinsic and every item
+        // in it reported a real height.
+        let row_delta: Vec<f32> = grid
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(i, track)| match row_real[i] {
+                Some(real) => {
+                    let delta = real - track.size;
+                    if delta > 0.5 || (delta < -0.5 && row_shrinkable[i]) {
+                        delta
+                    } else {
+                        0.0
+                    }
+                }
+                None => 0.0,
+            })
+            .collect();
+
+        if row_delta.iter().any(|g| *g != 0.0) {
             let old_positions: Vec<f32> = grid.rows.iter().map(|t| t.position).collect();
-            for (i, g) in row_growth.iter().enumerate() {
-                grid.rows[i].size += g;
+            for (i, g) in row_delta.iter().enumerate() {
+                grid.rows[i].size = (grid.rows[i].size + g).max(0.0);
             }
             // Recompute row positions from the first row's origin; a gap
             // follows every non-collapsed row (mirrors the auto-height
@@ -2306,17 +2387,22 @@ pub fn layout_grid_container(
                             crate::flex::translate_subtree(child, 0.0, dy);
                         }
                         // Default align stretch: the item's MARGIN box fills
-                        // the (grown) row, so its border box gets the row less
-                        // its own margins. Grow-only; explicit heights and
-                        // taller-than-row content are left alone.
+                        // the (re-sized) row, so its border box gets the row
+                        // less its own margins. Explicit heights are left
+                        // alone. In a grown row content taller than the row
+                        // is left alone too; in a SHRUNK row the row is the
+                        // tallest item's real height, so an item still
+                        // holding the stale area height (the block path
+                        // hands it the pre-pass area) gives it back.
                         if matches!(child.style.height, Length::Auto) {
                             let pb = child.dimensions.padding.top
                                 + child.dimensions.padding.bottom
                                 + child.dimensions.border.top
                                 + child.dimensions.border.bottom;
-                            let target =
-                                grid.rows[r0].size - vertical_margins(&child.style) - pb;
-                            if child.dimensions.content.height < target {
+                            let target = grid.rows[r0].size - vertical_margins(&child.style) - pb;
+                            if child.dimensions.content.height < target
+                                || (row_delta[r0] < 0.0 && child.dimensions.content.height > target)
+                            {
                                 child.dimensions.content.height = target;
                             }
                         }
@@ -5935,6 +6021,113 @@ mod tests {
             (h - 57.0).abs() < 0.51,
             "header should be 26 content + 30 padding + 1 border = 57, got {h} \
              (56 means the repair pass compared a border box against a margin box)"
+        );
+    }
+
+    /// The new_tab `.shortcut` shape: a padded flex row whose children are
+    /// three inline chips, each one text node. `count_text_lines` charges a
+    /// line per text NODE, so the row track is estimated at three lines
+    /// while the flex row lays out one.
+    fn shortcut_row(font_px: f32) -> LayoutBox {
+        let mut s = ComputedStyle::new();
+        s.display = Display::Flex;
+        s.box_sizing = BoxSizing::BorderBox;
+        s.font_size = Length::Px(font_px);
+        s.padding_top = Length::Px(12.0);
+        s.padding_bottom = Length::Px(12.0);
+        s.padding_left = Length::Px(16.0);
+        s.padding_right = Length::Px(16.0);
+        s.border_top_width = Length::Px(1.0);
+        s.border_bottom_width = Length::Px(1.0);
+        let mut row = LayoutBox::new(BoxType::Block, s);
+        for key in ["Ctrl", "Cmd", "K"] {
+            let mut cs = ComputedStyle::new();
+            cs.font_size = Length::Px(font_px);
+            let mut chip = LayoutBox::new(BoxType::Block, cs.clone());
+            chip.children
+                .push(LayoutBox::new(BoxType::Text(key.to_string()), cs));
+            row.children.push(chip);
+        }
+        row
+    }
+
+    /// n51: Phase 9.5 was grow-only, so a row whose estimate OVER-shot kept
+    /// the over-estimate. new_tab's `.shortcuts` grid sized every row 143px
+    /// for 60px items (seven text nodes on one line, estimated as seven
+    /// lines): the grid ran 832px instead of Chrome's 400 and everything
+    /// from the search field down sat 63px above Chrome. An `auto` row is
+    /// the items' real size, so it shrinks to the tallest item's margin box.
+    ///
+    /// T-RED on the grow-only pass: the second row lands at the estimated
+    /// pitch (three lines + padding + gap), not one line below the first.
+    #[test]
+    fn an_auto_row_shrinks_to_its_items_real_height() {
+        const FONT: f32 = 14.0;
+        const GAP: f32 = 12.0;
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Px(262.0)]);
+        container_style.row_gap = Length::Px(GAP);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+        container.children.push(shortcut_row(FONT));
+        container.children.push(shortcut_row(FONT));
+
+        layout_grid_container(&mut container, 262.0, 600.0);
+
+        let first = container.children[0].dimensions.border_box();
+        let second = container.children[1].dimensions.border_box();
+        let one_line = crate::resolve_line_height(&container.children[0].style, FONT);
+        // One line of chips + 24 padding + 2 border; the estimate said three.
+        let real = one_line + 26.0;
+        assert!(
+            (first.height - real).abs() < 1.0,
+            "a flex row of three chips is one line tall ({real}), got {} \
+             (the row kept track sizing's three-text-node estimate)",
+            first.height
+        );
+        assert!(
+            (second.y - (first.y + first.height + GAP)).abs() < 1.0,
+            "row 2 must start one real row + gap below row 1: expected {}, got {} \
+             (the estimated pitch would be {})",
+            first.y + first.height + GAP,
+            second.y,
+            first.y + 3.0 * one_line + 24.0 + GAP
+        );
+        let expected_container = 2.0 * first.height + GAP;
+        assert!(
+            (container.dimensions.content.height - expected_container).abs() < 1.0,
+            "the container's auto height follows the shrunk rows: expected {expected_container}, got {}",
+            container.dimensions.content.height
+        );
+    }
+
+    /// The shrink is limited to intrinsic tracks. `minmax(100px, auto)`
+    /// carries a definite floor the track no longer remembers once the
+    /// contribution loop has grown its base size, so it keeps the grow-only
+    /// behaviour and the row stays at least 100px.
+    #[test]
+    fn a_minmax_row_with_a_definite_floor_does_not_shrink() {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Px(262.0)]);
+        container_style.grid_template_rows = GridTemplate::from_sizes(vec![TrackSize::MinMax(
+            Box::new(TrackSize::Px(100.0)),
+            Box::new(TrackSize::Auto),
+        )]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+        container.children.push(shortcut_row(14.0));
+
+        layout_grid_container(&mut container, 262.0, 600.0);
+
+        // The ROW is the subject: a flex-container item re-derives its own
+        // auto height from its content and is not stretched back to a row
+        // that did not move (pre-existing; the grow path has the same gap).
+        let h = container.dimensions.content.height;
+        assert!(
+            h >= 99.5,
+            "a minmax(100px, auto) row must keep its 100px floor, got {h}"
         );
     }
 
