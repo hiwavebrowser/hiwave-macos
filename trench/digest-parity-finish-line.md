@@ -9300,3 +9300,178 @@ real behavioural mutation for the second.
   mine went through the wrong one of two entry points. The lesson that keeps
   repeating is not "write a test", it is *check that the fixture has the shape
   the engine actually calls*.
+
+## 2026-09-16
+
+**Metric: `2/26` → `2/26` on macOS, unchanged and not re-run.** No macOS lane
+tonight, so nothing here is a receipt. On this seat the metric cannot have
+moved and this is a proof rather than a re-run: all 26 `layout.json` **and**
+all 26 `frame.ppm` are md5-identical before and after, so no case can have
+crossed the conjunction or fallen off it.
+
+**P-item: P3 (flex residual). NOT complete.** I worked the unit #196 named as
+next — the main-axis half of its rule — and it is correct, Chrome-checked,
+mutation-checked and **inert on the corpus**. That last part is the entry:
+this is the first night whose change I can show is right at the engine level
+and show moves nothing at all on the gating set.
+
+### The defect
+
+css-flexbox-1 §9.7: an item's used main size is what the flex algorithm
+resolved in steps 4–10, and its children's flow never changes it. Step 11 lays
+a block flex item's children out with `layout_block_children_with_collapse`,
+which ends by assigning the flow cursor to `content.height`. In a COLUMN
+container that field is the item's MAIN size. Step 11d re-derives only items
+whose main size came from content, so nothing repaired the rest.
+
+`#196` fixed the cross-axis half and its M2 probe survived precisely because
+widening it to this axis is closer to the spec than the code. That survivor is
+now closed by a fix rather than by an assertion.
+
+Chrome 148 on the bundled Chromium, measured before writing anything:
+
+```
+#a { height: 30px } with 3x40px children   ->  height 30, content overflows
+#b  (its sibling)                          ->  y 30
+```
+
+RustKit through `parity-capture` on the same page: **120 before, 30 after.**
+
+### Commits — branch `atlas/n54-p3-column-definite-main`, cut from `develop da8f413`
+
+- `644dab8` — a column item's definite main size survives its children's flow.
+
+**Cut from `develop`, not from n53.** The change does not depend on the n51–n53
+stack, and applying it there would have made four nights deep. The cherry-pick
+onto `develop` conflicted only in the test module's tail (n53's fixtures); the
+resolution keeps n53's tests on n53's branch. Re-measured, re-swept and
+re-probed on the develop base after the move, not carried over.
+
+**Pushed, no PR.** Eight PRs (#193–#200) are open and nothing has merged since
+09-08; adding a ninth to an unreviewed queue for a change that moves no case
+seemed worse than pushing and asking. Decision 1.
+
+### Measured — Linux/SwiftShader, 26 cases, base `develop da8f413`. MECHANICS, NOT A RECEIPT
+
+| Oracle | before | after |
+|---|---:|---:|
+| Gate A geometry failures / joins | 2646 / 16 | 2646 / 16 |
+| Gate A geometry-green / measured | 3/26 · 26/26 | 3/26 · 26/26 |
+| Gate B paint-green / measured | 1/26 · 26/26 | 1/26 · 26/26 |
+| Gate B discrete auto-fails / examined | 0 / 260 | 0 / 260 |
+
+Per (case, selector, axis) across all 26 cases:
+**fixed 0 · newly failing 0 · improved 0 · worsened 0 · unchanged 2646.**
+
+**The corpus contains no column flex item with a definite main size.** That is
+not a null result about the defect — the engine capture above is the defect,
+reproduced at 120 against Chrome's 30 — it is a statement about the corpus. The
+stop rule cannot fire on a change that alters not one axis of one case, and
+neither can the metric move.
+
+### The finding this exposed, recorded and NOT fixed
+
+With a definite main size, **`flex-grow` never applies on the real engine
+path**:
+
+```
+.colg { height: 400px; display:flex; flex-direction:column }
+  #g1 { flex-grow:1; height:30px }   Chrome 400   RustKit 30
+  #g2 { flex:1 1 auto; height:30px } Chrome 400   RustKit 30
+  #g3 { flex-grow:1 }                Chrome 400   RustKit 400
+  #g4 { height:30px }                Chrome  30   RustKit 30   <- tonight's fix
+```
+
+Before tonight `#g1` read its child's 40; it now reads 30. **One wrong number
+replaced another, 10px further out**, and I am recording that rather than
+reporting the row as untouched. The root is upstream of the restore: steps 4–10
+resolve against `container_box.content.height`, which on the block path is the
+block pre-pass's stack and not the container's style height; 11d re-resolves
+content-sized items only, and it is the one place that reads the style height
+(`definite_inner_main`). `#g3` is green because it takes that path. Fixing it
+means hoisting a style-definite main size to the top of the algorithm, which
+changes `collect_flex_lines`, `resolve_flexible_lengths` and justify for every
+column container on the corpus — a unit of its own, not a rider.
+
+### Mutation-check results
+
+**6 probes, 4 RED, 2 SURVIVORS**, control green before and after, committed
+before mutating, each probe verified to be a real edit. Sweep re-run on the
+develop base after the rebase; identical results.
+
+| probe | result |
+|---|---|
+| M1 the restore deleted | RED |
+| M2 the axis guard dropped (restore on both axes) | **SURVIVOR** |
+| M3 the content-sized guard dropped (restore always) | **SURVIVOR** |
+| M4 the guard inverted | RED |
+| M5 the height captured after the flow, not before | RED |
+| M6 restores the style height, not the resolved one | RED |
+
+Both survivors are **masked by a later pass, and I measured the masking rather
+than asserting it** — the sweep reports a survivor, and the question "is my
+guard blind, or is the mutant genuinely unobservable" has been answered by
+argument nine nights running. Disabling the masking pass answers it with a
+number:
+
+- **M2** — 11b recomputes a row item's cross size after the flow. With 11b's
+  recompute disabled the row guard reads **60 against its expected 120**: the
+  guard does hold the rule, the shipped pipeline repairs the mutant. Where 11b
+  does *not* repair it — an item with a definite cross size — the mutant is
+  #196's fix.
+- **M3** — 11d re-derives a content-sized column item from its children. With
+  11d disabled the content-sized guard reads **16 against its expected 120**.
+
+Neither is closed with an assertion: a test failing M2 would pin behaviour
+narrower than the spec, and a test failing M3 would have to assert on a pass
+this change does not own.
+
+### A guard I wrote and then deleted
+
+My first version asserted the SIBLING's position — that `#b` starts at y=30
+rather than after the clobbered flow. Measured on the engine page, `#b` is at
+y=30 **both** with the clobber and without it, because `apply_positions` places
+every item from `target_main_size` and never re-reads the box the flow
+overwrote. It was green either way. Ten nights of this digest say a guard that
+stays green without its fix is decoration; this one was caught before the
+sweep, by reading the engine's own capture instead of trusting the story.
+
+### Decisions needed from Pete
+
+1. **Eight PRs (#193–#200) open, nothing merged since 09-08, and tonight makes
+   five branches pushed unopened** — is the queue waiting on review time, and
+   should the trench keep pushing unopened or start batching them into one PR?
+2. **Is P3 closable?** (carried unanswered from 09-11 through 09-15.) Tonight's
+   reading of the evidence: `flex-positioning` is 15/15 clean on the invariant
+   board and its 174 axes are text; of the board's 13 remaining violations,
+   `chrome_rustkit`, `settings` and `form-elements` are fixed on n49/n51/n50,
+   `image-gallery`'s four are the board's text-item blindness (09-14's finding,
+   still unfixed in the tool), and `about`'s six are a seat artifact — Chrome's
+   baseline has that icon 29 tall in a 29-tall container, i.e. nothing to centre
+   at all on macOS, against this seat's 20 in 20.6.
+3. **Should the definite-main-size + `flex-grow` root above be the next unit?**
+   It is a real Chrome-checked defect (400 vs 30) with no corpus instance, so it
+   would be a second night in a row that cannot move `N/26`.
+
+### Surprises
+
+- **A change that is provably inert is harder to report honestly than one that
+  regresses.** Every column of every board reads identical, the frames are
+  md5-identical, and the temptation is to quote the engine probe (120 → 30) as
+  though it were a corpus result. It is not, and the corpus is what the metric
+  counts.
+- **My unit fixture grew the item correctly and the engine did not.** The
+  fixture seeds the container's style height as its pre-pass height; the engine
+  hands flex the pre-pass *stack*. Same divergence as 09-15's, found this time
+  by capturing a synthetic page through `parity-capture` rather than by the
+  sweep. Checking a fixture against an engine capture is cheaper than a sweep
+  and caught more.
+- **The first fixture I wrote made every item shrink to zero.** Passing a
+  containing block with a zero height — not the container's own box — sent
+  `resolve_flexible_lengths` into shrinking 30px items to nothing, and the flow
+  clobber then "rescued" them. I would have been testing the rescue.
+- **`about`'s six invariant rows are not a defect.** The icon is 29 tall in
+  Chrome's own baseline and so is its container; on this seat it is 20 in 20.6,
+  and the 0.60 the board reports is that difference. Worth carrying into
+  decision 2: three of the board's remaining rows describe the seat, not the
+  engine.
