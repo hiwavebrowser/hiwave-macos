@@ -462,12 +462,37 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
                     // every sibling seam (mb+mt instead of max), un-doing the
                     // collapsed pre-pass — measured as the +20/+10 staircase
                     // on sticky-scroll's main column.
+                    //
+                    // css-flexbox-1 §9.7: an item's used MAIN size is the one
+                    // the flex algorithm resolved in steps 4–10 — its flex base
+                    // size after grow/shrink — and children's flow never
+                    // changes it. In a COLUMN container that size is the item's
+                    // height, and `layout_block_children_with_collapse` ends by
+                    // assigning the flow cursor to `content.height`, silently
+                    // replacing it. Chrome 148, measured on the bundled
+                    // Chromium rather than assumed: a `height: 30px` column
+                    // item holding 120px of children stays 30, its content
+                    // overflows, and its sibling starts at y=30; a
+                    // `flex: 1 1 auto; height: 30px` item in a 400px column
+                    // keeps the 400 it grew to. Restoring the resolved number
+                    // rather than the style length is what covers both.
+                    //
+                    // Items whose main size came from CONTENT are deliberately
+                    // left alone: step 11d re-derives those from exactly this
+                    // flow, and freezing them would stop a column of
+                    // content-sized rows growing to its children at all.
+                    let resolved_main_height = (main_axis == Axis::Vertical
+                        && !item.main_size_from_content)
+                        .then_some(item.layout_box.dimensions.content.height);
                     let mut item_margin_context = crate::MarginCollapseContext::new();
                     let mut item_float_context = crate::FloatContext::new();
                     item.layout_box.layout_block_children_with_collapse(
                         &mut item_margin_context,
                         &mut item_float_context,
                     );
+                    if let Some(height) = resolved_main_height {
+                        item.layout_box.dimensions.content.height = height;
+                    }
                 }
             }
         }
@@ -3397,6 +3422,165 @@ mod tests {
         assert!(
             (border_w - 464.0).abs() < 0.5,
             "column item width is its widest child + padding (400 + 64), got {border_w}"
+        );
+    }
+
+    /// A COLUMN flex item with a definite MAIN size keeps it; its children's
+    /// flow never grows it (css-flexbox-1 §9.7 — the used main size is the
+    /// resolved one, content overflows).
+    ///
+    /// T-RED: step 11 lays a block flex item's children out with
+    /// `layout_block_children_with_collapse`, which ends by assigning the flow
+    /// cursor to `content.height`. In a column container that field is the
+    /// item's MAIN size, already decided in steps 4–10, so the assignment
+    /// replaces it — and step 11d only re-derives items whose main size came
+    /// from content, so nothing repairs it. Measured before the fix: 120.
+    ///
+    /// Chrome 148 on the bundled Chromium, same tree:
+    ///   #a { height: 30px } with 3x40px children -> y 0, height 30
+    ///   #b (its sibling)                         -> y 30
+    ///
+    /// `prepass_height` is what the block pre-pass leaves on the CONTAINER's
+    /// own box, and it is the shape production uses: every caller passes
+    /// `container.dimensions.clone()`, so `container_main_size` is that
+    /// number, not a containing block's. A fixture that hands over a zero
+    /// height instead makes every item shrink to nothing and then tests the
+    /// flow that rescues them — which is a different tree from the engine's.
+    fn column_of_two(
+        first_height: Length,
+        container_height: Length,
+        prepass_height: f32,
+    ) -> LayoutBox {
+        let mut column_style = ComputedStyle::new();
+        column_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        column_style.display = rustkit_css::Display::Flex;
+        column_style.flex_direction = FlexDirection::Column;
+        column_style.height = container_height;
+        let mut column = LayoutBox::new(BoxType::Block, column_style);
+
+        let mut item_style = ComputedStyle::new();
+        item_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        item_style.height = first_height;
+        let mut item = LayoutBox::new(BoxType::Block, item_style);
+        for _ in 0..3 {
+            let mut child_style = ComputedStyle::new();
+            child_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+            child_style.height = Length::Px(40.0);
+            item.children
+                .push(LayoutBox::new(BoxType::Block, child_style));
+        }
+        // The height the block pre-pass leaves on the box, and it is
+        // deliberately the WRONG one: the pre-pass measures before the flex
+        // algorithm hands the item its main size, so a guard that asserted a
+        // number this field already agreed with would pass on the clobber.
+        item.dimensions.content.height = 120.0;
+        column.children.push(item);
+
+        let mut sibling_style = ComputedStyle::new();
+        sibling_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        sibling_style.height = Length::Px(30.0);
+        column
+            .children
+            .push(LayoutBox::new(BoxType::Block, sibling_style));
+        column.dimensions.content = Rect::new(0.0, 0.0, 700.0, prepass_height);
+        column
+    }
+
+    #[test]
+    fn a_definite_main_size_survives_its_childrens_flow() {
+        // 60 is the pre-pass's stack of the two 30px items, which is what the
+        // engine hands an auto-height column container.
+        let mut column = column_of_two(Length::Px(30.0), Length::Auto, 60.0);
+        let containing = column.dimensions.clone();
+        layout_flex_container(&mut column, &containing);
+
+        let item_h = column.children[0].dimensions.border_box().height;
+        assert!(
+            (item_h - 30.0).abs() < 0.01,
+            "an explicit `height: 30px` column item must stay 30 tall against \
+             120px of children, got {item_h}"
+        );
+
+        // No assertion on the SIBLING's position, deliberately: measured, it
+        // is y=30 with the clobber and without it, because apply_positions
+        // places every item from `target_main_size` and never re-reads the
+        // box the flow overwrote. The clobber damages the item's own height
+        // only, and an assertion here would be green either way.
+    }
+
+    #[test]
+    fn a_grown_main_size_survives_its_childrens_flow() {
+        // The restore must carry the RESOLVED main size, not the style length.
+        // `flex: 1 1 auto; height: 30px` in a 400px column grows to 400 in
+        // Chrome 148 (measured); freezing `style.height` would report 30.
+        let mut column = column_of_two(Length::Px(30.0), Length::Px(400.0), 400.0);
+        column.children.pop();
+        column.children[0].style.flex_grow = 1.0;
+        let containing = column.dimensions.clone();
+        layout_flex_container(&mut column, &containing);
+
+        let item_h = column.children[0].dimensions.border_box().height;
+        assert!(
+            (item_h - 400.0).abs() < 0.01,
+            "a grown column item keeps the 400 it grew to, not its 30px style \
+             height and not its 120px of children, got {item_h}"
+        );
+    }
+
+    #[test]
+    fn a_content_sized_main_size_still_takes_its_childrens_flow() {
+        // The boundary the restore must not cross. With `height: auto` the
+        // item's main size IS its content, so the flow is the answer and step
+        // 11d re-derives from it. Asserting only "> 30" would pass on the
+        // stale 120 the fixture seeds; the number is the three 40px children.
+        // The pre-pass stacks the auto item at its three children (120) plus
+        // the 30px sibling.
+        let mut column = column_of_two(Length::Auto, Length::Auto, 150.0);
+        let containing = column.dimensions.clone();
+        layout_flex_container(&mut column, &containing);
+
+        let item_h = column.children[0].dimensions.border_box().height;
+        assert!(
+            (item_h - 120.0).abs() < 0.01,
+            "an auto-height column item takes its three 40px children, got {item_h}"
+        );
+    }
+
+    #[test]
+    fn a_row_items_height_is_not_frozen_by_this_rule() {
+        // The axis half. In a ROW container the item's height is its CROSS
+        // size, which this rule does not own — a content-sized row item must
+        // still grow to its children. (§9.4's definite-cross half is a
+        // separate rule with its own guard.)
+        let mut row_style = ComputedStyle::new();
+        row_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        row_style.display = rustkit_css::Display::Flex;
+        row_style.flex_direction = FlexDirection::Row;
+        let mut row = LayoutBox::new(BoxType::Block, row_style);
+
+        let mut item_style = ComputedStyle::new();
+        item_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        item_style.width = Length::Px(200.0);
+        let mut item = LayoutBox::new(BoxType::Block, item_style);
+        for _ in 0..3 {
+            let mut child_style = ComputedStyle::new();
+            child_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+            child_style.height = Length::Px(40.0);
+            item.children
+                .push(LayoutBox::new(BoxType::Block, child_style));
+        }
+        item.dimensions.content.height = 60.0;
+        row.children.push(item);
+        row.dimensions.content = Rect::new(0.0, 0.0, 700.0, 60.0);
+
+        let containing = row.dimensions.clone();
+        layout_flex_container(&mut row, &containing);
+
+        let item_h = row.children[0].dimensions.border_box().height;
+        assert!(
+            (item_h - 120.0).abs() < 0.01,
+            "a row item with an explicit WIDTH still takes its three 40px \
+             children's height, expected 120, got {item_h}"
         );
     }
 }
