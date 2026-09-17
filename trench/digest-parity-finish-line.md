@@ -9683,3 +9683,53 @@ above this addendum, not that one.
 
 No code work this cycle: the watch is unsubscribed, the check-in trigger
 deleted, and the effort cap was spent long ago.
+
+### Addendum, same day 15:23Z — the backlog is on `develop`
+
+Nine PRs merged today, by Pete, in this order: #193, #194, #196 (13:34–13:35Z),
+then #195, #197, #198, #199, #200, #201, #202 (13:51–15:23Z). `develop` is at
+the merge of #202. Nothing from #193–#202 is open.
+
+**What it took.** After the first three merges every remaining PR went
+"dirty". Real code conflicts: two — #195 and #202 each collided with #196's
+definite-cross-size restore in `flex.rs` step 11 (both kept; restore first
+for #195 so the abspos re-anchor sees the final box, restore last for #202 so
+a definite size wins over the pending margin), and #200 collided with #199 in
+`lib.rs` (kept #200's `inline_wrapped_tail` and #199's gate-free
+`text_splits_inline`). Everything else — every pair of the seven — conflicted
+only on the per-run receipt files (`parity-baseline/parity_test_results.json`,
+`trench/wpt/last-run.json`, a few `parity-baseline/diffs/*/run-1/*`), because
+each night rewrites them. Seven rounds of re-merging, one per merge; each
+branch kept its own receipts. Nothing rebased, nothing force-pushed.
+
+**Metric: not measured on the merged `develop`.** Every PR's macOS lane was
+green on its final head, ratchet holding, but no lane ran on the merged
+result — the nightly lane makes that receipt. Each PR's own board number is
+in its description and was measured against `da8f413`, which is now nine
+merges stale; the numbers do not add.
+
+**Three things this exposed, recorded rather than fixed:**
+
+1. **No CI lane runs `cargo test`.** `f1-test-compile` is `cargo test
+   --no-run` — its log ends at the list of built executables — and the swarm
+   jobs run the parity board. The unit suites this campaign's prompt makes
+   mandatory before every commit are checked only on the seats. #199's two
+   justify tests (`justified_wrapped_lines_fill_the_container_except_the_last`,
+   `a_long_first_run_keeps_its_last_line_open_for_the_next_sibling`) are
+   red on this Linux seat — every wrapped line measures exactly the container
+   width without CoreText, so there is no slack to justify — and green on the
+   macOS seat that wrote them, and CI has never executed them anywhere.
+2. **A shared `CARGO_TARGET_DIR` across git worktrees serves stale test
+   binaries.** Three branches that add different numbers of tests reported
+   the same count until each crate was `cargo clean -p`'d before its run.
+   Any script that tests several checkouts against one target dir needs that
+   clean, or a target dir per checkout.
+3. **The receipt files are the merge cost.** Committing `last-run.json` and
+   `parity_test_results.json` per PR guarantees every pair of open PRs
+   conflicts. If the trench keeps pinning receipts in-tree, a per-branch
+   file name (or keeping them out of the diff and in the PR body only) would
+   make the next backlog mergeable without a round per merge.
+
+**Decisions still open:** the 09-17 night's three above (review time vs.
+batching — now moot for this set; P3 closable?; `new_tab`'s `.container`
++306 as the next unit). The merge does not answer them.
