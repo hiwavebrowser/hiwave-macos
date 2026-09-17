@@ -1391,6 +1391,8 @@ impl LayoutBox {
 
         // Apply positioning offsets after normal layout
         self.apply_position_offsets(containing_block);
+        // This box is final: anchor its abspos children to its padding box.
+        self.reanchor_absolute_children();
     }
 
     /// Layout an inline box.
@@ -2296,6 +2298,8 @@ impl LayoutBox {
 
         // Apply positioning offsets after normal layout
         self.apply_position_offsets(containing_block);
+        // This box is final: anchor its abspos children to its padding box.
+        self.reanchor_absolute_children();
     }
 
     /// Layout a block-level box with an explicit definite height for percentage resolution.
@@ -2668,34 +2672,6 @@ impl LayoutBox {
         }
     }
 
-    /// This box's content height when it is definite BEFORE its children
-    /// lay out (an absolute `height`), else `None`. Percentages are left
-    /// out: they need the grandparent's definite height, which this box
-    /// does not hold. Mirrors the absolute arms of calculate_block_height.
-    fn definite_content_height(&self) -> Option<f32> {
-        let padding_border = self.dimensions.padding.top
-            + self.dimensions.padding.bottom
-            + self.dimensions.border.top
-            + self.dimensions.border.bottom;
-        let specified = match self.style.height {
-            Length::Px(h) => h,
-            Length::Em(em) => {
-                em * match self.style.font_size {
-                    Length::Px(px) => px,
-                    _ => 16.0,
-                }
-            }
-            Length::Rem(rem) => rem * 16.0,
-            Length::Vh(vh) if self.viewport.1 > 0.0 => vh / 100.0 * self.viewport.1,
-            _ => return None,
-        };
-        Some(if self.style.box_sizing == BoxSizing::BorderBox {
-            (specified - padding_border).max(0.0)
-        } else {
-            specified
-        })
-    }
-
     /// Re-resolve an absolutely positioned box's offsets against its REAL
     /// containing block, carrying the already-laid-out subtree with it. The
     /// first pass positioned it against a stand-in whose height was the
@@ -2707,6 +2683,10 @@ impl LayoutBox {
             return;
         }
         let (origin_x, origin_y) = (self.dimensions.content.x, self.dimensions.content.y);
+        let (origin_w, origin_h) = (
+            self.dimensions.content.width,
+            self.dimensions.content.height,
+        );
         self.apply_position_offsets_absolute(containing_block);
         let (dx, dy) = (
             self.dimensions.content.x - origin_x,
@@ -2716,6 +2696,46 @@ impl LayoutBox {
             for child in &mut self.children {
                 crate::flex::translate_subtree(child, dx, dy);
             }
+        }
+        // An `inset`-stretched box changes SIZE here, after its own children
+        // were anchored to its pre-stretch box: a `bottom: 2px` knob inside
+        // an `inset: 0` slider sat 22px above the slider (settings' toggles,
+        // n46). Its abspos children are re-anchored to the new padding box.
+        if self.dimensions.content.width != origin_w || self.dimensions.content.height != origin_h
+        {
+            self.reanchor_absolute_children();
+        }
+    }
+
+    /// CSS 2.1 §10.1: the containing block of an absolutely positioned
+    /// descendant is the PADDING box of its positioned ancestor. Expressed as
+    /// a `Dimensions` whose content rect is that padding box, because
+    /// `apply_position_offsets_absolute` reads `containing_block.content`.
+    fn abspos_containing_block(&self) -> Dimensions {
+        Dimensions {
+            content: self.dimensions.padding_box(),
+            ..Default::default()
+        }
+    }
+
+    /// Re-anchor every absolutely positioned child against this box's FINAL
+    /// padding box. Runs once this box's own size and position are settled —
+    /// after its children laid out, its height resolved and its own offsets
+    /// (including an `inset: 0` stretch) applied.
+    ///
+    /// During child layout an abspos child resolves `bottom:` against a
+    /// stand-in whose height is the parent's flow cursor (its static
+    /// position). The old re-anchor ran inside that loop and only when the
+    /// parent's `height` was an absolute length, against the CONTENT box: a
+    /// `bottom: 2px` knob inside an `inset: 0` slider (settings' toggles),
+    /// inside any auto-height positioned box, or inside a padded one landed
+    /// against the parent's top / short of the padding edge. Idempotent:
+    /// offsets are recomputed absolutely, so a box the parent's own move
+    /// already carried simply lands in the same place.
+    pub(crate) fn reanchor_absolute_children(&mut self) {
+        let cb = self.abspos_containing_block();
+        for child in &mut self.children {
+            child.reanchor_absolute(&cb);
         }
     }
 
@@ -3035,21 +3055,15 @@ impl LayoutBox {
         // + middles) need alignment after the loop: (line_start, text_index).
         let mut split_records: Vec<(usize, usize)> = Vec::new();
 
-        // See layout_block_children_with_collapse: the real containing-block
-        // height an abspos child's `bottom`/`inset` resolve against.
-        let definite_height = self.definite_content_height();
-
         for (i, child) in self.children.iter_mut().enumerate() {
-            // Skip absolutely/fixed positioned children for flow layout
+            // Skip absolutely/fixed positioned children for flow layout.
+            // The stand-in's height is the flow cursor (static position);
+            // `bottom`/`inset` are re-resolved against the real padding box
+            // by reanchor_absolute_children once this box is final.
             if child.position == Position::Absolute || child.position == Position::Fixed {
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y;
                 child.layout(&cb);
-                if let Some(height) = definite_height {
-                    let mut real_cb = self.dimensions.clone();
-                    real_cb.content.height = height;
-                    child.reanchor_absolute(&real_cb);
-                }
                 continue;
             }
 
@@ -3614,13 +3628,11 @@ impl LayoutBox {
         // `cb.content.height = cursor_y` below is the STATIC POSITION trick
         // (calculate_block_position stacks a box at cb.y + cb.height), not
         // the containing block's height — so `bottom: 0` / `inset: 0` on an
-        // abspos child resolved against "content laid out so far". A
+        // abspos child resolves against "content laid out so far". A
         // `::after { inset: 0 }` cover on a `height: 100px` div holding two
         // 27px lines came out 54px tall (WPT overflow-wrap-anywhere-001).
-        // When this box's height is definite before its children lay out,
-        // the child is re-anchored against it afterwards (CSS 2.1 §10.1:
-        // the containing block is the positioned ancestor's padding box).
-        let definite_height = self.definite_content_height();
+        // Once this box is final, reanchor_absolute_children re-resolves the
+        // child against the real padding box (CSS 2.1 §10.1).
 
         for (i, child) in self.children.iter_mut().enumerate() {
             // Skip absolutely/fixed positioned children for flow layout
@@ -3636,11 +3648,6 @@ impl LayoutBox {
                 // swallow the margin between them).
                 let mut oof_margin_context = margin_context.clone();
                 child.layout_with_collapse(&cb, &mut oof_margin_context, float_context);
-                if let Some(height) = definite_height {
-                    let mut real_cb = self.dimensions.clone();
-                    real_cb.content.height = height;
-                    child.reanchor_absolute(&real_cb);
-                }
                 continue;
             }
 
@@ -9916,11 +9923,11 @@ mod tests {
         assert_eq!(cover.dimensions.content.width, 100.0);
     }
 
-    /// The re-anchor must not touch `position: fixed` (viewport containing
-    /// block) or a parent whose height is auto (nothing definite to anchor
-    /// to — the flow-cursor stand-in stays the best available answer).
+    /// An auto-height parent anchors its abspos child to its FINAL content
+    /// height (30px of flow here) — the same answer the flow cursor gave
+    /// when the child came last, now guaranteed regardless of order.
     #[test]
-    fn abspos_reanchor_leaves_auto_height_parents_alone() {
+    fn abspos_reanchor_uses_auto_height_parents_final_height() {
         let mut parent_style = ComputedStyle::new();
         parent_style.width = Length::Px(100.0);
         let mut parent = LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
@@ -9940,6 +9947,105 @@ mod tests {
         };
         parent.layout(&viewport);
         assert_eq!(parent.children[1].dimensions.content.height, 30.0);
+    }
+
+    /// n46 (settings' toggle knobs 21px above their sliders): a `bottom: 2px`
+    /// knob inside an `inset: 0` slider inside a 26px-tall positioned box.
+    /// The slider's height comes from its inset stretch, which resolved
+    /// AFTER its children laid out — so the knob's `bottom` was measured
+    /// against a 0px-tall stand-in and sat against the slider's top. T-RED
+    /// without the post-layout re-anchor: knob y = slider.y - 22.
+    #[test]
+    fn abspos_bottom_inside_inset_stretched_parent_anchors_to_stretched_height() {
+        let mut toggle_style = ComputedStyle::new();
+        toggle_style.width = Length::Px(48.0);
+        toggle_style.height = Length::Px(26.0);
+        let mut toggle = LayoutBox::with_position(BoxType::Block, toggle_style, Position::Relative);
+
+        let mut slider_style = ComputedStyle::new();
+        slider_style.border_top_width = Length::Px(1.0);
+        slider_style.border_bottom_width = Length::Px(1.0);
+        slider_style.border_left_width = Length::Px(1.0);
+        slider_style.border_right_width = Length::Px(1.0);
+        let mut slider = LayoutBox::with_position(BoxType::Block, slider_style, Position::Absolute);
+        slider.set_offsets(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
+
+        let mut knob_style = ComputedStyle::new();
+        knob_style.width = Length::Px(20.0);
+        knob_style.height = Length::Px(20.0);
+        let mut knob = LayoutBox::with_position(BoxType::Block, knob_style, Position::Absolute);
+        knob.set_offsets(None, None, Some(2.0), Some(2.0));
+        slider.children.push(knob);
+        toggle.children.push(slider);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        toggle.layout(&viewport);
+
+        // A bare root lays out at the stand-in's cursor (viewport bottom);
+        // everything below is relative to the toggle's border box.
+        let (tx, ty) = (
+            toggle.dimensions.border_box().x,
+            toggle.dimensions.border_box().y,
+        );
+        let slider = &toggle.children[0];
+        assert_eq!(slider.dimensions.border_box().height, 26.0, "inset:0 fills the toggle");
+        let knob = &slider.children[0];
+        // Chrome 148: padding box of the slider is y 1..25; knob = 25 - 2 - 20 = 3.
+        assert_eq!(
+            knob.dimensions.content.y - ty,
+            3.0,
+            "knob sits 2px above the slider's padding-box bottom"
+        );
+        assert_eq!(knob.dimensions.content.x - tx, 3.0);
+    }
+
+    /// CSS 2.1 §10.1: the containing block is the positioned ancestor's
+    /// PADDING box. A `bottom: 4px` knob in an auto-height parent with
+    /// `padding: 8px 0` holding 48px of flow lands at 8 + 48 + 8 - 4 - 20,
+    /// not 8 + 48 - 24 (content box).
+    #[test]
+    fn abspos_bottom_resolves_against_padding_box_of_auto_height_parent() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(380.0);
+        parent_style.padding_top = Length::Px(8.0);
+        parent_style.padding_bottom = Length::Px(8.0);
+        let mut parent = LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
+
+        let mut knob_style = ComputedStyle::new();
+        knob_style.width = Length::Px(20.0);
+        knob_style.height = Length::Px(20.0);
+        let mut knob = LayoutBox::with_position(BoxType::Block, knob_style, Position::Absolute);
+        knob.set_offsets(None, Some(4.0), Some(4.0), None);
+        // The knob comes FIRST so the flow cursor is 0 when it lays out.
+        parent.children.push(knob);
+        for _ in 0..2 {
+            let mut line = ComputedStyle::new();
+            line.height = Length::Px(24.0);
+            parent.children.push(LayoutBox::new(BoxType::Block, line));
+        }
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+
+        let pb = parent.dimensions.border_box();
+        assert_eq!(pb.height, 64.0);
+        let knob = &parent.children[0];
+        assert_eq!(
+            knob.dimensions.content.y - pb.y,
+            64.0 - 4.0 - 20.0,
+            "bottom: against the padding box"
+        );
+        assert_eq!(
+            knob.dimensions.content.x - pb.x,
+            380.0 - 4.0 - 20.0,
+            "right: against the padding box"
+        );
     }
 
     #[test]

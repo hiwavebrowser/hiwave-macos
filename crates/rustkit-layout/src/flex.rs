@@ -446,6 +446,7 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
                             child.layout(&cb);
                         }
                     }
+                    item.layout_box.reanchor_absolute_children();
                 } else {
                     // Block container: lay out children in normal flow.
                     // Cloning the item's FINAL dimensions per child would make every
@@ -483,6 +484,10 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
                     if let Some(height) = definite_cross_height {
                         item.layout_box.dimensions.content.height = height;
                     }
+                    // The item's flexed size is final here (restored above
+                    // when definite); its abspos children (`bottom:` badges)
+                    // anchor to that, not to the pre-pass cursor.
+                    item.layout_box.reanchor_absolute_children();
                 }
             }
         }
