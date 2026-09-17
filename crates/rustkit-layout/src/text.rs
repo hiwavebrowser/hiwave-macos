@@ -1898,7 +1898,15 @@ impl TextShaper {
             // Need to find a break point
             // Binary search for the right break point
             let break_offset = self.find_line_break(
-                remaining, font_chain, weight, style, stretch, size, cur_max, breaker,
+                remaining,
+                font_chain,
+                weight,
+                style,
+                stretch,
+                size,
+                cur_max,
+                breaker,
+                !preserve_spaces,
             )?;
 
             if break_offset == 0 {
@@ -1969,8 +1977,8 @@ impl TextShaper {
                     self.shape(line_text, font_chain, weight, style, stretch, size)?;
 
                 lines.push(WrappedLine {
-                    runs: vec![shaped_line.clone()],
-                    width: shaped_line.metrics.width,
+                    width: line_ink_width(&shaped_line, !preserve_spaces),
+                    runs: vec![shaped_line],
                     start_offset: base_offset + line_start,
                     end_offset: base_offset + line_start + line_end,
                 });
@@ -1982,9 +1990,16 @@ impl TextShaper {
                 let shaped_line =
                     self.shape(line_text, font_chain, weight, style, stretch, size)?;
 
+                // A line closed by a soft break reports its INK width: the
+                // collapsible space at the break point stays in the text
+                // (paint skips it) but hangs off the line (§4.1.3), so it is
+                // not part of the line's width — right/center alignment
+                // and justification measure against the ink. The LAST line
+                // (the fits-entirely arm above) keeps its trailing space:
+                // it is live content between this run and the next sibling.
                 lines.push(WrappedLine {
-                    runs: vec![shaped_line.clone()],
-                    width: shaped_line.metrics.width,
+                    width: line_ink_width(&shaped_line, !preserve_spaces),
+                    runs: vec![shaped_line],
                     start_offset: base_offset + line_start,
                     end_offset: base_offset + line_start + break_offset,
                 });
@@ -2008,6 +2023,7 @@ impl TextShaper {
         size: f32,
         max_width: f32,
         breaker: &LineBreaker,
+        hang_trailing_spaces: bool,
     ) -> Result<usize, TextError> {
         // Get all break opportunities
         let break_offsets = breaker.break_offsets(text);
@@ -2020,10 +2036,34 @@ impl TextShaper {
                 continue;
             }
 
-            let prefix = &text[..offset];
-            let shaped = self.shape(prefix, font_chain, weight, style, stretch, size)?;
+            // css-text-3 §4.1.3: collapsible spaces at the end of a line are
+            // removed before the line is measured — they HANG past the edge
+            // and never decide the break. Measuring the prefix with its
+            // break-point space made every line whose ink fits but whose
+            // ink + space does not break one word early (n49: a 300px Georgia
+            // line "…and the official" wrapped "official" where Chrome fits
+            // it), and the trailing-space width was silently added to the
+            // slack of every justified line. `break-spaces` is the one value
+            // whose spaces never hang (§4.1.3): they are measured.
+            let prefix = if hang_trailing_spaces {
+                text[..offset].trim_end_matches(is_collapsible_space)
+            } else {
+                &text[..offset]
+            };
+            // A space-only prefix is a line of hanging spaces: zero ink, it
+            // always fits (pre-wrap " XXXXX" in 5ch breaks after the leading
+            // space — WPT overflow-wrap-anywhere-004/005 — the space-only
+            // first line is the break, not a skipped opportunity).
+            let fits = if prefix.is_empty() {
+                true
+            } else {
+                self.shape(prefix, font_chain, weight, style, stretch, size)?
+                    .metrics
+                    .width
+                    <= max_width
+            };
 
-            if shaped.metrics.width <= max_width {
+            if fits {
                 best_break = offset;
             } else {
                 break;
@@ -2032,6 +2072,23 @@ impl TextShaper {
 
         Ok(best_break)
     }
+}
+
+/// The width of a closed line's ink: the run's width minus the advances of
+/// the collapsible spaces that hang off its end (css-text-3 §4.1.3). With
+/// `hang == false` (break-spaces) every space is measured.
+fn line_ink_width(run: &ShapedRun, hang: bool) -> f32 {
+    if !hang {
+        return run.metrics.width;
+    }
+    let hanging: f32 = run
+        .glyphs
+        .iter()
+        .rev()
+        .take_while(|g| is_collapsible_space(g.character))
+        .map(|g| g.advance)
+        .sum();
+    (run.metrics.width - hanging).max(0.0)
 }
 
 /// css-text-3 §4.1: the white space that COLLAPSES (and is removed at a
@@ -2910,6 +2967,56 @@ mod tests {
     /// every 4-character line has the same advance; `break-all` stands in
     /// for `line-break: anywhere` (the layout crate maps it the same way).
     #[test]
+    fn pre_wrap_leading_space_is_a_break_and_hangs_on_its_own_line() {
+        // WPT overflow-wrap-anywhere-004: ` XXXXX ` in a 5ch pre-wrap box —
+        // the leading space is a soft break opportunity and the word must
+        // not be broken: line 1 is the space alone, line 2 is the word.
+        // (n49's hanging-space fit test first skipped the space-only prefix
+        // as "nothing to measure" and broke the word instead.)
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::monospace();
+        let five = shaper
+            .shape(
+                "XXXXX",
+                &chain,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                FontStretch::Normal,
+                20.0,
+            )
+            .expect("shape")
+            .metrics
+            .width;
+        let lines: Vec<String> = shaper
+            .wrap_text_white_space(
+                " XXXXX ",
+                &chain,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                FontStretch::Normal,
+                20.0,
+                five * 1.01,
+                CssWordBreak::Normal,
+                CssOverflowWrap::Anywhere,
+                rustkit_css::WhiteSpace::PreWrap,
+            )
+            .expect("wrap")
+            .iter()
+            .map(|l| l.text())
+            .collect();
+        assert_eq!(lines.len(), 2, "space line + word line, got {lines:?}");
+        assert_eq!(
+            lines[0].trim_end(),
+            "",
+            "line 1 is the hanging leading space: {lines:?}"
+        );
+        assert!(
+            lines[1].starts_with("XXXXX"),
+            "line 2 is the unbroken word: {lines:?}"
+        );
+    }
+
+    #[test]
     fn test_wrap_break_spaces_keeps_the_space_at_a_soft_break() {
         let shaper = TextShaper::new();
         let chain = FontFamilyChain::monospace();
@@ -2948,12 +3055,37 @@ mod tests {
             wrap(rustkit_css::WhiteSpace::BreakSpaces),
             ["X XX", " XX ", "X XX", " X"]
         );
-        // The collapsible default still consumes the space at the break —
-        // this is the legacy behaviour every other white-space value keeps.
-        assert_eq!(
-            wrap(rustkit_css::WhiteSpace::Normal),
-            ["X XX", "XX X", "XX X"]
-        );
+        // The collapsible default HANGS the space at the break (§4.1.3):
+        // it stays in the line's text (paint skips it, consumers trim it)
+        // but never decides the fit — the line's width is its ink. Before
+        // n49 the fit test measured the space, so the break landed before
+        // it and every line was one word short whenever ink fit and ink +
+        // space did not.
+        let normal = wrap(rustkit_css::WhiteSpace::Normal);
+        assert_eq!(normal, ["X XX ", "XX X ", "XX X"]);
+        let widths: Vec<f32> = shaper
+            .wrap_text_white_space(
+                "X XX XX X XX X",
+                &chain,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                FontStretch::Normal,
+                20.0,
+                four_chars * 1.01,
+                CssWordBreak::BreakAll,
+                CssOverflowWrap::Normal,
+                rustkit_css::WhiteSpace::Normal,
+            )
+            .expect("wrap")
+            .iter()
+            .map(|l| l.width)
+            .collect();
+        for (t, w) in normal.iter().zip(&widths) {
+            assert!(
+                *w <= four_chars * 1.01 + 0.01,
+                "line {t:?} width {w} must be its ink (four chars = {four_chars})"
+            );
+        }
     }
 
     #[test]

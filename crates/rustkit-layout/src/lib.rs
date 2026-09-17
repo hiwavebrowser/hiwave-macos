@@ -1056,6 +1056,46 @@ pub struct TextLine {
     pub width: f32,
     /// X offset from the box's content origin (per-line text-align).
     pub x_offset: f32,
+    /// `text-align: justify` (css-text-3 §7.3): extra advance added to each
+    /// word separator on this line so the line fills the container. 0 on
+    /// every line that is not justified — the last line of a run (the block's
+    /// last line, or a line that continues into a sibling) keeps its natural
+    /// spacing, as does a line with no justification opportunity.
+    pub justify_space: f32,
+}
+
+impl TextLine {
+    /// Justification opportunities on this line: the word separators
+    /// css-text-3 §7.3 lists that this engine can expand (U+0020 and
+    /// U+00A0 — both shape as one glyph with its own advance).
+    pub fn justification_opportunities(text: &str) -> usize {
+        text.chars().filter(|c| Self::is_word_separator(*c)).count()
+    }
+
+    /// Whether `c` is a word separator that justification expands.
+    pub fn is_word_separator(c: char) -> bool {
+        matches!(c, ' ' | '\u{a0}')
+    }
+
+    /// The width a justified line's INK spans before expansion: the
+    /// trimmed text shaped by the same advance path paint uses
+    /// (`shape_line_advances`, letter/word-spacing applied). `TextLine::width`
+    /// is not that number — the wrap keeps the collapsible space at the
+    /// break point in both `text` and `width` (Georgia 17.6px: 4.4px), and
+    /// slack measured against it left every justified line 4px short of the
+    /// container. `None` when the shaper cannot give per-char advances
+    /// (ligature clusters): paint cannot expand such a line either.
+    pub fn natural_ink_width(
+        text: &str,
+        style: &rustkit_css::ComputedStyle,
+        font_size: f32,
+    ) -> Option<f32> {
+        let trimmed = text.trim_end();
+        if trimmed.is_empty() {
+            return None;
+        }
+        shape_line_advances(trimmed, style, font_size).map(|adv| adv.iter().sum())
+    }
 }
 
 /// Identity of the DOM element a layout box was generated from.
@@ -1682,6 +1722,7 @@ impl LayoutBox {
                             text: l.text(),
                             width: l.width,
                             x_offset: 0.0,
+                            justify_space: 0.0,
                         })
                         .collect();
                     let max_line_width = text_lines.iter().map(|l| l.width).fold(0.0f32, f32::max);
@@ -1721,12 +1762,6 @@ impl LayoutBox {
         self.dimensions.content.height = run_line_height(&self.style, font_size, &metrics);
     }
 
-    /// Whether a text child that does NOT fit the remaining line space
-    /// should split across line boxes (phase-5 IFC flow) rather than drop
-    /// to its own block row. IFC Slice B2 opened the split to Center/Right:
-    /// closed lines get per-visual-line alignment (`align_split_close`),
-    /// so "a run spanning several line boxes cannot be shifted as one
-    /// child" no longer forces the block path.
     /// A non-atomic inline child whose text wrapped onto several line boxes:
     /// `(line count, end x of the last line relative to the container's
     /// content left, that text's line height)`. `None` when every
@@ -1749,9 +1784,23 @@ impl LayoutBox {
         out
     }
 
-    fn text_splits_inline(child: &LayoutBox, cursor_x: f32) -> bool {
-        cursor_x > 0.0
-            && matches!(child.box_type, BoxType::Text(_))
+    /// Whether a text child that does NOT fit the remaining line space
+    /// should split across line boxes (phase-5 IFC flow) rather than drop
+    /// to its own block row. IFC Slice B2 opened the split to Center/Right:
+    /// closed lines get per-visual-line alignment (`align_split_close`),
+    /// so "a run spanning several line boxes cannot be shifted as one
+    /// child" no longer forces the block path.
+    ///
+    /// n49: the split applies from the line START too. The old `cursor_x >
+    /// 0` gate sent a paragraph's FIRST long run down the block path, which
+    /// closes every line it makes — so `<p>long text… <span>x</span> more`
+    /// put the span on a fresh line under the run instead of on the run's
+    /// last line (article-typography's `.highlight`; every paragraph that
+    /// opens with a long run and carries a link/em/strong later — most of
+    /// them). The flow path at cursor 0 is the block path with the last
+    /// line left open.
+    fn text_splits_inline(child: &LayoutBox, _cursor_x: f32) -> bool {
+        matches!(child.box_type, BoxType::Text(_))
             && !matches!(
                 child.style.white_space,
                 rustkit_css::WhiteSpace::Nowrap | rustkit_css::WhiteSpace::Pre
@@ -1787,23 +1836,42 @@ impl LayoutBox {
 
         let shaper = TextShaper::new();
         let chain = FontFamilyChain::from_css_value(&self.style.font_family);
-        // This run starts at the inline cursor (the caller's gate requires
-        // cursor_x > 0), so say so: with a zero-wide container the first and
-        // full budgets are both 0 and the shaper's `first < max` proxy can
-        // no longer tell — it glued the first grapheme onto the open line.
-        let lines = match shaper.wrap_text_mid_line_white_space(
-            &text,
-            &chain,
-            self.style.font_weight,
-            self.style.font_style,
-            self.style.font_stretch,
-            font_size,
-            first_line_width,
-            container_width,
-            effective_word_break(&self.style),
-            self.style.overflow_wrap,
-            self.style.white_space,
-        ) {
+        // A run that starts at an inline cursor past the line start says so
+        // explicitly: with a zero-wide container the first and full budgets
+        // are both 0 and the shaper's `first < max` proxy cannot tell — it
+        // glued the first grapheme onto the open line. A run at the line
+        // START (n49: the flow path now takes those too) wraps as the block
+        // path did — an unbreakable first word overflows its line instead
+        // of leaving an empty line box above itself.
+        let wrapped = if first_line_offset > 0.0 {
+            shaper.wrap_text_mid_line_white_space(
+                &text,
+                &chain,
+                self.style.font_weight,
+                self.style.font_style,
+                self.style.font_stretch,
+                font_size,
+                first_line_width,
+                container_width,
+                effective_word_break(&self.style),
+                self.style.overflow_wrap,
+                self.style.white_space,
+            )
+        } else {
+            shaper.wrap_text_white_space(
+                &text,
+                &chain,
+                self.style.font_weight,
+                self.style.font_style,
+                self.style.font_stretch,
+                font_size,
+                container_width,
+                effective_word_break(&self.style),
+                self.style.overflow_wrap,
+                self.style.white_space,
+            )
+        };
+        let lines = match wrapped {
             Ok(lines) if !lines.is_empty() => lines,
             _ => {
                 // Shaping failed — fall back to the block path's layout.
@@ -1832,6 +1900,7 @@ impl LayoutBox {
                 text: l.text(),
                 width: l.width,
                 x_offset: if i == 0 { first_line_offset } else { 0.0 },
+                justify_space: 0.0,
             })
             .collect();
         let line_count = text_lines.len();
@@ -3453,13 +3522,25 @@ impl LayoutBox {
             (half_leading + m.ascent, half_leading + m.descent)
         };
 
-        // Line top from current geometry: every member is top-placed today.
+        // A member's top on THIS line. A mid-line split run reaches the
+        // recorded line only through its LAST visual line (the open one its
+        // followers share); its box top is the top of its FIRST line, and
+        // reading that as the line top hoisted every follower up to the
+        // run's first line (n49: `<p>long run… <span>x</span>` put the span
+        // on line 1 of a 4-line run).
+        let member_top = |c: &LayoutBox| -> f32 {
+            let d = &c.dimensions;
+            let box_top = d.content.y - d.margin.top - d.border.top - d.padding.top;
+            match (&c.text_flow_first_offset, &c.text_lines) {
+                (Some(_), Some(tls)) if tls.len() > 1 => {
+                    box_top + (tls.len() as f32 - 1.0) * c.get_line_height()
+                }
+                _ => box_top,
+            }
+        };
         let line_top = members
             .iter()
-            .map(|&i| {
-                let d = &children[i].dimensions;
-                d.content.y - d.margin.top - d.border.top - d.padding.top
-            })
+            .map(|&i| member_top(&children[i]))
             .fold(f32::INFINITY, f32::min);
 
         // Pass 1: the line's ascent = max above-baseline extent, floored by
@@ -3513,10 +3594,14 @@ impl LayoutBox {
             } else {
                 continue;
             };
-            let d = &c.dimensions;
-            let current_top = d.content.y - d.margin.top - d.border.top - d.padding.top;
+            let current_top = member_top(c);
             let dy = target_top - current_top;
-            if dy.abs() > 0.01 {
+            let is_multi_line_split = c.text_flow_first_offset.is_some()
+                && c.text_lines.as_ref().is_some_and(|t| t.len() > 1);
+            // A split run's last line cannot move on its own (its lines
+            // are content.y + i * line-height); a taller follower on that
+            // line leaves the run where it is. Ledgered, not chased.
+            if dy.abs() > 0.01 && !is_multi_line_split {
                 crate::flex::translate_subtree(c, 0.0, dy);
             }
         }
@@ -3538,8 +3623,56 @@ impl LayoutBox {
             TextAlign::Left => 0.0,
             TextAlign::Right => (container_width - line_width).max(0.0),
             TextAlign::Center => ((container_width - line_width) / 2.0).max(0.0),
-            TextAlign::Justify => 0.0, // Justify would need gap distribution (complex)
+            TextAlign::Justify => 0.0, // no line shift: gaps are distributed below
         };
+
+        // css-text-3 §7.3: under `justify`, every line that ends in a soft
+        // wrap spreads its slack across its word separators. A wrapped run's
+        // last line is never justified — it is either the block's last line
+        // or it continues into the next inline sibling (a mixed line, which
+        // stays start-aligned: distributing across sibling runs is not
+        // implemented). Line 0 of a mid-line split starts after prior
+        // siblings for the same reason. Preserved-newline runs (pre-wrap /
+        // pre-line) are left alone: their breaks may be forced.
+        if matches!(text_align, TextAlign::Justify) {
+            for child in children.iter_mut() {
+                if !matches!(
+                    child.style.white_space,
+                    rustkit_css::WhiteSpace::Normal | rustkit_css::WhiteSpace::Nowrap
+                ) {
+                    continue;
+                }
+                // Line 0 of a split that starts past the line start is a
+                // mixed line (prior siblings own part of it); a split that
+                // starts AT the line start owns line 0 outright.
+                let first_justifiable =
+                    usize::from(child.text_flow_first_offset.is_some_and(|o| o > 0.0));
+                let font_size = match child.style.font_size {
+                    Length::Px(px) => px,
+                    _ => 16.0,
+                };
+                let style = child.style.clone();
+                let Some(text_lines) = child.text_lines.as_mut() else {
+                    continue;
+                };
+                let n = text_lines.len();
+                for tl in text_lines
+                    .iter_mut()
+                    .take(n.saturating_sub(1))
+                    .skip(first_justifiable)
+                {
+                    let opportunities = TextLine::justification_opportunities(tl.text.trim_end());
+                    let natural = TextLine::natural_ink_width(&tl.text, &style, font_size);
+                    tl.justify_space = match natural {
+                        Some(w) if opportunities > 0 && container_width - tl.x_offset - w > 0.0 => {
+                            (container_width - tl.x_offset - w) / opportunities as f32
+                        }
+                        _ => 0.0,
+                    };
+                }
+            }
+            return;
+        }
 
         for child in children {
             // A wrapped text run aligns each VISUAL line independently
@@ -6121,24 +6254,29 @@ impl DisplayList {
             // Build the list of lines to emit: wrapped text boxes carry
             // per-line fragments (see LayoutBox::text_lines); single-run
             // boxes emit exactly one line, positioned as before.
-            // Tuple: (text, x, y, width, line_top) — shadowing the outer
-            // names inside the loop keeps the emission code identical for
-            // both cases. `line_top` is the line box's top (y minus the
-            // half-leading), the key runs on one line share regardless of
-            // their own font's leading.
-            let render_lines: Vec<(String, f32, f32, f32, f32)> = match &layout_box.text_lines {
+            // Tuple: (text, x, y, width, line_top, justify_space) — shadowing
+            // the outer names inside the loop keeps the emission code
+            // identical for both cases. `line_top` is the line box's top (y
+            // minus the half-leading), the key runs on one line share
+            // regardless of their own font's leading. `justify_space` is the
+            // per-word-separator expansion of a justified line (0 otherwise);
+            // the line's width already includes it.
+            let render_lines: Vec<(String, f32, f32, f32, f32, f32)> = match &layout_box.text_lines {
                 Some(lines) => lines
                     .iter()
                     .enumerate()
                     .filter(|(_, l)| !l.text.is_empty())
                     .map(|(i, l)| {
                         let top = content_y + i as f32 * line_height;
+                        let expansion = l.justify_space
+                            * TextLine::justification_opportunities(l.text.trim_end()) as f32;
                         (
                             apply_text_transform(&l.text, style.text_transform),
                             x + l.x_offset,
                             top + half_leading,
-                            l.width,
+                            l.width + expansion,
                             top,
+                            l.justify_space,
                         )
                     })
                     .collect(),
@@ -6148,6 +6286,7 @@ impl DisplayList {
                     content_y + half_leading,
                     text_width,
                     content_y,
+                    0.0,
                 )],
             };
 
@@ -6155,7 +6294,7 @@ impl DisplayList {
             // half of the glyph seating chain so flat-1.2 vs metrics-normal
             // builds can be diffed line-by-line (forensics 2026-07-16 §4.2).
             if paint0_probe() {
-                for (t, _lx, ly, _lw, _top) in &render_lines {
+                for (t, _lx, ly, _lw, _top, _js) in &render_lines {
                     eprintln!(
                         "PAINT0 layout text={:?} fs={} lh={} asc={} desc={} half={} content_y={} y_cmd={}",
                         t.chars().take(16).collect::<String>(),
@@ -6170,14 +6309,27 @@ impl DisplayList {
                 }
             }
 
-            for (text, x, y, text_width, line_top) in render_lines {
+            for (text, x, y, text_width, line_top, justify_space) in render_lines {
                 // ADVANCE CONTRACT: ONE shape call feeds BOTH command types —
                 // layout's per-char advances and ascent ride the command so
                 // paint places glyphs exactly where layout measured them.
                 // (GradientText was skipped by the old continue-before-shape
                 // and re-owned pitch + baseline in paint — the last dual
                 // text path.)
-                let advances = shape_line_advances(&text, style, font_size);
+                let mut advances = shape_line_advances(&text, style, font_size);
+                // A justified line widens each word separator by the slack
+                // layout distributed (TextLine::justify_space). Only the
+                // per-char advance path can carry it: when shaping fell back
+                // (ligature clusters) the line paints at natural spacing.
+                if justify_space > 0.0 {
+                    if let Some(adv) = advances.as_mut() {
+                        for (a, c) in adv.iter_mut().zip(text.chars()) {
+                            if TextLine::is_word_separator(c) {
+                                *a += justify_space;
+                            }
+                        }
+                    }
+                }
 
                 // `text-overflow: ellipsis` on the enclosing block container
                 // (css-overflow-3 §5.1): cut the run at the block's content
@@ -7954,6 +8106,113 @@ mod tests {
         assert_eq!(layout_box.dimensions.content.x, 0.0);
     }
 
+    /// css-text-3 §7.3 receipt for a justified line: its natural width plus
+    /// the distributed slack reaches the container edge.
+    fn justified_width(line: &TextLine) -> f32 {
+        let natural = TextLine::natural_ink_width(&line.text, &ComputedStyle::new(), 16.0)
+            .expect("the test text shapes one glyph per char");
+        assert!(
+            natural <= line.width,
+            "the ink width never exceeds the wrap width (which keeps the break-point space): {natural} vs {}",
+            line.width
+        );
+        line.x_offset
+            + natural
+            + line.justify_space
+                * TextLine::justification_opportunities(line.text.trim_end()) as f32
+    }
+
+    #[test]
+    fn justified_wrapped_lines_fill_the_container_except_the_last() {
+        // text-align: justify (css-text-3 §7.3): every soft-wrapped line
+        // spreads its slack over its word separators and ends at the
+        // container edge; the block's last line keeps natural spacing.
+        // Before n49 the Justify arm was `0.0 // (complex)` and every
+        // justified paragraph on every page painted start-aligned.
+        let mut style = ComputedStyle::new();
+        style.text_align = TextAlign::Justify;
+        let mut layout_box = LayoutBox::new(BoxType::Text(LONG_TEXT.to_string()), style);
+        layout_box.layout_text(LONG_TEXT.to_string(), &containing_200());
+        let n = layout_box.text_lines.as_ref().expect("text should wrap").len();
+        assert!(n >= 3, "need at least three lines, got {n}");
+
+        let mut children = vec![layout_box];
+        LayoutBox::apply_text_align_offset(&mut children, 200.0, 200.0, TextAlign::Justify);
+        let lines = children[0].text_lines.as_ref().unwrap();
+        for (k, line) in lines.iter().enumerate().take(n - 1) {
+            assert_eq!(line.x_offset, 0.0, "justify never shifts a line (line {k})");
+            let gaps = TextLine::justification_opportunities(line.text.trim_end());
+            assert!(gaps > 0, "line {k} '{}' has no word separator", line.text);
+            assert!(
+                line.justify_space > 0.0,
+                "line {k} '{}' must be justified, justify_space = {}",
+                line.text,
+                line.justify_space
+            );
+            assert!(
+                (justified_width(line) - 200.0).abs() < 0.01,
+                "line {k} '{}' must end at the container edge: {}",
+                line.text,
+                justified_width(line)
+            );
+        }
+        let last = &lines[n - 1];
+        assert_eq!(last.justify_space, 0.0, "the block's last line is never justified");
+    }
+
+    #[test]
+    fn justify_leaves_left_lines_and_preserved_newlines_alone() {
+        // Left: no expansion. pre-wrap: a wrapped line may end in a forced
+        // break, which justification must not stretch (css-text-3 §7.3).
+        for (align, ws) in [
+            (TextAlign::Left, rustkit_css::WhiteSpace::Normal),
+            (TextAlign::Justify, rustkit_css::WhiteSpace::PreWrap),
+        ] {
+            let mut style = ComputedStyle::new();
+            style.text_align = align;
+            style.white_space = ws;
+            let mut layout_box = LayoutBox::new(BoxType::Text(LONG_TEXT.to_string()), style);
+            layout_box.layout_text(LONG_TEXT.to_string(), &containing_200());
+            assert!(layout_box.text_lines.as_ref().map_or(0, |l| l.len()) > 1);
+            let mut children = vec![layout_box];
+            LayoutBox::apply_text_align_offset(&mut children, 200.0, 200.0, align);
+            for line in children[0].text_lines.as_ref().unwrap() {
+                assert_eq!(
+                    line.justify_space, 0.0,
+                    "{align:?}/{ws:?}: line '{}' must not be justified",
+                    line.text
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn justify_midline_split_skips_line_zero_and_the_open_last_line() {
+        // A run that starts after a sibling: line 0 is a mixed line (its
+        // slack belongs to the sibling's spaces too — not distributed, it
+        // stays start-aligned, ledgered), middle lines fill the container,
+        // the open last line is left natural.
+        let parent = midline_split_parent(TextAlign::Justify);
+        assert_eq!(parent.children[0].dimensions.content.x, 0.0, "the prior sibling never moves");
+        let t = &parent.children[1];
+        let flow0 = t.text_flow_first_offset.unwrap();
+        let tls = t.text_lines.as_ref().unwrap();
+        let n = tls.len();
+        assert!(n >= 3, "need line0 + middle + last, got {n}");
+        assert!((tls[0].x_offset - flow0).abs() < 0.01, "line 0 keeps its FLOW offset");
+        assert_eq!(tls[0].justify_space, 0.0, "line 0 of a split is a mixed line: not justified");
+        for (k, tl) in tls.iter().enumerate().take(n - 1).skip(1) {
+            assert_eq!(tl.x_offset, 0.0, "middle line {k} sits at the origin");
+            assert!(
+                (justified_width(tl) - 200.0).abs() < 0.01,
+                "middle line {k} '{}' must end at the container edge: {}",
+                tl.text,
+                justified_width(tl)
+            );
+        }
+        assert_eq!(tls[n - 1].justify_space, 0.0, "the open last line is never justified");
+    }
+
     #[test]
     fn test_text_nowrap_stays_single_line() {
         let mut style = ComputedStyle::new();
@@ -8114,6 +8373,56 @@ mod tests {
         ));
         parent.layout_block_children();
         parent
+    }
+
+    #[test]
+    fn a_long_first_run_keeps_its_last_line_open_for_the_next_sibling() {
+        // CSS2 §9.4.2: inline content after a wrapped run continues on the
+        // run's LAST line box. Before n49 a run at cursor 0 took the block
+        // path, which closed all its lines, so the sibling started a new
+        // line under it ("one span wraps to a different line" on
+        // article-typography: `…used as an` / `<span>ornamental…`).
+        let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        parent.dimensions.content = Rect::new(0.0, 0.0, 200.0, 0.0);
+        parent.children.push(LayoutBox::new(
+            BoxType::Text(LONG_TEXT.to_string()),
+            ComputedStyle::new(),
+        ));
+        parent.children.push(LayoutBox::new(
+            BoxType::Text("Hi".to_string()),
+            ComputedStyle::new(),
+        ));
+        parent.layout_block_children();
+
+        let run = &parent.children[0];
+        let tls = run.text_lines.as_ref().expect("the long run wraps");
+        let n = tls.len();
+        assert!(n >= 2);
+        assert_eq!(
+            run.text_flow_first_offset,
+            Some(0.0),
+            "a run at the line start is a flow split with FLOW offset 0"
+        );
+        assert_eq!(tls[0].x_offset, 0.0);
+        let lh = run.get_line_height();
+        let last_top = run.dimensions.content.y + (n as f32 - 1.0) * lh;
+        let last_w = tls[n - 1].width;
+        let hi = &parent.children[1];
+        assert!(
+            (hi.dimensions.content.y - last_top).abs() < 0.01,
+            "the sibling must sit on the run's last line (top {last_top}), got y={}",
+            hi.dimensions.content.y
+        );
+        assert!(
+            (hi.dimensions.content.x - last_w).abs() < 0.01,
+            "the sibling must continue after the last line's ink ({last_w}), got x={}",
+            hi.dimensions.content.x
+        );
+        assert!(
+            (parent.dimensions.content.height - n as f32 * lh).abs() < 0.01,
+            "the block is exactly n line boxes tall, got {}",
+            parent.dimensions.content.height
+        );
     }
 
     #[test]
