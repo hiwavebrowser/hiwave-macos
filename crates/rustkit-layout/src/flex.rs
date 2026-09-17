@@ -464,10 +464,25 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
                     // on sticky-scroll's main column.
                     let mut item_margin_context = crate::MarginCollapseContext::new();
                     let mut item_float_context = crate::FloatContext::new();
+                    // css-flexbox-1 §9.4: an item whose cross size is DEFINITE
+                    // keeps it — content overflows rather than growing the box.
+                    // layout_block_children_with_collapse ends by assigning the
+                    // flow cursor to the item's `content.height`, and on this
+                    // path that height is the size the flex algorithm already
+                    // decided. Step 11b states this rule and `continue`s for
+                    // exactly these items, so nothing downstream repairs the
+                    // clobber: form-elements' `.toggle-switch { height: 26px }`
+                    // came out 32.08, its two in-flow children's line boxes.
+                    let definite_cross_height = (cross_axis == Axis::Vertical
+                        && item.has_explicit_cross_size)
+                        .then_some(item.layout_box.dimensions.content.height);
                     item.layout_box.layout_block_children_with_collapse(
                         &mut item_margin_context,
                         &mut item_float_context,
                     );
+                    if let Some(height) = definite_cross_height {
+                        item.layout_box.dimensions.content.height = height;
+                    }
                 }
             }
         }
@@ -3399,4 +3414,165 @@ mod tests {
             "column item width is its widest child + padding (400 + 64), got {border_w}"
         );
     }
+
+    /// A flex item with a DEFINITE cross size keeps it; its children's flow
+    /// never grows it (css-flexbox-1 §9.4 — content overflows instead).
+    ///
+    /// T-RED: step 11 lays a block flex item's children out with
+    /// `layout_block_children_with_collapse`, which ends by assigning the flow
+    /// cursor to the item's `content.height`. On this path that height is the
+    /// size the flex algorithm already decided, and step 11b states the §9.4
+    /// rule but `continue`s for exactly these items — so nothing repaired the
+    /// clobber. `form-elements`' `.toggle-label > .toggle-switch`
+    /// (`height: 26px`, two in-flow children) measured 32.08.
+    fn toggle_switch_row() -> LayoutBox {
+        fn border_box(s: &mut ComputedStyle) {
+            // The corpus's `* { box-sizing: border-box }` is load-bearing:
+            // the two sizing modes take different arithmetic through flex.
+            s.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        }
+        let mut switch_style = ComputedStyle::new();
+        border_box(&mut switch_style);
+        switch_style.position = rustkit_css::Position::Relative;
+        switch_style.width = Length::Px(50.0);
+        switch_style.height = Length::Px(26.0);
+        let mut switch = LayoutBox::new(BoxType::Block, switch_style);
+
+        let mut checkbox_style = ComputedStyle::new();
+        border_box(&mut checkbox_style);
+        checkbox_style.width = Length::Px(0.0);
+        checkbox_style.height = Length::Px(0.0);
+        switch.children.push(LayoutBox::new(
+            BoxType::FormControl(crate::FormControlType::Checkbox { checked: true }),
+            checkbox_style,
+        ));
+
+        let mut slider_style = ComputedStyle::new();
+        border_box(&mut slider_style);
+        slider_style.position = rustkit_css::Position::Absolute;
+        slider_style.top = Some(Length::Px(0.0));
+        slider_style.left = Some(Length::Px(0.0));
+        slider_style.right = Some(Length::Px(0.0));
+        slider_style.bottom = Some(Length::Px(0.0));
+        switch
+            .children
+            .push(LayoutBox::new(BoxType::Inline, slider_style));
+
+        let mut label_style = ComputedStyle::new();
+        border_box(&mut label_style);
+        label_style.display = rustkit_css::Display::Flex;
+        label_style.flex_direction = FlexDirection::Row;
+        label_style.align_items = AlignItems::Center;
+        label_style.column_gap = Length::Px(12.0);
+        let mut label = LayoutBox::new(BoxType::Block, label_style);
+        label.children.push(switch);
+        let mut text_style = ComputedStyle::new();
+        text_style.font_size = Length::Px(16.0);
+        label.children.push(LayoutBox::new(
+            BoxType::Text("Enable notifications".into()),
+            text_style,
+        ));
+        label
+    }
+
+    #[test]
+    fn a_definite_cross_size_survives_its_childrens_flow() {
+        let mut label = toggle_switch_row();
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 700.0, 0.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut label, &containing);
+
+        let switch_h = label.children[0].dimensions.border_box().height;
+        assert!(
+            (switch_h - 26.0).abs() < 0.01,
+            "an explicit `height: 26px` flex item must stay 26 tall, got {switch_h}"
+        );
+
+        // The same clobber is visible one level out: align-items:center centres
+        // every item against the line, so a line sized by the wrong item height
+        // puts the sibling text at the wrong y. 26/2 - 16/2 = 5.
+        let text = &label.children[1].dimensions;
+        let text_y = text.content.y;
+        let expected = (26.0 - text.border_box().height) / 2.0;
+        assert!(
+            (text_y - expected).abs() < 0.01,
+            "the centred sibling must centre against the 26px line, expected \
+             {expected}, got {text_y}"
+        );
+    }
+
+    #[test]
+    fn an_auto_cross_size_still_takes_its_childrens_flow() {
+        // The other side of §9.4, and the boundary the fix must not cross: an
+        // item with NO definite cross size is content-sized, so its children's
+        // flow — not the measure it arrived with — is what decides its height.
+        //
+        // The seeded 60 is what the block pre-pass leaves on the box, and it
+        // is deliberately wrong: the pre-pass measures at the container's
+        // width, the flex algorithm then hands the item a different main size,
+        // and step 11 relays the children. Asserting only "> 26.5" would pass
+        // on the stale 60 as happily as on the real 32.08, which is the shape
+        // of guard this file keeps writing and this sweep keeps catching.
+        let mut label = toggle_switch_row();
+        label.children[0].style.height = Length::Auto;
+        label.children[0].dimensions.content.height = 60.0;
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 700.0, 0.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut label, &containing);
+
+        let switch_h = label.children[0].dimensions.border_box().height;
+        assert!(
+            (26.5..40.0).contains(&switch_h),
+            "an auto-height item takes its two in-flow children's flow \
+             (measured 32.08), not the stale 60 it arrived with, got {switch_h}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_width_does_not_freeze_a_column_items_height() {
+        // The axis half of the rule. In a COLUMN container the cross axis is
+        // horizontal, so `width` is what `has_explicit_cross_size` reports —
+        // and the item's HEIGHT is its main size, not its cross size. Freezing
+        // the height here would be the same clobber with the sign flipped:
+        // a content-sized column item would stop growing to its children.
+        let mut item_style = ComputedStyle::new();
+        item_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        item_style.width = Length::Px(200.0);
+        let mut item = LayoutBox::new(BoxType::Block, item_style);
+        for _ in 0..3 {
+            let mut child_style = ComputedStyle::new();
+            child_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+            child_style.height = Length::Px(40.0);
+            item.children
+                .push(LayoutBox::new(BoxType::Block, child_style));
+        }
+        // As above: the height the item arrives with is the pre-pass's, and it
+        // must not be what survives.
+        item.dimensions.content.height = 60.0;
+
+        let mut column_style = ComputedStyle::new();
+        column_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        column_style.display = rustkit_css::Display::Flex;
+        column_style.flex_direction = FlexDirection::Column;
+        let mut column = LayoutBox::new(BoxType::Block, column_style);
+        column.children.push(item);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 700.0, 0.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut column, &containing);
+
+        let item_h = column.children[0].dimensions.border_box().height;
+        assert!(
+            (item_h - 120.0).abs() < 0.01,
+            "a column item with an explicit WIDTH still takes its three 40px \
+             children's height, expected 120, got {item_h}"
+        );
+    }
+
 }
