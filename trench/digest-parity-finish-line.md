@@ -9475,3 +9475,169 @@ sweep, by reading the engine's own capture instead of trusting the story.
   and the 0.60 the board reports is that difference. Worth carrying into
   decision 2: three of the board's remaining rows describe the seat, not the
   engine.
+
+## 2026-09-17
+
+**Metric: `2/26` → `2/26` on macOS, unchanged and not re-run.** No macOS lane
+tonight, so nothing here is a receipt. On this seat the metric cannot have
+moved, and that is a proof rather than a re-run: all 26 `layout.json` **and**
+all 26 `frame.ppm` are md5-identical before and after, so no case can have
+crossed the conjunction or fallen off it.
+
+**P-item: P3 (flex residual). NOT complete.** I worked 09-16's decision 3 — the
+definite-main-size root it found and deferred — expecting it to have corpus
+instances that last night's narrower change did not. **It does not.** That is
+the night's result: a correct, Chrome-exact engine fix that is the *second
+consecutive* change the 26-case corpus cannot see, and this time I can say
+exactly why.
+
+### The defect
+
+css-flexbox-1 §9.2/§9.7 resolve flex lines, grow/shrink and `justify-content`
+against the container's used inner MAIN size. On the vertical main axis the
+engine never had that number. Every production call site passes the
+container's OWN dimensions as `containing_block`, and on the block path their
+`content.height` is the pre-pass **flow cursor** — the stack of the children's
+own heights. Free space is then identically zero.
+
+Step 11d already resolved the height from style, but only inside its
+`any_changed` branch, i.e. only when some *content-sized* item had been
+corrected. A column whose items are all explicitly sized or basis-0 never
+reached it. The resolution now sits at the top of the algorithm, in front of
+every step that consumes it, and 11d shares the helper rather than restating
+the rule.
+
+Chrome 148 on the bundled Chromium, measured before I wrote anything, against
+RustKit through `parity-capture` on the same page:
+
+```
+                                     Chrome    before     after
+  #g1  flex-grow:1; height:30px         370        30       370
+  #g2  height:30px                  y=  370    y=  30   y=  370
+  #h1  flex-grow:1; height:30px      143.33        30    143.33
+  #h2  flex-grow:2; height:30px      256.67        30    256.67
+  #j1  justify-content:flex-end     y= 1170    y= 800   y= 1170
+```
+
+All five are now bit-exact with Chrome. **`justify-content` was broken here
+too, not only `flex-grow`** — 09-16 named the grow half; `#j1` sitting at 800
+against Chrome's 1170 is the same zero free space seen from the other side.
+
+### Commits — branch `atlas/n55-column-definite-main-size`, cut from `develop da8f413`
+
+- `6b45cbc` — a column container's definite height is the main size flex grows
+  and justifies in.
+
+**Pushed, no PR.** P3 is not complete, the change moves no case, and the queue
+is the problem below. Decision 1.
+
+### Measured — Linux/SwiftShader, 26 cases, base `develop da8f413`. MECHANICS, NOT A RECEIPT
+
+| Oracle | before | after |
+|---|---:|---:|
+| Gate A geometry failures / joins | 2646 / 16 | 2646 / 16 |
+| Gate A geometry-green / measured | 3/26 · 26/26 | 3/26 · 26/26 |
+| Gate B paint-green / measured | 1/26 · 26/26 | 1/26 · 26/26 |
+| Gate B discrete auto-fails / examined | 0 / 260 | 0 / 260 |
+
+Per (case, selector, axis) across all 26 cases:
+**fixed 0 · newly failing 0 · improved 0 · worsened 0 · unchanged 2662.**
+Both gates re-run on the final patch-filtered build, not on the intermediate.
+
+### Why it is inert, which is the part worth keeping
+
+The definiteness bar is `Length::Px`, deliberately the same bar 11d has always
+used, and **no column flex container on the corpus clears it**:
+
+| case | the column container | why the bar misses it |
+|---|---|---|
+| `shelf` | `body { height: 100% }` | percentage — and the block pre-pass already resolves it |
+| `chrome_rustkit` | `.chrome-container { height: 100% }` | same; it has no main-axis failure at all |
+| `new_tab` | `body { min-height: 100vh }` | a floor, not a definite height |
+
+The obvious next move — widen the bar to percentages — is **wrong, and I
+checked rather than assumed**. `shelf`'s and `chrome_rustkit`'s percent-height
+columns are already correct on the main axis, so widening would resolve a
+number the pre-pass has already resolved, against the container's own box
+standing in for a containing block it is not.
+
+### Mutation-check results
+
+**6 probes, 6 RED, no survivors**, control green before and after, committed
+before mutating.
+
+| probe | result |
+|---|---|
+| M1 the hoist deleted (main size back to the passed box) | RED |
+| M2 the definiteness bar drops `box-sizing` | RED |
+| M3 it reads `min-height` instead of `height` | RED |
+| M4 the hoist also fires on the horizontal main axis | RED |
+| M5 step 11d loses the definite path | RED |
+| M6 step 11d loses the `min-height` floor | RED |
+
+M4 is the one I would have skipped a month ago. It fails
+`test_header_nav_row_like_chrome`, which is what makes the axis scoping a
+measured constraint instead of caution: the row axis genuinely must keep
+reading its used width.
+
+The `box-sizing` guard exists because the first version of my fixture would not
+have caught M2 at all — `ComputedStyle::new()` is content-box, so the
+padding/border subtraction was untested arithmetic. Chrome was measured for
+both modes (`310 at y=30` border-box, `370` content-box) before the assertions
+were written. That is the 08-12 lesson applied on purpose rather than
+rediscovered.
+
+### A finding I did not fix: `new_tab`'s body is 239px too tall
+
+Found while checking whether the corpus had instances, recorded because it is a
+**corpus-visible** geometry defect and tonight's was not:
+
+```
+html > body                            height  exp 800     act 1039   +239
+body > div.container:nth-of-type(2)    height  exp 733     act 1039   +306
+body > div.container:nth-of-type(2)    y       exp  33.5   act    0    -33.5
+```
+
+`body` is `min-height: 100vh; flex-direction: column; justify-content: center`
+— the centring idiom 11d's own comment names. The floor is applied correctly;
+it is simply never reached, because `.container` is 306px taller than Chrome's
+and the content sum already exceeds 800. So the missing 33.5px of centring is a
+*symptom*, and the root is `.container`'s height. 223 of `new_tab`'s failures
+sit under it. This is a real target the corpus can score, unlike P3's residual.
+
+### Decisions needed from Pete
+
+1. **Nine PRs (#193–#201) are open, nothing has merged since 09-08 — forty
+   days — and tonight makes six branches pushed unopened**; the trench cannot
+   land anything, so is the queue waiting on review time, and should it keep
+   pushing unopened or batch?
+2. **Is P3 closable?** (carried from 09-11.) Two nights running, its remaining
+   defects have been real, Chrome-checked and invisible to all 26 cases, which
+   is the strongest evidence yet that P3's *corpus* work is finished even
+   though flex is not.
+3. **Should `new_tab`'s `.container` height (+306px, 223 failures) be the next
+   unit** instead of continuing down flex?
+
+### Surprises
+
+- **I expected corpus instances and measured none.** `shelf` and
+  `chrome_rustkit` both run column flex with a definite-looking height, and I
+  went in fairly sure last night's "no corpus instance" would not survive
+  widening the rule from sizing to grow-and-justify. It did survive, for a
+  reason neither night had stated: the definiteness bar, not the shape.
+- **`justify-content` was in the blast radius and nobody had said so.** 09-16
+  characterised this root as `flex-grow` never applying. Zero free space breaks
+  alignment identically, and `#j1` is 370px out of place from it.
+- **The corpus's percent-height columns are already right**, which is the only
+  reason the narrow bar is defensible. Had I widened it on the symmetry
+  argument alone I would have shipped a change that resolves a percentage
+  against the wrong box, and the 26 cases would have stayed green while it did.
+- **`cargo fmt --all` reformatted 94 files.** This tree is not rustfmt-clean at
+  `develop` (`flex.rs` alone has 8 pre-existing diffs), so the whole-workspace
+  format produced a 6583-line diff around a 192-line change. Reverted and
+  re-applied as a filtered patch; the shipped diff touches one file and adds no
+  new formatting debt. Worth knowing before anyone runs it in CI.
+- **The scheduled prompt that starts these nights still says "the first unit is
+  P0a-0"** and describes the metric as UNMEASURABLE. That was night 1. Anyone
+  reading it cold would redo finished work; it only reaches the right place
+  because the digest contradicts it. Worth updating the routine.
