@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-09-16T02:22:18.697997",
+  "timestamp": "2026-09-17T01:55:31.641638",
   "scope": "all",
   "iterations": 1,
   "max_variance": 0.1,
@@ -11,9 +11,9 @@
       "type": "builtins",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 27094,
+        "diffPixels": 26667,
         "totalPixels": 1024000,
-        "diffPercent": 2.6458984375,
+        "diffPercent": 2.6041992187500003,
         "width": 1280,
         "height": 800,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/new_tab/run-1/diff.png",
@@ -1128,15 +1128,15 @@
       },
       "passed": true,
       "pixel_runs": [
-        2.6458984375
+        2.6041992187500003
       ],
-      "diff_pct_median": 2.6458984375,
-      "diff_pct_min": 2.6458984375,
-      "diff_pct_max": 2.6458984375,
+      "diff_pct_median": 2.6041992187500003,
+      "diff_pct_min": 2.6041992187500003,
+      "diff_pct_max": 2.6041992187500003,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 2.6458984375
+      "diff_pct": 2.6041992187500003
     },
     {
       "case_id": "about",
@@ -1533,9 +1533,9 @@
       "type": "builtins",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 27822,
+        "diffPixels": 27831,
         "totalPixels": 786432,
-        "diffPercent": 3.537750244140625,
+        "diffPercent": 3.5388946533203125,
         "width": 1024,
         "height": 768,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/settings/run-1/diff.png",
@@ -2454,15 +2454,15 @@
       },
       "passed": true,
       "pixel_runs": [
-        3.537750244140625
+        3.5388946533203125
       ],
-      "diff_pct_median": 3.537750244140625,
-      "diff_pct_min": 3.537750244140625,
-      "diff_pct_max": 3.537750244140625,
+      "diff_pct_median": 3.5388946533203125,
+      "diff_pct_min": 3.5388946533203125,
+      "diff_pct_max": 3.5388946533203125,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 3.537750244140625
+      "diff_pct": 3.5388946533203125
     },
     {
       "case_id": "chrome_rustkit",

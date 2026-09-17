@@ -283,9 +283,11 @@ impl<'a> GridItem<'a> {
         // Count text children (simplified)
         let text_lines = self.count_text_lines();
 
-        // Padding contribution
-        let padding_top = self.layout_box.style.padding_top.to_px(font_size, font_size, 0.0);
-        let padding_bottom = self.layout_box.style.padding_bottom.to_px(font_size, font_size, 0.0);
+        // Padding contribution (rem against the 16px root, not the item's
+        // own font size — see the placement pass).
+        let style = &self.layout_box.style;
+        let padding_top = style.padding_top.to_px(font_size, 16.0, 0.0);
+        let padding_bottom = style.padding_bottom.to_px(font_size, 16.0, 0.0);
 
         let text_content = if text_lines > 0 {
             line_height_px * text_lines as f32
@@ -1881,19 +1883,27 @@ pub fn layout_grid_container(
                 child,
             );
 
-            // Calculate padding and border
+            // Calculate padding and border. `rem` resolves against the ROOT
+            // font size (16px, the crate-wide convention in length_to_px /
+            // intrinsic_len_px), never the item's own: with the item's
+            // font-size passed as the root, `padding: 0.75rem` on a 14px
+            // card read as 10.5px, and every flex/block grid item with rem
+            // padding came out 2·(rem·(16 − font)) short in both axes
+            // (new_tab's .shortcut rows 57 for Chrome's 60, kbd x 387 for
+            // 389).
             let font_size = match child.style.font_size {
                 Length::Px(px) => px,
                 _ => 16.0,
             };
-            let padding_left = child.style.padding_left.to_px(font_size, font_size, border_box_width);
-            let padding_right = child.style.padding_right.to_px(font_size, font_size, border_box_width);
-            let padding_top = child.style.padding_top.to_px(font_size, font_size, border_box_height);
-            let padding_bottom = child.style.padding_bottom.to_px(font_size, font_size, border_box_height);
-            let border_left = child.style.border_left_width.to_px(font_size, font_size, border_box_width);
-            let border_right = child.style.border_right_width.to_px(font_size, font_size, border_box_width);
-            let border_top = child.style.border_top_width.to_px(font_size, font_size, border_box_height);
-            let border_bottom = child.style.border_bottom_width.to_px(font_size, font_size, border_box_height);
+            let px = |l: &Length, against: f32| l.to_px(font_size, 16.0, against);
+            let padding_left = px(&child.style.padding_left, border_box_width);
+            let padding_right = px(&child.style.padding_right, border_box_width);
+            let padding_top = px(&child.style.padding_top, border_box_height);
+            let padding_bottom = px(&child.style.padding_bottom, border_box_height);
+            let border_left = px(&child.style.border_left_width, border_box_width);
+            let border_right = px(&child.style.border_right_width, border_box_width);
+            let border_top = px(&child.style.border_top_width, border_box_height);
+            let border_bottom = px(&child.style.border_bottom_width, border_box_height);
 
             // Set padding and border dimensions
             child.dimensions.padding.left = padding_left;
@@ -6949,5 +6959,50 @@ mod tests {
             "a box with no inline size has nothing to derive a block size from"
         );
     }
-}
 
+    /// A grid item's `rem` padding/border resolves against the 16px root, not
+    /// the item's own font size. The placement pass passed the item's
+    /// font-size as the root, so `padding: 0.75rem` on a 14px item read as
+    /// 10.5px in every axis (new_tab: each `.shortcut` row 57 for Chrome's
+    /// 60, its first key at x 387 for Chrome's 389 — the whole kbd column
+    /// 3px per row above Chrome).
+    #[test]
+    fn a_grid_items_rem_padding_resolves_against_the_root_font_size() {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Px(262.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        let mut item_style = ComputedStyle::new();
+        item_style.box_sizing = BoxSizing::BorderBox;
+        item_style.font_size = Length::Px(14.0);
+        item_style.padding_top = Length::Rem(0.75);
+        item_style.padding_bottom = Length::Rem(0.75);
+        item_style.padding_left = Length::Rem(1.0);
+        item_style.padding_right = Length::Rem(1.0);
+        item_style.border_top_width = Length::Px(1.0);
+        let mut item = LayoutBox::new(BoxType::Block, item_style);
+        let mut line_style = ComputedStyle::new();
+        line_style.height = Length::Px(34.0);
+        let line = LayoutBox::new(BoxType::Block, line_style);
+        item.children.push(line);
+        container.children.push(item);
+
+        layout_grid_container(&mut container, 262.0, 600.0);
+
+        let d = &container.children[0].dimensions;
+        assert!(
+            (d.padding.top - 12.0).abs() < 0.01 && (d.padding.left - 16.0).abs() < 0.01,
+            "0.75rem / 1rem are 12 / 16 against the root; got top {} left {} \
+             (10.5 / 14 is the item's 14px font used as the root)",
+            d.padding.top,
+            d.padding.left
+        );
+        let content_x = d.content.x;
+        assert!(
+            (content_x - 16.0).abs() < 0.01,
+            "content starts after the 16px padding: got x {content_x}"
+        );
+    }
+}

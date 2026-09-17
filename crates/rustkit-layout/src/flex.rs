@@ -481,6 +481,19 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
                         &mut item_margin_context,
                         &mut item_float_context,
                     );
+                    // A flex item is a formatting-context root, so its last
+                    // in-flow child's bottom margin never collapses through
+                    // it (CSS 2.1 §8.3.1) — it stays INSIDE the item. The
+                    // collapse pass only materializes that pending margin
+                    // when the box's own padding/border/height block the
+                    // collapse (its style cannot tell it is a flex item), and
+                    // leaves it in the context otherwise; take it here.
+                    let pending = item_margin_context.resolve();
+                    if pending > 0.0 {
+                        item.layout_box.dimensions.content.height += pending;
+                    }
+                    // A definite cross size wins over both the flow and the
+                    // pending margin (§9.4), so the restore goes last.
                     if let Some(height) = definite_cross_height {
                         item.layout_box.dimensions.content.height = height;
                     }
@@ -522,18 +535,18 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
                 // as a width — new_tab's `.container` (a column item,
                 // max-width 600) came out 745.4 wide: 681.4 of stacked
                 // child heights plus its own 64 of padding.
+                //
+                // A block item's height is the extent step 11 FLOWED
+                // (content.height, written by the collapse pass), not the
+                // sum of its children's margin boxes: the sum charges every
+                // sibling seam mb + mt where the flow collapsed it to
+                // max(mb, mt), so a column of margined blocks read taller
+                // than it was laid out — new_tab's `.container` (search box
+                // margin-bottom 2rem, next section margin-top 3rem) measured
+                // 746 for its flowed 714, and the 32 landed as empty space
+                // under the last child.
                 let children_height: f32 = match cross_axis {
-                    Axis::Vertical => {
-                        if item.layout_box.style.display.is_flex() {
-                            item.layout_box.dimensions.content.height
-                        } else {
-                            item.layout_box
-                                .children
-                                .iter()
-                                .map(|c| c.dimensions.margin_box().height)
-                                .sum()
-                        }
-                    }
+                    Axis::Vertical => item.layout_box.dimensions.content.height,
                     Axis::Horizontal => {
                         if item.layout_box.style.display.is_flex() {
                             item.layout_box.dimensions.content.width
@@ -655,15 +668,16 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
                 if !item.main_size_from_content || item.layout_box.children.is_empty() {
                     continue;
                 }
-                let laid_out: f32 = if item.layout_box.style.display.is_flex() {
-                    item.layout_box.dimensions.content.height
-                } else {
-                    item.layout_box
-                        .children
-                        .iter()
-                        .map(|c| c.dimensions.margin_box().height)
-                        .sum()
-                };
+                // The laid-out height is the extent step 11 FLOWED
+                // (content.height from the collapse pass, plus the kept
+                // last-child margin) for a block item too — not the sum of
+                // its children's margin boxes, which charges every sibling
+                // seam mb + mt where the flow collapsed it to max(mb, mt).
+                // new_tab's `.container` (a column item: search box
+                // margin-bottom 2rem, next section margin-top 3rem) measured
+                // 746 for its flowed 714, and the 32 landed as empty space
+                // under the last child.
+                let laid_out: f32 = item.layout_box.dimensions.content.height;
                 if laid_out <= 0.0 {
                     continue;
                 }
@@ -3420,6 +3434,112 @@ mod tests {
         );
     }
 
+    /// A block flex item's cross size is the extent step 11 FLOWED, with the
+    /// sibling seams collapsed — not the sum of its children's margin boxes.
+    ///
+    /// new_tab (2026-09-17): `.container` is a column flex item holding a
+    /// search box (`margin-bottom: 2rem`) followed by a section
+    /// (`margin-top: 3rem`). The collapse pass placed the section 48px below
+    /// the box, then 11b re-derived the item's height as 52 + 80 + ... and the
+    /// 32 the seam had absorbed landed as empty space under the last child:
+    /// 746 tall for a flowed 714 (Chrome 733 with a 52px input, ours 51).
+    #[test]
+    fn a_block_item_measures_its_collapsed_seams_not_the_margin_sum() {
+        let mut a_style = ComputedStyle::new();
+        a_style.height = Length::Px(20.0);
+        a_style.margin_bottom = Length::Px(32.0);
+        let a = LayoutBox::new(BoxType::Block, a_style);
+
+        let mut b_style = ComputedStyle::new();
+        b_style.height = Length::Px(20.0);
+        b_style.margin_top = Length::Px(48.0);
+        let b = LayoutBox::new(BoxType::Block, b_style);
+
+        let mut item_style = ComputedStyle::new();
+        item_style.padding_top = Length::Px(16.0);
+        item_style.padding_bottom = Length::Px(16.0);
+        let mut item = LayoutBox::new(BoxType::Block, item_style);
+        item.children.push(a);
+        item.children.push(b);
+
+        let mut container_style = ComputedStyle::new();
+        container_style.display = rustkit_css::Display::Flex;
+        container_style.flex_direction = FlexDirection::Column;
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+        container.children.push(item);
+
+        // The engine's root path: layout_with_collapse, so the block
+        // pre-pass collapses the seam before flex runs (as on the page).
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 600.0, 0.0),
+            ..Default::default()
+        };
+        let mut margins = crate::MarginCollapseContext::new();
+        let mut floats = crate::FloatContext::new();
+        container.layout_with_collapse(&cb, &mut margins, &mut floats);
+
+        let item = &container.children[0];
+        let b_y = item.children[1].dimensions.border_box().y;
+        assert!(
+            (b_y - (16.0 + 20.0 + 48.0)).abs() < 0.01,
+            "the seam collapses to max(32, 48): B at y = 16 + 20 + 48 = 84, got {b_y}"
+        );
+        let item_h = item.dimensions.border_box().height;
+        assert!(
+            (item_h - (16.0 + 20.0 + 48.0 + 20.0 + 16.0)).abs() < 0.01,
+            "item = padding + A + collapsed seam + B + padding = 120, got {item_h} \
+             (152 is the un-collapsed margin-box sum: the 32 lands under B)"
+        );
+        let container_h = container.dimensions.content.height;
+        assert!(
+            (container_h - 120.0).abs() < 0.01,
+            "the column's cross-derived height follows the item: 120, got {container_h}"
+        );
+    }
+
+    /// A flex item is a formatting-context root: its last in-flow child's
+    /// bottom margin stays INSIDE the item instead of collapsing through
+    /// (CSS 2.1 §8.3.1). Pinned so measuring the flowed extent (above) does
+    /// not drop the margin the old margin-box sum happened to include.
+    #[test]
+    fn a_block_item_keeps_its_last_childs_bottom_margin_inside() {
+        let mut p_style = ComputedStyle::new();
+        p_style.height = Length::Px(20.0);
+        p_style.margin_bottom = Length::Px(16.0);
+        let p = LayoutBox::new(BoxType::Block, p_style);
+
+        // No padding/border/height: nothing on the item's own box blocks
+        // the collapse, so only its BFC-root nature keeps the margin in.
+        let mut item = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        item.children.push(p);
+
+        let mut container_style = ComputedStyle::new();
+        container_style.display = rustkit_css::Display::Flex;
+        container_style.flex_direction = FlexDirection::Row;
+        container_style.align_items = AlignItems::FlexStart;
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+        container.children.push(item);
+
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 600.0, 0.0),
+            ..Default::default()
+        };
+        let mut margins = crate::MarginCollapseContext::new();
+        let mut floats = crate::FloatContext::new();
+        container.layout_with_collapse(&cb, &mut margins, &mut floats);
+
+        let item_h = container.children[0].dimensions.border_box().height;
+        assert!(
+            (item_h - 36.0).abs() < 0.01,
+            "item = child 20 + its bottom margin 16 kept inside = 36, got {item_h}"
+        );
+        let container_h = container.dimensions.content.height;
+        assert!(
+            (container_h - 36.0).abs() < 0.01,
+            "row cross size follows the item: 36, got {container_h}"
+        );
+    }
+
     /// A flex item with a DEFINITE cross size keeps it; its children's flow
     /// never grows it (css-flexbox-1 §9.4 — content overflows instead).
     ///
@@ -3579,5 +3699,4 @@ mod tests {
              children's height, expected 120, got {item_h}"
         );
     }
-
 }
