@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  body { margin: 0; font: 16px/1 Arial, sans-serif; background: #fff; }
+  .row { position: relative; height: 60px; margin: 10px; background: #eef; }
+  .box { position: absolute; left: 100px; top: 10px; width: 60px; height: 20px; background: #3a3; transform-origin: 0 0; }
+  .fill { width: 60px; height: 20px; background: #a3a; }
+  /* 1: scale, no overflow, no radius */
+  .r1 .box { transform: scale(2); }
+  /* 2: scale + overflow hidden */
+  .r2 .box { transform: scale(2); overflow: hidden; }
+  /* 3: scale + radius */
+  .r3 .box { transform: scale(2); border-radius: 10px; }
+  /* 4: scale + overflow + radius (n47 E) */
+  .r4 .box { transform: scale(2); overflow: hidden; border-radius: 10px; }
+  /* 5: translate + overflow + radius (control) */
+  .r5 .box { transform: translateX(40px); overflow: hidden; border-radius: 10px; }
+  /* 6: scale via matrix */
+  .r6 .box { transform: matrix(2,0,0,2,0,0); overflow: hidden; }
+  /* 7: scale with default origin */
+  .r7 .box { transform: scale(2); overflow: hidden; transform-origin: 50% 50%; }
+</style></head>
+<body>
+  <div class="row r1"><div class="box"><div class="fill"></div></div></div>
+  <div class="row r2"><div class="box"><div class="fill"></div></div></div>
+  <div class="row r3"><div class="box"><div class="fill"></div></div></div>
+  <div class="row r4"><div class="box"><div class="fill"></div></div></div>
+  <div class="row r5"><div class="box"><div class="fill"></div></div></div>
+  <div class="row r6"><div class="box"><div class="fill"></div></div></div>
+  <div class="row r7"><div class="box"><div class="fill"></div></div></div>
+</body></html>

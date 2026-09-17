@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  body { margin: 0; font: 16px/1 Arial, sans-serif; background: #fff; }
+  .row { position: relative; height: 60px; margin: 10px; background: #eef; }
+  .row .label { position: absolute; left: 0; top: 0; font-size: 12px; color: #333; }
+  .box { position: absolute; left: 100px; top: 10px; width: 60px; height: 20px; background: #3a3; }
+  .fill { width: 30px; height: 20px; background: #a3a; }
+
+  /* A: scale(2) about the top-left corner — the corner stays put, the box grows right and down. */
+  .a .box { transform: scale(2); transform-origin: 0 0; }
+  /* B: scale(2) about the centre (the default origin) — grows evenly on every side. */
+  .b .box { transform: scale(2); }
+  /* C: the n47 section E shape — scaled, overflow:hidden, rounded; the child fills a 120x40 rounded box. */
+  .c .box { transform: scale(2); transform-origin: 0 0; overflow: hidden; border-radius: 10px; }
+  .c .fill { width: 60px; }
+  /* D: rotate(90deg) about the centre — a 60x20 box becomes 20x60 around the same centre. */
+  .d .box { transform: rotate(90deg); }
+  /* E: scaleX only, about the right edge — the box grows to the LEFT. */
+  .e .box { transform: scaleX(2); transform-origin: 100% 50%; }
+  /* F: control — translate with a non-default origin: the origin must not matter. */
+  .f .box { transform: translate(40px, 10px); transform-origin: 0 0; }
+  /* G: a scaled clipper holding a translated child — outer·inner: the child shine bar is clipped inside the scaled button. */
+  .g .box { transform: scale(2); transform-origin: 0 0; overflow: hidden; }
+  .g .fill { position: absolute; inset: 0; width: auto; background: #fc0; transform: translateX(-50%); }
+</style></head>
+<body>
+  <div class="row a"><span class="label">A scale(2) origin 0 0</span><div class="box"><div class="fill"></div></div></div>
+  <div class="row b"><span class="label">B scale(2) origin centre</span><div class="box"><div class="fill"></div></div></div>
+  <div class="row c"><span class="label">C scaled rounded clipper (n47 E)</span><div class="box"><div class="fill"></div></div></div>
+  <div class="row d"><span class="label">D rotate(90deg) origin centre</span><div class="box"><div class="fill"></div></div></div>
+  <div class="row e"><span class="label">E scaleX(2) origin 100% 50%</span><div class="box"><div class="fill"></div></div></div>
+  <div class="row f"><span class="label">F control: translate, origin 0 0</span><div class="box"><div class="fill"></div></div></div>
+  <div class="row g"><span class="label">G translated child in a scaled clipper</span><div class="box"><div class="fill"></div></div></div>
+</body></html>
