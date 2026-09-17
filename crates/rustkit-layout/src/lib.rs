@@ -2089,11 +2089,16 @@ impl LayoutBox {
         // vertical padding/border, the content line composes with them; the
         // blob stays for bare controls (UA-default look, form-controls case
         // depends on it).
+        //
+        // n51: the unit closure resolved px and em only, so `padding: 1rem
+        // 1.5rem` — the idiom on every styled search box — read as NO author
+        // padding and the control fell to the bare 19px blob (new_tab's
+        // `#searchInput`: 19 for Chrome's 52, and everything below it 33px
+        // high). Resolve every absolute unit the way the rest of layout does.
         let author_pb_v = {
             let px = |l: &Length| match l {
-                Length::Px(v) => *v,
-                Length::Em(em) => em * font_size,
-                _ => 0.0,
+                Length::Percent(_) | Length::Auto => 0.0,
+                other => other.to_px(font_size, 16.0, 0.0),
             };
             px(&self.style.padding_top)
                 + px(&self.style.padding_bottom)
@@ -2149,9 +2154,8 @@ impl LayoutBox {
                 )
                 .width;
                 let px = |l: &Length| match l {
-                    Length::Px(v) => *v,
-                    Length::Em(em) => em * font_size,
-                    _ => 0.0,
+                    Length::Percent(_) | Length::Auto => 0.0,
+                    other => other.to_px(font_size, 16.0, 0.0),
                 };
                 let author_pb_h = px(&self.style.padding_left)
                     + px(&self.style.padding_right)
@@ -10941,5 +10945,49 @@ mod w3_zero_width_wrap_tests {
         let mut definite = text("abc", WhiteSpace::Normal, WordBreak::BreakAll);
         definite.layout_text_with_zero_wrap("abc".into(), &cb, true);
         assert_eq!(line_texts(&definite), ["a", "b", "c"]);
+    }
+
+    /// n51: a text input's author padding composes with its content line
+    /// in EVERY absolute unit. The unit closure took px and em only, so
+    /// `padding: 1rem 1.5rem` (new_tab's search box, and most styled search
+    /// fields) read as no author padding and the control fell to the bare
+    /// 19px blob; Chrome builds 18 + 32 + 2 = 52.
+    #[test]
+    fn a_text_input_with_rem_padding_composes_it_into_its_height() {
+        fn input(pad: Length) -> LayoutBox {
+            let mut s = ComputedStyle::new();
+            s.font_size = Length::Px(16.0);
+            s.padding_top = pad.clone();
+            s.padding_bottom = pad;
+            s.border_top_width = Length::Px(1.0);
+            s.border_bottom_width = Length::Px(1.0);
+            LayoutBox::new(
+                BoxType::FormControl(FormControlType::TextInput {
+                    value: String::new(),
+                    placeholder: String::new(),
+                    input_type: "text".to_string(),
+                }),
+                s,
+            )
+        }
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 500.0, 0.0),
+            ..Default::default()
+        };
+        let mut px = input(Length::Px(16.0));
+        px.layout(&cb);
+        let mut rem = input(Length::Rem(1.0));
+        rem.layout(&cb);
+        let want = px.dimensions.content.height;
+        assert!(
+            want > 40.0,
+            "setup: px padding must compose (17 + 32 + 2 = 51), got {want}"
+        );
+        assert!(
+            (rem.dimensions.content.height - want).abs() < 0.01,
+            "1rem padding must size the control like 16px padding ({want}), got {} \
+             (19 is the bare blob: the rem was dropped)",
+            rem.dimensions.content.height
+        );
     }
 }
