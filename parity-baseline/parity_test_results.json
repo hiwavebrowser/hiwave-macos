@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-09-13T01:58:53.359540",
+  "timestamp": "2026-09-14T02:36:00.053482",
   "scope": "all",
   "iterations": 1,
   "max_variance": 0.1,
@@ -3306,9 +3306,9 @@
       "type": "websuite",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 76437,
+        "diffPixels": 68977,
         "totalPixels": 1024000,
-        "diffPercent": 7.46455078125,
+        "diffPercent": 6.736035156250001,
         "width": 1280,
         "height": 800,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/article-typography/run-1/diff.png",
@@ -3764,15 +3764,15 @@
       },
       "passed": true,
       "pixel_runs": [
-        7.46455078125
+        6.736035156250001
       ],
-      "diff_pct_median": 7.46455078125,
-      "diff_pct_min": 7.46455078125,
-      "diff_pct_max": 7.46455078125,
+      "diff_pct_median": 6.736035156250001,
+      "diff_pct_min": 6.736035156250001,
+      "diff_pct_max": 6.736035156250001,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 7.46455078125
+      "diff_pct": 6.736035156250001
     },
     {
       "case_id": "card-grid",
