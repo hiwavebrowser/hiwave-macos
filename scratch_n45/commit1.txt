@@ -1,0 +1,39 @@
+fix(engine): an unknown pseudo-class invalidates the rule instead of matching every element; :is()/:where(), the -of-type family, :link, :empty, :placeholder-shown are decided
+
+`match_pseudo_class` ended in `_ => true`, so every pseudo-class the arm
+list did not name matched EVERY element: `:is()`/`:where()` (every modern
+reset's `:where(ul, ol) { padding: 0 }` zeroed padding everywhere), the
+`-of-type` family (`h2:first-of-type` styled every h2), `:link`/`:any-link`,
+`:placeholder-shown`/`:required`/`:invalid`/`:read-only`, `:has()`,
+`:lang()`, legacy `p:first-line` (styled the whole p), and other engines'
+vendor pseudo-classes (`:-moz-focusring`, which Chrome drops). `:empty`
+was hardcoded false. The comma branch evaluated list members
+independently where Selectors 4 §3.9 drops the whole rule on one invalid
+member. And `tokenize_selector` split at whitespace inside parentheses,
+so `:is(.a, .b)` was two tokens — `:is()` could never have worked.
+
+- `selector_list_is_valid`: every `:name` must be one the matcher decides
+  (`pseudo_class_is_supported`) or a legacy pseudo-element; `:is()`/
+  `:where()` arguments are forgiving. An invalid list returns false before
+  the comma split. The catch-all is `_ => false` and unreachable.
+- `SiblingContext` replaces `(element_index, sibling_count)` through the
+  build walk → style → matcher, adding the same-tag index/count and
+  `has_children` (element or text child, whitespace included, §14.5).
+  `create_pseudo_element` gets the host's real context instead of an
+  empty sibling list and (0, 1) — `x + y::before` rules match now.
+- New arms: `-of-type` family; `:is`/`:where`/`:matches`/`:-webkit-any`
+  and `:not()` over a top-level-comma list (members with a combinator
+  under-match, ledgered); `:link`/`:any-link`; `:empty`;
+  `:placeholder-shown`; `:required`/`:optional`/`:read-only`/
+  `:read-write`/`:valid`/`:invalid`/`:in-range`; `:checked` limited to
+  checkbox/radio/option; `:defined`; `:lang()`/`:dir()` from the own
+  attribute; `:root`/`:scope`; `:has()` and document-state pseudo-classes
+  false; `:first-line`/`:first-letter` false on the host.
+- Tokenizer tracks parentheses; the comma split guards a member equal to
+  the whole selector (an unclosed paren recursed forever).
+
+Receipt: parity-tests/repro/unknown-pseudo-class.html vs pinned Chrome
+148 — develop paints 14 of 15 swatches wrong, this commit 15/15 = Chrome.
+rustkit-engine 82 -> 87 tests.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
