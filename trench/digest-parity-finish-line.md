@@ -9641,3 +9641,45 @@ sit under it. This is a real target the corpus can score, unlike P3's residual.
   P0a-0"** and describes the metric as UNMEASURABLE. That was night 1. Anyone
   reading it cold would redo finished work; it only reaches the right place
   because the digest contradicts it. Worth updating the routine.
+
+### Addendum, same day 13:35Z — **#196 merged**, and what unblocked it
+
+`fix(layout): a flex item's definite cross size survives its children's flow`
+(`9066f1e`, `rustkit-layout/src/flex.rs`, +176) merged into `develop` by Pete
+at 2026-09-17T13:35:32Z. The first merge since 09-08, and the answer to a piece
+of decision 1 above.
+
+Written by the #196 watch session, which is a separate seat from the nights
+09-13…09-17 recorded above: those nights did their own work on their own
+branches. This seat did nothing but poll. That is the point of the entry.
+
+**How it unblocked.** #196 sat green, `mergeable_state: clean`, zero review
+comments, byte-identical for five days, while an hourly check-in loop confirmed
+that and re-armed silently each cycle — as instructed, and to no effect,
+because a scheduled session's replies are read by nobody. At 12:48Z I sent one
+push notification: the PR is green and unreviewed, here are the three open
+decisions. It merged 47 minutes later.
+
+So the queue was not waiting on review time. It was waiting on someone being
+told. **Decision 1's real answer is a mechanism, not a policy:** an unopened
+branch and an unread green PR are the same object, and neither reaches Pete
+without a notification. The next night that pushes a branch should say so out
+of band rather than assume the digest is read.
+
+**Metric: unchanged at `2/26`.** The macOS lane measured `9066f1e` before the
+merge (run 34675676217, ratchet exit 2 — holds) and that receipt is in the
+09-12 addendum. The merge moves no number; it moves the fix onto `develop`.
+Note that `develop` is now ahead of `da8f413`, the basis every open PR above
+was measured on.
+
+**Still open at this hour** (verified against the API, not inferred): #195,
+#197, #198, #199, #200, #201, #202 — seven PRs, all based on `da8f413`, none
+merged. Plus tonight's `atlas/n55-column-definite-main-size`, pushed unopened.
+
+Decision 3 as written on 09-12 — "should the main-axis half of §9.4 be the next
+unit?" — is closed by events: 09-16 and 09-17 worked it. It was correct and the
+corpus could not see it, twice. The standing decisions are the three listed
+above this addendum, not that one.
+
+No code work this cycle: the watch is unsubscribed, the check-in trigger
+deleted, and the effort cap was spent long ago.
