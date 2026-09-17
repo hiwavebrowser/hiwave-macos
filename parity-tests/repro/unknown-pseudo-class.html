@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>unknown pseudo-classes must not match everything</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  body { font-family: sans-serif; font-size: 16px; color: #000; }
+  .row { display: block; height: 40px; margin: 0; }
+  .sw { display: inline-block; width: 40px; height: 40px; margin: 0; background: #0000ff; vertical-align: top; }
+
+  /* A: :is()/:where() select ONLY their arguments. Chrome: A1 red, A2 blue. */
+  #a :is(.pick, .other) { background: #ff0000; }
+  #a :where(.pick) { background: #ff0000; }
+
+  /* B: :first-of-type / :last-of-type / :nth-of-type — typed sibling index.
+     Chrome: B1 red (first span), B2 blue, B3 red (last span), B4 blue (div). */
+  #b span:first-of-type { background: #ff0000; }
+  #b span:last-of-type { background: #ff0000; }
+  #b div:nth-of-type(2) { background: #00ff00; }
+
+  /* C: :placeholder-shown, :link, :any-link on non-matching subjects.
+     Chrome: C1 blue (span is not an input), C2 blue (span is not a link),
+     C3 red (a[href] is a link — :link + :any-link). */
+  #c .sw:placeholder-shown { background: #ff0000; }
+  #c .sw:link { background: #ff0000; }
+  #c .sw:any-link { background: #ff0000; }
+  #c a { background: #ff0000; }
+
+  /* D: an unknown pseudo-class invalidates the WHOLE rule, including the
+     other members of the selector list. Chrome: D1 blue, D2 blue. */
+  #d .sw:frobnicate { background: #ff0000; }
+  #d .sw:frobnicate, #d .keep { background: #ff0000; }
+
+  /* E: :empty, :optional/:required/:read-only. Chrome: E1 red (empty span),
+     E2 blue (span has text), E3 blue (span is not a form control). */
+  #e .sw:empty { background: #ff0000; }
+  #e .sw:required { background: #ff0000; }
+  #e .sw:read-write { background: #ff0000; }
+</style>
+</head>
+<body>
+  <div class="row" id="a"><span class="sw pick"></span><span class="sw"></span></div>
+  <div class="row" id="b"><span class="sw"></span><span class="sw"></span><span class="sw"></span><div class="sw"></div><div class="sw"></div></div>
+  <div class="row" id="c"><span class="sw"></span><span class="sw"></span><a class="sw" href="#x"></a></div>
+  <div class="row" id="d"><span class="sw"></span><span class="sw keep"></span></div>
+  <div class="row" id="e"><span class="sw"></span><span class="sw" style="color:#fff;font-size:1px">x</span><span class="sw"></span></div>
+</body>
+</html>
