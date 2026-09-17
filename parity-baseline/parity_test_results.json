@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-09-15T02:08:01.247397",
+  "timestamp": "2026-09-16T02:22:18.697997",
   "scope": "all",
   "iterations": 1,
   "max_variance": 0.1,
@@ -11,9 +11,9 @@
       "type": "builtins",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 27126,
+        "diffPixels": 27094,
         "totalPixels": 1024000,
-        "diffPercent": 2.6490234375,
+        "diffPercent": 2.6458984375,
         "width": 1280,
         "height": 800,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/new_tab/run-1/diff.png",
@@ -1128,15 +1128,15 @@
       },
       "passed": true,
       "pixel_runs": [
-        2.6490234375
+        2.6458984375
       ],
-      "diff_pct_median": 2.6490234375,
-      "diff_pct_min": 2.6490234375,
-      "diff_pct_max": 2.6490234375,
+      "diff_pct_median": 2.6458984375,
+      "diff_pct_min": 2.6458984375,
+      "diff_pct_max": 2.6458984375,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 2.6490234375
+      "diff_pct": 2.6458984375
     },
     {
       "case_id": "about",
@@ -1533,9 +1533,9 @@
       "type": "builtins",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 27843,
+        "diffPixels": 27822,
         "totalPixels": 786432,
-        "diffPercent": 3.5404205322265625,
+        "diffPercent": 3.537750244140625,
         "width": 1024,
         "height": 768,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/settings/run-1/diff.png",
@@ -2454,15 +2454,15 @@
       },
       "passed": true,
       "pixel_runs": [
-        3.5404205322265625
+        3.537750244140625
       ],
-      "diff_pct_median": 3.5404205322265625,
-      "diff_pct_min": 3.5404205322265625,
-      "diff_pct_max": 3.5404205322265625,
+      "diff_pct_median": 3.537750244140625,
+      "diff_pct_min": 3.537750244140625,
+      "diff_pct_max": 3.537750244140625,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 3.5404205322265625
+      "diff_pct": 3.537750244140625
     },
     {
       "case_id": "chrome_rustkit",
@@ -3306,9 +3306,9 @@
       "type": "websuite",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 63328,
+        "diffPixels": 76437,
         "totalPixels": 1024000,
-        "diffPercent": 6.184375,
+        "diffPercent": 7.46455078125,
         "width": 1280,
         "height": 800,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/article-typography/run-1/diff.png",
@@ -3764,15 +3764,15 @@
       },
       "passed": true,
       "pixel_runs": [
-        6.184375
+        7.46455078125
       ],
-      "diff_pct_median": 6.184375,
-      "diff_pct_min": 6.184375,
-      "diff_pct_max": 6.184375,
+      "diff_pct_median": 7.46455078125,
+      "diff_pct_min": 7.46455078125,
+      "diff_pct_max": 7.46455078125,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 6.184375
+      "diff_pct": 7.46455078125
     },
     {
       "case_id": "card-grid",
@@ -4659,9 +4659,9 @@
       "type": "websuite",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 25621,
+        "diffPixels": 25626,
         "totalPixels": 960000,
-        "diffPercent": 2.6688541666666667,
+        "diffPercent": 2.669375,
         "width": 800,
         "height": 1200,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/css-selectors/run-1/diff.png",
@@ -5523,15 +5523,15 @@
       },
       "passed": true,
       "pixel_runs": [
-        2.6688541666666667
+        2.669375
       ],
-      "diff_pct_median": 2.6688541666666667,
-      "diff_pct_min": 2.6688541666666667,
-      "diff_pct_max": 2.6688541666666667,
+      "diff_pct_median": 2.669375,
+      "diff_pct_min": 2.669375,
+      "diff_pct_max": 2.669375,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 2.6688541666666667
+      "diff_pct": 2.669375
     },
     {
       "case_id": "flex-positioning",
