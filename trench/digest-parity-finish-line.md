@@ -9901,3 +9901,48 @@ is how a night ships a confident wrong fix.
 - **The scheduled prompt still opens "the first unit is P0a-0"** and calls the
   metric UNMEASURABLE. That was night 1, six weeks ago. 09-17 flagged it; it is
   still unchanged, and it is the first thing a fresh seat reads.
+
+### Addendum, same day 13:44Z — **#203 merged**
+
+`ci: the Rust unit suites actually execute (F2, advisory for one cycle)`
+(`2044b53`) merged into `develop` by Pete at 13:44Z; `develop` is now `dd899bf`.
+Verified against the branch rather than the event: `2044b53` is an ancestor of
+`origin/develop`, the `unit-suites` job is in `develop`'s `parity.yml`, and
+`scripts/tests/test_unit_suites_actually_run.py` is on `develop`.
+
+**From this merge on, every PR and every nightly runs
+`cargo test -p rustkit-layout --lib` and `-p rustkit-engine --lib` on
+`macos-14`.** Forty-odd nights of "mutation-checked, N probes, N RED" stop
+being claims that ran once on the seat that wrote them.
+
+**The first receipt, taken on the PR before the merge** (run 35310439639, job
+`unit-suites`, 2m02s on a cold cache): green. `rustkit-engine --lib` read
+`ok. 87 passed; 0 failed` straight from the log; `rustkit-layout --lib` is
+green by exit status, since a red suite or a `DID NOT RUN` sets `status=1` and
+the log carries no `##[error]Process completed with exit code` before
+`Post job cleanup`. I did not quote layout's count because I did not page back
+far enough through the compile spew to read it, and an invented number in a
+receipt is the thing this campaign exists to stop.
+
+One methodological note worth keeping, because it is the lane's own thesis
+turned on itself: **the job's `conclusion: success` proves nothing here.**
+`continue-on-error` reports a failed step as a successful job, so reading the
+green check as the receipt would have been exactly the did-not-run-wearing-a-
+green-check shape the step's `DID NOT RUN` branch was written to catch. The
+receipt is the log and the summary table.
+
+**Decision 3 is now cheap to answer.** The advisory posture was chosen because
+the lane's colour on `macos-14` was unknown, and a blocking lane of unknown
+colour is a red lock rather than a gate. It is known: green, on one clean
+cycle. The flip deletes one `continue-on-error` line. Still Pete's call.
+
+**Metric unchanged at `2/26`.** No `crates/` change; the merge moves the
+instrument, not the engine. Decisions 1 (crates.io on this seat) and 2 (is P3
+closable?) are untouched by it.
+
+One correction to this night's entry above, measured after it was written:
+**the crates.io blockage is this container, not the fleet.** PR #204
+(`atlas/n53-form-controls`, opened 06:04Z by a different seat) cites
+`rustkit-layout 402 → 406 tests`, so that seat builds and tests normally.
+Decision 1 is therefore about restoring *this* seat, not about a campaign-wide
+outage — a narrower ask than the entry above implies.
