@@ -9733,3 +9733,171 @@ merges stale; the numbers do not add.
 **Decisions still open:** the 09-17 night's three above (review time vs.
 batching — now moot for this set; P3 closable?; `new_tab`'s `.container`
 +306 as the next unit). The merge does not answer them.
+
+## 2026-09-18
+
+**Metric: `2/26` → `2/26` on `develop`, NOT re-measured and not re-measurable
+from this seat tonight.** No capture was taken, no gate was run against engine
+output, and nothing here is a receipt. The number is carried forward from
+night 27's macOS run because nothing touched `crates/`.
+
+**P-item: none worked.** The queue's next unit could not be attempted. What
+follows is why, and what I did instead.
+
+### The seat cannot build
+
+`crates.io` is unreachable from this container:
+
+```
+https://index.crates.io/config.json   503  (upstream connect error / timeout)
+https://static.crates.io/             403  (egress policy denial)
+```
+
+`~/.cargo/registry` is empty, there is no `vendor/` and no `target/`, so
+`cargo build` and `cargo test` both die at dependency resolution. Nothing in
+this repository compiles here tonight. That removes, in one go:
+
+- `cargo test -p rustkit-layout --lib` and `-p rustkit-engine --lib`, which
+  this campaign's working rule makes mandatory before every commit;
+- `target/release/parity-capture`, so no `layout.json` and no `frame.ppm`;
+- therefore Gates A, B and C, the receipt, and any before/after board.
+
+The only committed RustKit capture in the tree,
+`parity-baseline/captures/new_tab.layout.json`, is from 2026-07-28 — before
+P0a-0 gave boxes their element identity, so it has no selector to join on, and
+roughly fifty nights of engine work stale. It is not a substitute and I did not
+treat it as one.
+
+**An engine change could therefore not be landed honestly.** A fix I cannot
+compile, with a guard I cannot run, is the decoration this campaign exists to
+stop — and 08-12 is the night that recorded what a partially-applied correct
+rule does to the number. So none was written.
+
+### What I did instead — CI now executes the Rust unit suites (F2)
+
+Finding 1 of the 09-17 addendum, closed: **no lane in this repository has ever
+run a Rust test.** `f1-test-compile` is `cargo test --workspace --no-run`; the
+swarm lanes run the parity board; `script-guards` runs the Python guards. Every
+mutation-checked Rust guard this campaign has written — hundreds of assertions,
+and the whole of its correctness evidence — has executed exactly once, on the
+seat of the night that wrote it, and never again.
+
+That is the same argument that put `script-guards` in `parity.yml`, applied to
+the other half of the suite, and by this campaign's own standard an unrun guard
+is not evidence. It is also the one unit on the queue's critical path that
+needs no cargo on this seat, which is the only reason it was tonight's.
+
+`unit-suites` runs the two campaign suites on `macos-14`, **advisory for one
+cycle** — the posture Gates A and B entered under ratified decision 2, and for
+the same reason: the lane has never run anywhere, so its colour is unknown, and
+a blocking lane of unknown colour is a red lock rather than a gate. Advisory
+means visible: the receipt reaches the job summary, did-not-run included.
+
+Three choices worth their sentence:
+
+- **Not `--workspace`.** `hiwave-app` and `hiwave-smoke` need a window server,
+  `rustkit-media` an audio device; a workspace run red-locks on the environment
+  instead of the engine.
+- **`macos-14`, not ubuntu.** Two of #199's justify tests are green on CoreText
+  and red on a Linux font stack (measured 09-17). A ubuntu lane would go red on
+  font substitution and teach everyone to ignore it.
+- **A suite that compiled, ran nothing and exited 0 fails the lane** and is
+  reported `DID NOT RUN`. `cargo test` produces exactly that whenever a harness
+  change filters every test away, and it is a did-not-run wearing a green
+  check.
+
+### Commits
+
+- `2044b53` — `ci:` the Rust unit suites actually execute (F2, advisory for one
+  cycle), plus `scripts/tests/test_unit_suites_actually_run.py`. Branch
+  `atlas/n56-ci-runs-the-unit-suites`, cut from `develop 9272261`. No
+  `crates/` change.
+
+### Mutation-check results
+
+**9 probes, 9 RED, no survivors.** Control green before and after;
+`parity.yml` restored byte-identical after the sweep; all 16 guards in
+`scripts/tests/` green.
+
+| probe | result | caught by |
+|---|---|---|
+| M1 the lane passes `--no-run` again | RED | `executes_rather_than_compiling` |
+| M2 the `unit-suites` job is deleted | RED | job lookup |
+| M3 `runs-on` → `ubuntu-latest` | RED | `runs_where_coretext_is` |
+| M4 `rustkit-engine` dropped from the loop | RED | `green_pair`, `executes_rather_than_compiling` |
+| M5 a suite that ran nothing scores green | RED | `ran_nothing_is_not_a_pass` |
+| M6 F1's `--no-run` falsifier deleted | RED | `f1_still_compiles_the_whole_workspace` |
+| M7 the receipt stops reaching the job summary | RED | 4 tests |
+| M8 the lane always exits 0 | RED | `red_suite_fails`, `ran_nothing` |
+| M9 the lane is skipped on `pull_request` | RED | `not_skipped_on_pull_requests` |
+
+Three of the guard's eight assertions **run the lane's own shell** against
+stubbed `cargo` output rather than reading the YAML, which is why M5, M7 and M8
+— all behavioural, none visible in the text — are caught at all. A guard that
+only grepped `parity.yml` would have survived every one of them.
+
+### The one thing I could still measure: nothing about `new_tab`
+
+09-17's decision 3 proposes `new_tab`'s `.container` (+306px, 223 failures) as
+the next unit. I could not attribute it, because attribution needs a capture.
+Two things recorded so the next seat does not repeat the dead end:
+
+**Chrome's 733 decomposes exactly**, from the committed baseline, so a single
+capture discriminates the subtree in one step rather than by bisection:
+
+```
+  .container   y 33.5  h 733  =  32 padding + 669 content + 32 padding
+    logo-wrapper      h  56   + 8  margin-bottom
+    tagline           h  18   + 48 margin-bottom (3rem)
+    search-container  h  52   + 32 margin-bottom (2rem), collapsing with
+    shortcuts-section         + 48 margin-top (3rem)  -> 48 between them
+      .shortcuts      h 400   = rows 60,60,60,60,50,50 + 5 gaps of 12
+                              = 2 columns of 262, auto-fit over 536
+  sum: 56+8+18+48+52+48+439 = 669
+```
+
+The adjacent-sibling margin collapse (32 vs 48 → 48) is load-bearing: get it
+wrong and the container is 32px tall in the wrong direction, which is not this
+defect but would confound a reading of it.
+
+**One hypothesis is already dead by source reading, not by guess.** The obvious
+suspect — `repeat(auto-fit, minmax(180px, 1fr))` unsupported, collapsing
+`.shortcuts` to one column — is wrong: `TrackRepeat::AutoFit` is parsed
+(`rustkit-css/src/lib.rs:1211`) and expanded at layout time with empty-track
+collapse (`rustkit-layout/src/grid.rs:737`). The arithmetic agrees: one column
+over 536px wraps no label, so twelve 50px rows and eleven gaps give 732, i.e.
++332, and the measured figure is +306. **I am not naming a root.** Source
+reading can kill a hypothesis; it cannot elect one, and electing one from here
+is how a night ships a confident wrong fix.
+
+### Decisions needed from Pete
+
+1. **The trench seat has no crates.io** — `static.crates.io` 403 is an egress
+   policy denial, not a flake — so no night here can build, test, capture or
+   measure until it is allowed or the image ships a warm/vendored registry;
+   which do you want?
+2. **Is P3 closable?** (carried 09-11, 09-16, 09-17, still unanswered.) Three
+   nights running its remaining defects have been real, Chrome-checked and
+   invisible to all 26 cases.
+3. **Flip `unit-suites` to blocking after its first green run?** It is one
+   `continue-on-error` line, and the lane is worth little while advisory.
+
+### Surprises
+
+- **The campaign's own mandatory test rule was never enforced anywhere but on
+  the seats.** Forty-odd nights of "mutation-checked, 11 probes, 11 RED" are
+  real, and every one of them has run exactly once. It took a seat that could
+  not run cargo at all to notice that CI could not either.
+- **A blocked network turned out to be the cheapest instrument audit of the
+  campaign.** With the engine unreachable, the only question left to ask was
+  what the instrument does without a seat attached, and the answer was: less
+  than everyone assumed.
+- **The 09-17 entry predicted this shape and I still nearly walked into it.**
+  My first instinct after the build failed was to read layout source and land
+  the `.container` fix "carefully". That is precisely the 08-12 failure with a
+  better excuse, and the only reason it did not happen is that the mandatory
+  test rule is unrunnable here — the rule saved the night by being impossible
+  to satisfy.
+- **The scheduled prompt still opens "the first unit is P0a-0"** and calls the
+  metric UNMEASURABLE. That was night 1, six weeks ago. 09-17 flagged it; it is
+  still unchanged, and it is the first thing a fresh seat reads.
