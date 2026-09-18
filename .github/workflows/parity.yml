@@ -30,6 +30,81 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: All test targets must COMPILE (F1)
         run: cargo test --workspace --no-run
+
+  # F2 — the unit suites actually EXECUTE. F1 above compiles every test target
+  # and stops there (`--no-run`), the swarm jobs run the parity board, and the
+  # script-guards lane runs the Python guards. Nothing in this repository has
+  # ever executed a Rust test: every mutation-checked guard this campaign has
+  # written — the whole of its correctness evidence — has run exactly once, on
+  # the seat of the night that wrote it, and never again.
+  #
+  # That is the same argument that put `script-guards` here, applied to the
+  # other half of the suite. A guard nobody runs is the decoration this
+  # campaign keeps warning about, and by its own standard an unrun guard is
+  # not evidence.
+  #
+  # Scope is the two suites the campaign's own working rule names as mandatory
+  # before every commit, not `--workspace`: hiwave-app and hiwave-smoke need a
+  # window server and rustkit-media needs an audio device, so a workspace run
+  # would red-lock on the environment rather than on the engine.
+  #
+  # macos-14 on purpose. Two of #199's justify tests are green on CoreText and
+  # red on a Linux font stack (measured 2026-09-17), so a ubuntu lane would
+  # red-lock on font substitution and teach everyone to ignore it.
+  #
+  # ADVISORY for one cycle, same posture as Gates A and B under ratified
+  # decision 2: this lane has never run anywhere, so its colour on macos-14 is
+  # unknown and a blocking lane of unknown colour is a red lock, not a gate.
+  # Advisory means VISIBLE, not ignored — the receipt goes to the job summary,
+  # including did-not-run, so the first run establishes the colour and the
+  # flip to blocking deletes one `continue-on-error` line.
+  unit-suites:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Campaign unit suites must PASS (F2, advisory)
+        id: unit_suites
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          summary="$RUNNER_TEMP/unit-suites.md"
+          {
+            echo "## Rust unit suites — advisory cycle"
+            echo
+            echo "The suites this campaign requires green before every commit."
+            echo "Advisory for one cycle; the flip to blocking removes one line."
+            echo
+            echo "| suite | result line | verdict |"
+            echo "|---|---|---|"
+          } > "$summary"
+          status=0
+          for pkg in rustkit-layout rustkit-engine; do
+            log="$RUNNER_TEMP/$pkg.log"
+            echo "::group::cargo test -p $pkg --lib"
+            if cargo test -p "$pkg" --lib --no-fail-fast 2>&1 | tee "$log"; then rc=0; else rc=1; fi
+            echo "::endgroup::"
+            # A suite that compiled, reported nothing and exited 0 is a
+            # did-not-run wearing a green check — the exact shape this
+            # campaign calls an instrument lie. `test result:` is cargo's
+            # own per-target line; no line means no target ran.
+            ran=$(grep -cE '^test result:' "$log" || true)
+            line=$(grep -E '^test result:' "$log" | head -1 || true)
+            if [ "$ran" -eq 0 ]; then
+              echo "| \`$pkg --lib\` | (none) | **DID NOT RUN** — no \`test result:\` line, so nothing executed |" >> "$summary"
+              status=1
+            elif [ "$rc" -ne 0 ]; then
+              echo "| \`$pkg --lib\` | $line | **RED** |" >> "$summary"
+              status=1
+            else
+              echo "| \`$pkg --lib\` | $line | green |" >> "$summary"
+            fi
+          done
+          cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          exit $status
   # ===========================================================================
   # Join-key contract (~1m). Cheap, corpus-wide, no Rust and no swarm.
   # ===========================================================================
