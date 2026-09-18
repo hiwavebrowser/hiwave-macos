@@ -2710,6 +2710,24 @@ impl Engine {
                             checked: attributes.contains_key("checked"),
                             name: attributes.get("name").cloned().unwrap_or_default(),
                         },
+                        // Button-type inputs are push buttons sized to their
+                        // label (HTML §4.10.5.1.20–22; Chrome: "Submit" 45.5px,
+                        // "Reset" 38.8px) — n53 form-controls built each as a
+                        // 160px text field.
+                        "submit" | "reset" | "button" => {
+                            let label = match attributes.get("value") {
+                                Some(v) => v.clone(),
+                                None => match input_type.as_str() {
+                                    "submit" => "Submit".to_string(),
+                                    "reset" => "Reset".to_string(),
+                                    _ => String::new(),
+                                },
+                            };
+                            rustkit_layout::FormControlType::Button {
+                                label,
+                                button_type: input_type,
+                            }
+                        }
                         _ => rustkit_layout::FormControlType::TextInput {
                             value,
                             placeholder,
@@ -3541,7 +3559,12 @@ impl Engine {
                 // interstitial whitespace text runs each taking a line.
                 style.display = rustkit_css::Display::InlineBlock;
                 style.font_size = rustkit_css::Length::Px(13.333);
-                style.font_family = "system-ui".to_string();
+                // The pinned oracle (Chrome CfT-148 on this seat) computes
+                // `font-family: Arial` for every unstyled control on every
+                // board case (n53 census over baselines/chrome-148); its
+                // labels measure as Arial to the tenth ("Submit" 41.5px).
+                // system-ui (SF) ran every control label 5–8% wide.
+                style.font_family = "Arial".to_string();
                 // UA default background lives HERE, not in the painter: paint
                 // used to substitute WHITE whenever computed alpha was 0,
                 // which cannot tell "author said nothing" from "author said
