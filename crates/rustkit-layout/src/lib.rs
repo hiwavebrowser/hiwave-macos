@@ -2129,14 +2129,22 @@ impl LayoutBox {
             FormControlType::TextInput { input_type, .. } => match input_type.as_str() {
                 "range" => (129.0 * ua_scale, 16.0 * ua_scale),
                 "color" => (50.0 * ua_scale, 27.0 * ua_scale),
-                // Default text input: ~20 characters wide, single line height
-                _ => (font_size * 12.0, single_line_box(19.0 * ua_scale)),
+                // Default text input: size=20 at the UA control font builds
+                // a 149px border-box in Chrome CfT-148 (n53 form-controls
+                // y-table: 149 on every bare text/email/password/number
+                // input; the old 12em blob said 160).
+                _ => (149.0 * ua_scale, single_line_box(19.0 * ua_scale)),
             },
             FormControlType::TextArea { rows, cols, .. } => {
-                // Textarea: based on rows/cols
+                // Textarea: cols × the monospace advance (0.6em) plus 18px
+                // of border + vertical scrollbar gutter — Chrome builds 178
+                // for cols=20 and 338 for cols=40 (n53).
                 let rows = (*rows).max(2) as f32;
                 let cols = (*cols).max(20) as f32;
-                (font_size * 0.6 * cols, (15.0 * rows + 2.0) * ua_scale)
+                (
+                    font_size * 0.6 * cols + 18.0 * ua_scale,
+                    (15.0 * rows + 2.0) * ua_scale,
+                )
             }
             FormControlType::Button { label, .. } => {
                 // Button: measured label width plus padding (was a
@@ -2172,13 +2180,34 @@ impl LayoutBox {
                 // Fixed size for checkboxes and radios
                 (13.0 * ua_scale, 13.0 * ua_scale)
             }
-            FormControlType::Select { size, .. } => {
+            FormControlType::Select { size, options, .. } => {
+                // Chrome sizes a select to its WIDEST option (n53
+                // form-controls: listbox 39 = "Item 4" 37 + 2px border;
+                // dropdown 137 = "A longer option text" + 24px of border and
+                // arrow well, 60 = "Select" + 24). The old 10em blob built
+                // 133 for both.
+                let widest = options
+                    .iter()
+                    .map(|o| {
+                        measure_text_advanced(
+                            o,
+                            &self.style.font_family,
+                            font_size,
+                            self.style.font_weight,
+                            self.style.font_style,
+                        )
+                        .width
+                    })
+                    .fold(0.0_f32, f32::max);
                 if *size > 1 {
                     // Inline listbox: 16px per visible row + 2px border.
-                    (font_size * 10.0, (16.0 * *size as f32 + 2.0) * ua_scale)
+                    (
+                        widest + 2.0 * ua_scale,
+                        (16.0 * *size as f32 + 2.0) * ua_scale,
+                    )
                 } else {
-                    // Dropdown: similar to text input but with arrow space
-                    (font_size * 10.0, single_line_box(19.0 * ua_scale))
+                    // Dropdown: widest option plus the arrow well.
+                    (widest + 24.0 * ua_scale, single_line_box(19.0 * ua_scale))
                 }
             }
         };
@@ -2272,13 +2301,107 @@ impl LayoutBox {
         // resolved (n43); with the 4px margins in the margin box, the hang
         // model builds Chrome's 39 and the bottom-edge model overshoots to
         // 41.5 (margin box + strut descent).
+        // A textarea is a scroll container (Chrome's UA `overflow: auto`),
+        // so like any inline-block whose overflow is not visible its
+        // baseline is the bottom margin edge (CSS2 §10.8.1) — n53
+        // form-controls: a bare 32px textarea alone on a line builds a 38px
+        // line in Chrome (the strut's descent hangs below it); the hang
+        // model built 32 and slid every section below by 6.
         if let BoxType::FormControl(control) = &self.box_type {
             return matches!(
                 control,
-                FormControlType::Checkbox { .. } | FormControlType::Radio { .. }
+                FormControlType::Checkbox { .. }
+                    | FormControlType::Radio { .. }
+                    | FormControlType::TextArea { .. }
             );
         }
-        self.style.display.is_atomic_inline() && self.children.is_empty()
+        if !self.style.display.is_atomic_inline() {
+            return false;
+        }
+        // An inline-block with in-flow line boxes sits on its LAST line's
+        // baseline (inline_block_baseline_y); one with none, or with an
+        // overflow other than visible, on its bottom margin edge. The
+        // overflow clause is CSS2 §10.8.1's and applies to inline-block
+        // ONLY: an inline-flex/grid scroll container keeps its content
+        // baseline (Blink ShouldIgnoreOverflowPropertyForInlineBlockBaseline
+        // — about's `a.sponsor-btn { display: inline-flex; overflow: hidden }`
+        // hung a strut descent under itself and shifted the page 3.4px).
+        if self.children.is_empty() {
+            return true;
+        }
+        let clipped = self.style.overflow_x != rustkit_css::Overflow::Visible
+            || self.style.overflow_y != rustkit_css::Overflow::Visible;
+        (clipped && self.style.display == rustkit_css::Display::InlineBlock)
+            || self.inline_block_baseline_y().is_none()
+    }
+
+    /// CSS2 §10.8.1: the baseline of an inline-block with in-flow content is
+    /// the baseline of its last line box — the last in-flow text run's last
+    /// line (a wrapped `<label>` hangs its single-line siblings off its
+    /// SECOND line), or, through nested blocks, the last descendant that
+    /// carries a baseline (text, control, image). None when no in-flow
+    /// descendant does (bottom-edge fallback). Absolute y in the box's
+    /// current geometry — read BEFORE the box is shifted.
+    fn inline_block_baseline_y(&self) -> Option<f32> {
+        for c in self.children.iter().rev() {
+            if matches!(c.position, Position::Absolute | Position::Fixed)
+                || c.float != Float::None
+                || c.style.display == rustkit_css::Display::None
+            {
+                continue;
+            }
+            match &c.box_type {
+                BoxType::Text(_) => {
+                    let fs = match c.style.font_size {
+                        Length::Px(px) => px,
+                        _ => 16.0,
+                    };
+                    let m = measure_text_advanced(
+                        "x",
+                        &c.style.font_family,
+                        fs,
+                        c.style.font_weight,
+                        c.style.font_style,
+                    );
+                    let (ascent, descent) = if m.ascent > 0.0 {
+                        (m.ascent, m.descent)
+                    } else {
+                        (fs * 0.8, fs * 0.2)
+                    };
+                    let line_h = resolve_line_height(&c.style, fs);
+                    let half_leading = ((line_h - (ascent + descent)) / 2.0).max(0.0);
+                    // Last line's baseline: the run's bottom minus the
+                    // below-baseline part of one line (paint seats each
+                    // line at content.y + i * line-height).
+                    let bottom = c.dimensions.content.y + c.dimensions.content.height;
+                    return Some(bottom - (half_leading + descent));
+                }
+                BoxType::FormControl(_) => {
+                    let mb = c.dimensions.margin_box();
+                    let hang = if c.baseline_is_bottom_edge() {
+                        0.0
+                    } else {
+                        c.form_control_baseline_hang()
+                    };
+                    return Some(mb.y + mb.height - hang);
+                }
+                BoxType::Image { .. } => {
+                    let mb = c.dimensions.margin_box();
+                    return Some(mb.y + mb.height);
+                }
+                BoxType::LineBreak => continue,
+                _ => {
+                    if c.style.display.is_atomic_inline() && c.baseline_is_bottom_edge() {
+                        let mb = c.dimensions.margin_box();
+                        return Some(mb.y + mb.height);
+                    }
+                    if let Some(b) = c.inline_block_baseline_y() {
+                        return Some(b);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Distance from a form control's synthetic baseline (its inner text
@@ -3570,6 +3693,16 @@ impl LayoutBox {
                     rustkit_css::VerticalAlign::Middle => h / 2.0 + x_height / 2.0,
                     _ => h, // baseline (Slice C subset: others fall through)
                 }
+            } else if c.style.display.is_atomic_inline() {
+                // Inline-block with in-flow content: its last line box's
+                // baseline (CSS2 §10.8.1). n53 form-controls: every
+                // `label { display: inline-block }` beside an input sat at
+                // the line top, 5px above Chrome; a wrapped label hung its
+                // row off its second line.
+                match c.inline_block_baseline_y() {
+                    Some(b) => b - member_top(c),
+                    None => continue,
+                }
             } else {
                 continue; // non-atomic inline boxes stay top-aligned (later slice)
             };
@@ -3594,6 +3727,11 @@ impl LayoutBox {
                         baseline_y - x_height / 2.0 - mb.height / 2.0
                     }
                     _ => baseline_y - mb.height,
+                }
+            } else if c.style.display.is_atomic_inline() {
+                match c.inline_block_baseline_y() {
+                    Some(b) => baseline_y - (b - member_top(c)),
+                    None => continue,
                 }
             } else {
                 continue;
@@ -9189,6 +9327,238 @@ mod tests {
             (second_row.content.y - expected_y).abs() < 0.5,
             "wrapped row must advance by line height incl. strut descent; expected content.y {expected_y}, got {}",
             second_row.content.y
+        );
+    }
+
+    /// n53 fixtures: a 16px/24px row (the form-controls `.row`), a 12px
+    /// inline-block `<label>` of the given text, whitespace, and a bare
+    /// text input — the page's `label + input` idiom.
+    fn n53_row_style() -> ComputedStyle {
+        let mut s = ComputedStyle::new();
+        s.font_family = "system-ui".to_string();
+        s.font_size = Length::Px(16.0);
+        s.line_height = rustkit_css::LineHeight::Px(24.0);
+        s
+    }
+
+    fn n53_label(text: &str) -> LayoutBox {
+        let mut s = n53_row_style();
+        s.display = rustkit_css::Display::InlineBlock;
+        s.width = Length::Px(120.0);
+        s.font_size = Length::Px(12.0);
+        s.line_height = rustkit_css::LineHeight::Px(18.0);
+        let mut label = LayoutBox::new(BoxType::Block, s.clone());
+        let mut text_style = s;
+        text_style.display = rustkit_css::Display::Inline;
+        text_style.width = Length::Auto;
+        label
+            .children
+            .push(LayoutBox::new(BoxType::Text(text.to_string()), text_style));
+        label
+    }
+
+    /// A bare control as the engine's UA arm styles it: inline-block, the
+    /// 13.333px Arial control font, the page's inherited line-height 1.5.
+    fn n53_control(control: FormControlType) -> LayoutBox {
+        let mut s = ComputedStyle::new();
+        s.display = rustkit_css::Display::InlineBlock;
+        s.font_family = "Arial".to_string();
+        s.font_size = Length::Px(13.333);
+        s.line_height = rustkit_css::LineHeight::Number(1.5);
+        LayoutBox::new(BoxType::FormControl(control), s)
+    }
+
+    fn n53_text_input() -> LayoutBox {
+        n53_control(FormControlType::TextInput {
+            value: String::new(),
+            placeholder: "Default size".to_string(),
+            input_type: "text".to_string(),
+        })
+    }
+
+    #[test]
+    fn inline_block_with_text_sits_on_its_last_line_baseline() {
+        // form-controls (n53): `label { display: inline-block; width: 120px;
+        // font-size: 12px }` beside a bare input in a 16px/24px row. Chrome
+        // 148: row 24 tall, label top at +5 (its 12px text's baseline meets
+        // the line baseline), input top at +4. RustKit placed the label at
+        // the row top (+0) on all twelve rows of the page — the alignment
+        // pass skipped every inline-block that had children.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 736.0, 0.0);
+        let mut row = LayoutBox::new(BoxType::Block, n53_row_style());
+        row.children.push(n53_label("Text:"));
+        row.children.push(LayoutBox::new(
+            BoxType::Text(" ".to_string()),
+            n53_row_style(),
+        ));
+        row.children.push(n53_text_input());
+        row.layout(&cb);
+
+        let row_top = row.dimensions.content.y;
+        let label_top = row.children[0].dimensions.border_box().y - row_top;
+        let input_top = row.children[2].dimensions.border_box().y - row_top;
+        assert!(
+            (label_top - 5.0).abs() <= 1.5,
+            "label must sit on the line baseline: Chrome +5, got +{label_top}"
+        );
+        assert!(
+            (input_top - 4.0).abs() <= 2.0,
+            "input keeps its hang-model seat: Chrome +4, got +{input_top}"
+        );
+        assert!(
+            (row.dimensions.content.height - 24.0).abs() <= 1.0,
+            "row stays one 24px line, got {}",
+            row.dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn wrapped_inline_block_hangs_the_line_off_its_last_line() {
+        // form-controls §5 (n53): `<input type=checkbox> <label>Checkbox 1
+        // </label> <input type=checkbox> <label>Checkbox 2 (checked)</label>`
+        // in a 120px-label row — the second label wraps to two 18px lines.
+        // Chrome 148: the line's baseline is that label's SECOND line's, so
+        // the checkboxes (bottom-edge baseline) and the one-line label all
+        // sit at +18 from the row top; the wrapped label at +0.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 736.0, 0.0);
+        let mut row = LayoutBox::new(BoxType::Block, n53_row_style());
+        let cb_box = || n53_control(FormControlType::Checkbox { checked: false });
+        let ws = || LayoutBox::new(BoxType::Text(" ".to_string()), n53_row_style());
+        row.children.push(cb_box());
+        row.children.push(ws());
+        row.children.push(n53_label("Checkbox 1"));
+        row.children.push(ws());
+        row.children.push(cb_box());
+        row.children.push(ws());
+        row.children.push(n53_label("Checkbox 2 (checked)"));
+        row.layout(&cb);
+
+        let row_top = row.dimensions.content.y;
+        let top = |i: usize| row.children[i].dimensions.border_box().y - row_top;
+        let wrapped = &row.children[6];
+        assert!(
+            (wrapped.dimensions.border_box().height - 36.0).abs() <= 1.0,
+            "the long label must wrap to two 18px lines, got {}",
+            wrapped.dimensions.border_box().height
+        );
+        assert!(
+            top(6).abs() <= 1.0,
+            "the wrapped label defines the line's ascent and stays at the top, got +{}",
+            top(6)
+        );
+        for (i, what) in [
+            (0, "first checkbox"),
+            (2, "one-line label"),
+            (4, "second checkbox"),
+        ] {
+            assert!(
+                (top(i) - 18.0).abs() <= 1.5,
+                "{what} must hang off the wrapped label's second line: Chrome +18, got +{}",
+                top(i)
+            );
+        }
+    }
+
+    #[test]
+    fn textarea_alone_on_a_line_hangs_the_strut_descent_below_it() {
+        // form-controls §7 (n53): a bare 32px textarea as the only child of a
+        // 16px/24px container. Chrome 148 builds a 38px line — the textarea
+        // is a scroll container, its baseline is its bottom margin edge, and
+        // the strut's descent + half-leading (6px here) hangs below. The hang
+        // model built 32 and every section under it slid up by 6.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 736.0, 0.0);
+        let mut block = LayoutBox::new(BoxType::Block, n53_row_style());
+        block.children.push(n53_control(FormControlType::TextArea {
+            value: String::new(),
+            placeholder: "Default textarea".to_string(),
+            rows: 2,
+            cols: 20,
+        }));
+        block.layout(&cb);
+
+        let ta = &block.children[0].dimensions;
+        assert!(
+            (ta.border_box().height - 32.0).abs() <= 1.0,
+            "bare two-row textarea stays 32px, got {}",
+            ta.border_box().height
+        );
+        assert!(
+            (ta.border_box().y - block.dimensions.content.y).abs() <= 0.5,
+            "textarea top is the line top, got +{}",
+            ta.border_box().y - block.dimensions.content.y
+        );
+        let sd = block.inline_strut_descent();
+        let expected = 32.0 + sd;
+        assert!(
+            (block.dimensions.content.height - expected).abs() <= 0.5,
+            "line = textarea + strut descent ({expected}; Chrome 38), got {}",
+            block.dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn bare_control_widths_match_chrome() {
+        // n53 form-controls y-table vs Chrome 148 at the UA control font:
+        // text input 149 (was the 12em blob, 160); textarea cols=20 178 and
+        // cols=40 338 (0.6em per col + 18 border/scrollbar gutter; was 160 /
+        // 320); a listbox is its widest option + 2 (39 for "Item 4"; was
+        // 133), a dropdown its widest option + 24 (137 for "A longer option
+        // text", 60 for "Select"; was 133).
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 736.0, 0.0);
+        let width = |mut b: LayoutBox| {
+            b.layout(&cb);
+            b.dimensions.border_box().width
+        };
+        let w = width(n53_text_input());
+        assert!(
+            (w - 149.0).abs() <= 0.5,
+            "bare text input width: Chrome 149, got {w}"
+        );
+
+        let ta = |cols: u32| {
+            n53_control(FormControlType::TextArea {
+                value: String::new(),
+                placeholder: String::new(),
+                rows: 2,
+                cols,
+            })
+        };
+        let w20 = width(ta(20));
+        let w40 = width(ta(40));
+        assert!(
+            (w20 - 178.0).abs() <= 1.0,
+            "textarea cols=20: Chrome 178, got {w20}"
+        );
+        assert!(
+            (w40 - 338.0).abs() <= 1.0,
+            "textarea cols=40: Chrome 338, got {w40}"
+        );
+
+        let sel = |options: &[&str], size: u32| {
+            n53_control(FormControlType::Select {
+                options: options.iter().map(|o| o.to_string()).collect(),
+                selected_index: None,
+                size,
+            })
+        };
+        let listbox = width(sel(&["Item 1", "Item 2", "Item 3", "Item 4"], 3));
+        assert!(
+            (listbox - 39.0).abs() <= 3.0,
+            "listbox = widest option + 2: Chrome 39, got {listbox}"
+        );
+        let dropdown = width(sel(&["Option 1", "Option 2", "A longer option text"], 0));
+        assert!(
+            (dropdown - 137.0).abs() <= 2.0,
+            "dropdown = widest option + 24: Chrome 137, got {dropdown}"
+        );
+        let short = width(sel(&["Select"], 0));
+        assert!(
+            (short - 60.0).abs() <= 3.0,
+            "dropdown 'Select': Chrome 60, got {short}"
         );
     }
 
