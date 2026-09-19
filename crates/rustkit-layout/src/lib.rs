@@ -2440,7 +2440,27 @@ impl LayoutBox {
             (font_size * 0.8, font_size * 0.2)
         };
         let half_leading = ((line_height - (ascent + descent)) / 2.0).max(0.0);
-        descent + half_leading + self.dimensions.padding.bottom + self.dimensions.border.bottom
+        // A single-line control taller than its text line (author `height`)
+        // centres the line in its content box, so half the spare height
+        // hangs below the baseline too. n54 form-controls §4: a `height:
+        // 50px` button read as 44.6 above + 5.4 below; under the 6px strut
+        // descent that is a 50.6px line for Chrome's 50.
+        let centres_its_line = match &self.box_type {
+            BoxType::FormControl(FormControlType::Button { .. })
+            | BoxType::FormControl(FormControlType::TextInput { .. }) => true,
+            BoxType::FormControl(FormControlType::Select { size, .. }) => *size <= 1,
+            _ => false,
+        };
+        let spare_below = if centres_its_line && !matches!(self.style.height, Length::Auto) {
+            ((self.dimensions.content.height - line_height) / 2.0).max(0.0)
+        } else {
+            0.0
+        };
+        descent
+            + half_leading
+            + spare_below
+            + self.dimensions.padding.bottom
+            + self.dimensions.border.bottom
     }
 
     /// Content area of a NON-REPLACED inline box and the half-leading that
@@ -2494,13 +2514,27 @@ impl LayoutBox {
     /// `normal` line-height by a rounding sliver, the clamped half-leading
     /// above would make every text line that sliver taller than the run's
     /// own line boxes (4 lines read 73.69 for 73.60).
+    ///
+    /// The part above the baseline is a WHOLE pixel, as in Blink: a face's
+    /// ascent and descent are rounded (SimpleFontData) and the half-leading
+    /// added above is floored (FontHeight::AddLeading); the fraction of the
+    /// line-height stays below. With the raw metrics a 36px wrapped label
+    /// over a 16px/24px strut summed to 37.58 for Chrome's 37 (form-controls
+    /// §5), and every such row pushed the page down by the sliver.
     fn text_line_box_extents(s: &ComputedStyle) -> (f32, f32) {
         let fs = match s.font_size {
             Length::Px(px) => px,
             _ => 16.0,
         };
-        let above = Self::text_baseline_extents(s).0;
-        (above, (resolve_line_height(s, fs) - above).max(0.0))
+        let m = measure_text_advanced("x", &s.font_family, fs, s.font_weight, s.font_style);
+        let (ascent, descent) = if m.ascent > 0.0 {
+            (m.ascent.round(), m.descent.round())
+        } else {
+            ((fs * 0.8).round(), (fs * 0.2).round())
+        };
+        let line_h = resolve_line_height(s, fs);
+        let above = ascent + ((line_h - (ascent + descent)) / 2.0).floor();
+        (above, (line_h - above).max(0.0))
     }
 
     /// This line member's extents above and below the line's baseline, for
@@ -2535,7 +2569,11 @@ impl LayoutBox {
         } else if self.style.display.is_atomic_inline() {
             let d = &self.dimensions;
             let top = d.content.y - d.margin.top - d.border.top - d.padding.top;
-            self.inline_block_baseline_y()? - top
+            // Whole pixels, for the same reason as text_line_box_extents: the
+            // inner baseline is a stack of line boxes plus a text ascent
+            // whose fraction belongs BELOW it (a wrapped 2 x 18px label reads
+            // 31.54 here; Blink's is 18 + 13 = 31).
+            (self.inline_block_baseline_y()? - top + 0.01).floor()
         } else {
             return None;
         };
@@ -9558,6 +9596,55 @@ mod tests {
             "whitespace between the members must not change the line's height: {} vs {}",
             row.dimensions.content.height,
             with_ws.dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn a_line_sums_whole_pixel_ascents_like_blink() {
+        // form-controls §5 (n54): the row whose second label wraps to two
+        // 18px lines. The line's ascent is that label's last-line baseline,
+        // 18 + 13, and the 16px/24px strut hangs 6 below: Chrome 148 builds
+        // 37. Raw metrics (13.54 / 5.95) summed to 37.58, and rounding the
+        // label's geometric baseline UP built 38.
+        assert_eq!(LayoutBox::text_line_box_extents(&n53_row_style()), (18.0, 6.0));
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 736.0, 0.0);
+        let mut row = LayoutBox::new(BoxType::Block, n53_row_style());
+        let ws = || LayoutBox::new(BoxType::Text(" ".to_string()), n53_row_style());
+        row.children
+            .push(n53_control(FormControlType::Checkbox { checked: false }));
+        row.children.push(ws());
+        row.children.push(n53_label("Checkbox 2 (checked)"));
+        row.layout(&cb);
+        assert!(
+            (row.dimensions.content.height - 37.0).abs() <= 0.05,
+            "wrapped-label row: Chrome 37, got {}",
+            row.dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn a_fixed_height_button_centres_its_line_about_the_baseline() {
+        // form-controls §4 (n54): `button { width: 200px; height: 50px }`
+        // alone in a 16px/24px container is a 50px line in Chrome 148 — its
+        // label is centred, so ~20px of the box hangs below the baseline and
+        // swallows the strut's 6. Seating the label at the box bottom left
+        // 5.4 below: the strut poked out and the line read 50.6.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 736.0, 0.0);
+        let mut block = LayoutBox::new(BoxType::Block, n53_row_style());
+        let mut button = n53_control(FormControlType::Button {
+            label: "Fixed size".to_string(),
+            button_type: "button".to_string(),
+        });
+        button.style.width = Length::Px(200.0);
+        button.style.height = Length::Px(50.0);
+        block.children.push(button);
+        block.layout(&cb);
+        assert!(
+            (block.dimensions.content.height - 50.0).abs() <= 0.05,
+            "fixed 50px button line: Chrome 50, got {}",
+            block.dimensions.content.height
         );
     }
 
