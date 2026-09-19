@@ -2797,7 +2797,7 @@ impl LayoutBox {
     /// Build-time transfer can only pre-resolve absolute lengths; percents
     /// (e.g. `left: -100%` off-canvas shimmer overlays) need the containing
     /// block, so they resolve here at apply time from the computed style.
-    fn resolved_offsets(&self, containing_block: &Dimensions) -> PositionOffsets {
+    pub(crate) fn resolved_offsets(&self, containing_block: &Dimensions) -> PositionOffsets {
         let resolve = |pre: Option<f32>, st: &Option<Length>, basis: f32| {
             pre.or(match st {
                 Some(Length::Percent(p)) => Some(p / 100.0 * basis),
