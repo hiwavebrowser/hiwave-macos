@@ -9946,3 +9946,197 @@ One correction to this night's entry above, measured after it was written:
 `rustkit-layout 402 → 406 tests`, so that seat builds and tests normally.
 Decision 1 is therefore about restoring *this* seat, not about a campaign-wide
 outage — a narrower ask than the entry above implies.
+
+## 2026-09-19
+
+**Metric: `2/26` → `2/26` on macOS, carried forward and NOT re-measured here.**
+No macOS lane ran tonight, so nothing below is a receipt. On this seat both
+conjunction columns that could move are unchanged — Gate A geometry-green 3/26,
+Gate B paint-green 1/26, discrete auto-fails 0, all 26 measured — so no case
+crossed the conjunction and none fell off it. The engine changed, so this is a
+measurement, not the md5 proof 09-17 could give.
+
+**P-item: P3 (flex residual). NOT complete. One root landed, and it is the
+first P3 root in four nights that the 26-case corpus can actually see.**
+
+### The seat builds again
+
+09-18's blocker is gone: `cargo fetch --locked` completed, the workspace
+compiles, `parity-capture` builds, and captures run under SwiftShader as
+before. `static.crates.io` still answers 403 to a bare `curl`, so the fix is
+not "the host was unblocked wholesale" — the sparse index and the actual crate
+downloads work through the proxy, and 09-18's diagnosis was accurate for the
+container it ran in. **Decision 1 of 09-18 is moot for now; it is not answered,
+and a future night may find it back.**
+
+### The defect
+
+css-flexbox-1 §4.1: the static position of an out-of-flow child of a flex
+container is where it would sit *as if it were the sole flex item* —
+`justify-content` on the main axis, `align-self`/`align-items` on the cross
+axis, inside the container's content box. Step 2 of RustKit's flex algorithm
+drops absolutely- and fixed-positioned children from item collection, and
+nothing put them back, so they kept the **block flow cursor** the pre-pass gave
+them.
+
+The corpus instance is `new_tab`'s footer:
+
+```
+  .footer { position: fixed; bottom: 1rem }   inside
+  body    { display: flex; flex-direction: column; align-items: center }
+
+                  Chrome 148     RustKit before     after
+  .footer   x        571.203            0.000     568.000
+  .footer > a x      662.016           96.000     664.000
+```
+
+571px, and it was the **largest single geometry error on the case** — and the
+only large one on it that does not depend on the font stack. The night found
+it by reading tonight's board for failures too big to be text metrics, not by
+working down the plan's prose.
+
+### Chrome ground truth, measured before a line was written
+
+A 14-shape probe page (400×200 container, one 60×30 in-flow item, one 50×20
+out-of-flow child) through the bundled Chromium, then through `parity-capture`:
+**14/14 RustKit positions wrong before, 14/14 bit-exact after.** The shapes
+cover row and column, both reverse directions, the three `justify-content`
+keywords a sole item distinguishes, `align-items` vs `align-self`, margins,
+container padding, a single specified inset on either axis, and an auto height
+floored by `min-height`.
+
+Two readings from it that the spec text alone would not have settled:
+
+- **`space-around` and `space-evenly` centre a sole item; `space-between`
+  packs it to main-start.** Chrome, not inference.
+- **The alignment is of the child's MARGIN box**, and the static-position
+  rectangle is the container's **content** box, not its border box.
+
+### Commits — branch `atlas/n57-new-tab-container-height`, cut from `develop 011ffee`
+
+- `b31315b` — an out-of-flow flex child takes the sole-item static position
+  (`rustkit-layout/src/flex.rs` step 13, +9 guards; `resolved_offsets` becomes
+  `pub(crate)`).
+
+**Pushed, no PR** — P3 is not complete, and the night order allows a PR only
+when the P-item is. The branch name is a misnomer: it was cut before the
+diagnosis, for 09-17's proposed `.container` unit, and the commit inside it is
+the flex static position. Decision 1 below.
+
+### Measured — Linux/SwiftShader, 26 cases, base `develop 011ffee`. MECHANICS, NOT A RECEIPT
+
+| Oracle | before | after |
+|---|---:|---:|
+| Gate A geometry failures / joins | 2593 / 16 | 2593 / 16 |
+| Gate A geometry-green / measured | 3/26 · 26/26 | 3/26 · 26/26 |
+| Gate B paint-green / measured | 1/26 · 26/26 | 1/26 · 26/26 |
+| Gate B discrete auto-fails / examined | 0 / 266 | 0 / 266 |
+| `new_tab` paint within ±5 | 85.32979% | **85.39639%** |
+
+Per (case, selector, axis) across all 26 cases:
+**fixed 0 · newly failing 0 · improved 2 · worsened 0 · unchanged 2607.**
+
+**The failure COUNT did not move at all** — and that is the number most boards
+would have printed:
+
+| | before | after |
+|---|---:|---:|
+| `new_tab` geometry failures | 210 | 210 |
+| `new_tab` sum·\|Δ\| | 2706.46 | **1574.43** |
+| `new_tab` worst box | 571.20 | **70.80** |
+| corpus sum·\|Δ\| | 57813.54 | **56681.51** |
+
+The footer's residual is **3.203px, exactly half its width error** (RustKit
+144.00 against Chrome 137.594 for "HiWave v0.1.0 - Settings"): a centred box
+whose width is wrong is displaced by half that. So what is left on that box is
+text advance widths — **P4's territory, not positioning** — and on a CoreText
+seat the same fix should land it exactly. That is a prediction the macOS lane
+can check, not a claim.
+
+Both gates were re-run on the **final** commit, not the intermediate: the code
+was retightened after the first board (the static-position rectangle now reads
+the containing block the way steps 6–10 do). All 26 `layout.json` are
+byte-identical between the two builds, so the retighten is measured
+behaviour-neutral rather than assumed to be.
+
+### Stop rule
+
+Checked per box, not per case: across all 26 cases and every axis, **zero boxes
+worsened**, no case gained a discrete failure, no case lost its green, and
+Gate B's percentage half regressed on nothing. The rule did not fire.
+
+### Mutation-check results
+
+**10 probes, 10 RED, no survivors**, control green before and after, committed
+before mutating (the lesson finally applied on the first try rather than after
+losing a test to `git checkout --`).
+
+| probe | result |
+|---|---|
+| M1 the whole of step 13 never runs | RED (all 9 guards) |
+| M2 a specified inset no longer protects its axis | RED |
+| M3 alignment reads the border box, not the margin box | RED |
+| M4 reverse directions lose their flipped main-start | RED |
+| M5 `align-self` ignored; the container's `align-items` always wins | RED |
+| M6 the vertical main size drops the `min-height` floor | RED |
+| M7 the static-position rectangle becomes the border box | RED |
+| M8 `space-between` treated as a centring keyword | RED |
+| M9 the box moves without its subtree | RED |
+| M10 `stretch` treated as a far-edge alignment | RED |
+
+**M1 caught a decoration guard before it shipped, which is new.** On the first
+sweep `space_between_packs_a_sole_out_of_flow_child_to_main_start` stayed
+**green with the entire fix removed**: its expected position is main-start
+`(0, 0)`, which is also the harness's default origin, so the assertion held
+without anything having moved the box. Fixed by starting the box at the block
+flow cursor `(0, 30)` — where the defect actually left it — so the guard now
+requires the fix. Four sweeps running the survivor has been *the guard written
+against the example rather than the rule*; this is the first time the "delete
+the whole change and see which guards still pass" probe found one **before**
+the commit went out rather than a night later.
+
+### Decisions needed from Pete
+
+1. **Open a PR for `atlas/n57-…`, or hold it?** The night order permits a PR
+   only when the P-item completes, but 09-17 measured that an unopened branch
+   and an unread green PR are the same object — neither reaches you without a
+   notification.
+2. **09-17's proposed next unit no longer exists as described.** `new_tab`'s
+   `.container` was `+306px` with `body` 239px too tall; on tonight's board
+   `body` is exact and `.container` is `−38px` height / `+19px` y. Re-derive
+   the next unit from a fresh board each night rather than from the previous
+   digest's numbers?
+3. **Mark the four font-stack tests `#[cfg(target_os = "macos")]`?** On this
+   seat `rustkit-layout --lib` is 409 passed / 4 failed *before and after* any
+   change tonight, all four text-advance tests that 09-17 measured green on
+   CoreText. A Linux seat cannot honour "never commit red" literally while they
+   are unconditional, and "red, but the same red as before" is exactly the
+   judgement call this campaign tries to remove.
+
+### Surprises
+
+- **A 571px error survived forty-odd nights of this campaign in the corpus's
+  most-looked-at case.** It is not subtle, it is not text, and `new_tab` has
+  been on every board since night 1. It stayed invisible because the board
+  ranks cases by failure COUNT, and this defect costs one case two counts.
+- **The count and the magnitude disagreed completely.** Geometry failures
+  210 → 210 while the worst box went 571.20 → 70.80. 08-12 recorded the same
+  shape on `gradient-backgrounds` and called it "a failure count is not a
+  magnitude"; tonight is the extreme version, where a count-only board would
+  have read *no change whatsoever* on the night's only real fix.
+- **Reading a target off a two-day-old digest would have wasted the night.**
+  The nine PRs merged on 09-17 changed `new_tab` substantially: 09-17's
+  `.container +306px / body +239px` is gone. The proposed unit was not there
+  to work.
+- **`cargo test -p rustkit-engine --lib` needs `VK_ICD_FILENAMES` on this
+  seat**, or 4 of its 80 tests die in adapter creation — not on an assertion.
+  With the ICD set it is 80/80 green. #203's lane runs on `macos-14` where this
+  is moot, so the trap is invisible to CI and costs any Linux seat the first
+  ten minutes of a false red. (That lane's 09-18 receipt read 87 tests for the
+  same suite; this seat compiles 80. `develop` has moved since, so the gap is
+  not necessarily platform-gated tests — worth one look by whoever next reads
+  the lane.)
+- **P3's remaining work is not all invisible after all.** Three nights running
+  (09-15, 09-16, 09-17) its defects were real, Chrome-exact and unmeasurable on
+  the corpus, and that had begun to read like evidence P3 was finished. It was
+  evidence about *where those nights looked*.
