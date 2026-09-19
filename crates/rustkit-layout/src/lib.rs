@@ -192,6 +192,18 @@ pub fn resolve_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
     }
 }
 
+/// Height of a closing line box (CSS2 §10.8.1): the members sit on one
+/// baseline, so the box spans the largest extent above it plus the largest
+/// below it, and the container's strut floors both. `tallest` / `bottom_edge`
+/// are the block-children loops' older accounting — the tallest member, and
+/// bottom-edge members plus the strut descent — kept as floors for the
+/// members the align pass leaves at the line top.
+fn line_advance(tallest: f32, bottom_edge: f32, extents: (f32, f32), strut: (f32, f32)) -> f32 {
+    tallest
+        .max(bottom_edge)
+        .max(extents.0.max(strut.0) + extents.1.max(strut.1))
+}
+
 /// Line height of ONE shaped text run: the box's `line-height`, except that
 /// under `normal` the run's own extents win when they are taller. A run's
 /// metrics are the union of every face it used (`TextShaper::shape` folds
@@ -2464,6 +2476,72 @@ impl LayoutBox {
         (content, half_leading)
     }
 
+    /// Above/below-baseline extents of a line of text in `s`, half-leading
+    /// included — the strut when `s` is the container's style (CSS2 §10.8.1).
+    fn text_baseline_extents(s: &ComputedStyle) -> (f32, f32) {
+        let fs = match s.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let m = measure_text_advanced("x", &s.font_family, fs, s.font_weight, s.font_style);
+        let line_h = resolve_line_height(s, fs);
+        let half_leading = ((line_h - (m.ascent + m.descent)) / 2.0).max(0.0);
+        (half_leading + m.ascent, half_leading + m.descent)
+    }
+
+    /// The same split for sizing a line box: the two parts sum to the
+    /// line-height EXACTLY. Where a face's ascent + descent exceeds its
+    /// `normal` line-height by a rounding sliver, the clamped half-leading
+    /// above would make every text line that sliver taller than the run's
+    /// own line boxes (4 lines read 73.69 for 73.60).
+    fn text_line_box_extents(s: &ComputedStyle) -> (f32, f32) {
+        let fs = match s.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let above = Self::text_baseline_extents(s).0;
+        (above, (resolve_line_height(s, fs) - above).max(0.0))
+    }
+
+    /// This line member's extents above and below the line's baseline, for
+    /// the line box's height (CSS2 §10.8.1: the line box spans the highest
+    /// box top to the lowest box bottom once every member sits on the
+    /// baseline, the strut included). Mirrors apply_vertical_align's
+    /// placement arms. None for members the align pass leaves at the line
+    /// top: non-atomic inline boxes, and `vertical-align: top|bottom` boxes,
+    /// which hang from the line edge and swallow the strut instead of
+    /// stacking on its descent; `middle` keeps the loop's own accounting
+    /// (it centres on the container's x-height, not on this box's font).
+    /// Reads the member's current geometry.
+    fn line_member_baseline_extents(&self) -> Option<(f32, f32)> {
+        if matches!(
+            self.style.vertical_align,
+            rustkit_css::VerticalAlign::Top
+                | rustkit_css::VerticalAlign::Bottom
+                | rustkit_css::VerticalAlign::Middle
+        ) {
+            return None;
+        }
+        if matches!(self.box_type, BoxType::Text(_)) {
+            return Some(Self::text_line_box_extents(&self.style));
+        }
+        let h = self.dimensions.margin_box().height;
+        let above = if matches!(self.box_type, BoxType::FormControl(_))
+            && !self.baseline_is_bottom_edge()
+        {
+            (h - self.form_control_baseline_hang()).max(0.0)
+        } else if self.baseline_is_bottom_edge() {
+            h
+        } else if self.style.display.is_atomic_inline() {
+            let d = &self.dimensions;
+            let top = d.content.y - d.margin.top - d.border.top - d.padding.top;
+            self.inline_block_baseline_y()? - top
+        } else {
+            return None;
+        };
+        Some((above, (h - above).max(0.0)))
+    }
+
     fn inline_strut_descent(&self) -> f32 {
         let font_size = match self.style.font_size {
             Length::Px(px) => px,
@@ -3272,9 +3350,13 @@ impl LayoutBox {
         // whose bottom edge IS their baseline (empty atomic inlines, images):
         // the strut's descent extends the line box under them.
         let mut line_below_baseline = 0.0_f32;
+        // Above/below-baseline extents of the current line's baseline-anchored
+        // members; the strut floors both when the line closes (line_advance).
+        let mut line_extents = (0.0_f32, 0.0_f32);
         let container_width = self.dimensions.content.width;
         let text_align = self.style.text_align;
         let strut_descent = self.inline_strut_descent();
+        let strut = Self::text_line_box_extents(&self.style);
         // A `<br>` on an otherwise empty line still produces a line box of
         // the container's line-height (CSS 2.1 §9.4.2 / §10.8).
         let empty_line_height = self.get_line_height();
@@ -3324,7 +3406,7 @@ impl LayoutBox {
                     lines.push((start, i, line_width));
                 }
                 let advance = if cursor_x > 0.0 || line_height > 0.0 {
-                    line_height.max(line_below_baseline)
+                    line_advance(line_height, line_below_baseline, line_extents, strut)
                 } else {
                     empty_line_height
                 };
@@ -3338,6 +3420,7 @@ impl LayoutBox {
                 cursor_x = 0.0;
                 line_height = 0.0;
                 line_below_baseline = 0.0;
+                line_extents = (0.0, 0.0);
                 line_start_index = None;
                 line_width = 0.0;
                 continue;
@@ -3396,10 +3479,11 @@ impl LayoutBox {
                     }
 
                     // Wrap to next line
-                    cursor_y += line_height.max(line_below_baseline);
+                    cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut);
                     cursor_x = 0.0;
                     line_height = 0.0;
                     line_below_baseline = 0.0;
+                    line_extents = (0.0, 0.0);
                     line_start_index = Some(i);
                     line_width = 0.0;
 
@@ -3458,12 +3542,13 @@ impl LayoutBox {
                         if let Some(start) = line_start_index {
                             lines.push((start, i + 1, line_width + child_width));
                         }
-                        cursor_y += line_height.max(line_below_baseline).max(lh)
+                        cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut).max(lh)
                             + (n_lines as f32 - 2.0).max(0.0) * lh;
                         cursor_x = last_end;
                         line_width = last_end;
                         line_height = lh;
                         line_below_baseline = 0.0;
+                        line_extents = (0.0, 0.0);
                         line_start_index = Some(i);
                         continue;
                     }
@@ -3481,6 +3566,17 @@ impl LayoutBox {
                 // sticky-scroll's .horizontal-scroll read 156.8 where Chrome
                 // reads 150 (+6.8 = descent + half-leading at line-height
                 // 1.6), and the error cascaded into every later sibling's y.
+                // Every baseline-anchored member raises the line's ascent or
+                // deepens its descent; the line box is their sum, not the
+                // tallest member (n54: `<label>Text:</label><input>` with no
+                // whitespace between built a 19px line for Chrome's 24).
+                let member_extents = match child.float {
+                    Float::None => child.line_member_baseline_extents(),
+                    _ => None,
+                };
+                if let Some((above, below)) = member_extents {
+                    line_extents = (line_extents.0.max(above), line_extents.1.max(below));
+                }
                 let anchored_to_baseline = !matches!(
                     child.style.vertical_align,
                     rustkit_css::VerticalAlign::Top | rustkit_css::VerticalAlign::Bottom
@@ -3516,12 +3612,13 @@ impl LayoutBox {
                     // after the loop (the open last line is aligned by the
                     // recorded-lines pass when it eventually closes).
                     split_records.push((line_start_index.unwrap_or(i), i));
-                    cursor_y += line_height.max(line_below_baseline).max(lh)
+                    cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut).max(lh)
                         + (n_lines as f32 - 2.0).max(0.0) * lh;
                     cursor_x = last_w;
                     line_width = last_w;
                     line_height = lh;
                     line_below_baseline = 0.0;
+                    line_extents = (0.0, 0.0);
                     line_start_index = Some(i);
                 }
             } else {
@@ -3531,10 +3628,11 @@ impl LayoutBox {
                     if let Some(start) = line_start_index {
                         lines.push((start, i, line_width));
                     }
-                    cursor_y += line_height.max(line_below_baseline);
+                    cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut);
                     cursor_x = 0.0;
                     line_height = 0.0;
                     line_below_baseline = 0.0;
+                    line_extents = (0.0, 0.0);
                     line_start_index = None;
                     line_width = 0.0;
                 }
@@ -3583,7 +3681,7 @@ impl LayoutBox {
             if let Some(start) = line_start_index {
                 lines.push((start, self.children.len(), line_width));
             }
-            cursor_y += line_height.max(line_below_baseline);
+            cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut);
         }
 
         // IFC Slice B2: align the CLOSED lines of each mid-line split
@@ -3641,13 +3739,7 @@ impl LayoutBox {
         // Above/below-baseline extents for a text-carrying style, matching
         // the paint emission: glyph top = content_y + half_leading,
         // baseline = glyph top + ascent.
-        let text_extents = |s: &ComputedStyle| -> (f32, f32) {
-            let fs = font_px(s);
-            let m = measure_text_advanced("x", &s.font_family, fs, s.font_weight, s.font_style);
-            let line_h = resolve_line_height(s, fs);
-            let half_leading = ((line_h - (m.ascent + m.descent)) / 2.0).max(0.0);
-            (half_leading + m.ascent, half_leading + m.descent)
-        };
+        let text_extents = Self::text_baseline_extents;
 
         // A member's top on THIS line. A mid-line split run reaches the
         // recorded line only through its LAST visual line (the open one its
@@ -3946,9 +4038,13 @@ impl LayoutBox {
         let mut line_height = 0.0_f32;
         // See layout_block_children: below-baseline extent of the current line.
         let mut line_below_baseline = 0.0_f32;
+        // Above/below-baseline extents of the current line's baseline-anchored
+        // members; the strut floors both when the line closes (line_advance).
+        let mut line_extents = (0.0_f32, 0.0_f32);
         let container_width = self.dimensions.content.width;
         let text_align = self.style.text_align;
         let strut_descent = self.inline_strut_descent();
+        let strut = Self::text_line_box_extents(&self.style);
         // See layout_block_children: a `<br>` on an empty line is a line box.
         let empty_line_height = self.get_line_height();
         // white-space: nowrap|pre suppress soft-wrapping (see layout_block_children).
@@ -4029,7 +4125,7 @@ impl LayoutBox {
                     lines.push((start, i, line_width));
                 }
                 let advance = if cursor_x > 0.0 || line_height > 0.0 {
-                    line_height.max(line_below_baseline)
+                    line_advance(line_height, line_below_baseline, line_extents, strut)
                 } else {
                     empty_line_height
                 };
@@ -4043,6 +4139,7 @@ impl LayoutBox {
                 cursor_x = 0.0;
                 line_height = 0.0;
                 line_below_baseline = 0.0;
+                line_extents = (0.0, 0.0);
                 line_start_index = None;
                 line_width = 0.0;
                 continue;
@@ -4101,10 +4198,11 @@ impl LayoutBox {
                     }
 
                     // Wrap to next line
-                    cursor_y += line_height.max(line_below_baseline);
+                    cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut);
                     cursor_x = 0.0;
                     line_height = 0.0;
                     line_below_baseline = 0.0;
+                    line_extents = (0.0, 0.0);
                     line_start_index = Some(i);
                     line_width = 0.0;
 
@@ -4163,12 +4261,13 @@ impl LayoutBox {
                         if let Some(start) = line_start_index {
                             lines.push((start, i + 1, line_width + child_width));
                         }
-                        cursor_y += line_height.max(line_below_baseline).max(lh)
+                        cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut).max(lh)
                             + (n_lines as f32 - 2.0).max(0.0) * lh;
                         cursor_x = last_end;
                         line_width = last_end;
                         line_height = lh;
                         line_below_baseline = 0.0;
+                        line_extents = (0.0, 0.0);
                         line_start_index = Some(i);
                         continue;
                     }
@@ -4186,6 +4285,17 @@ impl LayoutBox {
                 // sticky-scroll's .horizontal-scroll read 156.8 where Chrome
                 // reads 150 (+6.8 = descent + half-leading at line-height
                 // 1.6), and the error cascaded into every later sibling's y.
+                // Every baseline-anchored member raises the line's ascent or
+                // deepens its descent; the line box is their sum, not the
+                // tallest member (n54: `<label>Text:</label><input>` with no
+                // whitespace between built a 19px line for Chrome's 24).
+                let member_extents = match child.float {
+                    Float::None => child.line_member_baseline_extents(),
+                    _ => None,
+                };
+                if let Some((above, below)) = member_extents {
+                    line_extents = (line_extents.0.max(above), line_extents.1.max(below));
+                }
                 let anchored_to_baseline = !matches!(
                     child.style.vertical_align,
                     rustkit_css::VerticalAlign::Top | rustkit_css::VerticalAlign::Bottom
@@ -4213,12 +4323,13 @@ impl LayoutBox {
                 } else {
                     // B2: closed lines aligned by align_split_close below.
                     split_records.push((line_start_index.unwrap_or(i), i));
-                    cursor_y += line_height.max(line_below_baseline).max(lh)
+                    cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut).max(lh)
                         + (n_lines as f32 - 2.0).max(0.0) * lh;
                     cursor_x = last_w;
                     line_width = last_w;
                     line_height = lh;
                     line_below_baseline = 0.0;
+                    line_extents = (0.0, 0.0);
                     line_start_index = Some(i);
                 }
             } else {
@@ -4228,10 +4339,11 @@ impl LayoutBox {
                     if let Some(start) = line_start_index {
                         lines.push((start, i, line_width));
                     }
-                    cursor_y += line_height.max(line_below_baseline);
+                    cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut);
                     cursor_x = 0.0;
                     line_height = 0.0;
                     line_below_baseline = 0.0;
+                    line_extents = (0.0, 0.0);
                     line_start_index = None;
                     line_width = 0.0;
                 }
@@ -4279,7 +4391,7 @@ impl LayoutBox {
             if let Some(start) = line_start_index {
                 lines.push((start, self.children.len(), line_width));
             }
-            cursor_y += line_height.max(line_below_baseline);
+            cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut);
         }
 
         // IFC Slice B2: align the CLOSED lines of each mid-line split —
@@ -9411,6 +9523,68 @@ mod tests {
             "row stays one 24px line, got {}",
             row.dimensions.content.height
         );
+    }
+
+    #[test]
+    fn a_line_with_no_text_member_still_carries_the_strut() {
+        // n54: `<label>Text:</label><input>` with NO whitespace between — the
+        // same row as above without the text node that used to be the only
+        // way the strut reached a line. CSS2 §10.8.1: every line box starts
+        // with the container's strut, and its height is the largest extent
+        // above the baseline plus the largest below, not the tallest member.
+        // Chrome 148: 24; the tallest-member advance built 19 (the input).
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 736.0, 0.0);
+        let mut row = LayoutBox::new(BoxType::Block, n53_row_style());
+        row.children.push(n53_label("Text:"));
+        row.children.push(n53_text_input());
+        row.layout(&cb);
+
+        assert!(
+            (row.dimensions.content.height - 24.0).abs() <= 1.0,
+            "an inline-block-only row is still one 24px line, got {}",
+            row.dimensions.content.height
+        );
+        let mut with_ws = LayoutBox::new(BoxType::Block, n53_row_style());
+        with_ws.children.push(n53_label("Text:"));
+        with_ws.children.push(LayoutBox::new(
+            BoxType::Text(" ".to_string()),
+            n53_row_style(),
+        ));
+        with_ws.children.push(n53_text_input());
+        with_ws.layout(&cb);
+        assert!(
+            (row.dimensions.content.height - with_ws.dimensions.content.height).abs() <= 0.01,
+            "whitespace between the members must not change the line's height: {} vs {}",
+            row.dimensions.content.height,
+            with_ws.dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn a_text_only_line_is_exactly_one_line_height() {
+        // The strut and a text member of the container's own font split the
+        // SAME line-height about the baseline: summing them must not grow a
+        // plain text line by the rounding sliver between a face's ascent +
+        // descent and its `normal` line-height.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 736.0, 0.0);
+        for style in [ComputedStyle::new(), n53_row_style()] {
+            let mut block = LayoutBox::new(BoxType::Block, style.clone());
+            block
+                .children
+                .push(LayoutBox::new(BoxType::Text("Hi".to_string()), style.clone()));
+            block
+                .children
+                .push(LayoutBox::new(BoxType::Text(" there".to_string()), style));
+            block.layout(&cb);
+            let lh = block.children[0].get_line_height();
+            assert!(
+                (block.dimensions.content.height - lh).abs() <= 0.01,
+                "two runs on one line are one line-height ({lh}), got {}",
+                block.dimensions.content.height
+            );
+        }
     }
 
     #[test]
