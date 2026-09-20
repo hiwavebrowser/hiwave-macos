@@ -192,6 +192,18 @@ pub fn resolve_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
     }
 }
 
+/// Distance from a line's top to the baseline of a text run, as Blink seats it:
+/// ascent and descent are whole pixels (SkScalarRoundToScalar) and the leading
+/// above the text is FLOORED (`CalculateLeadingSpace`), the remainder going
+/// below. A 16px run with ascent 15.47 / descent 3.38 on a 27.2px line sits at
+/// floor((27.2 - 18) / 2) + 15 = 19, not 4.18 + 15.47 = 19.65: seated on the
+/// fractional sum, every line whose top lands below .35 painted one row low.
+/// Negative leading stays clamped to 0, as at the line-box sites.
+pub(crate) fn blink_baseline_offset(line_height: f32, ascent: f32, descent: f32) -> f32 {
+    let (ascent, descent) = (ascent.round(), descent.round());
+    ((line_height - (ascent + descent)) / 2.0).max(0.0).floor() + ascent
+}
+
 /// Line height of ONE shaped text run: the box's `line-height`, except that
 /// under `normal` the run's own extents win when they are taller. A run's
 /// metrics are the union of every face it used (`TextShaper::shape` folds
@@ -6387,11 +6399,11 @@ impl DisplayList {
             );
             let line_height = run_line_height(style, font_size, &metrics);
 
-            // Content height is ascent + descent (the actual rendered text height)
-            let content_height = metrics.ascent + metrics.descent;
-
-            // Half-leading is the space above (and below) the text content
-            let half_leading = ((line_height - content_height) / 2.0).max(0.0);
+            // Offset from a line's top to the y the text command carries.
+            // Paint seats the baseline at round(y + ascent), so this is the
+            // Blink seat minus the fractional ascent (see blink_baseline_offset).
+            let half_leading =
+                blink_baseline_offset(line_height, metrics.ascent, metrics.descent) - metrics.ascent;
 
             // Build the list of lines to emit: wrapped text boxes carry
             // per-line fragments (see LayoutBox::text_lines); single-run
@@ -7074,6 +7086,30 @@ pub fn measure_text(text: &str, _font_family: &str, font_size: f32) -> text::Tex
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_baseline_seat_floors_the_leading_above_whole_pixel_metrics() {
+        // about's `.card p`: 16px system font (ascent 15.47, descent 3.38) on
+        // a 27.2px line. Chrome's ink baseline is line top + 19 on all three
+        // paragraphs above the fold (tops 430.0 / 469.19 / 535.56 -> rows
+        // 449 / 488 / 555); the fractional seat 4.18 + 15.47 put the first
+        // two one row low.
+        let seat = blink_baseline_offset(27.2, 15.46875, 3.375);
+        assert_eq!(seat, 19.0);
+        assert_eq!((430.0_f32 + seat).round(), 449.0);
+        assert_eq!((469.1875_f32 + seat).round(), 488.0);
+        assert_eq!((535.5625_f32 + seat).round(), 555.0);
+    }
+
+    #[test]
+    fn test_baseline_seat_without_leading_is_the_rounded_ascent() {
+        // `normal` lines (no leading) already agreed with Chrome: the logo
+        // (64px, 61.875 / 13.5 on a 76px line) and the 14px badge.
+        assert_eq!(blink_baseline_offset(76.0, 61.875, 13.5), 62.0);
+        assert_eq!(blink_baseline_offset(17.0, 13.535156, 2.953125), 14.0);
+        // Negative leading stays clamped, as at the line-box sites.
+        assert_eq!(blink_baseline_offset(16.0, 15.46875, 3.375), 15.0);
+    }
 
     #[test]
     fn test_oversized_gradient_paint_is_clipped_to_its_box() {
