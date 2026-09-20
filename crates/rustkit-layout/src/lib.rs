@@ -1379,6 +1379,20 @@ impl LayoutBox {
         containing_block: &Dimensions,
         definite_height: f32,
     ) {
+        self.layout_with_percent_base(
+            containing_block,
+            (definite_height > 0.0).then_some(definite_height),
+        );
+    }
+
+    /// `layout_with_definite_height`, keeping a DEFINITE ZERO base distinct
+    /// from "no definite base" — a bare `f32` collapses the two onto 0 and
+    /// sends the zero case to the viewport fallback.
+    pub(crate) fn layout_with_percent_base(
+        &mut self,
+        containing_block: &Dimensions,
+        definite_height: Option<f32>,
+    ) {
         match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
                 // Check for flex or grid container
@@ -2575,11 +2589,11 @@ impl LayoutBox {
     fn layout_block_with_definite_height(
         &mut self,
         containing_block: &Dimensions,
-        definite_height: f32,
+        definite_height: Option<f32>,
     ) {
         tracing::trace!(
             containing_width = containing_block.content.width,
-            definite_height = definite_height,
+            definite_height = definite_height.unwrap_or(f32::NAN),
             "layout_block_with_definite_height called"
         );
 
@@ -2597,7 +2611,8 @@ impl LayoutBox {
         // Layout children. Percentage-height children resolve against THIS
         // box's height when it is definite (CSS 2.1 §10.5); the containing
         // block they are handed carries the flow cursor instead.
-        let definite_for_children = self.definite_content_height_for_children(definite_height);
+        let definite_for_children =
+            self.definite_content_height_for_children(definite_height.unwrap_or(0.0));
         self.layout_block_children(definite_for_children);
 
         // Height depends on children - use definite_height for percentage resolution
@@ -2720,9 +2735,9 @@ impl LayoutBox {
         }
 
         // Height depends on children
-        self.calculate_block_height(
-            percent_height_base.unwrap_or(containing_block.content.height),
-        );
+        self.calculate_block_height(percent_height_base.or_else(|| {
+            (containing_block.content.height > 0.0).then_some(containing_block.content.height)
+        }));
 
         // Reset margin context for next sibling, add bottom margin — and the
         // last child's bottom margin that collapsed through our open bottom
@@ -2837,7 +2852,9 @@ impl LayoutBox {
         let definite_for_children =
             self.definite_content_height_for_children(containing_block.content.height);
         self.layout_block_children(definite_for_children);
-        self.calculate_block_height(containing_block.content.height);
+        self.calculate_block_height(
+            (containing_block.content.height > 0.0).then_some(containing_block.content.height),
+        );
     }
 
     /// Offsets with percent values resolved against the containing block.
@@ -3427,7 +3444,10 @@ impl LayoutBox {
                 // Children self-position at cb.y + cb.height; the cursor is
                 // already baked into cb.y, so the height term must be zero.
                 cb.content.height = 0.0;
-                child.layout_with_definite_height(&cb, definite_height.unwrap_or(cb.content.height));
+                child.layout_with_percent_base(
+                    &cb,
+                    definite_height.or((cb.content.height > 0.0).then_some(cb.content.height)),
+                );
 
                 let child_width = child.dimensions.margin_box().width;
                 let child_height = child.dimensions.margin_box().height;
@@ -3453,7 +3473,10 @@ impl LayoutBox {
                     // Re-layout at new position
                     cb.content.x = self.dimensions.content.x;
                     cb.content.y = self.dimensions.content.y + cursor_y;
-                    child.layout_with_definite_height(&cb, definite_height.unwrap_or(cb.content.height));
+                    child.layout_with_percent_base(
+                    &cb,
+                    definite_height.or((cb.content.height > 0.0).then_some(cb.content.height)),
+                );
                 }
 
                 // Track line start
@@ -3595,7 +3618,10 @@ impl LayoutBox {
                         let t = t.clone();
                         child.layout_text_with_zero_wrap(t, &cb, true);
                     }
-                    _ => child.layout_with_definite_height(&cb, definite_height.unwrap_or(cb.content.height)),
+                    _ => child.layout_with_percent_base(
+                        &cb,
+                        definite_height.or((cb.content.height > 0.0).then_some(cb.content.height)),
+                    ),
                 }
 
                 // An inline-level box (e.g. a styled <span>/<a>) laid out on
@@ -4426,10 +4452,15 @@ impl LayoutBox {
     }
 
     /// Calculate block height.
-    /// The containing_block_height parameter is used for resolving percentage heights.
-    /// Per CSS spec, percentage heights resolve against the containing block's height
-    /// when the containing block has a definite height.
-    fn calculate_block_height(&mut self, containing_block_height: f32) {
+    /// `percent_base` is the containing block's DEFINITE content height, used
+    /// for resolving percentage heights. `None` means the containing block has
+    /// no definite height; the historical viewport fallback still applies
+    /// there (CSS 2.1 §10.5 makes the value `auto` — see
+    /// `an_auto_height_parent_hands_its_percentage_child_no_definite_base`).
+    /// `Some(0.0)` is a DEFINITE zero and resolves to zero: a bare `f32` could
+    /// not tell the two apart, so a `height: 0` parent handed its percentage
+    /// child the viewport.
+    fn calculate_block_height(&mut self, percent_base: Option<f32>) {
         // Get padding and border for box-sizing calculations
         let padding_top = self.dimensions.padding.top;
         let padding_bottom = self.dimensions.padding.bottom;
@@ -4449,19 +4480,19 @@ impl LayoutBox {
                 };
             }
             Length::Percent(pct) => {
-                // Percent height resolves against containing block height when definite,
-                // otherwise falls back to viewport height
-                let reference_height = if containing_block_height > 0.0 {
-                    containing_block_height
-                } else {
-                    self.viewport.1
+                // A definite base resolves the percentage, zero included; with
+                // no definite base the viewport fallback stands (unchanged).
+                let reference_height = match percent_base {
+                    Some(h) => Some(h),
+                    None if self.viewport.1 > 0.0 => Some(self.viewport.1),
+                    None => None,
                 };
-                if reference_height > 0.0 {
+                if let Some(reference_height) = reference_height {
                     let specified = pct / 100.0 * reference_height;
                     self.dimensions.content.height = if is_border_box {
                         (specified - padding_border_height).max(0.0)
                     } else {
-                        specified
+                        specified.max(0.0)
                     };
                 }
             }
@@ -11061,6 +11092,35 @@ mod tests {
             wrapper.children[0].dimensions.content.height, 60.0,
             "50% of the wrapper's 120px, not of the viewport"
         );
+    }
+
+    /// A border-box parent whose padding exceeds its specified height has a
+    /// content box of zero, never a negative one — and the base it hands a
+    /// percentage child is that clamped value. Without the floor the child
+    /// comes out NEGATIVE, which no other guard here can reach.
+    #[test]
+    fn a_percentage_child_of_an_over_padded_border_box_parent_is_never_negative() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(150.0);
+        parent_style.height = Length::Px(10.0);
+        parent_style.box_sizing = BoxSizing::BorderBox;
+        parent_style.padding_top = Length::Px(20.0);
+        parent_style.padding_bottom = Length::Px(20.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.height = Length::Percent(100.0);
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, child_style));
+        parent.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+        assert_eq!(parent.children[0].dimensions.content.height, 0.0);
     }
 
     /// WPT overflow-wrap-anywhere-001: `::after { position:absolute; inset:0 }`
