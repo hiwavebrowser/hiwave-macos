@@ -4448,6 +4448,12 @@ impl LayoutBox {
         } else {
             specified
         };
+        // Defensive, and measured to be exactly that: every consumer of this
+        // base runs through `calculate_block_height`, whose min-height pass
+        // floors a negative content height at 0 anyway, so no assertion can
+        // require this clamp (mutation probe M10, 2026-09-20, survived the
+        // whole 415-test suite). Kept because a negative CONTENT BOX is not a
+        // thing to hand anyone, not because a test needs it.
         Some(content.max(0.0))
     }
 
