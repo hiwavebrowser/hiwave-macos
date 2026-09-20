@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-09-20T02:09:20.649827",
+  "timestamp": "2026-09-20T02:48:53.628037",
   "scope": "all",
   "iterations": 1,
   "max_variance": 0.1,
@@ -3306,9 +3306,9 @@
       "type": "websuite",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 52339,
+        "diffPixels": 51102,
         "totalPixels": 1024000,
-        "diffPercent": 5.11123046875,
+        "diffPercent": 4.9904296875,
         "width": 1280,
         "height": 800,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/article-typography/run-1/diff.png",
@@ -3764,15 +3764,15 @@
       },
       "passed": true,
       "pixel_runs": [
-        5.11123046875
+        4.9904296875
       ],
-      "diff_pct_median": 5.11123046875,
-      "diff_pct_min": 5.11123046875,
-      "diff_pct_max": 5.11123046875,
+      "diff_pct_median": 4.9904296875,
+      "diff_pct_min": 4.9904296875,
+      "diff_pct_max": 4.9904296875,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 5.11123046875
+      "diff_pct": 4.9904296875
     },
     {
       "case_id": "card-grid",
@@ -4659,9 +4659,9 @@
       "type": "websuite",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 20811,
+        "diffPixels": 20367,
         "totalPixels": 960000,
-        "diffPercent": 2.1678125,
+        "diffPercent": 2.1215625,
         "width": 800,
         "height": 1200,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/css-selectors/run-1/diff.png",
@@ -5523,15 +5523,15 @@
       },
       "passed": true,
       "pixel_runs": [
-        2.1678125
+        2.1215625
       ],
-      "diff_pct_median": 2.1678125,
-      "diff_pct_min": 2.1678125,
-      "diff_pct_max": 2.1678125,
+      "diff_pct_median": 2.1215625,
+      "diff_pct_min": 2.1215625,
+      "diff_pct_max": 2.1215625,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 2.1678125
+      "diff_pct": 2.1215625
     },
     {
       "case_id": "flex-positioning",
@@ -8090,9 +8090,9 @@
       "type": "websuite",
       "threshold": 15,
       "pixel": {
-        "diffPixels": 17328,
+        "diffPixels": 14803,
         "totalPixels": 1024000,
-        "diffPercent": 1.6921875,
+        "diffPercent": 1.4456054687500002,
         "width": 1280,
         "height": 800,
         "diffPath": "/Users/petecopeland/Repos/hiwave/hiwave-macos/parity-baseline/diffs/sticky-scroll/run-1/diff.png",
@@ -8997,15 +8997,15 @@
       },
       "passed": true,
       "pixel_runs": [
-        1.6921875
+        1.4456054687500002
       ],
-      "diff_pct_median": 1.6921875,
-      "diff_pct_min": 1.6921875,
-      "diff_pct_max": 1.6921875,
+      "diff_pct_median": 1.4456054687500002,
+      "diff_pct_min": 1.4456054687500002,
+      "diff_pct_max": 1.4456054687500002,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 1.6921875
+      "diff_pct": 1.4456054687500002
     },
     {
       "case_id": "backgrounds",
