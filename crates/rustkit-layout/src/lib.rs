@@ -4492,7 +4492,7 @@ impl LayoutBox {
                     self.dimensions.content.height = if is_border_box {
                         (specified - padding_border_height).max(0.0)
                     } else {
-                        specified.max(0.0)
+                        specified
                     };
                 }
             }
@@ -11121,6 +11121,31 @@ mod tests {
         };
         parent.layout(&viewport);
         assert_eq!(parent.children[0].dimensions.content.height, 0.0);
+    }
+
+    /// The root case the public `f32` entry still has to get right: a
+    /// containing block with NO height at all (the shape
+    /// `layout(&Dimensions::default())` hands the root) is "no definite base",
+    /// not a definite zero, so the viewport fallback stands. Converting it to
+    /// `Some(0.0)` at that boundary would size every percentage-height root
+    /// box to zero.
+    #[test]
+    fn a_zero_height_containing_block_is_absent_not_a_definite_zero() {
+        let mut root_style = ComputedStyle::new();
+        root_style.width = Length::Px(150.0);
+        root_style.height = Length::Percent(100.0);
+        let mut root = LayoutBox::new(BoxType::Block, root_style);
+        root.set_viewport(900.0, 1000.0);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 0.0),
+            ..Default::default()
+        };
+        root.layout(&containing);
+        assert_eq!(
+            root.dimensions.content.height, 1000.0,
+            "no containing-block height means the viewport fallback, not 0"
+        );
     }
 
     /// WPT overflow-wrap-anywhere-001: `::after { position:absolute; inset:0 }`
