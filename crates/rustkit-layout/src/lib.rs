@@ -344,18 +344,6 @@ pub fn resolve_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
     }
 }
 
-/// Distance from a line's top to the baseline of a text run, as Blink seats it:
-/// ascent and descent are whole pixels (SkScalarRoundToScalar) and the leading
-/// above the text is FLOORED (`CalculateLeadingSpace`), the remainder going
-/// below. A 16px run with ascent 15.47 / descent 3.38 on a 27.2px line sits at
-/// floor((27.2 - 18) / 2) + 15 = 19, not 4.18 + 15.47 = 19.65: seated on the
-/// fractional sum, every line whose top lands below .35 painted one row low.
-/// Negative leading stays clamped to 0, as at the line-box sites.
-pub(crate) fn blink_baseline_offset(line_height: f32, ascent: f32, descent: f32) -> f32 {
-    let (ascent, descent) = (ascent.round(), descent.round());
-    ((line_height - (ascent + descent)) / 2.0).max(0.0).floor() + ascent
-}
-
 /// Line height of ONE shaped text run: the box's `line-height`, except that
 /// under `normal` the run's own extents win when they are taller. A run's
 /// metrics are the union of every face it used (`TextShaper::shape` folds
@@ -373,6 +361,18 @@ pub fn run_line_height(style: &ComputedStyle, font_size: f32, metrics: &TextMetr
         return base;
     }
     base.max(used_font_line_height(metrics))
+}
+
+/// Distance from a line's top to the baseline of a text run, as Blink seats it:
+/// ascent and descent are whole pixels (SkScalarRoundToScalar) and the leading
+/// above the text is FLOORED (`CalculateLeadingSpace`), the remainder going
+/// below. A 16px run with ascent 15.47 / descent 3.38 on a 27.2px line sits at
+/// floor((27.2 - 18) / 2) + 15 = 19, not 4.18 + 15.47 = 19.65: seated on the
+/// fractional sum, every line whose top lands below .35 painted one row low.
+/// Negative leading stays clamped to 0, as at the line-box sites.
+pub(crate) fn blink_baseline_offset(line_height: f32, ascent: f32, descent: f32) -> f32 {
+    let (ascent, descent) = (ascent.round(), descent.round());
+    ((line_height - (ascent + descent)) / 2.0).max(0.0).floor() + ascent
 }
 
 /// Convert a specified size on a replaced element to a CONTENT size.
