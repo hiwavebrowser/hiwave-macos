@@ -10140,3 +10140,271 @@ the commit went out rather than a night later.
   (09-15, 09-16, 09-17) its defects were real, Chrome-exact and unmeasurable on
   the corpus, and that had begun to read like evidence P3 was finished. It was
   evidence about *where those nights looked*.
+
+## 2026-09-20
+
+**Metric: `2/26` → `2/26` on macOS, carried forward and NOT re-measured.** No
+macOS lane ran tonight, so nothing below is a receipt. On this seat both
+conjunction columns that could move are unchanged — Gate A geometry-green 3/26,
+Gate B paint-green 1/26, discrete auto-fails 0, all 26 measured — so no case
+crossed the conjunction and none fell off it. The engine changed, so that is a
+measurement, not an md5 proof.
+
+**P-item: the queue's geometry-first amendment (containing blocks). NOT
+complete.** One root, and it is the largest single geometry error in the 26-case
+corpus. Read the first section before the fix: it changes what "the next unit"
+means for whoever comes next.
+
+### The queue is not where the board says it is: six P3 fixes are stranded
+
+Tonight's first act was the n49 flex invariant board off `develop 011ffee`. It
+reads **12 violations** — and the two largest are defects this campaign has
+already diagnosed, fixed and mutation-checked:
+
+| board row | Δ | fixed on | state |
+|---|---:|---|---|
+| `chrome_rustkit` `.sidebar-toggle` align:center | −57.00 | `atlas/n49-p3-flex` (09-11) | **unmerged** |
+| `settings` `.decay-control` justify:flex-end | −18.98 | `atlas/n51-p3-flex-justify-end` (09-13) | **unmerged** |
+| `image-gallery` `.content` justify:center ×4 | +3.69 | `atlas/n52…` / `atlas/n53…` (09-14/15) | **unmerged** |
+
+Seven engine branches sit unmerged against `develop`, six of them the P3 lane:
+`n49-p3-flex`, `n51-p3-flex-justify-end`, `n52-p3-flex-column-center`,
+`n53-p3-content-justify`, `n54-p3-column-definite-main`,
+`n55-column-definite-main-size`, `n57-new-tab-container-height`. Six were cut
+from `develop da8f413`; **all six now conflict with `develop`** — every conflict
+is in `flex.rs`'s `mod tests`, where each night appended its guards at the same
+place, so the engine code still merges clean and the conflicts are mechanical
+rather than semantic. I did not resolve them: that is integration work on six
+other seats' PRs, not tonight's unit.
+
+The operational consequence, and the reason this is the entry's headline:
+**deriving "the next unit" from a board taken off `develop` now means redoing
+finished work.** 09-19's decision 2 said to re-derive the unit from a fresh
+board each night rather than from the previous digest. That is still right, and
+it is no longer sufficient — the board has to be read against the stack of
+in-flight branches, or it will keep pointing at rows that are already fixed and
+waiting.
+
+Only one open PR exists on the repo (#205, the line-box strut floor, opened
+09-19 by a different lane). The other seven branches were pushed without one.
+
+### The defect
+
+With the already-owned rows set aside, the largest unclaimed error on Gate A is
+not flex at all. It is `websuite/micro/rounded-corners` test 7:
+
+```
+.test-box { display: inline-block; width: 150px; height: 100px }
+.test7 .inner { width: 100%; height: 100% }
+
+                  Chrome 148   RustKit before   after
+  .inner width       150.00          150.00    150.00
+  .inner height      100.00         1000.00    100.00
+```
+
+**1000 is the case's viewport height.** CSS 2.1 §10.5 resolves a percentage
+height against the containing block's height — but the containing block a flow
+child is handed carries the parent's FLOW CURSOR in `content.height`. That is
+the static-position trick `calculate_block_position` needs to stack boxes, and
+it is documented in `layout_block_children_with_collapse` for the abspos case.
+A percentage child therefore read 0, and `calculate_block_height` fell back to
+`self.viewport.1`.
+
+It is the in-flow twin of the abspos defect `reanchor_absolute_children` closes
+(n46, `abspos_inset_fills_parents_definite_height_not_its_flow_cursor`), and it
+is general block layout — not inline-block, not flex. A five-line probe on a
+plain `height: 100px` parent reproduces it.
+
+`definite_content_height_for_children` answers the height a percentage child
+resolves against, and only where it is knowable WITHOUT laying the children out.
+It is threaded **alongside** the containing block, never inside it, so the cursor
+keeps its positioning duty: both flow paths, the inline-block branch, and flex
+step 11, where the item's already-computed `definite_cross_height` is the same
+answer to the same question.
+
+### Commits — branch `atlas/n58-percent-height-definite-parent`, cut from `develop 011ffee`
+
+- `277b038` — a percentage height resolves against its parent's definite height,
+  not the viewport (+6 guards).
+- `1f3e866` — close the rule/example gap: a percentage parent is itself a
+  definite base.
+- `f33a349` — close the first two survivors (the `auto` boundary, the percentage
+  inline-block).
+- `6c4bcf9` — a definite ZERO base is not the same as no base:
+  `calculate_block_height` takes `Option<f32>`. Corpus-neutral, and measured as
+  such — all 26 `layout.json` byte-identical to the previous commit.
+- `453a720` — close M10's redundant second floor and M12's absent/zero boundary.
+- `a232f6c` — name M10 as a measured survivor in the source rather than leaving
+  it to be re-probed.
+
+**Pushed, no PR.** The night order permits a PR only when the P-item completes,
+and this is one root of a class. Decision 1 below.
+
+### Measured — Linux/SwiftShader, 26 cases, base `develop 011ffee`. MECHANICS, NOT A RECEIPT
+
+| Oracle | before | after |
+|---|---:|---:|
+| Gate A geometry failures / joins | 2593 / 16 | **2591** / 16 |
+| Gate A geometry-green / measured | 3/26 · 26/26 | 3/26 · 26/26 |
+| Gate B paint-green / measured | 1/26 · 26/26 | 1/26 · 26/26 |
+| Gate B discrete auto-fails / examined | 0 / 266 | 0 / **267** |
+| n49 flex invariant board | 12 violations | **11** |
+
+Per (case, selector, axis) across all 26 cases:
+**fixed 2 · newly failing 0 · improved 1 · worsened 0 · unchanged 2606.**
+
+| case | geometry fails | sum·\|Δ\| |
+|---|---:|---:|
+| `rounded-corners` | 67 → 66 | 1222.93 → **322.93** |
+| `chrome_rustkit` | 45 → 44 | 383.94 → **298.44** |
+
+```
+rounded-corners · .test7 > div.inner       · height · 100 · 1000 → 100   FIXED
+chrome_rustkit  · div.sidebar-toggle       · height ·  43 ·  100 → 43    FIXED
+chrome_rustkit  · … > span.workspace-name  · y      · Δ +29.5 → Δ +1.0
+```
+
+The count moved by 2 and the magnitude by 985.5px. This is the third night
+running that a count-only board would have read as noise.
+
+**`chrome_rustkit`'s `.sidebar-toggle` is the same row `atlas/n49-p3-flex`
+closes, by a different root.** n49 fixed percentage cross-size resolution inside
+the flex algorithm; tonight fixed the base the block pre-pass hands every child.
+Both are correct and independent, and the two changes do not touch the same
+lines — but whoever merges them should know the corpus row is shared, because a
+board taken after either one will show it green.
+
+### The oracle disagreement, reported rather than smoothed
+
+**Gate B's percentage half FELL on `chrome_rustkit`: 95.7727% → 95.5586%**
+(+274px outside ±5 on a 128000px frame).
+
+Localised, not guessed. All 304 newly-outside pixels lie in x∈[16,62],
+y∈[55,67] — exactly `span.workspace-name`, the box Gate A says moved **28.5px
+closer to Chrome**:
+
+```
+span.workspace-name   Chrome y 53.5   before 83.0 (Δ29.5)   after 54.5 (Δ1.0)
+sample px (16,55)     Chrome (15,23,42)   before (15,23,42)   after (241,245,249)
+```
+
+At its old y the text sat 29.5px away, over chrome that happens to be the same
+dark navy Chrome paints there, and **scored well by accident**. Correctly
+placed, its glyph coverage disagrees — on a seat with no font backend at all.
+
+This is §1 of the plan, live: *the metric preferred the broken layout.* It is
+the same shape as the shelf (3.71% broken vs 33.87% correct), two orders of
+magnitude smaller.
+
+**I did not auto-revert, and that is a judgement call I am flagging rather than
+burying.** The stop rule fires on *a change that improves the metric while any
+oracle regresses*. `N/26` did not move, so its antecedent is not met; Gate A —
+the primary oracle, made primary for exactly this reason — improved on the same
+case and the same box; and the 13 affected rows are text on a seat whose paint
+numbers are explicitly not receipts. Reverting would restore a 900px and a 57px
+geometry error to protect 0.21pp of paint. Decision 2 below asks Pete to ratify
+or overrule that reading.
+
+### Mutation-check results
+
+**12 probes. 11 RED, 1 named survivor. Control green before and after.** The
+sweep ran three times: two survivors on the first pass, one on the second, none
+unexplained on the third.
+
+| probe | result | caught by |
+|---|---|---|
+| M1 the helper always answers `None` (whole fix removed) | RED | 7 guards |
+| M2 the helper drops the border-box conversion | RED | 2 guards |
+| M3 the helper answers for an `auto` height too | RED* | `an_auto_height_parent_hands_its_percentage_child_no_definite_base` |
+| M4 the helper stops answering for a percentage parent | RED* | `a_percentage_height_chain_resolves_through_a_percentage_parent` |
+| M5 the inline-block branch stops passing the base | RED* | `a_percentage_height_inline_block_resolves_against_its_definite_parent` |
+| M6 flex step 11 stops passing `definite_cross_height` | RED | the flex guard |
+| M7 the non-collapse flow path stops computing the base | RED | 5 guards |
+| M8 the base overwrites the flow cursor (both paths) | RED | `a_definite_height_parent_still_stacks_its_children_on_the_cursor` |
+| M9 the collapse path stops passing it to block children | RED | 2 guards |
+| M10 the helper drops its `.max(0.0)` floor | **SURVIVED** | — see below |
+| M11 a definite ZERO base falls back to the viewport | RED | the over-padded guard |
+| M12 the public `f32` entry stops distinguishing zero from absent | RED* | `a_zero_height_containing_block_is_absent_not_a_definite_zero` |
+
+\* red only after the guard named beside it was written; each was a survivor on
+an earlier pass.
+
+**Three survivors, three different lessons, and only one of them is the old one.**
+
+1. **M3 and M5 survived the first sweep** for the same reason as the last four
+   sweeps — *the guard was written against the example, not the rule*. All six
+   original guards used a `height: 100px` parent, and a box with a `Px` height
+   answers for its children whatever base it was handed, so the `Percent` arm of
+   the helper and the whole inline-block wiring were unrequired. The fix was
+   guards with a *percentage* parent and a *percentage* inline-block. 09-19's
+   checklist item ("after writing the guards, ask which line of the change no
+   assertion would miss") was applied — and applied too narrowly, to the fix's
+   shape rather than to each of its arms.
+2. **M3 and M10 turned out to share a root in the CODE, not the tests.**
+   `calculate_block_height` took its base as a bare `f32` and read `<= 0.0` as
+   "no definite base", so `Some(0.0)` and `None` were indistinguishable — which
+   is why no assertion could separate them, and why a `height: 0` parent handed
+   its percentage child the viewport. `6c4bcf9` makes it `Option<f32>`. **A
+   survivor that no reasonable guard can kill is usually telling you the code
+   cannot express the distinction**, and that is a more useful reading than
+   "write a better test".
+3. **M10 still survives, and is now named in the source.** With the redundant
+   second floor removed it *still* stays green, because `calculate_block_height`
+   ends with a min-height pass that floors any negative content height at 0.
+   Nothing observable depends on the clamp. It is kept as defensive and labelled
+   as such (`a232f6c`) so the next sweep does not spend a cycle re-deriving that.
+
+One process note, recorded because it cost a rerun: mid-sweep `git checkout --`
+reverted an *uncommitted* fix along with the mutation. 09-19 recorded learning to
+commit before mutating; tonight I did that for the first eleven probes and then
+edited-then-probed for the twelfth. The rule is not "commit before the sweep", it
+is "commit before **every** probe".
+
+### Stop rule
+
+Checked per box, not per case, across all 26 cases and every axis: **zero boxes
+worsened on Gate A**, no case gained a discrete failure, no case lost its green.
+Gate B's percentage half regressed on one case; that regression is written up in
+full above rather than folded into this line, and the rule as written did not
+fire because the metric did not move.
+
+### Decisions needed from Pete
+
+1. **Seven engine branches are pushed with no PR, six of them the P3 lane, and
+   all six now conflict with `develop` in `flex.rs`'s test module** — should the
+   trench open PRs for them (and resolve the mechanical conflicts), or is that
+   another seat's job and the trench should keep stacking branches?
+2. **Ratify or overrule tonight's stop-rule reading**: Gate A fixed a 900px and
+   a 57px error while Gate B fell 0.21pp on one case, because a correctly-placed
+   text box stopped scoring well by accident — keep, or auto-revert as the rule's
+   letter would have it if `N/26` had moved?
+3. Still open from 09-19: **mark the four font-stack tests
+   `#[cfg(target_os = "macos")]`?** This seat is 411 passed / 4 failed before and
+   after every change tonight, and "red, but the same red as before" is exactly
+   the judgement call this campaign tries to remove.
+
+### Surprises
+
+- **The largest single geometry error in the corpus was 900px, in a micro case,
+  and it is not a font, a gradient or a flex rule.** `rounded-corners` has been
+  on every board since night 1 at 3.33% mean diff — near the bottom of the old
+  board — because 900px of wrong height on one box inside `overflow: hidden`
+  costs almost no pixels. Both boards the campaign has used, mean-diff and
+  failure-count, were blind to it in different ways; only the magnitude column
+  Gate A's schema carries shows it at all.
+- **Reading the board off `develop` would have had me re-fix n49's defect.** I
+  came within one step of it: `.sidebar-toggle` was the largest row on the
+  invariant board, and the reason I did not is that 09-11's digest entry named
+  it. The digest is currently the only index of what is already fixed-but-
+  unmerged, which is a single point of failure for a campaign whose stated rule
+  is "never redo finished work".
+- **Tonight's fix cleared that row anyway, from a different root.** Two
+  independent correct fixes for one corpus row, found five nights apart, neither
+  aware of the other. That is what a nine-deep unmerged stack costs.
+- **A survivor can be a message about the code.** M3 and M10 both resisted
+  guarding because `calculate_block_height` could not represent "definite zero";
+  chasing them with better tests would have failed indefinitely. Two sweeps in a
+  row this campaign has read a survivor as a test defect. This one was not.
+- **The paint oracle got worse because the layout got right**, on a box that
+  moved 28.5px closer to Chrome. It is a 274-pixel instance of the argument the
+  whole campaign was built on, and it arrived unprompted on an ordinary night.
