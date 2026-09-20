@@ -2498,6 +2498,23 @@ impl LayoutBox {
         (content, half_leading)
     }
 
+    /// Seat a non-replaced inline's rect on its content area, a half-leading
+    /// below the line top. Its direct TEXT children stay where they are: a
+    /// text box is the line-height-tall slot at the line top, and paint seats
+    /// the glyphs inside that slot from the run's own leading
+    /// (`blink_baseline_offset`). Translating them too applied the leading
+    /// twice — every `<span>`/`<a>`/`<strong>` on a line with leading painted
+    /// its text below its neighbours (article-typography `.meta`, 14.4px on a
+    /// 23.04px line: baseline 184 for Chrome's 181).
+    fn shift_inline_content_area(&mut self, half_leading: f32) {
+        self.dimensions.content.y += half_leading;
+        for sub in &mut self.children {
+            if !matches!(sub.box_type, BoxType::Text(_)) {
+                crate::flex::translate_subtree(sub, 0.0, half_leading);
+            }
+        }
+    }
+
     fn inline_strut_descent(&self) -> f32 {
         let font_size = match self.style.font_size {
             Length::Px(px) => px,
@@ -3473,10 +3490,7 @@ impl LayoutBox {
                 if matches!(child.box_type, BoxType::Inline) {
                     let (_, half_leading) = child.inline_content_area();
                     if half_leading > 0.0 {
-                        child.dimensions.content.y += half_leading;
-                        for sub in &mut child.children {
-                            crate::flex::translate_subtree(sub, 0.0, half_leading);
-                        }
+                        child.shift_inline_content_area(half_leading);
                     }
                     line_height = line_height.max(child.get_line_height());
                     // The inline's text wrapped onto several line boxes: the
@@ -4178,10 +4192,7 @@ impl LayoutBox {
                 if matches!(child.box_type, BoxType::Inline) {
                     let (_, half_leading) = child.inline_content_area();
                     if half_leading > 0.0 {
-                        child.dimensions.content.y += half_leading;
-                        for sub in &mut child.children {
-                            crate::flex::translate_subtree(sub, 0.0, half_leading);
-                        }
+                        child.shift_inline_content_area(half_leading);
                     }
                     line_height = line_height.max(child.get_line_height());
                     // The inline's text wrapped onto several line boxes: the
