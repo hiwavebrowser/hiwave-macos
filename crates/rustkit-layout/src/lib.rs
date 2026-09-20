@@ -10993,6 +10993,76 @@ mod tests {
         );
     }
 
+    /// The boundary this change deliberately does NOT cross, pinned so the
+    /// next unit has something to flip. An auto-height parent's height
+    /// depends on its children, so it hands them no definite base — and the
+    /// child then keeps the historical `self.viewport.1` fallback in
+    /// `calculate_block_height`. CSS 2.1 §10.5 says the child computes to
+    /// `auto` here (Chrome gives it its content height, 0), so this
+    /// assertion records a KNOWN-WRONG value on purpose; what it guards is
+    /// that the helper stays silent for `auto`, rather than handing the
+    /// child a base of 0 and making the two cases indistinguishable.
+    #[test]
+    fn an_auto_height_parent_hands_its_percentage_child_no_definite_base() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(150.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.height = Length::Percent(100.0);
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, child_style));
+        parent.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+        assert_eq!(
+            parent.children[0].dimensions.content.height, 1000.0,
+            "unchanged by this unit: the viewport fallback, not a 0 base \
+             (§10.5 wants `auto`, i.e. 0 — that is the next unit)"
+        );
+    }
+
+    /// The inline-block branch builds its own containing block with
+    /// `content.height = 0`, so an inline-block whose OWN height is a
+    /// percentage has nothing to resolve against unless the parent's definite
+    /// height is passed alongside it. The 100px-inline-block guard above
+    /// cannot see this: a box with a `Px` height answers for its children
+    /// whatever base it was handed.
+    #[test]
+    fn a_percentage_height_inline_block_resolves_against_its_definite_parent() {
+        let mut wrapper_style = ComputedStyle::new();
+        wrapper_style.width = Length::Px(900.0);
+        wrapper_style.height = Length::Px(120.0);
+        let mut wrapper = LayoutBox::new(BoxType::Block, wrapper_style);
+
+        let mut box_style = ComputedStyle::new();
+        box_style.display = rustkit_css::Display::InlineBlock;
+        box_style.width = Length::Px(150.0);
+        box_style.height = Length::Percent(50.0);
+        wrapper
+            .children
+            .push(LayoutBox::new(BoxType::Block, box_style));
+        wrapper.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        let mut mc = MarginCollapseContext::new();
+        let mut fc = FloatContext::new();
+        wrapper.layout_with_collapse(&viewport, &mut mc, &mut fc);
+
+        assert_eq!(
+            wrapper.children[0].dimensions.content.height, 60.0,
+            "50% of the wrapper's 120px, not of the viewport"
+        );
+    }
+
     /// WPT overflow-wrap-anywhere-001: `::after { position:absolute; inset:0 }`
     /// on a `height: 100px` div holding 54px of flow content was 54px tall —
     /// the abspos child resolved `bottom` against the parent's flow cursor
