@@ -1513,19 +1513,9 @@ fn get_content_cross_height(layout_box: &LayoutBox) -> f32 {
         return line_height;
     }
 
-    // For form controls, use intrinsic height
+    // For form controls, use the intrinsic border-box height block flow uses
     if let crate::BoxType::FormControl(control) = &layout_box.box_type {
-        use crate::FormControlType;
-        return match control {
-            FormControlType::TextInput { .. } => font_size * 1.5 + 8.0,
-            FormControlType::TextArea { rows, .. } => {
-                let rows = (*rows).max(2) as f32;
-                font_size * 1.2 * rows + 8.0
-            }
-            FormControlType::Button { .. } => font_size * 1.5 + 12.0,
-            FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => font_size * 1.2,
-            FormControlType::Select { .. } => font_size * 1.5 + 8.0,
-        };
+        return crate::form_control_intrinsic_size(&layout_box.style, control).1;
     }
 
     // For images, use natural height
@@ -1813,41 +1803,13 @@ fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f3
     };
 
     match box_type {
+        // One sizing model for block flow and flex items (n58): the blobs
+        // that lived here ignored author padding/border.
         crate::BoxType::FormControl(control) => {
-            use crate::FormControlType;
-            match control {
-                FormControlType::TextInput { .. } => {
-                    match main_axis {
-                        Axis::Horizontal => font_size * 12.0, // ~20 chars
-                        Axis::Vertical => font_size * 1.5 + 8.0,
-                    }
-                }
-                FormControlType::TextArea { rows, cols, .. } => match main_axis {
-                    Axis::Horizontal => font_size * 0.6 * (*cols).max(20) as f32,
-                    Axis::Vertical => font_size * 1.2 * (*rows).max(2) as f32 + 8.0,
-                },
-                FormControlType::Button { label, .. } => match main_axis {
-                    Axis::Horizontal => {
-                        crate::measure_text_advanced(
-                            label,
-                            &style.font_family,
-                            font_size,
-                            style.font_weight,
-                            style.font_style,
-                        )
-                        .width
-                            + 24.0
-                    }
-                    Axis::Vertical => font_size * 1.5 + 12.0,
-                },
-                FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
-                    // Fixed size for checkboxes and radios
-                    font_size * 1.2
-                }
-                FormControlType::Select { .. } => match main_axis {
-                    Axis::Horizontal => font_size * 10.0,
-                    Axis::Vertical => font_size * 1.5 + 8.0,
-                },
+            let (w, h) = crate::form_control_intrinsic_size(style, control);
+            match main_axis {
+                Axis::Horizontal => w,
+                Axis::Vertical => h,
             }
         }
         crate::BoxType::Image {
@@ -1933,25 +1895,10 @@ fn get_intrinsic_cross_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f
 
     match box_type {
         crate::BoxType::FormControl(control) => {
-            use crate::FormControlType;
-            match control {
-                FormControlType::TextInput { .. } => match cross_axis {
-                    Axis::Horizontal => font_size * 12.0,
-                    Axis::Vertical => font_size * 1.5 + 8.0,
-                },
-                FormControlType::TextArea { rows, cols, .. } => match cross_axis {
-                    Axis::Horizontal => font_size * 0.6 * (*cols).max(20) as f32,
-                    Axis::Vertical => font_size * 1.2 * (*rows).max(2) as f32 + 8.0,
-                },
-                FormControlType::Button { label, .. } => match cross_axis {
-                    Axis::Horizontal => label.len() as f32 * font_size * 0.6 + 24.0,
-                    Axis::Vertical => font_size * 1.5 + 12.0,
-                },
-                FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => font_size * 1.2,
-                FormControlType::Select { .. } => match cross_axis {
-                    Axis::Horizontal => font_size * 10.0,
-                    Axis::Vertical => font_size * 1.5 + 8.0,
-                },
+            let (w, h) = crate::form_control_intrinsic_size(style, control);
+            match cross_axis {
+                Axis::Horizontal => w,
+                Axis::Vertical => h,
             }
         }
         crate::BoxType::Image {
