@@ -10955,6 +10955,44 @@ mod tests {
         );
     }
 
+    /// The rule, not the example: a parent whose own height is a PERCENTAGE
+    /// of a definite grandparent is itself definite, so the chain resolves
+    /// all the way down. A helper that only answered for `Length::Px` would
+    /// leave this child on the viewport fallback, and every guard written
+    /// against the 100px example would stay green.
+    #[test]
+    fn a_percentage_height_chain_resolves_through_a_percentage_parent() {
+        let mut grand_style = ComputedStyle::new();
+        grand_style.width = Length::Px(150.0);
+        grand_style.height = Length::Px(200.0);
+        let mut grand = LayoutBox::new(BoxType::Block, grand_style);
+
+        let mut parent_style = ComputedStyle::new();
+        parent_style.height = Length::Percent(50.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.height = Length::Percent(50.0);
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, child_style));
+        grand.children.push(parent);
+        grand.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        grand.layout(&viewport);
+
+        assert_eq!(grand.children[0].dimensions.content.height, 100.0);
+        assert_eq!(
+            grand.children[0].children[0].dimensions.content.height,
+            50.0,
+            "50% of the parent's used 100px, not of the viewport"
+        );
+    }
+
     /// WPT overflow-wrap-anywhere-001: `::after { position:absolute; inset:0 }`
     /// on a `height: 100px` div holding 54px of flow content was 54px tall —
     /// the abspos child resolved `bottom` against the parent's flow cursor
