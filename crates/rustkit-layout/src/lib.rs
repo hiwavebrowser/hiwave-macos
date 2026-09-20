@@ -2506,11 +2506,19 @@ impl LayoutBox {
     /// twice — every `<span>`/`<a>`/`<strong>` on a line with leading painted
     /// its text below its neighbours (article-typography `.meta`, 14.4px on a
     /// 23.04px line: baseline 184 for Chrome's 181).
+    ///
+    /// Nested inlines (`<a><em>text</em></a>`) have no shift of their own — the
+    /// outermost one carries their rects — so the rule recurses: inline rects
+    /// move, text leaves at any inline depth stay, anything else (an atomic
+    /// inline) moves whole. Stopping at direct children left `span > strong`
+    /// text a full half-leading low (7px on a 16px/32px line).
     fn shift_inline_content_area(&mut self, half_leading: f32) {
         self.dimensions.content.y += half_leading;
         for sub in &mut self.children {
-            if !matches!(sub.box_type, BoxType::Text(_)) {
-                crate::flex::translate_subtree(sub, 0.0, half_leading);
+            match sub.box_type {
+                BoxType::Text(_) => {}
+                BoxType::Inline => sub.shift_inline_content_area(half_leading),
+                _ => crate::flex::translate_subtree(sub, 0.0, half_leading),
             }
         }
     }
@@ -7162,6 +7170,30 @@ mod tests {
         assert_eq!((430.0_f32 + seat).round(), 449.0);
         assert_eq!((469.1875_f32 + seat).round(), 488.0);
         assert_eq!((535.5625_f32 + seat).round(), 555.0);
+    }
+
+    #[test]
+    fn test_inline_content_area_shift_leaves_text_in_its_line_slot() {
+        // `<span><strong>HxHx</strong></span>` on a 16px/32px line: both
+        // inline rects sit a half-leading (7) below the line top, as in Chrome
+        // (147 for a line at 140); the text leaf stays at the line top, where
+        // paint seats it from the run's own leading. Translating it as well
+        // painted the word 7px under the rest of the line.
+        let style = ComputedStyle::new();
+        let mut text = LayoutBox::new(BoxType::Text("HxHx".to_string()), style.clone());
+        text.dimensions.content.y = 140.0;
+        let mut strong = LayoutBox::new(BoxType::Inline, style.clone());
+        strong.dimensions.content.y = 140.0;
+        strong.children.push(text);
+        let mut span = LayoutBox::new(BoxType::Inline, style);
+        span.dimensions.content.y = 140.0;
+        span.children.push(strong);
+
+        span.shift_inline_content_area(7.0);
+
+        assert_eq!(span.dimensions.content.y, 147.0);
+        assert_eq!(span.children[0].dimensions.content.y, 147.0);
+        assert_eq!(span.children[0].children[0].dimensions.content.y, 140.0);
     }
 
     #[test]
