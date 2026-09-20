@@ -480,6 +480,10 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
                     item.layout_box.layout_block_children_with_collapse(
                         &mut item_margin_context,
                         &mut item_float_context,
+                        // Same definite height, same rule: a percentage-height
+                        // child resolves against the item's used cross size
+                        // (CSS 2.1 §10.5), not against the item's flow cursor.
+                        definite_cross_height,
                     );
                     // A flex item is a formatting-context root, so its last
                     // in-flow child's bottom margin never collapses through
@@ -3625,6 +3629,39 @@ mod tests {
             (text_y - expected).abs() < 0.01,
             "the centred sibling must centre against the 26px line, expected \
              {expected}, got {text_y}"
+        );
+    }
+
+    /// A flex item with a DEFINITE cross size is the containing block its
+    /// in-flow children resolve percentage heights against (CSS 2.1 §10.5).
+    /// Step 11 lays those children out through
+    /// `layout_block_children_with_collapse`, which hands them the item's flow
+    /// cursor in `content.height` — so before the definite height was passed
+    /// alongside it, a `height: 100%` child fell back to the VIEWPORT.
+    /// T-RED without the `definite_cross_height` argument: the fill is the
+    /// viewport height, not 26.
+    #[test]
+    fn a_percentage_height_child_of_a_definite_flex_item_fills_that_item() {
+        let mut label = toggle_switch_row();
+        // Replace the abspos slider with an in-flow percentage-height fill:
+        // the abspos path has its own re-anchor, the in-flow path did not.
+        let mut fill_style = ComputedStyle::new();
+        fill_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        fill_style.height = Length::Percent(100.0);
+        label.children[0].children[1] = LayoutBox::new(BoxType::Block, fill_style);
+        label.children[0].children[1].viewport = (900.0, 1000.0);
+        label.children[0].viewport = (900.0, 1000.0);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 700.0, 0.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut label, &containing);
+
+        let fill = label.children[0].children[1].dimensions.content.height;
+        assert!(
+            (fill - 26.0).abs() < 0.01,
+            "height:100% of a 26px flex item is 26, got {fill}"
         );
     }
 

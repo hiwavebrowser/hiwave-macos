@@ -2143,7 +2143,7 @@ pub fn layout_grid_container(
                         let mut child_margins = crate::MarginCollapseContext::new();
                         let mut floats = crate::FloatContext::new();
                         grandchild
-                            .layout_block_children_with_collapse(&mut child_margins, &mut floats);
+                            .layout_block_children_with_collapse(&mut child_margins, &mut floats, None);
                     }
 
                     // Calculate height for percentage resolution

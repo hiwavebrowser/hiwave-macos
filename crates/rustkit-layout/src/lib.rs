@@ -2502,6 +2502,21 @@ impl LayoutBox {
         margin_context: &mut MarginCollapseContext,
         float_context: &mut FloatContext,
     ) {
+        self.layout_with_collapse_in(containing_block, margin_context, float_context, None);
+    }
+
+    /// `layout_with_collapse`, plus the containing block's DEFINITE content
+    /// height for percentage resolution (see
+    /// `definite_content_height_for_children`). `None` keeps the historical
+    /// behaviour: percentages read `containing_block.content.height`, which on
+    /// the flow path is the parent's cursor.
+    pub(crate) fn layout_with_collapse_in(
+        &mut self,
+        containing_block: &Dimensions,
+        margin_context: &mut MarginCollapseContext,
+        float_context: &mut FloatContext,
+        percent_height_base: Option<f32>,
+    ) {
         // Handle clear property
         if self.clear != Clear::None {
             let clear_y = float_context.clear(self.clear);
@@ -2512,7 +2527,12 @@ impl LayoutBox {
 
         match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
-                self.layout_block_with_collapse(containing_block, margin_context, float_context);
+                self.layout_block_with_collapse(
+                    containing_block,
+                    margin_context,
+                    float_context,
+                    percent_height_base,
+                );
             }
             BoxType::Inline => {
                 self.layout_inline(containing_block);
@@ -2574,8 +2594,11 @@ impl LayoutBox {
         // Position the box
         self.calculate_block_position(containing_block);
 
-        // Layout children
-        self.layout_block_children();
+        // Layout children. Percentage-height children resolve against THIS
+        // box's height when it is definite (CSS 2.1 §10.5); the containing
+        // block they are handed carries the flow cursor instead.
+        let definite_for_children = self.definite_content_height_for_children(definite_height);
+        self.layout_block_children(definite_for_children);
 
         // Height depends on children - use definite_height for percentage resolution
         self.calculate_block_height(definite_height);
@@ -2587,6 +2610,7 @@ impl LayoutBox {
         containing_block: &Dimensions,
         margin_context: &mut MarginCollapseContext,
         float_context: &mut FloatContext,
+        percent_height_base: Option<f32>,
     ) {
         // Calculate width first (depends on containing block)
         self.calculate_block_width(containing_block);
@@ -2644,6 +2668,13 @@ impl LayoutBox {
         // on the flags instead: the first in-flow block child skips its top
         // margin when it was adjoined above, and the last child's bottom
         // margin stays pending when this box's bottom edge is open.
+        // Knowable now, before any child flows: this box's own height when it
+        // does not depend on its children. Children resolve percentage heights
+        // against it (CSS 2.1 §10.5); `None` leaves them on the old path.
+        let definite_for_children =
+            self.definite_content_height_for_children(percent_height_base
+                .unwrap_or(containing_block.content.height));
+
         let mut child_margin_context = MarginCollapseContext::new();
         child_margin_context.children_are_formatting_roots =
             self.style.display.is_flex() || self.style.display.is_grid();
@@ -2659,12 +2690,20 @@ impl LayoutBox {
         // Check for flex or grid container - these have special child layout
         if self.style.display.is_flex() {
             // For flex containers, layout children normally first to get their intrinsic sizes
-            self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
+            self.layout_block_children_with_collapse(
+                &mut child_margin_context,
+                float_context,
+                definite_for_children,
+            );
             // Then apply flex layout algorithm
             flex::layout_flex_container(self, &self.dimensions.clone());
         } else if self.style.display.is_grid() {
             // For grid containers, layout children normally first
-            self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
+            self.layout_block_children_with_collapse(
+                &mut child_margin_context,
+                float_context,
+                definite_for_children,
+            );
             // Then apply grid layout algorithm
             grid::layout_grid_container(
                 self,
@@ -2673,11 +2712,17 @@ impl LayoutBox {
             );
         } else {
             // Normal block layout
-            self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
+            self.layout_block_children_with_collapse(
+                &mut child_margin_context,
+                float_context,
+                definite_for_children,
+            );
         }
 
         // Height depends on children
-        self.calculate_block_height(containing_block.content.height);
+        self.calculate_block_height(
+            percent_height_base.unwrap_or(containing_block.content.height),
+        );
 
         // Reset margin context for next sibling, add bottom margin — and the
         // last child's bottom margin that collapsed through our open bottom
@@ -2789,7 +2834,9 @@ impl LayoutBox {
             + self.dimensions.padding.top;
 
         // Layout children
-        self.layout_block_children();
+        let definite_for_children =
+            self.definite_content_height_for_children(containing_block.content.height);
+        self.layout_block_children(definite_for_children);
         self.calculate_block_height(containing_block.content.height);
     }
 
@@ -3264,7 +3311,7 @@ impl LayoutBox {
     }
 
     /// Layout block children.
-    fn layout_block_children(&mut self) {
+    fn layout_block_children(&mut self, definite_height: Option<f32>) {
         let mut cursor_y = 0.0;
         let mut cursor_x = 0.0;
         let mut line_height = 0.0_f32;
@@ -3380,7 +3427,7 @@ impl LayoutBox {
                 // Children self-position at cb.y + cb.height; the cursor is
                 // already baked into cb.y, so the height term must be zero.
                 cb.content.height = 0.0;
-                child.layout(&cb);
+                child.layout_with_definite_height(&cb, definite_height.unwrap_or(cb.content.height));
 
                 let child_width = child.dimensions.margin_box().width;
                 let child_height = child.dimensions.margin_box().height;
@@ -3406,7 +3453,7 @@ impl LayoutBox {
                     // Re-layout at new position
                     cb.content.x = self.dimensions.content.x;
                     cb.content.y = self.dimensions.content.y + cursor_y;
-                    child.layout(&cb);
+                    child.layout_with_definite_height(&cb, definite_height.unwrap_or(cb.content.height));
                 }
 
                 // Track line start
@@ -3548,7 +3595,7 @@ impl LayoutBox {
                         let t = t.clone();
                         child.layout_text_with_zero_wrap(t, &cb, true);
                     }
-                    _ => child.layout(&cb),
+                    _ => child.layout_with_definite_height(&cb, definite_height.unwrap_or(cb.content.height)),
                 }
 
                 // An inline-level box (e.g. a styled <span>/<a>) laid out on
@@ -3940,6 +3987,7 @@ impl LayoutBox {
         &mut self,
         margin_context: &mut MarginCollapseContext,
         float_context: &mut FloatContext,
+        definite_height: Option<f32>,
     ) {
         let mut cursor_y = 0.0;
         let mut cursor_x = 0.0;
@@ -4085,7 +4133,7 @@ impl LayoutBox {
                 // Children self-position at cb.y + cb.height; the cursor is
                 // already baked into cb.y, so the height term must be zero.
                 cb.content.height = 0.0;
-                child.layout_with_collapse(&cb, margin_context, float_context);
+                child.layout_with_collapse_in(&cb, margin_context, float_context, definite_height);
 
                 let child_width = child.dimensions.margin_box().width;
                 let child_height = child.dimensions.margin_box().height;
@@ -4111,7 +4159,12 @@ impl LayoutBox {
                     // Re-layout at new position
                     cb.content.x = self.dimensions.content.x;
                     cb.content.y = self.dimensions.content.y + cursor_y;
-                    child.layout_with_collapse(&cb, margin_context, float_context);
+                    child.layout_with_collapse_in(
+                        &cb,
+                        margin_context,
+                        float_context,
+                        definite_height,
+                    );
                 }
 
                 // Track line start
@@ -4246,7 +4299,12 @@ impl LayoutBox {
                         let t = t.clone();
                         child.layout_text_with_zero_wrap(t, &cb, true);
                     }
-                    _ => child.layout_with_collapse(&cb, margin_context, float_context),
+                    _ => child.layout_with_collapse_in(
+                        &cb,
+                        margin_context,
+                        float_context,
+                        definite_height,
+                    ),
                 }
 
                 // See layout_block_children: keep inline box decoration aligned.
@@ -4321,6 +4379,50 @@ impl LayoutBox {
         }
 
         self.dimensions.content.height = cursor_y;
+    }
+
+    /// CSS 2.1 §10.5: the content height a percentage-height CHILD of this
+    /// box resolves against. `Some` only when this box's own height is
+    /// definite WITHOUT consulting its children, so it is knowable before
+    /// they lay out; `None` means "depends on content".
+    ///
+    /// This exists because the containing block a child is handed carries the
+    /// parent's FLOW CURSOR in `content.height` (the static-position trick in
+    /// `layout_block_children_with_collapse`), not the parent's height — so a
+    /// percentage child saw 0 and `calculate_block_height` fell back to the
+    /// viewport. The same shape as the abspos defect `reanchor_absolute_children`
+    /// closes, on the in-flow side.
+    ///
+    /// `min-height`/`max-height` are deliberately not consulted: they clamp
+    /// the used height after children flow, which is exactly the "depends on
+    /// content" case the spec makes `auto`.
+    fn definite_content_height_for_children(&self, containing_block_height: f32) -> Option<f32> {
+        let specified = match self.style.height {
+            Length::Px(px) => px,
+            Length::Percent(pct) if containing_block_height > 0.0 => {
+                pct / 100.0 * containing_block_height
+            }
+            Length::Vh(vh) if self.viewport.1 > 0.0 => vh / 100.0 * self.viewport.1,
+            Length::Em(em) => {
+                let font_size = match self.style.font_size {
+                    Length::Px(px) => px,
+                    _ => 16.0,
+                };
+                em * font_size
+            }
+            Length::Rem(rem) => rem * 16.0,
+            _ => return None,
+        };
+        let content = if self.style.box_sizing == BoxSizing::BorderBox {
+            specified
+                - (self.dimensions.padding.top
+                    + self.dimensions.padding.bottom
+                    + self.dimensions.border.top
+                    + self.dimensions.border.bottom)
+        } else {
+            specified
+        };
+        Some(content.max(0.0))
     }
 
     /// Calculate block height.
@@ -8433,7 +8535,7 @@ mod tests {
             text_style,
         ));
 
-        parent.layout_block_children();
+        parent.layout_block_children(None);
 
         let t = &parent.children[0];
         let w = t.dimensions.content.width;
@@ -8471,7 +8573,7 @@ mod tests {
             ComputedStyle::new(),
         ));
 
-        parent.layout_block_children();
+        parent.layout_block_children(None);
 
         let b = &parent.children[0];
         let t = &parent.children[1];
@@ -8513,7 +8615,7 @@ mod tests {
             BoxType::Text(LONG_TEXT.to_string()),
             ComputedStyle::new(),
         ));
-        parent.layout_block_children();
+        parent.layout_block_children(None);
         parent
     }
 
@@ -8534,7 +8636,7 @@ mod tests {
             BoxType::Text("Hi".to_string()),
             ComputedStyle::new(),
         ));
-        parent.layout_block_children();
+        parent.layout_block_children(None);
 
         let run = &parent.children[0];
         let tls = run.text_lines.as_ref().expect("the long run wraps");
@@ -10663,6 +10765,194 @@ mod tests {
         assert_eq!(layout_box.offsets.left, Some(20.0));
         assert_eq!(layout_box.offsets.right, None);
         assert_eq!(layout_box.offsets.bottom, None);
+    }
+
+
+    /// The containing block a flow child is handed carries the parent's
+    /// CURSOR in `content.height` (the static-position trick), so a
+    /// percentage height read 0 and `calculate_block_height` fell back to the
+    /// VIEWPORT. websuite/micro/rounded-corners test 7 is the corpus
+    /// instance: `.test-box { height: 100px }` holding
+    /// `.inner { height: 100% }` came out 1000 — the case's viewport height —
+    /// against Chrome's 100, the largest single geometry error in the 26-case
+    /// corpus. T-RED without the fix: 1000.
+    #[test]
+    fn a_percentage_height_child_resolves_against_its_definite_parent() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(150.0);
+        parent_style.height = Length::Px(100.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut inner_style = ComputedStyle::new();
+        inner_style.width = Length::Percent(100.0);
+        inner_style.height = Length::Percent(100.0);
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, inner_style));
+        parent.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+
+        let inner = &parent.children[0];
+        assert_eq!(
+            inner.dimensions.content.height, 100.0,
+            "height:100% of a 100px parent is 100"
+        );
+        assert!(
+            (inner.dimensions.content.height - 1000.0).abs() > 0.5,
+            "it must not be the viewport height"
+        );
+        assert_eq!(inner.dimensions.content.width, 150.0);
+        assert_eq!(
+            parent.dimensions.content.height, 100.0,
+            "the parent keeps its own specified height"
+        );
+    }
+
+    /// The same box inside an INLINE-BLOCK, which is the shape the corpus
+    /// actually has (`.test-box { display: inline-block; height: 100px }`).
+    /// The inline-block branch builds its own containing block with
+    /// `content.height = 0` before laying the child out, so it needs the
+    /// definite height passed explicitly too.
+    #[test]
+    fn a_percentage_height_child_of_an_inline_block_takes_the_inline_blocks_height() {
+        let mut wrapper_style = ComputedStyle::new();
+        wrapper_style.width = Length::Px(900.0);
+        let mut wrapper = LayoutBox::new(BoxType::Block, wrapper_style);
+
+        let mut box_style = ComputedStyle::new();
+        box_style.display = rustkit_css::Display::InlineBlock;
+        box_style.width = Length::Px(150.0);
+        box_style.height = Length::Px(100.0);
+        let mut test_box = LayoutBox::new(BoxType::Block, box_style);
+
+        let mut inner_style = ComputedStyle::new();
+        inner_style.width = Length::Percent(100.0);
+        inner_style.height = Length::Percent(100.0);
+        test_box
+            .children
+            .push(LayoutBox::new(BoxType::Block, inner_style));
+        wrapper.children.push(test_box);
+        wrapper.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        let mut mc = MarginCollapseContext::new();
+        let mut fc = FloatContext::new();
+        wrapper.layout_with_collapse(&viewport, &mut mc, &mut fc);
+
+        let inner = &wrapper.children[0].children[0];
+        assert_eq!(inner.dimensions.content.height, 100.0);
+        assert_eq!(
+            wrapper.children[0].dimensions.content.height, 100.0,
+            "the inline-block keeps its own height"
+        );
+    }
+
+    /// `box-sizing: border-box` on the parent: the specified 100px is the
+    /// BORDER box, so the content box a percentage child fills is
+    /// 100 - padding - border. A fix that handed the child the specified
+    /// length instead of the content height reads 100 here.
+    #[test]
+    fn a_percentage_height_child_fills_a_border_box_parents_content_box() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(150.0);
+        parent_style.height = Length::Px(100.0);
+        parent_style.box_sizing = BoxSizing::BorderBox;
+        parent_style.padding_top = Length::Px(8.0);
+        parent_style.padding_bottom = Length::Px(8.0);
+        parent_style.border_top_width = Length::Px(2.0);
+        parent_style.border_bottom_width = Length::Px(2.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut inner_style = ComputedStyle::new();
+        inner_style.height = Length::Percent(50.0);
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, inner_style));
+        parent.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+
+        assert_eq!(parent.dimensions.content.height, 80.0);
+        assert_eq!(
+            parent.children[0].dimensions.content.height, 40.0,
+            "50% of the parent's 80px CONTENT box"
+        );
+    }
+
+    /// The boundary the fix must not cross: an auto-height parent's height
+    /// DOES depend on its children, so it hands them no definite base and
+    /// keeps its content height. A fix that handed children a base of 0
+    /// (or the cursor) would collapse this parent to 0.
+    #[test]
+    fn an_auto_height_parent_still_takes_its_childrens_flow() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(150.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut inner_style = ComputedStyle::new();
+        inner_style.height = Length::Px(37.0);
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, inner_style));
+        parent.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+        assert_eq!(parent.dimensions.content.height, 37.0);
+        assert_eq!(parent.children[0].dimensions.content.height, 37.0);
+    }
+
+    /// The other half of the containing block's double duty: `content.height`
+    /// on the child's containing block is still the parent's FLOW CURSOR, so
+    /// two children of a definite-height parent stack instead of overlapping.
+    /// A fix that overwrote the cursor with the definite height would lay the
+    /// second child at the parent's bottom edge.
+    #[test]
+    fn a_definite_height_parent_still_stacks_its_children_on_the_cursor() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(150.0);
+        parent_style.height = Length::Px(100.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        for _ in 0..2 {
+            let mut kid_style = ComputedStyle::new();
+            kid_style.height = Length::Percent(25.0);
+            parent
+                .children
+                .push(LayoutBox::new(BoxType::Block, kid_style));
+        }
+        parent.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+
+        let top = parent.dimensions.content.y;
+        assert_eq!(parent.children[0].dimensions.content.height, 25.0);
+        assert_eq!(parent.children[1].dimensions.content.height, 25.0);
+        assert_eq!(parent.children[0].dimensions.content.y, top);
+        assert_eq!(
+            parent.children[1].dimensions.content.y,
+            top + 25.0,
+            "the second child stacks on the cursor, not on the definite height"
+        );
     }
 
     /// WPT overflow-wrap-anywhere-001: `::after { position:absolute; inset:0 }`
