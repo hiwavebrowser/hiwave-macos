@@ -3869,6 +3869,9 @@ impl LayoutBox {
                 _ => box_top,
             }
         };
+        // An inline-block's inner baseline in whole pixels, exactly as
+        // line_member_baseline_extents sizes the line from it.
+        let atomic_above = |above: f32| (above + 0.01).floor();
         // A non-atomic inline the pass can seat: baseline-aligned, all on one
         // line. `top|bottom|middle` inlines and wrapped ones stay put
         // (ledgered) but still count toward the line top.
@@ -3917,7 +3920,7 @@ impl LayoutBox {
                 // the line top, 5px above Chrome; a wrapped label hung its
                 // row off its second line.
                 match c.inline_block_baseline_y() {
-                    Some(b) => b - member_top(c),
+                    Some(b) => atomic_above(b - member_top(c)),
                     None => continue,
                 }
             } else {
@@ -3951,7 +3954,7 @@ impl LayoutBox {
                 }
             } else if c.style.display.is_atomic_inline() {
                 match c.inline_block_baseline_y() {
-                    Some(b) => baseline_y - (b - member_top(c)),
+                    Some(b) => baseline_y - atomic_above(b - member_top(c)),
                     None => continue,
                 }
             } else {
