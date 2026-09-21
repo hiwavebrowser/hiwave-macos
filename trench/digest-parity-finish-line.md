@@ -10408,3 +10408,247 @@ fire because the metric did not move.
 - **The paint oracle got worse because the layout got right**, on a box that
   moved 28.5px closer to Chrome. It is a 274-pixel instance of the argument the
   whole campaign was built on, and it arrived unprompted on an ordinary night.
+
+## 2026-09-21
+
+**Metric: `2/26` → `2/26` on macOS, carried forward and NOT re-measured.** No
+macOS lane ran tonight, so nothing below is a receipt. On this seat every
+conjunction column is unchanged — Gate A geometry-green 3/26, Gate B
+paint-green 1/26, discrete auto-fails 0, all 26 measured — so no case crossed
+the conjunction and none fell off it. The engine changed, so that is a
+measurement rather than an md5 proof.
+
+**P-item: the queue's geometry-first amendment (containing blocks), the same
+class 09-20 opened. NOT complete.** One root, then the second root it exposed,
+because the first one alone was a paint regression wearing a geometry win.
+
+### The defect
+
+`chrome_rustkit`'s sidebar, in a 1280x100 chrome strip:
+
+```
+  .sidebar { position: absolute; top: 84px; height: calc(100% - 84px) }
+
+                 Chrome 148   RustKit before   after calc   after both
+  .sidebar h         16.00           203.00         0.00        16.00
+```
+
+**`parse_length` had never parsed a `calc()` expression.** It read
+`calc(<single value>)` and returned `None` for everything else, so the
+declaration was DROPPED and the height was `auto` — 203px of content. The
+source said so plainly (`// Handle calc() - simplified support`); what it did
+not say is that the unsupported half fails silently, as a missing declaration
+rather than a parse error.
+
+`CalcSum` is the css-values-3 §8.1 normal form: one coefficient per unit,
+summed. calc() over lengths is linear — `+`/`-` between terms, `*`/`/` only by
+plain numbers — so an expression tree buys nothing the sum does not carry.
+`CalcSum::into_length` collapses a sum using at most ONE unit back onto that
+unit's variant, so `calc(2 * 50px)` stays `Length::Px(100.0)` and
+`Length::Calc` appears only where the value was broken before it existed. That
+is what bounds the blast radius across the 62 sites that match `Length::Px` or
+`Length::Percent`: none of them loses a value it used to see, and any site
+still falling to `_` gets the `auto` it already got.
+
+**The whole width axis needed no change.** `calculate_block_width` already
+funnels every non-`auto` width through `length_to_px`, i.e. through
+`to_px_with_viewport`. Asserted rather than assumed
+(`a_calc_width_resolves_through_the_existing_width_path`), because "it already
+works" is the claim most likely to stop being true quietly.
+
+### The half-rule, and why there are two commits and not one
+
+With calc parsing and nothing else, the board read:
+
+| oracle | before | after calc alone |
+|---|---:|---:|
+| Gate A `.sidebar` height Δ | 187.00 | **16.00** |
+| Gate B `chrome_rustkit` within ±5 | 95.55859% | **93.00547%** |
+| Gate B pixels outside tolerance | 5685 | **8953** |
+
+Geometry improved by 171px and paint lost 3268 pixels, all of them the
+sidebar's own background: at height 0 the box paints nothing. The 220x16 it
+used to cover is 3520px, which is the number.
+
+That is 08-12's lesson with a different face — *a partial application of a
+correct rule made the number worse.* The calc resolved against 84, the parent's
+**flow cursor**, not against the containing block's 100. Out-of-flow children
+are handed a stand-in whose `content.height` is that cursor; both
+`layout_block_children` call sites document it as the static-position trick and
+say `reanchor_absolute_children` re-resolves the child against the real padding
+box once the parent is final. It re-resolved the *offsets* and never the
+*height*.
+
+So the second commit puts the height where the offsets already were. It is the
+out-of-flow twin of `277b038` (09-20), which fixed the same confusion for flow
+children, and the two together are one rule: **a percentage height resolves
+against its containing block, never against content laid out so far.**
+
+### Commits — branch `atlas/n59-calc-and-out-of-flow-percent-height`
+
+Cut from `atlas/n58-percent-height-definite-parent`, **not** from `develop`,
+and that is forced rather than chosen: the calc arm lives inside
+`definite_content_height_for_children` and the `Option<f32>` entry to
+`calculate_block_height`, both of which n58 introduced. Decision 1 below.
+
+- `fb01dc6` — `calc()` over more than one unit is a length, not a dropped
+  declaration (`CalcSum` + parser + `to_px_with_viewport`; consumers in block
+  height, min/max-height, the definite-base helper, flex's explicit container
+  height, grid's `apply_align_self`).
+- `2fcf70c` — guard the min-/max-height arms, which shipped without one.
+- `068596b` — an out-of-flow percentage height resolves against its containing
+  block, not the flow cursor.
+- `8b79ec0` — close the M11 survivor.
+
+**Pushed, no PR.** The class is not finished — see the surprises.
+
+### Measured — Linux/SwiftShader, 26 cases, base `develop 011ffee` + n58. MECHANICS, NOT A RECEIPT
+
+| Oracle | before | after |
+|---|---:|---:|
+| Gate A geometry failures / joins | 2591 / 16 | **2590** / 16 |
+| Gate A geometry-green / measured | 3/26 · 26/26 | 3/26 · 26/26 |
+| Gate B paint-green / measured | 1/26 · 26/26 | 1/26 · 26/26 |
+| Gate B discrete auto-fails / examined | 0 / 267 | 0 / **268** |
+
+Per (case, selector, axis) across all 26 cases:
+**fixed 1 · newly failing 0 · improved 0 · worsened 0 · unchanged 2590.**
+
+| case | geometry fails | sum·\|Δ\| |
+|---|---:|---:|
+| `chrome_rustkit` | 44 → **43** | 298.44 → **111.44** |
+
+**Gate B's percentage half is bit-identical on all 26 cases**, the regression
+above having been the half-rule and not the fix. One more element is now
+geometrically exact enough for the discrete detectors to speak about it
+(267 → 268), which is the second thing a geometry fix buys.
+
+`chrome_rustkit`'s remaining 43 failures are, every one of them, text metrics —
+line boxes at 14px against Chrome's 16, glyph advances on `span.sidebar-label`
+and `span.url-text`. **On this seat there is no font backend at all, so the
+case cannot be taken further here.** Whether `.sidebar` was its last non-font
+geometry failure is a prediction for the macOS lane to check, not a claim.
+
+### Stop rule
+
+Checked per box, not per case, across all 26 cases and every axis: **zero boxes
+worsened on Gate A**, no case gained a discrete failure, no case lost its green,
+and Gate B's percentage half moved on nothing. The rule did not fire **on what
+was committed**. It would have fired on the intermediate state, and the two
+commits exist so that it does not have to.
+
+### Mutation-check results
+
+**19 probes. 19 RED after one survivor was closed. Control green before and
+after; `git status` clean at the end of the sweep.**
+
+| probe | result | caught by |
+|---|---|---|
+| M1 the calc parser arm returns `None` again (whole fix removed) | RED | 14 guards |
+| M2 `into_length` never collapses (always `Calc`) | RED | `a_calc_that_uses_one_unit…` |
+| M3 `into_length` always collapses (never `Calc`) | RED | 13 guards |
+| M4 `+`/`-` no longer require surrounding whitespace | RED | `calc_rejects_what_the_spec_rejects` |
+| M5 the sum splitter scans left to right (right-associative) | RED | `calc_subtraction_is_left_associative` |
+| M6 `*` accepts a length on its right | RED | `calc_rejects…`, `calc_multiplication…` |
+| M7 division by zero allowed | RED | `calc_rejects…` |
+| M8 `to_px` drops the px term | RED | 11 guards |
+| M9 `to_px` drops the percentage term | RED | 10 guards |
+| M10 `calculate_block_height`'s Calc arm deleted | RED | 5 guards |
+| M11 that arm loses its zero-percent case | RED* | `a_calc_with_no_percentage_needs_no_base` |
+| M12 `definite_content_height_for_children`'s Calc arm deleted | RED | `a_calc_height_parent_is_itself_a_definite_base` |
+| M13 flex's explicit-height Calc arm deleted | RED | the flex guard |
+| M14 grid's `apply_align_self` Calc arm deleted | RED | the grid guard |
+| M15 `split_number_and_unit` stops protecting `em`'s `e` | RED | 2 guards |
+| M16 min-height's Calc arm deleted | RED | `a_calc_min_and_max_height…` |
+| M17 max-height's Calc arm deleted | RED | same |
+| M18 the out-of-flow height re-resolve deleted | RED | `an_out_of_flow_percentage_height…` |
+| M19 that re-resolve covers `Calc` but not `Percent` | RED | same |
+
+\* red only after `8b79ec0`.
+
+**M11 is the fifth sweep running whose survivor came from the same place, and
+the second in two nights whose lesson was 09-20's M10 rather than the older
+one.** The arm says a calc with no percentage term needs no base. Every guard
+ran on a 1000px viewport — and where the calc has no percentage term the basis
+**cannot change the answer**, so no assertion taken against a real viewport can
+require that arm at all. The distinction between `Some(0.0)` and `None` only
+becomes observable once the viewport fallback is gone too, which means a box
+with `set_viewport(0.0, 0.0)`. Not "write a better test": *reach the state where
+the distinction exists.*
+
+Process note, because it is now three nights in a row: every probe ran from a
+committed tree and the sweep restored with `git checkout -- crates/`. One probe
+(M12) failed to apply rather than surviving — its snippet was written against
+pre-`rustfmt` text. **A mutation that does not apply must not read as a pass**,
+and the harness printing `MUTATION FAILED TO APPLY` instead of a verdict is the
+only reason that one was re-run rather than counted.
+
+### What the stranded stack looks like tonight
+
+09-20 asked for the board to be read against the in-flight branches and named
+the digest as the only index of what is fixed-but-unmerged. That index, current
+as of tonight (none of these is merged; `develop` is still `011ffee`):
+
+| branch | corpus rows it owns | base |
+|---|---|---|
+| `atlas/n49-p3-flex` | `chrome_rustkit .sidebar-toggle` align:center | `da8f413` |
+| `atlas/n51-p3-flex-justify-end` | `settings .decay-control` justify:flex-end | `da8f413` |
+| `atlas/n52-p3-flex-column-center` | `image-gallery .aspect-box > .content` (inset overlay in an aspect-ratio item) | `da8f413` |
+| `atlas/n53-p3-content-justify` | as n52, plus `image-gallery .content` justify:center ×4 | `da8f413` |
+| `atlas/n54-p3-column-definite-main` | none corpus-visible | `da8f413` |
+| `atlas/n55-column-definite-main-size` | none corpus-visible | `da8f413` |
+| `atlas/n57-new-tab-container-height` | `new_tab .footer` + its `a` (571px, 566px) | `011ffee` |
+| `atlas/n58-percent-height-definite-parent` | `rounded-corners .test7 .inner`, `chrome_rustkit .sidebar-toggle` | `011ffee` |
+| `atlas/n59-calc-and-out-of-flow-percent-height` (tonight) | `chrome_rustkit .sidebar` | n58 |
+
+Two open PRs exist on the repo, both from another lane: #205 (line-box strut
+floor) and #206 (text baseline + form-control sizing). Between them they cover
+much of `form-elements` and `form-controls`, which is why tonight's board
+skipped those rows.
+
+### Decisions needed from Pete
+
+1. **Tonight's branch is stacked on n58, which is itself unmerged** — the calc
+   arm sits inside two functions n58 introduced — so the stranded pile is now
+   nine branches deep and one of them depends on another; should the trench
+   open PRs and resolve the mechanical `flex.rs` test-module conflicts, or keep
+   stacking? (09-20 decision 1, unanswered, now with a dependency in it.)
+2. Still open from 09-20: **ratify or overrule 09-20's stop-rule reading**
+   (Gate A fixed a 900px error while Gate B fell 0.21pp on one case). Tonight
+   the same shape appeared and was resolved by finishing the rule instead of
+   judging it, which is the better answer where it is available — but it is not
+   always available.
+3. Still open from 09-19 and 09-20: **mark the four font-stack tests
+   `#[cfg(target_os = "macos")]`?** This seat is 420 passed / 4 failed before
+   and after every change tonight, and "red, but the same red as before" is
+   exactly the judgement call this campaign exists to remove.
+
+### Surprises
+
+- **`calc()` was never implemented, and nothing in forty nights of boards said
+  so.** The corpus contains exactly one `calc()` — `chrome_rustkit`'s sidebar —
+  and the failure mode is a *dropped declaration*, which is invisible to every
+  instrument the campaign has: no parse error, no phantom box, no join failure.
+  It showed up as one 187px height and nothing else. A grep for `calc(` across
+  the corpus took ten seconds and would have found it on night 1.
+- **The first fix made the metric's paint half worse by 3268 pixels, and the
+  geometry half better by 171.** Had the night stopped at "the 187px error is
+  now 16", the digest would have carried a win and the engine a box that paints
+  nothing. The pair-reporting rule is what caught it: a geometry-only board
+  would have read −171px and a mean-diff board would have read a regression
+  with no cause attached.
+- **The blast-radius question answered itself in the type system.** The worry
+  going in was 62 match sites on `Length::Percent`/`Px`. Collapsing single-unit
+  sums back onto their old variants meant only values that were *already
+  broken* ever became `Length::Calc`, so every unhandled site keeps exactly
+  today's behaviour — which is why an incremental application here is not
+  08-12's trap, and why the two arms that were NOT extended could be left with
+  a stated reason rather than a guess.
+- **The class is not finished and the next root is already visible.** flex's
+  `definite_inner_main` treats only `Px` as definite; `Percent` has the same gap
+  there, so calc introduces no new inconsistency and the shared gap is its own
+  unit. Separately, RustKit's `reanchor_absolute_children` treats *any* parent
+  as the abspos containing block, positioned or not — CSS 2.1 §10.1 wants the
+  nearest positioned ancestor. On `chrome_rustkit` the two coincide at 100px, so
+  tonight's number does not depend on the difference, and it is recorded rather
+  than fixed on a case that cannot tell them apart.
