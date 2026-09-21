@@ -805,6 +805,19 @@ pub fn layout_flex_container(container: &mut LayoutBox, containing_block: &Dimen
                 rustkit_css::Length::Percent(pct) if containing_block.content.height > 0.0 => {
                     Some(pct / 100.0 * containing_block.content.height)
                 }
+                // Same condition as the percentage arm: a `calc()` is a
+                // length, and it needs the containing block only for its
+                // percentage term. Line 234's `is_definite` already counts a
+                // calc height as specified, so leaving it on `_` would make
+                // the container definite and then give it no used height.
+                rustkit_css::Length::Calc(ref sum)
+                    if sum.percent == 0.0 || containing_block.content.height > 0.0 =>
+                {
+                    Some(resolve_length(
+                        &container.style.height,
+                        containing_block.content.height,
+                    ))
+                }
                 _ => None,
             };
             match explicit {
@@ -2935,6 +2948,37 @@ mod tests {
             "Expected child2_y ({}) >= child1_y ({})",
             child2_y,
             child1_y
+        );
+    }
+
+    /// `is_definite_cross_size` counts any non-`auto` height as specified, so
+    /// a `calc()` container is definite — and then it must get a used height
+    /// to match. Left on the `_` arm the container is definite with no
+    /// explicit height, and falls back to its content.
+    #[test]
+    fn a_calc_height_flex_container_uses_its_resolved_height() {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Row;
+        style.height = rustkit_css::parse_length("calc(100% - 100px)").expect("calc parses");
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.width = Length::Px(100.0);
+        child_style.height = Length::Px(50.0);
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, child_style));
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 400.0, 500.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        assert_eq!(
+            container.dimensions.content.height, 400.0,
+            "100% of the containing block's 500px minus 100px, not the 50px of content"
         );
     }
 

@@ -4428,6 +4428,13 @@ impl LayoutBox {
             Length::Percent(pct) if containing_block_height > 0.0 => {
                 pct / 100.0 * containing_block_height
             }
+            // A `calc()` height is as definite as the terms it is made of: it
+            // needs a base only where it carries a percentage term.
+            Length::Calc(ref sum)
+                if sum.percent == 0.0 || containing_block_height > 0.0 =>
+            {
+                self.length_to_px(&self.style.height, containing_block_height)
+            }
             Length::Vh(vh) if self.viewport.1 > 0.0 => vh / 100.0 * self.viewport.1,
             Length::Em(em) => {
                 let font_size = match self.style.font_size {
@@ -4475,6 +4482,13 @@ impl LayoutBox {
         let padding_border_height = padding_top + padding_bottom + border_top + border_bottom;
         let is_border_box = self.style.box_sizing == BoxSizing::BorderBox;
 
+        // Lifted out of the match so the arm below can read the sum without
+        // borrowing `self.style` across the assignment to `self.dimensions`.
+        let calc_height = match &self.style.height {
+            Length::Calc(sum) => Some(**sum),
+            _ => None,
+        };
+
         // If height is explicitly set, use it
         match self.style.height {
             Length::Px(h) => {
@@ -4495,6 +4509,29 @@ impl LayoutBox {
                 };
                 if let Some(reference_height) = reference_height {
                     let specified = pct / 100.0 * reference_height;
+                    self.dimensions.content.height = if is_border_box {
+                        (specified - padding_border_height).max(0.0)
+                    } else {
+                        specified
+                    };
+                }
+            }
+            Length::Calc(_) => {
+                // css-values-3 §8.1: a `calc()` over lengths and percentages
+                // IS a length once the percentage basis is known, so it takes
+                // exactly the base a bare percentage takes — including the
+                // viewport fallback for an indefinite parent. A calc with no
+                // percentage term needs no base at all and must not be lost
+                // with one: `calc(2em + 4px)` is definite everywhere.
+                let sum = calc_height.unwrap_or_default();
+                let reference_height = match percent_base {
+                    Some(h) => Some(h),
+                    None if sum.percent == 0.0 => Some(0.0),
+                    None if self.viewport.1 > 0.0 => Some(self.viewport.1),
+                    None => None,
+                };
+                if let Some(reference_height) = reference_height {
+                    let specified = self.length_to_px(&self.style.height, reference_height);
                     self.dimensions.content.height = if is_border_box {
                         (specified - padding_border_height).max(0.0)
                     } else {
@@ -4555,6 +4592,13 @@ impl LayoutBox {
             Length::Px(px) => px,
             Length::Vh(vh) => vh / 100.0 * self.viewport.1,
             Length::Percent(pct) => pct / 100.0 * self.viewport.1,
+            // Same basis as the `Percent` arm above, deliberately: a `calc()`
+            // is a length, so it must not resolve against a different
+            // reference from the bare percentage sitting next to it. (That
+            // basis is `self.viewport.1` rather than `percent_base` here —
+            // a pre-existing inconsistency with the height arm, left as it is
+            // so this change carries one rule and not two.)
+            Length::Calc(_) => self.length_to_px(&self.style.min_height, self.viewport.1),
             _ => 0.0,
         };
         let min_height = if is_border_box && min_height_raw > 0.0 {
@@ -4571,6 +4615,7 @@ impl LayoutBox {
             Length::Px(px) => px,
             Length::Vh(vh) => vh / 100.0 * self.viewport.1,
             Length::Percent(pct) => pct / 100.0 * self.viewport.1,
+            Length::Calc(_) => self.length_to_px(&self.style.max_height, self.viewport.1),
             _ => f32::INFINITY,
         };
         let max_height = if is_border_box && max_height_raw < f32::INFINITY {
@@ -11098,6 +11143,166 @@ mod tests {
             wrapper.children[0].dimensions.content.height, 60.0,
             "50% of the wrapper's 120px, not of the viewport"
         );
+    }
+
+    fn calc_sum(value: &str) -> Length {
+        rustkit_css::parse_length(value).unwrap_or_else(|| panic!("{value} did not parse"))
+    }
+
+    /// chrome_rustkit's `.sidebar`: `position: absolute; top: 84px;
+    /// height: calc(100% - 84px)` in a 1280x100 chrome strip. Chrome gives it
+    /// 16px. RustKit gave it 203 — its content height — because
+    /// `calc(100% - 84px)` did not parse, so the declaration was dropped and
+    /// the height was `auto`.
+    #[test]
+    fn a_calc_height_resolves_against_its_parents_definite_height() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(1280.0);
+        parent_style.height = Length::Px(100.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.width = Length::Px(220.0);
+        child_style.height = calc_sum("calc(100% - 84px)");
+        let mut child = LayoutBox::new(BoxType::Block, child_style);
+        // Content taller than the calc asks for, so an `auto` fallback is
+        // visibly different from the resolved value rather than coincidentally
+        // equal to it.
+        let mut filler_style = ComputedStyle::new();
+        filler_style.height = Length::Px(203.0);
+        child
+            .children
+            .push(LayoutBox::new(BoxType::Block, filler_style));
+        parent.children.push(child);
+        parent.set_viewport(1280.0, 100.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 100.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+
+        assert_eq!(
+            parent.children[0].dimensions.content.height, 16.0,
+            "100% of the parent's 100px minus 84px, not the 203px of content"
+        );
+    }
+
+    /// The percentage half and the absolute half must take the SAME base a
+    /// bare percentage would. An `auto`-height parent hands no definite base,
+    /// and the viewport fallback stands — the behaviour `Length::Percent`
+    /// already has, which is what makes `calc()` a length rather than a
+    /// second rule.
+    #[test]
+    fn a_calc_height_takes_the_same_base_a_bare_percentage_takes() {
+        for (height, expected) in [
+            (Length::Percent(50.0), 500.0),
+            (calc_sum("calc(50% - 10px)"), 490.0),
+        ] {
+            let mut parent_style = ComputedStyle::new();
+            parent_style.width = Length::Px(150.0);
+            let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+            let mut child_style = ComputedStyle::new();
+            child_style.height = height.clone();
+            parent
+                .children
+                .push(LayoutBox::new(BoxType::Block, child_style));
+            parent.set_viewport(900.0, 1000.0);
+
+            let viewport = Dimensions {
+                content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+                ..Default::default()
+            };
+            parent.layout(&viewport);
+            assert_eq!(
+                parent.children[0].dimensions.content.height, expected,
+                "{height:?} must resolve against the same base as the percentage beside it"
+            );
+        }
+    }
+
+    /// A `calc()` with no percentage term is definite wherever it appears —
+    /// including under a parent that has no definite height to offer. Falling
+    /// back to the viewport there would make `calc(2em + 4px)` 1000px.
+    #[test]
+    fn a_calc_with_no_percentage_needs_no_base() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(150.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.font_size = Length::Px(20.0);
+        child_style.height = calc_sum("calc(2em + 4px)");
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, child_style));
+        parent.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+        assert_eq!(parent.children[0].dimensions.content.height, 44.0);
+    }
+
+    /// A calc-sized parent is a definite base for ITS percentage children —
+    /// the rule `a_percentage_height_chain_resolves_through_a_percentage_parent`
+    /// states for percentages, applied to the variant beside it.
+    #[test]
+    fn a_calc_height_parent_is_itself_a_definite_base() {
+        let mut outer_style = ComputedStyle::new();
+        outer_style.width = Length::Px(150.0);
+        outer_style.height = Length::Px(200.0);
+        let mut outer = LayoutBox::new(BoxType::Block, outer_style);
+
+        let mut mid_style = ComputedStyle::new();
+        mid_style.height = calc_sum("calc(100% - 40px)");
+        let mut mid = LayoutBox::new(BoxType::Block, mid_style);
+
+        let mut inner_style = ComputedStyle::new();
+        inner_style.height = Length::Percent(50.0);
+        mid.children
+            .push(LayoutBox::new(BoxType::Block, inner_style));
+        outer.children.push(mid);
+        outer.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        outer.layout(&viewport);
+        assert_eq!(outer.children[0].dimensions.content.height, 160.0);
+        assert_eq!(
+            outer.children[0].children[0].dimensions.content.height, 80.0,
+            "50% of the calc parent's 160px, not of the viewport"
+        );
+    }
+
+    /// A calc width needs no arm of its own — `calculate_block_width` already
+    /// funnels every non-`auto` width through `length_to_px`. Asserted rather
+    /// than assumed, because "it already works" is the claim most likely to
+    /// stop being true silently.
+    #[test]
+    fn a_calc_width_resolves_through_the_existing_width_path() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(400.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.width = calc_sum("calc(100% - 40px)");
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, child_style));
+        parent.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+        assert_eq!(parent.children[0].dimensions.content.width, 360.0);
     }
 
     /// A border-box parent whose padding exceeds its specified height has a
