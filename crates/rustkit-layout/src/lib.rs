@@ -11259,6 +11259,26 @@ mod tests {
         };
         parent.layout(&viewport);
         assert_eq!(parent.children[0].dimensions.content.height, 44.0);
+
+        // …and with no viewport either. Mutation probe M11 (2026-09-21)
+        // survived the case above: where the calc carries no percentage term
+        // the basis cannot change the answer, so the `percent == 0` arm is
+        // unobservable UNTIL the viewport fallback is also gone. This is the
+        // only shape that tells `Some(0.0)` from `None` — and `None` leaves
+        // the height unset, i.e. at its content.
+        let mut bare_parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut bare_child = ComputedStyle::new();
+        bare_child.font_size = Length::Px(20.0);
+        bare_child.height = calc_sum("calc(2em + 4px)");
+        bare_parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, bare_child));
+        bare_parent.set_viewport(0.0, 0.0);
+        bare_parent.layout(&Dimensions::default());
+        assert_eq!(
+            bare_parent.children[0].dimensions.content.height, 44.0,
+            "a calc with no percentage term is definite with no base at all"
+        );
     }
 
     /// A calc-sized parent is a definite base for ITS percentage children —
