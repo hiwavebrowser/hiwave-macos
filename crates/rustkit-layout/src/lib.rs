@@ -2601,7 +2601,7 @@ impl LayoutBox {
     /// box top to the lowest box bottom once every member sits on the
     /// baseline, the strut included). Mirrors apply_vertical_align's
     /// placement arms. None for members the align pass leaves at the line
-    /// top: non-atomic inline boxes, and `vertical-align: top|bottom` boxes,
+    /// top: `vertical-align: top|bottom` boxes,
     /// which hang from the line edge and swallow the strut instead of
     /// stacking on its descent; `middle` keeps the loop's own accounting
     /// (it centres on the container's x-height, not on this box's font).
@@ -2615,7 +2615,10 @@ impl LayoutBox {
         ) {
             return None;
         }
-        if matches!(self.box_type, BoxType::Text(_)) {
+        // A non-atomic inline sits on the baseline as a line of text in its
+        // own font (its rect is only the content area; the line sees the
+        // line-height split).
+        if matches!(self.box_type, BoxType::Text(_) | BoxType::Inline) {
             return Some(Self::text_line_box_extents(&self.style));
         }
         let h = self.dimensions.margin_box().height;
@@ -3833,7 +3836,11 @@ impl LayoutBox {
         // Above/below-baseline extents for a text-carrying style, matching
         // the paint emission: glyph top = content_y + half_leading,
         // baseline = glyph top + ascent.
-        let text_extents = Self::text_baseline_extents;
+        //
+        // Whole-pixel, as paint seats a run (`blink_baseline_offset`) and as
+        // the line box is sized: on the fractional split a member dropped to
+        // a neighbour's baseline landed between rows and painted one off.
+        let text_extents = Self::text_line_box_extents;
 
         // A member's top on THIS line. A mid-line split run reaches the
         // recorded line only through its LAST visual line (the open one its
@@ -3844,12 +3851,36 @@ impl LayoutBox {
         let member_top = |c: &LayoutBox| -> f32 {
             let d = &c.dimensions;
             let box_top = d.content.y - d.margin.top - d.border.top - d.padding.top;
+            // A non-atomic inline's rect is its content area, a half-leading
+            // below the line slot its text sits in; the slot is the member.
+            // One whose text wrapped reaches this line through its last line
+            // box, like a split run.
+            if matches!(c.box_type, BoxType::Inline) {
+                let slot_top = box_top - c.inline_content_area().1;
+                return match Self::inline_wrapped_tail(c, 0.0) {
+                    Some((n, _, lh)) => slot_top + (n as f32 - 1.0) * lh,
+                    None => slot_top,
+                };
+            }
             match (&c.text_flow_first_offset, &c.text_lines) {
                 (Some(_), Some(tls)) if tls.len() > 1 => {
                     box_top + (tls.len() as f32 - 1.0) * c.get_line_height()
                 }
                 _ => box_top,
             }
+        };
+        // A non-atomic inline the pass can seat: baseline-aligned, all on one
+        // line. `top|bottom|middle` inlines and wrapped ones stay put
+        // (ledgered) but still count toward the line top.
+        let seats_as_text = |c: &LayoutBox| -> bool {
+            matches!(c.box_type, BoxType::Inline)
+                && !matches!(
+                    c.style.vertical_align,
+                    rustkit_css::VerticalAlign::Top
+                        | rustkit_css::VerticalAlign::Bottom
+                        | rustkit_css::VerticalAlign::Middle
+                )
+                && Self::inline_wrapped_tail(c, 0.0).is_none()
         };
         let line_top = members
             .iter()
@@ -3866,7 +3897,7 @@ impl LayoutBox {
         let x_height = fs * 0.5;
         for &i in &members {
             let c = &children[i];
-            let above = if matches!(c.box_type, BoxType::Text(_)) {
+            let above = if matches!(c.box_type, BoxType::Text(_)) || seats_as_text(c) {
                 text_extents(&c.style).0
             } else if matches!(c.box_type, BoxType::FormControl(_)) && !c.baseline_is_bottom_edge()
             {
@@ -3890,7 +3921,7 @@ impl LayoutBox {
                     None => continue,
                 }
             } else {
-                continue; // non-atomic inline boxes stay top-aligned (later slice)
+                continue;
             };
             ascent = ascent.max(above);
         }
@@ -3900,7 +3931,11 @@ impl LayoutBox {
         // own extent already defines the ascent.
         for &i in &members {
             let c = &mut children[i];
-            let target_top = if matches!(c.box_type, BoxType::Text(_)) {
+            // A small-font `<span>` beside body text sat at the line top —
+            // its baseline a few px above its neighbours' (n54 settings: no
+            // on-row text at all). Its slot drops like a text run's; the
+            // rect and the text inside move together.
+            let target_top = if matches!(c.box_type, BoxType::Text(_)) || seats_as_text(c) {
                 baseline_y - text_extents(&c.style).0
             } else if matches!(c.box_type, BoxType::FormControl(_)) && !c.baseline_is_bottom_edge()
             {
@@ -7344,6 +7379,83 @@ mod tests {
         assert_eq!(span.dimensions.content.y, 147.0);
         assert_eq!(span.children[0].dimensions.content.y, 147.0);
         assert_eq!(span.children[0].children[0].dimensions.content.y, 140.0);
+    }
+
+    #[test]
+    fn test_small_font_inline_drops_to_the_line_baseline() {
+        // `<p>HxHx <span class="small">HxHx</span></p>`, 16px/32px Arial with
+        // an 11px span: Chrome seats the span's content area at line top + 11
+        // (repro inline-baseline-drop.html: p at 20, span rect at 31) — its
+        // slot one pixel below the line top, so both baselines share a row.
+        // The align pass left every non-atomic inline at the line top.
+        let mut body = ComputedStyle::new();
+        body.font_size = Length::Px(16.0);
+        body.line_height = rustkit_css::LineHeight::Px(32.0);
+        let mut small = body.clone();
+        small.font_size = Length::Px(11.0);
+
+        let mut text = LayoutBox::new(BoxType::Text("HxHx ".to_string()), body.clone());
+        text.dimensions.content.y = 100.0;
+        text.dimensions.content.height = 32.0;
+        let mut inner = LayoutBox::new(BoxType::Text("HxHx".to_string()), small.clone());
+        inner.dimensions.content.y = 100.0;
+        inner.dimensions.content.height = 32.0;
+        let mut span = LayoutBox::new(BoxType::Inline, small.clone());
+        span.dimensions.content.y = 100.0;
+        span.children.push(inner);
+        let (_, half_leading) = span.inline_content_area();
+        span.shift_inline_content_area(half_leading);
+
+        let mut line = vec![text, span];
+        LayoutBox::apply_vertical_align(&mut line, &body);
+
+        let drop = LayoutBox::text_line_box_extents(&body).0
+            - LayoutBox::text_line_box_extents(&small).0;
+        assert!(drop > 0.0, "the 16px strut sits above an 11px run, got {drop}");
+        assert_eq!(drop.fract(), 0.0, "whole-pixel seats, got {drop}");
+        assert_eq!(line[0].dimensions.content.y, 100.0, "the strut-font text does not move");
+        assert_eq!(line[1].children[0].dimensions.content.y, 100.0 + drop);
+        assert_eq!(line[1].dimensions.content.y, 100.0 + half_leading + drop);
+    }
+
+    #[test]
+    fn test_line_of_only_small_inlines_keeps_its_line_top() {
+        // A line whose only member is an inline: its rect sits a half-leading
+        // below the slot, and reading the rect as the line top would push the
+        // baseline — and the span — down by that half-leading again.
+        let mut body = ComputedStyle::new();
+        body.font_size = Length::Px(16.0);
+        body.line_height = rustkit_css::LineHeight::Px(32.0);
+
+        let mut inner = LayoutBox::new(BoxType::Text("HxHx".to_string()), body.clone());
+        inner.dimensions.content.y = 100.0;
+        let mut span = LayoutBox::new(BoxType::Inline, body.clone());
+        span.dimensions.content.y = 100.0;
+        span.children.push(inner);
+        let (_, half_leading) = span.inline_content_area();
+        span.shift_inline_content_area(half_leading);
+
+        let mut line = vec![span];
+        LayoutBox::apply_vertical_align(&mut line, &body);
+
+        assert_eq!(line[0].children[0].dimensions.content.y, 100.0);
+        assert_eq!(line[0].dimensions.content.y, 100.0 + half_leading);
+    }
+
+    #[test]
+    fn test_inline_member_feeds_the_line_box_extents() {
+        // The same line is 33px in Chrome, not 32: the small span's slot hangs
+        // 12 below a baseline the strut puts 21 down.
+        let mut body = ComputedStyle::new();
+        body.font_size = Length::Px(16.0);
+        body.line_height = rustkit_css::LineHeight::Px(32.0);
+        let mut small = body.clone();
+        small.font_size = Length::Px(11.0);
+        let span = LayoutBox::new(BoxType::Inline, small.clone());
+        assert_eq!(
+            span.line_member_baseline_extents(),
+            Some(LayoutBox::text_line_box_extents(&small))
+        );
     }
 
     #[test]
