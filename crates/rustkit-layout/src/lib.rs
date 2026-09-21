@@ -3000,6 +3000,20 @@ impl LayoutBox {
             self.dimensions.content.width,
             self.dimensions.content.height,
         );
+        // CSS 2.1 §10.5: a percentage height resolves against the CONTAINING
+        // BLOCK — for an out-of-flow box, the padding box this re-anchor is
+        // handed. During flow layout the stand-in's `content.height` was the
+        // parent's flow cursor (the static-position trick documented at both
+        // `layout_block_children` call sites), so a percentage resolved
+        // against "content laid out so far". chrome_rustkit's `.sidebar`
+        // (`top: 84px; height: calc(100% - 84px)` in a 100px strip) read that
+        // cursor as 84 and came out ZERO tall against Chrome's 16.
+        //
+        // Only the lengths that actually depend on the base are recomputed:
+        // a `Px` height is already right, and an `auto` one is its content.
+        if matches!(self.style.height, Length::Percent(_) | Length::Calc(_)) {
+            self.calculate_block_height(Some(containing_block.content.height));
+        }
         self.apply_position_offsets_absolute(containing_block);
         let (dx, dy) = (
             self.dimensions.content.x - origin_x,
@@ -11278,6 +11292,58 @@ mod tests {
             outer.children[0].children[0].dimensions.content.height, 80.0,
             "50% of the calc parent's 160px, not of the viewport"
         );
+    }
+
+    /// The abspos twin of `a_calc_height_resolves_against_its_parents_definite_height`.
+    /// During flow layout an out-of-flow child is handed a stand-in whose
+    /// `content.height` is the parent's flow cursor, so a percentage (or a
+    /// calc carrying one) resolves against "content laid out so far" —
+    /// chrome_rustkit's `.sidebar` read 84 and came out zero tall. Both
+    /// heights are asserted in one test because the rule is one rule: a calc
+    /// must take the same base the bare percentage beside it takes.
+    #[test]
+    fn an_out_of_flow_percentage_height_resolves_against_its_containing_block() {
+        for (height, expected) in [
+            (Length::Percent(100.0), 100.0),
+            (calc_sum("calc(100% - 84px)"), 16.0),
+        ] {
+            let mut parent_style = ComputedStyle::new();
+            parent_style.width = Length::Px(1280.0);
+            parent_style.height = Length::Px(100.0);
+            let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+            // Two in-flow siblings ahead of it, so the flow cursor (84) is a
+            // different number from the containing block's height (100) and
+            // the test can tell which one was used.
+            for h in [40.0_f32, 44.0] {
+                let mut sib = ComputedStyle::new();
+                sib.height = Length::Px(h);
+                parent.children.push(LayoutBox::new(BoxType::Block, sib));
+            }
+
+            let mut sidebar_style = ComputedStyle::new();
+            sidebar_style.position = rustkit_css::Position::Absolute;
+            sidebar_style.top = Some(Length::Px(84.0));
+            sidebar_style.left = Some(Length::Px(0.0));
+            sidebar_style.width = Length::Px(220.0);
+            sidebar_style.height = height.clone();
+            let mut sidebar = LayoutBox::new(BoxType::Block, sidebar_style);
+            sidebar.position = Position::Absolute;
+            parent.children.push(sidebar);
+            parent.set_viewport(1280.0, 100.0);
+
+            let viewport = Dimensions {
+                content: Rect::new(0.0, 0.0, 1280.0, 100.0),
+                ..Default::default()
+            };
+            parent.layout(&viewport);
+
+            assert_eq!(
+                parent.children[2].dimensions.content.height, expected,
+                "{height:?} must resolve against the containing block's 100px, \
+                 not the 84px flow cursor"
+            );
+        }
     }
 
     /// `min-height` and `max-height` read a calc through the same basis their
