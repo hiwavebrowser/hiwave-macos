@@ -11280,6 +11280,39 @@ mod tests {
         );
     }
 
+    /// `min-height` and `max-height` read a calc through the same basis their
+    /// `Percent` arm uses. Without their own arms a calc min-height is 0 and a
+    /// calc max-height is infinite — both silently absent rather than wrong,
+    /// which is the harder kind to notice.
+    #[test]
+    fn a_calc_min_and_max_height_clamp_like_the_percentage_beside_them() {
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+
+        let mut floored_style = ComputedStyle::new();
+        floored_style.width = Length::Px(150.0);
+        floored_style.height = Length::Px(10.0);
+        floored_style.min_height = calc_sum("calc(50% - 100px)");
+        let mut floored = LayoutBox::new(BoxType::Block, floored_style);
+        floored.set_viewport(900.0, 1000.0);
+        floored.layout(&viewport);
+        assert_eq!(
+            floored.dimensions.content.height, 400.0,
+            "50% of the 1000px viewport minus 100px, the basis the Percent arm uses"
+        );
+
+        let mut capped_style = ComputedStyle::new();
+        capped_style.width = Length::Px(150.0);
+        capped_style.height = Length::Px(900.0);
+        capped_style.max_height = calc_sum("calc(50% - 100px)");
+        let mut capped = LayoutBox::new(BoxType::Block, capped_style);
+        capped.set_viewport(900.0, 1000.0);
+        capped.layout(&viewport);
+        assert_eq!(capped.dimensions.content.height, 400.0);
+    }
+
     /// A calc width needs no arm of its own — `calculate_block_width` already
     /// funnels every non-`auto` width through `length_to_px`. Asserted rather
     /// than assumed, because "it already works" is the claim most likely to
