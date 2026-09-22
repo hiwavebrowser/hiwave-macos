@@ -10819,9 +10819,10 @@ nights' guards and would have counted as work while proving nothing new.
 
 ### Decisions needed from Pete
 
-1. **PR #208 is open against `develop` with the six merges — merge it.** It is
+1. **PR #209 is open against `develop` with the six merges — merge it.** It is
    the accumulated P2/P3/containing-block work from 09-11 through 09-21, and
-   nothing else in the queue can be honestly measured until it lands.
+   nothing else in the queue can be honestly measured until it lands. (#208 was
+   the same PR on the wrong ref and is closed — see the last surprise.)
 2. **Ratify holding `n51`** until `bare_control_widths_match_chrome` is green
    (its two regressing boxes are 11.98px of control width, not a flex bug), or
    say to land it and carry the two-box Gate A regression.
@@ -10860,3 +10861,15 @@ nights' guards and would have counted as work while proving nothing new.
   into 19px of displacement. Both are the same failure of a metric to mean what
   it appears to mean, and only the per-box receipt with magnitudes made either
   one legible.
+- **The first PR of the night described a tree it was not built from.** `git
+  worktree` left HEAD detached during the n51 bisect, so the six correct merges
+  landed on a detached HEAD while `atlas/n60-stack-integration` stayed on the
+  earlier seven-branch attempt — and `git push` sends the branch, not what you
+  measured. #208 therefore carried the one head this night holds out, under a
+  description claiming zero worsened boxes. Caught by comparing the pushed ref
+  against the commit the captures came from, which is a check I only ran
+  because the campaign's whole premise is that a number and the thing it
+  describes drift apart silently. Replaced by #209 on a new branch; nothing was
+  force-pushed. **The lesson is narrow and mechanical: after a bisect that
+  detaches HEAD, verify `rev-parse` of the pushed ref equals the tree that was
+  measured, before opening anything.**
