@@ -962,6 +962,169 @@ pub fn layout_flex_container_in(
             }
         }
     }
+
+    // 13. css-flexbox-1 §4.1: the STATIC POSITION of an out-of-flow child of a
+    // flex container is where it would sit "as if it were the sole flex item"
+    // — `justify-content` on the main axis, `align-self`/`align-items` on the
+    // cross axis, inside the container's content box. Step 2 drops these
+    // children from item collection and nothing put them back, so they kept
+    // the BLOCK flow cursor the pre-pass gave them: new_tab's
+    // `.footer { position: fixed; bottom: 1rem }` sat at x=0 under a
+    // `align-items: center` body where Chrome centres it at 571.20 — the
+    // largest single geometry error on that case and the only one on it that
+    // does not depend on the font stack.
+    //
+    // Only an axis whose BOTH insets are auto takes the static position: a
+    // specified `left`/`right`/`top`/`bottom` is resolved against the real
+    // containing block (§10.3.7) by `apply_position_offsets_absolute`, and
+    // that resolution must win. Measured against Chrome 148 on a 14-shape
+    // probe: `top: 10px` keeps y and still centres x, `left: 10px` keeps x and
+    // still centres y.
+    {
+        let main_is_horizontal = main_axis == Axis::Horizontal;
+        let reverse_main = direction.is_reverse();
+        let reverse_cross = wrap == FlexWrap::WrapReverse;
+        let container_align_items = container.style.align_items;
+        let container_justify = container.style.justify_content;
+        // The container's content box, read from the same place steps 6–10
+        // read it (`container_origin`, `container_main_size`): the caller
+        // passes the container's own dimensions, so this is its content box.
+        let content = containing_block.content;
+
+        // The main size to align in. On the horizontal axis the container's
+        // used content width is final here. On the vertical axis it is NOT —
+        // `container_main_size` is the CONTAINING BLOCK's number and
+        // content.height is the children's stack — so the size is re-derived
+        // by the same rule step 11d uses for the number it justifies in: a
+        // definite `height` from style, else the content extent floored at
+        // `min-height` (`min-height: 100vh` is the centring idiom on
+        // new_tab's body, and Chrome aligns in the floored 800, not the stack).
+        let used_inner_main = if main_is_horizontal {
+            content.width
+        } else {
+            let pb = container.dimensions.padding.vertical() + container.dimensions.border.vertical();
+            let is_bb = container.style.box_sizing == rustkit_css::BoxSizing::BorderBox;
+            let inner_from_spec = |raw: f32| if is_bb { (raw - pb).max(0.0) } else { raw };
+            match container.style.height {
+                Length::Px(v) => inner_from_spec(v),
+                _ => {
+                    let min = match container.style.min_height {
+                        Length::Px(px) => inner_from_spec(px),
+                        Length::Vh(vh) => inner_from_spec(vh / 100.0 * container.viewport.1),
+                        _ => 0.0,
+                    };
+                    // Step 12 has already written the flowed extent here; the
+                    // passed box still carries the pre-pass stack.
+                    container.dimensions.content.height.max(min)
+                }
+            }
+        };
+        // The cross size is the one steps 6–10 aligned the in-flow items in,
+        // so an out-of-flow child and its in-flow siblings cannot disagree
+        // about where the cross axis ends.
+        let used_inner_cross = definite_inner_cross.unwrap_or(if main_is_horizontal {
+            content.height
+        } else {
+            content.width
+        });
+
+        for child in &mut container.children {
+            if !matches!(
+                child.style.position,
+                rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
+            ) {
+                continue;
+            }
+
+            let offsets = child.resolved_offsets(containing_block);
+            let main_auto = if main_is_horizontal {
+                offsets.left.is_none() && offsets.right.is_none()
+            } else {
+                offsets.top.is_none() && offsets.bottom.is_none()
+            };
+            let cross_auto = if main_is_horizontal {
+                offsets.top.is_none() && offsets.bottom.is_none()
+            } else {
+                offsets.left.is_none() && offsets.right.is_none()
+            };
+            if !main_auto && !cross_auto {
+                continue;
+            }
+
+            let margin_box = child.dimensions.margin_box();
+            let (outer_main, outer_cross) = if main_is_horizontal {
+                (margin_box.width, margin_box.height)
+            } else {
+                (margin_box.height, margin_box.width)
+            };
+
+            // A sole item leaves all the free space to the alignment keyword;
+            // the distribution keywords degenerate: space-between packs to
+            // main-start, space-around and space-evenly to the centre.
+            let free_main = (used_inner_main - outer_main).max(0.0);
+            let main_start = match container_justify {
+                JustifyContent::FlexStart | JustifyContent::SpaceBetween => 0.0,
+                JustifyContent::FlexEnd => free_main,
+                JustifyContent::Center
+                | JustifyContent::SpaceAround
+                | JustifyContent::SpaceEvenly => free_main / 2.0,
+            };
+            // `row-reverse`/`column-reverse` put main-start at the far edge.
+            let main_start = if reverse_main {
+                free_main - main_start
+            } else {
+                main_start
+            };
+
+            let free_cross = (used_inner_cross - outer_cross).max(0.0);
+            let align = resolved_align(child.style.align_self, container_align_items);
+            let cross_start = match align {
+                // A static-position box is not stretched by `stretch`, and
+                // `baseline` has no line to sit on: both align to cross-start.
+                AlignItems::FlexStart | AlignItems::Stretch | AlignItems::Baseline => 0.0,
+                AlignItems::FlexEnd => free_cross,
+                AlignItems::Center => free_cross / 2.0,
+            };
+            let cross_start = if reverse_cross {
+                free_cross - cross_start
+            } else {
+                cross_start
+            };
+
+            let (target_x, target_y) = if main_is_horizontal {
+                (content.x + main_start, content.y + cross_start)
+            } else {
+                (content.x + cross_start, content.y + main_start)
+            };
+
+            // Positions are absolute, so move by the delta on the MARGIN box
+            // and carry the already-laid-out subtree (translate_subtree) —
+            // shifting the box origin alone strands its text and children.
+            let current = child.dimensions.margin_box();
+            let (horizontal_auto, vertical_auto) = if main_is_horizontal {
+                (main_auto, cross_auto)
+            } else {
+                (cross_auto, main_auto)
+            };
+            let dx = if horizontal_auto {
+                target_x - current.x
+            } else {
+                0.0
+            };
+            let dy = if vertical_auto {
+                target_y - current.y
+            } else {
+                0.0
+            };
+            if dx != 0.0 || dy != 0.0 {
+                child.dimensions.content.x += dx;
+                child.dimensions.content.y += dy;
+                for grandchild in &mut child.children {
+                    translate_subtree(grandchild, dx, dy);
+                }
+            }
+        }
+    }
 }
 
 /// Create a FlexItem from a LayoutBox.
@@ -4728,6 +4891,335 @@ mod tests {
         assert!(
             (m1 - 370.0).abs() < 0.5,
             "content-box: the specified 400 IS the inner size, so 400 less the sibling's 30 leaves 370, got {m1}"
+        );
+    }
+
+
+    /// Container + one in-flow item + one out-of-flow child, as the probe
+    /// page builds it. `oof` is styled by the caller.
+    fn probe(
+        direction: FlexDirection,
+        justify: JustifyContent,
+        align: AlignItems,
+        mut oof: LayoutBox,
+    ) -> LayoutBox {
+        let mut item_style = ComputedStyle::new();
+        item_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        item_style.width = Length::Px(60.0);
+        item_style.height = Length::Px(30.0);
+        let item = LayoutBox::new(BoxType::Block, item_style);
+
+        oof.style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        oof.dimensions.content.width = 50.0;
+        oof.dimensions.content.height = 20.0;
+
+        let mut c_style = ComputedStyle::new();
+        c_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        c_style.display = rustkit_css::Display::Flex;
+        c_style.flex_direction = direction;
+        c_style.justify_content = justify;
+        c_style.align_items = align;
+        c_style.width = Length::Px(400.0);
+        c_style.height = Length::Px(200.0);
+        let mut container = LayoutBox::new(BoxType::Block, c_style);
+        container.children.push(item);
+        container.children.push(oof);
+        container
+    }
+
+    fn oof_box() -> LayoutBox {
+        let mut s = ComputedStyle::new();
+        s.position = rustkit_css::Position::Absolute;
+        s.width = Length::Px(50.0);
+        s.height = Length::Px(20.0);
+        LayoutBox::new(BoxType::Block, s)
+    }
+
+    fn run(container: &mut LayoutBox, w: f32, h: f32) -> Rect {
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, w, h),
+            ..Default::default()
+        };
+        container.dimensions.content = containing.content;
+        layout_flex_container(container, &containing);
+        container.children[1].dimensions.border_box()
+    }
+
+    #[test]
+    fn an_out_of_flow_flex_child_sits_where_the_sole_flex_item_would() {
+        // Chrome: x=175, y=90 — centred on BOTH axes, not stacked after the
+        // in-flow item at (0, 30), which is where the block flow cursor left
+        // it and where RustKit left it until this fix.
+        let mut c = probe(
+            FlexDirection::Row,
+            JustifyContent::Center,
+            AlignItems::Center,
+            oof_box(),
+        );
+        let r = run(&mut c, 400.0, 200.0);
+        assert!(
+            (r.x - 175.0).abs() < 0.01 && (r.y - 90.0).abs() < 0.01,
+            "expected Chrome's (175, 90), got ({}, {})",
+            r.x,
+            r.y
+        );
+    }
+
+    #[test]
+    fn a_specified_inset_beats_the_static_position_on_that_axis_alone() {
+        // Chrome, `top: 10px`: x=175 (still centred), y=10 (the inset).
+        // `apply_position_offsets_absolute` owns resolving the inset and has
+        // already run by the time §4.1 is reached on the production path, so
+        // the box enters this step at y=10; what step 13 owns is LEAVING it
+        // there. The end-to-end pair is the probe page, where the same shape
+        // captures at Chrome's (175, 10) exactly.
+        let mut oof = oof_box();
+        oof.dimensions.content.y = 10.0;
+        oof.offsets.top = Some(10.0);
+        oof.style.top = Some(Length::Px(10.0));
+        let mut c = probe(
+            FlexDirection::Row,
+            JustifyContent::Center,
+            AlignItems::Center,
+            oof,
+        );
+        let r = run(&mut c, 400.0, 200.0);
+        assert!(
+            (r.x - 175.0).abs() < 0.01 && (r.y - 10.0).abs() < 0.01,
+            "top:10px keeps y at the inset and still centres x; \
+             expected (175, 10), got ({}, {})",
+            r.x,
+            r.y
+        );
+
+        // Chrome, `left: 10px`: x=10 (the inset), y=90 (still centred).
+        let mut oof = oof_box();
+        oof.dimensions.content.x = 10.0;
+        oof.offsets.left = Some(10.0);
+        oof.style.left = Some(Length::Px(10.0));
+        let mut c = probe(
+            FlexDirection::Row,
+            JustifyContent::Center,
+            AlignItems::Center,
+            oof,
+        );
+        let r = run(&mut c, 400.0, 200.0);
+        assert!(
+            (r.x - 10.0).abs() < 0.01 && (r.y - 90.0).abs() < 0.01,
+            "left:10px keeps x at the inset and still centres y; \
+             expected (10, 90), got ({}, {})",
+            r.x,
+            r.y
+        );
+    }
+
+    #[test]
+    fn the_static_position_aligns_the_childs_margin_box() {
+        // Chrome, `margin: 8px 12px`: x=175, y=90 — the MARGIN box is
+        // centred, so the border box lands 12 right and 8 down of it.
+        // Centring the border box instead would give x=175, y=90 only by
+        // accident of symmetry, so the assertion below also pins the
+        // margin box itself.
+        let mut oof = oof_box();
+        oof.dimensions.margin = EdgeSizes {
+            top: 8.0,
+            bottom: 8.0,
+            left: 12.0,
+            right: 12.0,
+        };
+        let mut c = probe(
+            FlexDirection::Row,
+            JustifyContent::FlexEnd,
+            AlignItems::FlexEnd,
+            oof,
+        );
+        let r = run(&mut c, 400.0, 200.0);
+        // Margin box flush to the far corner: its right edge at 400 and
+        // bottom at 200 puts the border box at 400-12-50=338, 200-8-20=172.
+        assert!(
+            (r.x - 338.0).abs() < 0.01 && (r.y - 172.0).abs() < 0.01,
+            "flex-end aligns the MARGIN box to the far edge; \
+             expected (338, 172), got ({}, {})",
+            r.x,
+            r.y
+        );
+    }
+
+    #[test]
+    fn row_reverse_puts_main_start_at_the_far_edge() {
+        // Chrome, row-reverse + justify-content:flex-start: x=350, y=0.
+        let mut c = probe(
+            FlexDirection::RowReverse,
+            JustifyContent::FlexStart,
+            AlignItems::FlexStart,
+            oof_box(),
+        );
+        let r = run(&mut c, 400.0, 200.0);
+        assert!(
+            (r.x - 350.0).abs() < 0.01 && (r.y - 0.0).abs() < 0.01,
+            "row-reverse main-start is the RIGHT edge; expected (350, 0), \
+             got ({}, {})",
+            r.x,
+            r.y
+        );
+    }
+
+    #[test]
+    fn align_self_on_the_out_of_flow_child_beats_the_containers_align_items() {
+        // Chrome, container align-items:center + child align-self:flex-end:
+        // x=175, y=180.
+        let mut oof = oof_box();
+        oof.style.align_self = AlignSelf::FlexEnd;
+        let mut c = probe(
+            FlexDirection::Row,
+            JustifyContent::Center,
+            AlignItems::Center,
+            oof,
+        );
+        let r = run(&mut c, 400.0, 200.0);
+        assert!(
+            (r.x - 175.0).abs() < 0.01 && (r.y - 180.0).abs() < 0.01,
+            "align-self:flex-end wins over align-items:center; \
+             expected (175, 180), got ({}, {})",
+            r.x,
+            r.y
+        );
+    }
+
+    #[test]
+    fn space_between_packs_a_sole_out_of_flow_child_to_main_start() {
+        // Chrome, justify-content:space-between + default align-items
+        // (stretch): x=0, y=0. A stretch keyword does not stretch a
+        // static-position box, and space-between with one item is
+        // main-start.
+        // The box STARTS at the block flow cursor (0, 30) — after the 30px
+        // in-flow item, which is where the pre-pass leaves it and where the
+        // defect left it. Without that, main-start (0, 0) is also the default
+        // origin and this guard would stay green with the whole fix removed.
+        let mut oof = oof_box();
+        oof.dimensions.content = Rect::new(0.0, 30.0, 50.0, 20.0);
+        let mut c = probe(
+            FlexDirection::Row,
+            JustifyContent::SpaceBetween,
+            AlignItems::Stretch,
+            oof,
+        );
+        let r = run(&mut c, 400.0, 200.0);
+        assert!(
+            (r.x - 0.0).abs() < 0.01
+                && (r.y - 0.0).abs() < 0.01
+                && (r.height - 20.0).abs() < 0.01,
+            "expected Chrome's (0, 0) at 20px tall, got ({}, {}) at {}",
+            r.x,
+            r.y,
+            r.height
+        );
+    }
+
+    #[test]
+    fn the_static_position_rectangle_is_the_containers_content_box() {
+        // Chrome, padding 20px 40px on the container: x=175, y=90 — i.e.
+        // centred in the 320x160 CONTENT box at origin (40, 20), not in the
+        // 400x200 border box. Reading the border box would give (175, 90)
+        // as well, so the container is made asymmetric: padding-left 40,
+        // padding-right 0 puts the content box at 40..400.
+        let mut c = probe(
+            FlexDirection::Row,
+            JustifyContent::Center,
+            AlignItems::Center,
+            oof_box(),
+        );
+        c.dimensions.padding = EdgeSizes {
+            top: 20.0,
+            bottom: 0.0,
+            left: 40.0,
+            right: 0.0,
+        };
+        let containing = Dimensions {
+            content: Rect::new(40.0, 20.0, 360.0, 180.0),
+            padding: c.dimensions.padding,
+            ..Default::default()
+        };
+        c.dimensions.content = containing.content;
+        layout_flex_container(&mut c, &containing);
+        let r = c.children[1].dimensions.border_box();
+        assert!(
+            (r.x - 195.0).abs() < 0.01 && (r.y - 100.0).abs() < 0.01,
+            "centred in the content box at (40,20,360,180): \
+             expected (195, 100), got ({}, {})",
+            r.x,
+            r.y
+        );
+    }
+
+    #[test]
+    fn the_main_size_aligned_in_is_floored_by_min_height() {
+        // Chrome, column + height:auto + min-height:200px: y=90. The free
+        // space justify-content centres in is the FLOORED 200, not the
+        // 30px in-flow item's stack. This is `min-height: 100vh` — the
+        // centring idiom on new_tab's body — in miniature.
+        let mut c = probe(
+            FlexDirection::Column,
+            JustifyContent::Center,
+            AlignItems::Center,
+            oof_box(),
+        );
+        c.style.height = Length::Auto;
+        c.style.min_height = Length::Px(200.0);
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 400.0, 0.0),
+            ..Default::default()
+        };
+        c.dimensions.content = containing.content;
+        layout_flex_container(&mut c, &containing);
+        let r = c.children[1].dimensions.border_box();
+        assert!(
+            (r.x - 175.0).abs() < 0.01 && (r.y - 90.0).abs() < 0.01,
+            "an auto height floored by min-height is the size justify-content \
+             centres in; expected (175, 90), got ({}, {})",
+            r.x,
+            r.y
+        );
+    }
+
+    #[test]
+    fn the_static_position_carries_the_childs_own_subtree() {
+        // A box that moves without its descendants strands their text at
+        // the old origin — the defect `translate_subtree` exists for. The
+        // grandchild sits 5px inside the out-of-flow box and must still be
+        // 5px inside it after §4.1 moves it.
+        let mut oof = oof_box();
+        let mut inner_style = ComputedStyle::new();
+        inner_style.width = Length::Px(10.0);
+        inner_style.height = Length::Px(10.0);
+        let mut inner = LayoutBox::new(BoxType::Block, inner_style);
+        inner.dimensions.content = Rect::new(5.0, 35.0, 10.0, 10.0);
+        oof.children.push(inner);
+        oof.dimensions.content = Rect::new(0.0, 30.0, 50.0, 20.0);
+
+        let mut c = probe(
+            FlexDirection::Row,
+            JustifyContent::Center,
+            AlignItems::Center,
+            oof,
+        );
+        let r = run(&mut c, 400.0, 200.0);
+        let inner = c.children[1].children[0].dimensions.content;
+        assert!(
+            (r.x - 175.0).abs() < 0.01 && (r.y - 90.0).abs() < 0.01,
+            "expected (175, 90), got ({}, {})",
+            r.x,
+            r.y
+        );
+        assert!(
+            (inner.x - (r.x + 5.0)).abs() < 0.01
+                && (inner.y - (r.y + 5.0)).abs() < 0.01,
+            "the grandchild must travel with its box: expected ({}, {}), got \
+             ({}, {})",
+            r.x + 5.0,
+            r.y + 5.0,
+            inner.x,
+            inner.y
         );
     }
 
