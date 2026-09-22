@@ -2204,7 +2204,7 @@ pub fn layout_grid_container(
                         let mut child_margins = crate::MarginCollapseContext::new();
                         let mut floats = crate::FloatContext::new();
                         grandchild
-                            .layout_block_children_with_collapse(&mut child_margins, &mut floats);
+                            .layout_block_children_with_collapse(&mut child_margins, &mut floats, None);
                     }
 
                     // Calculate height for percentage resolution
@@ -3417,6 +3417,11 @@ fn apply_align_self(
         Length::Auto => cell_height,
         Length::Px(h) => h,
         Length::Percent(p) => cell_height * p / 100.0,
+        // A `calc()` is a length, and `has_explicit_height` above already
+        // counts it as one — so it must resolve here too, against the same
+        // cell height the percentage arm uses. Left on the `_` arm it would
+        // be called explicit and then sized as if it were `auto`.
+        Length::Calc(_) => child.length_to_px(&child.style.height, cell_height),
         _ => cell_height,
     };
 
@@ -5996,6 +6001,28 @@ mod tests {
         let (y, h) = apply_align_self(&AlignSelf::Center, &AlignItems::Stretch, 20.0, 100.0, &layout_box);
         assert_eq!(y, 55.0, "align-self: center should center (20 + (100-30)/2)");
         assert_eq!(h, 30.0);
+    }
+
+    /// A `calc()` height is explicit, so `apply_align_self` must resolve it
+    /// rather than treat it as the cell height. Without the `Length::Calc`
+    /// arm the item is called explicit and then sized as if it were `auto` —
+    /// it fills the cell and centres at the cell's own origin.
+    #[test]
+    fn a_calc_height_grid_item_aligns_at_its_resolved_height() {
+        let mut style = ComputedStyle::new();
+        style.height = rustkit_css::parse_length("calc(100% - 40px)").expect("calc parses");
+        let layout_box = LayoutBox::new(BoxType::Block, style);
+
+        // Cell: y=20, height=100 -> the item is 60 tall, centred at 20+20.
+        let (y, h) = apply_align_self(
+            &AlignSelf::Center,
+            &AlignItems::Stretch,
+            20.0,
+            100.0,
+            &layout_box,
+        );
+        assert_eq!(h, 60.0, "100% of the 100px cell minus 40px");
+        assert_eq!(y, 40.0, "20 + (100 - 60) / 2");
     }
 
     #[test]

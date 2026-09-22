@@ -627,6 +627,10 @@ pub fn layout_flex_container_in(
                     item.layout_box.layout_block_children_with_collapse(
                         &mut item_margin_context,
                         &mut item_float_context,
+                        // Same definite height, same rule: a percentage-height
+                        // child resolves against the item's used cross size
+                        // (CSS 2.1 §10.5), not against the item's flow cursor.
+                        definite_cross_height,
                     );
                     // A flex item is a formatting-context root, so its last
                     // in-flow child's bottom margin never collapses through
@@ -948,6 +952,19 @@ pub fn layout_flex_container_in(
                 rustkit_css::Length::Percent(pct) if container_box.content.height > 0.0 => {
                     Some(pct / 100.0 * container_box.content.height)
                 }
+                // Same condition as the percentage arm: a `calc()` is a
+                // length, and it needs the containing block only for its
+                // percentage term. Line 234's `is_definite` already counts a
+                // calc height as specified, so leaving it on `_` would make
+                // the container definite and then give it no used height.
+                rustkit_css::Length::Calc(ref sum)
+                    if sum.percent == 0.0 || container_box.content.height > 0.0 =>
+                {
+                    Some(resolve_length(
+                        &container.style.height,
+                        container_box.content.height,
+                    ))
+                }
                 _ => None,
             };
             match explicit {
@@ -989,7 +1006,7 @@ pub fn layout_flex_container_in(
         // The container's content box, read from the same place steps 6–10
         // read it (`container_origin`, `container_main_size`): the caller
         // passes the container's own dimensions, so this is its content box.
-        let content = containing_block.content;
+        let content = container_box.content;
 
         // The main size to align in. On the horizontal axis the container's
         // used content width is final here. On the vertical axis it is NOT —
@@ -1036,7 +1053,7 @@ pub fn layout_flex_container_in(
                 continue;
             }
 
-            let offsets = child.resolved_offsets(containing_block);
+            let offsets = child.resolved_offsets(container_box);
             let main_auto = if main_is_horizontal {
                 offsets.left.is_none() && offsets.right.is_none()
             } else {
@@ -3302,6 +3319,37 @@ mod tests {
         );
     }
 
+    /// `is_definite_cross_size` counts any non-`auto` height as specified, so
+    /// a `calc()` container is definite — and then it must get a used height
+    /// to match. Left on the `_` arm the container is definite with no
+    /// explicit height, and falls back to its content.
+    #[test]
+    fn a_calc_height_flex_container_uses_its_resolved_height() {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Row;
+        style.height = rustkit_css::parse_length("calc(100% - 100px)").expect("calc parses");
+        let mut container = LayoutBox::new(BoxType::Block, style);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.width = Length::Px(100.0);
+        child_style.height = Length::Px(50.0);
+        container
+            .children
+            .push(LayoutBox::new(BoxType::Block, child_style));
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 400.0, 500.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut container, &containing);
+
+        assert_eq!(
+            container.dimensions.content.height, 400.0,
+            "100% of the containing block's 500px minus 100px, not the 50px of content"
+        );
+    }
+
     #[test]
     fn test_auto_height_stretch() {
         // Test that flex items in an auto-height container stretch to the tallest item,
@@ -4053,6 +4101,39 @@ mod tests {
         assert!(
             (h - 100.0).abs() > 0.5,
             "the percentage must not resolve against the 100px containing block, got {h}"
+        );
+    }
+
+    /// A flex item with a DEFINITE cross size is the containing block its
+    /// in-flow children resolve percentage heights against (CSS 2.1 §10.5).
+    /// Step 11 lays those children out through
+    /// `layout_block_children_with_collapse`, which hands them the item's flow
+    /// cursor in `content.height` — so before the definite height was passed
+    /// alongside it, a `height: 100%` child fell back to the VIEWPORT.
+    /// T-RED without the `definite_cross_height` argument: the fill is the
+    /// viewport height, not 26.
+    #[test]
+    fn a_percentage_height_child_of_a_definite_flex_item_fills_that_item() {
+        let mut label = toggle_switch_row();
+        // Replace the abspos slider with an in-flow percentage-height fill:
+        // the abspos path has its own re-anchor, the in-flow path did not.
+        let mut fill_style = ComputedStyle::new();
+        fill_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
+        fill_style.height = Length::Percent(100.0);
+        label.children[0].children[1] = LayoutBox::new(BoxType::Block, fill_style);
+        label.children[0].children[1].viewport = (900.0, 1000.0);
+        label.children[0].viewport = (900.0, 1000.0);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 700.0, 0.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut label, &containing);
+
+        let fill = label.children[0].children[1].dimensions.content.height;
+        assert!(
+            (fill - 26.0).abs() < 0.01,
+            "height:100% of a 26px flex item is 26, got {fill}"
         );
     }
 
