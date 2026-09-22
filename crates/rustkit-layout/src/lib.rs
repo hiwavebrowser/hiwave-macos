@@ -381,11 +381,55 @@ pub fn run_line_height(style: &ComputedStyle, font_size: f32, metrics: &TextMetr
 /// below. A 16px run with ascent 15.47 / descent 3.38 on a 27.2px line sits at
 /// floor((27.2 - 18) / 2) + 15 = 19, not 4.18 + 15.47 = 19.65: seated on the
 /// fractional sum, every line whose top lands below .35 painted one row low.
-/// Negative leading stays clamped to 0, as at the line-box sites.
+/// Negative leading is NOT clamped (n57): a `line-height: 1` heading whose
+/// face has a >1em content area seats above its line top, as in Blink.
 pub(crate) fn blink_baseline_offset(line_height: f32, ascent: f32, descent: f32) -> f32 {
     let (ascent, descent) = (ascent.round(), descent.round());
-    ((line_height - (ascent + descent)) / 2.0).max(0.0).floor() + ascent
+    half_leading(line_height, ascent, descent).floor() + ascent
 }
+
+/// Half-leading of a line: half of `line-height` minus the content area
+/// (ascent + descent), SIGNED. CSS2 §10.8.1 puts no floor on it — when the
+/// line-height is smaller than the content area the leading is negative and
+/// the glyphs overflow the line box equally above and below, which is what
+/// every `line-height: 1` heading and `line-height: 0.9` display line on a
+/// real page relies on (a 40px system-ui heading has a 47px content area).
+/// Until n57 six sites clamped this at zero, so such a line seated its
+/// baseline a whole |half-leading| low (4px at 40px, 2px on a 14px emoji in
+/// a 20px line — the chrome strip's url icon); Chrome floors it (Blink
+/// `FontHeight::AddLeading`) but never clamps it.
+pub fn half_leading(line_height: f32, ascent: f32, descent: f32) -> f32 {
+    (line_height - (ascent + descent)) / 2.0
+}
+
+/// The metrics a run's baseline is SEATED on. Under `line-height: normal`
+/// the run's united metrics (primary face + every fallback face it used,
+/// see `TextShaper::shape`): Blink unites the used fonts into the line box
+/// and the baseline sits at their max ascent ("☕ coffee" at 16px: 20 above).
+/// Under an EXPLICIT line-height Blink skips that accumulation
+/// (`NGInlineBoxState::AccumulateUsedFonts` runs only for `normal`) and
+/// seats the run on the PRIMARY face alone: "🔒 secure" at 16px in a 20px
+/// line has its baseline at top + 1 + 15 = 16 in Chrome, not top + 20.
+/// Seating it on the emoji face put every icon-plus-label line 2–4px low.
+///
+/// ASCII text never reaches a fallback face, so its united metrics ARE the
+/// primary's and no second probe is shaped.
+fn seat_metrics(style: &ComputedStyle, font_size: f32, text: &str, united: &TextMetrics) -> (f32, f32) {
+    if matches!(style.line_height, rustkit_css::LineHeight::Normal) || text.is_ascii() {
+        return (united.ascent, united.descent);
+    }
+    let primary = measure_text_advanced(
+        "x",
+        &style.font_family,
+        font_size,
+        style.font_weight,
+        style.font_style,
+    );
+    if primary.ascent > 0.0 {
+        (primary.ascent, primary.descent)
+    } else {
+        (united.ascent, united.descent)
+    }}
 
 /// Convert a specified size on a replaced element to a CONTENT size.
 ///
@@ -2415,7 +2459,7 @@ impl LayoutBox {
                         (fs * 0.8, fs * 0.2)
                     };
                     let line_h = resolve_line_height(&c.style, fs);
-                    let half_leading = ((line_h - (ascent + descent)) / 2.0).max(0.0);
+                    let half_leading = half_leading(line_h, ascent, descent);
                     // Last line's baseline: the run's bottom minus the
                     // below-baseline part of one line (paint seats each
                     // line at content.y + i * line-height).
@@ -2473,7 +2517,7 @@ impl LayoutBox {
         } else {
             (font_size * 0.8, font_size * 0.2)
         };
-        let half_leading = ((line_height - (ascent + descent)) / 2.0).max(0.0);
+        let half_leading = half_leading(line_height, ascent, descent);
         // A single-line control taller than its text line (author `height`)
         // centres the line in its content box, so half the spare height
         // hangs below the baseline too. n54 form-controls §4: a `height:
@@ -2494,8 +2538,7 @@ impl LayoutBox {
             + half_leading
             + spare_below
             + self.dimensions.padding.bottom
-            + self.dimensions.border.bottom
-    }
+            + self.dimensions.border.bottom    }
 
     /// Content area of a NON-REPLACED inline box and the half-leading that
     /// centers it in its own line box.
@@ -2526,7 +2569,7 @@ impl LayoutBox {
             (font_size * 0.8, font_size * 0.2)
         };
         let content = ascent + descent;
-        let half_leading = ((line_height - content) / 2.0).max(0.0);
+        let half_leading = half_leading(line_height, ascent, descent);
         (content, half_leading)
     }
 
@@ -2564,7 +2607,7 @@ impl LayoutBox {
         };
         let m = measure_text_advanced("x", &s.font_family, fs, s.font_weight, s.font_style);
         let line_h = resolve_line_height(s, fs);
-        let half_leading = ((line_h - (m.ascent + m.descent)) / 2.0).max(0.0);
+        let half_leading = half_leading(line_h, m.ascent, m.descent);
         (half_leading + m.ascent, half_leading + m.descent)
     }
 
@@ -2660,7 +2703,7 @@ impl LayoutBox {
         } else {
             (font_size * 0.8, font_size * 0.2)
         };
-        let half_leading = ((line_height - (ascent + descent)) / 2.0).max(0.0);
+        let half_leading = half_leading(line_height, ascent, descent);
         descent + half_leading
     }
 
@@ -3841,7 +3884,6 @@ impl LayoutBox {
         // the line box is sized: on the fractional split a member dropped to
         // a neighbour's baseline landed between rows and painted one off.
         let text_extents = Self::text_line_box_extents;
-
         // A member's top on THIS line. A mid-line split run reaches the
         // recorded line only through its LAST visual line (the open one its
         // followers share); its box top is the top of its FIRST line, and
@@ -6628,12 +6670,15 @@ impl DisplayList {
             );
             let line_height = run_line_height(style, font_size, &metrics);
 
-            // Offset from a line's top to the y the text command carries.
-            // Paint seats the baseline at round(y + ascent), so this is the
-            // Blink seat minus the fractional ascent (see blink_baseline_offset).
+            // The face the baseline is seated on: united under `normal`,
+            // the primary face under an explicit line-height (see
+            // `seat_metrics`). Offset from a line's top to the y the text
+            // command carries: paint seats the baseline at round(y + ascent),
+            // so this is the Blink seat minus the fractional ascent (see
+            // blink_baseline_offset); the leading in it is SIGNED.
+            let (seat_ascent, seat_descent) = seat_metrics(style, font_size, &text, &metrics);
             let half_leading =
-                blink_baseline_offset(line_height, metrics.ascent, metrics.descent) - metrics.ascent;
-
+                blink_baseline_offset(line_height, seat_ascent, seat_descent) - seat_ascent;
             // Build the list of lines to emit: wrapped text boxes carry
             // per-line fragments (see LayoutBox::text_lines); single-run
             // boxes emit exactly one line, positioned as before.
@@ -6683,8 +6728,8 @@ impl DisplayList {
                         t.chars().take(16).collect::<String>(),
                         font_size,
                         line_height,
-                        metrics.ascent,
-                        metrics.descent,
+                        seat_ascent,
+                        seat_descent,
                         half_leading,
                         content_y,
                         ly
@@ -6771,7 +6816,7 @@ impl DisplayList {
                             gradient: gradient.clone(),
                             rect: Rect::new(x, y, text_width, line_height),
                             advances,
-                            ascent: Some(metrics.ascent),
+                            ascent: Some(seat_ascent),
                         });
                         continue; // Skip regular text rendering for this line
                     }
@@ -6791,7 +6836,7 @@ impl DisplayList {
                         rustkit_css::FontStyle::Oblique => 2,
                     },
                     advances,
-                    ascent: Some(metrics.ascent),
+                    ascent: Some(seat_ascent),
                 });
 
                 // Draw text decorations
@@ -7467,8 +7512,12 @@ mod tests {
         // (64px, 61.875 / 13.5 on a 76px line) and the 14px badge.
         assert_eq!(blink_baseline_offset(76.0, 61.875, 13.5), 62.0);
         assert_eq!(blink_baseline_offset(17.0, 13.535156, 2.953125), 14.0);
-        // Negative leading stays clamped, as at the line-box sites.
-        assert_eq!(blink_baseline_offset(16.0, 15.46875, 3.375), 15.0);
+        // Negative leading is signed and floored (n57): a 16px line under
+        // an 18px content area seats at floor(-1) + 15 = 14, as in Chrome
+        // (repro negative-leading.html row 4: ink rows 151-166 both engines).
+        assert_eq!(blink_baseline_offset(16.0, 15.46875, 3.375), 14.0);
+        // 40px system-ui heading at line-height 1: floor(-3.5) + 39 = 35.
+        assert_eq!(blink_baseline_offset(40.0, 38.671875, 8.4375), 35.0);
     }
 
     #[test]
@@ -7796,6 +7845,91 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    // ==================== negative leading + seat face (n57) ====================
+
+    /// root → block → text run in `family` at `font_size` with `line_height`;
+    /// returns `(content_y, y_cmd, ascent_cmd)` of the one Text command.
+    fn seat_probe(
+        family: &str,
+        font_size: f32,
+        line_height: rustkit_css::LineHeight,
+        text: &str,
+    ) -> (f32, f32, f32) {
+        let mut style = ComputedStyle::new();
+        style.font_family = family.to_string();
+        style.font_size = Length::Px(font_size);
+        style.line_height = line_height;
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.dimensions.content = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut text_box = LayoutBox::new(BoxType::Text(text.to_string()), style);
+        text_box.dimensions.content = Rect::new(20.0, 100.0, 600.0, font_size);
+        root.children.push(text_box);
+        let list = DisplayList::build(&root);
+        let cmd = list
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                DisplayCommand::Text { y, ascent, .. } => Some((*y, ascent.expect("ascent"))),
+                _ => None,
+            })
+            .expect("one Text command");
+        (100.0, cmd.0, cmd.1)
+    }
+
+    #[test]
+    fn test_half_leading_is_signed() {
+        assert_eq!(half_leading(24.0, 15.0, 3.0), 3.0);
+        assert_eq!(half_leading(16.0, 15.0, 3.0), -1.0);
+        assert!((half_leading(40.0, 38.67, 8.44) + 3.555).abs() < 1e-3);
+    }
+
+    /// `line-height: 1` on a face whose content area exceeds 1em (Arial:
+    /// 0.905 + 0.212 = 1.117em): the run's y_cmd sits ABOVE its content top
+    /// by half the overflow, so the baseline lands where Chrome's does
+    /// (32px bold Arial in a 32px line: top + 29 − 2 = top + 27; a zero
+    /// floor put it at top + 29).
+    #[test]
+    fn test_negative_leading_seats_the_baseline_above_the_line_top() {
+        let (top, y, ascent) = seat_probe("Arial", 32.0, rustkit_css::LineHeight::Number(1.0), "Arial");
+        let m = measure_text_advanced("x", "Arial", 32.0, rustkit_css::FontWeight(400), rustkit_css::FontStyle::Normal);
+        if m.ascent <= 0.0 {
+            return; // no Arial on this machine: nothing to seat against
+        }
+        let content = m.ascent + m.descent;
+        assert!(content > 32.0, "Arial's content area exceeds 1em: {content}");
+        // Whole-pixel seat: floor(signed half-leading) + rounded ascent, minus
+        // the fractional ascent paint adds back (blink_baseline_offset).
+        let expected_half = blink_baseline_offset(32.0, m.ascent, m.descent) - m.ascent;
+        assert!(expected_half < 0.0, "Arial at line-height 1 has negative leading");
+        assert!(
+            (y - (top + expected_half)).abs() < 0.01,
+            "y_cmd {y} should be top {top} + {expected_half}"
+        );
+        assert!(y < top, "negative leading seats above the line top");
+        assert!((ascent - m.ascent).abs() < 0.01);
+    }
+
+    /// An explicit line-height seats the run on the PRIMARY face: "🔒 x" at
+    /// 16px Arial in a 20px line ships Arial's ascent (~14.5), not the emoji
+    /// face's 20 — Chrome's baseline is top + 1 + 15 = 16 there. Under
+    /// `normal` the united metrics still win (n40: "☕ coffee" is a 26px line
+    /// seated 20 down).
+    #[test]
+    fn test_explicit_line_height_seats_on_the_primary_face() {
+        let arial = measure_text_advanced("x", "Arial", 16.0, rustkit_css::FontWeight(400), rustkit_css::FontStyle::Normal);
+        let united = measure_text_advanced("🔒 x", "Arial", 16.0, rustkit_css::FontWeight(400), rustkit_css::FontStyle::Normal);
+        if arial.ascent <= 0.0 || united.ascent <= arial.ascent + 1.0 {
+            return; // no emoji fallback face on this machine
+        }
+        let (top, y, ascent) = seat_probe("Arial", 16.0, rustkit_css::LineHeight::Px(20.0), "🔒 x");
+        assert!((ascent - arial.ascent).abs() < 0.01, "explicit line-height: primary ascent {ascent} vs {}", arial.ascent);
+        let expected_half = blink_baseline_offset(20.0, arial.ascent, arial.descent) - arial.ascent;
+        assert!((y - (top + expected_half)).abs() < 0.01, "y_cmd {y}, expected top + {expected_half}");
+
+        let (_, _, ascent_normal) = seat_probe("Arial", 16.0, rustkit_css::LineHeight::Normal, "🔒 x");
+        assert!((ascent_normal - united.ascent).abs() < 0.01, "normal: united ascent {ascent_normal} vs {}", united.ascent);
     }
 
     #[test]
