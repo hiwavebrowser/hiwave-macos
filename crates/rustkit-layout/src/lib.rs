@@ -1384,7 +1384,13 @@ impl LayoutBox {
                 // Check for flex or grid container
                 if self.style.display.is_flex() {
                     self.layout_block_with_definite_height(containing_block, definite_height);
-                    // Flex layout is applied to children
+                    // Flex layout is applied to children. No containing
+                    // block goes over: on this path `containing_block` is
+                    // often the STATIC-POSITION STAND-IN (its height is the
+                    // parent's flow cursor), and treating that as a real
+                    // containing block sizes an `inset: 0` overlay under an
+                    // auto-height parent to the cursor. `reanchor_absolute`
+                    // is the one place that always holds the real box.
                     flex::layout_flex_container(self, &self.dimensions.clone());
                 } else if self.style.display.is_grid() {
                     self.layout_block_with_definite_height(containing_block, definite_height);
@@ -2660,7 +2666,9 @@ impl LayoutBox {
         if self.style.display.is_flex() {
             // For flex containers, layout children normally first to get their intrinsic sizes
             self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
-            // Then apply flex layout algorithm
+            // Then apply flex layout algorithm. See the sibling call in
+            // `layout_with_definite_height` for why no containing block goes
+            // over from here.
             flex::layout_flex_container(self, &self.dimensions.clone());
         } else if self.style.display.is_grid() {
             // For grid containers, layout children normally first
@@ -2921,13 +2929,82 @@ impl LayoutBox {
         }
     }
 
+    /// This box's content height when it is definite BEFORE its children
+    /// lay out (an absolute `height`), else `None`. Percentages are left
+    /// out: they need the grandparent's definite height, which this box
+    /// does not hold. Mirrors the absolute arms of calculate_block_height.
+    fn definite_content_height(&self) -> Option<f32> {
+        let padding_border = self.dimensions.padding.top
+            + self.dimensions.padding.bottom
+            + self.dimensions.border.top
+            + self.dimensions.border.bottom;
+        let specified = match self.style.height {
+            Length::Px(h) => h,
+            Length::Em(em) => {
+                em * match self.style.font_size {
+                    Length::Px(px) => px,
+                    _ => 16.0,
+                }
+            }
+            Length::Rem(rem) => rem * 16.0,
+            Length::Vh(vh) if self.viewport.1 > 0.0 => vh / 100.0 * self.viewport.1,
+            _ => return None,
+        };
+        Some(if self.style.box_sizing == BoxSizing::BorderBox {
+            (specified - padding_border).max(0.0)
+        } else {
+            specified
+        })
+    }
+
+    /// This box's inner (content-box) height when `height: auto` is made
+    /// DEFINITE by opposite insets on an out-of-flow box, else `None`.
+    ///
+    /// CSS2 §10.6.4: for an absolutely positioned box with `height: auto`
+    /// and neither `top` nor `bottom` auto, the used height is fixed by the
+    /// constraint equation — it is as definite as a specified `height`, and
+    /// it is the number every `inset: 0` overlay is built on. Nothing in the
+    /// style carries it: `style.height` reads `Auto`, so every consumer that
+    /// asks *style* whether the main size is definite answers "no" and falls
+    /// back to sizing by content.
+    ///
+    /// It lives here, beside `definite_content_height`, because the flex
+    /// container path and `apply_position_offsets_absolute` must agree on
+    /// the number to the last bit — two copies of this subtraction that
+    /// drift apart are the defect class night 8 recorded.
+    pub(crate) fn inset_definite_content_height(
+        &self,
+        containing_block: &Dimensions,
+    ) -> Option<f32> {
+        if !matches!(self.position, Position::Absolute | Position::Fixed) {
+            return None;
+        }
+        if !matches!(self.style.height, Length::Auto) {
+            return None;
+        }
+        let offsets = self.resolved_offsets(containing_block);
+        let (top, bottom) = (offsets.top?, offsets.bottom?);
+        Some(
+            (containing_block.content.height
+                - top
+                - bottom
+                - self.dimensions.margin.top
+                - self.dimensions.margin.bottom
+                - self.dimensions.border.top
+                - self.dimensions.border.bottom
+                - self.dimensions.padding.top
+                - self.dimensions.padding.bottom)
+                .max(0.0),
+        )
+    }
+
     /// Re-resolve an absolutely positioned box's offsets against its REAL
     /// containing block, carrying the already-laid-out subtree with it. The
     /// first pass positioned it against a stand-in whose height was the
     /// parent's flow cursor (static position); only `bottom`-anchored and
     /// `inset`-stretched boxes move here. `position: fixed` is untouched —
     /// its containing block is the viewport, not this parent.
-    fn reanchor_absolute(&mut self, containing_block: &Dimensions) {
+    pub(crate) fn reanchor_absolute(&mut self, containing_block: &Dimensions) {
         if self.position != Position::Absolute {
             return;
         }
@@ -2946,6 +3023,28 @@ impl LayoutBox {
                 crate::flex::translate_subtree(child, dx, dy);
             }
         }
+        // On the block path this is where an inset-stretched box's used height
+        // FIRST becomes known: the child was laid out against a stand-in whose
+        // height is the parent's flow cursor (the static-position trick), so
+        // the containing block's real height was not available until now.
+        //
+        // A translate carries the subtree but does not re-justify it. A flex
+        // container whose main size just changed has to redistribute its free
+        // space, or `justify-content` keeps the answer it computed from the
+        // cursor — `center` in a stand-in the size of its own content means no
+        // free space at all, and every item stays packed against the start
+        // edge. Passing the containing block as well keeps step 11d's
+        // re-derivation on the same number.
+        if self.style.display.is_flex()
+            && self.inset_definite_content_height(containing_block).is_some()
+        {
+            crate::flex::layout_flex_container_in(
+                self,
+                &self.dimensions.clone(),
+                Some(containing_block),
+            );
+        }
+
         // An `inset`-stretched box changes SIZE here, after its own children
         // were anchored to its pre-stretch box: a `bottom: 2px` knob inside
         // an `inset: 0` slider sat 22px above the slider (settings' toggles,
@@ -3041,20 +3140,12 @@ impl LayoutBox {
         if has_top && has_bottom {
             // When both top and bottom are set with height: auto, stretch to fill
             let top = offsets.top.unwrap();
-            let bottom = offsets.bottom.unwrap();
 
-            // Calculate stretched height if height is auto
-            if matches!(self.style.height, Length::Auto) {
-                let available_height = containing_block.content.height
-                    - top
-                    - bottom
-                    - self.dimensions.margin.top
-                    - self.dimensions.margin.bottom
-                    - self.dimensions.border.top
-                    - self.dimensions.border.bottom
-                    - self.dimensions.padding.top
-                    - self.dimensions.padding.bottom;
-                self.dimensions.content.height = available_height.max(0.0);
+            // Calculate stretched height if height is auto. The subtraction
+            // lives in `inset_definite_content_height` so the flex container
+            // path resolves the identical number.
+            if let Some(available_height) = self.inset_definite_content_height(containing_block) {
+                self.dimensions.content.height = available_height;
             }
 
             // Position from top
@@ -9721,6 +9812,30 @@ mod tests {
     }
 
     #[test]
+    fn an_inset_stretch_never_overrides_a_specified_height() {
+        // CSS2 §10.6.4 stretches an out-of-flow box between `top` and
+        // `bottom` only where `height` is auto; with a height specified the
+        // constraint is over-determined and `bottom` is the one that gives.
+        // `inset_definite_content_height` is the single copy of that rule
+        // and BOTH its callers depend on the check: the positioning path
+        // would otherwise resize a 40px overlay to its containing block.
+        let mut style = ComputedStyle::new();
+        style.height = Length::Px(40.0);
+        let mut b = LayoutBox::with_position(BoxType::Block, style, Position::Absolute);
+        b.set_offsets(Some(0.0), None, Some(0.0), None);
+        b.dimensions.content.height = 40.0;
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 300.0, 200.0),
+            ..Default::default()
+        };
+        b.apply_position_offsets(&cb);
+        assert_eq!(
+            b.dimensions.content.height, 40.0,
+            "a specified height survives inset: 0"
+        );
+    }
+
+    #[test]
     fn an_out_of_flow_auto_width_box_shrinks_to_its_content() {
         // Room to spare: shrink-to-fit is the max-content width, NOT the
         // containing block. This is new_tab's footer defect in miniature.
@@ -10706,6 +10821,111 @@ mod tests {
     /// An auto-height parent anchors its abspos child to its FINAL content
     /// height (30px of flow here) — the same answer the flow cursor gave
     /// when the child came last, now guaranteed regardless of order.
+    /// image-gallery's `.aspect-box > .content`, driven through the REAL
+    /// entry point rather than through `layout_flex_container` directly.
+    ///
+    /// This guard exists because the flex-side guards cannot see the caller.
+    /// They call `layout_flex_container_in` and pass the containing block
+    /// themselves, so they hold the rule but not the wiring: a `lib.rs` call
+    /// site that hands over `None` puts every item back at the top edge and
+    /// leaves all six of them green. `LayoutBox::layout` is what grid Phase 9
+    /// uses for an out-of-flow grandchild, so this is the path the page takes.
+    ///
+    /// 100px card, `inset: 0` column flex container, `justify-content: center`,
+    /// two items summing 50: the free space is 50 and the stack starts at 25.
+    /// Justifying in the 50px flow cursor instead starts it at 0.
+    #[test]
+    fn an_inset_overlays_flex_line_centres_in_the_card_through_the_layout_entry_point() {
+        let mut card_style = ComputedStyle::new();
+        card_style.width = Length::Px(100.0);
+        card_style.height = Length::Px(100.0);
+        let mut card = LayoutBox::with_position(BoxType::Block, card_style, Position::Relative);
+
+        let mut overlay_style = ComputedStyle::new();
+        overlay_style.display = rustkit_css::Display::Flex;
+        overlay_style.flex_direction = rustkit_css::FlexDirection::Column;
+        overlay_style.justify_content = rustkit_css::JustifyContent::Center;
+        let mut overlay =
+            LayoutBox::with_position(BoxType::Block, overlay_style, Position::Absolute);
+        overlay.set_offsets(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
+        for h in [30.0, 20.0] {
+            let mut item_style = ComputedStyle::new();
+            item_style.height = Length::Px(h);
+            overlay
+                .children
+                .push(LayoutBox::new(BoxType::Block, item_style));
+        }
+        card.children.push(overlay);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        card.layout(&viewport);
+
+        let overlay = &card.children[0];
+        assert_eq!(
+            overlay.dimensions.content.height, 100.0,
+            "the overlay itself must stretch to the card (the precondition)"
+        );
+        let lead = overlay.children[0].dimensions.content.y - overlay.dimensions.content.y;
+        assert!(
+            (lead - 25.0).abs() < 0.01,
+            "50 of content centred in the card's 100 leaves 25 above, not {lead} \
+             — the flex line was justified in the flow cursor"
+        );
+    }
+
+    /// The re-anchor must not resize or re-justify a box that is NOT
+    /// inset-definite. `top: 0` alone leaves the height indefinite (CSS2
+    /// §10.6.4 needs both offsets), so such a flex container stays sized by
+    /// its content and its line keeps the packing it already had — the
+    /// re-justify has to be gated on the rule, not on being a flex container
+    /// that happens to be out of flow.
+    #[test]
+    fn the_reanchor_leaves_a_flex_container_with_only_one_inset_alone() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(100.0);
+        parent_style.height = Length::Px(200.0);
+        let mut parent = LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
+
+        let mut overlay_style = ComputedStyle::new();
+        overlay_style.display = rustkit_css::Display::Flex;
+        overlay_style.flex_direction = rustkit_css::FlexDirection::Column;
+        overlay_style.justify_content = rustkit_css::JustifyContent::Center;
+        let mut overlay =
+            LayoutBox::with_position(BoxType::Block, overlay_style, Position::Absolute);
+        overlay.set_offsets(Some(0.0), None, None, None);
+        for h in [30.0, 20.0] {
+            let mut item_style = ComputedStyle::new();
+            item_style.height = Length::Px(h);
+            overlay
+                .children
+                .push(LayoutBox::new(BoxType::Block, item_style));
+        }
+        parent.children.push(overlay);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+
+        let overlay = &parent.children[0];
+        assert_eq!(
+            overlay.dimensions.content.height, 50.0,
+            "one inset is not a definite height: the container is its content's 50"
+        );
+        let lead = overlay.children[0].dimensions.content.y - overlay.dimensions.content.y;
+        assert!(
+            lead.abs() < 0.01,
+            "no free space in a content-sized container: expected 0, got {lead}"
+        );
+    }
+
+    /// The re-anchor must not touch `position: fixed` (viewport containing
+    /// block) or a parent whose height is auto (nothing definite to anchor
+    /// to — the flow-cursor stand-in stays the best available answer).
     #[test]
     fn abspos_reanchor_uses_auto_height_parents_final_height() {
         let mut parent_style = ComputedStyle::new();
