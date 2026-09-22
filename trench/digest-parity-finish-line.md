@@ -10652,3 +10652,211 @@ skipped those rows.
   nearest positioned ancestor. On `chrome_rustkit` the two coincide at 100px, so
   tonight's number does not depend on the difference, and it is recorded rather
   than fixed on a case that cannot tell them apart.
+
+## 2026-09-22
+
+**Metric: `2/26` → `2/26` on macOS, carried forward and NOT re-measured.** No
+macOS lane ran tonight. On this seat the conjunction reads **1/26 before and
+1/26 after** (`bg-pure`), computed by hand from the two gate reports: geometry-
+green 3/26 (`bg-pure`, `combinators`, `specificity`), paint-green 1/26,
+discrete auto-fails 0, and all 26 cases identical across 3 capture iterations.
+`finish_line_receipt.py` was run and **correctly refused to score** — it wants
+the swarm aggregate for its stability column and there is none on this seat, so
+it printed "this receipt measured nothing" rather than a number. That refusal is
+the instrument working; the 1/26 above is four columns ANDed by hand and is
+labelled as such.
+
+**P-item: none of P1–P6. Tonight was the stranded stack itself — the blocker
+three nights running have named and none has cleared. COMPLETE, and it is the
+first time the pile has been measured as one thing.**
+
+### Why this and not the next root
+
+09-20 and 09-21 both opened by pointing at the same thing: nine engine branches
+finished, mutation-checked and pushed with no PR, `develop` still `011ffee`,
+and a board taken off `develop` pointing at rows that were fixed days ago. The
+cost was already booked — 09-20 found `chrome_rustkit .sidebar-toggle` fixed
+twice from two independent roots, five nights apart, because neither night could
+see the other's branch. A tenth stacked branch would have added to that. The
+queue's next root (flex's `definite_inner_main` percentage gap, named last
+night) is ALSO already half-answered inside the stack: `n55` rewrote that exact
+function into `definite_inner_main_size`. Reading the queue off `develop` would
+have had me write it a third time.
+
+### What landed: `atlas/n60-stack-integration`, 6 merges, 27 commits
+
+Merged in date order onto `develop 011ffee`: `n49-p3-flex`,
+`n53-p3-content-justify` (carries `n52`), `n54-p3-column-definite-main`,
+`n55-column-definite-main-size`, `n57-new-tab-container-height`,
+`n59-calc-and-out-of-flow-percent-height` (carries `n58`). 4 files,
++3090 / −97.
+
+**`atlas/n51-p3-flex-justify-end` is deliberately NOT in it. See below.**
+
+Every conflict was in `flex.rs` and `lib.rs`. 09-20 called them "mechanical,
+in `mod tests`". Two thirds of that is right and the last third cost most of
+the night:
+
+- **The test-module conflicts are not resolvable by union.** Where both sides
+  append a test at the same anchor, git leaves the lines that CLOSE the last
+  function in the shared context AFTER the hunk, so `ours + theirs` silently
+  drops `ours`' closing braces. Where the two sides' tests share body lines
+  (`let mut item_style = …`), git interleaves them into several small hunks and
+  a union splices two different tests into one. Both produce a file that does
+  not compile — which is the lucky case. Resolved by merging the test module at
+  **item** granularity: keep ours, append the items theirs added that ours does
+  not have, report anything edited on both sides. One item was edited on both
+  (`an_explicit_width_does_not_freeze_a_column_items_height`); ours and theirs
+  turned out byte-identical, checked rather than assumed.
+- **Six engine conflicts were real**, and three of them are the same shape:
+  two nights independently rewrote the same function and neither knew.
+  `n53` renamed `layout_flex_container`'s parameter to `container_box` and
+  added `layout_flex_container_in`; `n55` hoisted the main-size resolution into
+  `definite_inner_main_size`; `n59` was written against the old parameter name
+  and referenced `containing_block` at four sites that no longer exist. The
+  merged forms are written out in the merge commits; the one worth naming is
+  step 11d, where `n53`'s inset rule and `n55`'s style rule are disjoint by
+  construction (§10.6.4 needs `height: auto`) and compose as
+  `style_definite_inner_main.or(inset_inner_main)`.
+
+**Nothing was lost in resolution, checked mechanically**: every non-comment line
+each branch added to `crates/` is present in the integration, except the 5 lines
+I rewrote on purpose (the two `or(…)` compositions and the four renames), each
+named above.
+
+### Measured — Linux/SwiftShader, 26 cases, `develop 011ffee` → the integration. MECHANICS, NOT A RECEIPT
+
+| Oracle | develop | integration |
+|---|---:|---:|
+| Gate A geometry failures | 2593 | **2586** |
+| Gate A sum·\|Δ\| | 57813.54 | **54376.63** |
+| Gate A joins / green / measured | 16 · 3/26 · 26/26 | 16 · 3/26 · 26/26 |
+| Gate B paint-green / measured | 1/26 · 26/26 | 1/26 · 26/26 |
+| Gate B discrete auto-fails / examined | 0 / 266 | 0 / **268** |
+| Conjunction (hand-ANDed) | 1/26 | 1/26 |
+
+Per (case, selector, axis) across all 26 cases:
+**fixed 7 · newly failing 0 · improved 7 · worsened 0 · unchanged 2595.**
+
+| case | geometry fails | sum·\|Δ\| |
+|---|---:|---:|
+| `new_tab` | 210 → 210 | 2706.46 → **1574.43** |
+| `image-gallery` | 148 → **144** | 2532.73 → **1400.35** |
+| `rounded-corners` | 67 → **66** | 1222.93 → **322.93** |
+| `chrome_rustkit` | 45 → **43** | 383.94 → **111.44** |
+
+The other 22 cases are bit-identical on Gate A. **The count moved by 7 and the
+magnitude by 3436.91px** — `new_tab` alone gives back 1132px on a row whose
+failure COUNT does not move at all. That is the fourth night running where a
+count-only board would have read this work as noise.
+
+Gate B: **24 of 26 cases bit-identical**. `new_tab` +0.0666pp. `chrome_rustkit`
+−0.2141pp (95.7727 → 95.5586) — this is not new, it is exactly the regression
+09-20 measured and localised to `span.workspace-name`, a text box that moved
+28.5px CLOSER to Chrome and stopped scoring well by accident on a seat with no
+font backend. The stack carries it because `n58` is in the stack. It is the
+same 274 pixels, not a second instance.
+
+### The stop rule DID fire, on `n51`, and that is why it is held out
+
+The first integration included all seven heads. Its board read the same 7 fixes
+— and **2 boxes worse**:
+
+```
+settings · #tabDecayValue · x · +7.00 → −11.98
+settings · #tabDecayUnit  · x · +7.00 → −11.98
+```
+
+Bisected across the merge commits rather than guessed: `atlas/n51-p3-flex-
+justify-end` alone moves them (702.00 → 683.02; Chrome says 695.00).
+
+The mechanism, measured:
+
+```
+                     Chrome 148        RustKit (both trees)
+  .decay-control     x 695 w 147       x 702 w 140
+  #tabDecayValue     x 695 w  60       w 60
+  #tabDecayUnit      x 761 w  81       w 92.98     <-- 11.98 too wide
+```
+
+RustKit's two controls sum to 152.98 inside a 140px box, so the line OVERFLOWS
+by 12.98. `n51`'s rule is right — css-flexbox-1 §9.7: with negative free space
+`justify-content: flex-end` overflows the START edge — and applying it moves the
+items left by exactly the 12.98 of overflow. **In Chrome nothing overflows at
+all** (60 + 81 = 141 inside 147). `n51` is a correct rule whose corpus instance
+is entirely a consequence of a control being 11.98px too wide, which is P4/P6
+work and is one of the four tests already red on this seat
+(`bare_control_widths_match_chrome`).
+
+So: held out, not reverted, not discarded. The branch is untouched and lands the
+day the control width does. I am flagging rather than burying the judgement:
+the rule as written fires on "improves the metric while any oracle regresses",
+and the metric (`N/26`) did not move, so by its letter it did not fire — the
+same gap 09-20 asked about and nobody has closed. I applied it anyway because
+this regression is on **Gate A**, the oracle the plan names PRIMARY, and holding
+one branch costs nothing that waiting does not already cost.
+
+### Tests
+
+| suite | develop | integration |
+|---|---|---|
+| `rustkit-layout --lib` | 400 passed, 4 failed | **452 passed, 4 failed** |
+| `rustkit-engine --lib` | — | 80 passed, 0 failed |
+| `rustkit-css --lib` | — | 34 passed, 0 failed |
+
+The 4 failures are the same four on both trees — the font-stack group this seat
+has carried since 09-19, decision 3 below. +52 tests, no new failure.
+
+### Mutation-check results
+
+**None, and that is the honest entry: tonight shipped no new behaviour.** Every
+engine line in the integration arrived with its own night's sweep (11 probes on
+09-12, 12 on 09-20, 19 on 09-21, and so on). The integration's own risk is not
+"is the rule right" but "did the merge drop something", and the check that
+answers THAT is the line-presence audit above plus the three unit suites — both
+run, both reported. A mutation sweep here would have been a sweep of other
+nights' guards and would have counted as work while proving nothing new.
+
+### Decisions needed from Pete
+
+1. **PR #208 is open against `develop` with the six merges — merge it.** It is
+   the accumulated P2/P3/containing-block work from 09-11 through 09-21, and
+   nothing else in the queue can be honestly measured until it lands.
+2. **Ratify holding `n51`** until `bare_control_widths_match_chrome` is green
+   (its two regressing boxes are 11.98px of control width, not a flex bug), or
+   say to land it and carry the two-box Gate A regression.
+3. Still open from 09-19, 09-20 and 09-21: **mark the four font-stack tests
+   `#[cfg(target_os = "macos")]`?** Four nights of "red, but the same red as
+   before" is exactly the judgement call this campaign exists to remove — and
+   tonight one of those four turned out to be the blocker under decision 2,
+   which is the first time that red has cost the queue something.
+
+### Surprises
+
+- **Nine branches of finished work are worth 7 geometry failures and 3436px.**
+  Not nothing, and much less than nine nights of digests imply. The reason is
+  visible in the per-case table: three of the four moving cases keep their
+  failure COUNT and give back magnitude, because the boxes below a fixed
+  container are still wrong for text reasons. The campaign's remaining geometry
+  debt is not where the branch list suggests.
+- **Two of the six merges conflicted because two nights rewrote the same
+  function without knowing.** `n55` hoisted `definite_inner_main_size` out of
+  step 11d; 09-21's digest then named that same function's percentage gap as
+  "the next unit". The strand does not just delay work, it manufactures
+  duplicate work — and the digest, the only index of what is in flight, is not
+  enough to prevent it because it records defects, not the shape of the code
+  after the fix.
+- **A union merge of a Rust test module is a trap that compiles often enough to
+  be dangerous.** Where two appended tests share body lines, concatenating the
+  sides produces one function with another's assertions inside it. Mine failed
+  to compile; a slightly different overlap would not have, and the result would
+  have been a guard asserting the wrong thing while staying green — the exact
+  "decoration" this campaign rejects, arrived at through integration rather than
+  through writing a weak test.
+- **`n51` is the cleanest instance yet of the plan's §1 thesis, and it points
+  the other way.** §1's example is a broken layout that SCORED well. This is a
+  correct layout that scores WORSE, on the primary oracle, because a different
+  unfixed defect (a control 11.98px too wide) turns a spec-mandated overflow
+  into 19px of displacement. Both are the same failure of a metric to mean what
+  it appears to mean, and only the per-box receipt with magnitudes made either
+  one legible.
