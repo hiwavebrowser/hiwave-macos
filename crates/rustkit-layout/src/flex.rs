@@ -204,6 +204,45 @@ impl<'a> Default for FlexLine<'a> {
     }
 }
 
+/// A specified length, reduced to the container's INNER size under
+/// `box-sizing: border-box`. Shared by every main-axis resolution below so
+/// the two places that need this arithmetic cannot drift apart.
+fn inner_main_from_spec(container: &LayoutBox, raw: f32) -> f32 {
+    if container.style.box_sizing == rustkit_css::BoxSizing::BorderBox {
+        let pb = container.dimensions.padding.vertical() + container.dimensions.border.vertical();
+        (raw - pb).max(0.0)
+    } else {
+        raw
+    }
+}
+
+/// The container's used inner main size on the VERTICAL main axis, resolved
+/// from STYLE, or `None` when the height is indefinite (`auto`, or a
+/// percentage this function cannot resolve without the real containing
+/// block — see `min_inner_main_size` for the floor that still applies).
+///
+/// Only `Length::Px` counts as definite here, which is deliberately the same
+/// bar step 11d has always used: a percentage height needs the containing
+/// block, and every caller passes the container's own box in its place, so
+/// resolving one here would be resolving it against the wrong number.
+fn definite_inner_main_size(container: &LayoutBox) -> Option<f32> {
+    match container.style.height {
+        Length::Px(v) => Some(inner_main_from_spec(container, v)),
+        _ => None,
+    }
+}
+
+/// The `min-height` floor on the vertical main axis, in inner terms.
+/// `min-height: 100vh` with `justify-content: center` is the centring idiom
+/// on `new_tab`'s body and on real landing pages (css-sizing-3 §5.1).
+fn min_inner_main_size(container: &LayoutBox) -> f32 {
+    match container.style.min_height {
+        Length::Px(px) => inner_main_from_spec(container, px),
+        Length::Vh(vh) => inner_main_from_spec(container, vh / 100.0 * container.viewport.1),
+        _ => 0.0,
+    }
+}
+
 /// Layout a flex container and its children.
 pub fn layout_flex_container(container: &mut LayoutBox, container_box: &Dimensions) {
     layout_flex_container_in(container, container_box, None)
@@ -239,6 +278,13 @@ pub fn layout_flex_container_in(
     container_box: &Dimensions,
     positioning_cb: Option<&Dimensions>,
 ) {
+    // Resolved once, up front, and read by both the main-size choice below
+    // and step 11d's redistribution: these take `&LayoutBox`, and from the
+    // moment the item list borrows `container.children` mutably no whole-box
+    // borrow is available again.
+    let style_definite_inner_main = definite_inner_main_size(container);
+    let style_min_inner_main = min_inner_main_size(container);
+
     let style = &container.style;
 
     // 1. Determine main/cross axes
@@ -261,9 +307,25 @@ pub fn layout_flex_container_in(
         positioning_cb.and_then(|cb| inset_definite_used_main(container, cb));
 
     // Get container dimensions
+    //
+    // css-flexbox-1 §9.2/§9.7 resolve flex lines, grow/shrink and
+    // justify-content against the container's used inner MAIN size. On the
+    // vertical main axis that number cannot be read off the box the caller
+    // passes: every production call site hands `layout_flex_container` the
+    // container's OWN dimensions, and on the block path their content.height
+    // is the pre-pass FLOW CURSOR — the stack of the children's own heights.
+    // Growing against that makes free space identically zero, so `flex-grow`
+    // never applied in a column container with a definite height (measured
+    // against Chrome 148: a 400px column with a `flex-grow:1; height:30px`
+    // item kept the item at 30). Step 11d already resolved this from style,
+    // but only on the branch where some CONTENT-sized item had been
+    // corrected, so a column whose items are all explicitly sized or
+    // basis-0 never reached it. Resolving it here puts the one number in
+    // front of every step that consumes it; 11d now shares the helper
+    // rather than restating the rule.
     let container_main_size = match main_axis {
         Axis::Horizontal => container_box.content.width,
-        Axis::Vertical => container_box.content.height,
+        Axis::Vertical => style_definite_inner_main.unwrap_or(container_box.content.height),
     };
     // Deliberately NOT given the same treatment: the cross-axis analogue (an
     // inset-stretched ROW container centring items in a stale cursor) is the
@@ -795,38 +857,11 @@ pub fn layout_flex_container_in(
             // idiom on new_tab's body and on real landing pages), so rows
             // can never be placed closer than their real heights and the
             // free space centred in is the real one.
-            let main_pb_container =
-                container.dimensions.padding.vertical() + container.dimensions.border.vertical();
-            let container_is_border_box =
-                container.style.box_sizing == rustkit_css::BoxSizing::BorderBox;
-            let inner_from_spec = |raw: f32| {
-                if container_is_border_box {
-                    (raw - main_pb_container).max(0.0)
-                } else {
-                    raw
-                }
-            };
-            //
-            // `height: auto` is NOT always indefinite, and reading style
-            // alone is what made it look that way. An out-of-flow box with
-            // both `top` and `bottom` set has a used height fixed by CSS2
-            // §10.6.4 — `inset: 0` — and that number never reaches
-            // `style.height`. image-gallery's `.aspect-box > .content` is
-            // the whole idiom: `position:absolute; inset:0; display:flex;
-            // flex-direction:column; justify-content:center`. Step 8 centred
-            // it correctly against the containing block's 32; this pass then
-            // re-justified against the 19.65 content sum, so its free space
-            // went to zero and `center` packed the items flush against the
-            // top edge. The centring was right until the repass took it away.
-            let definite_inner_main = match container.style.height {
-                Length::Px(v) => Some(inner_from_spec(v)),
-                _ => inset_inner_main,
-            };
-            let min_inner_main = match container.style.min_height {
-                Length::Px(px) => inner_from_spec(px),
-                Length::Vh(vh) => inner_from_spec(vh / 100.0 * container.viewport.1),
-                _ => 0.0,
-            };
+            // Step 11d reads the same two numbers the entry resolved (n55),
+            // and an out-of-flow box with both insets set keeps its §10.6.4
+            // used height where style has none.
+            let definite_inner_main = style_definite_inner_main.or(inset_inner_main);
+            let min_inner_main = style_min_inner_main;
             for line in &mut lines {
                 let content_sum = line.hypothetical_main_size()
                     + main_gap * line.items.len().saturating_sub(1) as f32;
@@ -4344,6 +4379,133 @@ mod tests {
             (item_h - 120.0).abs() < 0.01,
             "a row item with an explicit WIDTH still takes its three 40px \
              children's height, expected 120, got {item_h}"
+        );
+    }
+
+
+    #[test]
+    fn a_column_flex_item_grows_into_the_containers_definite_height() {
+        // css-flexbox-1 §9.7: free space is the container's inner MAIN size
+        // minus the items' outer hypothetical main sizes. Chrome 148,
+        // measured on the bundled Chromium before this test was written:
+        //
+        //   .colg { height: 400px; display: flex; flex-direction: column }
+        //     #g1 { flex-grow: 1; height: 30px }   ->  370
+        //     #g2 {               height: 30px }   ->   30, at y = 370
+        //
+        // The fixture mirrors the ENGINE's call shape, and that is the whole
+        // point of it: every production caller passes the container's OWN
+        // dimensions, whose content.height on the block path is the pre-pass
+        // flow cursor — the 60px stack of the two children — and NOT the
+        // container's 400px used height. Seeding 400 here would hand the fix
+        // the number it is supposed to derive.
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.height = Length::Px(400.0);
+
+        let mut container = LayoutBox::new(BoxType::Block, style);
+        for grow in [1.0f32, 0.0] {
+            let mut s = ComputedStyle::new();
+            s.height = Length::Px(30.0);
+            s.flex_grow = grow;
+            container.children.push(LayoutBox::new(BoxType::Block, s));
+        }
+        container.dimensions.content = Rect::new(0.0, 0.0, 200.0, 60.0);
+        let containing = container.dimensions.clone();
+        layout_flex_container(&mut container, &containing);
+
+        let a = container.children[0].dimensions.content.height;
+        let b = container.children[1].dimensions.content.height;
+        let b_y = container.children[1].dimensions.content.y;
+        assert!(
+            (a - 370.0).abs() < 0.5,
+            "the grow item takes the 340px of free space in the 400px column, got {a}"
+        );
+        assert!(
+            (b - 30.0).abs() < 0.5,
+            "the non-grow item keeps 30, got {b}"
+        );
+        assert!(
+            (b_y - 370.0).abs() < 0.5,
+            "the sibling sits after the grown item, got {b_y}"
+        );
+    }
+
+    #[test]
+    fn a_definite_column_main_size_is_inner_under_both_box_sizing_modes() {
+        // The free space a column distributes is the container's INNER main
+        // size, so `box-sizing` decides whether the specified height already
+        // contains the padding and border. Chrome 148, measured:
+        //
+        //   .bb { box-sizing: border-box; height: 400px;
+        //         padding: 25px 0; border-top/bottom: 5px }
+        //     #k1 { flex-grow: 1; height: 30px }  -> 310 at y = 30
+        //     #k2 {               height: 30px }  ->  30 at y = 340
+        //   .cb { box-sizing: content-box; height: 400px; padding: 25px 0 }
+        //     #m1 { flex-grow: 1; height: 30px }  -> 400
+        //
+        // 400 - 10 border - 50 padding = 340 inner, minus 60 of items = 280
+        // of free space; content-box keeps all 400. Without the subtraction
+        // the border-box item grows 60px past its container.
+        fn column(border_box: bool) -> LayoutBox {
+            let mut style = ComputedStyle::new();
+            style.display = rustkit_css::Display::Flex;
+            style.flex_direction = FlexDirection::Column;
+            style.height = Length::Px(400.0);
+            style.box_sizing = if border_box {
+                rustkit_css::BoxSizing::BorderBox
+            } else {
+                rustkit_css::BoxSizing::ContentBox
+            };
+            let mut c = LayoutBox::new(BoxType::Block, style);
+            for grow in [1.0f32, 0.0] {
+                let mut s = ComputedStyle::new();
+                s.height = Length::Px(30.0);
+                s.flex_grow = grow;
+                c.children.push(LayoutBox::new(BoxType::Block, s));
+            }
+            // Resolved by the block pre-pass before flex ever runs.
+            c.dimensions.padding.top = 25.0;
+            c.dimensions.padding.bottom = 25.0;
+            if border_box {
+                c.dimensions.border.top = 5.0;
+                c.dimensions.border.bottom = 5.0;
+            }
+            // The content ORIGIN the pre-pass hands over already sits inside
+            // the container's own border and padding, so items are placed
+            // from there and Chrome's absolute y values carry straight over.
+            let origin_y = if border_box { 30.0 } else { 25.0 };
+            c.dimensions.content = Rect::new(0.0, origin_y, 200.0, 60.0);
+            c
+        }
+
+        let mut bb = column(true);
+        let cb_dims = bb.dimensions.clone();
+        layout_flex_container(&mut bb, &cb_dims);
+        let k1 = bb.children[0].dimensions.content.height;
+        let k1_y = bb.children[0].dimensions.content.y;
+        let k2_y = bb.children[1].dimensions.content.y;
+        assert!(
+            (k1_y - 30.0).abs() < 0.5,
+            "border-box: the first item starts inside the border and padding, got {k1_y}"
+        );
+        assert!(
+            (k1 - 310.0).abs() < 0.5,
+            "border-box: 400 less 10 border and 50 padding leaves 340 inner, so the grow item is 310, got {k1}"
+        );
+        assert!(
+            (k2_y - 340.0).abs() < 0.5,
+            "border-box: the sibling sits at 340, got {k2_y}"
+        );
+
+        let mut cb = column(false);
+        let cb2 = cb.dimensions.clone();
+        layout_flex_container(&mut cb, &cb2);
+        let m1 = cb.children[0].dimensions.content.height;
+        assert!(
+            (m1 - 370.0).abs() < 0.5,
+            "content-box: the specified 400 IS the inner size, so 400 less the sibling's 30 leaves 370, got {m1}"
         );
     }
 
