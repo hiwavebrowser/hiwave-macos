@@ -10873,3 +10873,60 @@ nights' guards and would have counted as work while proving nothing new.
   force-pushed. **The lesson is narrow and mechanical: after a bisect that
   detaches HEAD, verify `rev-parse` of the pushed ref equals the tree that was
   measured, before opening anything.**
+
+### Addendum — the macOS receipt for #209 (run 35691759679, `macos-14`)
+
+The PR lane came back green on `e8b39e0`, all 13 checks, and it makes the
+measurement this seat cannot. **This supersedes tonight's SwiftShader figures
+as the measurement of record**; they stand as mechanics.
+
+The baseline is not an approximation. Run 35313335192 (#204, 09-18) has
+`crates/`, `Cargo.toml` and `Cargo.lock` **byte-identical to `develop 011ffee`**
+— 011ffee is its merge commit and #203's workflow files are the only other
+difference — so it is this PR's base engine.
+
+```
+                                develop engine      this branch
+  Gate A geometry failures                 940              928
+  Gate A join failures                      16               16
+  Gate A geometry-green                   5/26             6/26
+  Gate B paint-green                      3/26             3/26
+  Gate B discrete auto-fails                 0                0
+  N/26 finish-line-green                  2/26             2/26
+  ratchet                          exit 2, holds    exit 2, holds
+```
+
+Three cases move, every one of them down:
+
+| case | geometry failures |
+|---|---|
+| `image-gallery` | 15 → **7** |
+| `chrome_rustkit` | 7 → **4** |
+| `rounded-corners` | 1 → **0** — RED → **GREEN** |
+
+The other 23 are identical case-for-case, `settings` included (343 both
+sides). **No case increased.** Verified twice: the per-case lines sum to each
+run's own header (940 and 928), and I re-read the four lines above out of the
+raw logs myself rather than taking the extraction's word for it.
+
+**`N/26` does not move, and that is the honest headline.** `rounded-corners`
+is geometry-exact, stable and discrete-clean, and still paint-red — so the
+conjunction does not take it. The metric refuses to reward a column, which is
+what it was built to do.
+
+Two things worth carrying forward:
+
+- **macOS and SwiftShader agree on direction and disagree on size.** −12 here
+  against −7 there, on the same three cases plus `new_tab`. `new_tab`'s count
+  is 27 on macOS and 210 on this seat: the difference is text metrics, which
+  is also why this seat's 2593 and macOS's 940 are not the same board. Gate B's
+  two movers are the same pair with the same signs at about a quarter the
+  size (`chrome_rustkit` −0.0594pp, `new_tab` +0.0595pp).
+- **The ratchet's tighten-eligible list goes 10 → 12**, gaining
+  `chrome_rustkit` and `image-gallery`. That is the floor this work earned,
+  and re-seeding it is a separate, deliberate act.
+
+What I could NOT read: per-case magnitudes. `gate-a.json` has them and the
+artifact is unreachable from this seat (egress policy), and the log prints
+only the first five failures per case. So the macOS figures are counts and
+verdicts; `sum·|Δ|` stays a SwiftShader number.
