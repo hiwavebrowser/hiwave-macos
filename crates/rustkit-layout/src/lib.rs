@@ -20,6 +20,7 @@ pub mod grid;
 pub mod images;
 pub mod intrinsic_cache;
 pub mod margin_collapse;
+pub mod multicol;
 pub mod scroll;
 pub mod text;
 
@@ -2911,6 +2912,16 @@ impl LayoutBox {
                 self.dimensions.content.width,
                 self.dimensions.content.height,
             );
+        } else if let Some(cols) =
+            multicol::column_geometry(&self.style, self.dimensions.content.width)
+        {
+            // Multi-column: the children flow at the column width, then
+            // balance over the columns (see multicol).
+            let full_width = self.dimensions.content.width;
+            self.dimensions.content.width = cols.width;
+            self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
+            self.dimensions.content.width = full_width;
+            multicol::balance_columns(self, &cols);
         } else {
             // Normal block layout
             self.layout_block_children_with_collapse(

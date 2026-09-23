@@ -4542,6 +4542,14 @@ impl Engine {
                     style.column_gap = length;
                 }
             }
+            "column-count" => match value.trim() {
+                "auto" => style.column_count = None,
+                v => {
+                    if let Some(n) = v.parse::<u32>().ok().filter(|n| *n >= 1) {
+                        style.column_count = Some(n);
+                    }
+                }
+            },
             "order" => {
                 if let Ok(order) = value.parse::<i32>() {
                     style.order = order;

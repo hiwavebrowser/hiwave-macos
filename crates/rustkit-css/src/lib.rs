@@ -2332,6 +2332,10 @@ pub struct ComputedStyle {
     pub row_gap: Length,
     pub column_gap: Length,
 
+    // Multi-column (css-multicol-1)
+    /// `column-count`; `None` is `auto` — not a multi-column container.
+    pub column_count: Option<u32>,
+
     // Flexbox Item
     pub order: i32,
     pub flex_grow: f32,
