@@ -4344,6 +4344,11 @@ impl Engine {
                 // whole value to parse_length, so `border: 2px solid #333` was
                 // silently dropped and only a bare `border: 2px` ever applied.
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    let border_style = border_style_keyword(value);
+                    style.border_top_style = border_style;
+                    style.border_right_style = border_style;
+                    style.border_bottom_style = border_style;
+                    style.border_left_style = border_style;
                     style.border_top_width = width.clone();
                     style.border_right_width = width.clone();
                     style.border_bottom_width = width.clone();
@@ -4353,6 +4358,36 @@ impl Engine {
                         style.border_right_color = color;
                         style.border_bottom_color = color;
                         style.border_left_color = color;
+                    }
+                }
+            }
+            "border-style" => {
+                // 1–4 keywords, standard sides expansion. `none`/`hidden`
+                // are not zeroed here (the width arms own that).
+                let styles: Vec<rustkit_css::BorderStyle> = value
+                    .split_whitespace()
+                    .filter_map(rustkit_css::BorderStyle::from_keyword)
+                    .collect();
+                let (t, r, b, l) = match styles[..] {
+                    [a] => (a, a, a, a),
+                    [a, b] => (a, b, a, b),
+                    [a, b, c] => (a, b, c, b),
+                    [a, b, c, d] => (a, b, c, d),
+                    _ => return,
+                };
+                style.border_top_style = t;
+                style.border_right_style = r;
+                style.border_bottom_style = b;
+                style.border_left_style = l;
+            }
+            "border-top-style" | "border-right-style" | "border-bottom-style"
+            | "border-left-style" => {
+                if let Some(s) = rustkit_css::BorderStyle::from_keyword(value.trim()) {
+                    match property {
+                        "border-top-style" => style.border_top_style = s,
+                        "border-right-style" => style.border_right_style = s,
+                        "border-bottom-style" => style.border_bottom_style = s,
+                        _ => style.border_left_style = s,
                     }
                 }
             }
@@ -4367,6 +4402,7 @@ impl Engine {
             }
             "border-top" => {
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    style.border_top_style = border_style_keyword(value);
                     style.border_top_width = width;
                     if let Some(color) = color {
                         style.border_top_color = color;
@@ -4375,6 +4411,7 @@ impl Engine {
             }
             "border-right" => {
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    style.border_right_style = border_style_keyword(value);
                     style.border_right_width = width;
                     if let Some(color) = color {
                         style.border_right_color = color;
@@ -4383,6 +4420,7 @@ impl Engine {
             }
             "border-bottom" => {
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    style.border_bottom_style = border_style_keyword(value);
                     style.border_bottom_width = width;
                     if let Some(color) = color {
                         style.border_bottom_color = color;
@@ -4391,6 +4429,7 @@ impl Engine {
             }
             "border-left" => {
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    style.border_left_style = border_style_keyword(value);
                     style.border_left_width = width;
                     if let Some(color) = color {
                         style.border_left_color = color;
@@ -9408,6 +9447,15 @@ fn ch_advance_px(style: &ComputedStyle) -> f32 {
 
 /// Parse a shorthand value with 1-4 parts (like margin, padding).
 /// Returns (top, right, bottom, left).
+/// The border style a `border` / `border-<side>` shorthand names; a
+/// shorthand without one keeps `Solid` (see rustkit_css::BorderStyle).
+fn border_style_keyword(value: &str) -> rustkit_css::BorderStyle {
+    value
+        .split_whitespace()
+        .find_map(rustkit_css::BorderStyle::from_keyword)
+        .unwrap_or_default()
+}
+
 /// Parse a `border` / `border-<side>` shorthand: `<width> || <style> || <color>`.
 /// ComputedStyle has no border-style field, so the style keyword only matters
 /// for `none`/`hidden` (which force a zero width, matching how the box would

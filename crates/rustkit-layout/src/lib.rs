@@ -6849,54 +6849,63 @@ impl DisplayList {
     fn render_borders(&mut self, layout_box: &LayoutBox) {
         let d = &layout_box.dimensions;
         let s = &layout_box.style;
+        let bb = d.border_box();
 
-        // Render each border side separately for correct colors
-        // Top border
-        if d.border.top > 0.0 {
-            let rect = Rect::new(
-                d.border_box().x,
-                d.border_box().y,
-                d.border_box().width,
+        // Render each border side separately for correct colors. A side is
+        // a strip along the whole border-box edge (corners overlap, as the
+        // solid path always has); dashed/dotted sides are split into dashes
+        // along it (see border_dash_pattern).
+        let sides = [
+            // (thickness, color, style, strip rect, horizontal)
+            (
                 d.border.top,
-            );
-            self.commands
-                .push(DisplayCommand::SolidColor(s.border_top_color, rect));
-        }
-
-        // Right border
-        if d.border.right > 0.0 {
-            let rect = Rect::new(
-                d.border_box().right() - d.border.right,
-                d.border_box().y,
+                s.border_top_color,
+                s.border_top_style,
+                Rect::new(bb.x, bb.y, bb.width, d.border.top),
+                true,
+            ),
+            (
                 d.border.right,
-                d.border_box().height,
-            );
-            self.commands
-                .push(DisplayCommand::SolidColor(s.border_right_color, rect));
-        }
-
-        // Bottom border
-        if d.border.bottom > 0.0 {
-            let rect = Rect::new(
-                d.border_box().x,
-                d.border_box().bottom() - d.border.bottom,
-                d.border_box().width,
+                s.border_right_color,
+                s.border_right_style,
+                Rect::new(bb.right() - d.border.right, bb.y, d.border.right, bb.height),
+                false,
+            ),
+            (
                 d.border.bottom,
-            );
-            self.commands
-                .push(DisplayCommand::SolidColor(s.border_bottom_color, rect));
-        }
-
-        // Left border
-        if d.border.left > 0.0 {
-            let rect = Rect::new(
-                d.border_box().x,
-                d.border_box().y,
+                s.border_bottom_color,
+                s.border_bottom_style,
+                Rect::new(bb.x, bb.bottom() - d.border.bottom, bb.width, d.border.bottom),
+                true,
+            ),
+            (
                 d.border.left,
-                d.border_box().height,
-            );
-            self.commands
-                .push(DisplayCommand::SolidColor(s.border_left_color, rect));
+                s.border_left_color,
+                s.border_left_style,
+                Rect::new(bb.x, bb.y, d.border.left, bb.height),
+                false,
+            ),
+        ];
+        for (thickness, color, style, strip, horizontal) in sides {
+            if thickness <= 0.0 {
+                continue;
+            }
+            let length = if horizontal { strip.width } else { strip.height };
+            let Some((dash, gap)) = border_dash_pattern(style, thickness, length) else {
+                self.commands.push(DisplayCommand::SolidColor(color, strip));
+                continue;
+            };
+            let mut offset = 0.0;
+            while offset < length - 0.01 {
+                let run = dash.min(length - offset);
+                let rect = if horizontal {
+                    Rect::new(strip.x + offset, strip.y, run, strip.height)
+                } else {
+                    Rect::new(strip.x, strip.y + offset, strip.width, run)
+                };
+                self.commands.push(DisplayCommand::SolidColor(color, rect));
+                offset += dash + gap;
+            }
         }
     }
 
@@ -7614,6 +7623,45 @@ pub fn measure_text_simple(text: &str, font_size: f32) -> TextMetrics {
 )]
 pub fn measure_text(text: &str, _font_family: &str, font_size: f32) -> text::TextMetrics {
     measure_text_simple(text, font_size)
+}
+
+/// Blink's dash pattern for one border side of `length` px
+/// (`StrokeData::SetupPaintDashPathEffect` + `SelectBestDashGap`): a dashed
+/// side draws dashes of 2x its thickness with 1x gaps (3x / 2x under 3px),
+/// a dotted side 1x / 1x; the gap is then stretched or squeezed so the side
+/// starts AND ends on a whole dash, choosing the dash count whose gap is
+/// nearest the nominal one. A side too short for two dashes paints solid.
+/// Returns `(dash, gap)`, or `None` for a solid side.
+///
+/// Thick dotted borders are round dots in Chrome; they are square here.
+fn border_dash_pattern(
+    style: rustkit_css::BorderStyle,
+    thickness: f32,
+    length: f32,
+) -> Option<(f32, f32)> {
+    let (dash, gap) = match style {
+        rustkit_css::BorderStyle::Solid => return None,
+        rustkit_css::BorderStyle::Dashed if thickness < 3.0 => (thickness * 3.0, thickness * 2.0),
+        rustkit_css::BorderStyle::Dashed => (thickness * 2.0, thickness),
+        rustkit_css::BorderStyle::Dotted => (thickness, thickness),
+    };
+    if dash <= 0.0 || length <= dash * 2.0 {
+        return None;
+    }
+    let min_dashes = ((length + gap) / (dash + gap)).floor();
+    let max_dashes = min_dashes + 1.0;
+    let min_gap = if min_dashes > 1.0 {
+        (length - min_dashes * dash) / (min_dashes - 1.0)
+    } else {
+        f32::INFINITY
+    };
+    let max_gap = (length - max_dashes * dash) / (max_dashes - 1.0);
+    let best = if max_gap <= 0.0 || (min_gap - gap).abs() < (max_gap - gap).abs() {
+        min_gap
+    } else {
+        max_gap
+    };
+    Some((dash, best))
 }
 
 #[cfg(test)]
@@ -12406,6 +12454,37 @@ mod tests {
         let display_list = DisplayList::build(&layout_box);
 
         assert!(!display_list.commands.is_empty());
+    }
+
+    #[test]
+    fn dashed_border_matches_blinks_dash_gap_selection() {
+        // backgrounds test 3: 10px dashed on a 200x100 border box. Chrome:
+        // top side 7 dashes of 20 with 10px gaps (7*20 + 6*10 = 200), left
+        // side 4 dashes of 20 with gaps of 20/3.
+        use rustkit_css::BorderStyle::*;
+        assert_eq!(border_dash_pattern(Dashed, 10.0, 200.0), Some((20.0, 10.0)));
+        let (dash, gap) = border_dash_pattern(Dashed, 10.0, 100.0).unwrap();
+        assert_eq!(dash, 20.0);
+        assert!((gap - 20.0 / 3.0).abs() < 1e-4, "gap {}", gap);
+        assert_eq!(border_dash_pattern(Solid, 10.0, 200.0), None);
+        assert_eq!(border_dash_pattern(Dashed, 10.0, 40.0), None, "too short: solid");
+
+        let mut style = ComputedStyle::new();
+        style.border_top_style = Dashed;
+        style.border_top_color = Color::from_rgb(51, 51, 51);
+        let mut b = LayoutBox::new(BoxType::Block, style);
+        b.dimensions.content = Rect::new(10.0, 10.0, 180.0, 80.0);
+        b.dimensions.border = EdgeSizes { top: 10.0, right: 0.0, bottom: 0.0, left: 10.0 };
+        let list = DisplayList::build(&b);
+        let top_dashes = list
+            .commands
+            .iter()
+            .filter(|c| {
+                matches!(c, DisplayCommand::SolidColor(_, r)
+                    if r.y == 0.0 && r.height == 10.0 && r.width == 20.0)
+            })
+            .count();
+        assert_eq!(top_dashes, 7);
     }
 
     #[test]

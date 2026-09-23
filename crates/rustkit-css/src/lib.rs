@@ -2197,6 +2197,32 @@ pub enum BackgroundClip {
     Text,
 }
 
+/// `border-<side>-style`, as far as paint distinguishes it. `none`/`hidden`
+/// are folded into a zero border width at parse time, and the styles paint
+/// does not draw yet (double, groove, ridge, inset, outset) stay `Solid` —
+/// which is also the default, so a border given only a width keeps painting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BorderStyle {
+    #[default]
+    Solid,
+    Dashed,
+    Dotted,
+}
+
+impl BorderStyle {
+    /// The paint-relevant style named by a CSS keyword, or `None` when the
+    /// token is not a border-style keyword.
+    pub fn from_keyword(token: &str) -> Option<Self> {
+        match token.to_ascii_lowercase().as_str() {
+            "dashed" => Some(Self::Dashed),
+            "dotted" => Some(Self::Dotted),
+            "solid" | "double" | "groove" | "ridge" | "inset" | "outset" | "none"
+            | "hidden" => Some(Self::Solid),
+            _ => None,
+        }
+    }
+}
+
 /// Computed style for an element.
 #[derive(Debug, Clone, Default)]
 pub struct ComputedStyle {
@@ -2232,6 +2258,10 @@ pub struct ComputedStyle {
     pub border_right_color: Color,
     pub border_bottom_color: Color,
     pub border_left_color: Color,
+    pub border_top_style: BorderStyle,
+    pub border_right_style: BorderStyle,
+    pub border_bottom_style: BorderStyle,
+    pub border_left_style: BorderStyle,
 
     // Border radius (for rounded corners)
     pub border_top_left_radius: Length,
