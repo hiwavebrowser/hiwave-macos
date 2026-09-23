@@ -776,6 +776,33 @@ pub fn layout_flex_container_in(
         style.align_content,
     );
     for line in &mut lines {
+        // Re-stretch (css-flexbox-1 §9.4.11) against the line's FINAL cross
+        // size. Step 5 stretched each auto-height item of a row, but step 11
+        // re-flowed its children and wrote the flow height over the
+        // stretched one (only definite heights are restored there), and 11b
+        // only ever grows an item to its content. So every `align-items:
+        // stretch` item shorter than its line kept its content height:
+        // card-grid's cards were 256.7 in a 279.4 row where Chrome stretches
+        // all three. Row containers only — a column item's width was
+        // stretched before its children flowed and survives step 11.
+        if cross_axis == Axis::Vertical {
+            for item in &mut line.items {
+                if item.has_explicit_cross_size
+                    || resolved_align(item.align_self, style.align_items) != AlignItems::Stretch
+                {
+                    continue;
+                }
+                let target = (line.cross_size - item.cross_margin_start - item.cross_margin_end)
+                    .max(item.min_cross_size)
+                    .min(item.max_cross_size);
+                let content_height = (target - item.cross_pb()).max(0.0);
+                if content_height > item.layout_box.dimensions.content.height {
+                    item.cross_size = target;
+                    item.layout_box.dimensions.content.height = content_height;
+                    item.layout_box.reanchor_absolute_children();
+                }
+            }
+        }
         align_cross_axis(line, style.align_items);
         for item in &mut line.items {
             // New absolute border-box cross position, converted to a content
@@ -2551,6 +2578,42 @@ mod tests {
         inner.height = Length::Px(60.0);
         b.children.push(LayoutBox::new(BoxType::Block, inner));
         b
+    }
+
+    #[test]
+    fn wrapped_items_stretch_to_their_line_after_reflow() {
+        // card-grid: a wrapping row of auto-height cards; Chrome stretches
+        // every card to its line, step 11 used to leave them at content height.
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_wrap = rustkit_css::FlexWrap::Wrap;
+        style.column_gap = Length::Px(24.0);
+        style.row_gap = Length::Px(24.0);
+        let mut container = LayoutBox::new(BoxType::Block, style);
+        for h in [100.0, 150.0, 100.0, 120.0] {
+            let mut item_style = ComputedStyle::new();
+            item_style.width = Length::Px(300.0);
+            let mut item = LayoutBox::new(BoxType::Block, item_style);
+            let mut inner = ComputedStyle::new();
+            inner.height = Length::Px(h);
+            item.children.push(LayoutBox::new(BoxType::Block, inner));
+            container.children.push(item);
+        }
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.children.push(container);
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 1000.0, 0.0);
+        root.layout_with_collapse(
+            &cb,
+            &mut crate::MarginCollapseContext::new(),
+            &mut crate::FloatContext::new(),
+        );
+        let hs: Vec<(f32, f32)> = root.children[0]
+            .children
+            .iter()
+            .map(|c| (c.dimensions.content.y, c.dimensions.content.height))
+            .collect();
+        assert_eq!(hs, vec![(0.0, 150.0), (0.0, 150.0), (0.0, 150.0), (174.0, 120.0)]);
     }
 
     #[test]
