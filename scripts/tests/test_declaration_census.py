@@ -57,10 +57,22 @@ def check(name, condition, detail=""):
         FAILURES.append(name)
 
 
-def expect_refusal(name, fn):
+def expect_refusal(name, fn, because=None):
+    """A refusal, AND the reason it gives.
+
+    The message is not decoration. Two refusals can be indistinguishable by
+    outcome and still mean opposite things to whoever reads the red CI: "no
+    capture was read" and "captures were read and held no declaration" both
+    stop the run, and only the text says which. A guard that asserts only
+    `it refused` leaves the line that tells them apart free to be deleted —
+    measured, as the M7 survivor of this file's first sweep.
+    """
     try:
         fn()
     except CensusRefusal as refusal:
+        if because is not None and because not in str(refusal):
+            check(name, False, f"refused with {refusal!r}, wanted {because!r}")
+            return
         print(f"  PASS {name} ({refusal})")
         return
     check(name, False, "expected a CensusRefusal, got a report")
@@ -211,26 +223,41 @@ def test_custom_property_pass_is_checked_not_assumed():
 def test_declaration_parsing():
     html = """
       <style>
-        /* commented-out: column-count: 2; */
-        .a { color: red; height: 4px }
+        /* a whole rule, commented out: .b { column-count: 2 } */
+        .a { color: red; /* backdrop-filter: blur(2px); */ height: 4px }
       </style>
       <div style="float: left; width: 3px"></div>
     """
     names = declarations_in_html(html)
     check("reads style blocks", "color" in names and "height" in names)
     check("reads inline style attributes", "float" in names and "width" in names)
+    # Both comment shapes, because they fail differently: a commented-out rule
+    # still offers RULE_BODY_RE a `{ … }` to find, while a commented-out
+    # declaration sits inside a body that is otherwise live. The first sweep's
+    # fixture had only a comment OUTSIDE any rule, which no parse would have
+    # counted, so it asserted nothing.
     check(
-        "a property named only inside a comment is not authored",
+        "a declaration commented out inside a live rule is not authored",
+        "backdrop-filter" not in names,
+        names,
+    )
+    check(
+        "a whole rule commented out is not authored",
         "column-count" not in names,
         names,
     )
 
 
 def test_empty_runs_refuse():
-    expect_refusal("no case read at all refuses", lambda: census(fake_engine(), []))
     expect_refusal(
-        "cases read but no declaration found refuses",
+        "no case read at all refuses, and says THAT",
+        lambda: census(fake_engine(), []),
+        because="no corpus case was read",
+    )
+    expect_refusal(
+        "cases read but no declaration found refuses, and says THAT instead",
         lambda: census(fake_engine(), [case("c", "<p>no css here</p>")]),
+        because="not one declaration found",
     )
 
 
