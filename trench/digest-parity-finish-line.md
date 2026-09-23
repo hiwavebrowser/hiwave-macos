@@ -10930,3 +10930,170 @@ What I could NOT read: per-case magnitudes. `gate-a.json` has them and the
 artifact is unreachable from this seat (egress policy), and the log prints
 only the first five failures per case. So the macOS figures are counts and
 verdicts; `sum·|Δ|` stays a SwiftShader number.
+
+## 2026-09-23
+
+**Metric: `2/26` → `2/26` on macOS, carried forward and NOT re-measured.** No
+macOS lane ran tonight and nothing I landed touches `crates/`, so the number
+cannot have moved. On this seat the board was re-taken (26/26 captured,
+SwiftShader, 9.5s) and reads **2586 Gate A geometry failures, 16 join failures,
+3/26 geometry-green** — bit-identical to last night's integration figures, as
+it must be on an unchanged engine. Mechanics, not a receipt.
+
+**P-item: none of P1–P6 directly. I could not pick the next root off this
+seat's board, measured why, and built the instrument that did pick one.
+COMPLETE.**
+
+### Why the board could not pick tonight's root
+
+The queue is geometry-first, so the night opened by reading Gate A for the
+largest remaining root. Every candidate above 100px turned out to be a seat
+artifact:
+
+| what looked like a root | what it is |
+|---|---|
+| `pseudo-classes` 32 failures, ALL x, at 3.8125 and 7.625 | one inter-inline-block whitespace advance, doubled on the second gap. This seat's space glyph, not a layout rule — and `pseudo-classes` is geometry-GREEN on macOS |
+| `form-elements` `button.btn-success` x +376.00 | Chrome wraps the button row onto a second line; RustKit fits five buttons on one because each is 22–28px narrower. A consequence of advance widths, not of flex |
+| micro cases' uniform 1.12px height on every box | line-height from a different font stack |
+| `settings` 416 failures, the biggest column on the board | 343 of them on macOS: the difference between the two boards is text |
+
+macOS reads 940 total where this seat reads 2586. **1646 failures — 64% of
+what this seat can see — are not on the macOS board at all.** Choosing a root
+by magnitude here means choosing a font-stack artifact four times out of five,
+which is what three of the last four nights did the slow way.
+
+### What I built instead
+
+`scripts/declaration_census.py` + `cases/declaration_gaps.json` +
+`scripts/tests/test_declaration_census.py`, on `atlas/n61-declaration-census`
+off `origin/master`, **PR #211** against `develop`. Cherry-copied onto this
+branch as `cf1c6d9`, `30eff29`, `db0cb13`.
+
+It answers one question: **which property names does the corpus author that
+`apply_style_property` has no arm for** — i.e. which declarations are dropped
+silently, with no parse error and no phantom box. That is the 09-21 `calc()`
+class, and the note in that night's digest was that a ten-second grep would
+have found it on night 1. This is the grep, made repeatable, ratcheted, and
+guarded. It runs in a second, needs no GPU and no capture, and joins CI by
+existing (`parity.yml`'s `script-guards` globs `scripts/tests/test_*.py`; the
+guard runs the census over the working tree and asserts the ledger holds).
+
+**It is property-level only and says so on every run.** `calc()` itself would
+NOT have been caught by it: `height` has an arm, and the loss was inside
+`parse_length`. Claiming otherwise would make it the third instrument lie in
+plan §1's list.
+
+### What it found — 16 gaps, 2 of them layout
+
+`cursor` (24 declarations over 8 cases) is the largest row and the least
+important, which is the census's own Goodhart warning: read it by count and it
+points at an affordance with no render effect. The two that matter:
+
+**`column-count`** — `article-typography` `.columns { column-count: 2 }`:
+
+```
+                 Chrome 148                  RustKit
+  p1             x 260  w 360  h 168.84      x 260  w 760  h  84.48
+  p2             x 660  w 360  h 140.70      x 260  w 760  h  84.48
+  div.columns    y 1454.45     h 174.78                    h 188.96
+```
+
+9 boxes carrying **1462.1px of the case's 2786.2px `sum|Δ|`** — 52% of the
+case. The geometry is font-independent, so unlike everything else on tonight's
+board it reads the same on macOS. **The largest font-independent geometry root
+left in the corpus.** Multi-column layout is unimplemented — there is no
+fragmentation machinery at all — so it is a feature unit and was recorded
+rather than half-landed.
+
+**`float`** — `rustkit-layout` HAS floats: `FloatContext`, `establishes_bfc`,
+`LayoutBox::with_float`, BFC rules. Nothing in the engine ever sets
+`LayoutBox.float` from CSS. **Every caller of that subsystem is a unit test.**
+An implemented feature no authored page can reach. Corpus cost is one
+`::first-letter` (itself unimplemented); real-page cost is not, and P5's
+holdout board is where it lands.
+
+### Commits
+
+- `cf1c6d9` — the census, the ledger and its guard. No engine change.
+- `30eff29` — close the two survivors of the first mutation sweep.
+- `db0cb13` — size `column-count` from the board instead of from the reasoning.
+
+### Mutation-check results
+
+**14 probes, 14 RED, 0 survivors.** Control green before and after; every probe
+applied from a committed tree and restored with `git checkout --`; a probe that
+fails to apply reports `MUTATION FAILED TO APPLY` rather than counting.
+
+| probe | caught by |
+|---|---|
+| M1 arm regex accepts any indentation (value keywords become properties) | `value keywords inside an arm body are not properties` |
+| M2 no minimum arm count | `a source with too few arms refuses` |
+| M3 no required spine | `a missing spine arm refuses the whole run` |
+| M4 the `var()` pass is assumed rather than checked | `no var() pass means the --x exclusion is not safe` |
+| M5 CSS comments are not stripped | `a declaration commented out inside a live rule` *(after `30eff29`)* |
+| M6 inline `style=` attributes are not read | `reads inline style attributes` |
+| M7 a run that read no case is not a refusal | `no case read at all refuses, and says THAT` *(after `30eff29`)* |
+| M8 a run that found no declaration is not a refusal | `cases read but no declaration found refuses` |
+| M9 the gate always passes | `an unledgered gap fails` |
+| M10 the ledger is ignored | `a ledgered gap passes` |
+| M11 brace walk returns whatever it reached | `an unclosed function refuses` |
+| M12 custom properties are censused like any other | `custom properties are never reported as dropped` |
+| M13 holdout cases are always included | `26 gating cases` |
+| M14 the ledger is read from the wrong path | `the ledger is committed and non-empty` |
+
+**The first sweep had 2 survivors, M5 and M7, and they are the same shape as
+the survivors of the last four sweeps — the guard written against the example
+rather than against the rule.** M5's fixture put its only comment OUTSIDE any
+rule, where no parse would have counted it, so deleting the comment stripper
+changed nothing. M7 asserted that an empty run refuses, but an empty case list
+and a case list yielding no declaration refuse identically; only the MESSAGE
+tells "the captures never ran" from "the parse is broken", and nothing asserted
+on it. 09-12 called this pattern a checklist item rather than a lesson —
+*after writing the guards, ask which line of the change no assertion would
+miss* — and running that checklist is what turned 12/14 into 14/14.
+
+### Stop rule
+
+Did not fire and could not: `crates/` is byte-identical to `origin/master` on
+both branches, so no oracle has an input that changed. Stated rather than
+skipped, because "no engine change" is a claim and `git diff` is the check.
+
+### Decisions needed from Pete
+
+1. **Five PRs are now open and unmerged** — #205, #206, #207, #209, #210 — and
+   `develop` has not moved since 09-18. #209 is still the one that blocks the
+   queue. The strand did not end when the branches became PRs.
+2. **`column-count` is a feature unit, not a night's unit.** Schedule it as its
+   own P-item with its own scope (fragmentation is the hard half), or rule it
+   out of scope for the finish line and say so in the ledger?
+3. **The float subsystem is unreachable from CSS.** Wiring the property is a
+   one-line arm; what it turns on is a whole untested-in-production layout
+   path. Wire it (and take whatever it does to the board), or leave it ledgered
+   until P5's holdout board says how much the real web needs it?
+
+### Surprises
+
+- **A measurement contradicted my own ledger entry an hour after I wrote it.**
+  I recorded `column-count` as "the container is ~165px too tall and everything
+  below carries the shift", which is what single-column reasoning predicts.
+  It is wrong: doubling a column's width halves its paragraph's height, so
+  RustKit's stack lands **14.18px above** Chrome's balanced 174.78, and the 22
+  y-failures below it read 11.31px — the 14.18 less the 2.87 the page already
+  carried in. The defect is local, not page-wide. `db0cb13` is the correction
+  and it stays in the history: an entry sized by reasoning would have had the
+  next night hunting a 165px shift that is not there.
+- **An entire layout subsystem is reachable only from its own tests.** Floats
+  have a context, a BFC rule and a constructor, and the property that would
+  turn them on was never wired. Nothing in the campaign's instruments could
+  have said so — a feature that is never reached produces no wrong pixel, it
+  produces a page laid out as if the author had not asked.
+- **This seat's board has stopped being able to choose.** 64% of what it sees
+  is not on the macOS board. It can still measure a change (before/after on the
+  same seat is honest), and it can no longer rank the remaining defects. The
+  census is the first instrument on this seat that does not care what the font
+  stack does.
+- **The census's biggest row is its least important one.** `cursor`, 24
+  declarations, no render effect in a static capture. Any ordering by count
+  puts it first. That is the same failure mode the campaign's own metric is
+  built against, arriving in a tool I wrote the same night — which is why the
+  ledger carries a reason per row instead of a count per row.
