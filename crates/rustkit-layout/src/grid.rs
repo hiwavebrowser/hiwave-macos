@@ -1988,6 +1988,19 @@ pub fn layout_grid_container(
                 // 1. Position at the top of the grid item (not below its height)
                 // 2. Resolve percentage heights against the grid item's actual height
                 let grid_item_height = child.dimensions.content.height;
+                // The grid item's own ratio inputs, read before the loop
+                // below takes a mutable borrow of its children (see the
+                // out-of-flow arm in Phase 9).
+                let item_style_height = child.style.height.clone();
+                let item_style_for_ratio = child.style.clone();
+                let item_pb_width = child.dimensions.padding.left
+                    + child.dimensions.padding.right
+                    + child.dimensions.border.left
+                    + child.dimensions.border.right;
+                let item_pb_height = child.dimensions.padding.top
+                    + child.dimensions.padding.bottom
+                    + child.dimensions.border.top
+                    + child.dimensions.border.bottom;
                 let grid_item_y = child.dimensions.content.y;
                 let grid_item_x = child.dimensions.content.x;
                 let grid_item_width = child.dimensions.content.width;
@@ -2037,16 +2050,64 @@ pub fn layout_grid_container(
                     if grandchild.position == crate::Position::Absolute
                         || grandchild.position == crate::Position::Fixed {
                         if grid_item_positioned {
+                            // The item's own `aspect-ratio` height, where it
+                            // has one. Phase 9 runs BEFORE the item's
+                            // `calculate_block_height` applies the ratio, so
+                            // `child.dimensions.content.height` is still the
+                            // pre-ratio number here — 32 on image-gallery's
+                            // four `.aspect-box` cards, every one of which
+                            // ends up 288/216/192/162 tall a moment later.
+                            // Handing that 32 over as the containing block
+                            // makes an `inset: 0` overlay stretch to 32 in a
+                            // 288px card: `.content` came out 256px short on
+                            // all four, and Chrome puts it at the full 288.
+                            //
+                            // css-sizing-4 §4 — a definite width plus a ratio
+                            // is a definite height. The width IS resolved by
+                            // now, so the number was available and only had
+                            // to be asked for.
+                            //
+                            // GROW-ONLY, and `height: auto` only, because that
+                            // is what Phase 9.5 does twenty lines below when it
+                            // repairs the item itself: content wins where it is
+                            // taller (a `4 / 1` item 400px wide holding a 300px
+                            // child is 300, not the ratio's 100). The overlay's
+                            // containing block has to be the height the item
+                            // actually ends up with — the two passes disagreeing
+                            // would just move the defect.
+                            let cb_height = if matches!(item_style_height, rustkit_css::Length::Auto)
+                            {
+                                match crate::aspect_ratio_content_height(
+                                    &item_style_for_ratio,
+                                    grid_item_width,
+                                    item_pb_width,
+                                    item_pb_height,
+                                ) {
+                                    Some(ar_h) => grid_item_height.max(ar_h),
+                                    None => grid_item_height,
+                                }
+                            } else {
+                                grid_item_height
+                            };
                             let item_cb = crate::Dimensions {
                                 content: crate::Rect::new(
                                     grid_item_x,
                                     grid_item_y,
                                     grid_item_width,
-                                    grid_item_height,
+                                    cb_height,
                                 ),
                                 ..Default::default()
                             };
                             grandchild.layout(&item_cb);
+                            // `item_cb` is this grandchild's REAL containing
+                            // block, which `layout` above cannot know: the
+                            // generic path has to assume it may have been
+                            // handed a static-position stand-in. The re-anchor
+                            // is where that is asserted, and it is what
+                            // re-justifies an inset-stretched flex line in the
+                            // used height instead of in the flow cursor
+                            // (image-gallery's `.aspect-box > .content`).
+                            grandchild.reanchor_absolute(&item_cb);
                         } else {
                             trace!("Phase 9: abs/fixed grandchild, static grid item — skip");
                         }
@@ -2143,7 +2204,7 @@ pub fn layout_grid_container(
                         let mut child_margins = crate::MarginCollapseContext::new();
                         let mut floats = crate::FloatContext::new();
                         grandchild
-                            .layout_block_children_with_collapse(&mut child_margins, &mut floats);
+                            .layout_block_children_with_collapse(&mut child_margins, &mut floats, None);
                     }
 
                     // Calculate height for percentage resolution
@@ -3356,6 +3417,11 @@ fn apply_align_self(
         Length::Auto => cell_height,
         Length::Px(h) => h,
         Length::Percent(p) => cell_height * p / 100.0,
+        // A `calc()` is a length, and `has_explicit_height` above already
+        // counts it as one — so it must resolve here too, against the same
+        // cell height the percentage arm uses. Left on the `_` arm it would
+        // be called explicit and then sized as if it were `auto`.
+        Length::Calc(_) => child.length_to_px(&child.style.height, cell_height),
         _ => cell_height,
     };
 
@@ -3395,6 +3461,132 @@ mod tests {
         ]);
 
         LayoutBox::new(BoxType::Block, style)
+    }
+
+
+    /// image-gallery's `.aspect-grid > .aspect-box > .content`: a
+    /// `position:absolute; inset:0` overlay inside a `position:relative`
+    /// grid item whose height comes from `aspect-ratio`.
+    ///
+    /// Phase 9 hands the overlay its containing block BEFORE the item's own
+    /// `calculate_block_height` applies the ratio, so the height it saw was
+    /// the pre-ratio content number. Measured on the corpus: `.content` 32
+    /// tall inside a 288px card, on all four cards, against Chrome's 288.
+    fn ratio_item_with_overlay(ratio: Option<f32>, height: Length, child_h: f32) -> LayoutBox {
+        let mut gs = ComputedStyle::new();
+        gs.display = Display::Grid;
+        gs.grid_template_columns = GridTemplate::from_sizes(vec![TrackSize::Px(288.0)]);
+        let mut grid = LayoutBox::new(BoxType::Block, gs);
+        grid.dimensions.content = crate::Rect::new(0.0, 0.0, 288.0, 0.0);
+
+        let mut is = ComputedStyle::new();
+        is.aspect_ratio = ratio;
+        is.height = height;
+        is.position = rustkit_css::Position::Relative;
+        let mut item = LayoutBox::with_position(BoxType::Block, is, crate::Position::Static);
+
+        // an in-flow child, so the item has a content height of its own
+        let mut fs = ComputedStyle::new();
+        fs.height = Length::Px(child_h);
+        item.children.push(LayoutBox::new(BoxType::Block, fs));
+
+        // `height: auto` (the default) — the overlay is sized by its insets.
+        let mut overlay =
+            LayoutBox::with_position(BoxType::Block, ComputedStyle::new(), crate::Position::Absolute);
+        overlay.set_offsets(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
+        item.children.push(overlay);
+
+        grid.children.push(item);
+        grid
+    }
+
+    fn overlay_height(mut grid: LayoutBox) -> f32 {
+        layout_grid_container(&mut grid, 288.0, 0.0);
+        let item = &grid.children[0];
+        item.children[1].dimensions.content.height
+    }
+
+    #[test]
+    fn an_inset_overlay_fills_a_grid_item_sized_by_its_aspect_ratio() {
+        // 288 wide, ratio 1/1 -> the item is 288 tall and the overlay fills it.
+        let h = overlay_height(ratio_item_with_overlay(Some(1.0), Length::Auto, 10.0));
+        assert!(
+            (h - 288.0).abs() < 0.5,
+            "the overlay fills the 288px ratio box, got {h}"
+        );
+    }
+
+    #[test]
+    fn a_taller_content_height_still_beats_the_ratio_for_the_overlay() {
+        // Phase 9.5 is grow-only and Chrome agrees: a `4 / 1` item 288 wide
+        // holding a 300px child is 300 tall, not the ratio's 72. The overlay's
+        // containing block must be the height the item actually takes, or the
+        // two passes disagree and the defect just moves.
+        let h = overlay_height(ratio_item_with_overlay(Some(4.0), Length::Auto, 300.0));
+        assert!(
+            (h - 300.0).abs() < 0.5,
+            "content taller than the ratio wins: expected 300, got {h}"
+        );
+    }
+
+    /// The other half of the same card, and the half that needed Phase 9 to
+    /// re-anchor: the overlay is the right SIZE (the test above) and its flex
+    /// line has to be justified in that size rather than in its own content.
+    ///
+    /// `LayoutBox::layout` cannot do this on its own, because on the plain
+    /// block path the box it is handed is the static-position stand-in — so
+    /// Phase 9 has to say "this one is real" by re-anchoring. Delete that call
+    /// and the caption goes back to the top edge of the card, which is
+    /// image-gallery's `.aspect-box > .content > span` at y=1086.65 against
+    /// Chrome's 1234.
+    ///
+    /// The overlay's items carry EXPLICIT heights so that step 11d never
+    /// fires: 11d's re-derivation must not be able to stand in for this.
+    #[test]
+    fn an_inset_overlay_justifies_its_flex_line_in_the_card_not_in_its_content() {
+        let mut grid = ratio_item_with_overlay(Some(1.0), Length::Auto, 10.0);
+        {
+            let overlay = &mut grid.children[0].children[1];
+            overlay.style.display = Display::Flex;
+            overlay.style.flex_direction = rustkit_css::FlexDirection::Column;
+            overlay.style.justify_content = rustkit_css::JustifyContent::Center;
+            for h in [30.0, 20.0] {
+                let mut item_style = ComputedStyle::new();
+                item_style.height = Length::Px(h);
+                overlay
+                    .children
+                    .push(LayoutBox::new(BoxType::Block, item_style));
+            }
+        }
+        layout_grid_container(&mut grid, 288.0, 0.0);
+
+        let overlay = &grid.children[0].children[1];
+        assert!(
+            (overlay.dimensions.content.height - 288.0).abs() < 0.5,
+            "the overlay fills the 288px card (the precondition), got {}",
+            overlay.dimensions.content.height
+        );
+        let lead = overlay.children[0].dimensions.content.y - overlay.dimensions.content.y;
+        assert!(
+            (lead - 119.0).abs() < 0.5,
+            "50 of content centred in 288 leaves 119 above, not {lead} — the line \
+             was justified in the overlay's own content"
+        );
+    }
+
+    #[test]
+    fn a_specified_item_height_keeps_the_overlay_off_the_ratio() {
+        // With `height` specified the ratio does not size the block axis, so
+        // the grid-assigned number stays the overlay's containing block.
+        let h = overlay_height(ratio_item_with_overlay(
+            Some(1.0),
+            Length::Px(120.0),
+            10.0,
+        ));
+        assert!(
+            (h - 120.0).abs() < 0.5,
+            "a specified 120px height wins over the 1/1 ratio, got {h}"
+        );
     }
 
     /// Intrinsic contributions must count padding expressed in ANY unit.
@@ -5809,6 +6001,28 @@ mod tests {
         let (y, h) = apply_align_self(&AlignSelf::Center, &AlignItems::Stretch, 20.0, 100.0, &layout_box);
         assert_eq!(y, 55.0, "align-self: center should center (20 + (100-30)/2)");
         assert_eq!(h, 30.0);
+    }
+
+    /// A `calc()` height is explicit, so `apply_align_self` must resolve it
+    /// rather than treat it as the cell height. Without the `Length::Calc`
+    /// arm the item is called explicit and then sized as if it were `auto` —
+    /// it fills the cell and centres at the cell's own origin.
+    #[test]
+    fn a_calc_height_grid_item_aligns_at_its_resolved_height() {
+        let mut style = ComputedStyle::new();
+        style.height = rustkit_css::parse_length("calc(100% - 40px)").expect("calc parses");
+        let layout_box = LayoutBox::new(BoxType::Block, style);
+
+        // Cell: y=20, height=100 -> the item is 60 tall, centred at 20+20.
+        let (y, h) = apply_align_self(
+            &AlignSelf::Center,
+            &AlignItems::Stretch,
+            20.0,
+            100.0,
+            &layout_box,
+        );
+        assert_eq!(h, 60.0, "100% of the 100px cell minus 40px");
+        assert_eq!(y, 40.0, "20 + (100 - 60) / 2");
     }
 
     #[test]
