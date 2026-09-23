@@ -11097,3 +11097,51 @@ skipped, because "no engine change" is a claim and `git diff` is the check.
   puts it first. That is the same failure mode the campaign's own metric is
   built against, arriving in a tool I wrote the same night — which is why the
   ledger carries a reason per row instead of a count per row.
+
+### Addendum — the metric was re-measured after all (run 35822237634, `macos-14`)
+
+Written above as "carried forward and NOT re-measured". That was true when I
+wrote it and stopped being true twenty minutes later: PR #211's own Parity Gate
+run is a full macOS lane, and a `pull_request` checkout tests the MERGE ref, not
+the branch. Verified rather than assumed — `refs/pull/211/merge` is
+`12b6e855`, and its `crates/`, `Cargo.toml` and `Cargo.lock` are
+**byte-identical to `origin/develop 011ffee`**; the only difference in the whole
+tree is my three instrument files. So the run measures **develop's engine**.
+
+```
+  N/26 finish-line-green                  2/26   (bg-pure, bg-solid)
+  measured                               26/26 on all four conditions
+    geometry                              5/26 green
+    paint                                 3/26 green
+    stability                            26/26 green
+    discrete                             26/26 green
+  Gate A geometry failures                 940
+  ratchet                          exit 2, holds · 10 tighten-eligible
+  Gate C mean raw                     15.5185%   (diagnostic only)
+```
+
+Per-case geometry failures sum to exactly 940, checked by adding them rather
+than trusting the header: settings 343 · about 155 · form-elements 91 ·
+flex-positioning 75 · form-controls 69 · article-typography 52 · card-grid 29 ·
+new_tab 27 · css-selectors 27 · sticky-scroll 21 · image-gallery 15 ·
+chrome_rustkit 7 · images-intrinsic 6 · gradient-backgrounds 5 · shelf 5 ·
+gradient-no-radius 4 · gradient-radius-only 4 · backgrounds 2 ·
+gpu-gradient-regression 1 · gradients 1 · rounded-corners 1 ·
+bg-pure/bg-solid/combinators/pseudo-classes/specificity 0.
+
+**Identical, case for case, to 09-18's run 35313335192** — which is what it
+should be on an engine nobody touched, and it is the first time this campaign
+has confirmed the carried-forward number instead of assuming it. `2/26` is a
+measurement tonight, not an inheritance.
+
+Two things this makes readable that the SwiftShader board could not:
+
+- **`settings` is 343 of 940 — 37% of the macOS geometry debt in one case**,
+  and the one PR that most directly addresses it (#205, the line-box strut
+  floor, settings 3.53 → 2.30) has been open and unmerged since 09-19. The
+  queue's largest single row is already fixed on a branch nobody has merged.
+- **`article-typography` is 52 on macOS against 97 on this seat.** The
+  `column-count` subtree is 9 of those failures on either board, because that
+  defect is font-independent — so it is **17% of that case on macOS** where the
+  SwiftShader board reads it as 9%. Tonight's root is bigger on the seat that
+  counts, which is the opposite of how the last four nights' candidates behaved.
