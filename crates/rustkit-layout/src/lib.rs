@@ -183,6 +183,158 @@ pub(crate) fn aspect_ratio_content_height(
     })
 }
 
+/// Intrinsic BORDER-box size of a form control: the bare-control calibration,
+/// or the control's content line composed with author padding/border. Block
+/// flow (`layout_form_control`) and flex items (`flex::get_intrinsic_*`) both
+/// size from here — the flex path carried its own older blobs (button = label
+/// + 24 wide, 1.5em + 12 tall, author padding ignored), so flex-positioning's
+/// `.btn { padding: 8px 16px }` row built 55.9x33 for Chrome's 63.9x34 and
+/// everything below it sat a pixel high.
+pub(crate) fn form_control_intrinsic_size(
+    style: &ComputedStyle,
+    control: &FormControlType,
+) -> (f32, f32) {
+    let font_size = match style.font_size {
+        Length::Px(px) => px,
+        _ => 16.0,
+    };
+
+    // Author padding + border COMPOSE with the control's content height
+    // (DIG-1, css-selectors heatmap 2026-07-11): the old blob formula
+    // font_size*1.5+8 pretended to be the whole border-box, so
+    // input{padding:8px; border:2px} measured 29px where Chrome builds
+    // 35 (content line 15, plus 16 padding, plus 4 border) — and
+    // every section below slid up by the deficit. When the author sets
+    // vertical padding/border, the content line composes with them; the
+    // blob stays for bare controls (UA-default look, form-controls case
+    // depends on it).
+    //
+    // n51: the unit closure resolved px and em only, so `padding: 1rem
+    // 1.5rem` — the idiom on every styled search box — read as NO author
+    // padding and the control fell to the bare 19px blob (new_tab's
+    // `#searchInput`: 19 for Chrome's 52, and everything below it 33px
+    // high). Resolve every absolute unit the way the rest of layout does.
+    let author_pb_v = {
+        let px = |l: &Length| match l {
+            Length::Percent(_) | Length::Auto => 0.0,
+            other => other.to_px(font_size, 16.0, 0.0),
+        };
+        px(&style.padding_top)
+            + px(&style.padding_bottom)
+            + px(&style.border_top_width)
+            + px(&style.border_bottom_width)
+    };
+    // The content line is the control font's `normal` line (n58): Arial is
+    // 15 at the UA 13.333px and 16 at 14px in Chrome; the old `font_size + 1`
+    // read 14.33 / 15, so every styled control was 0.7–1px short.
+    let single_line_box = |blob: f32| {
+        if author_pb_v > 0.0 {
+            normal_line_height(style, font_size) + author_pb_v
+        } else {
+            blob
+        }
+    };
+
+    // Bare-control border-box sizes are calibrated to Chrome CfT-148 at
+    // the UA control font (13.333px system-ui, PR #42): single-line
+    // input/button/select build a 19px border-box (UA border included),
+    // checkbox/radio 13x13, textarea 15px per row + 2px border, range
+    // 16x129, color 27x50 (form-controls t8 dig, 2026-07-17: the old
+    // blobs fs*1.5+8 / fs*1.5+12 / fs*1.2 measured 28/32/16 — +9/+13/+3
+    // on every bare control, cascading +63px of drift down the page).
+    // Scaled by font_size so author-sized controls keep proportion; at
+    // the UA font the scale is 1.0 and the match to Chrome is exact.
+    let ua_scale = font_size / (40.0 / 3.0);
+
+    // Calculate intrinsic dimensions based on control type
+    match control {
+        FormControlType::TextInput { input_type, .. } => match input_type.as_str() {
+            "range" => (129.0 * ua_scale, 16.0 * ua_scale),
+            "color" => (50.0 * ua_scale, 27.0 * ua_scale),
+            // Default text input: size=20 at the UA control font builds
+            // a 149px border-box in Chrome CfT-148 (n53 form-controls
+            // y-table: 149 on every bare text/email/password/number
+            // input; the old 12em blob said 160).
+            _ => (149.0 * ua_scale, single_line_box(19.0 * ua_scale)),
+        },
+        FormControlType::TextArea { rows, cols, .. } => {
+            // Textarea: cols × the monospace advance (0.6em) plus 18px
+            // of border + vertical scrollbar gutter — Chrome builds 178
+            // for cols=20 and 338 for cols=40 (n53).
+            let rows = (*rows).max(2) as f32;
+            let cols = (*cols).max(20) as f32;
+            (
+                font_size * 0.6 * cols + 18.0 * ua_scale,
+                (15.0 * rows + 2.0) * ua_scale,
+            )
+        }
+        FormControlType::Button { label, .. } => {
+            // Button: measured label width plus padding (was a
+            // chars-times-0.6em guess that oversized real labels ~40%).
+            // Height composes author padding/border like TextInput/Select
+            // (DIG-2): the css-selectors buttons (padding 8px 16px) build
+            // (fs+1)+16 = 31 in Chrome; the blob said 33. Width also
+            // composes when the author sets horizontal padding.
+            let label_width = measure_text_advanced(
+                label,
+                &style.font_family,
+                font_size,
+                style.font_weight,
+                style.font_style,
+            )
+            .width;
+            let px = |l: &Length| match l {
+                Length::Percent(_) | Length::Auto => 0.0,
+                other => other.to_px(font_size, 16.0, 0.0),
+            };
+            let author_pb_h = px(&style.padding_left)
+                + px(&style.padding_right)
+                + px(&style.border_left_width)
+                + px(&style.border_right_width);
+            let width = if author_pb_h > 0.0 {
+                label_width + author_pb_h
+            } else {
+                label_width + 24.0
+            };
+            (width, single_line_box(19.0 * ua_scale))
+        }
+        FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
+            // Fixed size for checkboxes and radios
+            (13.0 * ua_scale, 13.0 * ua_scale)
+        }
+        FormControlType::Select { size, options, .. } => {
+            // Chrome sizes a select to its WIDEST option (n53
+            // form-controls: listbox 39 = "Item 4" 37 + 2px border;
+            // dropdown 137 = "A longer option text" + 24px of border and
+            // arrow well, 60 = "Select" + 24). The old 10em blob built
+            // 133 for both.
+            let widest = options
+                .iter()
+                .map(|o| {
+                    measure_text_advanced(
+                        o,
+                        &style.font_family,
+                        font_size,
+                        style.font_weight,
+                        style.font_style,
+                    )
+                    .width
+                })
+                .fold(0.0_f32, f32::max);
+            if *size > 1 {
+                // Inline listbox: 16px per visible row + 2px border.
+                (
+                    widest + 2.0 * ua_scale,
+                    (16.0 * *size as f32 + 2.0) * ua_scale,
+                )
+            } else {
+                // Dropdown: widest option plus the arrow well.
+                (widest + 24.0 * ua_scale, single_line_box(19.0 * ua_scale))
+            }
+        }
+    }
+}
+
 /// Resolve a box's `line-height` to px, consulting font metrics for `normal`.
 pub fn resolve_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
     match style.line_height {
@@ -221,6 +373,18 @@ pub fn run_line_height(style: &ComputedStyle, font_size: f32, metrics: &TextMetr
         return base;
     }
     base.max(used_font_line_height(metrics))
+}
+
+/// Distance from a line's top to the baseline of a text run, as Blink seats it:
+/// ascent and descent are whole pixels (SkScalarRoundToScalar) and the leading
+/// above the text is FLOORED (`CalculateLeadingSpace`), the remainder going
+/// below. A 16px run with ascent 15.47 / descent 3.38 on a 27.2px line sits at
+/// floor((27.2 - 18) / 2) + 15 = 19, not 4.18 + 15.47 = 19.65: seated on the
+/// fractional sum, every line whose top lands below .35 painted one row low.
+/// Negative leading stays clamped to 0, as at the line-box sites.
+pub(crate) fn blink_baseline_offset(line_height: f32, ascent: f32, descent: f32) -> f32 {
+    let (ascent, descent) = (ascent.round(), descent.round());
+    ((line_height - (ascent + descent)) / 2.0).max(0.0).floor() + ascent
 }
 
 /// Convert a specified size on a replaced element to a CONTENT size.
@@ -2092,137 +2256,7 @@ impl LayoutBox {
             _ => 16.0,
         };
 
-        // Author padding + border COMPOSE with the control's content height
-        // (DIG-1, css-selectors heatmap 2026-07-11): the old blob formula
-        // font_size*1.5+8 pretended to be the whole border-box, so
-        // input{padding:8px; border:2px} measured 29px where Chrome builds
-        // 35 (content ~= font_size+1, plus 16 padding, plus 4 border) — and
-        // every section below slid up by the deficit. When the author sets
-        // vertical padding/border, the content line composes with them; the
-        // blob stays for bare controls (UA-default look, form-controls case
-        // depends on it).
-        //
-        // n51: the unit closure resolved px and em only, so `padding: 1rem
-        // 1.5rem` — the idiom on every styled search box — read as NO author
-        // padding and the control fell to the bare 19px blob (new_tab's
-        // `#searchInput`: 19 for Chrome's 52, and everything below it 33px
-        // high). Resolve every absolute unit the way the rest of layout does.
-        let author_pb_v = {
-            let px = |l: &Length| match l {
-                Length::Percent(_) | Length::Auto => 0.0,
-                other => other.to_px(font_size, 16.0, 0.0),
-            };
-            px(&self.style.padding_top)
-                + px(&self.style.padding_bottom)
-                + px(&self.style.border_top_width)
-                + px(&self.style.border_bottom_width)
-        };
-        let single_line_box = |blob: f32| {
-            if author_pb_v > 0.0 {
-                (font_size + 1.0) + author_pb_v
-            } else {
-                blob
-            }
-        };
-
-        // Bare-control border-box sizes are calibrated to Chrome CfT-148 at
-        // the UA control font (13.333px system-ui, PR #42): single-line
-        // input/button/select build a 19px border-box (UA border included),
-        // checkbox/radio 13x13, textarea 15px per row + 2px border, range
-        // 16x129, color 27x50 (form-controls t8 dig, 2026-07-17: the old
-        // blobs fs*1.5+8 / fs*1.5+12 / fs*1.2 measured 28/32/16 — +9/+13/+3
-        // on every bare control, cascading +63px of drift down the page).
-        // Scaled by font_size so author-sized controls keep proportion; at
-        // the UA font the scale is 1.0 and the match to Chrome is exact.
-        let ua_scale = font_size / (40.0 / 3.0);
-
-        // Calculate intrinsic dimensions based on control type
-        let (intrinsic_width, intrinsic_height) = match &control {
-            FormControlType::TextInput { input_type, .. } => match input_type.as_str() {
-                "range" => (129.0 * ua_scale, 16.0 * ua_scale),
-                "color" => (50.0 * ua_scale, 27.0 * ua_scale),
-                // Default text input: size=20 at the UA control font builds
-                // a 149px border-box in Chrome CfT-148 (n53 form-controls
-                // y-table: 149 on every bare text/email/password/number
-                // input; the old 12em blob said 160).
-                _ => (149.0 * ua_scale, single_line_box(19.0 * ua_scale)),
-            },
-            FormControlType::TextArea { rows, cols, .. } => {
-                // Textarea: cols × the monospace advance (0.6em) plus 18px
-                // of border + vertical scrollbar gutter — Chrome builds 178
-                // for cols=20 and 338 for cols=40 (n53).
-                let rows = (*rows).max(2) as f32;
-                let cols = (*cols).max(20) as f32;
-                (
-                    font_size * 0.6 * cols + 18.0 * ua_scale,
-                    (15.0 * rows + 2.0) * ua_scale,
-                )
-            }
-            FormControlType::Button { label, .. } => {
-                // Button: measured label width plus padding (was a
-                // chars-times-0.6em guess that oversized real labels ~40%).
-                // Height composes author padding/border like TextInput/Select
-                // (DIG-2): the css-selectors buttons (padding 8px 16px) build
-                // (fs+1)+16 = 31 in Chrome; the blob said 33. Width also
-                // composes when the author sets horizontal padding.
-                let label_width = measure_text_advanced(
-                    label,
-                    &self.style.font_family,
-                    font_size,
-                    self.style.font_weight,
-                    self.style.font_style,
-                )
-                .width;
-                let px = |l: &Length| match l {
-                    Length::Percent(_) | Length::Auto => 0.0,
-                    other => other.to_px(font_size, 16.0, 0.0),
-                };
-                let author_pb_h = px(&self.style.padding_left)
-                    + px(&self.style.padding_right)
-                    + px(&self.style.border_left_width)
-                    + px(&self.style.border_right_width);
-                let width = if author_pb_h > 0.0 {
-                    label_width + author_pb_h
-                } else {
-                    label_width + 24.0
-                };
-                (width, single_line_box(19.0 * ua_scale))
-            }
-            FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
-                // Fixed size for checkboxes and radios
-                (13.0 * ua_scale, 13.0 * ua_scale)
-            }
-            FormControlType::Select { size, options, .. } => {
-                // Chrome sizes a select to its WIDEST option (n53
-                // form-controls: listbox 39 = "Item 4" 37 + 2px border;
-                // dropdown 137 = "A longer option text" + 24px of border and
-                // arrow well, 60 = "Select" + 24). The old 10em blob built
-                // 133 for both.
-                let widest = options
-                    .iter()
-                    .map(|o| {
-                        measure_text_advanced(
-                            o,
-                            &self.style.font_family,
-                            font_size,
-                            self.style.font_weight,
-                            self.style.font_style,
-                        )
-                        .width
-                    })
-                    .fold(0.0_f32, f32::max);
-                if *size > 1 {
-                    // Inline listbox: 16px per visible row + 2px border.
-                    (
-                        widest + 2.0 * ua_scale,
-                        (16.0 * *size as f32 + 2.0) * ua_scale,
-                    )
-                } else {
-                    // Dropdown: widest option plus the arrow well.
-                    (widest + 24.0 * ua_scale, single_line_box(19.0 * ua_scale))
-                }
-            }
-        };
+        let (intrinsic_width, intrinsic_height) = form_control_intrinsic_size(&self.style, &control);
 
         // Override with explicit CSS dimensions if specified, but always fall back to intrinsic
         // if the explicit value resolves to zero (e.g., percent of zero-height container)
@@ -2496,6 +2530,31 @@ impl LayoutBox {
         (content, half_leading)
     }
 
+    /// Seat a non-replaced inline's rect on its content area, a half-leading
+    /// below the line top. Its direct TEXT children stay where they are: a
+    /// text box is the line-height-tall slot at the line top, and paint seats
+    /// the glyphs inside that slot from the run's own leading
+    /// (`blink_baseline_offset`). Translating them too applied the leading
+    /// twice — every `<span>`/`<a>`/`<strong>` on a line with leading painted
+    /// its text below its neighbours (article-typography `.meta`, 14.4px on a
+    /// 23.04px line: baseline 184 for Chrome's 181).
+    ///
+    /// Nested inlines (`<a><em>text</em></a>`) have no shift of their own — the
+    /// outermost one carries their rects — so the rule recurses: inline rects
+    /// move, text leaves at any inline depth stay, anything else (an atomic
+    /// inline) moves whole. Stopping at direct children left `span > strong`
+    /// text a full half-leading low (7px on a 16px/32px line).
+    fn shift_inline_content_area(&mut self, half_leading: f32) {
+        self.dimensions.content.y += half_leading;
+        for sub in &mut self.children {
+            match sub.box_type {
+                BoxType::Text(_) => {}
+                BoxType::Inline => sub.shift_inline_content_area(half_leading),
+                _ => crate::flex::translate_subtree(sub, 0.0, half_leading),
+            }
+        }
+    }
+
     /// Above/below-baseline extents of a line of text in `s`, half-leading
     /// included — the strut when `s` is the container's style (CSS2 §10.8.1).
     fn text_baseline_extents(s: &ComputedStyle) -> (f32, f32) {
@@ -2542,7 +2601,7 @@ impl LayoutBox {
     /// box top to the lowest box bottom once every member sits on the
     /// baseline, the strut included). Mirrors apply_vertical_align's
     /// placement arms. None for members the align pass leaves at the line
-    /// top: non-atomic inline boxes, and `vertical-align: top|bottom` boxes,
+    /// top: `vertical-align: top|bottom` boxes,
     /// which hang from the line edge and swallow the strut instead of
     /// stacking on its descent; `middle` keeps the loop's own accounting
     /// (it centres on the container's x-height, not on this box's font).
@@ -2556,7 +2615,10 @@ impl LayoutBox {
         ) {
             return None;
         }
-        if matches!(self.box_type, BoxType::Text(_)) {
+        // A non-atomic inline sits on the baseline as a line of text in its
+        // own font (its rect is only the content area; the line sees the
+        // line-height split).
+        if matches!(self.box_type, BoxType::Text(_) | BoxType::Inline) {
             return Some(Self::text_line_box_extents(&self.style));
         }
         let h = self.dimensions.margin_box().height;
@@ -3561,10 +3623,7 @@ impl LayoutBox {
                 if matches!(child.box_type, BoxType::Inline) {
                     let (_, half_leading) = child.inline_content_area();
                     if half_leading > 0.0 {
-                        child.dimensions.content.y += half_leading;
-                        for sub in &mut child.children {
-                            crate::flex::translate_subtree(sub, 0.0, half_leading);
-                        }
+                        child.shift_inline_content_area(half_leading);
                     }
                     line_height = line_height.max(child.get_line_height());
                     // The inline's text wrapped onto several line boxes: the
@@ -3777,7 +3836,11 @@ impl LayoutBox {
         // Above/below-baseline extents for a text-carrying style, matching
         // the paint emission: glyph top = content_y + half_leading,
         // baseline = glyph top + ascent.
-        let text_extents = Self::text_baseline_extents;
+        //
+        // Whole-pixel, as paint seats a run (`blink_baseline_offset`) and as
+        // the line box is sized: on the fractional split a member dropped to
+        // a neighbour's baseline landed between rows and painted one off.
+        let text_extents = Self::text_line_box_extents;
 
         // A member's top on THIS line. A mid-line split run reaches the
         // recorded line only through its LAST visual line (the open one its
@@ -3788,12 +3851,39 @@ impl LayoutBox {
         let member_top = |c: &LayoutBox| -> f32 {
             let d = &c.dimensions;
             let box_top = d.content.y - d.margin.top - d.border.top - d.padding.top;
+            // A non-atomic inline's rect is its content area, a half-leading
+            // below the line slot its text sits in; the slot is the member.
+            // One whose text wrapped reaches this line through its last line
+            // box, like a split run.
+            if matches!(c.box_type, BoxType::Inline) {
+                let slot_top = box_top - c.inline_content_area().1;
+                return match Self::inline_wrapped_tail(c, 0.0) {
+                    Some((n, _, lh)) => slot_top + (n as f32 - 1.0) * lh,
+                    None => slot_top,
+                };
+            }
             match (&c.text_flow_first_offset, &c.text_lines) {
                 (Some(_), Some(tls)) if tls.len() > 1 => {
                     box_top + (tls.len() as f32 - 1.0) * c.get_line_height()
                 }
                 _ => box_top,
             }
+        };
+        // An inline-block's inner baseline in whole pixels, exactly as
+        // line_member_baseline_extents sizes the line from it.
+        let atomic_above = |above: f32| (above + 0.01).floor();
+        // A non-atomic inline the pass can seat: baseline-aligned, all on one
+        // line. `top|bottom|middle` inlines and wrapped ones stay put
+        // (ledgered) but still count toward the line top.
+        let seats_as_text = |c: &LayoutBox| -> bool {
+            matches!(c.box_type, BoxType::Inline)
+                && !matches!(
+                    c.style.vertical_align,
+                    rustkit_css::VerticalAlign::Top
+                        | rustkit_css::VerticalAlign::Bottom
+                        | rustkit_css::VerticalAlign::Middle
+                )
+                && Self::inline_wrapped_tail(c, 0.0).is_none()
         };
         let line_top = members
             .iter()
@@ -3810,7 +3900,7 @@ impl LayoutBox {
         let x_height = fs * 0.5;
         for &i in &members {
             let c = &children[i];
-            let above = if matches!(c.box_type, BoxType::Text(_)) {
+            let above = if matches!(c.box_type, BoxType::Text(_)) || seats_as_text(c) {
                 text_extents(&c.style).0
             } else if matches!(c.box_type, BoxType::FormControl(_)) && !c.baseline_is_bottom_edge()
             {
@@ -3830,11 +3920,11 @@ impl LayoutBox {
                 // the line top, 5px above Chrome; a wrapped label hung its
                 // row off its second line.
                 match c.inline_block_baseline_y() {
-                    Some(b) => b - member_top(c),
+                    Some(b) => atomic_above(b - member_top(c)),
                     None => continue,
                 }
             } else {
-                continue; // non-atomic inline boxes stay top-aligned (later slice)
+                continue;
             };
             ascent = ascent.max(above);
         }
@@ -3844,7 +3934,11 @@ impl LayoutBox {
         // own extent already defines the ascent.
         for &i in &members {
             let c = &mut children[i];
-            let target_top = if matches!(c.box_type, BoxType::Text(_)) {
+            // A small-font `<span>` beside body text sat at the line top —
+            // its baseline a few px above its neighbours' (n54 settings: no
+            // on-row text at all). Its slot drops like a text run's; the
+            // rect and the text inside move together.
+            let target_top = if matches!(c.box_type, BoxType::Text(_)) || seats_as_text(c) {
                 baseline_y - text_extents(&c.style).0
             } else if matches!(c.box_type, BoxType::FormControl(_)) && !c.baseline_is_bottom_edge()
             {
@@ -3860,7 +3954,7 @@ impl LayoutBox {
                 }
             } else if c.style.display.is_atomic_inline() {
                 match c.inline_block_baseline_y() {
-                    Some(b) => baseline_y - (b - member_top(c)),
+                    Some(b) => baseline_y - atomic_above(b - member_top(c)),
                     None => continue,
                 }
             } else {
@@ -4280,10 +4374,7 @@ impl LayoutBox {
                 if matches!(child.box_type, BoxType::Inline) {
                     let (_, half_leading) = child.inline_content_area();
                     if half_leading > 0.0 {
-                        child.dimensions.content.y += half_leading;
-                        for sub in &mut child.children {
-                            crate::flex::translate_subtree(sub, 0.0, half_leading);
-                        }
+                        child.shift_inline_content_area(half_leading);
                     }
                     line_height = line_height.max(child.get_line_height());
                     // The inline's text wrapped onto several line boxes: the
@@ -6537,11 +6628,11 @@ impl DisplayList {
             );
             let line_height = run_line_height(style, font_size, &metrics);
 
-            // Content height is ascent + descent (the actual rendered text height)
-            let content_height = metrics.ascent + metrics.descent;
-
-            // Half-leading is the space above (and below) the text content
-            let half_leading = ((line_height - content_height) / 2.0).max(0.0);
+            // Offset from a line's top to the y the text command carries.
+            // Paint seats the baseline at round(y + ascent), so this is the
+            // Blink seat minus the fractional ascent (see blink_baseline_offset).
+            let half_leading =
+                blink_baseline_offset(line_height, metrics.ascent, metrics.descent) - metrics.ascent;
 
             // Build the list of lines to emit: wrapped text boxes carry
             // per-line fragments (see LayoutBox::text_lines); single-run
@@ -7224,6 +7315,161 @@ pub fn measure_text(text: &str, _font_family: &str, font_size: f32) -> text::Tex
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_styled_button_composes_its_font_line_with_author_padding() {
+        // flex-positioning `.btn { padding: 8px 16px; border: none; font-size:
+        // 14px }`: Chrome builds label + 32 wide and 16 + 16 = 32 tall (the
+        // control font's normal line, not font_size + 1), and the flex path
+        // must size it from the same function as block flow.
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(14.0);
+        style.padding_top = Length::Px(8.0);
+        style.padding_bottom = Length::Px(8.0);
+        style.padding_left = Length::Px(16.0);
+        style.padding_right = Length::Px(16.0);
+        let control = FormControlType::Button {
+            label: "Save".to_string(),
+            button_type: "button".to_string(),
+        };
+        let (w, h) = form_control_intrinsic_size(&style, &control);
+        let label = measure_text_advanced(
+            "Save",
+            &style.font_family,
+            14.0,
+            style.font_weight,
+            style.font_style,
+        )
+        .width;
+        assert_eq!(w, label + 32.0);
+        assert_eq!(h, normal_line_height(&style, 14.0) + 16.0);
+        assert_eq!(h.fract(), 0.0, "a normal line is whole pixels, got {h}");
+    }
+
+    #[test]
+    fn test_baseline_seat_floors_the_leading_above_whole_pixel_metrics() {
+        // about's `.card p`: 16px system font (ascent 15.47, descent 3.38) on
+        // a 27.2px line. Chrome's ink baseline is line top + 19 on all three
+        // paragraphs above the fold (tops 430.0 / 469.19 / 535.56 -> rows
+        // 449 / 488 / 555); the fractional seat 4.18 + 15.47 put the first
+        // two one row low.
+        let seat = blink_baseline_offset(27.2, 15.46875, 3.375);
+        assert_eq!(seat, 19.0);
+        assert_eq!((430.0_f32 + seat).round(), 449.0);
+        assert_eq!((469.1875_f32 + seat).round(), 488.0);
+        assert_eq!((535.5625_f32 + seat).round(), 555.0);
+    }
+
+    #[test]
+    fn test_inline_content_area_shift_leaves_text_in_its_line_slot() {
+        // `<span><strong>HxHx</strong></span>` on a 16px/32px line: both
+        // inline rects sit a half-leading (7) below the line top, as in Chrome
+        // (147 for a line at 140); the text leaf stays at the line top, where
+        // paint seats it from the run's own leading. Translating it as well
+        // painted the word 7px under the rest of the line.
+        let style = ComputedStyle::new();
+        let mut text = LayoutBox::new(BoxType::Text("HxHx".to_string()), style.clone());
+        text.dimensions.content.y = 140.0;
+        let mut strong = LayoutBox::new(BoxType::Inline, style.clone());
+        strong.dimensions.content.y = 140.0;
+        strong.children.push(text);
+        let mut span = LayoutBox::new(BoxType::Inline, style);
+        span.dimensions.content.y = 140.0;
+        span.children.push(strong);
+
+        span.shift_inline_content_area(7.0);
+
+        assert_eq!(span.dimensions.content.y, 147.0);
+        assert_eq!(span.children[0].dimensions.content.y, 147.0);
+        assert_eq!(span.children[0].children[0].dimensions.content.y, 140.0);
+    }
+
+    #[test]
+    fn test_small_font_inline_drops_to_the_line_baseline() {
+        // `<p>HxHx <span class="small">HxHx</span></p>`, 16px/32px Arial with
+        // an 11px span: Chrome seats the span's content area at line top + 11
+        // (repro inline-baseline-drop.html: p at 20, span rect at 31) — its
+        // slot one pixel below the line top, so both baselines share a row.
+        // The align pass left every non-atomic inline at the line top.
+        let mut body = ComputedStyle::new();
+        body.font_size = Length::Px(16.0);
+        body.line_height = rustkit_css::LineHeight::Px(32.0);
+        let mut small = body.clone();
+        small.font_size = Length::Px(11.0);
+
+        let mut text = LayoutBox::new(BoxType::Text("HxHx ".to_string()), body.clone());
+        text.dimensions.content.y = 100.0;
+        text.dimensions.content.height = 32.0;
+        let mut inner = LayoutBox::new(BoxType::Text("HxHx".to_string()), small.clone());
+        inner.dimensions.content.y = 100.0;
+        inner.dimensions.content.height = 32.0;
+        let mut span = LayoutBox::new(BoxType::Inline, small.clone());
+        span.dimensions.content.y = 100.0;
+        span.children.push(inner);
+        let (_, half_leading) = span.inline_content_area();
+        span.shift_inline_content_area(half_leading);
+
+        let mut line = vec![text, span];
+        LayoutBox::apply_vertical_align(&mut line, &body);
+
+        let drop = LayoutBox::text_line_box_extents(&body).0
+            - LayoutBox::text_line_box_extents(&small).0;
+        assert!(drop > 0.0, "the 16px strut sits above an 11px run, got {drop}");
+        assert_eq!(drop.fract(), 0.0, "whole-pixel seats, got {drop}");
+        assert_eq!(line[0].dimensions.content.y, 100.0, "the strut-font text does not move");
+        assert_eq!(line[1].children[0].dimensions.content.y, 100.0 + drop);
+        assert_eq!(line[1].dimensions.content.y, 100.0 + half_leading + drop);
+    }
+
+    #[test]
+    fn test_line_of_only_small_inlines_keeps_its_line_top() {
+        // A line whose only member is an inline: its rect sits a half-leading
+        // below the slot, and reading the rect as the line top would push the
+        // baseline — and the span — down by that half-leading again.
+        let mut body = ComputedStyle::new();
+        body.font_size = Length::Px(16.0);
+        body.line_height = rustkit_css::LineHeight::Px(32.0);
+
+        let mut inner = LayoutBox::new(BoxType::Text("HxHx".to_string()), body.clone());
+        inner.dimensions.content.y = 100.0;
+        let mut span = LayoutBox::new(BoxType::Inline, body.clone());
+        span.dimensions.content.y = 100.0;
+        span.children.push(inner);
+        let (_, half_leading) = span.inline_content_area();
+        span.shift_inline_content_area(half_leading);
+
+        let mut line = vec![span];
+        LayoutBox::apply_vertical_align(&mut line, &body);
+
+        assert_eq!(line[0].children[0].dimensions.content.y, 100.0);
+        assert_eq!(line[0].dimensions.content.y, 100.0 + half_leading);
+    }
+
+    #[test]
+    fn test_inline_member_feeds_the_line_box_extents() {
+        // The same line is 33px in Chrome, not 32: the small span's slot hangs
+        // 12 below a baseline the strut puts 21 down.
+        let mut body = ComputedStyle::new();
+        body.font_size = Length::Px(16.0);
+        body.line_height = rustkit_css::LineHeight::Px(32.0);
+        let mut small = body.clone();
+        small.font_size = Length::Px(11.0);
+        let span = LayoutBox::new(BoxType::Inline, small.clone());
+        assert_eq!(
+            span.line_member_baseline_extents(),
+            Some(LayoutBox::text_line_box_extents(&small))
+        );
+    }
+
+    #[test]
+    fn test_baseline_seat_without_leading_is_the_rounded_ascent() {
+        // `normal` lines (no leading) already agreed with Chrome: the logo
+        // (64px, 61.875 / 13.5 on a 76px line) and the 14px badge.
+        assert_eq!(blink_baseline_offset(76.0, 61.875, 13.5), 62.0);
+        assert_eq!(blink_baseline_offset(17.0, 13.535156, 2.953125), 14.0);
+        // Negative leading stays clamped, as at the line-box sites.
+        assert_eq!(blink_baseline_offset(16.0, 15.46875, 3.375), 15.0);
+    }
 
     #[test]
     fn test_oversized_gradient_paint_is_clipped_to_its_box() {
