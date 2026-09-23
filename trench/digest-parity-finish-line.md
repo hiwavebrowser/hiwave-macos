@@ -11145,3 +11145,15 @@ Two things this makes readable that the SwiftShader board could not:
   defect is font-independent — so it is **17% of that case on macOS** where the
   SwiftShader board reads it as 9%. Tonight's root is bigger on the seat that
   counts, which is the opposite of how the last four nights' candidates behaved.
+
+### Addendum — #211 merged (12:48 UTC)
+
+`develop` is now `47c7be8`. The census, its ledger and its guard are on the
+mainline and run on every PR. One thing to expect rather than be surprised by:
+on `develop`'s engine the ledger's `text-overflow` row reads **TIGHTEN-ELIGIBLE**
+and the run still exits 0 — that is the ratchet behaving as designed, not a
+stale entry to chase. It comes out of the file the next time someone re-seeds.
+
+`develop` moved for the first time since 09-18, and the six-hour-old question
+stands unchanged: #205, #206, #207, #209 and #210 are still open, and #209 is
+still what the queue is waiting on.
