@@ -11329,6 +11329,37 @@ mod tests {
     }
 
     #[test]
+    fn dashed_border_matches_blinks_dash_gap_selection() {
+        // backgrounds test 3: 10px dashed on a 200x100 border box. Chrome:
+        // top side 7 dashes of 20 with 10px gaps (7*20 + 6*10 = 200), left
+        // side 4 dashes of 20 with gaps of 20/3.
+        use rustkit_css::BorderStyle::*;
+        assert_eq!(border_dash_pattern(Dashed, 10.0, 200.0), Some((20.0, 10.0)));
+        let (dash, gap) = border_dash_pattern(Dashed, 10.0, 100.0).unwrap();
+        assert_eq!(dash, 20.0);
+        assert!((gap - 20.0 / 3.0).abs() < 1e-4, "gap {}", gap);
+        assert_eq!(border_dash_pattern(Solid, 10.0, 200.0), None);
+        assert_eq!(border_dash_pattern(Dashed, 10.0, 40.0), None, "too short: solid");
+
+        let mut style = ComputedStyle::new();
+        style.border_top_style = Dashed;
+        style.border_top_color = Color::from_rgb(51, 51, 51);
+        let mut b = LayoutBox::new(BoxType::Block, style);
+        b.dimensions.content = Rect::new(10.0, 10.0, 180.0, 80.0);
+        b.dimensions.border = EdgeSizes { top: 10.0, right: 0.0, bottom: 0.0, left: 10.0 };
+        let list = DisplayList::build(&b);
+        let top_dashes = list
+            .commands
+            .iter()
+            .filter(|c| {
+                matches!(c, DisplayCommand::SolidColor(_, r)
+                    if r.y == 0.0 && r.height == 10.0 && r.width == 20.0)
+            })
+            .count();
+        assert_eq!(top_dashes, 7);
+    }
+
+    #[test]
     fn test_float_context() {
         let mut ctx = FloatContext::new();
 
@@ -12454,37 +12485,6 @@ mod tests {
         let display_list = DisplayList::build(&layout_box);
 
         assert!(!display_list.commands.is_empty());
-    }
-
-    #[test]
-    fn dashed_border_matches_blinks_dash_gap_selection() {
-        // backgrounds test 3: 10px dashed on a 200x100 border box. Chrome:
-        // top side 7 dashes of 20 with 10px gaps (7*20 + 6*10 = 200), left
-        // side 4 dashes of 20 with gaps of 20/3.
-        use rustkit_css::BorderStyle::*;
-        assert_eq!(border_dash_pattern(Dashed, 10.0, 200.0), Some((20.0, 10.0)));
-        let (dash, gap) = border_dash_pattern(Dashed, 10.0, 100.0).unwrap();
-        assert_eq!(dash, 20.0);
-        assert!((gap - 20.0 / 3.0).abs() < 1e-4, "gap {}", gap);
-        assert_eq!(border_dash_pattern(Solid, 10.0, 200.0), None);
-        assert_eq!(border_dash_pattern(Dashed, 10.0, 40.0), None, "too short: solid");
-
-        let mut style = ComputedStyle::new();
-        style.border_top_style = Dashed;
-        style.border_top_color = Color::from_rgb(51, 51, 51);
-        let mut b = LayoutBox::new(BoxType::Block, style);
-        b.dimensions.content = Rect::new(10.0, 10.0, 180.0, 80.0);
-        b.dimensions.border = EdgeSizes { top: 10.0, right: 0.0, bottom: 0.0, left: 10.0 };
-        let list = DisplayList::build(&b);
-        let top_dashes = list
-            .commands
-            .iter()
-            .filter(|c| {
-                matches!(c, DisplayCommand::SolidColor(_, r)
-                    if r.y == 0.0 && r.height == 10.0 && r.width == 20.0)
-            })
-            .count();
-        assert_eq!(top_dashes, 7);
     }
 
     #[test]
