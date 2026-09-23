@@ -11157,3 +11157,42 @@ stale entry to chase. It comes out of the file the next time someone re-seeds.
 `develop` moved for the first time since 09-18, and the six-hour-old question
 stands unchanged: #205, #206, #207, #209 and #210 are still open, and #209 is
 still what the queue is waiting on.
+
+### Addendum — #209 MERGED (2026-09-23 18:45 UTC), and what `develop` now is
+
+`develop 90262c9`. The strand is closed: the six branches are on `develop`,
+27 commits, and the merge took them **whole** — the merge commit's diff against
+its first parent is +3090 / −97 across the same four files, i.e. bit-for-bit the
+PR's own diffstat, so nothing was lost or silently re-resolved on the way in.
+
+**`develop` is no longer the tree #209 was measured against.** Three other PRs
+landed ahead of it in the same window — #211 (declaration census), #205
+(line-box strut floor) and #207 (inline baseline drop), both of the latter from
+the text lane. So the base moved under the receipt, and the combined tip is
+something no board had seen. Measured here rather than assumed:
+
+```
+                        011ffee (the #209 baseline)   90262c9 (develop now)
+  Gate A failures                        2593                  2586
+  Gate A green / joins                 3/26 · 16             3/26 · 16
+  Gate B paint-green                     1/26                  1/26
+  Gate B discrete / examined            0 / 266               0 / 273
+  conjunction (hand-ANDed)               1/26                  1/26
+```
+
+The totals look like #209's alone and are not: per (case, selector, axis) the
+composition is **fixed 34 · newly failing 27 · improved 408 · worsened 279 ·
+unchanged 1888**, against #209's own 7 · 0 · 7 · 0. `settings` gives back
+5525px of magnitude while its failure COUNT rises 408 → 433; `form-controls`
+96 → 80; `article-typography` holds its count and gains 153px. Gate B moved on
+22 of 26 cases, the largest being `shelf` −0.83pp.
+
+**Almost every worsened row is text**, and they are `article-typography` line
+positions — the class #205 and #207 own. **This seat has no font backend, so it
+cannot adjudicate them**, and reporting "develop regressed" from here would be
+the overclaim this campaign exists to prevent. Their own macOS receipts are on
+their PRs; the macOS lane is the arbiter. Recorded, not judged.
+
+What this means for the next night: **take a fresh board off `develop 90262c9`
+before choosing a unit.** The pre-merge boards in this digest are now history,
+and the queue's geometry rows have moved under all four merges at once.
