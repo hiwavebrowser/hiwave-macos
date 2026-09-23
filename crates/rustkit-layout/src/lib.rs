@@ -6229,6 +6229,17 @@ impl DisplayList {
 
     /// Render a layout box's own content (shadows, background, borders, text, images).
     fn render_box_content(&mut self, layout_box: &LayoutBox) {
+        // A text run is not an element (CSS 2.1 §14.2: backgrounds, borders
+        // and shadows belong to elements), so it paints glyphs only. Its
+        // style can still carry box decorations: the engine copies
+        // `background_gradient` onto every text child for gradient text,
+        // and a pseudo-element's text child clones the whole pseudo style.
+        // Painting them repainted the parent's gradient, rescaled to the
+        // run's own rect (image-gallery: a gradient tile behind every emoji).
+        if matches!(layout_box.box_type, BoxType::Text(_)) {
+            self.render_text(layout_box);
+            return;
+        }
         // Box shadows (outer) are drawn first, behind the element
         self.render_box_shadows(layout_box);
         // Then background
@@ -12406,6 +12417,28 @@ mod tests {
         let display_list = DisplayList::build(&layout_box);
 
         assert!(!display_list.commands.is_empty());
+    }
+
+    #[test]
+    fn text_run_paints_no_background_of_its_own() {
+        // The engine copies box decorations onto text children (the gradient
+        // for gradient text; a pseudo-element's whole style). Only the
+        // element paints them.
+        let mut text_style = ComputedStyle::new();
+        text_style.background_color = Color::from_rgb(255, 0, 0);
+        let mut text = LayoutBox::new(BoxType::Text("🌆".to_string()), text_style);
+        text.dimensions.content = Rect::new(10.0, 10.0, 48.0, 63.0);
+        let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        parent.dimensions.content = Rect::new(0.0, 0.0, 200.0, 100.0);
+        parent.children.push(text);
+        let display_list = DisplayList::build(&parent);
+        let fills: Vec<String> = display_list
+            .commands
+            .iter()
+            .map(|c| format!("{:?}", c))
+            .filter(|c| c.starts_with("SolidColor") || c.starts_with("RoundedRect"))
+            .collect();
+        assert!(fills.is_empty(), "text run painted a box fill: {:?}", fills);
     }
 
     #[test]
