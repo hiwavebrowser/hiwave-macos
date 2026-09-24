@@ -3788,14 +3788,16 @@ impl Engine {
 
         for stylesheet in stylesheets {
             for rule in &stylesheet.rules {
-                if self.selector_matches(
-                    &rule.selector,
-                    tag_name,
-                    attributes,
-                    ancestors,
-                    siblings_before,
-                    sib,
-                ) {
+                if self.rule_may_match(&rule.selector, tag_name, attributes)
+                    && self.selector_matches(
+                        &rule.selector,
+                        tag_name,
+                        attributes,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                    )
+                {
                     let specificity = self.selector_specificity(&rule.selector);
                     matching_rules.push((rule, specificity, rule_index));
                 }
@@ -5993,6 +5995,144 @@ impl Engine {
     /// `siblings_before` is a list of (tag_name, classes, id) tuples for preceding siblings.
     /// `sib` carries the element's position among its siblings (see
     /// [`SiblingContext`]).
+    /// Cheap necessary condition for `selector_matches`: can this selector's
+    /// SUBJECT (the last compound of any list member) possibly be this
+    /// element? `false` means `selector_matches` would return false too, so
+    /// the cascade can skip the full matcher.
+    ///
+    /// Why it exists: the cascade tests every rule against every element,
+    /// and `selector_matches` re-validates, re-splits and re-tokenizes the
+    /// selector string on each call. Wikipedia (~3k rules x ~4k elements)
+    /// spent 33-41s per style pass there, so every real site with a real
+    /// stylesheet failed the 30s load budget on the real-site board.
+    ///
+    /// The key is derived with the matcher's OWN validity check, comma split,
+    /// pseudo-element guard and tokenizer, and only from constraints
+    /// `simple_selector_matches_with_pseudo` enforces unconditionally on the
+    /// subject (its id, its leading class, its tag), so it can never reject
+    /// a rule the matcher would accept. Keys are cached per selector string.
+    fn rule_may_match(
+        &self,
+        selector: &str,
+        tag_name: &str,
+        attributes: &HashMap<String, String>,
+    ) -> bool {
+        /// One list member's subject requirements; `None` fields are
+        /// unconstrained.
+        #[derive(Default)]
+        struct SubjectKey {
+            id: Option<String>,
+            tag: Option<String>,
+            class: Option<String>,
+        }
+
+        thread_local! {
+            static KEYS: std::cell::RefCell<HashMap<String, Rc<Vec<SubjectKey>>>> =
+                std::cell::RefCell::new(HashMap::new());
+        }
+
+        // Mirrors the per-branch requirements of
+        // simple_selector_matches_with_pseudo for the subject compound.
+        fn key_for_compound(compound: &str) -> SubjectKey {
+            if compound == "*" || compound == ":root" {
+                return SubjectKey::default();
+            }
+            if let Some(id) = compound.strip_prefix('#') {
+                // The matcher compares the WHOLE remainder to the id.
+                return SubjectKey {
+                    id: Some(id.to_string()),
+                    ..Default::default()
+                };
+            }
+            let stop = |c: char| c == '.' || c == '#' || c == ':' || c == '[';
+            if compound.starts_with('.')
+                && !compound.contains(|c| c == '#' || c == '[' || c == ':')
+            {
+                // Every listed class is required; the first one suffices.
+                return SubjectKey {
+                    class: compound[1..]
+                        .split('.')
+                        .find(|s| !s.is_empty())
+                        .map(str::to_string),
+                    ..Default::default()
+                };
+            }
+            let tag_end = compound.find(stop).unwrap_or(compound.len());
+            let tag_part = &compound[..tag_end];
+            let rest = &compound[tag_end..];
+            let class = rest.strip_prefix('.').map(|r| {
+                let end = r.find(stop).unwrap_or(r.len());
+                r[..end].to_string()
+            });
+            SubjectKey {
+                id: None,
+                tag: (!tag_part.is_empty()).then(|| tag_part.to_ascii_lowercase()),
+                class,
+            }
+        }
+
+        fn keys_for(engine: &Engine, selector: &str, out: &mut Vec<SubjectKey>) {
+            let selector = selector.trim();
+            if !Engine::selector_list_is_valid(selector) {
+                return;
+            }
+            if selector.contains(',') {
+                let members = Engine::split_top_level_commas(selector);
+                if members.len() != 1 || members[0] != selector {
+                    for m in members {
+                        keys_for(engine, m, out);
+                    }
+                    return;
+                }
+            }
+            if selector.contains("::")
+                || selector.ends_with(":before")
+                || selector.ends_with(":after")
+                || selector.contains(":before ")
+                || selector.contains(":after ")
+            {
+                return;
+            }
+            let tokens = engine.tokenize_selector(selector);
+            match tokens.last() {
+                Some((compound, combinator)) if combinator.is_empty() => {
+                    out.push(key_for_compound(compound))
+                }
+                _ => {}
+            }
+        }
+
+        let keys = KEYS.with(|cache| {
+            if let Some(k) = cache.borrow().get(selector) {
+                return k.clone();
+            }
+            let mut v = Vec::new();
+            keys_for(self, selector, &mut v);
+            let v = Rc::new(v);
+            let mut cache = cache.borrow_mut();
+            // Selectors are page-controlled; keep a runaway page from
+            // growing this without bound.
+            if cache.len() > 100_000 {
+                cache.clear();
+            }
+            cache.insert(selector.to_string(), v.clone());
+            v
+        });
+
+        keys.iter().any(|k| {
+            k.id.as_deref()
+                .map_or(true, |id| attributes.get("id").map(String::as_str) == Some(id))
+                && k.tag
+                    .as_deref()
+                    .map_or(true, |t| t.eq_ignore_ascii_case(tag_name))
+                && k.class.as_deref().map_or(true, |c| {
+                    attributes
+                        .get("class")
+                        .is_some_and(|cl| cl.split_whitespace().any(|x| x == c))
+                })
+        })
+    }
+
     fn selector_matches(
         &self,
         selector: &str,
@@ -6002,6 +6142,8 @@ impl Engine {
         siblings_before: &[(String, Vec<String>, Option<String>)],
         sib: SiblingContext,
     ) -> bool {
+        #[cfg(test)]
+        FULL_SELECTOR_MATCHES.with(|n| n.set(n.get() + 1));
         let selector = selector.trim();
 
         // Selectors 4 §3.9: a selector list containing an invalid selector is
@@ -14701,5 +14843,109 @@ mod visual_rect_tests {
             "the bound stays centred on the box's centre (150, 120): expected \
              (100.50, 70.50), got ({x}, {y})"
         );
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times the full selector matcher ran on this thread.
+    static FULL_SELECTOR_MATCHES: Cell<u64> = const { Cell::new(0) };
+}
+
+// Real Engine (Compositor wants a device) — macOS only, like
+// element_identity_tests.
+#[cfg(all(test, target_os = "macos"))]
+mod rule_prefilter_tests {
+    use super::*;
+
+    fn attrs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn cascade_skips_the_full_matcher_for_rules_whose_subject_cannot_match() {
+        // A real-site stylesheet is thousands of class rules; any one element
+        // matches a handful. Running the string matcher on every pair was
+        // 33-41s per style pass on Wikipedia (real-site board, LOADS 30s).
+        let mut css = String::new();
+        for i in 0..500 {
+            css.push_str(&format!(".miss-{i} {{ color: red }}\n"));
+        }
+        css.push_str(".hit { color: blue }\n");
+        let sheet = Stylesheet::parse(&css).expect("css");
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let vars = HashMap::new();
+
+        FULL_SELECTOR_MATCHES.with(|n| n.set(0));
+        let style = engine.compute_style_for_element(
+            "div",
+            &attrs(&[("class", "hit")]),
+            std::slice::from_ref(&sheet),
+            &vars,
+            &[],
+            &[],
+            SiblingContext::SOLE,
+            None,
+        );
+        let full = FULL_SELECTOR_MATCHES.with(|n| n.get());
+
+        assert_eq!(style.color, rustkit_css::Color::new(0, 0, 255, 1.0));
+        assert!(
+            full <= 1,
+            "the 500 .miss-N rules must be rejected before the full matcher; \
+             it ran {full} times"
+        );
+    }
+
+    #[test]
+    fn prefilter_never_rejects_a_selector_the_matcher_accepts() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let selectors = [
+            "*", ":root", "div", "DIV", "div.a", "div.a.b", ".a", ".a.b", ".b.a", ".a:hover",
+            ".a[data-x]", "#main", "#main.a", "div#main", "p", "p, .a", ".z, div",
+            ".z, #main", "body div", "body > div.a", "ul li + div", "section ~ .a",
+            ":is(.a, .z)", "div:not(.z)", ".a:first-child", "div[data-x=\"1\"]",
+            "*.a", "div::before", ".a:after", "[data-x]", ":nth-child(2n+1)",
+            "a:hover, div.b", "svg|rect", ".a\\:b", "html body .a",
+        ];
+        let elements = [
+            ("div", attrs(&[("class", "a b"), ("id", "main"), ("data-x", "1")])),
+            ("div", attrs(&[("class", "b")])),
+            ("DIV", attrs(&[("class", "a")])),
+            ("p", attrs(&[])),
+            ("html", attrs(&[])),
+            ("span", attrs(&[("id", "main.a")])),
+        ];
+        let ancestors = vec![
+            ("section".to_string(), vec!["a".to_string()], None),
+            ("body".to_string(), vec![], None),
+            ("html".to_string(), vec![], None),
+        ];
+        let siblings = vec![("section".to_string(), vec![], None)];
+        for sel in selectors {
+            for (tag, a) in &elements {
+                let full = engine.selector_matches(
+                    sel,
+                    tag,
+                    a,
+                    &ancestors,
+                    &siblings,
+                    SiblingContext::SOLE,
+                );
+                if full {
+                    assert!(
+                        engine.rule_may_match(sel, tag, a),
+                        "prefilter rejected `{sel}` for <{tag} {a:?}>, which the matcher accepts"
+                    );
+                }
+            }
+        }
+        // And it does reject the plain impossible cases.
+        assert!(!engine.rule_may_match(".z", "div", &attrs(&[("class", "a")])));
+        assert!(!engine.rule_may_match("p.a", "div", &attrs(&[("class", "a")])));
+        assert!(!engine.rule_may_match("#nope", "div", &attrs(&[("id", "main")])));
     }
 }
