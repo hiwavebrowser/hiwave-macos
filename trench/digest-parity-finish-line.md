@@ -11616,3 +11616,27 @@ the same reason it did on 09-23: a `pull_request` run is a full macOS lane on th
 merge ref. **The number moved because `develop` moved, not because anything I did
 moved it** — but "carried forward" now reads as if the campaign's number were
 still 2/26, and it is 3/26.
+
+### Addendum — #225 MERGED (2026-09-24 11:20 UTC), `develop 8ab35e7`
+
+The night's P-item is on the mainline. Verified rather than taken from the
+webhook: `db53604` is an ancestor of `origin/develop`, and the merge commit's
+diff against its first parent is **+255 / −6 across exactly two files**
+(`scripts/seat_control_report.py`, `scripts/tests/test_seat_control_is_not_a_receipt.py`)
+— bit-for-bit the PR's diffstat, so nothing was lost or re-resolved on the way
+in, and the `.cursor/` contamination that closed #224 did not come with it.
+
+The seat-control report and Gate A now agree about what a RustKit rect is, on
+every PR and every nightly, and the cross-instrument equality guard holds it.
+Check-ins stopped; watch released.
+
+**State at end of night, for whoever reads this next:**
+- Metric **3/26** on macOS (run 35960587374). `develop` is `8ab35e7`; that run
+  measured `a66c159`'s engine, and #225 carries no `crates/` change, so 3/26
+  still holds on the current tip.
+- Six cases are geometry-, discrete- and stability-green and blocked by paint
+  alone (`images-intrinsic` by 0.38pp). **Decision 4 is unanswered** and the
+  queue's direction turns on it.
+- Recorded next unit: the multi-line-inline fragment-union mismatch in Gate A —
+  `article-typography` `pre > code`, `settings` `.setting-label > span`, 6 axes,
+  406px. Its branch must be cut from **`develop`**, not `master`.
