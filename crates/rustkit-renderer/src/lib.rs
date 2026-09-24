@@ -1922,6 +1922,10 @@ impl Renderer {
                 self.draw_border(*rect, *color, *top, *right, *bottom, *left);
             }
 
+            DisplayCommand::RoundedBorder { rect, widths, colors, radius } => {
+                self.draw_rounded_border(*rect, *widths, *colors, *radius);
+            }
+
             DisplayCommand::Text {
                 text,
                 x,
@@ -2747,6 +2751,137 @@ impl Renderer {
         }
     }
     
+    /// Draw solid borders whose corners are rounded.
+    ///
+    /// `widths`/`colors` are `[top, right, bottom, left]`. Radii are clamped
+    /// exactly as `draw_rounded_rect` clamps the background, so the ring and
+    /// the fill it sits on share one outer curve. Each corner box is
+    /// `max(radius, side width)` on each axis and is painted per pixel:
+    /// coverage = outer curve − inner (padding-edge) curve, where the inner
+    /// curve is the ellipse `(r − vertical width, r − horizontal width)`
+    /// about the same centre (CSS Backgrounds 3 §5.2), square when either
+    /// is ≤ 0. Between corner boxes each side is a plain strip. A corner
+    /// pixel takes the colour of the side on its half of the line from the
+    /// outer corner to the inner corner.
+    fn draw_rounded_border(
+        &mut self,
+        rect: Rect,
+        widths: [f32; 4],
+        colors: [Color; 4],
+        radius: rustkit_layout::BorderRadius,
+    ) {
+        let [t, r, b, l] = widths;
+        if rect.width < 4.0 || rect.height < 4.0 {
+            let sides = [
+                (t, colors[0], Rect::new(rect.x, rect.y, rect.width, t)),
+                (r, colors[1], Rect::new(rect.x + rect.width - r, rect.y, r, rect.height)),
+                (b, colors[2], Rect::new(rect.x, rect.y + rect.height - b, rect.width, b)),
+                (l, colors[3], Rect::new(rect.x, rect.y, l, rect.height)),
+            ];
+            for (w, c, s) in sides {
+                if w > 0.0 {
+                    self.draw_solid_rect(s, c);
+                }
+            }
+            return;
+        }
+
+        let max_r = (rect.width / 2.0).min(rect.height / 2.0);
+        let half_w = rect.width / 2.0;
+        let half_h = rect.height / 2.0;
+        // (radius, vertical side width, horizontal side width,
+        //  vertical colour, horizontal colour, corner index)
+        let corners = [
+            (radius.top_left.min(max_r), l, t, colors[3], colors[0], 0u8),
+            (radius.top_right.min(max_r), r, t, colors[1], colors[0], 1u8),
+            (radius.bottom_right.min(max_r), r, b, colors[1], colors[2], 2u8),
+            (radius.bottom_left.min(max_r), l, b, colors[3], colors[2], 3u8),
+        ];
+        // Corner box extents: width along x, height along y.
+        let cw = |rad: f32, vw: f32| rad.max(vw).min(half_w);
+        let ch = |rad: f32, hw: f32| rad.max(hw).min(half_h);
+        let (tl_w, tl_h) = (cw(corners[0].0, l), ch(corners[0].0, t));
+        let (tr_w, tr_h) = (cw(corners[1].0, r), ch(corners[1].0, t));
+        let (br_w, br_h) = (cw(corners[2].0, r), ch(corners[2].0, b));
+        let (bl_w, bl_h) = (cw(corners[3].0, l), ch(corners[3].0, b));
+
+        // Straight strips between the corner boxes.
+        let right = rect.x + rect.width;
+        let bottom = rect.y + rect.height;
+        if t > 0.0 && rect.width > tl_w + tr_w {
+            self.draw_solid_rect(
+                Rect::new(rect.x + tl_w, rect.y, rect.width - tl_w - tr_w, t),
+                colors[0],
+            );
+        }
+        if b > 0.0 && rect.width > bl_w + br_w {
+            self.draw_solid_rect(
+                Rect::new(rect.x + bl_w, bottom - b, rect.width - bl_w - br_w, b),
+                colors[2],
+            );
+        }
+        if l > 0.0 && rect.height > tl_h + bl_h {
+            self.draw_solid_rect(
+                Rect::new(rect.x, rect.y + tl_h, l, rect.height - tl_h - bl_h),
+                colors[3],
+            );
+        }
+        if r > 0.0 && rect.height > tr_h + br_h {
+            self.draw_solid_rect(
+                Rect::new(right - r, rect.y + tr_h, r, rect.height - tr_h - br_h),
+                colors[1],
+            );
+        }
+
+        let boxes = [(tl_w, tl_h), (tr_w, tr_h), (br_w, br_h), (bl_w, bl_h)];
+        for ((rad, vw, hw, vcol, hcol, q), (bw, bh)) in corners.into_iter().zip(boxes) {
+            if bw <= 0.0 || bh <= 0.0 {
+                continue;
+            }
+            let box_x = if q == 0 || q == 3 { rect.x } else { right - bw };
+            let box_y = if q == 0 || q == 1 { rect.y } else { bottom - bh };
+            let (rx, ry) = (rad - vw, rad - hw);
+            let mut py = box_y;
+            while py < box_y + bh - 0.001 {
+                let ph = (box_y + bh - py).min(1.0);
+                let mut px = box_x;
+                while px < box_x + bw - 0.001 {
+                    let pw = (box_x + bw - px).min(1.0);
+                    let (cx, cy) = (px + pw * 0.5, py + ph * 0.5);
+                    // Distances from the corner's two outer edges.
+                    let ex = if q == 0 || q == 3 { cx - rect.x } else { right - cx };
+                    let ey = if q == 0 || q == 1 { cy - rect.y } else { bottom - cy };
+
+                    let outer = if rad > 0.0 && ex < rad && ey < rad {
+                        let d = ((rad - ex).powi(2) + (rad - ey).powi(2)).sqrt();
+                        ((rad - d) * 0.5 + 0.5).clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    let inner = if rx > 0.0 && ry > 0.0 && ex < rad && ey < rad {
+                        let k = (((rad - ex) / rx).powi(2) + ((rad - ey) / ry).powi(2)).sqrt();
+                        ((1.0 - k) * rx.min(ry) * 0.5 + 0.5).clamp(0.0, 1.0)
+                    } else {
+                        (ex - vw + 0.5).clamp(0.0, 1.0) * (ey - hw + 0.5).clamp(0.0, 1.0)
+                    };
+                    let coverage = (outer - inner).clamp(0.0, 1.0);
+                    if coverage > 0.01 {
+                        // Horizontal side owns the pixel when it lies on the
+                        // edge side of the outer→inner corner diagonal.
+                        let horizontal = vw <= 0.0 || (hw > 0.0 && ey * vw < ex * hw);
+                        let c = if horizontal { hcol } else { vcol };
+                        self.draw_solid_rect(
+                            Rect::new(px, py, pw, ph),
+                            Color::new(c.r, c.g, c.b, c.a * coverage),
+                        );
+                    }
+                    px += 1.0;
+                }
+                py += 1.0;
+            }
+        }
+    }
+
     /// Draw a box shadow.
     /// 
     /// For now, this uses a simplified approach:
