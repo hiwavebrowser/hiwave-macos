@@ -203,6 +203,8 @@ struct ViewState {
     external_stylesheets: Vec<Stylesheet>,
     /// Headless bounds (only set for headless views, None for window-based views).
     headless_bounds: Option<Bounds>,
+    /// What the current document's scripts did on load (see [`ScriptRecord`]).
+    script_log: Vec<ScriptRecord>,
 }
 
 /// Engine configuration.
@@ -219,6 +221,17 @@ pub struct EngineConfig {
     /// Disable animations and transitions for deterministic parity captures.
     /// When true, all CSS animations and transitions are ignored during rendering.
     pub disable_animations: bool,
+    /// Wall-clock budget for a page's scripts on the load path. Once spent,
+    /// the remaining scripts are recorded as over budget and not started (a
+    /// script already running is bounded by the loop-iteration limit, not
+    /// by this).
+    pub script_budget_ms: u64,
+    /// How far the page's virtual timer clock runs after `load`.
+    pub timer_horizon_ms: u64,
+    /// Iterations any single loop in a page script may run before Boa
+    /// throws an error the script cannot catch. Boa has no wall-clock
+    /// interrupt; this is what stops `while (true) {}` from hanging a load.
+    pub script_loop_iteration_limit: u64,
 }
 
 impl Default for EngineConfig {
@@ -229,8 +242,84 @@ impl Default for EngineConfig {
             cookies_enabled: true,
             background_color: [1.0, 1.0, 1.0, 1.0], // White
             disable_animations: false,
+            script_budget_ms: 10_000,
+            timer_horizon_ms: 5_000,
+            script_loop_iteration_limit: 10_000_000,
         }
     }
+}
+
+/// Timer callbacks one load may run (a 16ms `requestAnimationFrame` loop
+/// across the default 5s horizon is ~300).
+const MAX_TIMER_CALLBACKS: u32 = 10_000;
+
+/// How a page `<script>` is scheduled, per its `type`, `src`, `async`
+/// and `defer` attributes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScriptTiming {
+    /// Parser-blocking: runs in document order.
+    Classic,
+    /// `defer` external script: after the document is parsed, in order.
+    Defer,
+    /// `async` external script: when it arrives (here, after the deferred ones).
+    Async,
+}
+
+/// What happened to one piece of page script on the load path.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScriptOutcome {
+    /// Ran to completion.
+    Ran,
+    /// Threw, with `String(error)` (`TypeError: x is not a function`).
+    Threw(String),
+    /// Not run, and why (`type=module unsupported`).
+    Skipped(&'static str),
+    /// The external script could not be fetched.
+    FetchFailed(String),
+    /// Not started: the page's script budget was spent.
+    OverBudget,
+}
+
+/// One entry in a view's script log: a `<script>` element, or an exception
+/// that escaped a lifecycle-event listener or timer callback.
+#[derive(Debug, Clone)]
+pub struct ScriptRecord {
+    /// The script URL, `inline#<n>` (n = position among the page's
+    /// scripts), or `event:<type>` / `timers` for async exceptions.
+    pub source: String,
+    /// Source length in bytes (0 when nothing was fetched or run).
+    pub bytes: usize,
+    /// Wall time spent running it.
+    pub elapsed_ms: u64,
+    pub outcome: ScriptOutcome,
+}
+
+/// Classify a `<script>` element. `None` for data blocks
+/// (`application/ld+json`, `text/template`, ...), which are not scripts.
+fn script_timing(node: &Node) -> Option<Result<ScriptTiming, &'static str>> {
+    let script_type = node
+        .get_attribute("type")
+        .map(|t| t.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    // A trailing parameter (`text/javascript; charset=utf-8`) doesn't
+    // change the essence.
+    let essence = script_type.split(';').next().unwrap_or("").trim();
+    match essence {
+        "" | "text/javascript" | "application/javascript" | "application/x-javascript"
+        | "text/ecmascript" | "application/ecmascript" | "text/jscript" => {}
+        "module" => return Some(Err("type=module unsupported")),
+        _ => return None,
+    }
+    // The engine has no module support, so it is exactly the "legacy
+    // browser" `nomodule` scripts exist for: those run.
+    let external = node.get_attribute("src").is_some();
+    Some(Ok(if external && node.get_attribute("async").is_some() {
+        ScriptTiming::Async
+    } else if external && node.get_attribute("defer").is_some() {
+        ScriptTiming::Defer
+    } else {
+        ScriptTiming::Classic
+    }))
 }
 
 impl EngineConfig {
@@ -768,6 +857,7 @@ impl Engine {
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Vec::new(),
             headless_bounds: None,
+            script_log: Vec::new(),
         };
 
         self.views.insert(id, view_state);
@@ -824,6 +914,7 @@ impl Engine {
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Vec::new(),
             headless_bounds: None,
+            script_log: Vec::new(),
         };
 
         let id = view_state.id;
@@ -889,6 +980,7 @@ impl Engine {
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Vec::new(),
             headless_bounds: Some(bounds),
+            script_log: Vec::new(),
         };
 
         self.views.insert(id, view_state);
@@ -1391,6 +1483,214 @@ impl Engine {
     }
 
     /// Load a URL in a view.
+    /// What the current document's scripts did on load: one record per
+    /// `<script>` in execution order, then any exception that escaped a
+    /// lifecycle listener or timer callback.
+    pub fn script_log(&self, id: EngineViewId) -> Option<&[ScriptRecord]> {
+        self.views.get(&id).map(|v| v.script_log.as_slice())
+    }
+
+    /// Run the document's `<script>`s: classic scripts in document order,
+    /// then `defer`, then `async`; then `DOMContentLoaded`, `load`, and the
+    /// page's timers up to `timer_horizon_ms` of virtual time. Every
+    /// outcome lands in the view's script log.
+    ///
+    /// The document is fully parsed before any script runs, so a script
+    /// sees the whole tree rather than the part above it.
+    async fn run_page_scripts(&mut self, id: EngineViewId, base: &Url) {
+        let Some(document) = self.views.get(&id).and_then(|v| v.document.clone()) else {
+            return;
+        };
+
+        // Collect in document order.
+        enum Body {
+            Inline(String),
+            External(Url),
+        }
+        let mut entries: Vec<(String, Result<(ScriptTiming, Body), &'static str>)> = Vec::new();
+        let mut index = 0usize;
+        document.traverse(|node| {
+            if node.tag_name().map(|t| t.eq_ignore_ascii_case("script")) != Some(true) {
+                return;
+            }
+            let Some(timing) = script_timing(node) else { return };
+            index += 1;
+            let src = node.get_attribute("src").map(str::trim);
+            let label = match src {
+                Some(s) => base.join(s).map(|u| u.to_string()).unwrap_or_else(|_| s.to_string()),
+                None => format!("inline#{index}"),
+            };
+            let entry = timing.and_then(|timing| match src {
+                Some(s) => base
+                    .join(s)
+                    .map(|u| (timing, Body::External(u)))
+                    .map_err(|_| "unparseable src"),
+                None => Ok((timing, Body::Inline(node.text_content()))),
+            });
+            entries.push((label, entry));
+        });
+        if entries.is_empty() {
+            return;
+        }
+
+        // Fetch every external script concurrently, keeping document order.
+        use futures::stream::StreamExt;
+        const MAX_CONCURRENT_SCRIPT_LOADS: usize = 8;
+        let loader = self.loader.clone();
+        let fetched: Vec<(String, Result<(ScriptTiming, String), ScriptOutcome>)> =
+            futures::stream::iter(entries.into_iter().map(|(label, entry)| {
+                let loader = loader.clone();
+                async move {
+                    let result = match entry {
+                        Err(reason) => Err(ScriptOutcome::Skipped(reason)),
+                        Ok((timing, Body::Inline(text))) => Ok((timing, text)),
+                        Ok((timing, Body::External(url))) => {
+                            match loader.fetch(Request::get(url)).await {
+                                Ok(response) if response.ok() => match response.text().await {
+                                    Ok(text) => Ok((timing, text)),
+                                    Err(e) => Err(ScriptOutcome::FetchFailed(format!("{e}"))),
+                                },
+                                Ok(response) => Err(ScriptOutcome::FetchFailed(format!(
+                                    "HTTP {}",
+                                    response.status
+                                ))),
+                                Err(e) => Err(ScriptOutcome::FetchFailed(format!("{e}"))),
+                            }
+                        }
+                    };
+                    (label, result)
+                }
+            }))
+            .buffered(MAX_CONCURRENT_SCRIPT_LOADS)
+            .collect()
+            .await;
+
+        let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
+        let horizon_ms = self.config.timer_horizon_ms;
+        let loop_limit = self.config.script_loop_iteration_limit;
+        let Some(view) = self.views.get_mut(&id) else { return };
+        let Some(bindings) = view.bindings.as_ref() else { return };
+        let log = &mut view.script_log;
+        bindings.set_loop_iteration_limit(loop_limit);
+
+        // Execution order: classic, defer, async (stable within each).
+        let mut runnable: Vec<(String, ScriptTiming, String)> = Vec::new();
+        for (label, result) in fetched {
+            match result {
+                Ok((timing, text)) => runnable.push((label, timing, text)),
+                Err(outcome) => log.push(ScriptRecord {
+                    source: label,
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome,
+                }),
+            }
+        }
+        runnable.sort_by_key(|(_, timing, _)| match timing {
+            ScriptTiming::Classic => 0,
+            ScriptTiming::Defer => 1,
+            ScriptTiming::Async => 2,
+        });
+
+        // A panic inside the JS engine leaves its state unknowable: record
+        // it and run nothing more on this page.
+        let poisoned = Cell::new(false);
+        let run = |source: String, bytes: usize, f: &dyn Fn() -> Result<(), String>| {
+            let started = std::time::Instant::now();
+            let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+                Ok(Ok(())) => ScriptOutcome::Ran,
+                Ok(Err(message)) => ScriptOutcome::Threw(message),
+                Err(_) => {
+                    poisoned.set(true);
+                    ScriptOutcome::Threw("JS engine panic".into())
+                }
+            };
+            ScriptRecord {
+                source,
+                bytes,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                outcome,
+            }
+        };
+        let strip = |e: rustkit_bindings::BindingError| {
+            let message = e.to_string();
+            message
+                .strip_prefix("JS error: Execution error: ")
+                .map(str::to_string)
+                .unwrap_or(message)
+        };
+
+        let started = std::time::Instant::now();
+        let _ = bindings.set_ready_state("loading");
+        for (label, _, text) in runnable {
+            if poisoned.get() || started.elapsed() >= budget {
+                log.push(ScriptRecord {
+                    source: label,
+                    bytes: text.len(),
+                    elapsed_ms: 0,
+                    outcome: if poisoned.get() {
+                        ScriptOutcome::Skipped("JS engine panicked earlier on this page")
+                    } else {
+                        ScriptOutcome::OverBudget
+                    },
+                });
+                continue;
+            }
+            let record = run(label, text.len(), &|| {
+                bindings.evaluate(&text).map(|_| ()).map_err(strip)
+            });
+            log.push(record);
+        }
+        if poisoned.get() {
+            return;
+        }
+
+        // Lifecycle events and timers. Listener/callback exceptions are
+        // caught in JS and drained after each step.
+        let steps: [(&str, &dyn Fn() -> Result<(), String>); 3] = [
+            ("event:DOMContentLoaded", &|| {
+                bindings.set_ready_state("interactive").map_err(strip)?;
+                bindings
+                    .fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Document, "DOMContentLoaded")
+                    .map_err(strip)?;
+                bindings
+                    .fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Window, "DOMContentLoaded")
+                    .map_err(strip)
+            }),
+            ("event:load", &|| {
+                bindings.set_ready_state("complete").map_err(strip)?;
+                bindings
+                    .fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Window, "load")
+                    .map_err(strip)
+            }),
+            ("timers", &|| {
+                bindings
+                    .run_timers(horizon_ms, MAX_TIMER_CALLBACKS)
+                    .map(|_| ())
+                    .map_err(strip)
+            }),
+        ];
+        for (source, step) in steps {
+            let record = run(source.to_string(), 0, step);
+            // Only an escaped error (the loop limit, a panic) is worth a
+            // record of its own; a clean step is not a script.
+            if record.outcome != ScriptOutcome::Ran {
+                log.push(record);
+            }
+            if poisoned.get() {
+                return;
+            }
+            for message in bindings.take_reported_errors() {
+                log.push(ScriptRecord {
+                    source: source.to_string(),
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::Threw(message),
+                });
+            }
+        }
+    }
+
     pub async fn load_url(&mut self, id: EngineViewId, url: Url) -> Result<(), EngineError> {
         self.load_url_with_disposition(id, url, false).await
     }
@@ -1522,6 +1822,7 @@ impl Engine {
         // (Prometheus, #110 R1 must-fix.)
         view.edit_states.clear();
         view.focused_node = None;
+        view.script_log.clear();
 
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
@@ -1570,6 +1871,19 @@ impl Engine {
         if self.nav_superseded(id, generation) {
             debug!(?id, %url, "Navigation abandoned after subresources");
             return Ok(());
+        }
+
+        // Page scripts, then DOMContentLoaded / load and the timers they
+        // schedule. Script failures are the page's, not the navigation's:
+        // they go to the view's script log.
+        if self.config.javascript_enabled {
+            self.run_page_scripts(id, &url).await;
+            // Scripts await the network and timers too: a stop while they
+            // run abandons the navigation exactly like one during subresources.
+            if self.nav_superseded(id, generation) {
+                debug!(?id, %url, "Navigation abandoned after page scripts");
+                return Ok(());
+            }
         }
 
         // Finish navigation
@@ -1685,6 +1999,7 @@ impl Engine {
         // (Prometheus, #110 R1 must-fix.)
         view.edit_states.clear();
         view.focused_node = None;
+        view.script_log.clear();
 
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
@@ -16129,6 +16444,140 @@ mod remote_font_tests {
         assert!(
             elapsed < delay * (FACES as u32) / 2,
             "{FACES} faces at {delay:?} each took {elapsed:?}: fetched sequentially"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "headless"))]
+mod page_script_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// Serve `routes` (path -> body) on 127.0.0.1 until the test exits;
+    /// anything else is a 404.
+    fn serve(routes: Vec<(&'static str, &'static str, String)>) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let request = String::from_utf8_lossy(&request);
+                let path = request.split_whitespace().nth(1).unwrap_or("/");
+                let (status, content_type, body) = routes
+                    .iter()
+                    .find(|(p, _, _)| *p == path)
+                    .map(|(_, ct, body)| ("200 OK", *ct, body.clone()))
+                    .unwrap_or(("404 Not Found", "text/plain", String::new()));
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        port
+    }
+
+    fn load(config: EngineConfig, port: u16) -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(config).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(engine.load_url(view, url)).expect("load_url");
+        (engine, view)
+    }
+
+    #[test]
+    fn page_scripts_run_in_order_with_lifecycle_events_and_timers() {
+        let page = r#"<html><head>
+<script>
+var order = ['inline1'];
+document.addEventListener('DOMContentLoaded', function () { order.push('dcl:' + document.readyState); });
+window.addEventListener('load', function () {
+    order.push('load:' + document.readyState);
+    setTimeout(function () { order.push('timer'); }, 1000);
+});
+</script>
+<script src="/async.js" async></script>
+<script src="/defer.js" defer></script>
+<script src="/classic.js"></script>
+<script type="module">order.push('module');</script>
+<script type="application/ld+json">{"not": "a script"}</script>
+<script>order.push('inline2'); missingFunction();</script>
+<script src="/missing.js"></script>
+</head><body>hi</body></html>"#;
+        let port = serve(vec![
+            ("/", "text/html", page.to_string()),
+            ("/classic.js", "text/javascript", "order.push('classic');".into()),
+            ("/defer.js", "text/javascript", "order.push('defer');".into()),
+            ("/async.js", "text/javascript", "order.push('async');".into()),
+        ]);
+        let (mut engine, view) = load(EngineConfig::default(), port);
+
+        let order = engine.execute_script(view, "order.join(',')").unwrap();
+        assert_eq!(
+            order,
+            r#"String("inline1,classic,inline2,defer,async,dcl:interactive,load:complete,timer")"#
+        );
+
+        let log = engine.script_log(view).unwrap();
+        let outcome = |needle: &str| {
+            log.iter()
+                .find(|r| r.source.contains(needle))
+                .map(|r| r.outcome.clone())
+                .unwrap_or_else(|| panic!("no record for {needle}: {log:#?}"))
+        };
+        assert_eq!(outcome("classic.js"), ScriptOutcome::Ran);
+        assert_eq!(outcome("missing.js"), ScriptOutcome::FetchFailed("HTTP 404 Not Found".into()));
+        assert_eq!(outcome("inline#5"), ScriptOutcome::Skipped("type=module unsupported"));
+        match outcome("inline#6") {
+            ScriptOutcome::Threw(m) => assert!(m.contains("missingFunction"), "{m}"),
+            other => panic!("inline#6: {other:?}"),
+        }
+        // The JSON data block is not a script at all.
+        assert_eq!(log.len(), 7, "{log:#?}");
+    }
+
+    #[test]
+    fn a_hung_script_does_not_hang_the_load() {
+        let page = r#"<html><head>
+<script>var after = false; while (true) {}</script>
+<script>after = true; window.addEventListener('load', function () { throw new TypeError('in load'); });</script>
+</head><body>hi</body></html>"#;
+        let port = serve(vec![("/", "text/html", page.to_string())]);
+        let config = EngineConfig {
+            script_loop_iteration_limit: 100_000,
+            ..EngineConfig::default()
+        };
+        let started = std::time::Instant::now();
+        let (mut engine, view) = load(config, port);
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+
+        // The next script still ran, and the listener's error was recorded.
+        assert_eq!(engine.execute_script(view, "after").unwrap(), "Boolean(true)");
+        let log = engine.script_log(view).unwrap();
+        assert!(
+            matches!(&log[0].outcome, ScriptOutcome::Threw(m) if m.to_lowercase().contains("loop")),
+            "{log:#?}"
+        );
+        assert!(
+            log.iter().any(|r| r.source == "event:load"
+                && matches!(&r.outcome, ScriptOutcome::Threw(m) if m.contains("in load"))),
+            "{log:#?}"
         );
     }
 }
