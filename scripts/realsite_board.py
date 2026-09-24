@@ -137,6 +137,44 @@ def rustkit_viewport_text(display_list_path, width, height):
     return " ".join(runs)
 
 
+PRODUCT_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+              "(KHTML, like Gecko) Version/17.4 Safari/605.1.15 HiWave/1.0")
+
+
+def probe_access(url):
+    """Top-level document status + bot-manager vendor, as the product UA sees it.
+
+    A separate plain GET (not RustKit's own request), recorded so a block is
+    reported as blocked:<vendor> rather than a bare failure
+    (PLAN-realsite.md, "Access blocks").
+    """
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={"User-Agent": PRODUCT_UA, "Accept": "*/*"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            status, headers = r.status, r.headers
+    except urllib.error.HTTPError as e:
+        status, headers = e.code, e.headers
+    except Exception as e:  # network trouble is not a block
+        return {"status": None, "error": str(e)[:120], "vendor": None, "blocked": False}
+
+    h = {k.lower(): v for k, v in headers.items()}
+    cookies = " ".join(v for k, v in headers.items() if k.lower() == "set-cookie")
+    vendor = None
+    if "x-datadome" in h or "datadome=" in cookies:
+        vendor = "datadome"
+    elif "x-amzn-waf-action" in h:
+        vendor = "aws-waf"
+    elif "cf-mitigated" in h or ("cf-ray" in h and status in (403, 429, 503)):
+        vendor = "cloudflare"
+    elif "bm_s=" in cookies or "_abck=" in cookies or "akamai" in h.get("server", "").lower():
+        vendor = "akamai"
+    blocked = status in (202, 403, 429, 503) and vendor is not None
+    return {"status": status, "vendor": vendor, "blocked": blocked}
+
+
 def chrome_capture(url, png, text_json, width, height, env):
     res, err, _ = run_json(
         ["node", str(ORACLE), "chrome", url, str(png), str(text_json),
@@ -206,6 +244,10 @@ def score_site(site, capture_bin, outdir, width, height, env):
             loads_why = "blank frame (%.2f%% non-background)" % (frac * 100)
         else:
             loads = True
+    access = probe_access(url)
+    rec["access"] = access
+    if not loads and access["blocked"]:
+        loads_why = "blocked:%s (HTTP %s) — %s" % (access["vendor"], access["status"], loads_why)
     rec["loads"] = {"pass": loads, "why": loads_why}
 
     # READABLE
@@ -334,6 +376,8 @@ def main():
         "looks_right_unstable": [r["id"] for r in rows if r["looks_right"].get("unstable")],
         "readable_unscored": [r["id"] for r in rows if r["readable"].get("unscored")],
         "oracle_failed": [r["id"] for r in rows if r["oracle_capture"] is None],
+        "blocked": {r["id"]: "%s/%s" % (r["access"]["vendor"], r["access"]["status"])
+                    for r in rows if r["access"]["blocked"]},
         "per_site": {r["id"]: r["points"] for r in rows},
     }
     (outdir / "summary.json").write_text(json.dumps(summary, indent=2))
@@ -342,6 +386,7 @@ def main():
         summary["points"], summary["max_points"], summary["loads"], summary["readable"],
         summary["looks_right"], ", ".join(summary["looks_right_unstable"]) or "none",
         ", ".join(summary["oracle_failed"]) or "none"))
+    print("BLOCKED %s" % (", ".join("%s (%s)" % kv for kv in summary["blocked"].items()) or "none"))
     print("run: %s" % outdir.relative_to(REPO) if outdir.is_relative_to(REPO) else outdir)
 
 
