@@ -11462,3 +11462,20 @@ nothing is unshipped, and rewriting them off a shared branch is forbidden. It is
 recorded here so no future night reads "branch law" and then reads a `git diff`
 that contradicts it. The law holds where it is enforceable: no engine change has
 landed on this branch since, and #224's own branch is clean.
+
+### Addendum — decision 1 was already stale when I wrote it
+
+Between 05:11 and 05:14 UTC, while #224 was being pushed, new commits landed on
+**#214, #215, #217 and #210** — the four `r2-fail` PRs — and their Parity Gate
+runs are in progress. The R1/R2 holds are being worked right now (#217's is
+Prometheus's `none`/`hidden` border-width hold). So decision 1's premise, that
+the label queue is sitting, is wrong: what is true is only that the queue is
+**eight deep and the trench's next unit sits behind `settings`' fix**. The
+question for Pete stands in that narrower form; the implication that nobody is
+on it does not. Recorded rather than edited above, because a decision I asked for
+on a false premise is exactly what 09-23's `column-count` correction was about.
+
+**#224 CI:** Baseline Audit green; Parity Gate queued behind those four runs. Its
+macOS lane tests `refs/pull/224/merge`, and since this PR is scripts-only that
+run measures `develop`'s engine — the same mechanism that turned 09-23's
+carried-forward `2/26` into a measurement. Its receipt is the one to read.
