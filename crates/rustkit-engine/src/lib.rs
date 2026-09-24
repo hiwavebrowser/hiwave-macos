@@ -4605,12 +4605,18 @@ impl Engine {
                 };
             }
             "border-radius" => {
-                // Parse border-radius (shorthand: all corners same)
-                if let Some(length) = rustkit_css::parse_length(value) {
-                    style.border_top_left_radius = length.clone();
-                    style.border_top_right_radius = length.clone();
-                    style.border_bottom_right_radius = length.clone();
-                    style.border_bottom_left_radius = length;
+                // 1–4 values in box order: top-left, top-right,
+                // bottom-right, bottom-left (CSS Backgrounds 3 §5.1). Only
+                // the one-value form used to parse; `8px 8px 0 0` (the
+                // top-rounded card/tab idiom) failed parse_length and the
+                // whole declaration was dropped, leaving square corners.
+                // The `h / v` elliptical form stays unparsed: radii are one
+                // scalar per corner (ledgered).
+                if let Some([tl, tr, br, bl]) = parse_border_radius_shorthand(value) {
+                    style.border_top_left_radius = tl;
+                    style.border_top_right_radius = tr;
+                    style.border_bottom_right_radius = br;
+                    style.border_bottom_left_radius = bl;
                 }
             }
             "border-top-left-radius" => {
@@ -9522,6 +9528,26 @@ fn is_inherited_property(property: &str) -> bool {
     )
 }
 
+/// `border-radius` shorthand without the `/` part: 1–4 lengths expanded to
+/// `[top-left, top-right, bottom-right, bottom-left]`. None for anything it
+/// cannot read whole (a `/`, a bad token, more than four values).
+fn parse_border_radius_shorthand(value: &str) -> Option<[rustkit_css::Length; 4]> {
+    if value.contains('/') {
+        return None;
+    }
+    let v: Vec<rustkit_css::Length> = value
+        .split_whitespace()
+        .map(rustkit_css::parse_length)
+        .collect::<Option<_>>()?;
+    Some(match v.as_slice() {
+        [a] => [a.clone(), a.clone(), a.clone(), a.clone()],
+        [a, b] => [a.clone(), b.clone(), a.clone(), b.clone()],
+        [a, b, c] => [a.clone(), b.clone(), c.clone(), b.clone()],
+        [a, b, c, d] => [a.clone(), b.clone(), c.clone(), d.clone()],
+        _ => return None,
+    })
+}
+
 /// Parse a box-shadow value from CSS.
 /// Supports: offset-x offset-y [blur [spread]] color [inset]
 fn parse_box_shadow(value: &str) -> Option<rustkit_css::BoxShadow> {
@@ -12570,6 +12596,26 @@ mod tests {
             stop.position,
             Some(rustkit_css::StopPosition::Percent(0.25))
         );
+    }
+
+    #[test]
+    fn border_radius_shorthand_expands_one_to_four_values() {
+        use rustkit_css::Length::Px;
+        assert_eq!(parse_border_radius_shorthand("8px"), Some([Px(8.0), Px(8.0), Px(8.0), Px(8.0)]));
+        assert_eq!(
+            parse_border_radius_shorthand("8px 8px 0 0"),
+            Some([Px(8.0), Px(8.0), rustkit_css::Length::Zero, rustkit_css::Length::Zero])
+        );
+        assert_eq!(
+            parse_border_radius_shorthand("1px 2px"),
+            Some([Px(1.0), Px(2.0), Px(1.0), Px(2.0)])
+        );
+        assert_eq!(
+            parse_border_radius_shorthand("1px 2px 3px"),
+            Some([Px(1.0), Px(2.0), Px(3.0), Px(2.0)])
+        );
+        assert_eq!(parse_border_radius_shorthand("50px / 25px"), None);
+        assert_eq!(parse_border_radius_shorthand("1px 2px 3px 4px 5px"), None);
     }
 
     #[test]
