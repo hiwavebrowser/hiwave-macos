@@ -221,10 +221,11 @@ pub struct EngineConfig {
     /// Disable animations and transitions for deterministic parity captures.
     /// When true, all CSS animations and transitions are ignored during rendering.
     pub disable_animations: bool,
-    /// Wall-clock budget for a page's scripts on the load path. Once spent,
-    /// the remaining scripts are recorded as over budget and not started (a
-    /// script already running is bounded by the loop-iteration limit, not
-    /// by this).
+    /// Wall-clock budget for a page's scripts on the load path, fetching
+    /// and running together. Once spent, unfetched and unstarted scripts
+    /// are recorded as over budget (a script already running is bounded by
+    /// the loop-iteration limit, not by this). Scripts run after every
+    /// subresource today, so this comes out of the page's load time.
     pub script_budget_ms: u64,
     /// How far the page's virtual timer clock runs after `load`.
     pub timer_horizon_ms: u64,
@@ -242,7 +243,7 @@ impl Default for EngineConfig {
             cookies_enabled: true,
             background_color: [1.0, 1.0, 1.0, 1.0], // White
             disable_animations: false,
-            script_budget_ms: 10_000,
+            script_budget_ms: 5_000,
             timer_horizon_ms: 5_000,
             script_loop_iteration_limit: 10_000_000,
         }
@@ -1533,6 +1534,13 @@ impl Engine {
             return;
         }
 
+        // One budget covers fetching and running: a page with 46 external
+        // scripts (instagram) spent most of it on the network. A fetch that
+        // hasn't finished by the deadline is over budget.
+        let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
+        let started = std::time::Instant::now();
+        let deadline = tokio::time::Instant::now() + budget;
+
         // Fetch every external script concurrently, keeping document order.
         use futures::stream::StreamExt;
         const MAX_CONCURRENT_SCRIPT_LOADS: usize = 8;
@@ -1545,17 +1553,22 @@ impl Engine {
                         Err(reason) => Err(ScriptOutcome::Skipped(reason)),
                         Ok((timing, Body::Inline(text))) => Ok((timing, text)),
                         Ok((timing, Body::External(url))) => {
-                            match loader.fetch(Request::get(url)).await {
-                                Ok(response) if response.ok() => match response.text().await {
-                                    Ok(text) => Ok((timing, text)),
+                            let fetch = async {
+                                match loader.fetch(Request::get(url)).await {
+                                    Ok(response) if response.ok() => match response.text().await {
+                                        Ok(text) => Ok((timing, text)),
+                                        Err(e) => Err(ScriptOutcome::FetchFailed(format!("{e}"))),
+                                    },
+                                    Ok(response) => Err(ScriptOutcome::FetchFailed(format!(
+                                        "HTTP {}",
+                                        response.status
+                                    ))),
                                     Err(e) => Err(ScriptOutcome::FetchFailed(format!("{e}"))),
-                                },
-                                Ok(response) => Err(ScriptOutcome::FetchFailed(format!(
-                                    "HTTP {}",
-                                    response.status
-                                ))),
-                                Err(e) => Err(ScriptOutcome::FetchFailed(format!("{e}"))),
-                            }
+                                }
+                            };
+                            tokio::time::timeout_at(deadline, fetch)
+                                .await
+                                .unwrap_or(Err(ScriptOutcome::OverBudget))
                         }
                     };
                     (label, result)
@@ -1565,7 +1578,6 @@ impl Engine {
             .collect()
             .await;
 
-        let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
         let horizon_ms = self.config.timer_horizon_ms;
         let loop_limit = self.config.script_loop_iteration_limit;
         let Some(view) = self.views.get_mut(&id) else { return };
@@ -1620,7 +1632,6 @@ impl Engine {
                 .unwrap_or(message)
         };
 
-        let started = std::time::Instant::now();
         let _ = bindings.set_ready_state("loading");
         for (label, _, text) in runnable {
             if poisoned.get() || started.elapsed() >= budget {
@@ -16472,6 +16483,9 @@ mod page_script_tests {
                 }
                 let request = String::from_utf8_lossy(&request);
                 let path = request.split_whitespace().nth(1).unwrap_or("/");
+                if path.starts_with("/slow") {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                }
                 let (status, content_type, body) = routes
                     .iter()
                     .find(|(p, _, _)| *p == path)
@@ -16550,6 +16564,35 @@ window.addEventListener('load', function () {
         }
         // The JSON data block is not a script at all.
         assert_eq!(log.len(), 7, "{log:#?}");
+    }
+
+    #[test]
+    fn the_script_budget_covers_fetching() {
+        let page = r#"<html><head>
+<script src="/slow.js"></script>
+<script>var ranAfter = true;</script>
+</head><body>hi</body></html>"#;
+        let port = serve(vec![
+            ("/", "text/html", page.to_string()),
+            ("/slow.js", "text/javascript", "var slow = true;".into()),
+        ]);
+        let config = EngineConfig {
+            script_budget_ms: 500,
+            ..EngineConfig::default()
+        };
+        let started = std::time::Instant::now();
+        let (mut engine, view) = load(config, port);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(2_500),
+            "waited for the slow script: {:?}",
+            started.elapsed()
+        );
+        let log = engine.script_log(view).unwrap();
+        assert_eq!(log[0].outcome, ScriptOutcome::OverBudget, "{log:#?}");
+        // The budget was spent waiting, so the inline script after it is
+        // not started either.
+        assert_eq!(log[1].outcome, ScriptOutcome::OverBudget, "{log:#?}");
+        assert_eq!(engine.execute_script(view, "typeof slow").unwrap(), r#"String("undefined")"#);
     }
 
     #[test]
