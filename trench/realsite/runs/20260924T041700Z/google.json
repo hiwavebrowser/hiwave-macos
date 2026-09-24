@@ -1,0 +1,73 @@
+{
+  "id": "google",
+  "url": "https://www.google.com/",
+  "chrome": [
+    {
+      "url": "https://www.google.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.google.com/?zx=1790223427547",
+      "title": "Google",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/google/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/google/chrome-a.png",
+      "elapsed_ms": 13070
+    },
+    {
+      "url": "https://www.google.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.google.com/?zx=1790223444416",
+      "title": "Google",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/google/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/google/chrome-b.png",
+      "elapsed_ms": 21946
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.google.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/google/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/google/rustkit-display-list.json",
+    "layout_stats": null,
+    "elapsed_ms": 7530,
+    "error": null,
+    "wall_ms": 7561,
+    "non_background_fraction": 0.1162
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 28,
+    "rustkit_words": 30,
+    "ratio": 0.8571,
+    "missing_sample": [
+      "learn",
+      "month",
+      "national",
+      "recovery"
+    ]
+  },
+  "looks_right": {
+    "pass": true,
+    "chrome_self_diff": 0,
+    "diff": 10.35166015625
+  },
+  "points": 3
+}

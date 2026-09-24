@@ -1,0 +1,88 @@
+{
+  "id": "weather",
+  "url": "https://weather.com/",
+  "chrome": [
+    {
+      "url": "https://weather.com/",
+      "status": "error",
+      "error": "page.screenshot: Timeout 30000ms exceeded.",
+      "nav_error": null,
+      "elapsed_ms": 52477
+    },
+    {
+      "url": "https://weather.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "final_url": "https://weather.com/",
+      "title": "National and Local Weather Radar, Daily Forecast, Hurricane and information from The Weather Channel and weather.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/weather/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/weather/chrome-b.png",
+      "elapsed_ms": 59425
+    }
+  ],
+  "oracle_capture": "b",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://weather.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/weather/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/weather/rustkit-display-list.json",
+    "layout_stats": null,
+    "elapsed_ms": 6408,
+    "error": null,
+    "wall_ms": 6545,
+    "non_background_fraction": 0.1891
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 72,
+    "rustkit_words": 26,
+    "ratio": 0.0556,
+    "missing_sample": [
+      "0",
+      "10",
+      "12",
+      "14s",
+      "3",
+      "35",
+      "41",
+      "44",
+      "45",
+      "46",
+      "47",
+      "4m",
+      "51",
+      "advertisement",
+      "air",
+      "allergies",
+      "am",
+      "as",
+      "bolt",
+      "chance",
+      "clear",
+      "cold",
+      "danger",
+      "day",
+      "edt"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "diff": 36.439257812499996
+  },
+  "points": 1
+}

@@ -1,0 +1,71 @@
+{
+  "id": "linkedin",
+  "url": "https://www.linkedin.com/",
+  "chrome": [
+    {
+      "url": "https://www.linkedin.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.linkedin.com/",
+      "title": "LinkedIn: Log In or Sign Up",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/linkedin/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/linkedin/chrome-a.png",
+      "elapsed_ms": 15663
+    },
+    {
+      "url": "https://www.linkedin.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.linkedin.com/",
+      "title": "LinkedIn: Log In or Sign Up",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/linkedin/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/linkedin/chrome-b.png",
+      "elapsed_ms": 16940
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.linkedin.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/linkedin/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/linkedin/rustkit-display-list.json",
+    "layout_stats": null,
+    "elapsed_ms": 3745,
+    "error": null,
+    "wall_ms": 3778,
+    "non_background_fraction": 0.062
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 35,
+    "rustkit_words": 44,
+    "ratio": 0.9429,
+    "missing_sample": [
+      "finance",
+      "productivity"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "diff": 21.41845703125
+  },
+  "points": 2
+}

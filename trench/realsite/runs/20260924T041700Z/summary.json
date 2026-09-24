@@ -1,0 +1,50 @@
+{
+  "ts": "20260924T041700Z",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "sites": 20,
+  "points": 14,
+  "max_points": 60,
+  "loads": 10,
+  "readable": 2,
+  "looks_right": 2,
+  "looks_right_unstable": [
+    "amazon"
+  ],
+  "readable_unscored": [
+    "chatgpt",
+    "nytimes"
+  ],
+  "oracle_failed": [],
+  "blocked": {
+    "amazon": "aws-waf/202",
+    "chatgpt": "cloudflare/403",
+    "ebay": "akamai/403",
+    "nytimes": "datadome/403"
+  },
+  "per_site": {
+    "google": 3,
+    "youtube": 0,
+    "facebook": 0,
+    "instagram": 1,
+    "wikipedia": 1,
+    "amazon": 0,
+    "reddit": 0,
+    "x": 2,
+    "linkedin": 2,
+    "yahoo": 1,
+    "bing": 1,
+    "chatgpt": 0,
+    "microsoft": 1,
+    "apple": 0,
+    "netflix": 1,
+    "github": 0,
+    "ebay": 0,
+    "nytimes": 0,
+    "cnn": 0,
+    "weather": 1
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "id": "instagram",
+  "url": "https://www.instagram.com/",
+  "chrome": [
+    {
+      "url": "https://www.instagram.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.instagram.com/",
+      "title": "Instagram",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/instagram/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/instagram/chrome-a.png",
+      "elapsed_ms": 16419
+    },
+    {
+      "url": "https://www.instagram.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.instagram.com/",
+      "title": "Instagram",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/instagram/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/instagram/chrome-b.png",
+      "elapsed_ms": 27381
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.instagram.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/instagram/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/instagram/rustkit-display-list.json",
+    "layout_stats": null,
+    "elapsed_ms": 5090,
+    "error": null,
+    "wall_ms": 5161,
+    "non_background_fraction": 0.0205
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 46,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "2026",
+      "about",
+      "account",
+      "ai",
+      "api",
+      "blog",
+      "close",
+      "consumer",
+      "contact",
+      "create",
+      "email",
+      "english",
+      "everyday",
+      "facebook",
+      "forgot",
+      "friends",
+      "from",
+      "health",
+      "help",
+      "in",
+      "instagram",
+      "into",
+      "jobs",
+      "lite",
+      "locations"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 7.21240234375,
+    "diff": 16.33828125
+  },
+  "points": 1
+}

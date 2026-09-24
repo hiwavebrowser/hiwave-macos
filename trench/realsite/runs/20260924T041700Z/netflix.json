@@ -1,0 +1,82 @@
+{
+  "id": "netflix",
+  "url": "https://www.netflix.com/",
+  "chrome": [
+    {
+      "url": "https://www.netflix.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.netflix.com/",
+      "title": "Netflix - Watch TV Shows Online, Watch Movies Online",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/netflix/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/netflix/chrome-a.png",
+      "elapsed_ms": 35481
+    },
+    {
+      "url": "https://www.netflix.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.netflix.com/",
+      "title": "Netflix - Watch TV Shows Online, Watch Movies Online",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/netflix/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/netflix/chrome-b.png",
+      "elapsed_ms": 43115
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.netflix.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/netflix/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/netflix/rustkit-display-list.json",
+    "layout_stats": null,
+    "elapsed_ms": 3323,
+    "error": null,
+    "wall_ms": 3361,
+    "non_background_fraction": 0.5421
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 35,
+    "rustkit_words": 28,
+    "ratio": 0.6286,
+    "missing_sample": [
+      "address",
+      "and",
+      "for",
+      "get",
+      "just",
+      "love",
+      "more",
+      "movies",
+      "shows",
+      "started",
+      "tv",
+      "unlimited",
+      "you"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "diff": 44.48671875
+  },
+  "points": 1
+}

@@ -1,0 +1,94 @@
+{
+  "id": "bing",
+  "url": "https://www.bing.com/",
+  "chrome": [
+    {
+      "url": "https://www.bing.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.bing.com/",
+      "title": "Search - Microsoft Bing",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/bing/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/bing/chrome-a.png",
+      "elapsed_ms": 27985
+    },
+    {
+      "url": "https://www.bing.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.bing.com/",
+      "title": "Search - Microsoft Bing",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/bing/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/bing/chrome-b.png",
+      "elapsed_ms": 27448
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.bing.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/bing/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T041700Z/bing/rustkit-display-list.json",
+    "layout_stats": null,
+    "elapsed_ms": 788,
+    "error": null,
+    "wall_ms": 842,
+    "non_background_fraction": 0.3195
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 43,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "15",
+      "africa",
+      "alum",
+      "amazing",
+      "analyst",
+      "beyond",
+      "choosin",
+      "copilot",
+      "creator",
+      "denies",
+      "dies",
+      "discover",
+      "espn",
+      "house",
+      "image",
+      "images",
+      "in",
+      "last",
+      "maps",
+      "mass",
+      "massive",
+      "meat",
+      "news",
+      "page",
+      "prison"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0.06650390625000001,
+    "diff": 80.12705078124999
+  },
+  "points": 1
+}
