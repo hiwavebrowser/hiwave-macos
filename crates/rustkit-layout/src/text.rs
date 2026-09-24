@@ -1083,6 +1083,9 @@ impl TextShaper {
                 char_count as isize,
             );
 
+            // Pair kerning, which CTFontGetAdvancesForGlyphs leaves out.
+            let kern = Self::kerning_deltas(&ct_font, text, &glyph_advances, size);
+
             // Build positioned glyphs
             let text_chars: Vec<char> = text.chars().collect();
             let mut glyphs = Vec::with_capacity(text_chars.len());
@@ -1133,7 +1136,7 @@ impl TextShaper {
                         }
                     }
                 } else {
-                    advance
+                    advance + kern.get(utf16_idx).copied().unwrap_or(0.0)
                 };
 
                 glyphs.push(PositionedGlyph {
@@ -1202,6 +1205,86 @@ impl TextShaper {
                 direction: TextDirection::Ltr,
             })
         }
+    }
+
+    /// Per-UTF-16-unit kerning adjustments for `text` in `font`.
+    ///
+    /// `CTFontGetAdvancesForGlyphs` returns each glyph's nominal advance, so
+    /// runs were measured (and, through the advance contract, painted) with
+    /// no pair kerning. Chrome kerns. "CSS Specificity Test" at 32px bold is
+    /// 303.70px of nominal advances against 300.03px kerned, and every micro
+    /// case's h1 drifted right by that much toward its last word.
+    ///
+    /// A CTLine of the same string in the same font, with ligatures off so
+    /// glyphs stay one per unit, gives each unit's pen position. The delta
+    /// for unit i is `pos(next unit) − pos(i) − nominal advance(i)`. A delta
+    /// larger than a fifth of the size is not kerning (Core Text shaped that
+    /// unit in another face), so it is dropped.
+    #[cfg(target_os = "macos")]
+    fn kerning_deltas(
+        font: &core_text::font::CTFont,
+        text: &str,
+        nominal: &[CGSize],
+        size: f32,
+    ) -> Vec<f32> {
+        use core_foundation::attributed_string::CFMutableAttributedString;
+        use core_foundation::base::{CFRange, TCFType};
+        use core_foundation::number::CFNumber;
+        use core_foundation::string::CFString;
+        use core_text::line::CTLine;
+        use core_text::string_attributes::{kCTFontAttributeName, kCTLigatureAttributeName};
+
+        let n = nominal.len();
+        let mut deltas = vec![0.0f32; n];
+        if n < 2 {
+            return deltas;
+        }
+        let cf_text = CFString::new(text);
+        let mut astr = CFMutableAttributedString::new();
+        astr.replace_str(&cf_text, CFRange::init(0, 0));
+        let len = astr.char_len();
+        if len as usize != n {
+            return deltas;
+        }
+        let range = CFRange::init(0, len);
+        unsafe {
+            astr.set_attribute(range, kCTFontAttributeName, font);
+            astr.set_attribute(range, kCTLigatureAttributeName, &CFNumber::from(0i32));
+        }
+        let line = CTLine::new_with_attributed_string(astr.as_concrete_TypeRef());
+
+        let mut pos: Vec<Option<f64>> = vec![None; n];
+        for run in line.glyph_runs().iter() {
+            let positions = run.positions();
+            let indices = run.string_indices();
+            for (p, &i) in positions.iter().zip(indices.iter()) {
+                if let Some(slot) = pos.get_mut(i as usize) {
+                    if slot.is_none() {
+                        *slot = Some(p.x);
+                    }
+                }
+            }
+        }
+
+        let limit = size * 0.2;
+        let mut i = 0;
+        while i < n {
+            let Some(here) = pos[i] else {
+                i += 1;
+                continue;
+            };
+            let next = (i + 1..n).find(|&j| pos[j].is_some());
+            if let Some(j) = next {
+                let d = (pos[j].unwrap() - here - nominal[i].width) as f32;
+                if d.abs() <= limit {
+                    deltas[i] = d;
+                }
+                i = j;
+            } else {
+                break;
+            }
+        }
+        deltas
     }
 
     /// Advance and face extents for a character the primary face lacks,
@@ -3285,5 +3368,34 @@ mod measure_side_font_chain_tests {
         let helvetica = width("Helvetica");
         assert_ne!(menlo, helvetica, "probe fonts must differ for this test to discriminate");
         assert_eq!(walked, menlo, "missing family must be skipped at measure time");
+    }
+
+    /// Pair kerning reaches the advances. Chrome's h1 "CSS Specificity Test"
+    /// (32px bold system-ui) is 300.03px kerned. The nominal advances sum to
+    /// 303.70, which was every micro case's h1 drift before n64.
+    #[test]
+    fn runs_are_kerned_like_a_core_text_line() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::from_css_value("system-ui");
+        let shape = |t: &str| {
+            shaper
+                .shape(t, &chain, FontWeight::BOLD, FontStyle::Normal, FontStretch::Normal, 32.0)
+                .expect("shapes")
+        };
+        let run = shape("CSS Specificity Test");
+        let nominal: f32 = "CSS Specificity Test"
+            .chars()
+            .map(|c| shape(&c.to_string()).metrics.width)
+            .sum();
+        assert!(
+            (run.metrics.width - 300.03).abs() < 0.5,
+            "kerned run {} (nominal {nominal})",
+            run.metrics.width
+        );
+        assert!(nominal - run.metrics.width > 3.0);
+        // Advances still sum to the run width, one per char (advance contract).
+        let sum: f32 = run.glyphs.iter().map(|g| g.advance).sum();
+        assert!((sum - run.metrics.width).abs() < 0.01);
+        assert_eq!(run.glyphs.len(), "CSS Specificity Test".chars().count());
     }
 }
