@@ -79,6 +79,18 @@ def _layout(root, case_id, elements):
     (d / "layout.json").write_text(json.dumps({"root": {"children": children}}))
 
 
+def _layout_nodes(root, case_id, nodes):
+    """Write a layout.json from whole nodes, so a test can give one a transform.
+
+    `_layout` above only ever emits `border_box`, which is why every guard in
+    this file was blind to which rect the report picks.
+    """
+    d = root / case_id
+    d.mkdir(parents=True, exist_ok=True)
+    children = [dict(selector=sel, children=[], **node) for sel, node in nodes.items()]
+    (d / "layout.json").write_text(json.dumps({"root": {"children": children}}))
+
+
 # ---------------------------------------------------------------------------
 # The attribution itself
 # ---------------------------------------------------------------------------
@@ -138,6 +150,192 @@ def test_tolerance_comes_from_the_gate_and_is_not_restated():
 
     assert scr.GEOMETRY_TOLERANCE_PX is layout_oracle_gate.GEOMETRY_TOLERANCE_PX
     assert scr.NON_GATING_SCOPES is layout_oracle_gate.NON_GATING_SCOPES
+
+
+def test_which_rect_chrome_s_baseline_corresponds_to_comes_from_the_gate():
+    """The same rule as the tolerance, and for the same reason.
+
+    `getBoundingClientRect()` is POST-transform. Which RustKit rect that
+    corresponds to is a RULE, not a field name, and Gate A owns it. A local
+    copy of the extraction drifts silently: both instruments keep printing
+    plausible numbers and disagree about what a failure is.
+    """
+    import layout_oracle_gate
+
+    assert scr.border_box is layout_oracle_gate.border_box, (
+        "seat_control_report restated the rect extraction instead of importing "
+        "Gate A's — that is how the transform rule was lost once already"
+    )
+
+
+def test_a_transformed_box_is_scored_on_its_visual_rect():
+    """The unit form: a transform must not read as displacement.
+
+    A box at layout x=640 that the renderer translates to x=240 is AT 240, and
+    240 is what Chrome's baseline records. Reading the layout rect reports a
+    400px defect on a box the engine gets exactly right.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        _layout_nodes(
+            tmp,
+            "probe",
+            {
+                "div.glow": {
+                    "border_box": _box(x=640.0, width=800.0, height=800.0),
+                    "visual_border_box": _box(x=240.0, width=800.0, height=800.0),
+                },
+                "div.plain": {"border_box": _box(x=7.0)},
+            },
+        )
+        rects = scr.rustkit_rects(tmp / "probe" / "layout.json")
+
+    assert rects["div.glow"]["x"] == 240.0, (
+        f"a transformed box read as x={rects['div.glow']['x']} — the layout rect, "
+        "not the rect Chrome's baseline is"
+    )
+    # An untransformed box emits no visual rect, and its layout rect IS its
+    # visual rect. Without this the assertion above would also pass on a
+    # version that ignored `border_box` entirely.
+    assert rects["div.plain"]["x"] == 7.0
+
+
+def test_a_transform_is_never_reported_as_a_defect_that_survives_the_control():
+    """End to end, and the shape that actually cost the campaign a ranking.
+
+    `real` is the bucket that tells the trench *this one is worth your night*.
+    A transform scored on the layout rect lands there with the full translate
+    as its magnitude, on both oracles at once — so the control cannot clear it
+    and it outranks every genuine defect on the board. Measured on develop
+    `a66c159`: `new_tab`'s `.ambient-glow` at 400.00px, first on the board,
+    green under Gate A.
+    """
+    fixture_sha = hashlib.sha256((REPO / "cases" / "registry.json").read_bytes()).hexdigest()
+    placed = _box(x=240.0, width=800.0, height=800.0)
+    transformed = {
+        "div.glow": {
+            "border_box": _box(x=640.0, width=800.0, height=800.0),
+            "visual_border_box": dict(placed),
+        }
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        control_dir, layout_dir = tmp / "control", tmp / "layout"
+        _stamp(control_dir, {"probe": fixture_sha})
+        _write_case(control_dir, "websuite", "probe", {"div.glow": dict(placed)})
+        pinned_dir = tmp / "baselines" / "pinned" / "websuite" / "probe"
+        pinned_dir.mkdir(parents=True, exist_ok=True)
+        (pinned_dir / "layout-rects.json").write_text(
+            json.dumps(_rects({"div.glow": dict(placed)}))
+        )
+        _layout_nodes(layout_dir, "probe", transformed)
+        (tmp / "cases").mkdir(exist_ok=True)
+        (tmp / "cases" / "registry.json").write_bytes(
+            (REPO / "cases" / "registry.json").read_bytes()
+        )
+
+        original = scr.PINNED_SET, scr.REPO_ROOT
+        try:
+            scr.PINNED_SET = "pinned"
+            scr.REPO_ROOT = tmp
+            rec = scr.score_case(
+                "probe", "websuite", layout_dir, control_dir, "cases/registry.json",
+                json.loads((control_dir / "STAMP.json").read_text()),
+            )
+        finally:
+            scr.PINNED_SET, scr.REPO_ROOT = original
+
+    assert rec["status"] == "MEASURED", rec
+    assert rec["buckets"]["real"] == 0, (
+        f"a transformed box landed in the `real` bucket ({rec['buckets']}) — "
+        "the report would send the trench after a box Gate A scores green"
+    )
+    assert rec["reported_sum"] == 0.0, rec
+    assert rec["real_sum"] == 0.0, rec
+
+
+def test_the_reported_column_is_gate_a_s_number_on_the_same_captures():
+    """The rule the three guards above are each one example of.
+
+    `Δ_reported` is DEFINED as Gate A on the pinned set — that is what the
+    module docstring promises a reader. So it is not enough that this report
+    handles transforms; its `reported` column must equal what Gate A computes
+    from the same two files, whatever the two instruments come to disagree
+    about next. Written as the general form on purpose: the transform rule was
+    lost because every guard in this file was about classification, and nothing
+    compared the two instruments to each other.
+
+    Measured on develop `a66c159`, 26 cases: before the fix the columns
+    disagreed on `new_tab` (1991.43 vs Gate A's 1591.43) and `sticky-scroll`
+    (1589.98 vs 1439.88); after it, all 26 agree to the cent and on the axis
+    count.
+    """
+    import layout_oracle_gate
+
+    fixture_sha = hashlib.sha256((REPO / "cases" / "registry.json").read_bytes()).hexdigest()
+    # A transformed box, a plainly displaced box, and an exact box — so the
+    # comparison has something to disagree about in each direction.
+    chrome_rects = {
+        "div.glow": _box(x=240.0, width=800.0, height=800.0),
+        "div.late": _box(x=10.0, y=20.0),
+        "div.exact": _box(x=5.0),
+    }
+    nodes = {
+        "div.glow": {
+            "border_box": _box(x=640.0, width=800.0, height=800.0),
+            "visual_border_box": _box(x=240.0, width=800.0, height=800.0),
+        },
+        "div.late": {"border_box": _box(x=10.0, y=48.0)},
+        "div.exact": {"border_box": _box(x=5.0)},
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        control_dir, layout_dir = tmp / "control", tmp / "layout"
+        _stamp(control_dir, {"probe": fixture_sha})
+        _write_case(control_dir, "websuite", "probe", chrome_rects)
+        pinned_dir = tmp / "baselines" / "pinned" / "websuite" / "probe"
+        pinned_dir.mkdir(parents=True, exist_ok=True)
+        (pinned_dir / "layout-rects.json").write_text(json.dumps(_rects(chrome_rects)))
+        _layout_nodes(layout_dir, "probe", nodes)
+        (tmp / "cases").mkdir(exist_ok=True)
+        (tmp / "cases" / "registry.json").write_bytes(
+            (REPO / "cases" / "registry.json").read_bytes()
+        )
+
+        original = scr.PINNED_SET, scr.REPO_ROOT
+        try:
+            scr.PINNED_SET = "pinned"
+            scr.REPO_ROOT = tmp
+            rec = scr.score_case(
+                "probe", "websuite", layout_dir, control_dir, "cases/registry.json",
+                json.loads((control_dir / "STAMP.json").read_text()),
+            )
+        finally:
+            scr.PINNED_SET, scr.REPO_ROOT = original
+
+        gate = layout_oracle_gate.compare_case(
+            "probe",
+            _rects(chrome_rects),
+            json.loads((layout_dir / "probe" / "layout.json").read_text()),
+        )
+
+    deltas = [f for f in gate["failures"] if f["kind"] == "delta"]
+    gate_sum = sum(abs(f["actual"] - f["expected"]) for f in deltas)
+
+    assert rec["status"] == "MEASURED", rec
+    assert round(rec["reported_sum"], 4) == round(gate_sum, 4), (
+        f"the report's reported column is {rec['reported_sum']} where Gate A "
+        f"computes {gate_sum} from the same two files — the two instruments "
+        "disagree about what a geometry failure is"
+    )
+    assert rec["reported_axes"] == len(deltas), (
+        f"reported_axes={rec['reported_axes']} vs Gate A's {len(deltas)} failing axes"
+    )
+    # The world is sound: there IS a real failure in it, so the equality above
+    # is not two zeroes agreeing.
+    assert len(deltas) > 0 and rec["reported_sum"] > 0, (rec, deltas)
 
 
 # ---------------------------------------------------------------------------
