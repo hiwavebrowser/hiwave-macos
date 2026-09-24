@@ -32,6 +32,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use thiserror::Error;
 use tracing::{debug, info, trace, warn};
+// `error!` is only used inside the Win32 window-creation paths; keep the
+// import platform-gated so macOS builds stay warning-free.
+#[cfg(windows)]
+use tracing::error;
 
 #[cfg(windows)]
 use rustkit_core::{

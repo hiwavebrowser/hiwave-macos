@@ -8646,27 +8646,18 @@ impl Engine {
                 let event_type_str = match event.event_type {
                     KeyEventType::KeyDown => "keydown",
                     KeyEventType::KeyUp => "keyup",
-                    KeyEventType::Char => "keypress",
+                    KeyEventType::Input => "keypress",
                 };
 
-                let key_str = match event.key_code {
-                    KeyCode::Enter => "Enter".to_string(),
-                    KeyCode::Tab => "Tab".to_string(),
-                    KeyCode::Backspace => "Backspace".to_string(),
-                    KeyCode::Escape => "Escape".to_string(),
-                    KeyCode::Space => " ".to_string(),
-                    KeyCode::Left => "ArrowLeft".to_string(),
-                    KeyCode::Right => "ArrowRight".to_string(),
-                    KeyCode::Up => "ArrowUp".to_string(),
-                    KeyCode::Down => "ArrowDown".to_string(),
-                    KeyCode::Home => "Home".to_string(),
-                    KeyCode::End => "End".to_string(),
-                    KeyCode::PageUp => "PageUp".to_string(),
-                    KeyCode::PageDown => "PageDown".to_string(),
-                    KeyCode::Delete => "Delete".to_string(),
-                    KeyCode::Insert => "Insert".to_string(),
-                    KeyCode::Char(c) => c.to_string(),
-                    _ => format!("{:?}", event.key_code),
+                // rustkit-core's KeyEvent already carries the DOM `key`
+                // value (the view host fills it from the platform event);
+                // the old per-variant table referenced KeyCode variants
+                // (`Char`, `Left`, ...) that do not exist and had never
+                // compiled on Windows.
+                let key_str = if event.key.is_empty() {
+                    format!("{:?}", event.key_code)
+                } else {
+                    event.key.clone()
                 };
 
                 let keyboard_event = Event::new_trusted(event_type_str, true, true);
