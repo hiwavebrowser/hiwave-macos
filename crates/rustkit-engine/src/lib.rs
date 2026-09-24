@@ -3878,7 +3878,7 @@ impl Engine {
                         );
                     }
                     ch_pending.note(&decl.property, &resolved_value);
-                    self.apply_style_property(&mut style, &decl.property, &resolved_value);
+                    self.apply_cascaded(&mut style, parent_style, &decl.property, &resolved_value);
                     if recording {
                         records.push(DeclarationRecord {
                             property: decl.property.clone(),
@@ -3899,6 +3899,7 @@ impl Engine {
             if let Some(style_attr) = attributes.get("style") {
                 self.apply_inline_style(
                     &mut style,
+                    parent_style,
                     style_attr,
                     css_vars,
                     &mut ch_pending,
@@ -4047,6 +4048,7 @@ impl Engine {
     fn apply_inline_style(
         &self,
         style: &mut ComputedStyle,
+        parent_style: Option<&ComputedStyle>,
         style_attr: &str,
         css_vars: &HashMap<String, String>,
         ch_pending: &mut ChPending,
@@ -4066,9 +4068,29 @@ impl Engine {
                 // Resolve CSS variables in the value
                 let resolved_value = self.resolve_css_variables(value, css_vars);
                 ch_pending.note(&property, &resolved_value);
-                self.apply_style_property(style, &property, &resolved_value);
+                self.apply_cascaded(style, parent_style, &property, &resolved_value);
             }
         }
+    }
+
+    /// One cascaded declaration: `inherit` copies the parent's computed
+    /// value where `inherit_property` knows the property; everything else
+    /// goes through `apply_style_property`.
+    fn apply_cascaded(
+        &self,
+        style: &mut ComputedStyle,
+        parent_style: Option<&ComputedStyle>,
+        property: &str,
+        value: &str,
+    ) {
+        if value.trim().eq_ignore_ascii_case("inherit") {
+            if let Some(parent) = parent_style {
+                if Self::inherit_property(style, parent, property) {
+                    return;
+                }
+            }
+        }
+        self.apply_style_property(style, property, value);
     }
 
     /// Re-apply the cascade's `ch`-bearing winners now that the font is known.
@@ -4101,6 +4123,60 @@ impl Engine {
     }
 
     /// Apply a single CSS property to a computed style.
+    /// `property: inherit` — copy the parent's computed value (CSS Cascade 4
+    /// §7.3.1). Returns false for a property this does not know, which then
+    /// falls through to `apply_style_property`'s old keep-what-you-have
+    /// behaviour.
+    ///
+    /// Keeping what you have was only right when nothing had overwritten the
+    /// parent seed. The UA arm overwrites it for links (`a { color: inherit }`
+    /// stayed #0000EE) and form controls (`input { font-family: inherit }`
+    /// stayed Arial), and a lower-specificity author value survived too.
+    fn inherit_property(
+        style: &mut ComputedStyle,
+        parent: &ComputedStyle,
+        property: &str,
+    ) -> bool {
+        match property {
+            "color" => style.color = parent.color,
+            "font-family" => style.font_family = parent.font_family.clone(),
+            "font-size" => style.font_size = parent.font_size.clone(),
+            "font-weight" => style.font_weight = parent.font_weight,
+            "font-style" => style.font_style = parent.font_style,
+            "font-stretch" => style.font_stretch = parent.font_stretch,
+            "line-height" => style.line_height = parent.line_height.clone(),
+            "font" => {
+                style.font_family = parent.font_family.clone();
+                style.font_size = parent.font_size.clone();
+                style.font_weight = parent.font_weight;
+                style.font_style = parent.font_style;
+                style.font_stretch = parent.font_stretch;
+                style.line_height = parent.line_height.clone();
+            }
+            "letter-spacing" => style.letter_spacing = parent.letter_spacing.clone(),
+            "word-spacing" => style.word_spacing = parent.word_spacing.clone(),
+            "text-align" => style.text_align = parent.text_align,
+            "text-transform" => style.text_transform = parent.text_transform,
+            "white-space" => style.white_space = parent.white_space,
+            "word-break" => style.word_break = parent.word_break,
+            "overflow-wrap" | "word-wrap" => style.overflow_wrap = parent.overflow_wrap,
+            "line-break" => style.line_break = parent.line_break,
+            "background-color" => style.background_color = parent.background_color,
+            "border-color" => {
+                style.border_top_color = parent.border_top_color;
+                style.border_right_color = parent.border_right_color;
+                style.border_bottom_color = parent.border_bottom_color;
+                style.border_left_color = parent.border_left_color;
+            }
+            "border-top-color" => style.border_top_color = parent.border_top_color,
+            "border-right-color" => style.border_right_color = parent.border_right_color,
+            "border-bottom-color" => style.border_bottom_color = parent.border_bottom_color,
+            "border-left-color" => style.border_left_color = parent.border_left_color,
+            _ => return false,
+        }
+        true
+    }
+
     fn apply_style_property(&self, style: &mut ComputedStyle, property: &str, value: &str) {
         let value = value.trim();
 
@@ -12906,6 +12982,54 @@ mod element_identity_tests {
         // Inline important wins over everything, and parses.
         let s = style_with(Some("color: lime !important"));
         assert_eq!(s.color, lime);
+    }
+
+    /// `inherit` copies the parent's computed value even where the UA arm
+    /// or a lower-specificity rule overwrote the inherited seed.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn inherit_keyword_takes_the_parent_value_over_ua_and_earlier_rules() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let sheet = Stylesheet::parse(
+            "a { color: inherit; } \
+             input { font-family: inherit; font-size: inherit; } \
+             div { border-color: red; } \
+             .k { border-color: inherit; }",
+        )
+        .expect("sheet");
+        let vars = HashMap::new();
+        let mut parent = ComputedStyle::new();
+        parent.color = rustkit_css::Color::new(10, 20, 30, 1.0);
+        parent.font_family = "system-ui".to_string();
+        parent.font_size = rustkit_css::Length::Px(14.0);
+        parent.border_top_color = rustkit_css::Color::new(1, 2, 3, 1.0);
+        let style = |tag: &str, a: HashMap<String, String>| {
+            engine.compute_style_for_element(
+                tag,
+                &a,
+                std::slice::from_ref(&sheet),
+                &vars,
+                &[],
+                &[],
+                SiblingContext::SOLE,
+                Some(&parent),
+            )
+        };
+
+        assert_eq!(style("a", attrs(&[])).color, parent.color, "not the UA link blue");
+        let input = style("input", attrs(&[]));
+        assert_eq!(input.font_family, "system-ui", "not the UA control Arial");
+        assert_eq!(input.font_size, rustkit_css::Length::Px(14.0));
+        assert_eq!(
+            style("div", attrs(&[("class", "k")])).border_top_color,
+            parent.border_top_color,
+            "a non-inherited property takes the parent's value, not the earlier rule's"
+        );
+        assert_eq!(
+            style("div", attrs(&[("style", "color: inherit")])).color,
+            parent.color,
+            "inline inherit"
+        );
     }
 
     #[test]
