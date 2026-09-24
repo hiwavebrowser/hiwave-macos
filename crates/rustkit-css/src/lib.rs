@@ -2197,16 +2197,19 @@ pub enum BackgroundClip {
     Text,
 }
 
-/// `border-<side>-style`, as far as paint distinguishes it. `none`/`hidden`
-/// are folded into a zero border width at parse time, and the styles paint
+/// `border-<side>-style`, as far as paint distinguishes it. The styles paint
 /// does not draw yet (double, groove, ridge, inset, outset) stay `Solid` —
 /// which is also the default, so a border given only a width keeps painting.
+/// `None` covers `none` and `hidden`: the cascade zeroes that side's width
+/// once every declaration is in (CSS Backgrounds 3 §3.3), so the order in
+/// which width and style were declared does not matter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BorderStyle {
     #[default]
     Solid,
     Dashed,
     Dotted,
+    None,
 }
 
 impl BorderStyle {
@@ -2216,8 +2219,8 @@ impl BorderStyle {
         match token.to_ascii_lowercase().as_str() {
             "dashed" => Some(Self::Dashed),
             "dotted" => Some(Self::Dotted),
-            "solid" | "double" | "groove" | "ridge" | "inset" | "outset" | "none"
-            | "hidden" => Some(Self::Solid),
+            "solid" | "double" | "groove" | "ridge" | "inset" | "outset" => Some(Self::Solid),
+            "none" | "hidden" => Some(Self::None),
             _ => None,
         }
     }

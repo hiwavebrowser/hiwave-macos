@@ -7640,7 +7640,8 @@ fn border_dash_pattern(
     length: f32,
 ) -> Option<(f32, f32)> {
     let (dash, gap) = match style {
-        rustkit_css::BorderStyle::Solid => return None,
+        // `None` never reaches paint with a width (the cascade zeroes it).
+        rustkit_css::BorderStyle::Solid | rustkit_css::BorderStyle::None => return None,
         rustkit_css::BorderStyle::Dashed if thickness < 3.0 => (thickness * 3.0, thickness * 2.0),
         rustkit_css::BorderStyle::Dashed => (thickness * 2.0, thickness),
         rustkit_css::BorderStyle::Dotted => (thickness, thickness),
@@ -11333,7 +11334,7 @@ mod tests {
         // backgrounds test 3: 10px dashed on a 200x100 border box. Chrome:
         // top side 7 dashes of 20 with 10px gaps (7*20 + 6*10 = 200), left
         // side 4 dashes of 20 with gaps of 20/3.
-        use rustkit_css::BorderStyle::*;
+        use rustkit_css::BorderStyle::{Dashed, Solid};
         assert_eq!(border_dash_pattern(Dashed, 10.0, 200.0), Some((20.0, 10.0)));
         let (dash, gap) = border_dash_pattern(Dashed, 10.0, 100.0).unwrap();
         assert_eq!(dash, 20.0);
