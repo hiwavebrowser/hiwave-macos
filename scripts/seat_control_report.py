@@ -56,6 +56,7 @@ from layout_oracle_gate import (  # noqa: E402
     GEOMETRY_TOLERANCE_PX,
     NON_GATING_SCOPES,
     REPO_ROOT,
+    border_box,
     load_case_registry,
     load_json,
 )
@@ -126,24 +127,50 @@ def find_layout_json(layout_root: Path, case_id: str) -> Optional[Path]:
 
 
 def rustkit_rects(layout_path: Path) -> Dict[str, Dict[str, float]]:
-    """RustKit's exported border boxes, keyed by the P0a-0 join key."""
+    """RustKit's rects, keyed by the P0a-0 join key.
+
+    The rect is chosen by Gate A's own `border_box`, IMPORTED and not restated.
+    Which rect corresponds to Chrome's `getBoundingClientRect` is a rule, not a
+    field name: the baseline is POST-transform, so on a transformed box the
+    layout `border_box` and Chrome's rect measure two different things and the
+    difference between them is the renderer's translate, not a defect. Gate A
+    learned that (see its `border_box` docstring, and `sticky-scroll`'s
+    `.overflow-content`); this report restated the extraction as
+    `node["border_box"]` and un-learned it.
+
+    Measured cost of the restatement, 2026-09-24, develop `a66c159`: `new_tab`'s
+    `.ambient-glow` (`transform: translateX(-50%)` on an 800px box) was reported
+    as a 400.00px delta that survived the control — the LARGEST pure-`real` axis
+    on the whole 26-case board, ranked first, and entirely a phantom. Gate A
+    scored the same box GREEN on the same captures. A night that picked its unit
+    off this board picked a box the engine already gets bit-exact.
+    """
     doc = load_json(layout_path)
     if doc is None:
         return {}
-    out: Dict[str, Dict[str, float]] = {}
+    seen: Dict[str, List[Dict[str, float]]] = {}
 
     def walk(node: Dict[str, Any]) -> None:
         selector = node.get("selector")
-        box = node.get("border_box")
+        box = border_box(node)
         # Anonymous and text boxes carry no selector and are EXCLUDED, never
         # paired positionally — same rule as Gate A.
-        if selector and isinstance(box, dict) and selector not in out:
-            out[selector] = box
+        if selector and isinstance(box, dict):
+            seen.setdefault(selector, []).append(box)
         for child in node.get("children", []) or []:
             walk(child)
 
     walk(doc.get("root", doc))
-    return out
+
+    # A selector that matched more than one box is an AMBIGUOUS join, and Gate A
+    # refuses to compare it (`ambiguous_selector`) rather than pick one. Taking
+    # the first would attribute a delta to whichever box the walk reached first
+    # — a confident number for an element the receipt oracle declines to score.
+    # Nothing to score is the honest answer, and it is the same answer Gate A
+    # gives. No case in the 26-case set is ambiguous today, so this changes no
+    # figure on the current board; it stops the two instruments from disagreeing
+    # the first time one is.
+    return {selector: boxes[0] for selector, boxes in seen.items() if len(boxes) == 1}
 
 
 def classify(reported: float, real: float) -> str:
