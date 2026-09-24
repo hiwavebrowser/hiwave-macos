@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-09-23T21:12:05.978327",
+  "timestamp": "2026-09-23T22:00:30.391235",
   "scope": "all",
   "iterations": 1,
   "max_variance": 0.1,
@@ -7421,9 +7421,9 @@
       "type": "websuite",
       "threshold": 10,
       "pixel": {
-        "diffPixels": 51853,
+        "diffPixels": 7213,
         "totalPixels": 1024000,
-        "diffPercent": 5.06376953125,
+        "diffPercent": 0.70439453125,
         "width": 1280,
         "height": 800,
         "diffPath": "/Users/petecopeland/Repos/.worktrees/atlas-restack/parity-baseline/diffs/image-gallery/run-1/diff.png",
@@ -8075,15 +8075,15 @@
       },
       "passed": true,
       "pixel_runs": [
-        5.06376953125
+        0.70439453125
       ],
-      "diff_pct_median": 5.06376953125,
-      "diff_pct_min": 5.06376953125,
-      "diff_pct_max": 5.06376953125,
+      "diff_pct_median": 0.70439453125,
+      "diff_pct_min": 0.70439453125,
+      "diff_pct_max": 0.70439453125,
       "diff_pct_variance": 0.0,
       "measured_runs": 1,
       "stable": false,
-      "diff_pct": 5.06376953125
+      "diff_pct": 0.70439453125
     },
     {
       "case_id": "sticky-scroll",
