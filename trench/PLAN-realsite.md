@@ -68,3 +68,4 @@ someone has reviewed** without saying so in the PR.
   Commit and push the hub branch.
 - Do not ping anyone. The noon digest delivers.
 - Never edit the site list or thresholds to move the number.
+- **Security findings stay private.** hiwave-macos is public. If a site exposes a security defect (sandbox, cross-site cache or cookie leaks, TLS/cert handling, script isolation), do NOT describe the mechanism in a PR body, commit message, or digest. Write "security fix, details withheld" and add one line for Pete under decisions.
