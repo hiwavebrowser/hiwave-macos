@@ -8726,15 +8726,65 @@ fn parse_radial_gradient(value: &str, repeating: bool) -> Option<rustkit_css::Gr
     }
 
     let mut shape = rustkit_css::RadialShape::Ellipse;
-    let size = rustkit_css::RadialSize::FarthestCorner;
+    let mut size = rustkit_css::RadialSize::FarthestCorner;
     let mut center = (0.5, 0.5);
     let mut stops_start = 0;
 
+    let size_keyword = |t: &str| match t {
+        "closest-side" => Some(rustkit_css::RadialSize::ClosestSide),
+        "farthest-side" => Some(rustkit_css::RadialSize::FarthestSide),
+        "closest-corner" => Some(rustkit_css::RadialSize::ClosestCorner),
+        "farthest-corner" => Some(rustkit_css::RadialSize::FarthestCorner),
+        _ => None,
+    };
+    let px_radius = |t: &str| t.strip_suffix("px").and_then(|v| v.parse::<f32>().ok());
+
     // Check for shape/size/position in first part
     let first = parts[0].trim().to_lowercase();
-    if first.contains("circle") || first.contains("ellipse") || first.contains("at ") {
-        if first.contains("circle") {
-            shape = rustkit_css::RadialShape::Circle;
+    let first_token = first.split_whitespace().next().unwrap_or("");
+    if first.contains("circle")
+        || first.contains("ellipse")
+        || first.contains("at ")
+        || size_keyword(first_token).is_some()
+        || px_radius(first_token).is_some()
+    {
+        // css-images-3 §3.3.2 `[ <radial-shape> || <radial-size> ]`: the
+        // size was never read — every radial gradient was farthest-corner,
+        // so `closest-side at top` (a zero-height ellipse, solid last
+        // colour in Chrome) painted a full cyan-to-blue ramp.
+        let shape_and_size = if first.starts_with("at ") {
+            ""
+        } else {
+            first.split(" at ").next().unwrap_or("")
+        };
+        let mut radii = Vec::new();
+        let mut shape_given = false;
+        for tok in shape_and_size.split_whitespace() {
+            match tok {
+                "circle" => {
+                    shape = rustkit_css::RadialShape::Circle;
+                    shape_given = true;
+                }
+                "ellipse" => shape_given = true,
+                t => {
+                    if let Some(s) = size_keyword(t) {
+                        size = s;
+                    } else if let Some(r) = px_radius(t) {
+                        radii.push(r);
+                    }
+                }
+            }
+        }
+        match radii[..] {
+            // One length with no shape is a circle (§3.3.2).
+            [r] => {
+                if !shape_given {
+                    shape = rustkit_css::RadialShape::Circle;
+                }
+                size = rustkit_css::RadialSize::Explicit(r, r);
+            }
+            [rx, ry] => size = rustkit_css::RadialSize::Explicit(rx, ry),
+            _ => {}
         }
         // Parse "at" position
         if let Some(at_idx) = first.find(" at ") {
@@ -12365,6 +12415,30 @@ mod tests {
             assert_eq!(linear.direction, rustkit_css::GradientDirection::ToBottom);
         } else {
             panic!("Expected Linear gradient with default direction");
+        }
+    }
+
+    #[test]
+    fn radial_gradient_size_is_parsed() {
+        use rustkit_css::{RadialShape as S, RadialSize as Z};
+        let cases = [
+            ("radial-gradient(ellipse closest-side at top, cyan, blue)", S::Ellipse, Z::ClosestSide),
+            ("radial-gradient(ellipse farthest-side at top, cyan, blue)", S::Ellipse, Z::FarthestSide),
+            ("radial-gradient(closest-corner, cyan, blue)", S::Ellipse, Z::ClosestCorner),
+            ("radial-gradient(circle farthest-side, cyan, blue)", S::Circle, Z::FarthestSide),
+            ("radial-gradient(40px, cyan, blue)", S::Circle, Z::Explicit(40.0, 40.0)),
+            ("radial-gradient(60px 30px at 10% 20%, cyan, blue)", S::Ellipse, Z::Explicit(60.0, 30.0)),
+            ("radial-gradient(at top, cyan, blue)", S::Ellipse, Z::FarthestCorner),
+            ("radial-gradient(cyan, blue)", S::Ellipse, Z::FarthestCorner),
+        ];
+        for (css, shape, size) in cases {
+            match parse_gradient(css) {
+                Some(rustkit_css::Gradient::Radial(r)) => {
+                    assert_eq!((r.shape, r.size), (shape, size), "{}", css);
+                    assert_eq!(r.stops.len(), 2, "{}", css);
+                }
+                other => panic!("{}: {:?}", css, other),
+            }
         }
     }
 
