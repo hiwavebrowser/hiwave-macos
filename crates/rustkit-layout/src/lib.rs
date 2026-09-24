@@ -7354,10 +7354,15 @@ impl DisplayList {
         let font_weight = layout_box.style.font_weight.0;
         // Same resolution layout_form_control composes the box from, so the
         // painter's text seat and the box's height agree on the padding.
+        // `rem` resolves against the root font: settings' `padding: 0.5rem
+        // 0.75rem` read as 0 here while the box was sized with it, so every
+        // select/number label sat on the control's left border.
+        let root_font_size = self.root_font_size;
         let padding = {
             let px = |l: &Length| match l {
                 Length::Px(v) => *v,
                 Length::Em(em) => em * font_size,
+                Length::Rem(rem) => rem * root_font_size,
                 _ => 0.0,
             };
             [
