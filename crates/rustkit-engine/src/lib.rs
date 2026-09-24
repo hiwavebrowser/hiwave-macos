@@ -5861,26 +5861,38 @@ impl Engine {
             }
         }
 
-        let mut loaded = 0;
-        for (key, family, url) in targets {
+        // Fetch concurrently. One at a time, YouTube's 135 declared faces
+        // took 23s — most of the page's 31s and past the real-site board's
+        // 30s LOADS budget. `buffered` (not unordered) keeps results in rule
+        // order, so the cache is filled exactly as the sequential loop did.
+        use futures::stream::{self, StreamExt};
+        const MAX_IN_FLIGHT: usize = 16;
+        let loader = &self.loader;
+        let fetched: Vec<_> = stream::iter(targets.into_iter().map(|(key, family, url)| async move {
             info!(%family, %url, "Loading web font");
-            match self.loader.fetch(Request::get(url.clone())).await {
+            let outcome = match loader.fetch(Request::get(url.clone())).await {
                 Ok(response) if response.ok() => match response.bytes().await {
-                    Ok(bytes) => {
-                        self.font_loader.insert_loaded(key, bytes.to_vec());
-                        loaded += 1;
-                    }
-                    Err(e) => {
-                        warn!(%family, %url, ?e, "Failed to read web font body");
-                        self.font_loader.mark_failed(key);
-                    }
+                    Ok(bytes) => Ok(bytes.to_vec()),
+                    Err(e) => Err(format!("Failed to read web font body: {e:?}")),
                 },
-                Ok(response) => {
-                    warn!(%family, %url, status = %response.status, "Failed to fetch web font");
-                    self.font_loader.mark_failed(key);
+                Ok(response) => Err(format!("Failed to fetch web font: status {}", response.status)),
+                Err(e) => Err(format!("Failed to fetch web font: {e:?}")),
+            };
+            (key, family, url, outcome)
+        }))
+        .buffered(MAX_IN_FLIGHT)
+        .collect()
+        .await;
+
+        let mut loaded = 0;
+        for (key, family, url, outcome) in fetched {
+            match outcome {
+                Ok(bytes) => {
+                    self.font_loader.insert_loaded(key, bytes);
+                    loaded += 1;
                 }
-                Err(e) => {
-                    warn!(%family, %url, ?e, "Failed to fetch web font");
+                Err(reason) => {
+                    warn!(%family, %url, %reason, "Web font not loaded");
                     self.font_loader.mark_failed(key);
                 }
             }
@@ -14939,5 +14951,74 @@ mod rule_prefilter_tests {
         assert!(!engine.rule_may_match(".z", "div", &attrs(&[("class", "a")])));
         assert!(!engine.rule_may_match("p.a", "div", &attrs(&[("class", "a")])));
         assert!(!engine.rule_may_match("#nope", "div", &attrs(&[("id", "main")])));
+    }
+}
+
+// Needs a headless view: `cargo test -p rustkit-engine --features headless`.
+#[cfg(all(test, target_os = "macos", feature = "headless"))]
+mod remote_font_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
+
+    /// Serve every request after `delay`, one thread per connection.
+    fn slow_font_server(delay: Duration) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut buf = [0u8; 4096];
+                    let _ = stream.read(&mut buf);
+                    std::thread::sleep(delay);
+                    let body = b"not-a-real-font";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: font/ttf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(body);
+                });
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn remote_web_fonts_are_fetched_concurrently() {
+        // YouTube declares 135 faces; fetched one at a time they took 23s of
+        // a 31s load (real-site board LOADS budget: 30s).
+        const FACES: usize = 8;
+        let delay = Duration::from_millis(300);
+        let port = slow_font_server(delay);
+
+        let mut css = String::new();
+        for i in 0..FACES {
+            css.push_str(&format!(
+                "@font-face {{ font-family: f{i}; src: url(http://127.0.0.1:{port}/f{i}.ttf); }}\n"
+            ));
+        }
+        let html = format!("<html><head><style>{css}</style></head><body>x</body></html>");
+
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        engine.load_html(view, &html).expect("load");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let started = Instant::now();
+        let loaded = rt.block_on(engine.load_remote_web_fonts(view));
+        let elapsed = started.elapsed();
+
+        assert_eq!(loaded, FACES, "every face should be fetched");
+        assert!(
+            elapsed < delay * (FACES as u32) / 2,
+            "{FACES} faces at {delay:?} each took {elapsed:?}: fetched sequentially"
+        );
     }
 }
