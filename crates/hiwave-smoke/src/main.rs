@@ -103,6 +103,9 @@ struct Args {
     html_file: Option<String>,
     /// Live URL to load through `Engine::load_url` (overrides --html-file).
     url: Option<String>,
+    /// Skip the scripted sidebar/shelf layout churn so the content view stays
+    /// at the full --width x --height (implied by --url: viewing, not stress).
+    static_layout: bool,
     width: u32,
     height: u32,
     perf_output: Option<String>,
@@ -118,6 +121,7 @@ impl Args {
         let mut dump_frame = None;
         let mut html_file = None;
         let mut url = None;
+        let mut static_layout = false;
         let mut width = 1100u32;
         let mut height = 640u32;
         let mut perf_output = None;
@@ -140,6 +144,9 @@ impl Args {
                 }
                 "--url" => {
                     url = args.next();
+                }
+                "--static" => {
+                    static_layout = true;
                 }
                 "--width" => {
                     if let Some(val) = args.next() {
@@ -171,6 +178,7 @@ impl Args {
             duration_ms,
             dump_frame,
             html_file,
+            static_layout: static_layout || url.is_some(),
             url,
             width,
             height,
@@ -248,12 +256,15 @@ impl Args {
     }
 }
 
-fn spawn_scripted_flow(proxy: EventLoopProxy<UserEvent>, duration_ms: u64) {
+fn spawn_scripted_flow(proxy: EventLoopProxy<UserEvent>, duration_ms: u64, static_layout: bool) {
     std::thread::spawn(move || {
         let start = Instant::now();
 
-        // Phase 1: sidebar drag simulation
-        for i in 0..30 {
+        // Phase 1: sidebar drag simulation. It ends with a 232px left
+        // sidebar, the 220px right one open and a 120px shelf, so a
+        // 1280x800 request shows content at 828x680. --static (and --url)
+        // skip it so the page is viewed at the requested size.
+        for i in 0..if static_layout { 0 } else { 30 } {
             let left = (i as f64) * 8.0; // 0..240
             let right_open = i % 10 >= 5;
             let shelf = if i % 2 == 0 { 0.0 } else { 120.0 };
@@ -421,7 +432,7 @@ fn main() {
     }
     perf.record("render", render_start.elapsed());
 
-    spawn_scripted_flow(proxy, args.duration_ms);
+    spawn_scripted_flow(proxy, args.duration_ms, args.static_layout);
 
     let mut last_layout = (0.0_f64, false, 0.0_f64);
     let start = Instant::now();
