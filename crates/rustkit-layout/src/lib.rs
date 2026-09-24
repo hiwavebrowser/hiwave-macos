@@ -5526,6 +5526,18 @@ pub enum DisplayCommand {
     /// `PushClip` here instead loses the corner notches: a child painting its
     /// own background fills the square corner the parent's radius cut away.
     PushClipRounded { rect: Rect, radius: BorderRadius },
+    /// Solid borders around a border box with rounded corners. `rect` is
+    /// the border box, `widths`/`colors` are `[top, right, bottom, left]`,
+    /// and `radius` is the outer (border-edge) radius. The inner (padding)
+    /// edge curves with `radius − width` per axis (CSS Backgrounds 3 §5.2).
+    /// The side strips alone painted a square frame around a rounded
+    /// background.
+    RoundedBorder {
+        rect: Rect,
+        widths: [f32; 4],
+        colors: [Color; 4],
+        radius: BorderRadius,
+    },
     /// Pop clip rect.
     PopClip,
     /// Start stacking context.
@@ -6906,6 +6918,36 @@ impl DisplayList {
         let d = &layout_box.dimensions;
         let s = &layout_box.style;
         let bb = d.border_box();
+
+        // Rounded corners: one command, so the renderer can curve both
+        // edges of the ring. The strips below painted a square frame around
+        // a rounded background (rounded-corners §5). Solid rings only: the
+        // ring command has no dash pattern, so a rounded dashed/dotted border
+        // keeps the per-side path below (square corners, correct dashes).
+        let radius = self.border_radius_px(layout_box);
+        let widths = [d.border.top, d.border.right, d.border.bottom, d.border.left];
+        let all_solid = [
+            s.border_top_style,
+            s.border_right_style,
+            s.border_bottom_style,
+            s.border_left_style,
+        ]
+        .iter()
+        .all(|st| matches!(st, rustkit_css::BorderStyle::Solid | rustkit_css::BorderStyle::None));
+        if !radius.is_zero() && all_solid && widths.iter().any(|w| *w > 0.0) {
+            self.commands.push(DisplayCommand::RoundedBorder {
+                rect: d.border_box(),
+                widths,
+                colors: [
+                    s.border_top_color,
+                    s.border_right_color,
+                    s.border_bottom_color,
+                    s.border_left_color,
+                ],
+                radius,
+            });
+            return;
+        }
 
         // Render each border side separately for correct colors. A side is
         // a strip along the whole border-box edge (corners overlap, as the
@@ -8520,6 +8562,65 @@ mod tests {
             DisplayCommand::PushClipRounded { rect, radius } => Some((*rect, *radius)),
             _ => None,
         })
+    }
+
+    #[test]
+    fn a_bordered_box_under_a_radius_paints_one_rounded_border() {
+        let mut b = rounded_overflow_parent(12.0, false);
+        b.children.clear();
+        b.dimensions.border = EdgeSizes {
+            top: 5.0,
+            right: 5.0,
+            bottom: 5.0,
+            left: 5.0,
+        };
+        b.style.border_top_color = Color::BLACK;
+        let list = DisplayList::build(&under_root(b));
+        let rounded: Vec<_> = list
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DisplayCommand::RoundedBorder { rect, widths, colors, radius } => {
+                    Some((*rect, *widths, *colors, *radius))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rounded.len(), 1, "one rounded border, not four square strips");
+        let (rect, widths, colors, radius) = rounded[0];
+        assert_eq!(rect.width, 237.0, "the border box");
+        assert_eq!(widths, [5.0; 4]);
+        assert_eq!(colors[0], Color::BLACK);
+        assert_eq!(radius.bottom_left, 12.0);
+        assert!(
+            !list.commands.iter().any(|c| matches!(c, DisplayCommand::SolidColor(col, _) if *col == Color::BLACK)),
+            "the square strips must not also paint"
+        );
+
+        // Square corners keep the strip path.
+        let mut sq = rounded_overflow_parent(0.0, false);
+        sq.children.clear();
+        sq.dimensions.border.top = 5.0;
+        let list = DisplayList::build(&under_root(sq));
+        assert!(!list
+            .commands
+            .iter()
+            .any(|c| matches!(c, DisplayCommand::RoundedBorder { .. })));
+    }
+
+    #[test]
+    fn a_rounded_dashed_border_keeps_its_dashes() {
+        // #217 x #227 seam: the ring command has no dash pattern, so a
+        // dashed side under a radius stays on the per-side (dashed) path.
+        let mut b = rounded_overflow_parent(12.0, false);
+        b.children.clear();
+        b.dimensions.border = EdgeSizes { top: 5.0, right: 5.0, bottom: 5.0, left: 5.0 };
+        b.style.border_top_style = rustkit_css::BorderStyle::Dashed;
+        let list = DisplayList::build(&under_root(b));
+        assert!(
+            !list.commands.iter().any(|c| matches!(c, DisplayCommand::RoundedBorder { .. })),
+            "a dashed side must not collapse into a solid rounded ring"
+        );
     }
 
     #[test]
