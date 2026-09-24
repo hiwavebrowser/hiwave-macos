@@ -2862,17 +2862,18 @@ impl Engine {
 
                 if tag_lower == "select" {
                     // Get options from children
-                    let options: Vec<String> = node
+                    let entries: Vec<(String, bool)> = node
                         .children()
                         .into_iter()
                         .filter_map(|child| {
-                            if let rustkit_dom::NodeType::Element { tag_name, .. } =
-                                &child.node_type
+                            if let rustkit_dom::NodeType::Element {
+                                tag_name, attributes, ..
+                            } = &child.node_type
                             {
                                 if tag_name.to_lowercase() == "option" {
                                     let text = child.text_content();
                                     if !text.is_empty() {
-                                        return Some(text);
+                                        return Some((text, attributes.contains_key("selected")));
                                     }
                                 }
                             }
@@ -2880,7 +2881,17 @@ impl Engine {
                         })
                         .collect();
 
-                    let selected_index = if options.is_empty() { None } else { Some(0) };
+                    // HTML §4.10.10 selectedness: the option carrying
+                    // `selected` (the last one, if several) is displayed.
+                    // Index 0 was hardcoded, so settings' Tab Decay unit
+                    // showed "hours" where `<option value="days" selected>`
+                    // makes Chrome show "days".
+                    let selected_index = if entries.is_empty() {
+                        None
+                    } else {
+                        Some(entries.iter().rposition(|(_, s)| *s).unwrap_or(0))
+                    };
+                    let options: Vec<String> = entries.into_iter().map(|(t, _)| t).collect();
 
                     // size > 1 (or `multiple` without size, which Chrome
                     // shows as a 4-row listbox) renders inline rows.
@@ -14293,6 +14304,31 @@ mod web_font_tests {
         let d = style_around(&layout, "d").expect("d");
         assert_eq!(widths(&d), [Px(5.0), Px(5.0), Px(5.0), Px(5.0)], "control");
         assert_eq!(d.border_top_style, rustkit_css::BorderStyle::Dashed);
+    }
+
+    #[test]
+    fn a_select_shows_its_selected_option() {
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <select><option>hours</option><option selected>days</option><option>weeks</option></select>
+            <select><option>a</option><option>b</option></select>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+        fn selects(b: &LayoutBox, out: &mut Vec<Option<usize>>) {
+            if let BoxType::FormControl(rustkit_layout::FormControlType::Select {
+                selected_index, ..
+            }) = &b.box_type
+            {
+                out.push(*selected_index);
+            }
+            for c in &b.children {
+                selects(c, out);
+            }
+        }
+        let mut got = Vec::new();
+        selects(&layout, &mut got);
+        assert_eq!(got, vec![Some(1), Some(0)]);
     }
 
     #[test]
