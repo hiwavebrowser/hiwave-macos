@@ -476,6 +476,22 @@ pub struct Engine {
     svg_cache: std::collections::HashMap<String, rustkit_svg::SvgDocument>,
 }
 
+/// Split a trailing `!important` (ASCII case-insensitive, whitespace allowed
+/// between `!` and `important`) off a declaration value. Stylesheet rules get
+/// this from the parser; inline `style=` values arrive raw.
+fn split_important(value: &str) -> (&str, bool) {
+    let trimmed = value.trim_end();
+    let bytes = trimmed.as_bytes();
+    const KW: &[u8] = b"important";
+    if bytes.len() >= KW.len() && bytes[bytes.len() - KW.len()..].eq_ignore_ascii_case(KW) {
+        let before = trimmed[..trimmed.len() - KW.len()].trim_end();
+        if let Some(rest) = before.strip_suffix('!') {
+            return (rest.trim_end(), true);
+        }
+    }
+    (trimmed, false)
+}
+
 /// One author declaration that MATCHED an element, win or lose.
 ///
 /// Losers are kept deliberately. "Parsed but dead" is the bug class this
@@ -497,9 +513,10 @@ pub struct DeclarationRecord {
     pub origin: &'static str,
     /// Whether the declaration carried `!important`.
     ///
-    /// Recorded but NOT acted on: this cascade orders by specificity alone.
-    /// An `!important` declaration that lost is therefore a real engine bug,
-    /// and reporting the flag is how the tool shows it instead of hiding it.
+    /// Honoured since n64: important declarations apply in a second pass
+    /// after every normal one (inline included), so they carry a higher
+    /// `order`. An `!important` declaration that lost to a normal one is
+    /// therefore a real engine bug, and the flag is how the tool shows it.
     pub important: bool,
     /// Position in application order. The highest `order` for a given
     /// property is the winner, because it wrote the field last.
@@ -3345,15 +3362,25 @@ impl Engine {
         // Sort by specificity (a, b, c)
         matching_rules.sort_by_key(|(spec, _)| *spec);
 
-        // Apply matching rules
-        for (_, rule) in matching_rules {
-            for declaration in &rule.declarations {
-                let value_str = match &declaration.value {
-                    rustkit_css::PropertyValue::Specified(s) => s.as_str(),
-                    rustkit_css::PropertyValue::Inherit => continue,
-                    rustkit_css::PropertyValue::Initial => continue,
-                };
-                self.apply_style_property(&mut pseudo_style, &declaration.property, value_str);
+        // Apply matching rules: normal declarations, then `!important` ones
+        // (CSS Cascade 4 §6.1), specificity order within each.
+        for important_pass in [false, true] {
+            for (_, rule) in &matching_rules {
+                for declaration in &rule.declarations {
+                    if declaration.important != important_pass {
+                        continue;
+                    }
+                    let value_str = match &declaration.value {
+                        rustkit_css::PropertyValue::Specified(s) => s.as_str(),
+                        rustkit_css::PropertyValue::Inherit => continue,
+                        rustkit_css::PropertyValue::Initial => continue,
+                    };
+                    self.apply_style_property(
+                        &mut pseudo_style,
+                        &declaration.property,
+                        value_str,
+                    );
+                }
             }
         }
 
@@ -3823,46 +3850,71 @@ impl Engine {
         // until the whole cascade has run — collect, then replay below.
         let mut ch_pending = ChPending::default();
 
-        // Apply matching rules in order
-        for (rule, specificity, _) in matching_rules {
-            for decl in &rule.declarations {
-                // Extract string value from PropertyValue
-                let value_str = match &decl.value {
-                    rustkit_css::PropertyValue::Specified(s) => s.clone(),
-                    rustkit_css::PropertyValue::Inherit => continue, // Skip inherit for now
-                    rustkit_css::PropertyValue::Initial => continue, // Skip initial for now
-                };
-                let resolved_value = self.resolve_css_variables(&value_str, css_vars);
-                if value_str != resolved_value {
-                    trace!(
-                        property = decl.property.as_str(),
-                        original = value_str.as_str(),
-                        resolved = resolved_value.as_str(),
-                        "Resolved CSS variable"
-                    );
-                }
-                ch_pending.note(&decl.property, &resolved_value);
-                self.apply_style_property(&mut style, &decl.property, &resolved_value);
-                if recording {
-                    records.push(DeclarationRecord {
-                        property: decl.property.clone(),
-                        value: resolved_value,
-                        selector: rule.selector.clone(),
-                        specificity,
-                        origin: "author",
-                        important: decl.important,
-                        order,
-                    });
-                    order += 1;
+        // CSS Cascade 4 §6.1: importance outranks specificity. Author normal
+        // rules, then the inline style's normal declarations, then author
+        // `!important` rules (same specificity order among themselves), then
+        // inline `!important`. Until n64 this loop ordered by specificity
+        // alone: `.test5 { background: red !important }` lost to
+        // `#test5 { background: green }` (specificity box 5), and an inline
+        // `style="color: red !important"` handed "red !important" to the
+        // value parser, which dropped the declaration.
+        for important_pass in [false, true] {
+            for (rule, specificity, _) in &matching_rules {
+                for decl in &rule.declarations {
+                    if decl.important != important_pass {
+                        continue;
+                    }
+                    // Extract string value from PropertyValue
+                    let value_str = match &decl.value {
+                        rustkit_css::PropertyValue::Specified(s) => s.clone(),
+                        rustkit_css::PropertyValue::Inherit => continue, // Skip inherit for now
+                        rustkit_css::PropertyValue::Initial => continue, // Skip initial for now
+                    };
+                    let resolved_value = self.resolve_css_variables(&value_str, css_vars);
+                    if value_str != resolved_value {
+                        trace!(
+                            property = decl.property.as_str(),
+                            original = value_str.as_str(),
+                            resolved = resolved_value.as_str(),
+                            "Resolved CSS variable"
+                        );
+                    }
+                    ch_pending.note(&decl.property, &resolved_value);
+                    self.apply_style_property(&mut style, &decl.property, &resolved_value);
+                    if recording {
+                        records.push(DeclarationRecord {
+                            property: decl.property.clone(),
+                            value: resolved_value,
+                            selector: rule.selector.clone(),
+                            specificity: *specificity,
+                            origin: "author",
+                            important: decl.important,
+                            order,
+                        });
+                        order += 1;
+                    }
                 }
             }
-        }
 
-        // Parse inline style attribute if present (highest specificity)
-        if let Some(style_attr) = attributes.get("style") {
-            self.apply_inline_style(&mut style, style_attr, css_vars, &mut ch_pending);
-            if recording {
-                self.record_inline_style(style_attr, css_vars, &mut records, &mut order);
+            // Inline style attribute: above every selector within its
+            // importance level.
+            if let Some(style_attr) = attributes.get("style") {
+                self.apply_inline_style(
+                    &mut style,
+                    style_attr,
+                    css_vars,
+                    &mut ch_pending,
+                    important_pass,
+                );
+                if recording {
+                    self.record_inline_style(
+                        style_attr,
+                        css_vars,
+                        &mut records,
+                        &mut order,
+                        important_pass,
+                    );
+                }
             }
         }
 
@@ -3914,6 +3966,7 @@ impl Engine {
         css_vars: &HashMap<String, String>,
         records: &mut Vec<DeclarationRecord>,
         order: &mut usize,
+        important_pass: bool,
     ) {
         for declaration in style_attr.split(';') {
             let declaration = declaration.trim();
@@ -3921,15 +3974,19 @@ impl Engine {
                 continue;
             }
             if let Some((property, value)) = declaration.split_once(':') {
+                let (value, important) = split_important(value.trim());
+                if important != important_pass {
+                    continue;
+                }
                 records.push(DeclarationRecord {
                     property: property.trim().to_lowercase(),
-                    value: self.resolve_css_variables(value.trim(), css_vars),
+                    value: self.resolve_css_variables(value, css_vars),
                     selector: "style=".to_string(),
                     // An inline declaration outranks any selector; CSS gives
                     // it a specificity above (1,0,0) rather than a tuple.
                     specificity: (usize::MAX, 0, 0),
                     origin: "author-inline",
-                    important: false,
+                    important,
                     order: *order,
                 });
                 *order += 1;
@@ -4000,6 +4057,7 @@ impl Engine {
         style_attr: &str,
         css_vars: &HashMap<String, String>,
         ch_pending: &mut ChPending,
+        important_pass: bool,
     ) {
         for declaration in style_attr.split(';') {
             let declaration = declaration.trim();
@@ -4008,7 +4066,10 @@ impl Engine {
             }
             if let Some((property, value)) = declaration.split_once(':') {
                 let property = property.trim().to_lowercase();
-                let value = value.trim();
+                let (value, important) = split_important(value.trim());
+                if important != important_pass {
+                    continue;
+                }
                 // Resolve CSS variables in the value
                 let resolved_value = self.resolve_css_variables(value, css_vars);
                 ch_pending.note(&property, &resolved_value);
@@ -7843,9 +7904,9 @@ impl Engine {
     ///   is a hardcoded Rust `match` on tag name, not parsed rules, so a
     ///   UA-set property has no selector to cite. Properties with no author
     ///   declaration carry `"winner": null` and `"origin": "user-agent-or-initial"`.
-    /// - **`!important` is recorded but not honoured by the cascade**, which
-    ///   orders by specificity alone. An `important: true` declaration that
-    ///   is not the winner is a real engine bug, and it is visible here.
+    /// - **`!important` is honoured** (normal pass, then important pass,
+    ///   inline last within each). An `important: true` declaration that
+    ///   loses to a normal one is a real engine bug, and it is visible here.
     pub fn export_style_json(
         &self,
         id: EngineViewId,
@@ -7956,9 +8017,10 @@ impl Engine {
                 "origins": "author and author-inline only — the UA stylesheet is a \
                             hardcoded match on tag name, not parsed rules, so it has no \
                             selector to cite",
-                "important": "recorded but NOT honoured by this cascade, which orders by \
-                              specificity alone; an important declaration that is not the \
-                              winner is an engine bug, not a reporting artefact",
+                "important": "honoured: important declarations apply after every normal \
+                              one (inline last within each level); an important declaration \
+                              that loses to a normal one is an engine bug, not a reporting \
+                              artefact",
                 "computed_properties": Self::COMPUTED_PROPERTIES,
             }
         });
@@ -13000,6 +13062,64 @@ mod element_identity_tests {
     }
 
     #[test]
+    fn split_important_strips_the_flag() {
+        assert_eq!(split_important("red !important"), ("red", true));
+        assert_eq!(split_important("red ! IMPORTANT "), ("red", true));
+        assert_eq!(split_important("red!important"), ("red", true));
+        assert_eq!(split_important("red"), ("red", false));
+        // `important` without the bang is a value token, not the flag.
+        assert_eq!(split_important("important"), ("important", false));
+    }
+
+    /// CSS Cascade 4 §6.1: importance outranks specificity, and inline
+    /// normal < author important < inline important. Mirrors specificity
+    /// box 5, which painted green for Chrome's red until n64.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn important_outranks_specificity_and_inline() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let sheet = Stylesheet::parse(
+            "#t { background: green; color: green; } \
+             .t { background: red !important; } \
+             div { color: blue !important; }",
+        )
+        .expect("sheet");
+        let vars = HashMap::new();
+        let style_with = |inline: Option<&str>| {
+            let mut a = attrs(&[("id", "t"), ("class", "t")]);
+            if let Some(s) = inline {
+                a.insert("style".to_string(), s.to_string());
+            }
+            engine.compute_style_for_element(
+                "div",
+                &a,
+                std::slice::from_ref(&sheet),
+                &vars,
+                &[],
+                &[],
+                SiblingContext::SOLE,
+                None,
+            )
+        };
+        let red = rustkit_css::Color::new(255, 0, 0, 1.0);
+        let blue = rustkit_css::Color::new(0, 0, 255, 1.0);
+        let lime = rustkit_css::Color::new(0, 255, 0, 1.0);
+
+        let s = style_with(None);
+        assert_eq!(s.background_color, red, "(0,1,0) !important beats (1,0,0)");
+        assert_eq!(s.color, blue, "(0,0,1) !important beats (1,0,0)");
+
+        // Inline normal loses to author important.
+        let s = style_with(Some("color: lime; background: lime"));
+        assert_eq!(s.color, blue);
+        assert_eq!(s.background_color, red);
+
+        // Inline important wins over everything, and parses.
+        let s = style_with(Some("color: lime !important"));
+        assert_eq!(s.color, lime);
+    }
+
+    #[test]
     fn selector_segments_match_committed_chrome_baseline() {
         // `body > div.header:nth-of-type(1)` — two sibling divs, so indexed.
         assert_eq!(
@@ -13751,7 +13871,27 @@ mod web_font_tests {
         w
     }
 
-    fn test_engine() -> Option<Engine> {
+    /// An engine plus a lock held for the whole test. `install_web_fonts_for`
+    /// writes process-global font state, so a test installing
+    /// `EngineTestAhem` could land between another test's no-@font-face
+    /// control and its measurement (seen n64: the control read Ahem's 100px
+    /// in two of three full-suite runs once one more Engine test existed).
+    struct LockedEngine {
+        engine: Engine,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl std::ops::Deref for LockedEngine {
+        type Target = Engine;
+        fn deref(&self) -> &Engine {
+            &self.engine
+        }
+    }
+
+    static WEB_FONT_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn test_engine() -> Option<LockedEngine> {
+        let guard = WEB_FONT_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let compositor = match Compositor::new() {
             Ok(c) => c,
             Err(e) => {
@@ -13760,7 +13900,7 @@ mod web_font_tests {
             }
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        Some(Engine {
+        let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
             font_loader: Arc::new(FontLoader::new()),
@@ -13776,6 +13916,10 @@ mod web_font_tests {
             svg_cache: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
+        };
+        Some(LockedEngine {
+            engine,
+            _guard: guard,
         })
     }
 
@@ -14172,6 +14316,8 @@ mod web_font_tests {
 
         // Same face via a filesystem path — the WPT runner's shape. A fresh
         // engine so the data: load above cannot be what satisfies this.
+        // (Drop the first one explicitly: it holds the web-font lock.)
+        drop(engine);
         let Some(engine) = test_engine() else { return };
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../rustkit-text/tests/fixtures/Ahem.ttf");
         let via_file = probe_width(
