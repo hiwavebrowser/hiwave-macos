@@ -11479,3 +11479,36 @@ on a false premise is exactly what 09-23's `column-count` correction was about.
 macOS lane tests `refs/pull/224/merge`, and since this PR is scripts-only that
 run measures `develop`'s engine — the same mechanism that turned 09-23's
 carried-forward `2/26` into a measurement. Its receipt is the one to read.
+
+### Addendum — #224 closed, **#225** is the PR, and the mistake was mine
+
+The subscription wake on #224 made me read the PR's own metadata rather than my
+branch's, and it said **4 changed files, 3 commits** where I had written two of
+each. The branch was cut from `origin/master` — following 09-23's pattern, which
+did the same — and **`master`'s tip is not an ancestor of `develop`**. So the
+diff against `develop` carried #218 as well: `.cursor/environment.json` and
+`.cursor/install.sh`. An instrument PR that also carries an unrelated chore is
+not attributable, which is the thing the PR is about.
+
+09-23's #211 got away with it because master's tip *was* on develop that day.
+That is luck, not a pattern, and the rule I should have applied is the obvious
+one: **cut the branch from the base you intend to merge into.** `master` is not
+that base; `develop` is.
+
+Recut as `atlas/n63-seat-control-rect` by cherry-copying the two commits onto
+`develop a66c159` — not by rebasing and force-pushing, which the night order
+forbids and which would not have helped anyway. Verified before opening #225,
+because "same commits" is a claim:
+
+- the three files involved are byte-identical on `master` and `develop`;
+- all 17 `scripts/tests/test_*.py` suites green on the new base;
+- the 26-case board re-run on the develop base is identical **in every field**
+  to the master-base run, so no figure in the receipt depends on the base.
+
+`#224` closed with a comment pointing at #225; watch moved.
+
+**What this cost:** nothing but the cycle, because I caught it before review. What
+it would have cost if I hadn't is a reviewer asking why an instrument fix touches
+`.cursor/`, which is exactly the question a reviewer should never have to ask on
+this branch. Recorded because two nights in a row now cut instrument branches
+from `master` and only one of them was safe.
