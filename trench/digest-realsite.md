@@ -72,7 +72,7 @@ Passing all 3: google. Blocked (0 pts): amazon aws-waf/202, chatgpt cloudflare/4
 **PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
 - #241 `atlas/rs-concurrent-fonts` @ 43bd55c: concurrent web fonts (last session's hub fix). Rebased onto b9f133e
   before any review, because #240 appended a test module at the same end-of-file spot. `gh pr comment` was blocked, so the note is here.
-- #244 `atlas/rs-script-data-with-attributes` @ 637ed65-equivalent on b9f133e: the tokenizer entered script
+- #244 `atlas/rs-script-data-with-attributes` @ a75462b: the tokenizer entered script
   data / RAWTEXT / RCDATA only for bare tags. `<script nonce=…>` was tokenized as HTML, so google's first inline
   script arrived as 73 of 303 bytes and a `'</div>'` in a JS string could close real elements. It hit nearly every real site.
 - #245 `atlas/rs-run-scripts` @ 2620162: `load_url` runs `<script>`s (classic → defer → async; module and
