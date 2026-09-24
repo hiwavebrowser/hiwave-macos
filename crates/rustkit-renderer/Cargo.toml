@@ -16,6 +16,8 @@ rustkit-common = { path = "../rustkit-common" }
 # GPU rendering
 wgpu = "24"
 bytemuck = { version = "1", features = ["derive"] }
+# Screenshot PNG encoding (Windows capture path)
+png = "0.17"
 
 # Text rendering
 rustkit-text = { path = "../rustkit-text" }

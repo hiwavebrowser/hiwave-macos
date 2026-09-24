@@ -28,6 +28,10 @@ pub use macos::MacOSViewHost;
 #[cfg(target_os = "macos")]
 pub use macos::{drain_pending_clicks, drain_pending_keys, PendingClick, PendingKey};
 
+// Screenshot capture (Windows: GPU readback of a hosted view)
+#[cfg(windows)]
+pub mod screenshot;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use thiserror::Error;
