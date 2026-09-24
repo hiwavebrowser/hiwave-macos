@@ -10,12 +10,14 @@ on:
     # pr-swarm, which actually gates.
     branches: [master, main]
   workflow_dispatch:  # Allow manual triggers
-  # Nightly develop receipt (2026-09-23). Per-run parity outputs are no
-  # longer committed in PRs (see .gitignore), so develop's numbers come from
-  # this run: it appends a `develop` row to metrics-history and writes a
-  # night-over-night per-case comparison. 04:00 UTC = midnight EDT (23:00 EST).
+  # Weekly develop receipt (Pete, 2026-09-24: parity reports once a week;
+  # the real-site board is the daily focus). Per-run parity outputs are not
+  # committed in PRs (see .gitignore), so develop's numbers come from this
+  # run: it appends a `develop` row to metrics-history and writes a
+  # week-over-week per-case comparison. Mondays 04:00 UTC = Sunday midnight
+  # EDT, right after the Sunday-night parity trench.
   schedule:
-    - cron: "0 4 * * *"
+    - cron: "0 4 * * 1"
 
 env:
   RUST_BACKTRACE: 1
