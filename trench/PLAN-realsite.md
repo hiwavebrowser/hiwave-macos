@@ -66,6 +66,44 @@ flip any of them:
   browser that runs the challenge honestly. If a vendor still blocks after
   that, record it and move on.
 
+## Phase 1 direction (Pete, 2026-09-24): JavaScript before CSS grid
+
+RustKit runs no page `<script>` on any load path, and that caps READABLE and
+LOADS on most of the board (JS-rendered apps, and the four JS-challenge walls).
+Grid layout waits. The JS sprint, in order, each step its own `rs-` PR with a
+test that fails without it:
+
+1. **Run scripts on the load path.** `load_url`: inline and external `<script>`
+   in document order (classic scripts block; `defer` after parse; `async`
+   when fetched; `type=module` is recorded as unsupported for now), through
+   `rustkit-js` (Boa, feature already in the tree) and `rustkit-bindings`.
+   Then dispatch `DOMContentLoaded` / `load`, run timers and microtasks inside
+   `--settle-ms`, and re-style and re-layout after DOM mutation. Enforce a
+   per-script time budget: a hung script must never hang the capture.
+2. **A JS error census on the board.** Record per site the uncaught
+   exceptions and missing-API accesses (`X is not a function`,
+   `undefined property Y`). Rank the missing APIs by how many sites hit them,
+   and put the top 10 in each digest.
+3. **Implement APIs in census order.** Only what sites actually hit, no
+   speculative DOM breadth. Expect `document.createElement` / `append*` /
+   `innerHTML`, `querySelector*`, `classList`, `addEventListener`,
+   `setTimeout`, `requestAnimationFrame`, `fetch` / XHR, `location`,
+   `history`, `localStorage`, cookies, `navigator` / `screen` / `matchMedia`.
+4. **The challenge walls** (amazon, chatgpt, ebay, nytimes) are the
+   acceptance test for cookies + reload + timers + `crypto.subtle`, under the
+   no-evasion rule above.
+
+**Report, don't decide:** Boa's speed on multi-megabyte production bundles
+(YouTube, Facebook). If a site's scripts cannot finish inside the 30s LOADS
+budget after the easy wins, measure it (script bytes, Boa time) and put it
+under decisions for Pete. Switching engines (V8 / QuickJS) is an
+architecture call, not a trench call.
+
+**Security:** script execution is the largest attack surface this browser has.
+Keep the sandbox (no filesystem, no process access from JS), enforce
+same-origin on fetch/XHR and cookies from day one, and follow the
+security-findings-stay-private rule for anything found.
+
 ## Phase 1 — grind the points
 
 Each session:
