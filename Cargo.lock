@@ -2547,8 +2547,10 @@ dependencies = [
  "rustkit-viewhost",
  "serde_json",
  "tao",
+ "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
  "wry",
 ]
 

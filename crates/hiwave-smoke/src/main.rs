@@ -93,11 +93,16 @@ fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
     }
 }
 
+/// Product user agent for live URLs; keep in sync with parity-capture.
+const PRODUCT_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15 HiWave/1.0";
+
 /// Parse command line arguments
 struct Args {
     duration_ms: u64,
     dump_frame: Option<String>,
     html_file: Option<String>,
+    /// Live URL to load through `Engine::load_url` (overrides --html-file).
+    url: Option<String>,
     width: u32,
     height: u32,
     perf_output: Option<String>,
@@ -112,6 +117,7 @@ impl Args {
         let mut duration_ms = 4000u64;
         let mut dump_frame = None;
         let mut html_file = None;
+        let mut url = None;
         let mut width = 1100u32;
         let mut height = 640u32;
         let mut perf_output = None;
@@ -131,6 +137,9 @@ impl Args {
                 }
                 "--html-file" => {
                     html_file = args.next();
+                }
+                "--url" => {
+                    url = args.next();
                 }
                 "--width" => {
                     if let Some(val) = args.next() {
@@ -162,6 +171,7 @@ impl Args {
             duration_ms,
             dump_frame,
             html_file,
+            url,
             width,
             height,
             perf_output,
@@ -350,10 +360,14 @@ fn main() {
     // Content area (using RustKit engine)
     // Use parity testing config to disable animations for deterministic capture
     let engine_start = Instant::now();
-    let mut engine = EngineBuilder::new()
-        .with_config(rustkit_engine::EngineConfig::for_parity_testing())
-        .build()
-        .expect("Failed to create RustKit engine");
+    // A live URL is fetched with the product's user agent, so sites serve
+    // what they serve HiWave users (same UA as `parity-capture --url`).
+    let mut builder = EngineBuilder::new()
+        .with_config(rustkit_engine::EngineConfig::for_parity_testing());
+    if args.url.is_some() {
+        builder = builder.user_agent(PRODUCT_USER_AGENT);
+    }
+    let mut engine = builder.build().expect("Failed to create RustKit engine");
     perf.record("engine_init", engine_start.elapsed());
 
     // Get the raw window handle for creating the RustKit view
@@ -376,12 +390,27 @@ fn main() {
         .expect("Failed to create RustKit content view");
     perf.record("view_create", view_start.elapsed());
 
-    // Load test content into the RustKit view (from file or default)
-    let test_html = args.load_html_content();
-
+    // Load content: a live URL through the browser's navigation path
+    // (document, then stylesheets/fonts/images), else the HTML file/default.
     let load_start = Instant::now();
-    if let Err(e) = engine.load_html(content_view_id, &test_html) {
-        error!(?e, "Failed to load HTML into RustKit view");
+    if let Some(raw) = args.url.as_deref() {
+        match url::Url::parse(raw) {
+            Ok(u) => {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create tokio runtime");
+                if let Err(e) = rt.block_on(engine.load_url(content_view_id, u)) {
+                    error!(?e, url = raw, "Failed to load URL into RustKit view");
+                }
+            }
+            Err(e) => error!(?e, url = raw, "Invalid --url"),
+        }
+    } else {
+        let test_html = args.load_html_content();
+        if let Err(e) = engine.load_html(content_view_id, &test_html) {
+            error!(?e, "Failed to load HTML into RustKit view");
+        }
     }
     perf.record("html_load", load_start.elapsed());
 
