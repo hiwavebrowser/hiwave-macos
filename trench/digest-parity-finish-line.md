@@ -11512,3 +11512,107 @@ it would have cost if I hadn't is a reviewer asking why an instrument fix touche
 `.cursor/`, which is exactly the question a reviewer should never have to ask on
 this branch. Recorded because two nights in a row now cut instrument branches
 from `master` and only one of them was safe.
+
+### Addendum — THE METRIC MOVED: `2/26` → **`3/26`**, and it is not mine
+
+Run [35960587374](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/35960587374),
+`macos-14` (arm64, CoreText and Metal), #225's Parity Gate on
+`refs/pull/225/merge`. All 14 checks green; R2 stamped PASS at `db53604`.
+
+```
+Finish line — N/26 finish-line-green
+  metric:     3/26 cases pass all four conditions
+  measured:   26/26 scored on all four  (0 not fully measured)
+    geometry   9/26 green, 26/26 measured
+    paint      3/26 green, 26/26 measured
+    stability 26/26 green, 26/26 measured
+    discrete  26/26 green, 26/26 measured
+
+  GREEN  bg-pure · bg-solid · gradients
+  ratchet  exit 2, holds · 17 tighten-eligible
+  Gate C   mean raw 14.4034%  (diagnostic only)
+```
+
+**Against 09-23's `2/26` (run 35822237634):** metric 2 → **3**, the new green case
+is `gradients`. Geometry green 5 → **9**. Gate A failures **940 → 621**, summed
+from the ratchet's per-case rows rather than taken from a header:
+
+| case | 09-23 | now | Δ |
+|---|---:|---:|---:|
+| flex-positioning | 75 | 12 | **−63** |
+| about | 155 | 95 | −60 |
+| settings | 343 | 284 | −59 |
+| form-elements | 91 | 49 | −42 |
+| form-controls | 69 | 43 | −26 |
+| css-selectors | 27 | 4 | −23 |
+| image-gallery | 15 | 2 | −13 |
+| card-grid | 29 | 19 | −10 |
+| article-typography | 52 | 46 | −6 |
+| images-intrinsic | 6 | 0 | −6 |
+| new_tab · chrome_rustkit | 27 · 7 | 24 · 4 | −3 each |
+| backgrounds · gradients · rounded-corners · sticky-scroll | | | −2 · −1 · −1 · −1 |
+
+**Zero cases worsened.** Sixteen improved, ten held.
+
+**None of this is #225's.** Stated plainly because a PR whose run produces a
+moved number is exactly where a campaign talks itself into credit it has not
+earned: #225 changes two files under `scripts/`, and `seat_control_report.py` is
+**not in the receipt pipeline at all** — `finish_line_receipt.py` reads
+`gate-a.json`, `gate-b.json` and `aggregate_report.json`, and nothing it touches
+imports the seat control. The `crates/` in the merge ref is `develop a66c159`'s.
+The move belongs to the engine PRs that landed between `011ffee` and `a66c159`:
+**#205** (line-box strut floor), **#207** (inline baseline drop), **#209** (the
+nine-branch stack integration), **#212** (multicol `column-count`), **#213**
+(grid span growth limits), **#216** (radial gradient size). 09-23's decision-1
+worry — that the queue's largest row was fixed on a branch nobody had merged —
+is answered by the merges themselves, and `settings` −59 with
+`flex-positioning` −63 is what that answer looks like.
+
+#### What the receipt makes readable, and it inverts the current queue premise
+
+Geometry is green on **9** cases; only **3** of those are green overall. The
+other six are geometry-green, discrete-green and stable, and **blocked by paint
+alone**:
+
+| case | paint (needs ≥ 0.99) | short by |
+|---|---:|---:|
+| images-intrinsic | 0.98618 | 0.38pp |
+| combinators | 0.97288 | 1.71pp |
+| pseudo-classes | 0.97789 | 1.21pp |
+| rounded-corners | 0.96981 | 2.02pp |
+| backgrounds | 0.96876 | 2.12pp |
+| specificity | 0.95854 | 3.15pp |
+
+**Six cases are one paint fix each from the metric, and none of them is a
+geometry problem any more.** The 2026-08-12 geometry-first amendment was ratified
+because Gate B could not report on displaced elements — 1421 of 1593 withheld.
+That premise is now measurably weaker on these six: they have no failing boxes
+at all, so Gate B's jurisdiction over them is total. `images-intrinsic` at
+0.38pp is the closest any case has been to crossing without touching layout.
+
+This is a real change of direction and I am not taking it unilaterally — see
+decision 4 below. What I can say without a decision: the next unit chosen off
+geometry magnitude alone would now be `settings` (284 of 621, 46% of the debt in
+one case), and the next unit chosen off *distance to the metric* would be
+`images-intrinsic` paint. Those are different nights.
+
+#### Decision 4 for Pete (supersedes nothing; the other three stand)
+
+**Six cases are geometry-clean, stable, discrete-clean and short of the paint bar
+by 0.38–3.15pp. Does the queue turn to paint for those six — the P1/P6 paint
+families, smallest gap first — or does geometry-first hold until `settings` and
+`about` come down?** The honest case for turning: `images-intrinsic` is 0.38pp
+from being the 4th green case and has no geometry left to fix. The honest case
+against: six paint wins would take the metric to 9/26 while 621 geometry failures
+remain, and a metric that moves on the six easiest cases is the shape the
+campaign distrusts.
+
+#### One correction to my own entry above
+
+The main entry says the metric is "carried forward and NOT re-measured" and that
+"nothing I landed touches `crates/`, so the number cannot have moved". The second
+half is still true and the first half stopped being true forty minutes later, for
+the same reason it did on 09-23: a `pull_request` run is a full macOS lane on the
+merge ref. **The number moved because `develop` moved, not because anything I did
+moved it** — but "carried forward" now reads as if the campaign's number were
+still 2/26, and it is 3/26.
