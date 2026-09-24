@@ -11196,3 +11196,244 @@ their PRs; the macOS lane is the arbiter. Recorded, not judged.
 What this means for the next night: **take a fresh board off `develop 90262c9`
 before choosing a unit.** The pre-merge boards in this digest are now history,
 and the queue's geometry rows have moved under all four merges at once.
+
+## 2026-09-24
+
+**Metric: `2/26` → `2/26` on macOS, carried forward and NOT re-measured.** No
+macOS lane ran on my work tonight and nothing I landed touches `crates/`, so the
+number cannot have moved. What blocks re-measuring it from here is unchanged and
+structural: this seat has no CoreText and no Metal. PR #224's own Parity Gate run
+is a macOS lane and will confirm or refute the carry-forward the way #211's did
+on 09-23 — that is the check, not this entry.
+
+**P-item: none of P1–P6. I could not choose a unit off this seat's board without
+being lied to, measured the lie, and fixed the instrument that tells `Δ_real`
+from `Δ_confound`. COMPLETE.** Third night in a row whose unit turned out to be
+one layer under the queue, and I am recording that as a pattern rather than a
+coincidence — see the last section.
+
+### The night's order was to take a fresh board, and the fresh board named a phantom
+
+09-23 closed with: *take a fresh board off `develop 90262c9` before choosing a
+unit.* `develop` had moved again by the time I read it — `a66c159`, after #212
+(multicol `column-count`, which answers 09-23's decision 2 in the affirmative),
+#213, #216, #219 and #220. So: seat control captured (26/26), 26 cases captured
+through `parity-capture` (26/26, 9.4s), Gate A run, and the three-way split run.
+
+Gate A, Linux/SwiftShader, `develop a66c159`. **MECHANICS, NOT A RECEIPT.**
+
+```
+  Gate A geometry failures      2580     join failures 16      geometry-green 3/26
+  (join failures: 12 missing_box, 8 phantom_box, ZERO ambiguous_selector)
+```
+
+Then the seat-control split, which is the instrument that is supposed to make
+this board rankable. Its top row, by `|Δ_real|`, in the `real` bucket — the
+bucket whose whole meaning is *this one is worth your night*:
+
+```
+  new_tab   body > div.ambient-glow   x   reported 400.00   real 400.00   confound 0.00
+```
+
+400px, pure, zero seat contribution, ranked **first on the whole board**. Gate A
+scores that box **GREEN** on the same captures.
+
+`.ambient-glow` is `position: fixed; left: 50%; transform: translateX(-50%);
+width: 800px` in a 1280px viewport. Chrome's rect is x 240. RustKit's layout
+`border_box` is x 640 and its `visual_border_box` is x **240** — bit-exact.
+`getBoundingClientRect` is post-transform; a transform does not change layout;
+the engine emits both quantities and says which is which. Gate A imports that
+rule. `seat_control_report.py` restated the extraction as `node["border_box"]`
+and lost it.
+
+Gate A's own docstring records the case that taught it this — `sticky-scroll`'s
+`.overflow-content`, `translate(-50%, -50%)`, *"read 139.53px out of place while
+its layout position was correct, and getting the layout position RIGHT made the
+reported delta larger."* The seat control was written 33 nights later and
+un-learned it in one line.
+
+The second transformed box on the board is that same `.overflow-content`, and it
+is worse than a magnitude error:
+
+```
+                    Gate A (correct)    seat control (before)
+  x                        +9.53                   +159.53
+  y                       -74.95                    +75.05
+```
+
+**The phantom inverted the sign.** A night reading that row would have gone
+looking for a card 75px too low that is in fact 75px too high.
+
+### Commits — branch `atlas/n63-seat-control-visual-box`, cut from `origin/master`, **PR #224** against `develop`
+
+- `1b8ddc3` — `rustkit_rects` takes its rect from Gate A's `border_box`,
+  imported and not restated; 4 new guards.
+- `cf535df` — close the survivors, and refuse an ambiguous selector the way
+  Gate A does.
+
+Instrument lane, per the branch law: `crates/`, `Cargo.toml` and `Cargo.lock`
+are untouched (`git diff --stat origin/master...HEAD -- crates/ Cargo.toml
+Cargo.lock` is empty).
+
+### Measured — the RustKit side only, so the confound total must not move
+
+```
+  reported total   46666.85 -> 46116.74   (-550.11)
+  real total       40535.32 -> 39985.21   (-550.11)
+  confound total   20889.77 -> 20889.77   (bit-identical)
+  cases moved      2 of 26; the other 24 byte-identical
+  new_tab real bucket  97 -> 96 axes
+```
+
+The confound total is also **identical to night 44's 20889.77** on a control
+captured 18 days later, which is the consistency check I did not expect to get
+for free: same fonts, same Chromium, same number.
+
+**The strongest receipt is not in that table.** `Δ_reported` is *defined* as Gate
+A on the pinned set. After the fix the report's `reported` column equals Gate A's
+`sum|Δ|` and failing-axis count on **all 26 cases**, to the cent. Before it,
+2 of 26 disagreed. That equality is now a guard rather than tonight's
+observation.
+
+### A second divergence of the same class, found by the fixture
+
+Gate A **refuses** an ambiguous selector (`ambiguous_selector`, not compared);
+the report silently paired the first box the walk reached — a confident delta for
+an element the receipt oracle declines to score. Fixed to refuse.
+
+It moves nothing today: zero of the 26 cases has an ambiguous selector on
+`a66c159`. I re-ran the board twice to confirm every per-case sum, axis count and
+bucket is bit-identical to the rect-fix-only board, rather than asserting it from
+the reasoning — 09-23's correction was the lesson and I did not want to repeat
+it in the same week.
+
+### Mutation-check results
+
+**7 probes, 7 RED, 0 survivors.** Control green before and after; every probe
+applied from the committed tree and restored with `git checkout --`.
+
+| probe | caught by |
+|---|---|
+| M1 rect choice reverted to a local `border_box` read | 3 guards |
+| M2 import dropped, extraction restated **correctly** as a local copy | `…comes_from_the_gate` |
+| M3 the visual rect becomes the only rect | 4 guards |
+| M4 the report applies a tolerance of its own (`> 0.0`) | `…is_gate_a_s_number…` |
+| M5 ambiguous selector paired with the **last** box | `…is_gate_a_s_number…` |
+| M6 ambiguous selector paired with the **first** box | `…is_gate_a_s_number…` |
+| M7 a selector-less box admitted under its parent's selector | 2 guards |
+
+**The sweep took two rounds and the second round is the part worth reading.** M4
+and M5 survived the first; hardening the fixture for those made M6 and M7 survive
+the second. All four are the shape this digest has now flagged on 09-12, 09-21,
+09-23 and tonight — *the guard written against the example rather than against
+the rule*. M6 is the sharpest of the four: after `div.twin` was added, pairing
+the **first** twin still passed, because that twin happened to sit exactly where
+Chrome puts the element, so it produced no delta and the totals matched a Gate A
+that had refused the join entirely — for the opposite reason. Two instruments
+agreeing on a number for contradictory reasons is exactly what this file exists
+to prevent, and my own fixture staged it. Closed by putting **neither** twin
+where Chrome puts it.
+
+One honest note on the four guards: three are examples and one is the rule.
+`test_the_reported_column_is_gate_a_s_number_on_the_same_captures` is the rule,
+and every one of M4–M7 was caught by it alone. The three example guards caught
+only the transform. If I had written the rule first, the sweep would have been
+one round.
+
+### Also measured, and it is the same class a THIRD time — this one in Gate A
+
+With the phantom gone, the corrected board's top pure-`real` axis is:
+
+```
+  article-typography   body > div.container > article > pre > code   height
+                       reported -132.06   real -132.06   confound 0.00
+```
+
+Chrome 148.38, RustKit 16.32. But RustKit's `code` box has one text child, and
+**that child spans 152.06** — the content is laid out over the right extent.
+Chrome's rect for a multi-line inline is the union of its line fragments;
+RustKit exports the inline box's single fragment. The two are not the same
+quantity, and Gate A calls the difference a 132px geometry defect.
+
+Sized by measurement, not by reasoning, because my first cut of the detector was
+wrong: a loose test (`union_h > own_h`) flagged 34 elements and 1609px, and most
+of them were single-line inlines whose *text child is the line box* and so
+taller than the inline's content area — `span.highlight` at 18.13 vs a text
+child of 28.16, against a Chrome height of 20, is not this class at all. The
+tight form (`union_h > own_h × 1.6`) gives:
+
+| case | selector | rk exported | rk union | Chrome | axes |
+|---|---|---:|---:|---:|---:|
+| settings | `.setting-label:nth-of-type(6) > span` | 13.18 | 57.60 | 55.38 | 3 |
+| article-typography | `pre > code` | 16.32 | 152.06 | 148.38 | 3 |
+
+Two elements, **6 failing axes, 406px of 46,117 — 0.9%**. Three more `about`
+elements the tight test flags are NOT this class: their union is 23.80 against a
+Chrome height of 17.00, i.e. RustKit wraps where Chrome does not. That is advance
+widths and it is seat confound.
+
+So: small in magnitude, **first in the ranking**, and in the primary grind
+driver rather than in a diagnostic. It is not a one-liner — the engine has no
+inline fragment model; an inline's box is one fragment and the per-line records
+live on the text child as `text_lines` (width + `x_offset` each), so the union
+has to be computed from those. It changes `crates/`, so it needs its own branch
+off `develop` and its own PR. **Recorded, not half-landed.** It is the obvious
+next unit.
+
+### Stop rule
+
+Did not fire and could not: `crates/` is byte-identical to `origin/master` on the
+PR branch, so no oracle has an input that changed. Checked with `git diff`
+rather than asserted, because "no engine change" is a claim.
+
+### Decisions needed from Pete
+
+1. **Four of the seven open PRs are labelled `r2-fail`** — #210, #214, #215,
+   #217 — and three of those carry the text lane's receipts that `settings`
+   (37% of the macOS geometry debt) is waiting on; is clearing that label queue
+   ahead of the trench's next unit, or does the trench keep landing units on top
+   of an eight-deep stack?
+2. **Three instrument lies of one shape in three weeks** (#84's stale
+   attribution, 09-23's phantom root, tonight's transform rect) all reduce to
+   *two instruments restated the same rule and one drifted*. Is a standing
+   cross-instrument equality guard — every derived instrument's numbers must
+   reproduce Gate A's on the same captures, as PR #224 now does for the seat
+   control — worth making a requirement for any new instrument, rather than a
+   guard I happened to write tonight?
+3. The multi-line-inline union above: fix it as an **export** (emit the fragment
+   union as the Chrome-corresponding rect, as `visual_border_box` already does
+   for transforms) or as **layout** (give inlines a real fragment model)? The
+   first is a night; the second is a feature.
+
+### Surprises
+
+- **The board's #1 defect was a phantom, and so was its replacement.** Two in
+  one night, in two different instruments, both the identical class: *RustKit's
+  exported rect and Chrome's rect are not the same quantity*. I went looking for
+  a layout root and found the join twice. The campaign has a name for the first
+  kind of error (plan §1, the metric preferring a broken layout) and this is its
+  mirror — the metric inventing a defect that is not there.
+- **Gate A had already learned tonight's rule, in writing, 33 nights ago.** The
+  fix is one line and the docstring explaining why it matters is fifteen. The
+  knowledge was not lost; it was not *imported*. That is a much more tractable
+  failure than a missing insight, and it is what decision 2 is about.
+- **My own fixture staged the M6 coincidence.** I put the first twin exactly
+  where Chrome puts the element without noticing, which made "pair the first
+  box" agree with "refuse the join" on the totals. A guard can be defeated by
+  the tester's unexamined choice of a round number.
+- **The seat's confound is bit-identical to night 44's, 18 days later.** 20889.77
+  both times. I expected drift from the Chromium the seat now ships (141, where
+  the pinned set is 148) and got none, which says the control is doing exactly
+  what it claims and that the two boards are comparable across the whole
+  campaign.
+- **Playwright on this seat now wants a browser revision the image does not
+  have** (1200 vs the installed 1194), so `capture_seat_control.mjs` failed
+  26/26 before I shimmed a browsers path in the scratchpad. The STAMP records
+  the Playwright version, not the Chromium one, so a control captured this way
+  is stamped `1.57.0` while the binary is Chromium 141. It did not matter
+  tonight — the numbers reproduce night 44's exactly — but the stamp cannot
+  currently tell those two worlds apart, and a future night on a different image
+  would not be warned.
+- **`rustkit-engine --lib` is 74 tests on `master` and 90 on `develop`.** 09-19
+  wondered whether the 80-vs-87 gap it saw was platform-gated tests; it is
+  simply which branch is checked out. Not a defect, and one fewer open question.
