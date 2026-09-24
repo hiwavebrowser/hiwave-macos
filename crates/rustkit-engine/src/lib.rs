@@ -3870,6 +3870,11 @@ impl Engine {
         // want of a font can finally be applied.
         self.resolve_ch_lengths(&mut style, &ch_pending);
 
+        // A `none`/`hidden` side has a zero used width, whichever of width
+        // and style was declared last (`border: 5px solid; border-style: none`
+        // used to keep the 5px frame).
+        zero_width_of_borderless_sides(&mut style);
+
         if recording {
             let id = attributes.get("id").cloned();
             let classes = attributes
@@ -4346,6 +4351,11 @@ impl Engine {
                 // whole value to parse_length, so `border: 2px solid #333` was
                 // silently dropped and only a bare `border: 2px` ever applied.
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    let border_style = border_style_keyword(value);
+                    style.border_top_style = border_style;
+                    style.border_right_style = border_style;
+                    style.border_bottom_style = border_style;
+                    style.border_left_style = border_style;
                     style.border_top_width = width.clone();
                     style.border_right_width = width.clone();
                     style.border_bottom_width = width.clone();
@@ -4355,6 +4365,36 @@ impl Engine {
                         style.border_right_color = color;
                         style.border_bottom_color = color;
                         style.border_left_color = color;
+                    }
+                }
+            }
+            "border-style" => {
+                // 1–4 keywords, standard sides expansion. `none`/`hidden`
+                // widths are zeroed after the cascade (zero_width_of_borderless_sides).
+                let styles: Vec<rustkit_css::BorderStyle> = value
+                    .split_whitespace()
+                    .filter_map(rustkit_css::BorderStyle::from_keyword)
+                    .collect();
+                let (t, r, b, l) = match styles[..] {
+                    [a] => (a, a, a, a),
+                    [a, b] => (a, b, a, b),
+                    [a, b, c] => (a, b, c, b),
+                    [a, b, c, d] => (a, b, c, d),
+                    _ => return,
+                };
+                style.border_top_style = t;
+                style.border_right_style = r;
+                style.border_bottom_style = b;
+                style.border_left_style = l;
+            }
+            "border-top-style" | "border-right-style" | "border-bottom-style"
+            | "border-left-style" => {
+                if let Some(s) = rustkit_css::BorderStyle::from_keyword(value.trim()) {
+                    match property {
+                        "border-top-style" => style.border_top_style = s,
+                        "border-right-style" => style.border_right_style = s,
+                        "border-bottom-style" => style.border_bottom_style = s,
+                        _ => style.border_left_style = s,
                     }
                 }
             }
@@ -4369,6 +4409,7 @@ impl Engine {
             }
             "border-top" => {
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    style.border_top_style = border_style_keyword(value);
                     style.border_top_width = width;
                     if let Some(color) = color {
                         style.border_top_color = color;
@@ -4377,6 +4418,7 @@ impl Engine {
             }
             "border-right" => {
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    style.border_right_style = border_style_keyword(value);
                     style.border_right_width = width;
                     if let Some(color) = color {
                         style.border_right_color = color;
@@ -4385,6 +4427,7 @@ impl Engine {
             }
             "border-bottom" => {
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    style.border_bottom_style = border_style_keyword(value);
                     style.border_bottom_width = width;
                     if let Some(color) = color {
                         style.border_bottom_color = color;
@@ -4393,6 +4436,7 @@ impl Engine {
             }
             "border-left" => {
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    style.border_left_style = border_style_keyword(value);
                     style.border_left_width = width;
                     if let Some(color) = color {
                         style.border_left_color = color;
@@ -9550,6 +9594,31 @@ fn ch_advance_px(style: &ComputedStyle) -> f32 {
 
 /// Parse a shorthand value with 1-4 parts (like margin, padding).
 /// Returns (top, right, bottom, left).
+/// Zero the width of every `none`/`hidden` border side. Runs after the whole
+/// cascade so declaration order between width and style cannot matter.
+fn zero_width_of_borderless_sides(style: &mut ComputedStyle) {
+    use rustkit_css::{BorderStyle, Length};
+    for (side_style, width) in [
+        (style.border_top_style, &mut style.border_top_width),
+        (style.border_right_style, &mut style.border_right_width),
+        (style.border_bottom_style, &mut style.border_bottom_width),
+        (style.border_left_style, &mut style.border_left_width),
+    ] {
+        if side_style == BorderStyle::None {
+            *width = Length::Zero;
+        }
+    }
+}
+
+/// The border style a `border` / `border-<side>` shorthand names; a
+/// shorthand without one keeps `Solid` (see rustkit_css::BorderStyle).
+fn border_style_keyword(value: &str) -> rustkit_css::BorderStyle {
+    value
+        .split_whitespace()
+        .find_map(rustkit_css::BorderStyle::from_keyword)
+        .unwrap_or_default()
+}
+
 /// Parse a `border` / `border-<side>` shorthand: `<width> || <style> || <color>`.
 /// ComputedStyle has no border-style field, so the style keyword only matters
 /// for `none`/`hidden` (which force a zero width, matching how the box would
@@ -13991,6 +14060,49 @@ mod web_font_tests {
             rustkit_css::FontWeight(400),
             "the shorthand resets an earlier font-weight it does not name"
         );
+    }
+
+    #[test]
+    fn a_none_or_hidden_border_side_has_zero_width_in_either_declaration_order() {
+        // Prometheus R1 HOLD on #217: `none`/`hidden` only zeroed the width
+        // inside the `border` shorthand, so a width set by an earlier
+        // declaration survived `border-style: none` and painted a frame.
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <div style="border: 5px solid red; border-style: none">a</div>
+            <div style="border-style: hidden; border-width: 5px">b</div>
+            <div style="border: 5px solid red; border-left-style: none">c</div>
+            <div style="border: 5px dashed red">d</div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+        fn style_around(b: &LayoutBox, text: &str) -> Option<ComputedStyle> {
+            if b.children
+                .iter()
+                .any(|c| matches!(&c.box_type, BoxType::Text(t) if t.trim() == text))
+            {
+                return Some(b.style.clone());
+            }
+            b.children.iter().find_map(|c| style_around(c, text))
+        }
+        use rustkit_css::Length::{Px, Zero};
+        let widths = |s: &ComputedStyle| {
+            [
+                s.border_top_width.clone(),
+                s.border_right_width.clone(),
+                s.border_bottom_width.clone(),
+                s.border_left_width.clone(),
+            ]
+        };
+        let a = style_around(&layout, "a").expect("a");
+        assert_eq!(widths(&a), [Zero, Zero, Zero, Zero], "style after width");
+        let b = style_around(&layout, "b").expect("b");
+        assert_eq!(widths(&b), [Zero, Zero, Zero, Zero], "width after style");
+        let c = style_around(&layout, "c").expect("c");
+        assert_eq!(widths(&c), [Px(5.0), Px(5.0), Px(5.0), Zero], "one side only");
+        let d = style_around(&layout, "d").expect("d");
+        assert_eq!(widths(&d), [Px(5.0), Px(5.0), Px(5.0), Px(5.0)], "control");
+        assert_eq!(d.border_top_style, rustkit_css::BorderStyle::Dashed);
     }
 
     #[test]
