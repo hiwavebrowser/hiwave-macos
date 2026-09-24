@@ -32,6 +32,40 @@ Land these as PRs to `develop`, since they are tooling the whole repo can use:
 Commit the first real board run on the hub branch and replace the `0 / 60`
 placeholder in BASELINE with the measured number. Then go to phase 1.
 
+## Access blocks (bot protection) — record them, fix the shared cause
+
+Measured 2026-09-23 with curl, logged out, from this Mac. Four of the 20 are
+behind JavaScript-challenge bot managers. Headers and HTTP/2 alone do not
+flip any of them:
+
+| Site | Status | Vendor |
+|---|---|---|
+| chatgpt | 403 | Cloudflare (`__cf_bm`, challenge) |
+| ebay | 403 | Akamai Bot Manager (`bm_s`) |
+| nytimes | 403 | DataDome (`x-datadome`, captcha) |
+| amazon | 202 | AWS WAF (`x-amzn-waf-action: challenge`) |
+
+- **The board must record access per site:** the HTTP status of the top-level
+  document, the vendor (from `server` / `x-datadome` / `x-amzn-waf-action` /
+  `cf-ray` / `bm_*` cookies), and whether a challenge page was served. A
+  blocked site scores LOADS=0 with reason `blocked:<vendor>`, never just
+  "failed". Report blocked sites as their own line in the digest.
+- **Shared fix, in this order (each its own `rs-` PR with a test):**
+  1. Network profile: default UA
+     `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36 HiWave/<version>`
+     (Chrome-compatible with a HiWave token, as Edge and Brave do; currently
+     `RustKit/1.0` in rustkit-http and rustkit-net). Send standard navigation
+     headers (Accept, Accept-Language, Accept-Encoding with decoding,
+     Sec-Fetch-*, Upgrade-Insecure-Requests), keep-alive, and HTTP/2 via ALPN.
+  2. Challenge completion: a persistent cookie jar across navigations,
+     `Set-Cookie` then reload/redirect, `location.reload()`, timers,
+     fetch/XHR, `crypto.subtle`, and consistent `navigator` / `screen` /
+     `Intl` values. The four sites above are the acceptance test.
+- **No evasion.** Do not forge fingerprints, solve captchas, rotate IPs, or
+  impersonate a different browser's TLS stack. The goal is to be a complete
+  browser that runs the challenge honestly. If a vendor still blocks after
+  that, record it and move on.
+
 ## Phase 1 — grind the points
 
 Each session:
