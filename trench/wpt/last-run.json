@@ -1,14 +1,14 @@
 {
   "schema": 1,
   "wpt_pin": "a6f29b0bedaf3f1edba7b6739127fe8e713bfcb3",
-  "hiwave_git_sha": "66630512880504f70320a8a48031b415494edfd1",
+  "hiwave_git_sha": "81330dc5cb15c4b6186f908ef1ba2adb56067a32",
   "runner": "scripts/wpt_tier1.py",
   "viewport": {
     "width": 800,
     "height": 600
   },
   "wpt_max_diff_pct": 0.0,
-  "ts": "2026-09-24T02:00:40.034015+00:00",
+  "ts": "2026-09-24T02:33:35.245460+00:00",
   "n": 30,
   "pass": 24,
   "fail": 2,
