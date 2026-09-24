@@ -79,15 +79,31 @@ def _layout(root, case_id, elements):
     (d / "layout.json").write_text(json.dumps({"root": {"children": children}}))
 
 
-def _layout_nodes(root, case_id, nodes):
+def _layout_nodes(root, case_id, nodes, duplicated=None):
     """Write a layout.json from whole nodes, so a test can give one a transform.
 
     `_layout` above only ever emits `border_box`, which is why every guard in
     this file was blind to which rect the report picks.
+
+    `duplicated` adds TWO boxes answering to that one selector, at different
+    positions, so a test can see what each instrument does with an ambiguous
+    join instead of assuming they do the same thing.
     """
     d = root / case_id
     d.mkdir(parents=True, exist_ok=True)
     children = [dict(selector=sel, children=[], **node) for sel, node in nodes.items()]
+    # An anonymous box, nested under a real element. It carries no selector and
+    # must be dropped: admitted under its parent's key it would make that
+    # selector ambiguous and take a REAL element out of the comparison.
+    if children:
+        children[0]["children"] = [{"border_box": _box(x=999.0), "children": []}]
+    if duplicated:
+        # NEITHER twin is where Chrome puts the element. A fixture whose first
+        # twin happened to be correct let "pair the first box" survive its
+        # probe: pairing it produced no delta, so the totals matched a Gate A
+        # that had refused the join entirely, for opposite reasons.
+        children.append({"selector": duplicated, "border_box": _box(x=200.0), "children": []})
+        children.append({"selector": duplicated, "border_box": _box(x=400.0), "children": []})
     (d / "layout.json").write_text(json.dumps({"root": {"children": children}}))
 
 
@@ -280,6 +296,13 @@ def test_the_reported_column_is_gate_a_s_number_on_the_same_captures():
         "div.glow": _box(x=240.0, width=800.0, height=800.0),
         "div.late": _box(x=10.0, y=20.0),
         "div.exact": _box(x=5.0),
+        # Inside the gate's tolerance: a failing-axis count that applied a
+        # tolerance of its own would disagree here and nowhere else.
+        "div.hair": _box(x=1.0),
+        # Two boxes answer to this one selector. Gate A refuses the join
+        # (`ambiguous_selector`) instead of picking one; so must this report,
+        # or it attributes a delta to whichever box the walk reached first.
+        "div.twin": _box(x=0.0),
     }
     nodes = {
         "div.glow": {
@@ -288,6 +311,7 @@ def test_the_reported_column_is_gate_a_s_number_on_the_same_captures():
         },
         "div.late": {"border_box": _box(x=10.0, y=48.0)},
         "div.exact": {"border_box": _box(x=5.0)},
+        "div.hair": {"border_box": _box(x=1.25)},
     }
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -298,7 +322,7 @@ def test_the_reported_column_is_gate_a_s_number_on_the_same_captures():
         pinned_dir = tmp / "baselines" / "pinned" / "websuite" / "probe"
         pinned_dir.mkdir(parents=True, exist_ok=True)
         (pinned_dir / "layout-rects.json").write_text(json.dumps(_rects(chrome_rects)))
-        _layout_nodes(layout_dir, "probe", nodes)
+        _layout_nodes(layout_dir, "probe", nodes, duplicated="div.twin")
         (tmp / "cases").mkdir(exist_ok=True)
         (tmp / "cases" / "registry.json").write_bytes(
             (REPO / "cases" / "registry.json").read_bytes()
