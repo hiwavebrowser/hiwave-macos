@@ -1,0 +1,94 @@
+{
+  "id": "bing",
+  "url": "https://www.bing.com/",
+  "chrome": [
+    {
+      "url": "https://www.bing.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.bing.com/",
+      "title": "Search - Microsoft Bing",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260924T1910Z-base/bing/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260924T1910Z-base/bing/chrome-a.png",
+      "elapsed_ms": 28387
+    },
+    {
+      "url": "https://www.bing.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.bing.com/",
+      "title": "Search - Microsoft Bing",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260924T1910Z-base/bing/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260924T1910Z-base/bing/chrome-b.png",
+      "elapsed_ms": 24643
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.bing.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260924T1910Z-base/bing/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260924T1910Z-base/bing/rustkit-display-list.json",
+    "layout_stats": null,
+    "elapsed_ms": 693,
+    "error": null,
+    "wall_ms": 728,
+    "non_background_fraction": 0.3195
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 42,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "ash",
+      "brain",
+      "copilot",
+      "court",
+      "creator",
+      "denies",
+      "detained",
+      "diagnosed",
+      "discover",
+      "disorder",
+      "during",
+      "faces",
+      "fl",
+      "found",
+      "guilty",
+      "house",
+      "human",
+      "identified",
+      "image",
+      "images",
+      "in",
+      "maps",
+      "massive",
+      "meat",
+      "meets"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 5.30537109375,
+    "diff": 87.86572265625
+  },
+  "points": 1
+}

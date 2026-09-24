@@ -1,0 +1,100 @@
+{
+  "id": "youtube",
+  "url": "https://www.youtube.com/",
+  "chrome": [
+    {
+      "url": "https://www.youtube.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.youtube.com/",
+      "title": "YouTube",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260924T1910Z-js/youtube/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260924T1910Z-js/youtube/chrome-a.png",
+      "elapsed_ms": 17073
+    },
+    {
+      "url": "https://www.youtube.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.youtube.com/",
+      "title": "YouTube",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260924T1910Z-js/youtube/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260924T1910Z-js/youtube/chrome-b.png",
+      "elapsed_ms": 18160
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.youtube.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260924T1910Z-js/youtube/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260924T1910Z-js/youtube/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 0,
+      "threw": 0,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 42,
+      "bytes": 1056845,
+      "elapsed_ms": 0
+    },
+    "elapsed_ms": 14001,
+    "error": null,
+    "wall_ms": 14068,
+    "non_background_fraction": 0.0025
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": false,
+    "why": "blank frame (0.25% non-background)"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 22,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "a",
+      "build",
+      "feed",
+      "get",
+      "help",
+      "home",
+      "in",
+      "ll",
+      "love",
+      "of",
+      "searching",
+      "shorts",
+      "sign",
+      "start",
+      "started",
+      "subscriptions",
+      "to",
+      "try",
+      "us",
+      "videos",
+      "watching",
+      "you"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

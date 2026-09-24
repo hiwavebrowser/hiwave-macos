@@ -1,0 +1,91 @@
+{
+  "id": "cnn",
+  "url": "https://www.cnn.com/",
+  "chrome": [
+    {
+      "url": "https://www.cnn.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.cnn.com/",
+      "title": "Breaking News, Latest News and Videos | CNN",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260924T2010Z-js2/cnn/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260924T2010Z-js2/cnn/chrome-a.png",
+      "elapsed_ms": 22001
+    },
+    {
+      "url": "https://www.cnn.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.cnn.com/",
+      "title": "Breaking News, Latest News and Videos | CNN",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260924T2010Z-js2/cnn/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260924T2010Z-js2/cnn/chrome-b.png",
+      "elapsed_ms": 22315
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "timeout",
+    "html_file": null,
+    "url": "https://www.cnn.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": null,
+    "layout_path": null,
+    "layout_stats": null,
+    "error": "capture exceeded 30000 ms",
+    "wall_ms": 30234
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": false,
+    "why": "capture exceeded 30000 ms"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 129,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "1",
+      "53",
+      "a",
+      "accepting",
+      "access",
+      "actions",
+      "advent",
+      "agree",
+      "allowed",
+      "and",
+      "arcy",
+      "as",
+      "back",
+      "bear",
+      "best",
+      "browser",
+      "business",
+      "by",
+      "calendars",
+      "catch",
+      "center",
+      "challenge",
+      "choices",
+      "clicking",
+      "closings"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0.01708984375,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

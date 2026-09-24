@@ -1,0 +1,49 @@
+amazon ok 323 {'ran': 0, 'threw': 0, 'skipped': 0, 'fetch_failed': 0, 'over_budget': 0, 'bytes': 0, 'elapsed_ms': 0}
+apple ok 26438 {'ran': 6, 'threw': 4, 'skipped': 4, 'fetch_failed': 0, 'over_budget': 0, 'bytes': 862052, 'elapsed_ms': 555}
+   slow: 242 ms 466023 B https://www.apple.com/metrics/ac-analytics/2.30.0/scripts/ac-analytics.js ran
+bing ok 3082 {'ran': 9, 'threw': 2, 'skipped': 0, 'fetch_failed': 0, 'over_budget': 0, 'bytes': 117705, 'elapsed_ms': 205}
+chatgpt ok 11891 {'ran': 9, 'threw': 5, 'skipped': 1, 'fetch_failed': 0, 'over_budget': 0, 'bytes': 6385, 'elapsed_ms': 1}
+cnn timeout None None
+ebay error 299 None
+facebook timeout None None
+github timeout None None
+google ok 5610 {'ran': 7, 'threw': 7, 'skipped': 0, 'fetch_failed': 0, 'over_budget': 0, 'bytes': 1445667, 'elapsed_ms': 1737}
+   slow: 1400 ms 1095259 B https://www.google.com/xjs/_/js/k=xjs.hd.en.4eJ7rtRE30A.2023.O/am=AAAAAAAAAAAAAAAAAAAAAAAA threw
+   slow: 290 ms 251195 B https://www.gstatic.com/og/_/js/k=og.asy.en_US.z6LsnA57xIY.2019.O/rt=j/m=_ac,_awd,ada,lldp threw
+instagram ok 17072 {'ran': 2, 'threw': 0, 'skipped': 0, 'fetch_failed': 37, 'over_budget': 8, 'bytes': 6103203, 'elapsed_ms': 3589}
+   slow: 304 ms 329408 B https://static.cdninstagram.com/rsrc.php/v4/yI/r/cNTFCS8G2AL.js ran
+   slow: 3285 ms 3918615 B https://static.cdninstagram.com/rsrc.php/v4inqn4/ya/l/en_US/b_73wHrAcFLSBM-q_Uex3wramiKW4c ran
+linkedin ok 7399 {'ran': 4, 'threw': 2, 'skipped': 0, 'fetch_failed': 0, 'over_budget': 0, 'bytes': 830599, 'elapsed_ms': 877}
+   slow: 518 ms 509708 B https://static.licdn.com/aero-v1/sc/h/azyj0u7xl6tpxe5fn3t3djk7p threw
+   slow: 359 ms 320427 B https://static.licdn.com/aero-v1/sc/h/26g24klhu4k9p8zgtz6fs4k01 threw
+microsoft ok 11441 {'ran': 2, 'threw': 4, 'skipped': 0, 'fetch_failed': 2, 'over_budget': 0, 'bytes': 134250, 'elapsed_ms': 170}
+netflix ok 3472 {'ran': 2, 'threw': 2, 'skipped': 0, 'fetch_failed': 0, 'over_budget': 0, 'bytes': 39460, 'elapsed_ms': 19}
+nytimes error 310 None
+reddit ok 285 {'ran': 1, 'threw': 0, 'skipped': 0, 'fetch_failed': 0, 'over_budget': 0, 'bytes': 420, 'elapsed_ms': 0}
+weather ok 12580 {'ran': 133, 'threw': 1, 'skipped': 1, 'fetch_failed': 0, 'over_budget': 0, 'bytes': 3091327, 'elapsed_ms': 1972}
+   slow: 232 ms 494951 B https://weather.com/wx-next-web/static/vendor/@mparticle/web-sdk@2.81.0/dist/mparticle.min ran
+   slow: 300 ms 203394 B https://weather.com/_next/static/chunks/1km8bjhh7no09.js?dpl=dpl_4W9tgMS9Gyb8rnap1jUrfLBBS ran
+   slow: 482 ms 672529 B https://weather.com/_next/static/chunks/03rzv1xm62zq1.js?dpl=dpl_4W9tgMS9Gyb8rnap1jUrfLBBS ran
+wikipedia timeout None None
+x ok 5239 {'ran': 1, 'threw': 6, 'skipped': 1, 'fetch_failed': 0, 'over_budget': 0, 'bytes': 5871, 'elapsed_ms': 4}
+yahoo ok 11039 {'ran': 147, 'threw': 2, 'skipped': 1, 'fetch_failed': 0, 'over_budget': 0, 'bytes': 2842513, 'elapsed_ms': 1392}
+   slow: 221 ms 199922 B https://www.yahoo.com/_nca/_next/static/chunks/87c73c54-0a523cc0db1f04ec.js?dpl=sha-0925b1 ran
+youtube ok 22925 {'ran': 0, 'threw': 0, 'skipped': 0, 'fetch_failed': 0, 'over_budget': 42, 'bytes': 847604, 'elapsed_ms': 0}
+
+6 TypeError: cannot convert 'null' or 'undefined' to object ['apple', 'chatgpt', 'google', 'netflix', 'x', 'yahoo']
+2 ReferenceError: ReadableStream is not defined ['chatgpt', 'x']
+2 ReferenceError: performance is not defined ['chatgpt', 'yahoo']
+2 ReferenceError: XMLHttpRequest is not defined ['google', 'netflix']
+2 TypeError: not a callable function ['google', 'microsoft']
+1 Error: Could not find root node ID: globalheader ['apple']
+1 ReferenceError: AbortController is not defined ['apple']
+1 ReferenceError: _w is not defined ['bing']
+1 ReferenceError: cannot assign to uninitialized global property `onload` ['bing']
+1 ReferenceError: structuredClone is not defined ['google']
+1 ReferenceError: require is not defined ['linkedin']
+1 ReferenceError: Element is not defined ['linkedin']
+1 ReferenceError: $ is not defined ['microsoft']
+1 Error: undefined missing autosuggest ['microsoft']
+1 Error: undefined missing jsll ['microsoft']
+1 ReferenceError: URL is not defined ['weather']
+1 ReferenceError: Event is not defined ['x']

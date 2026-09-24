@@ -1,0 +1,89 @@
+{
+  "id": "netflix",
+  "url": "https://www.netflix.com/",
+  "chrome": [
+    {
+      "url": "https://www.netflix.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.netflix.com/",
+      "title": "Netflix - Watch TV Shows Online, Watch Movies Online",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260924T1910Z-js/netflix/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260924T1910Z-js/netflix/chrome-a.png",
+      "elapsed_ms": 39485
+    },
+    {
+      "url": "https://www.netflix.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.netflix.com/",
+      "title": "Netflix - Watch TV Shows Online, Watch Movies Online",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260924T1910Z-js/netflix/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260924T1910Z-js/netflix/chrome-b.png",
+      "elapsed_ms": 39382
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.netflix.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260924T1910Z-js/netflix/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260924T1910Z-js/netflix/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 2,
+      "threw": 2,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 39460,
+      "elapsed_ms": 26
+    },
+    "elapsed_ms": 4950,
+    "error": null,
+    "wall_ms": 5019,
+    "non_background_fraction": 0.665
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 35,
+    "rustkit_words": 31,
+    "ratio": 0.6857,
+    "missing_sample": [
+      "and",
+      "for",
+      "just",
+      "love",
+      "more",
+      "movies",
+      "shows",
+      "the",
+      "tv",
+      "unlimited",
+      "you"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "diff": 49.00771484375
+  },
+  "points": 1
+}
