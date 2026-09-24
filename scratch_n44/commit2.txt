@@ -1,0 +1,21 @@
+test(parity): n44 board receipts — campaign 26/26 avg 2.6944 -> 2.6258 (shelf -1.69pp, new_tab -0.09), WPT 24/26 flat, honest last-run pin
+
+Basis: clean-tree develop afd73ab capture tonight (scratch_n44/board_develop_basis.json,
+avg 2.6944 — matches the #188 receipt exactly). With 87e7255
+(scratch_n44/board_with_fix2.json): shelf 4.6185 -> 2.9264, new_tab 2.6835 -> 2.5924,
+form-controls +0.0001, 23 of 26 byte-flat. board_with_fix.json is the currentColor
+change alone: byte-flat 26/26 on the meter while the shelf frame had changed
+(black icon -> accent icon) — the pixel-diff of the banked frames is what found the
+:focus-within and StrokeCircle bugs.
+
+WPT Tier-1 24/26 (pass 24 / fail 2 / skip 4), same two fails, trench/wpt/last-run.json
+pinned on the engine commit 87e7255.
+
+Tools: delta.py (two-board diff), bank.py (results + case captures), icon_color.py
+(icon-color / near-black census on the inline-svg repro), locate.py / rfind.py
+(substring navigation for code the Aleph index does not carry), run_board.sh.
+
+Measurement note: the first basis board was stopped and re-run — its cargo build had
+not linked before the crate edits landed, so it would have measured the fix.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>

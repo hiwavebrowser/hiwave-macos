@@ -1083,6 +1083,9 @@ impl TextShaper {
                 char_count as isize,
             );
 
+            // Pair kerning, which CTFontGetAdvancesForGlyphs leaves out.
+            let kern = Self::kerning_deltas(&ct_font, text, &glyph_advances, size);
+
             // Build positioned glyphs
             let text_chars: Vec<char> = text.chars().collect();
             let mut glyphs = Vec::with_capacity(text_chars.len());
@@ -1133,7 +1136,7 @@ impl TextShaper {
                         }
                     }
                 } else {
-                    advance
+                    advance + kern.get(utf16_idx).copied().unwrap_or(0.0)
                 };
 
                 glyphs.push(PositionedGlyph {
@@ -1202,6 +1205,86 @@ impl TextShaper {
                 direction: TextDirection::Ltr,
             })
         }
+    }
+
+    /// Per-UTF-16-unit kerning adjustments for `text` in `font`.
+    ///
+    /// `CTFontGetAdvancesForGlyphs` returns each glyph's nominal advance, so
+    /// runs were measured (and, through the advance contract, painted) with
+    /// no pair kerning. Chrome kerns. "CSS Specificity Test" at 32px bold is
+    /// 303.70px of nominal advances against 300.03px kerned, and every micro
+    /// case's h1 drifted right by that much toward its last word.
+    ///
+    /// A CTLine of the same string in the same font, with ligatures off so
+    /// glyphs stay one per unit, gives each unit's pen position. The delta
+    /// for unit i is `pos(next unit) − pos(i) − nominal advance(i)`. A delta
+    /// larger than a fifth of the size is not kerning (Core Text shaped that
+    /// unit in another face), so it is dropped.
+    #[cfg(target_os = "macos")]
+    fn kerning_deltas(
+        font: &core_text::font::CTFont,
+        text: &str,
+        nominal: &[CGSize],
+        size: f32,
+    ) -> Vec<f32> {
+        use core_foundation::attributed_string::CFMutableAttributedString;
+        use core_foundation::base::{CFRange, TCFType};
+        use core_foundation::number::CFNumber;
+        use core_foundation::string::CFString;
+        use core_text::line::CTLine;
+        use core_text::string_attributes::{kCTFontAttributeName, kCTLigatureAttributeName};
+
+        let n = nominal.len();
+        let mut deltas = vec![0.0f32; n];
+        if n < 2 {
+            return deltas;
+        }
+        let cf_text = CFString::new(text);
+        let mut astr = CFMutableAttributedString::new();
+        astr.replace_str(&cf_text, CFRange::init(0, 0));
+        let len = astr.char_len();
+        if len as usize != n {
+            return deltas;
+        }
+        let range = CFRange::init(0, len);
+        unsafe {
+            astr.set_attribute(range, kCTFontAttributeName, font);
+            astr.set_attribute(range, kCTLigatureAttributeName, &CFNumber::from(0i32));
+        }
+        let line = CTLine::new_with_attributed_string(astr.as_concrete_TypeRef());
+
+        let mut pos: Vec<Option<f64>> = vec![None; n];
+        for run in line.glyph_runs().iter() {
+            let positions = run.positions();
+            let indices = run.string_indices();
+            for (p, &i) in positions.iter().zip(indices.iter()) {
+                if let Some(slot) = pos.get_mut(i as usize) {
+                    if slot.is_none() {
+                        *slot = Some(p.x);
+                    }
+                }
+            }
+        }
+
+        let limit = size * 0.2;
+        let mut i = 0;
+        while i < n {
+            let Some(here) = pos[i] else {
+                i += 1;
+                continue;
+            };
+            let next = (i + 1..n).find(|&j| pos[j].is_some());
+            if let Some(j) = next {
+                let d = (pos[j].unwrap() - here - nominal[i].width) as f32;
+                if d.abs() <= limit {
+                    deltas[i] = d;
+                }
+                i = j;
+            } else {
+                break;
+            }
+        }
+        deltas
     }
 
     /// Advance and face extents for a character the primary face lacks,
@@ -1315,9 +1398,22 @@ impl TextShaper {
             ));
         }
 
-        // Try to find a font variant with the specified traits
-        // First try appending -Bold, -Italic, etc. to the family name
-        let mut variants_to_try = vec![family.to_string()];
+        // The family's own face for this weight/style, chosen the way paint
+        // (`GlyphRasterizer::with_style`) chooses it — ONE resolver for
+        // measure and draw. Until n50 the list below led with the BARE
+        // family name, so `named_font("Georgia")` answered first and every
+        // `font-weight: 700` run on a named family was measured with the
+        // regular face while paint drew Georgia-Bold at those advances:
+        // article-typography's h1 read 443px of overlapping bold ink where
+        // Chrome has 508 (every bold heading on every page using a named
+        // family; italic went the same way through `-Italic`).
+        if let Some(font) = rustkit_text::macos::family_face(family, size as f64, weight, italic) {
+            return Ok(font);
+        }
+
+        // Name guesses for PostScript-name inputs the family lookup cannot
+        // see ("HelveticaNeue-Light"): styled variants BEFORE the bare name.
+        let mut variants_to_try = Vec::new();
 
         if weight >= 700 {
             variants_to_try.push(format!("{}-Bold", family));
@@ -1333,6 +1429,7 @@ impl TextShaper {
             variants_to_try.push(format!("{}-Oblique", family));
             variants_to_try.push(format!("{}Italic", family));
         }
+        variants_to_try.push(family.to_string());
 
         // `CTFontCreateWithName` never fails: an uninstalled name comes back
         // as a substitute (Helvetica), so trusting `Ok` here stopped the
@@ -1884,7 +1981,15 @@ impl TextShaper {
             // Need to find a break point
             // Binary search for the right break point
             let break_offset = self.find_line_break(
-                remaining, font_chain, weight, style, stretch, size, cur_max, breaker,
+                remaining,
+                font_chain,
+                weight,
+                style,
+                stretch,
+                size,
+                cur_max,
+                breaker,
+                !preserve_spaces,
             )?;
 
             if break_offset == 0 {
@@ -1955,8 +2060,8 @@ impl TextShaper {
                     self.shape(line_text, font_chain, weight, style, stretch, size)?;
 
                 lines.push(WrappedLine {
-                    runs: vec![shaped_line.clone()],
-                    width: shaped_line.metrics.width,
+                    width: line_ink_width(&shaped_line, !preserve_spaces),
+                    runs: vec![shaped_line],
                     start_offset: base_offset + line_start,
                     end_offset: base_offset + line_start + line_end,
                 });
@@ -1968,9 +2073,16 @@ impl TextShaper {
                 let shaped_line =
                     self.shape(line_text, font_chain, weight, style, stretch, size)?;
 
+                // A line closed by a soft break reports its INK width: the
+                // collapsible space at the break point stays in the text
+                // (paint skips it) but hangs off the line (§4.1.3), so it is
+                // not part of the line's width — right/center alignment
+                // and justification measure against the ink. The LAST line
+                // (the fits-entirely arm above) keeps its trailing space:
+                // it is live content between this run and the next sibling.
                 lines.push(WrappedLine {
-                    runs: vec![shaped_line.clone()],
-                    width: shaped_line.metrics.width,
+                    width: line_ink_width(&shaped_line, !preserve_spaces),
+                    runs: vec![shaped_line],
                     start_offset: base_offset + line_start,
                     end_offset: base_offset + line_start + break_offset,
                 });
@@ -1994,6 +2106,7 @@ impl TextShaper {
         size: f32,
         max_width: f32,
         breaker: &LineBreaker,
+        hang_trailing_spaces: bool,
     ) -> Result<usize, TextError> {
         // Get all break opportunities
         let break_offsets = breaker.break_offsets(text);
@@ -2006,10 +2119,34 @@ impl TextShaper {
                 continue;
             }
 
-            let prefix = &text[..offset];
-            let shaped = self.shape(prefix, font_chain, weight, style, stretch, size)?;
+            // css-text-3 §4.1.3: collapsible spaces at the end of a line are
+            // removed before the line is measured — they HANG past the edge
+            // and never decide the break. Measuring the prefix with its
+            // break-point space made every line whose ink fits but whose
+            // ink + space does not break one word early (n49: a 300px Georgia
+            // line "…and the official" wrapped "official" where Chrome fits
+            // it), and the trailing-space width was silently added to the
+            // slack of every justified line. `break-spaces` is the one value
+            // whose spaces never hang (§4.1.3): they are measured.
+            let prefix = if hang_trailing_spaces {
+                text[..offset].trim_end_matches(is_collapsible_space)
+            } else {
+                &text[..offset]
+            };
+            // A space-only prefix is a line of hanging spaces: zero ink, it
+            // always fits (pre-wrap " XXXXX" in 5ch breaks after the leading
+            // space — WPT overflow-wrap-anywhere-004/005 — the space-only
+            // first line is the break, not a skipped opportunity).
+            let fits = if prefix.is_empty() {
+                true
+            } else {
+                self.shape(prefix, font_chain, weight, style, stretch, size)?
+                    .metrics
+                    .width
+                    <= max_width
+            };
 
-            if shaped.metrics.width <= max_width {
+            if fits {
                 best_break = offset;
             } else {
                 break;
@@ -2018,6 +2155,23 @@ impl TextShaper {
 
         Ok(best_break)
     }
+}
+
+/// The width of a closed line's ink: the run's width minus the advances of
+/// the collapsible spaces that hang off its end (css-text-3 §4.1.3). With
+/// `hang == false` (break-spaces) every space is measured.
+fn line_ink_width(run: &ShapedRun, hang: bool) -> f32 {
+    if !hang {
+        return run.metrics.width;
+    }
+    let hanging: f32 = run
+        .glyphs
+        .iter()
+        .rev()
+        .take_while(|g| is_collapsible_space(g.character))
+        .map(|g| g.advance)
+        .sum();
+    (run.metrics.width - hanging).max(0.0)
 }
 
 /// css-text-3 §4.1: the white space that COLLAPSES (and is removed at a
@@ -2462,6 +2616,46 @@ mod tests {
         assert!(!decoration.lines.line_through);
     }
 
+    /// Layout must MEASURE with the face paint draws. T-RED before n50:
+    /// the resolver tried the bare family before "-Bold", so a 700 run on
+    /// Georgia shaped with the regular face (same width as 400) while paint
+    /// drew Georgia-Bold — the probe's h1 read 443px of overlapping ink vs
+    /// Chrome's 508 for the bold row and 440 for the regular one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bold_named_family_shapes_with_its_bold_face() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::from_css_value("Georgia, 'Times New Roman', serif");
+        let width = |w: FontWeight, s: FontStyle| {
+            shaper
+                .shape(
+                    "The Art of Typography",
+                    &chain,
+                    w,
+                    s,
+                    FontStretch::Normal,
+                    44.0,
+                )
+                .unwrap()
+                .metrics
+                .width
+        };
+        let regular = width(FontWeight::NORMAL, FontStyle::Normal);
+        let bold = width(FontWeight::BOLD, FontStyle::Normal);
+        let italic = width(FontWeight::NORMAL, FontStyle::Italic);
+        assert!(
+            bold > regular * 1.10,
+            "bold {bold} must be the wider face, regular {regular}"
+        );
+        assert!(
+            (italic - regular).abs() > 0.5,
+            "italic {italic} must be its own face, regular {regular}"
+        );
+        // The chain's face, not a substitute, on both sides.
+        let font = TextShaper::create_ct_font_with_traits("Georgia", 44.0, 700, false).unwrap();
+        assert_eq!(font.postscript_name(), "Georgia-Bold");
+    }
+
     #[test]
     fn test_text_shaper_creation() {
         let shaper = TextShaper::new();
@@ -2856,6 +3050,56 @@ mod tests {
     /// every 4-character line has the same advance; `break-all` stands in
     /// for `line-break: anywhere` (the layout crate maps it the same way).
     #[test]
+    fn pre_wrap_leading_space_is_a_break_and_hangs_on_its_own_line() {
+        // WPT overflow-wrap-anywhere-004: ` XXXXX ` in a 5ch pre-wrap box —
+        // the leading space is a soft break opportunity and the word must
+        // not be broken: line 1 is the space alone, line 2 is the word.
+        // (n49's hanging-space fit test first skipped the space-only prefix
+        // as "nothing to measure" and broke the word instead.)
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::monospace();
+        let five = shaper
+            .shape(
+                "XXXXX",
+                &chain,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                FontStretch::Normal,
+                20.0,
+            )
+            .expect("shape")
+            .metrics
+            .width;
+        let lines: Vec<String> = shaper
+            .wrap_text_white_space(
+                " XXXXX ",
+                &chain,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                FontStretch::Normal,
+                20.0,
+                five * 1.01,
+                CssWordBreak::Normal,
+                CssOverflowWrap::Anywhere,
+                rustkit_css::WhiteSpace::PreWrap,
+            )
+            .expect("wrap")
+            .iter()
+            .map(|l| l.text())
+            .collect();
+        assert_eq!(lines.len(), 2, "space line + word line, got {lines:?}");
+        assert_eq!(
+            lines[0].trim_end(),
+            "",
+            "line 1 is the hanging leading space: {lines:?}"
+        );
+        assert!(
+            lines[1].starts_with("XXXXX"),
+            "line 2 is the unbroken word: {lines:?}"
+        );
+    }
+
+    #[test]
     fn test_wrap_break_spaces_keeps_the_space_at_a_soft_break() {
         let shaper = TextShaper::new();
         let chain = FontFamilyChain::monospace();
@@ -2894,12 +3138,37 @@ mod tests {
             wrap(rustkit_css::WhiteSpace::BreakSpaces),
             ["X XX", " XX ", "X XX", " X"]
         );
-        // The collapsible default still consumes the space at the break —
-        // this is the legacy behaviour every other white-space value keeps.
-        assert_eq!(
-            wrap(rustkit_css::WhiteSpace::Normal),
-            ["X XX", "XX X", "XX X"]
-        );
+        // The collapsible default HANGS the space at the break (§4.1.3):
+        // it stays in the line's text (paint skips it, consumers trim it)
+        // but never decides the fit — the line's width is its ink. Before
+        // n49 the fit test measured the space, so the break landed before
+        // it and every line was one word short whenever ink fit and ink +
+        // space did not.
+        let normal = wrap(rustkit_css::WhiteSpace::Normal);
+        assert_eq!(normal, ["X XX ", "XX X ", "XX X"]);
+        let widths: Vec<f32> = shaper
+            .wrap_text_white_space(
+                "X XX XX X XX X",
+                &chain,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                FontStretch::Normal,
+                20.0,
+                four_chars * 1.01,
+                CssWordBreak::BreakAll,
+                CssOverflowWrap::Normal,
+                rustkit_css::WhiteSpace::Normal,
+            )
+            .expect("wrap")
+            .iter()
+            .map(|l| l.width)
+            .collect();
+        for (t, w) in normal.iter().zip(&widths) {
+            assert!(
+                *w <= four_chars * 1.01 + 0.01,
+                "line {t:?} width {w} must be its ink (four chars = {four_chars})"
+            );
+        }
     }
 
     #[test]
@@ -3099,5 +3368,34 @@ mod measure_side_font_chain_tests {
         let helvetica = width("Helvetica");
         assert_ne!(menlo, helvetica, "probe fonts must differ for this test to discriminate");
         assert_eq!(walked, menlo, "missing family must be skipped at measure time");
+    }
+
+    /// Pair kerning reaches the advances. Chrome's h1 "CSS Specificity Test"
+    /// (32px bold system-ui) is 300.03px kerned. The nominal advances sum to
+    /// 303.70, which was every micro case's h1 drift before n64.
+    #[test]
+    fn runs_are_kerned_like_a_core_text_line() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::from_css_value("system-ui");
+        let shape = |t: &str| {
+            shaper
+                .shape(t, &chain, FontWeight::BOLD, FontStyle::Normal, FontStretch::Normal, 32.0)
+                .expect("shapes")
+        };
+        let run = shape("CSS Specificity Test");
+        let nominal: f32 = "CSS Specificity Test"
+            .chars()
+            .map(|c| shape(&c.to_string()).metrics.width)
+            .sum();
+        assert!(
+            (run.metrics.width - 300.03).abs() < 0.5,
+            "kerned run {} (nominal {nominal})",
+            run.metrics.width
+        );
+        assert!(nominal - run.metrics.width > 3.0);
+        // Advances still sum to the run width, one per char (advance contract).
+        let sum: f32 = run.glyphs.iter().map(|g| g.advance).sum();
+        assert!((sum - run.metrics.width).abs() < 0.01);
+        assert_eq!(run.glyphs.len(), "CSS Specificity Test".chars().count());
     }
 }

@@ -1,0 +1,37 @@
+fix(svg,engine,renderer): currentColor reaches inline SVG; :hover/:focus-within on an ancestor no longer match; stroked circles are rings
+
+Three defects, the last two exposed by the first colored pixels the shelf's
+search icon ever painted (pinned Chrome 148 strokes it rgb(148,163,184);
+we stroked it black, then in the accent color with a white disc inside).
+
+1. currentColor. rustkit-svg resolved Paint::CurrentColor to BLACK ("would
+   need context"). The CSS color is now a render-time input:
+   SvgStyle.current_color (inherited unconditionally), fill_color()/
+   stroke_color() resolve through Paint::resolve, and
+   SvgDocument::render_with_color carries it; render() keeps black for the
+   standalone <img src=*.svg> document. DisplayCommand::Image gains
+   current_color, filled from the box's computed color in
+   render_replaced_content and handed to the engine's svg splice.
+
+2. Pseudo-classes on an ancestor compound were never evaluated.
+   simple_selector_matches_ancestor parsed tag/class/id and broke at the
+   first ':' — so `.card:hover .title` and `.wrapper:focus-within .icon`
+   matched with the state off on every page. And match_pseudo_class's
+   static-false list lacked focus-within/focus-visible/target, which fell
+   to its `_ => true` arm. One pseudo_class_is_static_false() now serves
+   both matchers. T-RED: the new engine test fails on the subject-only fix
+   with the board's own number (left: (34, 211, 238)).
+
+3. StrokeCircle painted a colored disc and then an opaque WHITE disc of
+   radius r-w over it. Every fill="none" circle icon on a dark surface
+   carried a white disc, and the stroke sat inside the geometry instead of
+   centred on it (SVG 2 §13.4, r ± w/2). Replaced with draw_ring, a
+   triangle strip between the two radii.
+
+Tests: rustkit-svg +1 (currentColor resolves to the render call's color;
+render() stays black), rustkit-layout images +1 (Image command carries the
+box color), rustkit-engine +1 (:focus-within / :focus-visible / ancestor
+:hover do not match in the static frame). Suites: svg 16, layout 369,
+renderer 64, engine 82.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>

@@ -28,10 +28,18 @@ pub use macos::MacOSViewHost;
 #[cfg(target_os = "macos")]
 pub use macos::{drain_pending_clicks, drain_pending_keys, PendingClick, PendingKey};
 
+// Screenshot capture (Windows: GPU readback of a hosted view)
+#[cfg(windows)]
+pub mod screenshot;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use thiserror::Error;
 use tracing::{debug, info, trace, warn};
+// `error!` is only used inside the Win32 window-creation paths; keep the
+// import platform-gated so macOS builds stay warning-free.
+#[cfg(windows)]
+use tracing::error;
 
 #[cfg(windows)]
 use rustkit_core::{

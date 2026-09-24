@@ -308,6 +308,110 @@ impl From<ColorF32> for Color {
     }
 }
 
+/// The normal form css-values-3 §8.1 reduces a `calc()` over lengths and
+/// percentages to: one coefficient per unit, summed.
+///
+/// `calc()` over lengths is *linear* — `+`/`-` between terms, and `*`/`/` only
+/// by plain numbers — so an expression tree buys nothing a sum of coefficients
+/// does not already carry, and the sum resolves in one pass once the
+/// percentage basis is known. `calc(100% - 84px)` is `{ percent: 100.0,
+/// px: -84.0 }`.
+///
+/// Only produced where the expression genuinely MIXES units: a `calc()` whose
+/// terms all reduce to one unit collapses back to that unit's `Length`
+/// variant (see `CalcSum::into_length`), so `calc(2 * 50px)` stays
+/// `Length::Px(100.0)` and every existing match site keeps working on it.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct CalcSum {
+    /// Absolute px coefficient.
+    pub px: f32,
+    /// Percentage coefficient, in percent (100.0 is `100%`).
+    pub percent: f32,
+    /// `em` coefficient.
+    pub em: f32,
+    /// `rem` coefficient.
+    pub rem: f32,
+    /// `vw` coefficient.
+    pub vw: f32,
+    /// `vh` coefficient.
+    pub vh: f32,
+    /// `vmin` coefficient.
+    pub vmin: f32,
+    /// `vmax` coefficient.
+    pub vmax: f32,
+}
+
+impl CalcSum {
+    fn scaled(self, k: f32) -> Self {
+        CalcSum {
+            px: self.px * k,
+            percent: self.percent * k,
+            em: self.em * k,
+            rem: self.rem * k,
+            vw: self.vw * k,
+            vh: self.vh * k,
+            vmin: self.vmin * k,
+            vmax: self.vmax * k,
+        }
+    }
+
+    fn add(self, other: Self, sign: f32) -> Self {
+        CalcSum {
+            px: self.px + sign * other.px,
+            percent: self.percent + sign * other.percent,
+            em: self.em + sign * other.em,
+            rem: self.rem + sign * other.rem,
+            vw: self.vw + sign * other.vw,
+            vh: self.vh + sign * other.vh,
+            vmin: self.vmin + sign * other.vmin,
+            vmax: self.vmax + sign * other.vmax,
+        }
+    }
+
+    fn terms(&self) -> [f32; 8] {
+        [
+            self.px,
+            self.percent,
+            self.em,
+            self.rem,
+            self.vw,
+            self.vh,
+            self.vmin,
+            self.vmax,
+        ]
+    }
+
+    /// Collapse to a plain `Length` where the sum uses at most one unit.
+    ///
+    /// This is what keeps the blast radius of `Length::Calc` to the values
+    /// that are actually broken without it. Before this variant existed
+    /// `parse_length` returned `None` for any `calc()` it could not read as a
+    /// single value, so the declaration was DROPPED — a `height:
+    /// calc(100% - 84px)` became `auto`. Single-unit expressions were already
+    /// handled, and they stay on their old variant here, so no site that
+    /// matches `Length::Px` or `Length::Percent` loses a value it used to see.
+    fn into_length(self) -> Length {
+        let terms = self.terms();
+        let nonzero = terms.iter().filter(|c| **c != 0.0).count();
+        if nonzero > 1 {
+            return Length::Calc(Box::new(self));
+        }
+        match () {
+            _ if self.percent != 0.0 => Length::Percent(self.percent),
+            _ if self.em != 0.0 => Length::Em(self.em),
+            _ if self.rem != 0.0 => Length::Rem(self.rem),
+            _ if self.vw != 0.0 => Length::Vw(self.vw),
+            _ if self.vh != 0.0 => Length::Vh(self.vh),
+            _ if self.vmin != 0.0 => Length::Vmin(self.vmin),
+            _ if self.vmax != 0.0 => Length::Vmax(self.vmax),
+            // px last, and it also carries the all-zero case: `calc(0px)` and
+            // `calc(10px - 10px)` are both a definite zero length, which is
+            // `Px(0.0)` and NOT `Length::Zero`'s default-ness.
+            _ => Length::Px(self.px),
+        }
+    }
+}
+
 /// A CSS length value.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Length {
@@ -351,6 +455,11 @@ pub enum Length {
     Max(Box<(Length, Length)>),
     /// clamp(min, preferred, max) - clamps preferred between min and max.
     Clamp(Box<(Length, Length, Length)>),
+    /// `calc()` over more than one unit, in css-values-3 §8.1 normal form.
+    ///
+    /// A `calc()` that reduces to a single unit is NOT this variant — see
+    /// `CalcSum::into_length`.
+    Calc(Box<CalcSum>),
 }
 
 impl Length {
@@ -439,6 +548,16 @@ impl Length {
                     viewport_height,
                 );
                 pref.clamp(min_val, max_val)
+            }
+            Length::Calc(sum) => {
+                sum.px
+                    + sum.percent / 100.0 * container_size
+                    + sum.em * font_size
+                    + sum.rem * root_font_size
+                    + sum.vw / 100.0 * viewport_width
+                    + sum.vh / 100.0 * viewport_height
+                    + sum.vmin / 100.0 * viewport_width.min(viewport_height)
+                    + sum.vmax / 100.0 * viewport_width.max(viewport_height)
             }
         }
     }
@@ -2078,6 +2197,35 @@ pub enum BackgroundClip {
     Text,
 }
 
+/// `border-<side>-style`, as far as paint distinguishes it. The styles paint
+/// does not draw yet (double, groove, ridge, inset, outset) stay `Solid` —
+/// which is also the default, so a border given only a width keeps painting.
+/// `None` covers `none` and `hidden`: the cascade zeroes that side's width
+/// once every declaration is in (CSS Backgrounds 3 §3.3), so the order in
+/// which width and style were declared does not matter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BorderStyle {
+    #[default]
+    Solid,
+    Dashed,
+    Dotted,
+    None,
+}
+
+impl BorderStyle {
+    /// The paint-relevant style named by a CSS keyword, or `None` when the
+    /// token is not a border-style keyword.
+    pub fn from_keyword(token: &str) -> Option<Self> {
+        match token.to_ascii_lowercase().as_str() {
+            "dashed" => Some(Self::Dashed),
+            "dotted" => Some(Self::Dotted),
+            "solid" | "double" | "groove" | "ridge" | "inset" | "outset" => Some(Self::Solid),
+            "none" | "hidden" => Some(Self::None),
+            _ => None,
+        }
+    }
+}
+
 /// Computed style for an element.
 #[derive(Debug, Clone, Default)]
 pub struct ComputedStyle {
@@ -2113,6 +2261,10 @@ pub struct ComputedStyle {
     pub border_right_color: Color,
     pub border_bottom_color: Color,
     pub border_left_color: Color,
+    pub border_top_style: BorderStyle,
+    pub border_right_style: BorderStyle,
+    pub border_bottom_style: BorderStyle,
+    pub border_left_style: BorderStyle,
 
     // Border radius (for rounded corners)
     pub border_top_left_radius: Length,
@@ -2212,6 +2364,10 @@ pub struct ComputedStyle {
     pub align_content: AlignContent,
     pub row_gap: Length,
     pub column_gap: Length,
+
+    // Multi-column (css-multicol-1)
+    /// `column-count`; `None` is `auto` — not a multi-column container.
+    pub column_count: Option<u32>,
 
     // Flexbox Item
     pub order: i32,
@@ -2736,16 +2892,16 @@ pub fn parse_length(value: &str) -> Option<Length> {
         return None;
     }
 
-    // Handle calc() - simplified support
     if value.starts_with("calc(") && value.ends_with(')') {
-        // For now, try to extract a simple value from calc
-        // Full calc support would require expression parsing
-        let inner = &value[5..value.len() - 1].trim();
-        // If it's a simple value wrapped in calc, parse it
+        let inner = value[5..value.len() - 1].trim();
+        // A single value wrapped in `calc()` is still that value, and stayed
+        // on its own `Length` variant before this parser existed. Kept first
+        // so the collapse in `CalcSum::into_length` is never the only thing
+        // holding that up.
         if let Some(len) = parse_length(inner) {
             return Some(len);
         }
-        return None;
+        return parse_calc_sum(inner).map(CalcSum::into_length);
     }
 
     if value.ends_with("px") {
@@ -2791,6 +2947,157 @@ pub fn parse_length(value: &str) -> Option<Length> {
     }
 
     None
+}
+
+/// Parse the inside of a `calc()` into css-values-3 §8.1 normal form.
+///
+/// Grammar, exactly the spec's:
+/// ```text
+///   sum     := product ( S ('+' | '-') S product )*
+///   product := unit ( ('*' number) | ('/' number) )*   |   number '*' unit
+///   unit    := <length> | <percentage> | <number> | '(' sum ')'
+/// ```
+/// `+` and `-` REQUIRE surrounding whitespace (css-values-3 §8.1: without it
+/// `10px -5px` is one token, a signed length, not a subtraction) — this is why
+/// the sum splitter looks at the neighbouring characters rather than at `-`
+/// alone. `*` and `/` do not.
+///
+/// Returns `None` for anything outside that grammar, including a `*` or `/`
+/// whose operand is not a plain number, which the spec makes invalid rather
+/// than approximate.
+fn parse_calc_sum(input: &str) -> Option<CalcSum> {
+    let s = input.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let bytes = s.as_bytes();
+
+    // Split on top-level ' + ' / ' - ', right to left, so the left operand
+    // keeps its own additions and the sign applies to one product.
+    let mut depth = 0i32;
+    for i in (0..bytes.len()).rev() {
+        match bytes[i] {
+            b')' => depth += 1,
+            b'(' => depth -= 1,
+            b'+' | b'-' if depth == 0 => {
+                let prev = bytes.get(i.wrapping_sub(1)).copied();
+                let next = bytes.get(i + 1).copied();
+                let spaced = matches!(prev, Some(b' ') | Some(b'\t'))
+                    && matches!(next, Some(b' ') | Some(b'\t'));
+                if !spaced || i == 0 {
+                    continue;
+                }
+                let lhs = parse_calc_sum(&s[..i])?;
+                let rhs = parse_calc_product(&s[i + 1..])?;
+                let sign = if bytes[i] == b'+' { 1.0 } else { -1.0 };
+                return Some(lhs.add(rhs, sign));
+            }
+            _ => {}
+        }
+    }
+    parse_calc_product(s)
+}
+
+/// One `product` of the calc grammar: a unit scaled by plain numbers.
+fn parse_calc_product(input: &str) -> Option<CalcSum> {
+    let s = input.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let bytes = s.as_bytes();
+
+    let mut depth = 0i32;
+    for i in (0..bytes.len()).rev() {
+        match bytes[i] {
+            b')' => depth += 1,
+            b'(' => depth -= 1,
+            b'*' | b'/' if depth == 0 => {
+                let lhs = &s[..i];
+                let rhs = &s[i + 1..];
+                if bytes[i] == b'/' {
+                    // css-values-3 §8.1: the right side of `/` must be a number.
+                    let divisor = parse_plain_number(rhs)?;
+                    if divisor == 0.0 {
+                        return None;
+                    }
+                    return Some(parse_calc_product(lhs)?.scaled(1.0 / divisor));
+                }
+                // `*` takes a number on exactly one side.
+                if let Some(k) = parse_plain_number(rhs) {
+                    return Some(parse_calc_product(lhs)?.scaled(k));
+                }
+                if let Some(k) = parse_plain_number(lhs) {
+                    return Some(parse_calc_product(rhs)?.scaled(k));
+                }
+                return None;
+            }
+            _ => {}
+        }
+    }
+    parse_calc_unit(s)
+}
+
+/// One `unit`: a parenthesised sum, or a single length/percentage/number.
+fn parse_calc_unit(input: &str) -> Option<CalcSum> {
+    let s = input.trim();
+    if let Some(stripped) = s.strip_prefix('(') {
+        let inner = stripped.strip_suffix(')')?;
+        return parse_calc_sum(inner);
+    }
+    if s.starts_with("calc(") && s.ends_with(')') {
+        return parse_calc_sum(&s[5..s.len() - 1]);
+    }
+    let mut sum = CalcSum::default();
+    let (num, unit) = split_number_and_unit(s)?;
+    match unit {
+        "px" | "" => sum.px = num,
+        "%" => sum.percent = num,
+        "em" => sum.em = num,
+        "rem" => sum.rem = num,
+        "vw" => sum.vw = num,
+        "vh" => sum.vh = num,
+        "vmin" => sum.vmin = num,
+        "vmax" => sum.vmax = num,
+        _ => return None,
+    }
+    Some(sum)
+}
+
+/// A bare number, with no unit. `None` for anything else — including a length,
+/// which is what makes `100px * 2px` invalid rather than silently 200px.
+fn parse_plain_number(input: &str) -> Option<f32> {
+    let s = input.trim();
+    match split_number_and_unit(s) {
+        Some((num, "")) => Some(num),
+        _ => None,
+    }
+}
+
+/// Split `"-84px"` into `(-84.0, "px")`. The unit is lower-cased by the
+/// caller's input already being lower-cased in `parse_length`; `%` is a unit
+/// here, not punctuation.
+fn split_number_and_unit(s: &str) -> Option<(f32, &str)> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let split = s
+        .char_indices()
+        .position(|(_, c)| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || c == 'e'))
+        .unwrap_or(s.len());
+    // `e` is only exponent notation when it sits between digits; a bare `em`
+    // must not eat its own `e`.
+    let split = if split > 0 && s.as_bytes()[split - 1] == b'e' {
+        split - 1
+    } else {
+        split
+    };
+    let (num, unit) = s.split_at(split);
+    let value = num.parse::<f32>().ok()?;
+    if !value.is_finite() {
+        return None;
+    }
+    Some((value, unit.trim()))
 }
 
 /// Split CSS function arguments, handling nested parentheses.
@@ -2953,6 +3260,99 @@ mod tests {
         } else {
             panic!("Expected Length::Clamp");
         }
+    }
+
+    fn calc_of(value: &str) -> CalcSum {
+        match parse_length(value) {
+            Some(Length::Calc(sum)) => *sum,
+            other => panic!("expected Length::Calc for {value:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_calc_mixing_a_percentage_and_a_length_keeps_both_terms() {
+        // chrome_rustkit's `.sidebar`. Before `Length::Calc` existed this
+        // parsed to `None`, the declaration was dropped, and the box fell back
+        // to its content height — 203px against Chrome's 16.
+        let sum = calc_of("calc(100% - 84px)");
+        assert_eq!(sum.percent, 100.0);
+        assert_eq!(sum.px, -84.0);
+        assert_eq!(
+            Length::Calc(Box::new(sum)).to_px_with_viewport(16.0, 16.0, 100.0, 1280.0, 100.0),
+            16.0
+        );
+    }
+
+    #[test]
+    fn a_calc_that_uses_one_unit_stays_on_that_units_variant() {
+        // The blast-radius guard: every site that matches `Length::Px` or
+        // `Length::Percent` must keep seeing these. A `Calc` here would make
+        // those sites fall through to their `_` arm, i.e. to `auto`.
+        assert_eq!(parse_length("calc(100px)"), Some(Length::Px(100.0)));
+        assert_eq!(parse_length("calc(2 * 50px)"), Some(Length::Px(100.0)));
+        assert_eq!(parse_length("calc(100px / 4)"), Some(Length::Px(25.0)));
+        assert_eq!(parse_length("calc(100px - 40px)"), Some(Length::Px(60.0)));
+        match parse_length("calc(100% / 3)") {
+            Some(Length::Percent(pct)) => assert!((pct - 100.0 / 3.0).abs() < 1e-4, "{pct}"),
+            other => panic!("expected Length::Percent, got {other:?}"),
+        }
+        assert_eq!(parse_length("calc(50% + 50%)"), Some(Length::Percent(100.0)));
+        // A calc that cancels to nothing is a definite ZERO length, not the
+        // `Length::Zero` default: `Zero` is what an unset property holds.
+        assert_eq!(parse_length("calc(10px - 10px)"), Some(Length::Px(0.0)));
+    }
+
+    #[test]
+    fn calc_sums_every_unit_against_its_own_basis() {
+        let sum = calc_of("calc(50% + 2em + 1rem + 10vw + 10vh - 5px)");
+        assert_eq!(sum.percent, 50.0);
+        assert_eq!(sum.em, 2.0);
+        assert_eq!(sum.rem, 1.0);
+        assert_eq!(sum.vw, 10.0);
+        assert_eq!(sum.vh, 10.0);
+        assert_eq!(sum.px, -5.0);
+        // font 20, root 16, container 200, viewport 1000x500:
+        // 100 + 40 + 16 + 100 + 50 - 5
+        assert_eq!(
+            Length::Calc(Box::new(sum)).to_px_with_viewport(20.0, 16.0, 200.0, 1000.0, 500.0),
+            301.0
+        );
+    }
+
+    #[test]
+    fn calc_multiplication_and_division_scale_every_term() {
+        let sum = calc_of("calc((100% - 20px) / 2)");
+        assert_eq!(sum.percent, 50.0);
+        assert_eq!(sum.px, -10.0);
+        let sum = calc_of("calc(2 * (50% + 5px))");
+        assert_eq!(sum.percent, 100.0);
+        assert_eq!(sum.px, 10.0);
+    }
+
+    #[test]
+    fn calc_subtraction_is_left_associative() {
+        // Right-associative folding reads `100px - 30px - 20px` as
+        // 100 - (30 - 20) = 90 instead of 50.
+        assert_eq!(
+            parse_length("calc(100px - 30px - 20px)"),
+            Some(Length::Px(50.0))
+        );
+        let sum = calc_of("calc(100% - 30px - 20px)");
+        assert_eq!(sum.px, -50.0);
+    }
+
+    #[test]
+    fn calc_rejects_what_the_spec_rejects() {
+        // `+` and `-` need whitespace on both sides (css-values-3 §8.1);
+        // without it the token is a signed length and the sum is malformed.
+        assert_eq!(parse_length("calc(100% -84px)"), None);
+        // `*` and `/` take a plain NUMBER, never a second length.
+        assert_eq!(parse_length("calc(100% * 2px)"), None);
+        assert_eq!(parse_length("calc(100% / 2px)"), None);
+        assert_eq!(parse_length("calc(100% / 0)"), None);
+        assert_eq!(parse_length("calc(100% - )"), None);
+        assert_eq!(parse_length("calc(100% - 10foo)"), None);
+        assert_eq!(parse_length("calc()"), None);
     }
 
     #[test]

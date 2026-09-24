@@ -51,6 +51,14 @@ tools/*
 parity-history/
 parity-baseline/captures/
 parity-baseline/failure_packets/
+# Per-run parity and WPT outputs (2026-09-23). Every run rewrites these, so
+# committing them in PRs made every merge conflict with every other open PR.
+# The numbers go in the PR body; master's history lives on the
+# `metrics-history` branch (parity-metrics.yml).
+parity-baseline/diffs/
+parity-baseline/parity_test_results*.json
+parity-baseline/oracle_results.json
+trench/wpt/last-run.json
 progress_report.json
 # Global, not per-directory. The old `scripts/__pycache__/` line was why
 # scripts/tests/__pycache__/ kept getting committed — a narrow ignore looks

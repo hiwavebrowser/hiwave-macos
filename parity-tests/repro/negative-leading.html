@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>negative leading + emoji ascent (n57)</title>
+<style>
+  body { margin: 0; padding: 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #111; background: #fff; }
+  div, p, h1, h2 { margin: 0 0 12px 0; padding: 0; background: #f3f3f3; }
+  #h40 { font-size: 40px; font-weight: 700; line-height: 1; }
+  #a32 { font-family: Arial; font-size: 32px; font-weight: 700; line-height: 1; }
+  #p24 { font-size: 24px; line-height: 0.9; }
+  #p16 { font-size: 16px; line-height: 1; }
+  #p16 span { background: #ffe082; }
+  #wrap { font-size: 20px; line-height: 1; width: 260px; }
+  #e16 { font-size: 16px; line-height: 20px; }
+  #row { display: flex; align-items: center; height: 36px; font-size: 14px; line-height: 20px; }
+  #row .icon { font-size: 14px; margin-right: 6px; }
+  #e32 { font-size: 32px; line-height: 1; }
+  #lh15 { font-size: 16px; line-height: 1.5; }
+</style>
+</head>
+<body>
+  <h1 id="h40">Heading forty</h1>
+  <h2 id="a32">Arial thirty-two</h2>
+  <p id="p24">Twenty-four at nine tenths</p>
+  <p id="p16">Sixteen at one <span>with a span</span> inside</p>
+  <p id="wrap">Twenty at one wraps onto a second line here</p>
+  <p id="e16">🔒 secure sixteen</p>
+  <div id="row"><span class="icon">🔒</span><span>hiwave://new-tab</span></div>
+  <p id="e32">⭐ star thirty-two</p>
+  <p id="lh15">Sixteen at one and a half (control)</p>
+</body>
+</html>

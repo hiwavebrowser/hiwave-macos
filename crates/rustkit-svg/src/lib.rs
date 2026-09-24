@@ -145,8 +145,27 @@ impl SvgDocument {
         (width, height)
     }
 
-    /// Render to display commands.
+    /// Render to display commands with `currentColor` resolving to black —
+    /// the initial value of CSS `color`, which is what a standalone SVG
+    /// document (an `<img src=*.svg>`) sees.
     pub fn render(&self, x: f32, y: f32, width: f32, height: f32) -> Vec<DisplayCommand> {
+        self.render_with_color(x, y, width, height, Color::BLACK)
+    }
+
+    /// Render to display commands with `currentColor` resolving to
+    /// `current_color` — an inline `<svg>` inherits the CSS `color` of the
+    /// element it sits in, and every `fill="currentColor"` /
+    /// `stroke="currentColor"` icon on a real page takes its color from
+    /// there. The paint keyword lives on the parsed shapes; only the value
+    /// it resolves to is a render-time input.
+    pub fn render_with_color(
+        &self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        current_color: Color,
+    ) -> Vec<DisplayCommand> {
         let mut commands = Vec::new();
         // Apply viewBox transform if present
         let transform = if let Some(vb) = &self.view_box {
@@ -161,7 +180,11 @@ impl SvgDocument {
             Transform2D::identity().translate(x, y)
         };
 
-        self.root.render(&transform, &SvgStyle::default(), &mut commands);
+        let base = SvgStyle {
+            current_color,
+            ..SvgStyle::default()
+        };
+        self.root.render(&transform, &base, &mut commands);
 
         commands
     }
@@ -470,11 +493,19 @@ impl Paint {
         }
     }
 
-    /// Get color if this is a solid color.
+    /// Get color if this is a solid color, with `currentColor` taken as
+    /// black (the initial CSS `color`). Prefer [`Paint::resolve`] wherever
+    /// the surrounding CSS color is known.
     pub fn as_color(&self) -> Option<Color> {
+        self.resolve(Color::BLACK)
+    }
+
+    /// Get the solid color this paint draws with, resolving `currentColor`
+    /// to `current_color`. `None` for `none` and unresolved `url()` paints.
+    pub fn resolve(&self, current_color: Color) -> Option<Color> {
         match self {
             Paint::Color(c) => Some(*c),
-            Paint::CurrentColor => Some(Color::BLACK), // Would need context
+            Paint::CurrentColor => Some(current_color),
             _ => None,
         }
     }
@@ -535,6 +566,11 @@ pub struct SvgStyle {
     pub opacity: f32,
     /// Visibility.
     pub visibility: bool,
+    /// The CSS `color` in force where this SVG is painted — what
+    /// `currentColor` resolves to. Render context, not an authored SVG
+    /// property: it is seeded by the document's render call and inherited
+    /// unconditionally down the element tree.
+    pub current_color: Color,
 }
 
 impl Default for SvgStyle {
@@ -553,6 +589,7 @@ impl Default for SvgStyle {
             stroke_dashoffset: 0.0,
             opacity: 1.0,
             visibility: true,
+            current_color: Color::BLACK,
         }
     }
 }
@@ -565,6 +602,19 @@ impl SvgStyle {
         if self.opacity == 1.0 {
             self.opacity = parent.opacity;
         }
+        // The CSS color is context, never authored on a shape: always the
+        // parent's, so the render call's value reaches every element.
+        self.current_color = parent.current_color;
+    }
+
+    /// The solid fill color, with `currentColor` resolved.
+    pub fn fill_color(&self) -> Option<Color> {
+        self.fill.resolve(self.current_color)
+    }
+
+    /// The solid stroke color, with `currentColor` resolved.
+    pub fn stroke_color(&self) -> Option<Color> {
+        self.stroke.resolve(self.current_color)
     }
 
     /// Parse style attributes.
@@ -733,14 +783,14 @@ impl SvgRect {
         };
 
         // Fill
-        if let Some(color) = style.fill.as_color() {
+        if let Some(color) = style.fill_color() {
             let alpha = (color.a * style.fill_opacity * style.opacity).clamp(0.0, 1.0);
             let fill_color = Color { a: alpha, ..color };
             commands.push(DisplayCommand::FillRect { rect: rect.clone(), color: fill_color });
         }
 
         // Stroke
-        if let Some(color) = style.stroke.as_color() {
+        if let Some(color) = style.stroke_color() {
             let alpha = (color.a * style.stroke_opacity * style.opacity).clamp(0.0, 1.0);
             let stroke_color = Color { a: alpha, ..color };
             commands.push(DisplayCommand::StrokeRect {
@@ -792,7 +842,7 @@ impl SvgCircle {
         let r = self.r * scale;
 
         // Fill
-        if let Some(color) = style.fill.as_color() {
+        if let Some(color) = style.fill_color() {
             let alpha = (color.a * style.fill_opacity * style.opacity).clamp(0.0, 1.0);
             let fill_color = Color { a: alpha, ..color };
             commands.push(DisplayCommand::FillCircle {
@@ -804,7 +854,7 @@ impl SvgCircle {
         }
 
         // Stroke
-        if let Some(color) = style.stroke.as_color() {
+        if let Some(color) = style.stroke_color() {
             let alpha = (color.a * style.stroke_opacity * style.opacity).clamp(0.0, 1.0);
             let stroke_color = Color { a: alpha, ..color };
             commands.push(DisplayCommand::StrokeCircle {
@@ -863,7 +913,7 @@ impl SvgEllipse {
             height: self.ry * 2.0,
         };
 
-        if let Some(color) = style.fill.as_color() {
+        if let Some(color) = style.fill_color() {
             let alpha = (color.a * style.fill_opacity * style.opacity).clamp(0.0, 1.0);
             let fill_color = Color { a: alpha, ..color };
             commands.push(DisplayCommand::FillEllipse {
@@ -912,7 +962,7 @@ impl SvgLine {
         let (x1, y1) = transform.apply(self.x1, self.y1);
         let (x2, y2) = transform.apply(self.x2, self.y2);
 
-        if let Some(color) = style.stroke.as_color() {
+        if let Some(color) = style.stroke_color() {
             let alpha = (color.a * style.stroke_opacity * style.opacity).clamp(0.0, 1.0);
             let stroke_color = Color { a: alpha, ..color };
             commands.push(DisplayCommand::Line {
@@ -951,7 +1001,7 @@ impl SvgPolyline {
             .map(|(x, y)| transform.apply(*x, *y))
             .collect();
 
-        if let Some(color) = style.stroke.as_color() {
+        if let Some(color) = style.stroke_color() {
             let alpha = (color.a * style.stroke_opacity * style.opacity).clamp(0.0, 1.0);
             let stroke_color = Color { a: alpha, ..color };
             commands.push(DisplayCommand::Polyline {
@@ -987,7 +1037,7 @@ impl SvgPolygon {
             .map(|(x, y)| transform.apply(*x, *y))
             .collect();
 
-        if let Some(color) = style.fill.as_color() {
+        if let Some(color) = style.fill_color() {
             let alpha = (color.a * style.fill_opacity * style.opacity).clamp(0.0, 1.0);
             let fill_color = Color { a: alpha, ..color };
             commands.push(DisplayCommand::FillPolygon {
@@ -996,7 +1046,7 @@ impl SvgPolygon {
             });
         }
 
-        if let Some(color) = style.stroke.as_color() {
+        if let Some(color) = style.stroke_color() {
             let alpha = (color.a * style.stroke_opacity * style.opacity).clamp(0.0, 1.0);
             let stroke_color = Color { a: alpha, ..color };
             commands.push(DisplayCommand::StrokePolygon {
@@ -1375,7 +1425,7 @@ impl SvgPath {
             }
 
             // Fill (only for closed paths)
-            if let Some(color) = style.fill.as_color() {
+            if let Some(color) = style.fill_color() {
                 if points.len() >= 3 {
                     let alpha = (color.a * style.fill_opacity * style.opacity).clamp(0.0, 1.0);
                     let fill_color = Color { a: alpha, ..color };
@@ -1387,7 +1437,7 @@ impl SvgPath {
             }
 
             // Stroke
-            if let Some(color) = style.stroke.as_color() {
+            if let Some(color) = style.stroke_color() {
                 let alpha = (color.a * style.stroke_opacity * style.opacity).clamp(0.0, 1.0);
                 let stroke_color = Color { a: alpha, ..color };
                 commands.push(DisplayCommand::Polyline {
@@ -1467,7 +1517,7 @@ impl SvgText {
         // anisotropically scale here.
         let scaled_font_size = font_size * transform.a;
 
-        if let Some(color) = style.fill.as_color() {
+        if let Some(color) = style.fill_color() {
             let alpha = (color.a * style.fill_opacity * style.opacity).clamp(0.0, 1.0);
             let text_color = Color { a: alpha, ..color };
             commands.push(DisplayCommand::Text {
@@ -2055,6 +2105,53 @@ mod tests {
             commands.iter().any(|c| matches!(c, DisplayCommand::Polyline { .. })),
             "stroke=currentColor on the root must reach the shapes (strokes present)"
         );
+    }
+
+    #[test]
+    fn test_current_color_resolves_to_the_render_calls_css_color() {
+        // The shelf's search icon: `stroke="currentColor"` on the root, the
+        // <svg> sitting in an element whose CSS color is rgb(148,163,184).
+        // Chrome strokes it in that color; we stroked it in black because
+        // the paint keyword resolved with no context. The CSS color is a
+        // render-time input and must reach every shape — including the
+        // path (polyline) and the circle (stroke-circle), and a shape that
+        // names currentColor itself rather than inheriting the root's.
+        let doc = SvgDocument::parse(
+            r#"<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"/>
+                <path d="M21 21l-4.35-4.35"/>
+                <rect x="1" y="1" width="4" height="4" fill="currentColor" stroke="none"/>
+            </svg>"#,
+        )
+        .expect("parse");
+        let css = Color::new(148, 163, 184, 1.0);
+
+        let commands = doc.render_with_color(0.0, 0.0, 14.0, 14.0, css);
+        let mut seen = 0;
+        for c in &commands {
+            let color = match c {
+                DisplayCommand::Polyline { color, .. } => *color,
+                DisplayCommand::StrokeCircle { color, .. } => *color,
+                DisplayCommand::FillRect { color, .. } => *color,
+                other => panic!("unexpected command for the icon: {other:?}"),
+            };
+            assert_eq!(
+                (color.r, color.g, color.b),
+                (css.r, css.g, css.b),
+                "currentColor must resolve to the CSS color, got {color:?} in {c:?}"
+            );
+            seen += 1;
+        }
+        assert_eq!(seen, 3, "circle stroke + path stroke + rect fill: {commands:?}");
+
+        // The context-free render (an <img src=*.svg>, whose own CSS color
+        // is the initial black) keeps black.
+        let plain = doc.render(0.0, 0.0, 14.0, 14.0);
+        let black = plain
+            .iter()
+            .filter(|c| matches!(c, DisplayCommand::Polyline { color, .. } if color.r == 0 && color.g == 0 && color.b == 0))
+            .count();
+        assert_eq!(black, 1, "render() must still resolve currentColor to black: {plain:?}");
     }
 
     #[test]

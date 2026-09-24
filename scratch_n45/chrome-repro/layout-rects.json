@@ -1,0 +1,514 @@
+{
+  "timestamp": "2026-09-10T05:10:55.527Z",
+  "viewport": {
+    "width": 400,
+    "height": 200
+  },
+  "elementCount": 21,
+  "elements": [
+    {
+      "selector": "html > body",
+      "tag": "body",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 400,
+        "height": 200,
+        "top": 0,
+        "right": 400,
+        "bottom": 200,
+        "left": 0
+      },
+      "client": {
+        "width": 400,
+        "height": 200
+      },
+      "scroll": {
+        "width": 400,
+        "height": 200,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "#a",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 400,
+        "height": 40,
+        "top": 0,
+        "right": 400,
+        "bottom": 40,
+        "left": 0
+      },
+      "client": {
+        "width": 400,
+        "height": 40
+      },
+      "scroll": {
+        "width": 400,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.row:nth-of-type(1) > span.sw pick:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 40,
+        "height": 40,
+        "top": 0,
+        "right": 40,
+        "bottom": 40,
+        "left": 0
+      },
+      "client": {
+        "width": 40,
+        "height": 40
+      },
+      "scroll": {
+        "width": 40,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.row:nth-of-type(1) > span.sw:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 40,
+        "y": 0,
+        "width": 40,
+        "height": 40,
+        "top": 0,
+        "right": 80,
+        "bottom": 40,
+        "left": 40
+      },
+      "client": {
+        "width": 40,
+        "height": 40
+      },
+      "scroll": {
+        "width": 40,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "#b",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 40,
+        "width": 400,
+        "height": 40,
+        "top": 40,
+        "right": 400,
+        "bottom": 80,
+        "left": 0
+      },
+      "client": {
+        "width": 400,
+        "height": 40
+      },
+      "scroll": {
+        "width": 400,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.row:nth-of-type(2) > span.sw:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 0,
+        "y": 40,
+        "width": 40,
+        "height": 40,
+        "top": 40,
+        "right": 40,
+        "bottom": 80,
+        "left": 0
+      },
+      "client": {
+        "width": 40,
+        "height": 40
+      },
+      "scroll": {
+        "width": 40,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.row:nth-of-type(2) > span.sw:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 40,
+        "y": 40,
+        "width": 40,
+        "height": 40,
+        "top": 40,
+        "right": 80,
+        "bottom": 80,
+        "left": 40
+      },
+      "client": {
+        "width": 40,
+        "height": 40
+      },
+      "scroll": {
+        "width": 40,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.row:nth-of-type(2) > span.sw:nth-of-type(3)",
+      "tag": "span",
+      "rect": {
+        "x": 80,
+        "y": 40,
+        "width": 40,
+        "height": 40,
+        "top": 40,
+        "right": 120,
+        "bottom": 80,
+        "left": 80
+      },
+      "client": {
+        "width": 40,
+        "height": 40
+      },
+      "scroll": {
+        "width": 40,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.row:nth-of-type(2) > div.sw:nth-of-type(1)",
+      "tag": "div",
+      "rect": {
+        "x": 120,
+        "y": 40,
+        "width": 40,
+        "height": 40,
+        "top": 40,
+        "right": 160,
+        "bottom": 80,
+        "left": 120
+      },
+      "client": {
+        "width": 40,
+        "height": 40
+      },
+      "scroll": {
+        "width": 40,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.row:nth-of-type(2) > div.sw:nth-of-type(2)",
+      "tag": "div",
+      "rect": {
+        "x": 160,
+        "y": 40,
+        "width": 40,
+        "height": 40,
+        "top": 40,
+        "right": 200,
+        "bottom": 80,
+        "left": 160
+      },
+      "client": {
+        "width": 40,
+        "height": 40
+      },
+      "scroll": {
+        "width": 40,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "#c",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 80,
+        "width": 400,
+        "height": 40,
+        "top": 80,
+        "right": 400,
+        "bottom": 120,
+        "left": 0
+      },
+      "client": {
+        "width": 400,
+        "height": 40
+      },
+      "scroll": {
+        "width": 400,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.row:nth-of-type(3) > span.sw:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 0,
+        "y": 80,
+        "width": 40,
+        "height": 40,
+        "top": 80,
+        "right": 40,
+        "bottom": 120,
+        "left": 0
+      },
+      "client": {
+        "width": 40,
+        "height": 40
+      },
+      "scroll": {
+        "width": 40,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.row:nth-of-type(3) > span.sw:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 40,
+        "y": 80,
+        "width": 40,
+        "height": 40,
+        "top": 80,
+        "right": 80,
+        "bottom": 120,
+        "left": 40
+      },
+      "client": {
+        "width": 40,
+        "height": 40
+      },
+      "scroll": {
+        "width": 40,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.row:nth-of-type(3) > a.sw",
+      "tag": "a",
+      "rect": {
+        "x": 80,
+        "y": 80,
+        "width": 40,
+        "height": 40,
+        "top": 80,
+        "right": 120,
+        "bottom": 120,
+        "left": 80
+      },
+      "client": {
+        "width": 40,
+        "height": 40
+      },
+      "scroll": {
+        "width": 40,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "#d",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 120,
+        "width": 400,
+        "height": 40,
+        "top": 120,
+        "right": 400,
+        "bottom": 160,
+        "left": 0
+      },
+      "client": {
+        "width": 400,
+        "height": 40
+      },
+      "scroll": {
+        "width": 400,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.row:nth-of-type(4) > span.sw:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 0,
+        "y": 120,
+        "width": 40,
+        "height": 40,
+        "top": 120,
+        "right": 40,
+        "bottom": 160,
+        "left": 0
+      },
+      "client": {
+        "width": 40,
+        "height": 40
+      },
+      "scroll": {
+        "width": 40,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.row:nth-of-type(4) > span.sw keep:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 40,
+        "y": 120,
+        "width": 40,
+        "height": 40,
+        "top": 120,
+        "right": 80,
+        "bottom": 160,
+        "left": 40
+      },
+      "client": {
+        "width": 40,
+        "height": 40
+      },
+      "scroll": {
+        "width": 40,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "#e",
+      "tag": "div",
+      "rect": {
+        "x": 0,
+        "y": 160,
+        "width": 400,
+        "height": 40,
+        "top": 160,
+        "right": 400,
+        "bottom": 200,
+        "left": 0
+      },
+      "client": {
+        "width": 400,
+        "height": 40
+      },
+      "scroll": {
+        "width": 400,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.row:nth-of-type(5) > span.sw:nth-of-type(1)",
+      "tag": "span",
+      "rect": {
+        "x": 0,
+        "y": 160,
+        "width": 40,
+        "height": 40,
+        "top": 160,
+        "right": 40,
+        "bottom": 200,
+        "left": 0
+      },
+      "client": {
+        "width": 40,
+        "height": 40
+      },
+      "scroll": {
+        "width": 40,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.row:nth-of-type(5) > span.sw:nth-of-type(2)",
+      "tag": "span",
+      "rect": {
+        "x": 40,
+        "y": 160,
+        "width": 40,
+        "height": 40,
+        "top": 160,
+        "right": 80,
+        "bottom": 200,
+        "left": 40
+      },
+      "client": {
+        "width": 40,
+        "height": 40
+      },
+      "scroll": {
+        "width": 40,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    },
+    {
+      "selector": "body > div.row:nth-of-type(5) > span.sw:nth-of-type(3)",
+      "tag": "span",
+      "rect": {
+        "x": 80,
+        "y": 160,
+        "width": 40,
+        "height": 40,
+        "top": 160,
+        "right": 120,
+        "bottom": 200,
+        "left": 80
+      },
+      "client": {
+        "width": 40,
+        "height": 40
+      },
+      "scroll": {
+        "width": 40,
+        "height": 40,
+        "top": 0,
+        "left": 0
+      }
+    }
+  ]
+}

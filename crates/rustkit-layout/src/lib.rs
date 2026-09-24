@@ -20,6 +20,7 @@ pub mod grid;
 pub mod images;
 pub mod intrinsic_cache;
 pub mod margin_collapse;
+pub mod multicol;
 pub mod scroll;
 pub mod text;
 
@@ -183,6 +184,158 @@ pub(crate) fn aspect_ratio_content_height(
     })
 }
 
+/// Intrinsic BORDER-box size of a form control: the bare-control calibration,
+/// or the control's content line composed with author padding/border. Block
+/// flow (`layout_form_control`) and flex items (`flex::get_intrinsic_*`) both
+/// size from here — the flex path carried its own older blobs (button = label
+/// + 24 wide, 1.5em + 12 tall, author padding ignored), so flex-positioning's
+/// `.btn { padding: 8px 16px }` row built 55.9x33 for Chrome's 63.9x34 and
+/// everything below it sat a pixel high.
+pub(crate) fn form_control_intrinsic_size(
+    style: &ComputedStyle,
+    control: &FormControlType,
+) -> (f32, f32) {
+    let font_size = match style.font_size {
+        Length::Px(px) => px,
+        _ => 16.0,
+    };
+
+    // Author padding + border COMPOSE with the control's content height
+    // (DIG-1, css-selectors heatmap 2026-07-11): the old blob formula
+    // font_size*1.5+8 pretended to be the whole border-box, so
+    // input{padding:8px; border:2px} measured 29px where Chrome builds
+    // 35 (content line 15, plus 16 padding, plus 4 border) — and
+    // every section below slid up by the deficit. When the author sets
+    // vertical padding/border, the content line composes with them; the
+    // blob stays for bare controls (UA-default look, form-controls case
+    // depends on it).
+    //
+    // n51: the unit closure resolved px and em only, so `padding: 1rem
+    // 1.5rem` — the idiom on every styled search box — read as NO author
+    // padding and the control fell to the bare 19px blob (new_tab's
+    // `#searchInput`: 19 for Chrome's 52, and everything below it 33px
+    // high). Resolve every absolute unit the way the rest of layout does.
+    let author_pb_v = {
+        let px = |l: &Length| match l {
+            Length::Percent(_) | Length::Auto => 0.0,
+            other => other.to_px(font_size, 16.0, 0.0),
+        };
+        px(&style.padding_top)
+            + px(&style.padding_bottom)
+            + px(&style.border_top_width)
+            + px(&style.border_bottom_width)
+    };
+    // The content line is the control font's `normal` line (n58): Arial is
+    // 15 at the UA 13.333px and 16 at 14px in Chrome; the old `font_size + 1`
+    // read 14.33 / 15, so every styled control was 0.7–1px short.
+    let single_line_box = |blob: f32| {
+        if author_pb_v > 0.0 {
+            normal_line_height(style, font_size) + author_pb_v
+        } else {
+            blob
+        }
+    };
+
+    // Bare-control border-box sizes are calibrated to Chrome CfT-148 at
+    // the UA control font (13.333px system-ui, PR #42): single-line
+    // input/button/select build a 19px border-box (UA border included),
+    // checkbox/radio 13x13, textarea 15px per row + 2px border, range
+    // 16x129, color 27x50 (form-controls t8 dig, 2026-07-17: the old
+    // blobs fs*1.5+8 / fs*1.5+12 / fs*1.2 measured 28/32/16 — +9/+13/+3
+    // on every bare control, cascading +63px of drift down the page).
+    // Scaled by font_size so author-sized controls keep proportion; at
+    // the UA font the scale is 1.0 and the match to Chrome is exact.
+    let ua_scale = font_size / (40.0 / 3.0);
+
+    // Calculate intrinsic dimensions based on control type
+    match control {
+        FormControlType::TextInput { input_type, .. } => match input_type.as_str() {
+            "range" => (129.0 * ua_scale, 16.0 * ua_scale),
+            "color" => (50.0 * ua_scale, 27.0 * ua_scale),
+            // Default text input: size=20 at the UA control font builds
+            // a 149px border-box in Chrome CfT-148 (n53 form-controls
+            // y-table: 149 on every bare text/email/password/number
+            // input; the old 12em blob said 160).
+            _ => (149.0 * ua_scale, single_line_box(19.0 * ua_scale)),
+        },
+        FormControlType::TextArea { rows, cols, .. } => {
+            // Textarea: cols × the monospace advance (0.6em) plus 18px
+            // of border + vertical scrollbar gutter — Chrome builds 178
+            // for cols=20 and 338 for cols=40 (n53).
+            let rows = (*rows).max(2) as f32;
+            let cols = (*cols).max(20) as f32;
+            (
+                font_size * 0.6 * cols + 18.0 * ua_scale,
+                (15.0 * rows + 2.0) * ua_scale,
+            )
+        }
+        FormControlType::Button { label, .. } => {
+            // Button: measured label width plus padding (was a
+            // chars-times-0.6em guess that oversized real labels ~40%).
+            // Height composes author padding/border like TextInput/Select
+            // (DIG-2): the css-selectors buttons (padding 8px 16px) build
+            // (fs+1)+16 = 31 in Chrome; the blob said 33. Width also
+            // composes when the author sets horizontal padding.
+            let label_width = measure_text_advanced(
+                label,
+                &style.font_family,
+                font_size,
+                style.font_weight,
+                style.font_style,
+            )
+            .width;
+            let px = |l: &Length| match l {
+                Length::Percent(_) | Length::Auto => 0.0,
+                other => other.to_px(font_size, 16.0, 0.0),
+            };
+            let author_pb_h = px(&style.padding_left)
+                + px(&style.padding_right)
+                + px(&style.border_left_width)
+                + px(&style.border_right_width);
+            let width = if author_pb_h > 0.0 {
+                label_width + author_pb_h
+            } else {
+                label_width + 24.0
+            };
+            (width, single_line_box(19.0 * ua_scale))
+        }
+        FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
+            // Fixed size for checkboxes and radios
+            (13.0 * ua_scale, 13.0 * ua_scale)
+        }
+        FormControlType::Select { size, options, .. } => {
+            // Chrome sizes a select to its WIDEST option (n53
+            // form-controls: listbox 39 = "Item 4" 37 + 2px border;
+            // dropdown 137 = "A longer option text" + 24px of border and
+            // arrow well, 60 = "Select" + 24). The old 10em blob built
+            // 133 for both.
+            let widest = options
+                .iter()
+                .map(|o| {
+                    measure_text_advanced(
+                        o,
+                        &style.font_family,
+                        font_size,
+                        style.font_weight,
+                        style.font_style,
+                    )
+                    .width
+                })
+                .fold(0.0_f32, f32::max);
+            if *size > 1 {
+                // Inline listbox: 16px per visible row + 2px border.
+                (
+                    widest + 2.0 * ua_scale,
+                    (16.0 * *size as f32 + 2.0) * ua_scale,
+                )
+            } else {
+                // Dropdown: widest option plus the arrow well.
+                (widest + 24.0 * ua_scale, single_line_box(19.0 * ua_scale))
+            }
+        }
+    }
+}
+
 /// Resolve a box's `line-height` to px, consulting font metrics for `normal`.
 pub fn resolve_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
     match style.line_height {
@@ -190,6 +343,18 @@ pub fn resolve_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
         rustkit_css::LineHeight::Normal => normal_line_height(style, font_size),
         other => other.to_px(font_size),
     }
+}
+
+/// Height of a closing line box (CSS2 §10.8.1): the members sit on one
+/// baseline, so the box spans the largest extent above it plus the largest
+/// below it, and the container's strut floors both. `tallest` / `bottom_edge`
+/// are the block-children loops' older accounting — the tallest member, and
+/// bottom-edge members plus the strut descent — kept as floors for the
+/// members the align pass leaves at the line top.
+fn line_advance(tallest: f32, bottom_edge: f32, extents: (f32, f32), strut: (f32, f32)) -> f32 {
+    tallest
+        .max(bottom_edge)
+        .max(extents.0.max(strut.0) + extents.1.max(strut.1))
 }
 
 /// Line height of ONE shaped text run: the box's `line-height`, except that
@@ -209,6 +374,63 @@ pub fn run_line_height(style: &ComputedStyle, font_size: f32, metrics: &TextMetr
         return base;
     }
     base.max(used_font_line_height(metrics))
+}
+
+/// Distance from a line's top to the baseline of a text run, as Blink seats it:
+/// ascent and descent are whole pixels (SkScalarRoundToScalar) and the leading
+/// above the text is FLOORED (`CalculateLeadingSpace`), the remainder going
+/// below. A 16px run with ascent 15.47 / descent 3.38 on a 27.2px line sits at
+/// floor((27.2 - 18) / 2) + 15 = 19, not 4.18 + 15.47 = 19.65: seated on the
+/// fractional sum, every line whose top lands below .35 painted one row low.
+/// The leading is SIGNED (see `half_leading`): a `line-height: 1` heading with
+/// a taller content area seats its baseline above where a zero floor put it.
+pub(crate) fn blink_baseline_offset(line_height: f32, ascent: f32, descent: f32) -> f32 {
+    let (ascent, descent) = (ascent.round(), descent.round());
+    half_leading(line_height, ascent, descent).floor() + ascent
+}
+
+/// Half-leading of a line: half of `line-height` minus the content area
+/// (ascent + descent), SIGNED. CSS2 §10.8.1 puts no floor on it — when the
+/// line-height is smaller than the content area the leading is negative and
+/// the glyphs overflow the line box equally above and below, which is what
+/// every `line-height: 1` heading and `line-height: 0.9` display line on a
+/// real page relies on (a 40px system-ui heading has a 47px content area).
+/// Until n57 six sites clamped this at zero, so such a line seated its
+/// baseline a whole |half-leading| low (4px at 40px, 2px on a 14px emoji in
+/// a 20px line — the chrome strip's url icon); Chrome floors it (Blink
+/// `FontHeight::AddLeading`) but never clamps it.
+pub fn half_leading(line_height: f32, ascent: f32, descent: f32) -> f32 {
+    (line_height - (ascent + descent)) / 2.0
+}
+
+/// The metrics a run's baseline is SEATED on. Under `line-height: normal`
+/// the run's united metrics (primary face + every fallback face it used,
+/// see `TextShaper::shape`): Blink unites the used fonts into the line box
+/// and the baseline sits at their max ascent ("☕ coffee" at 16px: 20 above).
+/// Under an EXPLICIT line-height Blink skips that accumulation
+/// (`NGInlineBoxState::AccumulateUsedFonts` runs only for `normal`) and
+/// seats the run on the PRIMARY face alone: "🔒 secure" at 16px in a 20px
+/// line has its baseline at top + 1 + 15 = 16 in Chrome, not top + 20.
+/// Seating it on the emoji face put every icon-plus-label line 2–4px low.
+///
+/// ASCII text never reaches a fallback face, so its united metrics ARE the
+/// primary's and no second probe is shaped.
+fn seat_metrics(style: &ComputedStyle, font_size: f32, text: &str, united: &TextMetrics) -> (f32, f32) {
+    if matches!(style.line_height, rustkit_css::LineHeight::Normal) || text.is_ascii() {
+        return (united.ascent, united.descent);
+    }
+    let primary = measure_text_advanced(
+        "x",
+        &style.font_family,
+        font_size,
+        style.font_weight,
+        style.font_style,
+    );
+    if primary.ascent > 0.0 {
+        (primary.ascent, primary.descent)
+    } else {
+        (united.ascent, united.descent)
+    }
 }
 
 /// Convert a specified size on a replaced element to a CONTENT size.
@@ -1056,6 +1278,46 @@ pub struct TextLine {
     pub width: f32,
     /// X offset from the box's content origin (per-line text-align).
     pub x_offset: f32,
+    /// `text-align: justify` (css-text-3 §7.3): extra advance added to each
+    /// word separator on this line so the line fills the container. 0 on
+    /// every line that is not justified — the last line of a run (the block's
+    /// last line, or a line that continues into a sibling) keeps its natural
+    /// spacing, as does a line with no justification opportunity.
+    pub justify_space: f32,
+}
+
+impl TextLine {
+    /// Justification opportunities on this line: the word separators
+    /// css-text-3 §7.3 lists that this engine can expand (U+0020 and
+    /// U+00A0 — both shape as one glyph with its own advance).
+    pub fn justification_opportunities(text: &str) -> usize {
+        text.chars().filter(|c| Self::is_word_separator(*c)).count()
+    }
+
+    /// Whether `c` is a word separator that justification expands.
+    pub fn is_word_separator(c: char) -> bool {
+        matches!(c, ' ' | '\u{a0}')
+    }
+
+    /// The width a justified line's INK spans before expansion: the
+    /// trimmed text shaped by the same advance path paint uses
+    /// (`shape_line_advances`, letter/word-spacing applied). `TextLine::width`
+    /// is not that number — the wrap keeps the collapsible space at the
+    /// break point in both `text` and `width` (Georgia 17.6px: 4.4px), and
+    /// slack measured against it left every justified line 4px short of the
+    /// container. `None` when the shaper cannot give per-char advances
+    /// (ligature clusters): paint cannot expand such a line either.
+    pub fn natural_ink_width(
+        text: &str,
+        style: &rustkit_css::ComputedStyle,
+        font_size: f32,
+    ) -> Option<f32> {
+        let trimmed = text.trim_end();
+        if trimmed.is_empty() {
+            return None;
+        }
+        shape_line_advances(trimmed, style, font_size).map(|adv| adv.iter().sum())
+    }
 }
 
 /// Identity of the DOM element a layout box was generated from.
@@ -1339,12 +1601,32 @@ impl LayoutBox {
         containing_block: &Dimensions,
         definite_height: f32,
     ) {
+        self.layout_with_percent_base(
+            containing_block,
+            (definite_height > 0.0).then_some(definite_height),
+        );
+    }
+
+    /// `layout_with_definite_height`, keeping a DEFINITE ZERO base distinct
+    /// from "no definite base" — a bare `f32` collapses the two onto 0 and
+    /// sends the zero case to the viewport fallback.
+    pub(crate) fn layout_with_percent_base(
+        &mut self,
+        containing_block: &Dimensions,
+        definite_height: Option<f32>,
+    ) {
         match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
                 // Check for flex or grid container
                 if self.style.display.is_flex() {
                     self.layout_block_with_definite_height(containing_block, definite_height);
-                    // Flex layout is applied to children
+                    // Flex layout is applied to children. No containing
+                    // block goes over: on this path `containing_block` is
+                    // often the STATIC-POSITION STAND-IN (its height is the
+                    // parent's flow cursor), and treating that as a real
+                    // containing block sizes an `inset: 0` overlay under an
+                    // auto-height parent to the cursor. `reanchor_absolute`
+                    // is the one place that always holds the real box.
                     flex::layout_flex_container(self, &self.dimensions.clone());
                 } else if self.style.display.is_grid() {
                     self.layout_block_with_definite_height(containing_block, definite_height);
@@ -1391,6 +1673,8 @@ impl LayoutBox {
 
         // Apply positioning offsets after normal layout
         self.apply_position_offsets(containing_block);
+        // This box is final: anchor its abspos children to its padding box.
+        self.reanchor_absolute_children();
     }
 
     /// Layout an inline box.
@@ -1624,7 +1908,29 @@ impl LayoutBox {
             rustkit_css::WhiteSpace::Nowrap | rustkit_css::WhiteSpace::Pre
         );
         let width_is_resolved = container_width > 0.0 || container_is_definite_zero;
-        if can_wrap && width_is_resolved && text_width > container_width {
+        let overflows = can_wrap && width_is_resolved && text_width > container_width;
+        // css-text-3 §4.1.1 / §5.1: under the pre family a preserved segment
+        // break is a FORCED line break, whatever the width. The wrapper has
+        // always split at mandatory breaks (`break_into_lines`), but nothing
+        // reached it: the `white-space: pre` gate above never called it, and
+        // the overflow test skipped it for any pre-wrap / pre-line run that
+        // fit its container — so `<pre>` laid every source line on ONE line
+        // box (article-typography's six-line code block: 65px vs 195).
+        let has_segment_breaks = matches!(
+            self.style.white_space,
+            rustkit_css::WhiteSpace::Pre
+                | rustkit_css::WhiteSpace::PreWrap
+                | rustkit_css::WhiteSpace::PreLine
+                | rustkit_css::WhiteSpace::BreakSpaces
+        ) && text.contains(|c| c == '\n' || c == '\r');
+        if overflows || has_segment_breaks {
+            // Soft wrapping off (`pre`) or no resolved width: each segment
+            // is one line however wide it is — only the forced breaks split.
+            let wrap_width = if can_wrap && width_is_resolved {
+                container_width
+            } else {
+                f32::INFINITY
+            };
             let shaper = TextShaper::new();
             let chain = FontFamilyChain::from_css_value(&self.style.font_family);
             if let Ok(lines) = shaper.wrap_text_white_space(
@@ -1634,12 +1940,15 @@ impl LayoutBox {
                 self.style.font_style,
                 self.style.font_stretch,
                 font_size,
-                container_width,
+                wrap_width,
                 effective_word_break(&self.style),
                 self.style.overflow_wrap,
                 self.style.white_space,
             ) {
-                if lines.len() > 1 {
+                // A single-segment run with a trailing newline ("abc\n") is
+                // still line-box text: the break character must not reach
+                // the single-line path's measurement.
+                if lines.len() > 1 || has_segment_breaks {
                     // Known phase-1 gap: wrap_text shapes without letter/word-
                     // spacing, so spaced text may break slightly late. Ledgered.
                     //
@@ -1655,6 +1964,7 @@ impl LayoutBox {
                             text: l.text(),
                             width: l.width,
                             x_offset: 0.0,
+                            justify_space: 0.0,
                         })
                         .collect();
                     let max_line_width = text_lines.iter().map(|l| l.width).fold(0.0f32, f32::max);
@@ -1663,7 +1973,13 @@ impl LayoutBox {
                     self.dimensions.content.x = containing_block.content.x;
                     self.dimensions.content.y =
                         containing_block.content.y + containing_block.content.height;
-                    self.dimensions.content.width = max_line_width.min(container_width);
+                    // Same clamp as the single-line path: an unresolved
+                    // (zero) container width must not zero the box.
+                    self.dimensions.content.width = if container_width > 0.0 {
+                        max_line_width.min(container_width)
+                    } else {
+                        max_line_width
+                    };
                     self.dimensions.content.height =
                         line_count as f32 * run_line_height(&self.style, font_size, &metrics);
                     return;
@@ -1688,15 +2004,45 @@ impl LayoutBox {
         self.dimensions.content.height = run_line_height(&self.style, font_size, &metrics);
     }
 
+    /// A non-atomic inline child whose text wrapped onto several line boxes:
+    /// `(line count, end x of the last line relative to the container's
+    /// content left, that text's line height)`. `None` when every
+    /// descendant sits on one line. The last wrapped text descendant wins
+    /// (it is the one the flow continues after).
+    fn inline_wrapped_tail(inline: &LayoutBox, container_left: f32) -> Option<(usize, f32, f32)> {
+        fn walk(b: &LayoutBox, left: f32, out: &mut Option<(usize, f32, f32)>) {
+            if let (BoxType::Text(_), Some(lines)) = (&b.box_type, b.text_lines.as_ref()) {
+                if let Some(last) = lines.last().filter(|_| lines.len() > 1) {
+                    let end = b.dimensions.content.x - left + last.x_offset + last.width;
+                    *out = Some((lines.len(), end.max(0.0), b.get_line_height()));
+                }
+            }
+            for c in &b.children {
+                walk(c, left, out);
+            }
+        }
+        let mut out = None;
+        walk(inline, container_left, &mut out);
+        out
+    }
+
     /// Whether a text child that does NOT fit the remaining line space
     /// should split across line boxes (phase-5 IFC flow) rather than drop
     /// to its own block row. IFC Slice B2 opened the split to Center/Right:
     /// closed lines get per-visual-line alignment (`align_split_close`),
     /// so "a run spanning several line boxes cannot be shifted as one
     /// child" no longer forces the block path.
-    fn text_splits_inline(child: &LayoutBox, cursor_x: f32) -> bool {
-        cursor_x > 0.0
-            && matches!(child.box_type, BoxType::Text(_))
+    ///
+    /// n49: the split applies from the line START too. The old `cursor_x >
+    /// 0` gate sent a paragraph's FIRST long run down the block path, which
+    /// closes every line it makes — so `<p>long text… <span>x</span> more`
+    /// put the span on a fresh line under the run instead of on the run's
+    /// last line (article-typography's `.highlight`; every paragraph that
+    /// opens with a long run and carries a link/em/strong later — most of
+    /// them). The flow path at cursor 0 is the block path with the last
+    /// line left open.
+    fn text_splits_inline(child: &LayoutBox, _cursor_x: f32) -> bool {
+        matches!(child.box_type, BoxType::Text(_))
             && !matches!(
                 child.style.white_space,
                 rustkit_css::WhiteSpace::Nowrap | rustkit_css::WhiteSpace::Pre
@@ -1732,23 +2078,42 @@ impl LayoutBox {
 
         let shaper = TextShaper::new();
         let chain = FontFamilyChain::from_css_value(&self.style.font_family);
-        // This run starts at the inline cursor (the caller's gate requires
-        // cursor_x > 0), so say so: with a zero-wide container the first and
-        // full budgets are both 0 and the shaper's `first < max` proxy can
-        // no longer tell — it glued the first grapheme onto the open line.
-        let lines = match shaper.wrap_text_mid_line_white_space(
-            &text,
-            &chain,
-            self.style.font_weight,
-            self.style.font_style,
-            self.style.font_stretch,
-            font_size,
-            first_line_width,
-            container_width,
-            effective_word_break(&self.style),
-            self.style.overflow_wrap,
-            self.style.white_space,
-        ) {
+        // A run that starts at an inline cursor past the line start says so
+        // explicitly: with a zero-wide container the first and full budgets
+        // are both 0 and the shaper's `first < max` proxy cannot tell — it
+        // glued the first grapheme onto the open line. A run at the line
+        // START (n49: the flow path now takes those too) wraps as the block
+        // path did — an unbreakable first word overflows its line instead
+        // of leaving an empty line box above itself.
+        let wrapped = if first_line_offset > 0.0 {
+            shaper.wrap_text_mid_line_white_space(
+                &text,
+                &chain,
+                self.style.font_weight,
+                self.style.font_style,
+                self.style.font_stretch,
+                font_size,
+                first_line_width,
+                container_width,
+                effective_word_break(&self.style),
+                self.style.overflow_wrap,
+                self.style.white_space,
+            )
+        } else {
+            shaper.wrap_text_white_space(
+                &text,
+                &chain,
+                self.style.font_weight,
+                self.style.font_style,
+                self.style.font_stretch,
+                font_size,
+                container_width,
+                effective_word_break(&self.style),
+                self.style.overflow_wrap,
+                self.style.white_space,
+            )
+        };
+        let lines = match wrapped {
             Ok(lines) if !lines.is_empty() => lines,
             _ => {
                 // Shaping failed — fall back to the block path's layout.
@@ -1777,6 +2142,7 @@ impl LayoutBox {
                 text: l.text(),
                 width: l.width,
                 x_offset: if i == 0 { first_line_offset } else { 0.0 },
+                justify_space: 0.0,
             })
             .collect();
         let line_count = text_lines.len();
@@ -1956,104 +2322,7 @@ impl LayoutBox {
             _ => 16.0,
         };
 
-        // Author padding + border COMPOSE with the control's content height
-        // (DIG-1, css-selectors heatmap 2026-07-11): the old blob formula
-        // font_size*1.5+8 pretended to be the whole border-box, so
-        // input{padding:8px; border:2px} measured 29px where Chrome builds
-        // 35 (content ~= font_size+1, plus 16 padding, plus 4 border) — and
-        // every section below slid up by the deficit. When the author sets
-        // vertical padding/border, the content line composes with them; the
-        // blob stays for bare controls (UA-default look, form-controls case
-        // depends on it).
-        let author_pb_v = {
-            let px = |l: &Length| match l {
-                Length::Px(v) => *v,
-                Length::Em(em) => em * font_size,
-                _ => 0.0,
-            };
-            px(&self.style.padding_top)
-                + px(&self.style.padding_bottom)
-                + px(&self.style.border_top_width)
-                + px(&self.style.border_bottom_width)
-        };
-        let single_line_box = |blob: f32| {
-            if author_pb_v > 0.0 {
-                (font_size + 1.0) + author_pb_v
-            } else {
-                blob
-            }
-        };
-
-        // Bare-control border-box sizes are calibrated to Chrome CfT-148 at
-        // the UA control font (13.333px system-ui, PR #42): single-line
-        // input/button/select build a 19px border-box (UA border included),
-        // checkbox/radio 13x13, textarea 15px per row + 2px border, range
-        // 16x129, color 27x50 (form-controls t8 dig, 2026-07-17: the old
-        // blobs fs*1.5+8 / fs*1.5+12 / fs*1.2 measured 28/32/16 — +9/+13/+3
-        // on every bare control, cascading +63px of drift down the page).
-        // Scaled by font_size so author-sized controls keep proportion; at
-        // the UA font the scale is 1.0 and the match to Chrome is exact.
-        let ua_scale = font_size / (40.0 / 3.0);
-
-        // Calculate intrinsic dimensions based on control type
-        let (intrinsic_width, intrinsic_height) = match &control {
-            FormControlType::TextInput { input_type, .. } => match input_type.as_str() {
-                "range" => (129.0 * ua_scale, 16.0 * ua_scale),
-                "color" => (50.0 * ua_scale, 27.0 * ua_scale),
-                // Default text input: ~20 characters wide, single line height
-                _ => (font_size * 12.0, single_line_box(19.0 * ua_scale)),
-            },
-            FormControlType::TextArea { rows, cols, .. } => {
-                // Textarea: based on rows/cols
-                let rows = (*rows).max(2) as f32;
-                let cols = (*cols).max(20) as f32;
-                (font_size * 0.6 * cols, (15.0 * rows + 2.0) * ua_scale)
-            }
-            FormControlType::Button { label, .. } => {
-                // Button: measured label width plus padding (was a
-                // chars-times-0.6em guess that oversized real labels ~40%).
-                // Height composes author padding/border like TextInput/Select
-                // (DIG-2): the css-selectors buttons (padding 8px 16px) build
-                // (fs+1)+16 = 31 in Chrome; the blob said 33. Width also
-                // composes when the author sets horizontal padding.
-                let label_width = measure_text_advanced(
-                    label,
-                    &self.style.font_family,
-                    font_size,
-                    self.style.font_weight,
-                    self.style.font_style,
-                )
-                .width;
-                let px = |l: &Length| match l {
-                    Length::Px(v) => *v,
-                    Length::Em(em) => em * font_size,
-                    _ => 0.0,
-                };
-                let author_pb_h = px(&self.style.padding_left)
-                    + px(&self.style.padding_right)
-                    + px(&self.style.border_left_width)
-                    + px(&self.style.border_right_width);
-                let width = if author_pb_h > 0.0 {
-                    label_width + author_pb_h
-                } else {
-                    label_width + 24.0
-                };
-                (width, single_line_box(19.0 * ua_scale))
-            }
-            FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
-                // Fixed size for checkboxes and radios
-                (13.0 * ua_scale, 13.0 * ua_scale)
-            }
-            FormControlType::Select { size, .. } => {
-                if *size > 1 {
-                    // Inline listbox: 16px per visible row + 2px border.
-                    (font_size * 10.0, (16.0 * *size as f32 + 2.0) * ua_scale)
-                } else {
-                    // Dropdown: similar to text input but with arrow space
-                    (font_size * 10.0, single_line_box(19.0 * ua_scale))
-                }
-            }
-        };
+        let (intrinsic_width, intrinsic_height) = form_control_intrinsic_size(&self.style, &control);
 
         // Override with explicit CSS dimensions if specified, but always fall back to intrinsic
         // if the explicit value resolves to zero (e.g., percent of zero-height container)
@@ -2144,13 +2413,107 @@ impl LayoutBox {
         // resolved (n43); with the 4px margins in the margin box, the hang
         // model builds Chrome's 39 and the bottom-edge model overshoots to
         // 41.5 (margin box + strut descent).
+        // A textarea is a scroll container (Chrome's UA `overflow: auto`),
+        // so like any inline-block whose overflow is not visible its
+        // baseline is the bottom margin edge (CSS2 §10.8.1) — n53
+        // form-controls: a bare 32px textarea alone on a line builds a 38px
+        // line in Chrome (the strut's descent hangs below it); the hang
+        // model built 32 and slid every section below by 6.
         if let BoxType::FormControl(control) = &self.box_type {
             return matches!(
                 control,
-                FormControlType::Checkbox { .. } | FormControlType::Radio { .. }
+                FormControlType::Checkbox { .. }
+                    | FormControlType::Radio { .. }
+                    | FormControlType::TextArea { .. }
             );
         }
-        self.style.display.is_atomic_inline() && self.children.is_empty()
+        if !self.style.display.is_atomic_inline() {
+            return false;
+        }
+        // An inline-block with in-flow line boxes sits on its LAST line's
+        // baseline (inline_block_baseline_y); one with none, or with an
+        // overflow other than visible, on its bottom margin edge. The
+        // overflow clause is CSS2 §10.8.1's and applies to inline-block
+        // ONLY: an inline-flex/grid scroll container keeps its content
+        // baseline (Blink ShouldIgnoreOverflowPropertyForInlineBlockBaseline
+        // — about's `a.sponsor-btn { display: inline-flex; overflow: hidden }`
+        // hung a strut descent under itself and shifted the page 3.4px).
+        if self.children.is_empty() {
+            return true;
+        }
+        let clipped = self.style.overflow_x != rustkit_css::Overflow::Visible
+            || self.style.overflow_y != rustkit_css::Overflow::Visible;
+        (clipped && self.style.display == rustkit_css::Display::InlineBlock)
+            || self.inline_block_baseline_y().is_none()
+    }
+
+    /// CSS2 §10.8.1: the baseline of an inline-block with in-flow content is
+    /// the baseline of its last line box — the last in-flow text run's last
+    /// line (a wrapped `<label>` hangs its single-line siblings off its
+    /// SECOND line), or, through nested blocks, the last descendant that
+    /// carries a baseline (text, control, image). None when no in-flow
+    /// descendant does (bottom-edge fallback). Absolute y in the box's
+    /// current geometry — read BEFORE the box is shifted.
+    fn inline_block_baseline_y(&self) -> Option<f32> {
+        for c in self.children.iter().rev() {
+            if matches!(c.position, Position::Absolute | Position::Fixed)
+                || c.float != Float::None
+                || c.style.display == rustkit_css::Display::None
+            {
+                continue;
+            }
+            match &c.box_type {
+                BoxType::Text(_) => {
+                    let fs = match c.style.font_size {
+                        Length::Px(px) => px,
+                        _ => 16.0,
+                    };
+                    let m = measure_text_advanced(
+                        "x",
+                        &c.style.font_family,
+                        fs,
+                        c.style.font_weight,
+                        c.style.font_style,
+                    );
+                    let (ascent, descent) = if m.ascent > 0.0 {
+                        (m.ascent, m.descent)
+                    } else {
+                        (fs * 0.8, fs * 0.2)
+                    };
+                    let line_h = resolve_line_height(&c.style, fs);
+                    let half_leading = half_leading(line_h, ascent, descent);
+                    // Last line's baseline: the run's bottom minus the
+                    // below-baseline part of one line (paint seats each
+                    // line at content.y + i * line-height).
+                    let bottom = c.dimensions.content.y + c.dimensions.content.height;
+                    return Some(bottom - (half_leading + descent));
+                }
+                BoxType::FormControl(_) => {
+                    let mb = c.dimensions.margin_box();
+                    let hang = if c.baseline_is_bottom_edge() {
+                        0.0
+                    } else {
+                        c.form_control_baseline_hang()
+                    };
+                    return Some(mb.y + mb.height - hang);
+                }
+                BoxType::Image { .. } => {
+                    let mb = c.dimensions.margin_box();
+                    return Some(mb.y + mb.height);
+                }
+                BoxType::LineBreak => continue,
+                _ => {
+                    if c.style.display.is_atomic_inline() && c.baseline_is_bottom_edge() {
+                        let mb = c.dimensions.margin_box();
+                        return Some(mb.y + mb.height);
+                    }
+                    if let Some(b) = c.inline_block_baseline_y() {
+                        return Some(b);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Distance from a form control's synthetic baseline (its inner text
@@ -2176,8 +2539,28 @@ impl LayoutBox {
         } else {
             (font_size * 0.8, font_size * 0.2)
         };
-        let half_leading = ((line_height - (ascent + descent)) / 2.0).max(0.0);
-        descent + half_leading + self.dimensions.padding.bottom + self.dimensions.border.bottom
+        let half_leading = half_leading(line_height, ascent, descent);
+        // A single-line control taller than its text line (author `height`)
+        // centres the line in its content box, so half the spare height
+        // hangs below the baseline too. n54 form-controls §4: a `height:
+        // 50px` button read as 44.6 above + 5.4 below; under the 6px strut
+        // descent that is a 50.6px line for Chrome's 50.
+        let centres_its_line = match &self.box_type {
+            BoxType::FormControl(FormControlType::Button { .. })
+            | BoxType::FormControl(FormControlType::TextInput { .. }) => true,
+            BoxType::FormControl(FormControlType::Select { size, .. }) => *size <= 1,
+            _ => false,
+        };
+        let spare_below = if centres_its_line && !matches!(self.style.height, Length::Auto) {
+            ((self.dimensions.content.height - line_height) / 2.0).max(0.0)
+        } else {
+            0.0
+        };
+        descent
+            + half_leading
+            + spare_below
+            + self.dimensions.padding.bottom
+            + self.dimensions.border.bottom
     }
 
     /// Content area of a NON-REPLACED inline box and the half-leading that
@@ -2209,8 +2592,120 @@ impl LayoutBox {
             (font_size * 0.8, font_size * 0.2)
         };
         let content = ascent + descent;
-        let half_leading = ((line_height - content) / 2.0).max(0.0);
+        let half_leading = half_leading(line_height, ascent, descent);
         (content, half_leading)
+    }
+
+    /// Seat a non-replaced inline's rect on its content area, a half-leading
+    /// below the line top. Its direct TEXT children stay where they are: a
+    /// text box is the line-height-tall slot at the line top, and paint seats
+    /// the glyphs inside that slot from the run's own leading
+    /// (`blink_baseline_offset`). Translating them too applied the leading
+    /// twice — every `<span>`/`<a>`/`<strong>` on a line with leading painted
+    /// its text below its neighbours (article-typography `.meta`, 14.4px on a
+    /// 23.04px line: baseline 184 for Chrome's 181).
+    ///
+    /// Nested inlines (`<a><em>text</em></a>`) have no shift of their own — the
+    /// outermost one carries their rects — so the rule recurses: inline rects
+    /// move, text leaves at any inline depth stay, anything else (an atomic
+    /// inline) moves whole. Stopping at direct children left `span > strong`
+    /// text a full half-leading low (7px on a 16px/32px line).
+    fn shift_inline_content_area(&mut self, half_leading: f32) {
+        self.dimensions.content.y += half_leading;
+        for sub in &mut self.children {
+            match sub.box_type {
+                BoxType::Text(_) => {}
+                BoxType::Inline => sub.shift_inline_content_area(half_leading),
+                _ => crate::flex::translate_subtree(sub, 0.0, half_leading),
+            }
+        }
+    }
+
+    /// Above/below-baseline extents of a line of text in `s`, half-leading
+    /// included — the strut when `s` is the container's style (CSS2 §10.8.1).
+    fn text_baseline_extents(s: &ComputedStyle) -> (f32, f32) {
+        let fs = match s.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let m = measure_text_advanced("x", &s.font_family, fs, s.font_weight, s.font_style);
+        let line_h = resolve_line_height(s, fs);
+        let half_leading = half_leading(line_h, m.ascent, m.descent);
+        (half_leading + m.ascent, half_leading + m.descent)
+    }
+
+    /// The same split for sizing a line box: the two parts sum to the
+    /// line-height EXACTLY. Where a face's ascent + descent exceeds its
+    /// `normal` line-height by a rounding sliver, the clamped half-leading
+    /// above would make every text line that sliver taller than the run's
+    /// own line boxes (4 lines read 73.69 for 73.60).
+    ///
+    /// The part above the baseline is a WHOLE pixel, as in Blink: a face's
+    /// ascent and descent are rounded (SimpleFontData) and the half-leading
+    /// added above is floored (FontHeight::AddLeading); the fraction of the
+    /// line-height stays below. With the raw metrics a 36px wrapped label
+    /// over a 16px/24px strut summed to 37.58 for Chrome's 37 (form-controls
+    /// §5), and every such row pushed the page down by the sliver.
+    fn text_line_box_extents(s: &ComputedStyle) -> (f32, f32) {
+        let fs = match s.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let m = measure_text_advanced("x", &s.font_family, fs, s.font_weight, s.font_style);
+        let (ascent, descent) = if m.ascent > 0.0 {
+            (m.ascent.round(), m.descent.round())
+        } else {
+            ((fs * 0.8).round(), (fs * 0.2).round())
+        };
+        let line_h = resolve_line_height(s, fs);
+        let above = ascent + ((line_h - (ascent + descent)) / 2.0).floor();
+        (above, (line_h - above).max(0.0))
+    }
+
+    /// This line member's extents above and below the line's baseline, for
+    /// the line box's height (CSS2 §10.8.1: the line box spans the highest
+    /// box top to the lowest box bottom once every member sits on the
+    /// baseline, the strut included). Mirrors apply_vertical_align's
+    /// placement arms. None for members the align pass leaves at the line
+    /// top: `vertical-align: top|bottom` boxes,
+    /// which hang from the line edge and swallow the strut instead of
+    /// stacking on its descent; `middle` keeps the loop's own accounting
+    /// (it centres on the container's x-height, not on this box's font).
+    /// Reads the member's current geometry.
+    fn line_member_baseline_extents(&self) -> Option<(f32, f32)> {
+        if matches!(
+            self.style.vertical_align,
+            rustkit_css::VerticalAlign::Top
+                | rustkit_css::VerticalAlign::Bottom
+                | rustkit_css::VerticalAlign::Middle
+        ) {
+            return None;
+        }
+        // A non-atomic inline sits on the baseline as a line of text in its
+        // own font (its rect is only the content area; the line sees the
+        // line-height split).
+        if matches!(self.box_type, BoxType::Text(_) | BoxType::Inline) {
+            return Some(Self::text_line_box_extents(&self.style));
+        }
+        let h = self.dimensions.margin_box().height;
+        let above = if matches!(self.box_type, BoxType::FormControl(_))
+            && !self.baseline_is_bottom_edge()
+        {
+            (h - self.form_control_baseline_hang()).max(0.0)
+        } else if self.baseline_is_bottom_edge() {
+            h
+        } else if self.style.display.is_atomic_inline() {
+            let d = &self.dimensions;
+            let top = d.content.y - d.margin.top - d.border.top - d.padding.top;
+            // Whole pixels, for the same reason as text_line_box_extents: the
+            // inner baseline is a stack of line boxes plus a text ascent
+            // whose fraction belongs BELOW it (a wrapped 2 x 18px label reads
+            // 31.54 here; Blink's is 18 + 13 = 31).
+            (self.inline_block_baseline_y()? - top + 0.01).floor()
+        } else {
+            return None;
+        };
+        Some((above, (h - above).max(0.0)))
     }
 
     fn inline_strut_descent(&self) -> f32 {
@@ -2231,7 +2726,7 @@ impl LayoutBox {
         } else {
             (font_size * 0.8, font_size * 0.2)
         };
-        let half_leading = ((line_height - (ascent + descent)) / 2.0).max(0.0);
+        let half_leading = half_leading(line_height, ascent, descent);
         descent + half_leading
     }
 
@@ -2251,6 +2746,21 @@ impl LayoutBox {
         margin_context: &mut MarginCollapseContext,
         float_context: &mut FloatContext,
     ) {
+        self.layout_with_collapse_in(containing_block, margin_context, float_context, None);
+    }
+
+    /// `layout_with_collapse`, plus the containing block's DEFINITE content
+    /// height for percentage resolution (see
+    /// `definite_content_height_for_children`). `None` keeps the historical
+    /// behaviour: percentages read `containing_block.content.height`, which on
+    /// the flow path is the parent's cursor.
+    pub(crate) fn layout_with_collapse_in(
+        &mut self,
+        containing_block: &Dimensions,
+        margin_context: &mut MarginCollapseContext,
+        float_context: &mut FloatContext,
+        percent_height_base: Option<f32>,
+    ) {
         // Handle clear property
         if self.clear != Clear::None {
             let clear_y = float_context.clear(self.clear);
@@ -2261,7 +2771,12 @@ impl LayoutBox {
 
         match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
-                self.layout_block_with_collapse(containing_block, margin_context, float_context);
+                self.layout_block_with_collapse(
+                    containing_block,
+                    margin_context,
+                    float_context,
+                    percent_height_base,
+                );
             }
             BoxType::Inline => {
                 self.layout_inline(containing_block);
@@ -2296,17 +2811,19 @@ impl LayoutBox {
 
         // Apply positioning offsets after normal layout
         self.apply_position_offsets(containing_block);
+        // This box is final: anchor its abspos children to its padding box.
+        self.reanchor_absolute_children();
     }
 
     /// Layout a block-level box with an explicit definite height for percentage resolution.
     fn layout_block_with_definite_height(
         &mut self,
         containing_block: &Dimensions,
-        definite_height: f32,
+        definite_height: Option<f32>,
     ) {
         tracing::trace!(
             containing_width = containing_block.content.width,
-            definite_height = definite_height,
+            definite_height = definite_height.unwrap_or(f32::NAN),
             "layout_block_with_definite_height called"
         );
 
@@ -2321,8 +2838,12 @@ impl LayoutBox {
         // Position the box
         self.calculate_block_position(containing_block);
 
-        // Layout children
-        self.layout_block_children();
+        // Layout children. Percentage-height children resolve against THIS
+        // box's height when it is definite (CSS 2.1 §10.5); the containing
+        // block they are handed carries the flow cursor instead.
+        let definite_for_children =
+            self.definite_content_height_for_children(definite_height.unwrap_or(0.0));
+        self.layout_block_children(definite_for_children);
 
         // Height depends on children - use definite_height for percentage resolution
         self.calculate_block_height(definite_height);
@@ -2334,6 +2855,7 @@ impl LayoutBox {
         containing_block: &Dimensions,
         margin_context: &mut MarginCollapseContext,
         float_context: &mut FloatContext,
+        percent_height_base: Option<f32>,
     ) {
         // Calculate width first (depends on containing block)
         self.calculate_block_width(containing_block);
@@ -2391,6 +2913,13 @@ impl LayoutBox {
         // on the flags instead: the first in-flow block child skips its top
         // margin when it was adjoined above, and the last child's bottom
         // margin stays pending when this box's bottom edge is open.
+        // Knowable now, before any child flows: this box's own height when it
+        // does not depend on its children. Children resolve percentage heights
+        // against it (CSS 2.1 §10.5); `None` leaves them on the old path.
+        let definite_for_children =
+            self.definite_content_height_for_children(percent_height_base
+                .unwrap_or(containing_block.content.height));
+
         let mut child_margin_context = MarginCollapseContext::new();
         child_margin_context.children_are_formatting_roots =
             self.style.display.is_flex() || self.style.display.is_grid();
@@ -2406,25 +2935,55 @@ impl LayoutBox {
         // Check for flex or grid container - these have special child layout
         if self.style.display.is_flex() {
             // For flex containers, layout children normally first to get their intrinsic sizes
-            self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
-            // Then apply flex layout algorithm
+            self.layout_block_children_with_collapse(
+                &mut child_margin_context,
+                float_context,
+                definite_for_children,
+            );
+            // Then apply flex layout algorithm. See the sibling call in
+            // `layout_with_definite_height` for why no containing block goes
+            // over from here.
             flex::layout_flex_container(self, &self.dimensions.clone());
         } else if self.style.display.is_grid() {
             // For grid containers, layout children normally first
-            self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
+            self.layout_block_children_with_collapse(
+                &mut child_margin_context,
+                float_context,
+                definite_for_children,
+            );
             // Then apply grid layout algorithm
             grid::layout_grid_container(
                 self,
                 self.dimensions.content.width,
                 self.dimensions.content.height,
             );
+        } else if let Some(cols) =
+            multicol::column_geometry(&self.style, self.dimensions.content.width)
+        {
+            // Multi-column: the children flow at the column width, then
+            // balance over the columns (see multicol).
+            let full_width = self.dimensions.content.width;
+            self.dimensions.content.width = cols.width;
+            self.layout_block_children_with_collapse(
+                &mut child_margin_context,
+                float_context,
+                definite_for_children,
+            );
+            self.dimensions.content.width = full_width;
+            multicol::balance_columns(self, &cols);
         } else {
             // Normal block layout
-            self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
+            self.layout_block_children_with_collapse(
+                &mut child_margin_context,
+                float_context,
+                definite_for_children,
+            );
         }
 
         // Height depends on children
-        self.calculate_block_height(containing_block.content.height);
+        self.calculate_block_height(percent_height_base.or_else(|| {
+            (containing_block.content.height > 0.0).then_some(containing_block.content.height)
+        }));
 
         // Reset margin context for next sibling, add bottom margin — and the
         // last child's bottom margin that collapsed through our open bottom
@@ -2536,15 +3095,19 @@ impl LayoutBox {
             + self.dimensions.padding.top;
 
         // Layout children
-        self.layout_block_children();
-        self.calculate_block_height(containing_block.content.height);
+        let definite_for_children =
+            self.definite_content_height_for_children(containing_block.content.height);
+        self.layout_block_children(definite_for_children);
+        self.calculate_block_height(
+            (containing_block.content.height > 0.0).then_some(containing_block.content.height),
+        );
     }
 
     /// Offsets with percent values resolved against the containing block.
     /// Build-time transfer can only pre-resolve absolute lengths; percents
     /// (e.g. `left: -100%` off-canvas shimmer overlays) need the containing
     /// block, so they resolve here at apply time from the computed style.
-    fn resolved_offsets(&self, containing_block: &Dimensions) -> PositionOffsets {
+    pub(crate) fn resolved_offsets(&self, containing_block: &Dimensions) -> PositionOffsets {
         let resolve = |pre: Option<f32>, st: &Option<Length>, basis: f32| {
             pre.or(match st {
                 Some(Length::Percent(p)) => Some(p / 100.0 * basis),
@@ -2696,17 +3259,76 @@ impl LayoutBox {
         })
     }
 
+    /// This box's inner (content-box) height when `height: auto` is made
+    /// DEFINITE by opposite insets on an out-of-flow box, else `None`.
+    ///
+    /// CSS2 §10.6.4: for an absolutely positioned box with `height: auto`
+    /// and neither `top` nor `bottom` auto, the used height is fixed by the
+    /// constraint equation — it is as definite as a specified `height`, and
+    /// it is the number every `inset: 0` overlay is built on. Nothing in the
+    /// style carries it: `style.height` reads `Auto`, so every consumer that
+    /// asks *style* whether the main size is definite answers "no" and falls
+    /// back to sizing by content.
+    ///
+    /// It lives here, beside `definite_content_height`, because the flex
+    /// container path and `apply_position_offsets_absolute` must agree on
+    /// the number to the last bit — two copies of this subtraction that
+    /// drift apart are the defect class night 8 recorded.
+    pub(crate) fn inset_definite_content_height(
+        &self,
+        containing_block: &Dimensions,
+    ) -> Option<f32> {
+        if !matches!(self.position, Position::Absolute | Position::Fixed) {
+            return None;
+        }
+        if !matches!(self.style.height, Length::Auto) {
+            return None;
+        }
+        let offsets = self.resolved_offsets(containing_block);
+        let (top, bottom) = (offsets.top?, offsets.bottom?);
+        Some(
+            (containing_block.content.height
+                - top
+                - bottom
+                - self.dimensions.margin.top
+                - self.dimensions.margin.bottom
+                - self.dimensions.border.top
+                - self.dimensions.border.bottom
+                - self.dimensions.padding.top
+                - self.dimensions.padding.bottom)
+                .max(0.0),
+        )
+    }
+
     /// Re-resolve an absolutely positioned box's offsets against its REAL
     /// containing block, carrying the already-laid-out subtree with it. The
     /// first pass positioned it against a stand-in whose height was the
     /// parent's flow cursor (static position); only `bottom`-anchored and
     /// `inset`-stretched boxes move here. `position: fixed` is untouched —
     /// its containing block is the viewport, not this parent.
-    fn reanchor_absolute(&mut self, containing_block: &Dimensions) {
+    pub(crate) fn reanchor_absolute(&mut self, containing_block: &Dimensions) {
         if self.position != Position::Absolute {
             return;
         }
         let (origin_x, origin_y) = (self.dimensions.content.x, self.dimensions.content.y);
+        let (origin_w, origin_h) = (
+            self.dimensions.content.width,
+            self.dimensions.content.height,
+        );
+        // CSS 2.1 §10.5: a percentage height resolves against the CONTAINING
+        // BLOCK — for an out-of-flow box, the padding box this re-anchor is
+        // handed. During flow layout the stand-in's `content.height` was the
+        // parent's flow cursor (the static-position trick documented at both
+        // `layout_block_children` call sites), so a percentage resolved
+        // against "content laid out so far". chrome_rustkit's `.sidebar`
+        // (`top: 84px; height: calc(100% - 84px)` in a 100px strip) read that
+        // cursor as 84 and came out ZERO tall against Chrome's 16.
+        //
+        // Only the lengths that actually depend on the base are recomputed:
+        // a `Px` height is already right, and an `auto` one is its content.
+        if matches!(self.style.height, Length::Percent(_) | Length::Calc(_)) {
+            self.calculate_block_height(Some(containing_block.content.height));
+        }
         self.apply_position_offsets_absolute(containing_block);
         let (dx, dy) = (
             self.dimensions.content.x - origin_x,
@@ -2716,6 +3338,68 @@ impl LayoutBox {
             for child in &mut self.children {
                 crate::flex::translate_subtree(child, dx, dy);
             }
+        }
+        // On the block path this is where an inset-stretched box's used height
+        // FIRST becomes known: the child was laid out against a stand-in whose
+        // height is the parent's flow cursor (the static-position trick), so
+        // the containing block's real height was not available until now.
+        //
+        // A translate carries the subtree but does not re-justify it. A flex
+        // container whose main size just changed has to redistribute its free
+        // space, or `justify-content` keeps the answer it computed from the
+        // cursor — `center` in a stand-in the size of its own content means no
+        // free space at all, and every item stays packed against the start
+        // edge. Passing the containing block as well keeps step 11d's
+        // re-derivation on the same number.
+        if self.style.display.is_flex()
+            && self.inset_definite_content_height(containing_block).is_some()
+        {
+            crate::flex::layout_flex_container_in(
+                self,
+                &self.dimensions.clone(),
+                Some(containing_block),
+            );
+        }
+
+        // An `inset`-stretched box changes SIZE here, after its own children
+        // were anchored to its pre-stretch box: a `bottom: 2px` knob inside
+        // an `inset: 0` slider sat 22px above the slider (settings' toggles,
+        // n46). Its abspos children are re-anchored to the new padding box.
+        if self.dimensions.content.width != origin_w || self.dimensions.content.height != origin_h
+        {
+            self.reanchor_absolute_children();
+        }
+    }
+
+    /// CSS 2.1 §10.1: the containing block of an absolutely positioned
+    /// descendant is the PADDING box of its positioned ancestor. Expressed as
+    /// a `Dimensions` whose content rect is that padding box, because
+    /// `apply_position_offsets_absolute` reads `containing_block.content`.
+    fn abspos_containing_block(&self) -> Dimensions {
+        Dimensions {
+            content: self.dimensions.padding_box(),
+            ..Default::default()
+        }
+    }
+
+    /// Re-anchor every absolutely positioned child against this box's FINAL
+    /// padding box. Runs once this box's own size and position are settled —
+    /// after its children laid out, its height resolved and its own offsets
+    /// (including an `inset: 0` stretch) applied.
+    ///
+    /// During child layout an abspos child resolves `bottom:` against a
+    /// stand-in whose height is the parent's flow cursor (its static
+    /// position). The old re-anchor ran inside that loop and only when the
+    /// parent's `height` was an absolute length, against the CONTENT box: a
+    /// `bottom: 2px` knob inside an `inset: 0` slider (settings' toggles),
+    /// inside any auto-height positioned box, or inside a padded one landed
+    /// against the parent's top / short of the padding edge. Idempotent:
+    /// offsets are recomputed absolutely, so a box the parent's own move
+    /// already carried simply lands in the same place.
+    pub(crate) fn reanchor_absolute_children(&mut self) {
+        let cb = self.abspos_containing_block();
+        for child in &mut self.children {
+            child.reanchor_absolute(&cb);
         }
     }
 
@@ -2772,20 +3456,12 @@ impl LayoutBox {
         if has_top && has_bottom {
             // When both top and bottom are set with height: auto, stretch to fill
             let top = offsets.top.unwrap();
-            let bottom = offsets.bottom.unwrap();
 
-            // Calculate stretched height if height is auto
-            if matches!(self.style.height, Length::Auto) {
-                let available_height = containing_block.content.height
-                    - top
-                    - bottom
-                    - self.dimensions.margin.top
-                    - self.dimensions.margin.bottom
-                    - self.dimensions.border.top
-                    - self.dimensions.border.bottom
-                    - self.dimensions.padding.top
-                    - self.dimensions.padding.bottom;
-                self.dimensions.content.height = available_height.max(0.0);
+            // Calculate stretched height if height is auto. The subtraction
+            // lives in `inset_definite_content_height` so the flex container
+            // path resolves the identical number.
+            if let Some(available_height) = self.inset_definite_content_height(containing_block) {
+                self.dimensions.content.height = available_height;
             }
 
             // Position from top
@@ -2995,7 +3671,7 @@ impl LayoutBox {
     }
 
     /// Layout block children.
-    fn layout_block_children(&mut self) {
+    fn layout_block_children(&mut self, definite_height: Option<f32>) {
         let mut cursor_y = 0.0;
         let mut cursor_x = 0.0;
         let mut line_height = 0.0_f32;
@@ -3003,9 +3679,13 @@ impl LayoutBox {
         // whose bottom edge IS their baseline (empty atomic inlines, images):
         // the strut's descent extends the line box under them.
         let mut line_below_baseline = 0.0_f32;
+        // Above/below-baseline extents of the current line's baseline-anchored
+        // members; the strut floors both when the line closes (line_advance).
+        let mut line_extents = (0.0_f32, 0.0_f32);
         let container_width = self.dimensions.content.width;
         let text_align = self.style.text_align;
         let strut_descent = self.inline_strut_descent();
+        let strut = Self::text_line_box_extents(&self.style);
         // A `<br>` on an otherwise empty line still produces a line box of
         // the container's line-height (CSS 2.1 §9.4.2 / §10.8).
         let empty_line_height = self.get_line_height();
@@ -3035,21 +3715,15 @@ impl LayoutBox {
         // + middles) need alignment after the loop: (line_start, text_index).
         let mut split_records: Vec<(usize, usize)> = Vec::new();
 
-        // See layout_block_children_with_collapse: the real containing-block
-        // height an abspos child's `bottom`/`inset` resolve against.
-        let definite_height = self.definite_content_height();
-
         for (i, child) in self.children.iter_mut().enumerate() {
-            // Skip absolutely/fixed positioned children for flow layout
+            // Skip absolutely/fixed positioned children for flow layout.
+            // The stand-in's height is the flow cursor (static position);
+            // `bottom`/`inset` are re-resolved against the real padding box
+            // by reanchor_absolute_children once this box is final.
             if child.position == Position::Absolute || child.position == Position::Fixed {
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y;
                 child.layout(&cb);
-                if let Some(height) = definite_height {
-                    let mut real_cb = self.dimensions.clone();
-                    real_cb.content.height = height;
-                    child.reanchor_absolute(&real_cb);
-                }
                 continue;
             }
 
@@ -3061,7 +3735,7 @@ impl LayoutBox {
                     lines.push((start, i, line_width));
                 }
                 let advance = if cursor_x > 0.0 || line_height > 0.0 {
-                    line_height.max(line_below_baseline)
+                    line_advance(line_height, line_below_baseline, line_extents, strut)
                 } else {
                     empty_line_height
                 };
@@ -3075,6 +3749,7 @@ impl LayoutBox {
                 cursor_x = 0.0;
                 line_height = 0.0;
                 line_below_baseline = 0.0;
+                line_extents = (0.0, 0.0);
                 line_start_index = None;
                 line_width = 0.0;
                 continue;
@@ -3117,7 +3792,10 @@ impl LayoutBox {
                 // Children self-position at cb.y + cb.height; the cursor is
                 // already baked into cb.y, so the height term must be zero.
                 cb.content.height = 0.0;
-                child.layout(&cb);
+                child.layout_with_percent_base(
+                    &cb,
+                    definite_height.or((cb.content.height > 0.0).then_some(cb.content.height)),
+                );
 
                 let child_width = child.dimensions.margin_box().width;
                 let child_height = child.dimensions.margin_box().height;
@@ -3133,17 +3811,21 @@ impl LayoutBox {
                     }
 
                     // Wrap to next line
-                    cursor_y += line_height.max(line_below_baseline);
+                    cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut);
                     cursor_x = 0.0;
                     line_height = 0.0;
                     line_below_baseline = 0.0;
+                    line_extents = (0.0, 0.0);
                     line_start_index = Some(i);
                     line_width = 0.0;
 
                     // Re-layout at new position
                     cb.content.x = self.dimensions.content.x;
                     cb.content.y = self.dimensions.content.y + cursor_y;
-                    child.layout(&cb);
+                    child.layout_with_percent_base(
+                    &cb,
+                    definite_height.or((cb.content.height > 0.0).then_some(cb.content.height)),
+                );
                 }
 
                 // Track line start
@@ -3176,12 +3858,32 @@ impl LayoutBox {
                 if matches!(child.box_type, BoxType::Inline) {
                     let (_, half_leading) = child.inline_content_area();
                     if half_leading > 0.0 {
-                        child.dimensions.content.y += half_leading;
-                        for sub in &mut child.children {
-                            crate::flex::translate_subtree(sub, 0.0, half_leading);
-                        }
+                        child.shift_inline_content_area(half_leading);
                     }
                     line_height = line_height.max(child.get_line_height());
+                    // The inline's text wrapped onto several line boxes: the
+                    // flow must advance past ALL of them, exactly as the
+                    // phase-5 split below does for a bare text run. Before
+                    // n50 the line advanced by ONE line-height and the next
+                    // block sibling was laid over lines 2..n (`<p><span>long
+                    // text</span></p>` was one line tall; `<pre><code>` six
+                    // lines painted over the following paragraph).
+                    if let Some((n_lines, last_end, lh)) =
+                        Self::inline_wrapped_tail(child, self.dimensions.content.x)
+                    {
+                        if let Some(start) = line_start_index {
+                            lines.push((start, i + 1, line_width + child_width));
+                        }
+                        cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut).max(lh)
+                            + (n_lines as f32 - 2.0).max(0.0) * lh;
+                        cursor_x = last_end;
+                        line_width = last_end;
+                        line_height = lh;
+                        line_below_baseline = 0.0;
+                        line_extents = (0.0, 0.0);
+                        line_start_index = Some(i);
+                        continue;
+                    }
                 } else {
                     line_height = line_height.max(child_height);
                 }
@@ -3196,6 +3898,17 @@ impl LayoutBox {
                 // sticky-scroll's .horizontal-scroll read 156.8 where Chrome
                 // reads 150 (+6.8 = descent + half-leading at line-height
                 // 1.6), and the error cascaded into every later sibling's y.
+                // Every baseline-anchored member raises the line's ascent or
+                // deepens its descent; the line box is their sum, not the
+                // tallest member (n54: `<label>Text:</label><input>` with no
+                // whitespace between built a 19px line for Chrome's 24).
+                let member_extents = match child.float {
+                    Float::None => child.line_member_baseline_extents(),
+                    _ => None,
+                };
+                if let Some((above, below)) = member_extents {
+                    line_extents = (line_extents.0.max(above), line_extents.1.max(below));
+                }
                 let anchored_to_baseline = !matches!(
                     child.style.vertical_align,
                     rustkit_css::VerticalAlign::Top | rustkit_css::VerticalAlign::Bottom
@@ -3231,12 +3944,13 @@ impl LayoutBox {
                     // after the loop (the open last line is aligned by the
                     // recorded-lines pass when it eventually closes).
                     split_records.push((line_start_index.unwrap_or(i), i));
-                    cursor_y += line_height.max(line_below_baseline).max(lh)
+                    cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut).max(lh)
                         + (n_lines as f32 - 2.0).max(0.0) * lh;
                     cursor_x = last_w;
                     line_width = last_w;
                     line_height = lh;
                     line_below_baseline = 0.0;
+                    line_extents = (0.0, 0.0);
                     line_start_index = Some(i);
                 }
             } else {
@@ -3246,10 +3960,11 @@ impl LayoutBox {
                     if let Some(start) = line_start_index {
                         lines.push((start, i, line_width));
                     }
-                    cursor_y += line_height.max(line_below_baseline);
+                    cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut);
                     cursor_x = 0.0;
                     line_height = 0.0;
                     line_below_baseline = 0.0;
+                    line_extents = (0.0, 0.0);
                     line_start_index = None;
                     line_width = 0.0;
                 }
@@ -3263,7 +3978,10 @@ impl LayoutBox {
                         let t = t.clone();
                         child.layout_text_with_zero_wrap(t, &cb, true);
                     }
-                    _ => child.layout(&cb),
+                    _ => child.layout_with_percent_base(
+                        &cb,
+                        definite_height.or((cb.content.height > 0.0).then_some(cb.content.height)),
+                    ),
                 }
 
                 // An inline-level box (e.g. a styled <span>/<a>) laid out on
@@ -3298,7 +4016,7 @@ impl LayoutBox {
             if let Some(start) = line_start_index {
                 lines.push((start, self.children.len(), line_width));
             }
-            cursor_y += line_height.max(line_below_baseline);
+            cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut);
         }
 
         // IFC Slice B2: align the CLOSED lines of each mid-line split
@@ -3356,21 +4074,58 @@ impl LayoutBox {
         // Above/below-baseline extents for a text-carrying style, matching
         // the paint emission: glyph top = content_y + half_leading,
         // baseline = glyph top + ascent.
-        let text_extents = |s: &ComputedStyle| -> (f32, f32) {
-            let fs = font_px(s);
-            let m = measure_text_advanced("x", &s.font_family, fs, s.font_weight, s.font_style);
-            let line_h = resolve_line_height(s, fs);
-            let half_leading = ((line_h - (m.ascent + m.descent)) / 2.0).max(0.0);
-            (half_leading + m.ascent, half_leading + m.descent)
-        };
+        //
+        // Whole-pixel, as paint seats a run (`blink_baseline_offset`) and as
+        // the line box is sized: on the fractional split a member dropped to
+        // a neighbour's baseline landed between rows and painted one off.
+        let text_extents = Self::text_line_box_extents;
 
-        // Line top from current geometry: every member is top-placed today.
+        // A member's top on THIS line. A mid-line split run reaches the
+        // recorded line only through its LAST visual line (the open one its
+        // followers share); its box top is the top of its FIRST line, and
+        // reading that as the line top hoisted every follower up to the
+        // run's first line (n49: `<p>long run… <span>x</span>` put the span
+        // on line 1 of a 4-line run).
+        let member_top = |c: &LayoutBox| -> f32 {
+            let d = &c.dimensions;
+            let box_top = d.content.y - d.margin.top - d.border.top - d.padding.top;
+            // A non-atomic inline's rect is its content area, a half-leading
+            // below the line slot its text sits in; the slot is the member.
+            // One whose text wrapped reaches this line through its last line
+            // box, like a split run.
+            if matches!(c.box_type, BoxType::Inline) {
+                let slot_top = box_top - c.inline_content_area().1;
+                return match Self::inline_wrapped_tail(c, 0.0) {
+                    Some((n, _, lh)) => slot_top + (n as f32 - 1.0) * lh,
+                    None => slot_top,
+                };
+            }
+            match (&c.text_flow_first_offset, &c.text_lines) {
+                (Some(_), Some(tls)) if tls.len() > 1 => {
+                    box_top + (tls.len() as f32 - 1.0) * c.get_line_height()
+                }
+                _ => box_top,
+            }
+        };
+        // An inline-block's inner baseline in whole pixels, exactly as
+        // line_member_baseline_extents sizes the line from it.
+        let atomic_above = |above: f32| (above + 0.01).floor();
+        // A non-atomic inline the pass can seat: baseline-aligned, all on one
+        // line. `top|bottom|middle` inlines and wrapped ones stay put
+        // (ledgered) but still count toward the line top.
+        let seats_as_text = |c: &LayoutBox| -> bool {
+            matches!(c.box_type, BoxType::Inline)
+                && !matches!(
+                    c.style.vertical_align,
+                    rustkit_css::VerticalAlign::Top
+                        | rustkit_css::VerticalAlign::Bottom
+                        | rustkit_css::VerticalAlign::Middle
+                )
+                && Self::inline_wrapped_tail(c, 0.0).is_none()
+        };
         let line_top = members
             .iter()
-            .map(|&i| {
-                let d = &children[i].dimensions;
-                d.content.y - d.margin.top - d.border.top - d.padding.top
-            })
+            .map(|&i| member_top(&children[i]))
             .fold(f32::INFINITY, f32::min);
 
         // Pass 1: the line's ascent = max above-baseline extent, floored by
@@ -3383,7 +4138,7 @@ impl LayoutBox {
         let x_height = fs * 0.5;
         for &i in &members {
             let c = &children[i];
-            let above = if matches!(c.box_type, BoxType::Text(_)) {
+            let above = if matches!(c.box_type, BoxType::Text(_)) || seats_as_text(c) {
                 text_extents(&c.style).0
             } else if matches!(c.box_type, BoxType::FormControl(_)) && !c.baseline_is_bottom_edge()
             {
@@ -3396,8 +4151,18 @@ impl LayoutBox {
                     rustkit_css::VerticalAlign::Middle => h / 2.0 + x_height / 2.0,
                     _ => h, // baseline (Slice C subset: others fall through)
                 }
+            } else if c.style.display.is_atomic_inline() {
+                // Inline-block with in-flow content: its last line box's
+                // baseline (CSS2 §10.8.1). n53 form-controls: every
+                // `label { display: inline-block }` beside an input sat at
+                // the line top, 5px above Chrome; a wrapped label hung its
+                // row off its second line.
+                match c.inline_block_baseline_y() {
+                    Some(b) => atomic_above(b - member_top(c)),
+                    None => continue,
+                }
             } else {
-                continue; // non-atomic inline boxes stay top-aligned (later slice)
+                continue;
             };
             ascent = ascent.max(above);
         }
@@ -3407,7 +4172,11 @@ impl LayoutBox {
         // own extent already defines the ascent.
         for &i in &members {
             let c = &mut children[i];
-            let target_top = if matches!(c.box_type, BoxType::Text(_)) {
+            // A small-font `<span>` beside body text sat at the line top —
+            // its baseline a few px above its neighbours' (n54 settings: no
+            // on-row text at all). Its slot drops like a text run's; the
+            // rect and the text inside move together.
+            let target_top = if matches!(c.box_type, BoxType::Text(_)) || seats_as_text(c) {
                 baseline_y - text_extents(&c.style).0
             } else if matches!(c.box_type, BoxType::FormControl(_)) && !c.baseline_is_bottom_edge()
             {
@@ -3421,13 +4190,22 @@ impl LayoutBox {
                     }
                     _ => baseline_y - mb.height,
                 }
+            } else if c.style.display.is_atomic_inline() {
+                match c.inline_block_baseline_y() {
+                    Some(b) => baseline_y - atomic_above(b - member_top(c)),
+                    None => continue,
+                }
             } else {
                 continue;
             };
-            let d = &c.dimensions;
-            let current_top = d.content.y - d.margin.top - d.border.top - d.padding.top;
+            let current_top = member_top(c);
             let dy = target_top - current_top;
-            if dy.abs() > 0.01 {
+            let is_multi_line_split = c.text_flow_first_offset.is_some()
+                && c.text_lines.as_ref().is_some_and(|t| t.len() > 1);
+            // A split run's last line cannot move on its own (its lines
+            // are content.y + i * line-height); a taller follower on that
+            // line leaves the run where it is. Ledgered, not chased.
+            if dy.abs() > 0.01 && !is_multi_line_split {
                 crate::flex::translate_subtree(c, 0.0, dy);
             }
         }
@@ -3449,8 +4227,56 @@ impl LayoutBox {
             TextAlign::Left => 0.0,
             TextAlign::Right => (container_width - line_width).max(0.0),
             TextAlign::Center => ((container_width - line_width) / 2.0).max(0.0),
-            TextAlign::Justify => 0.0, // Justify would need gap distribution (complex)
+            TextAlign::Justify => 0.0, // no line shift: gaps are distributed below
         };
+
+        // css-text-3 §7.3: under `justify`, every line that ends in a soft
+        // wrap spreads its slack across its word separators. A wrapped run's
+        // last line is never justified — it is either the block's last line
+        // or it continues into the next inline sibling (a mixed line, which
+        // stays start-aligned: distributing across sibling runs is not
+        // implemented). Line 0 of a mid-line split starts after prior
+        // siblings for the same reason. Preserved-newline runs (pre-wrap /
+        // pre-line) are left alone: their breaks may be forced.
+        if matches!(text_align, TextAlign::Justify) {
+            for child in children.iter_mut() {
+                if !matches!(
+                    child.style.white_space,
+                    rustkit_css::WhiteSpace::Normal | rustkit_css::WhiteSpace::Nowrap
+                ) {
+                    continue;
+                }
+                // Line 0 of a split that starts past the line start is a
+                // mixed line (prior siblings own part of it); a split that
+                // starts AT the line start owns line 0 outright.
+                let first_justifiable =
+                    usize::from(child.text_flow_first_offset.is_some_and(|o| o > 0.0));
+                let font_size = match child.style.font_size {
+                    Length::Px(px) => px,
+                    _ => 16.0,
+                };
+                let style = child.style.clone();
+                let Some(text_lines) = child.text_lines.as_mut() else {
+                    continue;
+                };
+                let n = text_lines.len();
+                for tl in text_lines
+                    .iter_mut()
+                    .take(n.saturating_sub(1))
+                    .skip(first_justifiable)
+                {
+                    let opportunities = TextLine::justification_opportunities(tl.text.trim_end());
+                    let natural = TextLine::natural_ink_width(&tl.text, &style, font_size);
+                    tl.justify_space = match natural {
+                        Some(w) if opportunities > 0 && container_width - tl.x_offset - w > 0.0 => {
+                            (container_width - tl.x_offset - w) / opportunities as f32
+                        }
+                        _ => 0.0,
+                    };
+                }
+            }
+            return;
+        }
 
         for child in children {
             // A wrapped text run aligns each VISUAL line independently
@@ -3576,15 +4402,20 @@ impl LayoutBox {
         &mut self,
         margin_context: &mut MarginCollapseContext,
         float_context: &mut FloatContext,
+        definite_height: Option<f32>,
     ) {
         let mut cursor_y = 0.0;
         let mut cursor_x = 0.0;
         let mut line_height = 0.0_f32;
         // See layout_block_children: below-baseline extent of the current line.
         let mut line_below_baseline = 0.0_f32;
+        // Above/below-baseline extents of the current line's baseline-anchored
+        // members; the strut floors both when the line closes (line_advance).
+        let mut line_extents = (0.0_f32, 0.0_f32);
         let container_width = self.dimensions.content.width;
         let text_align = self.style.text_align;
         let strut_descent = self.inline_strut_descent();
+        let strut = Self::text_line_box_extents(&self.style);
         // See layout_block_children: a `<br>` on an empty line is a line box.
         let empty_line_height = self.get_line_height();
         // white-space: nowrap|pre suppress soft-wrapping (see layout_block_children).
@@ -3614,13 +4445,11 @@ impl LayoutBox {
         // `cb.content.height = cursor_y` below is the STATIC POSITION trick
         // (calculate_block_position stacks a box at cb.y + cb.height), not
         // the containing block's height — so `bottom: 0` / `inset: 0` on an
-        // abspos child resolved against "content laid out so far". A
+        // abspos child resolves against "content laid out so far". A
         // `::after { inset: 0 }` cover on a `height: 100px` div holding two
         // 27px lines came out 54px tall (WPT overflow-wrap-anywhere-001).
-        // When this box's height is definite before its children lay out,
-        // the child is re-anchored against it afterwards (CSS 2.1 §10.1:
-        // the containing block is the positioned ancestor's padding box).
-        let definite_height = self.definite_content_height();
+        // Once this box is final, reanchor_absolute_children re-resolves the
+        // child against the real padding box (CSS 2.1 §10.1).
 
         for (i, child) in self.children.iter_mut().enumerate() {
             // Skip absolutely/fixed positioned children for flow layout
@@ -3636,11 +4465,6 @@ impl LayoutBox {
                 // swallow the margin between them).
                 let mut oof_margin_context = margin_context.clone();
                 child.layout_with_collapse(&cb, &mut oof_margin_context, float_context);
-                if let Some(height) = definite_height {
-                    let mut real_cb = self.dimensions.clone();
-                    real_cb.content.height = height;
-                    child.reanchor_absolute(&real_cb);
-                }
                 continue;
             }
 
@@ -3672,7 +4496,7 @@ impl LayoutBox {
                     lines.push((start, i, line_width));
                 }
                 let advance = if cursor_x > 0.0 || line_height > 0.0 {
-                    line_height.max(line_below_baseline)
+                    line_advance(line_height, line_below_baseline, line_extents, strut)
                 } else {
                     empty_line_height
                 };
@@ -3686,6 +4510,7 @@ impl LayoutBox {
                 cursor_x = 0.0;
                 line_height = 0.0;
                 line_below_baseline = 0.0;
+                line_extents = (0.0, 0.0);
                 line_start_index = None;
                 line_width = 0.0;
                 continue;
@@ -3728,7 +4553,7 @@ impl LayoutBox {
                 // Children self-position at cb.y + cb.height; the cursor is
                 // already baked into cb.y, so the height term must be zero.
                 cb.content.height = 0.0;
-                child.layout_with_collapse(&cb, margin_context, float_context);
+                child.layout_with_collapse_in(&cb, margin_context, float_context, definite_height);
 
                 let child_width = child.dimensions.margin_box().width;
                 let child_height = child.dimensions.margin_box().height;
@@ -3744,17 +4569,23 @@ impl LayoutBox {
                     }
 
                     // Wrap to next line
-                    cursor_y += line_height.max(line_below_baseline);
+                    cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut);
                     cursor_x = 0.0;
                     line_height = 0.0;
                     line_below_baseline = 0.0;
+                    line_extents = (0.0, 0.0);
                     line_start_index = Some(i);
                     line_width = 0.0;
 
                     // Re-layout at new position
                     cb.content.x = self.dimensions.content.x;
                     cb.content.y = self.dimensions.content.y + cursor_y;
-                    child.layout_with_collapse(&cb, margin_context, float_context);
+                    child.layout_with_collapse_in(
+                        &cb,
+                        margin_context,
+                        float_context,
+                        definite_height,
+                    );
                 }
 
                 // Track line start
@@ -3787,12 +4618,32 @@ impl LayoutBox {
                 if matches!(child.box_type, BoxType::Inline) {
                     let (_, half_leading) = child.inline_content_area();
                     if half_leading > 0.0 {
-                        child.dimensions.content.y += half_leading;
-                        for sub in &mut child.children {
-                            crate::flex::translate_subtree(sub, 0.0, half_leading);
-                        }
+                        child.shift_inline_content_area(half_leading);
                     }
                     line_height = line_height.max(child.get_line_height());
+                    // The inline's text wrapped onto several line boxes: the
+                    // flow must advance past ALL of them, exactly as the
+                    // phase-5 split below does for a bare text run. Before
+                    // n50 the line advanced by ONE line-height and the next
+                    // block sibling was laid over lines 2..n (`<p><span>long
+                    // text</span></p>` was one line tall; `<pre><code>` six
+                    // lines painted over the following paragraph).
+                    if let Some((n_lines, last_end, lh)) =
+                        Self::inline_wrapped_tail(child, self.dimensions.content.x)
+                    {
+                        if let Some(start) = line_start_index {
+                            lines.push((start, i + 1, line_width + child_width));
+                        }
+                        cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut).max(lh)
+                            + (n_lines as f32 - 2.0).max(0.0) * lh;
+                        cursor_x = last_end;
+                        line_width = last_end;
+                        line_height = lh;
+                        line_below_baseline = 0.0;
+                        line_extents = (0.0, 0.0);
+                        line_start_index = Some(i);
+                        continue;
+                    }
                 } else {
                     line_height = line_height.max(child_height);
                 }
@@ -3807,6 +4658,17 @@ impl LayoutBox {
                 // sticky-scroll's .horizontal-scroll read 156.8 where Chrome
                 // reads 150 (+6.8 = descent + half-leading at line-height
                 // 1.6), and the error cascaded into every later sibling's y.
+                // Every baseline-anchored member raises the line's ascent or
+                // deepens its descent; the line box is their sum, not the
+                // tallest member (n54: `<label>Text:</label><input>` with no
+                // whitespace between built a 19px line for Chrome's 24).
+                let member_extents = match child.float {
+                    Float::None => child.line_member_baseline_extents(),
+                    _ => None,
+                };
+                if let Some((above, below)) = member_extents {
+                    line_extents = (line_extents.0.max(above), line_extents.1.max(below));
+                }
                 let anchored_to_baseline = !matches!(
                     child.style.vertical_align,
                     rustkit_css::VerticalAlign::Top | rustkit_css::VerticalAlign::Bottom
@@ -3834,12 +4696,13 @@ impl LayoutBox {
                 } else {
                     // B2: closed lines aligned by align_split_close below.
                     split_records.push((line_start_index.unwrap_or(i), i));
-                    cursor_y += line_height.max(line_below_baseline).max(lh)
+                    cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut).max(lh)
                         + (n_lines as f32 - 2.0).max(0.0) * lh;
                     cursor_x = last_w;
                     line_width = last_w;
                     line_height = lh;
                     line_below_baseline = 0.0;
+                    line_extents = (0.0, 0.0);
                     line_start_index = Some(i);
                 }
             } else {
@@ -3849,10 +4712,11 @@ impl LayoutBox {
                     if let Some(start) = line_start_index {
                         lines.push((start, i, line_width));
                     }
-                    cursor_y += line_height.max(line_below_baseline);
+                    cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut);
                     cursor_x = 0.0;
                     line_height = 0.0;
                     line_below_baseline = 0.0;
+                    line_extents = (0.0, 0.0);
                     line_start_index = None;
                     line_width = 0.0;
                 }
@@ -3867,7 +4731,12 @@ impl LayoutBox {
                         let t = t.clone();
                         child.layout_text_with_zero_wrap(t, &cb, true);
                     }
-                    _ => child.layout_with_collapse(&cb, margin_context, float_context),
+                    _ => child.layout_with_collapse_in(
+                        &cb,
+                        margin_context,
+                        float_context,
+                        definite_height,
+                    ),
                 }
 
                 // See layout_block_children: keep inline box decoration aligned.
@@ -3900,7 +4769,7 @@ impl LayoutBox {
             if let Some(start) = line_start_index {
                 lines.push((start, self.children.len(), line_width));
             }
-            cursor_y += line_height.max(line_below_baseline);
+            cursor_y += line_advance(line_height, line_below_baseline, line_extents, strut);
         }
 
         // IFC Slice B2: align the CLOSED lines of each mid-line split —
@@ -3944,11 +4813,73 @@ impl LayoutBox {
         self.dimensions.content.height = cursor_y;
     }
 
+    /// CSS 2.1 §10.5: the content height a percentage-height CHILD of this
+    /// box resolves against. `Some` only when this box's own height is
+    /// definite WITHOUT consulting its children, so it is knowable before
+    /// they lay out; `None` means "depends on content".
+    ///
+    /// This exists because the containing block a child is handed carries the
+    /// parent's FLOW CURSOR in `content.height` (the static-position trick in
+    /// `layout_block_children_with_collapse`), not the parent's height — so a
+    /// percentage child saw 0 and `calculate_block_height` fell back to the
+    /// viewport. The same shape as the abspos defect `reanchor_absolute_children`
+    /// closes, on the in-flow side.
+    ///
+    /// `min-height`/`max-height` are deliberately not consulted: they clamp
+    /// the used height after children flow, which is exactly the "depends on
+    /// content" case the spec makes `auto`.
+    fn definite_content_height_for_children(&self, containing_block_height: f32) -> Option<f32> {
+        let specified = match self.style.height {
+            Length::Px(px) => px,
+            Length::Percent(pct) if containing_block_height > 0.0 => {
+                pct / 100.0 * containing_block_height
+            }
+            // A `calc()` height is as definite as the terms it is made of: it
+            // needs a base only where it carries a percentage term.
+            Length::Calc(ref sum)
+                if sum.percent == 0.0 || containing_block_height > 0.0 =>
+            {
+                self.length_to_px(&self.style.height, containing_block_height)
+            }
+            Length::Vh(vh) if self.viewport.1 > 0.0 => vh / 100.0 * self.viewport.1,
+            Length::Em(em) => {
+                let font_size = match self.style.font_size {
+                    Length::Px(px) => px,
+                    _ => 16.0,
+                };
+                em * font_size
+            }
+            Length::Rem(rem) => rem * 16.0,
+            _ => return None,
+        };
+        let content = if self.style.box_sizing == BoxSizing::BorderBox {
+            specified
+                - (self.dimensions.padding.top
+                    + self.dimensions.padding.bottom
+                    + self.dimensions.border.top
+                    + self.dimensions.border.bottom)
+        } else {
+            specified
+        };
+        // Defensive, and measured to be exactly that: every consumer of this
+        // base runs through `calculate_block_height`, whose min-height pass
+        // floors a negative content height at 0 anyway, so no assertion can
+        // require this clamp (mutation probe M10, 2026-09-20, survived the
+        // whole 415-test suite). Kept because a negative CONTENT BOX is not a
+        // thing to hand anyone, not because a test needs it.
+        Some(content.max(0.0))
+    }
+
     /// Calculate block height.
-    /// The containing_block_height parameter is used for resolving percentage heights.
-    /// Per CSS spec, percentage heights resolve against the containing block's height
-    /// when the containing block has a definite height.
-    fn calculate_block_height(&mut self, containing_block_height: f32) {
+    /// `percent_base` is the containing block's DEFINITE content height, used
+    /// for resolving percentage heights. `None` means the containing block has
+    /// no definite height; the historical viewport fallback still applies
+    /// there (CSS 2.1 §10.5 makes the value `auto` — see
+    /// `an_auto_height_parent_hands_its_percentage_child_no_definite_base`).
+    /// `Some(0.0)` is a DEFINITE zero and resolves to zero: a bare `f32` could
+    /// not tell the two apart, so a `height: 0` parent handed its percentage
+    /// child the viewport.
+    fn calculate_block_height(&mut self, percent_base: Option<f32>) {
         // Get padding and border for box-sizing calculations
         let padding_top = self.dimensions.padding.top;
         let padding_bottom = self.dimensions.padding.bottom;
@@ -3956,6 +4887,13 @@ impl LayoutBox {
         let border_bottom = self.dimensions.border.bottom;
         let padding_border_height = padding_top + padding_bottom + border_top + border_bottom;
         let is_border_box = self.style.box_sizing == BoxSizing::BorderBox;
+
+        // Lifted out of the match so the arm below can read the sum without
+        // borrowing `self.style` across the assignment to `self.dimensions`.
+        let calc_height = match &self.style.height {
+            Length::Calc(sum) => Some(**sum),
+            _ => None,
+        };
 
         // If height is explicitly set, use it
         match self.style.height {
@@ -3968,15 +4906,38 @@ impl LayoutBox {
                 };
             }
             Length::Percent(pct) => {
-                // Percent height resolves against containing block height when definite,
-                // otherwise falls back to viewport height
-                let reference_height = if containing_block_height > 0.0 {
-                    containing_block_height
-                } else {
-                    self.viewport.1
+                // A definite base resolves the percentage, zero included; with
+                // no definite base the viewport fallback stands (unchanged).
+                let reference_height = match percent_base {
+                    Some(h) => Some(h),
+                    None if self.viewport.1 > 0.0 => Some(self.viewport.1),
+                    None => None,
                 };
-                if reference_height > 0.0 {
+                if let Some(reference_height) = reference_height {
                     let specified = pct / 100.0 * reference_height;
+                    self.dimensions.content.height = if is_border_box {
+                        (specified - padding_border_height).max(0.0)
+                    } else {
+                        specified
+                    };
+                }
+            }
+            Length::Calc(_) => {
+                // css-values-3 §8.1: a `calc()` over lengths and percentages
+                // IS a length once the percentage basis is known, so it takes
+                // exactly the base a bare percentage takes — including the
+                // viewport fallback for an indefinite parent. A calc with no
+                // percentage term needs no base at all and must not be lost
+                // with one: `calc(2em + 4px)` is definite everywhere.
+                let sum = calc_height.unwrap_or_default();
+                let reference_height = match percent_base {
+                    Some(h) => Some(h),
+                    None if sum.percent == 0.0 => Some(0.0),
+                    None if self.viewport.1 > 0.0 => Some(self.viewport.1),
+                    None => None,
+                };
+                if let Some(reference_height) = reference_height {
+                    let specified = self.length_to_px(&self.style.height, reference_height);
                     self.dimensions.content.height = if is_border_box {
                         (specified - padding_border_height).max(0.0)
                     } else {
@@ -4037,6 +4998,13 @@ impl LayoutBox {
             Length::Px(px) => px,
             Length::Vh(vh) => vh / 100.0 * self.viewport.1,
             Length::Percent(pct) => pct / 100.0 * self.viewport.1,
+            // Same basis as the `Percent` arm above, deliberately: a `calc()`
+            // is a length, so it must not resolve against a different
+            // reference from the bare percentage sitting next to it. (That
+            // basis is `self.viewport.1` rather than `percent_base` here —
+            // a pre-existing inconsistency with the height arm, left as it is
+            // so this change carries one rule and not two.)
+            Length::Calc(_) => self.length_to_px(&self.style.min_height, self.viewport.1),
             _ => 0.0,
         };
         let min_height = if is_border_box && min_height_raw > 0.0 {
@@ -4053,6 +5021,7 @@ impl LayoutBox {
             Length::Px(px) => px,
             Length::Vh(vh) => vh / 100.0 * self.viewport.1,
             Length::Percent(pct) => pct / 100.0 * self.viewport.1,
+            Length::Calc(_) => self.length_to_px(&self.style.max_height, self.viewport.1),
             _ => f32::INFINITY,
         };
         let max_height = if is_border_box && max_height_raw < f32::INFINITY {
@@ -4424,6 +5393,10 @@ pub enum DisplayCommand {
         object_fit: ObjectFit,
         /// Opacity (0.0 - 1.0)
         opacity: f32,
+        /// The box's computed CSS `color` — what `currentColor` resolves to
+        /// when the image is a vector document painted in place (an inline
+        /// `<svg>` icon). Raster images ignore it.
+        current_color: Color,
     },
     /// Draw a background image.
     BackgroundImage {
@@ -4553,6 +5526,18 @@ pub enum DisplayCommand {
     /// `PushClip` here instead loses the corner notches: a child painting its
     /// own background fills the square corner the parent's radius cut away.
     PushClipRounded { rect: Rect, radius: BorderRadius },
+    /// Solid borders around a border box with rounded corners. `rect` is
+    /// the border box, `widths`/`colors` are `[top, right, bottom, left]`,
+    /// and `radius` is the outer (border-edge) radius. The inner (padding)
+    /// edge curves with `radius − width` per axis (CSS Backgrounds 3 §5.2).
+    /// The side strips alone painted a square frame around a rounded
+    /// background.
+    RoundedBorder {
+        rect: Rect,
+        widths: [f32; 4],
+        colors: [Color; 4],
+        radius: BorderRadius,
+    },
     /// Pop clip rect.
     PopClip,
     /// Start stacking context.
@@ -5301,6 +6286,17 @@ impl DisplayList {
 
     /// Render a layout box's own content (shadows, background, borders, text, images).
     fn render_box_content(&mut self, layout_box: &LayoutBox) {
+        // A text run is not an element (CSS 2.1 §14.2: backgrounds, borders
+        // and shadows belong to elements), so it paints glyphs only. Its
+        // style can still carry box decorations: the engine copies
+        // `background_gradient` onto every text child for gradient text,
+        // and a pseudo-element's text child clones the whole pseudo style.
+        // Painting them repainted the parent's gradient, rescaled to the
+        // run's own rect (image-gallery: a gradient tile behind every emoji).
+        if matches!(layout_box.box_type, BoxType::Text(_)) {
+            self.render_text(layout_box);
+            return;
+        }
         // Box shadows (outer) are drawn first, behind the element
         self.render_box_shadows(layout_box);
         // Then background
@@ -5628,17 +6624,43 @@ impl DisplayList {
                 // the container but each intersecting tile painted full-size.
                 // One clip closes every path.
                 //
-                // Residual, stated: PushClip is a plain rect, so a scaled
-                // gradient under border-radius paints square into the corner
-                // notches (~0.05% of a 227x180 card at 16px radius). The
-                // normal-size path keeps its rounded clipping via
-                // border_radius on the gradient rect itself.
+                // The clip carries the box's radius. A plain `PushClip` cuts
+                // the oversized rect to a SQUARE container, so a scaled
+                // gradient under `border-radius` paints its own fill into the
+                // corner notches — the part of the border box the arc cuts
+                // away, where Chrome shows what is behind. That is P1's named
+                // residual, and Gate B reports it as `missing_clip`:
+                // gradient-backgrounds' `.linear-6` (`background-size: 400%
+                // 400%`, `border-radius: 16px`) auto-failed on three corners,
+                // 36 notch px, on the macOS board of 2026-09-08 — the first
+                // board on which the element's geometry was exact enough for
+                // the discrete detector to be allowed to speak about it.
+                //
+                // The unscaled path needs no clip and keeps its rounding via
+                // `border_radius` on the gradient rect itself; this is the
+                // same radius, applied to the container the scaled rect is
+                // being cut to.
+                //
+                // Limit, stated: `border_radius` is the border-box radius. On
+                // a `background-clip` of padding-box or content-box the
+                // container is inset and the exact answer is the inner
+                // radius, which nothing on this path computes — the solid
+                // fill above drops the radius entirely in that case. This
+                // change makes the scaled gradient agree with the unscaled
+                // one; it does not close the inner-radius gap.
                 let needs_clip = positioned_rect.x < container.x
                     || positioned_rect.y < container.y
                     || positioned_rect.x + positioned_rect.width > container.x + container.width
                     || positioned_rect.y + positioned_rect.height > container.y + container.height;
                 if needs_clip {
-                    self.commands.push(DisplayCommand::PushClip(container));
+                    if border_radius.is_zero() {
+                        self.commands.push(DisplayCommand::PushClip(container));
+                    } else {
+                        self.commands.push(DisplayCommand::PushClipRounded {
+                            rect: container,
+                            radius: border_radius,
+                        });
+                    }
                 }
 
                 // Handle background-repeat for gradients
@@ -5895,54 +6917,93 @@ impl DisplayList {
     fn render_borders(&mut self, layout_box: &LayoutBox) {
         let d = &layout_box.dimensions;
         let s = &layout_box.style;
+        let bb = d.border_box();
 
-        // Render each border side separately for correct colors
-        // Top border
-        if d.border.top > 0.0 {
-            let rect = Rect::new(
-                d.border_box().x,
-                d.border_box().y,
-                d.border_box().width,
+        // Rounded corners: one command, so the renderer can curve both
+        // edges of the ring. The strips below painted a square frame around
+        // a rounded background (rounded-corners §5). Solid rings only: the
+        // ring command has no dash pattern, so a rounded dashed/dotted border
+        // keeps the per-side path below (square corners, correct dashes).
+        let radius = self.border_radius_px(layout_box);
+        let widths = [d.border.top, d.border.right, d.border.bottom, d.border.left];
+        let all_solid = [
+            s.border_top_style,
+            s.border_right_style,
+            s.border_bottom_style,
+            s.border_left_style,
+        ]
+        .iter()
+        .all(|st| matches!(st, rustkit_css::BorderStyle::Solid | rustkit_css::BorderStyle::None));
+        if !radius.is_zero() && all_solid && widths.iter().any(|w| *w > 0.0) {
+            self.commands.push(DisplayCommand::RoundedBorder {
+                rect: d.border_box(),
+                widths,
+                colors: [
+                    s.border_top_color,
+                    s.border_right_color,
+                    s.border_bottom_color,
+                    s.border_left_color,
+                ],
+                radius,
+            });
+            return;
+        }
+
+        // Render each border side separately for correct colors. A side is
+        // a strip along the whole border-box edge (corners overlap, as the
+        // solid path always has); dashed/dotted sides are split into dashes
+        // along it (see border_dash_pattern).
+        let sides = [
+            // (thickness, color, style, strip rect, horizontal)
+            (
                 d.border.top,
-            );
-            self.commands
-                .push(DisplayCommand::SolidColor(s.border_top_color, rect));
-        }
-
-        // Right border
-        if d.border.right > 0.0 {
-            let rect = Rect::new(
-                d.border_box().right() - d.border.right,
-                d.border_box().y,
+                s.border_top_color,
+                s.border_top_style,
+                Rect::new(bb.x, bb.y, bb.width, d.border.top),
+                true,
+            ),
+            (
                 d.border.right,
-                d.border_box().height,
-            );
-            self.commands
-                .push(DisplayCommand::SolidColor(s.border_right_color, rect));
-        }
-
-        // Bottom border
-        if d.border.bottom > 0.0 {
-            let rect = Rect::new(
-                d.border_box().x,
-                d.border_box().bottom() - d.border.bottom,
-                d.border_box().width,
+                s.border_right_color,
+                s.border_right_style,
+                Rect::new(bb.right() - d.border.right, bb.y, d.border.right, bb.height),
+                false,
+            ),
+            (
                 d.border.bottom,
-            );
-            self.commands
-                .push(DisplayCommand::SolidColor(s.border_bottom_color, rect));
-        }
-
-        // Left border
-        if d.border.left > 0.0 {
-            let rect = Rect::new(
-                d.border_box().x,
-                d.border_box().y,
+                s.border_bottom_color,
+                s.border_bottom_style,
+                Rect::new(bb.x, bb.bottom() - d.border.bottom, bb.width, d.border.bottom),
+                true,
+            ),
+            (
                 d.border.left,
-                d.border_box().height,
-            );
-            self.commands
-                .push(DisplayCommand::SolidColor(s.border_left_color, rect));
+                s.border_left_color,
+                s.border_left_style,
+                Rect::new(bb.x, bb.y, d.border.left, bb.height),
+                false,
+            ),
+        ];
+        for (thickness, color, style, strip, horizontal) in sides {
+            if thickness <= 0.0 {
+                continue;
+            }
+            let length = if horizontal { strip.width } else { strip.height };
+            let Some((dash, gap)) = border_dash_pattern(style, thickness, length) else {
+                self.commands.push(DisplayCommand::SolidColor(color, strip));
+                continue;
+            };
+            let mut offset = 0.0;
+            while offset < length - 0.01 {
+                let run = dash.min(length - offset);
+                let rect = if horizontal {
+                    Rect::new(strip.x + offset, strip.y, run, strip.height)
+                } else {
+                    Rect::new(strip.x, strip.y + offset, strip.width, run)
+                };
+                self.commands.push(DisplayCommand::SolidColor(color, rect));
+                offset += dash + gap;
+            }
         }
     }
 
@@ -5978,33 +7039,42 @@ impl DisplayList {
             );
             let line_height = run_line_height(style, font_size, &metrics);
 
-            // Content height is ascent + descent (the actual rendered text height)
-            let content_height = metrics.ascent + metrics.descent;
-
-            // Half-leading is the space above (and below) the text content
-            let half_leading = ((line_height - content_height) / 2.0).max(0.0);
+            // The face the baseline is seated on: united under `normal`,
+            // the primary face under an explicit line-height (see
+            // `seat_metrics`). Offset from a line's top to the y the text
+            // command carries: paint seats the baseline at round(y +
+            // seat_ascent), so this is the Blink seat (signed, floored
+            // leading; see blink_baseline_offset) minus the fractional ascent.
+            let (seat_ascent, seat_descent) = seat_metrics(style, font_size, &text, &metrics);
+            let half_leading =
+                blink_baseline_offset(line_height, seat_ascent, seat_descent) - seat_ascent;
 
             // Build the list of lines to emit: wrapped text boxes carry
             // per-line fragments (see LayoutBox::text_lines); single-run
             // boxes emit exactly one line, positioned as before.
-            // Tuple: (text, x, y, width, line_top) — shadowing the outer
-            // names inside the loop keeps the emission code identical for
-            // both cases. `line_top` is the line box's top (y minus the
-            // half-leading), the key runs on one line share regardless of
-            // their own font's leading.
-            let render_lines: Vec<(String, f32, f32, f32, f32)> = match &layout_box.text_lines {
+            // Tuple: (text, x, y, width, line_top, justify_space) — shadowing
+            // the outer names inside the loop keeps the emission code
+            // identical for both cases. `line_top` is the line box's top (y
+            // minus the half-leading), the key runs on one line share
+            // regardless of their own font's leading. `justify_space` is the
+            // per-word-separator expansion of a justified line (0 otherwise);
+            // the line's width already includes it.
+            let render_lines: Vec<(String, f32, f32, f32, f32, f32)> = match &layout_box.text_lines {
                 Some(lines) => lines
                     .iter()
                     .enumerate()
                     .filter(|(_, l)| !l.text.is_empty())
                     .map(|(i, l)| {
                         let top = content_y + i as f32 * line_height;
+                        let expansion = l.justify_space
+                            * TextLine::justification_opportunities(l.text.trim_end()) as f32;
                         (
                             apply_text_transform(&l.text, style.text_transform),
                             x + l.x_offset,
                             top + half_leading,
-                            l.width,
+                            l.width + expansion,
                             top,
+                            l.justify_space,
                         )
                     })
                     .collect(),
@@ -6014,6 +7084,7 @@ impl DisplayList {
                     content_y + half_leading,
                     text_width,
                     content_y,
+                    0.0,
                 )],
             };
 
@@ -6021,14 +7092,14 @@ impl DisplayList {
             // half of the glyph seating chain so flat-1.2 vs metrics-normal
             // builds can be diffed line-by-line (forensics 2026-07-16 §4.2).
             if paint0_probe() {
-                for (t, _lx, ly, _lw, _top) in &render_lines {
+                for (t, _lx, ly, _lw, _top, _js) in &render_lines {
                     eprintln!(
                         "PAINT0 layout text={:?} fs={} lh={} asc={} desc={} half={} content_y={} y_cmd={}",
                         t.chars().take(16).collect::<String>(),
                         font_size,
                         line_height,
-                        metrics.ascent,
-                        metrics.descent,
+                        seat_ascent,
+                        seat_descent,
                         half_leading,
                         content_y,
                         ly
@@ -6036,14 +7107,27 @@ impl DisplayList {
                 }
             }
 
-            for (text, x, y, text_width, line_top) in render_lines {
+            for (text, x, y, text_width, line_top, justify_space) in render_lines {
                 // ADVANCE CONTRACT: ONE shape call feeds BOTH command types —
                 // layout's per-char advances and ascent ride the command so
                 // paint places glyphs exactly where layout measured them.
                 // (GradientText was skipped by the old continue-before-shape
                 // and re-owned pitch + baseline in paint — the last dual
                 // text path.)
-                let advances = shape_line_advances(&text, style, font_size);
+                let mut advances = shape_line_advances(&text, style, font_size);
+                // A justified line widens each word separator by the slack
+                // layout distributed (TextLine::justify_space). Only the
+                // per-char advance path can carry it: when shaping fell back
+                // (ligature clusters) the line paints at natural spacing.
+                if justify_space > 0.0 {
+                    if let Some(adv) = advances.as_mut() {
+                        for (a, c) in adv.iter_mut().zip(text.chars()) {
+                            if TextLine::is_word_separator(c) {
+                                *a += justify_space;
+                            }
+                        }
+                    }
+                }
 
                 // `text-overflow: ellipsis` on the enclosing block container
                 // (css-overflow-3 §5.1): cut the run at the block's content
@@ -6102,7 +7186,7 @@ impl DisplayList {
                             gradient: gradient.clone(),
                             rect: Rect::new(x, y, text_width, line_height),
                             advances,
-                            ascent: Some(metrics.ascent),
+                            ascent: Some(seat_ascent),
                         });
                         continue; // Skip regular text rendering for this line
                     }
@@ -6122,7 +7206,7 @@ impl DisplayList {
                         rustkit_css::FontStyle::Oblique => 2,
                     },
                     advances,
-                    ascent: Some(metrics.ascent),
+                    ascent: Some(seat_ascent),
                 });
 
                 // Draw text decorations
@@ -6278,6 +7362,7 @@ impl DisplayList {
                     object_fit,
                     (pos_x, pos_y),
                     layout_box.style.opacity,
+                    layout_box.style.color,
                 );
 
                 self.commands.push(cmd);
@@ -6311,10 +7396,15 @@ impl DisplayList {
         let font_weight = layout_box.style.font_weight.0;
         // Same resolution layout_form_control composes the box from, so the
         // painter's text seat and the box's height agree on the padding.
+        // `rem` resolves against the root font: settings' `padding: 0.5rem
+        // 0.75rem` read as 0 here while the box was sized with it, so every
+        // select/number label sat on the control's left border.
+        let root_font_size = self.root_font_size;
         let padding = {
             let px = |l: &Length| match l {
                 Length::Px(v) => *v,
                 Length::Em(em) => em * font_size,
+                Length::Rem(rem) => rem * root_font_size,
                 _ => 0.0,
             };
             [
@@ -6642,9 +7732,205 @@ pub fn measure_text(text: &str, _font_family: &str, font_size: f32) -> text::Tex
     measure_text_simple(text, font_size)
 }
 
+/// Blink's dash pattern for one border side of `length` px
+/// (`StrokeData::SetupPaintDashPathEffect` + `SelectBestDashGap`): a dashed
+/// side draws dashes of 2x its thickness with 1x gaps (3x / 2x under 3px),
+/// a dotted side 1x / 1x; the gap is then stretched or squeezed so the side
+/// starts AND ends on a whole dash, choosing the dash count whose gap is
+/// nearest the nominal one. A side too short for two dashes paints solid.
+/// Returns `(dash, gap)`, or `None` for a solid side.
+///
+/// Thick dotted borders are round dots in Chrome; they are square here.
+fn border_dash_pattern(
+    style: rustkit_css::BorderStyle,
+    thickness: f32,
+    length: f32,
+) -> Option<(f32, f32)> {
+    let (dash, gap) = match style {
+        // `None` never reaches paint with a width (the cascade zeroes it).
+        rustkit_css::BorderStyle::Solid | rustkit_css::BorderStyle::None => return None,
+        rustkit_css::BorderStyle::Dashed if thickness < 3.0 => (thickness * 3.0, thickness * 2.0),
+        rustkit_css::BorderStyle::Dashed => (thickness * 2.0, thickness),
+        rustkit_css::BorderStyle::Dotted => (thickness, thickness),
+    };
+    if dash <= 0.0 || length <= dash * 2.0 {
+        return None;
+    }
+    let min_dashes = ((length + gap) / (dash + gap)).floor();
+    let max_dashes = min_dashes + 1.0;
+    let min_gap = if min_dashes > 1.0 {
+        (length - min_dashes * dash) / (min_dashes - 1.0)
+    } else {
+        f32::INFINITY
+    };
+    let max_gap = (length - max_dashes * dash) / (max_dashes - 1.0);
+    let best = if max_gap <= 0.0 || (min_gap - gap).abs() < (max_gap - gap).abs() {
+        min_gap
+    } else {
+        max_gap
+    };
+    Some((dash, best))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_styled_button_composes_its_font_line_with_author_padding() {
+        // flex-positioning `.btn { padding: 8px 16px; border: none; font-size:
+        // 14px }`: Chrome builds label + 32 wide and 16 + 16 = 32 tall (the
+        // control font's normal line, not font_size + 1), and the flex path
+        // must size it from the same function as block flow.
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(14.0);
+        style.padding_top = Length::Px(8.0);
+        style.padding_bottom = Length::Px(8.0);
+        style.padding_left = Length::Px(16.0);
+        style.padding_right = Length::Px(16.0);
+        let control = FormControlType::Button {
+            label: "Save".to_string(),
+            button_type: "button".to_string(),
+        };
+        let (w, h) = form_control_intrinsic_size(&style, &control);
+        let label = measure_text_advanced(
+            "Save",
+            &style.font_family,
+            14.0,
+            style.font_weight,
+            style.font_style,
+        )
+        .width;
+        assert_eq!(w, label + 32.0);
+        assert_eq!(h, normal_line_height(&style, 14.0) + 16.0);
+        assert_eq!(h.fract(), 0.0, "a normal line is whole pixels, got {h}");
+    }
+
+    #[test]
+    fn test_baseline_seat_floors_the_leading_above_whole_pixel_metrics() {
+        // about's `.card p`: 16px system font (ascent 15.47, descent 3.38) on
+        // a 27.2px line. Chrome's ink baseline is line top + 19 on all three
+        // paragraphs above the fold (tops 430.0 / 469.19 / 535.56 -> rows
+        // 449 / 488 / 555); the fractional seat 4.18 + 15.47 put the first
+        // two one row low.
+        let seat = blink_baseline_offset(27.2, 15.46875, 3.375);
+        assert_eq!(seat, 19.0);
+        assert_eq!((430.0_f32 + seat).round(), 449.0);
+        assert_eq!((469.1875_f32 + seat).round(), 488.0);
+        assert_eq!((535.5625_f32 + seat).round(), 555.0);
+    }
+
+    #[test]
+    fn test_inline_content_area_shift_leaves_text_in_its_line_slot() {
+        // `<span><strong>HxHx</strong></span>` on a 16px/32px line: both
+        // inline rects sit a half-leading (7) below the line top, as in Chrome
+        // (147 for a line at 140); the text leaf stays at the line top, where
+        // paint seats it from the run's own leading. Translating it as well
+        // painted the word 7px under the rest of the line.
+        let style = ComputedStyle::new();
+        let mut text = LayoutBox::new(BoxType::Text("HxHx".to_string()), style.clone());
+        text.dimensions.content.y = 140.0;
+        let mut strong = LayoutBox::new(BoxType::Inline, style.clone());
+        strong.dimensions.content.y = 140.0;
+        strong.children.push(text);
+        let mut span = LayoutBox::new(BoxType::Inline, style);
+        span.dimensions.content.y = 140.0;
+        span.children.push(strong);
+
+        span.shift_inline_content_area(7.0);
+
+        assert_eq!(span.dimensions.content.y, 147.0);
+        assert_eq!(span.children[0].dimensions.content.y, 147.0);
+        assert_eq!(span.children[0].children[0].dimensions.content.y, 140.0);
+    }
+
+    #[test]
+    fn test_small_font_inline_drops_to_the_line_baseline() {
+        // `<p>HxHx <span class="small">HxHx</span></p>`, 16px/32px Arial with
+        // an 11px span: Chrome seats the span's content area at line top + 11
+        // (repro inline-baseline-drop.html: p at 20, span rect at 31) — its
+        // slot one pixel below the line top, so both baselines share a row.
+        // The align pass left every non-atomic inline at the line top.
+        let mut body = ComputedStyle::new();
+        body.font_size = Length::Px(16.0);
+        body.line_height = rustkit_css::LineHeight::Px(32.0);
+        let mut small = body.clone();
+        small.font_size = Length::Px(11.0);
+
+        let mut text = LayoutBox::new(BoxType::Text("HxHx ".to_string()), body.clone());
+        text.dimensions.content.y = 100.0;
+        text.dimensions.content.height = 32.0;
+        let mut inner = LayoutBox::new(BoxType::Text("HxHx".to_string()), small.clone());
+        inner.dimensions.content.y = 100.0;
+        inner.dimensions.content.height = 32.0;
+        let mut span = LayoutBox::new(BoxType::Inline, small.clone());
+        span.dimensions.content.y = 100.0;
+        span.children.push(inner);
+        let (_, half_leading) = span.inline_content_area();
+        span.shift_inline_content_area(half_leading);
+
+        let mut line = vec![text, span];
+        LayoutBox::apply_vertical_align(&mut line, &body);
+
+        let drop = LayoutBox::text_line_box_extents(&body).0
+            - LayoutBox::text_line_box_extents(&small).0;
+        assert!(drop > 0.0, "the 16px strut sits above an 11px run, got {drop}");
+        assert_eq!(drop.fract(), 0.0, "whole-pixel seats, got {drop}");
+        assert_eq!(line[0].dimensions.content.y, 100.0, "the strut-font text does not move");
+        assert_eq!(line[1].children[0].dimensions.content.y, 100.0 + drop);
+        assert_eq!(line[1].dimensions.content.y, 100.0 + half_leading + drop);
+    }
+
+    #[test]
+    fn test_line_of_only_small_inlines_keeps_its_line_top() {
+        // A line whose only member is an inline: its rect sits a half-leading
+        // below the slot, and reading the rect as the line top would push the
+        // baseline — and the span — down by that half-leading again.
+        let mut body = ComputedStyle::new();
+        body.font_size = Length::Px(16.0);
+        body.line_height = rustkit_css::LineHeight::Px(32.0);
+
+        let mut inner = LayoutBox::new(BoxType::Text("HxHx".to_string()), body.clone());
+        inner.dimensions.content.y = 100.0;
+        let mut span = LayoutBox::new(BoxType::Inline, body.clone());
+        span.dimensions.content.y = 100.0;
+        span.children.push(inner);
+        let (_, half_leading) = span.inline_content_area();
+        span.shift_inline_content_area(half_leading);
+
+        let mut line = vec![span];
+        LayoutBox::apply_vertical_align(&mut line, &body);
+
+        assert_eq!(line[0].children[0].dimensions.content.y, 100.0);
+        assert_eq!(line[0].dimensions.content.y, 100.0 + half_leading);
+    }
+
+    #[test]
+    fn test_inline_member_feeds_the_line_box_extents() {
+        // The same line is 33px in Chrome, not 32: the small span's slot hangs
+        // 12 below a baseline the strut puts 21 down.
+        let mut body = ComputedStyle::new();
+        body.font_size = Length::Px(16.0);
+        body.line_height = rustkit_css::LineHeight::Px(32.0);
+        let mut small = body.clone();
+        small.font_size = Length::Px(11.0);
+        let span = LayoutBox::new(BoxType::Inline, small.clone());
+        assert_eq!(
+            span.line_member_baseline_extents(),
+            Some(LayoutBox::text_line_box_extents(&small))
+        );
+    }
+
+    #[test]
+    fn test_baseline_seat_without_leading_is_the_rounded_ascent() {
+        // `normal` lines (no leading) already agreed with Chrome: the logo
+        // (64px, 61.875 / 13.5 on a 76px line) and the 14px badge.
+        assert_eq!(blink_baseline_offset(76.0, 61.875, 13.5), 62.0);
+        assert_eq!(blink_baseline_offset(17.0, 13.535156, 2.953125), 14.0);
+        // Negative leading is signed, then floored (n57 + #209): 15 + 3 on a
+        // 16px line leaves -1 above, so the baseline is 14, not the clamped 15.
+        assert_eq!(blink_baseline_offset(16.0, 15.46875, 3.375), 14.0);
+    }
 
     #[test]
     fn test_oversized_gradient_paint_is_clipped_to_its_box() {
@@ -6764,6 +8050,158 @@ mod tests {
         );
     }
 
+    // ---------- P1's residual: the scaled gradient's clip carries the radius ----------
+    //
+    // gradient-backgrounds' `.linear-6`: `background-size: 400% 400%` on a
+    // `.gradient-box { border-radius: 16px }`. The clip that stops the 4x rect
+    // bleeding over its neighbours was a plain rect, so the card painted its
+    // own fill square into the four corner notches where Chrome shows the page
+    // behind. Gate B auto-failed three of those corners as `missing_clip` on
+    // the macOS board of 2026-09-08 — 36 notch px, the whole board's only
+    // discrete failure.
+
+    /// A `.gradient-box`-shaped card: `background-size: 400% 400%`, optionally
+    /// under a uniform `border-radius`.
+    fn scaled_gradient_card(radius_px: f32) -> LayoutBox {
+        let mut style = ComputedStyle::new();
+        if radius_px > 0.0 {
+            style.border_top_left_radius = Length::Px(radius_px);
+            style.border_top_right_radius = Length::Px(radius_px);
+            style.border_bottom_right_radius = Length::Px(radius_px);
+            style.border_bottom_left_radius = Length::Px(radius_px);
+        }
+        style.background_layers = vec![rustkit_css::BackgroundLayer {
+            image: rustkit_css::BackgroundImage::Gradient(rustkit_css::Gradient::Linear(
+                rustkit_css::LinearGradient {
+                    direction: rustkit_css::GradientDirection::Angle(-45.0),
+                    stops: vec![
+                        rustkit_css::ColorStop {
+                            color: Color {
+                                r: 238,
+                                g: 119,
+                                b: 82,
+                                a: 1.0,
+                            },
+                            position: None,
+                        },
+                        rustkit_css::ColorStop {
+                            color: Color {
+                                r: 35,
+                                g: 213,
+                                b: 171,
+                                a: 1.0,
+                            },
+                            position: None,
+                        },
+                    ],
+                    repeating: false,
+                },
+            )),
+            // Percentages ride Explicit as negatives: -400.0 => container * 4.
+            size: rustkit_css::BackgroundSize::Explicit {
+                width: Some(-400.0),
+                height: Some(-400.0),
+            },
+            ..Default::default()
+        }];
+
+        let mut card = LayoutBox::new(BoxType::Block, style);
+        card.dimensions.content = Rect::new(533.0, 400.0, 227.0, 180.0);
+        card
+    }
+
+    #[test]
+    fn a_scaled_gradient_under_a_radius_is_clipped_at_that_radius() {
+        let card = scaled_gradient_card(16.0);
+        let container = card.dimensions.border_box();
+        let list = DisplayList::build(&card);
+
+        let rounded = list.commands.iter().find_map(|c| match c {
+            DisplayCommand::PushClipRounded { rect, radius } => Some((*rect, *radius)),
+            _ => None,
+        });
+        let (rect, radius) =
+            rounded.expect("a scaled gradient under a radius must push a ROUNDED clip");
+
+        assert!(
+            (rect.x - container.x).abs() < 0.5
+                && (rect.y - container.y).abs() < 0.5
+                && (rect.width - container.width).abs() < 0.5
+                && (rect.height - container.height).abs() < 0.5,
+            "the clip is the box, not the 4x rect: {rect:?} vs {container:?}"
+        );
+        // Every corner, not just the one a single notch happens to expose.
+        assert_eq!(
+            (
+                radius.top_left,
+                radius.top_right,
+                radius.bottom_right,
+                radius.bottom_left
+            ),
+            (16.0, 16.0, 16.0, 16.0),
+            "the clip must carry the box's own radius on all four corners"
+        );
+        assert!(
+            !list
+                .commands
+                .iter()
+                .any(|c| matches!(c, DisplayCommand::PushClip(_))),
+            "a square clip at the same box would cut the notches back off"
+        );
+    }
+
+    #[test]
+    fn a_scaled_gradient_under_a_radius_still_paints_the_zoomed_slice() {
+        // The clip must not become the paint rect: `background-size: 400%`
+        // shows a 4x-zoomed slice, and a gradient re-fitted to the container
+        // would be a different image that happens to have round corners.
+        let card = scaled_gradient_card(16.0);
+        let list = DisplayList::build(&card);
+
+        let push = list
+            .commands
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::PushClipRounded { .. }))
+            .expect("rounded clip");
+        let grad = list
+            .commands
+            .iter()
+            .position(
+                |c| matches!(c, DisplayCommand::LinearGradient { rect, .. } if rect.width > 900.0),
+            )
+            .expect("gradient must still paint at the scaled 4x rect");
+        let pop = list
+            .commands
+            .iter()
+            .position(|c| matches!(c, DisplayCommand::PopClip))
+            .expect("clip must be popped");
+        assert!(
+            push < grad && grad < pop,
+            "order must be PushClipRounded < gradient < PopClip, got {push}/{grad}/{pop}"
+        );
+    }
+
+    #[test]
+    fn a_scaled_gradient_with_square_corners_keeps_its_square_clip() {
+        // Control: the radius is what makes the clip rounded. A square card
+        // must not start paying for a rounded clip it has no corners for.
+        let card = scaled_gradient_card(0.0);
+        let list = DisplayList::build(&card);
+        assert!(
+            list.commands
+                .iter()
+                .any(|c| matches!(c, DisplayCommand::PushClip(_))),
+            "a scaled gradient with no radius still needs its square clip"
+        );
+        assert!(
+            !list
+                .commands
+                .iter()
+                .any(|c| matches!(c, DisplayCommand::PushClipRounded { .. })),
+            "no radius, no rounded clip"
+        );
+    }
+
     // ==================== text-overflow: ellipsis ====================
     //
     // css-overflow-3 §5.1. The chrome's `.tab-title` / `.url-text`, the
@@ -6819,6 +8257,88 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    // ==================== negative leading + seat face (n57) ====================
+
+    /// root → block → text run in `family` at `font_size` with `line_height`;
+    /// returns `(content_y, y_cmd, ascent_cmd)` of the one Text command.
+    fn seat_probe(
+        family: &str,
+        font_size: f32,
+        line_height: rustkit_css::LineHeight,
+        text: &str,
+    ) -> (f32, f32, f32) {
+        let mut style = ComputedStyle::new();
+        style.font_family = family.to_string();
+        style.font_size = Length::Px(font_size);
+        style.line_height = line_height;
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.dimensions.content = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut text_box = LayoutBox::new(BoxType::Text(text.to_string()), style);
+        text_box.dimensions.content = Rect::new(20.0, 100.0, 600.0, font_size);
+        root.children.push(text_box);
+        let list = DisplayList::build(&root);
+        let cmd = list
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                DisplayCommand::Text { y, ascent, .. } => Some((*y, ascent.expect("ascent"))),
+                _ => None,
+            })
+            .expect("one Text command");
+        (100.0, cmd.0, cmd.1)
+    }
+
+    #[test]
+    fn test_half_leading_is_signed() {
+        assert_eq!(half_leading(24.0, 15.0, 3.0), 3.0);
+        assert_eq!(half_leading(16.0, 15.0, 3.0), -1.0);
+        assert!((half_leading(40.0, 38.67, 8.44) + 3.555).abs() < 1e-3);
+    }
+
+    /// `line-height: 1` on a face whose content area exceeds 1em (Arial:
+    /// 0.905 + 0.212 = 1.117em): the run's y_cmd sits ABOVE its content top
+    /// by half the overflow, so the baseline lands where Chrome's does
+    /// (32px bold Arial in a 32px line: top + 29 − 2 = top + 27; a zero
+    /// floor put it at top + 29).
+    #[test]
+    fn test_negative_leading_seats_the_baseline_above_the_line_top() {
+        let (top, y, ascent) = seat_probe("Arial", 32.0, rustkit_css::LineHeight::Number(1.0), "Arial");
+        let m = measure_text_advanced("x", "Arial", 32.0, rustkit_css::FontWeight(400), rustkit_css::FontStyle::Normal);
+        if m.ascent <= 0.0 {
+            return; // no Arial on this machine: nothing to seat against
+        }
+        let content = m.ascent + m.descent;
+        assert!(content > 32.0, "Arial's content area exceeds 1em: {content}");
+        // Paint seats the baseline at round(y + ascent): Blink's whole-pixel
+        // seat with the signed leading floored (29 + floor((32 - 36) / 2)).
+        let expected = top + blink_baseline_offset(32.0, m.ascent, m.descent);
+        assert_eq!((y + ascent).round(), expected, "y_cmd {y} + ascent {ascent}");
+        assert!(expected < top + m.ascent.round(), "seated above the zero-floor baseline");
+        assert!(y < top, "negative leading seats above the line top");
+        assert!((ascent - m.ascent).abs() < 0.01);
+    }
+
+    /// An explicit line-height seats the run on the PRIMARY face: "🔒 x" at
+    /// 16px Arial in a 20px line ships Arial's ascent (~14.5), not the emoji
+    /// face's 20 — Chrome's baseline is top + 1 + 15 = 16 there. Under
+    /// `normal` the united metrics still win (n40: "☕ coffee" is a 26px line
+    /// seated 20 down).
+    #[test]
+    fn test_explicit_line_height_seats_on_the_primary_face() {
+        let arial = measure_text_advanced("x", "Arial", 16.0, rustkit_css::FontWeight(400), rustkit_css::FontStyle::Normal);
+        let united = measure_text_advanced("🔒 x", "Arial", 16.0, rustkit_css::FontWeight(400), rustkit_css::FontStyle::Normal);
+        if arial.ascent <= 0.0 || united.ascent <= arial.ascent + 1.0 {
+            return; // no emoji fallback face on this machine
+        }
+        let (top, y, ascent) = seat_probe("Arial", 16.0, rustkit_css::LineHeight::Px(20.0), "🔒 x");
+        assert!((ascent - arial.ascent).abs() < 0.01, "explicit line-height: primary ascent {ascent} vs {}", arial.ascent);
+        let expected = top + blink_baseline_offset(20.0, arial.ascent, arial.descent);
+        assert_eq!((y + ascent).round(), expected, "y_cmd {y} + primary ascent {ascent}");
+
+        let (_, _, ascent_normal) = seat_probe("Arial", 16.0, rustkit_css::LineHeight::Normal, "🔒 x");
+        assert!((ascent_normal - united.ascent).abs() < 0.01, "normal: united ascent {ascent_normal} vs {}", united.ascent);
     }
 
     #[test]
@@ -7047,6 +8567,65 @@ mod tests {
             DisplayCommand::PushClipRounded { rect, radius } => Some((*rect, *radius)),
             _ => None,
         })
+    }
+
+    #[test]
+    fn a_bordered_box_under_a_radius_paints_one_rounded_border() {
+        let mut b = rounded_overflow_parent(12.0, false);
+        b.children.clear();
+        b.dimensions.border = EdgeSizes {
+            top: 5.0,
+            right: 5.0,
+            bottom: 5.0,
+            left: 5.0,
+        };
+        b.style.border_top_color = Color::BLACK;
+        let list = DisplayList::build(&under_root(b));
+        let rounded: Vec<_> = list
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DisplayCommand::RoundedBorder { rect, widths, colors, radius } => {
+                    Some((*rect, *widths, *colors, *radius))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rounded.len(), 1, "one rounded border, not four square strips");
+        let (rect, widths, colors, radius) = rounded[0];
+        assert_eq!(rect.width, 237.0, "the border box");
+        assert_eq!(widths, [5.0; 4]);
+        assert_eq!(colors[0], Color::BLACK);
+        assert_eq!(radius.bottom_left, 12.0);
+        assert!(
+            !list.commands.iter().any(|c| matches!(c, DisplayCommand::SolidColor(col, _) if *col == Color::BLACK)),
+            "the square strips must not also paint"
+        );
+
+        // Square corners keep the strip path.
+        let mut sq = rounded_overflow_parent(0.0, false);
+        sq.children.clear();
+        sq.dimensions.border.top = 5.0;
+        let list = DisplayList::build(&under_root(sq));
+        assert!(!list
+            .commands
+            .iter()
+            .any(|c| matches!(c, DisplayCommand::RoundedBorder { .. })));
+    }
+
+    #[test]
+    fn a_rounded_dashed_border_keeps_its_dashes() {
+        // #217 x #227 seam: the ring command has no dash pattern, so a
+        // dashed side under a radius stays on the per-side (dashed) path.
+        let mut b = rounded_overflow_parent(12.0, false);
+        b.children.clear();
+        b.dimensions.border = EdgeSizes { top: 5.0, right: 5.0, bottom: 5.0, left: 5.0 };
+        b.style.border_top_style = rustkit_css::BorderStyle::Dashed;
+        let list = DisplayList::build(&under_root(b));
+        assert!(
+            !list.commands.iter().any(|c| matches!(c, DisplayCommand::RoundedBorder { .. })),
+            "a dashed side must not collapse into a solid rounded ring"
+        );
     }
 
     #[test]
@@ -7667,6 +9246,113 @@ mod tests {
         assert_eq!(layout_box.dimensions.content.x, 0.0);
     }
 
+    /// css-text-3 §7.3 receipt for a justified line: its natural width plus
+    /// the distributed slack reaches the container edge.
+    fn justified_width(line: &TextLine) -> f32 {
+        let natural = TextLine::natural_ink_width(&line.text, &ComputedStyle::new(), 16.0)
+            .expect("the test text shapes one glyph per char");
+        assert!(
+            natural <= line.width,
+            "the ink width never exceeds the wrap width (which keeps the break-point space): {natural} vs {}",
+            line.width
+        );
+        line.x_offset
+            + natural
+            + line.justify_space
+                * TextLine::justification_opportunities(line.text.trim_end()) as f32
+    }
+
+    #[test]
+    fn justified_wrapped_lines_fill_the_container_except_the_last() {
+        // text-align: justify (css-text-3 §7.3): every soft-wrapped line
+        // spreads its slack over its word separators and ends at the
+        // container edge; the block's last line keeps natural spacing.
+        // Before n49 the Justify arm was `0.0 // (complex)` and every
+        // justified paragraph on every page painted start-aligned.
+        let mut style = ComputedStyle::new();
+        style.text_align = TextAlign::Justify;
+        let mut layout_box = LayoutBox::new(BoxType::Text(LONG_TEXT.to_string()), style);
+        layout_box.layout_text(LONG_TEXT.to_string(), &containing_200());
+        let n = layout_box.text_lines.as_ref().expect("text should wrap").len();
+        assert!(n >= 3, "need at least three lines, got {n}");
+
+        let mut children = vec![layout_box];
+        LayoutBox::apply_text_align_offset(&mut children, 200.0, 200.0, TextAlign::Justify);
+        let lines = children[0].text_lines.as_ref().unwrap();
+        for (k, line) in lines.iter().enumerate().take(n - 1) {
+            assert_eq!(line.x_offset, 0.0, "justify never shifts a line (line {k})");
+            let gaps = TextLine::justification_opportunities(line.text.trim_end());
+            assert!(gaps > 0, "line {k} '{}' has no word separator", line.text);
+            assert!(
+                line.justify_space > 0.0,
+                "line {k} '{}' must be justified, justify_space = {}",
+                line.text,
+                line.justify_space
+            );
+            assert!(
+                (justified_width(line) - 200.0).abs() < 0.01,
+                "line {k} '{}' must end at the container edge: {}",
+                line.text,
+                justified_width(line)
+            );
+        }
+        let last = &lines[n - 1];
+        assert_eq!(last.justify_space, 0.0, "the block's last line is never justified");
+    }
+
+    #[test]
+    fn justify_leaves_left_lines_and_preserved_newlines_alone() {
+        // Left: no expansion. pre-wrap: a wrapped line may end in a forced
+        // break, which justification must not stretch (css-text-3 §7.3).
+        for (align, ws) in [
+            (TextAlign::Left, rustkit_css::WhiteSpace::Normal),
+            (TextAlign::Justify, rustkit_css::WhiteSpace::PreWrap),
+        ] {
+            let mut style = ComputedStyle::new();
+            style.text_align = align;
+            style.white_space = ws;
+            let mut layout_box = LayoutBox::new(BoxType::Text(LONG_TEXT.to_string()), style);
+            layout_box.layout_text(LONG_TEXT.to_string(), &containing_200());
+            assert!(layout_box.text_lines.as_ref().map_or(0, |l| l.len()) > 1);
+            let mut children = vec![layout_box];
+            LayoutBox::apply_text_align_offset(&mut children, 200.0, 200.0, align);
+            for line in children[0].text_lines.as_ref().unwrap() {
+                assert_eq!(
+                    line.justify_space, 0.0,
+                    "{align:?}/{ws:?}: line '{}' must not be justified",
+                    line.text
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn justify_midline_split_skips_line_zero_and_the_open_last_line() {
+        // A run that starts after a sibling: line 0 is a mixed line (its
+        // slack belongs to the sibling's spaces too — not distributed, it
+        // stays start-aligned, ledgered), middle lines fill the container,
+        // the open last line is left natural.
+        let parent = midline_split_parent(TextAlign::Justify);
+        assert_eq!(parent.children[0].dimensions.content.x, 0.0, "the prior sibling never moves");
+        let t = &parent.children[1];
+        let flow0 = t.text_flow_first_offset.unwrap();
+        let tls = t.text_lines.as_ref().unwrap();
+        let n = tls.len();
+        assert!(n >= 3, "need line0 + middle + last, got {n}");
+        assert!((tls[0].x_offset - flow0).abs() < 0.01, "line 0 keeps its FLOW offset");
+        assert_eq!(tls[0].justify_space, 0.0, "line 0 of a split is a mixed line: not justified");
+        for (k, tl) in tls.iter().enumerate().take(n - 1).skip(1) {
+            assert_eq!(tl.x_offset, 0.0, "middle line {k} sits at the origin");
+            assert!(
+                (justified_width(tl) - 200.0).abs() < 0.01,
+                "middle line {k} '{}' must end at the container edge: {}",
+                tl.text,
+                justified_width(tl)
+            );
+        }
+        assert_eq!(tls[n - 1].justify_space, 0.0, "the open last line is never justified");
+    }
+
     #[test]
     fn test_text_nowrap_stays_single_line() {
         let mut style = ComputedStyle::new();
@@ -7745,7 +9431,7 @@ mod tests {
             text_style,
         ));
 
-        parent.layout_block_children();
+        parent.layout_block_children(None);
 
         let t = &parent.children[0];
         let w = t.dimensions.content.width;
@@ -7783,7 +9469,7 @@ mod tests {
             ComputedStyle::new(),
         ));
 
-        parent.layout_block_children();
+        parent.layout_block_children(None);
 
         let b = &parent.children[0];
         let t = &parent.children[1];
@@ -7825,8 +9511,58 @@ mod tests {
             BoxType::Text(LONG_TEXT.to_string()),
             ComputedStyle::new(),
         ));
-        parent.layout_block_children();
+        parent.layout_block_children(None);
         parent
+    }
+
+    #[test]
+    fn a_long_first_run_keeps_its_last_line_open_for_the_next_sibling() {
+        // CSS2 §9.4.2: inline content after a wrapped run continues on the
+        // run's LAST line box. Before n49 a run at cursor 0 took the block
+        // path, which closed all its lines, so the sibling started a new
+        // line under it ("one span wraps to a different line" on
+        // article-typography: `…used as an` / `<span>ornamental…`).
+        let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        parent.dimensions.content = Rect::new(0.0, 0.0, 200.0, 0.0);
+        parent.children.push(LayoutBox::new(
+            BoxType::Text(LONG_TEXT.to_string()),
+            ComputedStyle::new(),
+        ));
+        parent.children.push(LayoutBox::new(
+            BoxType::Text("Hi".to_string()),
+            ComputedStyle::new(),
+        ));
+        parent.layout_block_children(None);
+
+        let run = &parent.children[0];
+        let tls = run.text_lines.as_ref().expect("the long run wraps");
+        let n = tls.len();
+        assert!(n >= 2);
+        assert_eq!(
+            run.text_flow_first_offset,
+            Some(0.0),
+            "a run at the line start is a flow split with FLOW offset 0"
+        );
+        assert_eq!(tls[0].x_offset, 0.0);
+        let lh = run.get_line_height();
+        let last_top = run.dimensions.content.y + (n as f32 - 1.0) * lh;
+        let last_w = tls[n - 1].width;
+        let hi = &parent.children[1];
+        assert!(
+            (hi.dimensions.content.y - last_top).abs() < 0.01,
+            "the sibling must sit on the run's last line (top {last_top}), got y={}",
+            hi.dimensions.content.y
+        );
+        assert!(
+            (hi.dimensions.content.x - last_w).abs() < 0.01,
+            "the sibling must continue after the last line's ink ({last_w}), got x={}",
+            hi.dimensions.content.x
+        );
+        assert!(
+            (parent.dimensions.content.height - n as f32 * lh).abs() < 0.01,
+            "the block is exactly n line boxes tall, got {}",
+            parent.dimensions.content.height
+        );
     }
 
     #[test]
@@ -8592,6 +10328,349 @@ mod tests {
         );
     }
 
+    /// n53 fixtures: a 16px/24px row (the form-controls `.row`), a 12px
+    /// inline-block `<label>` of the given text, whitespace, and a bare
+    /// text input — the page's `label + input` idiom.
+    fn n53_row_style() -> ComputedStyle {
+        let mut s = ComputedStyle::new();
+        s.font_family = "system-ui".to_string();
+        s.font_size = Length::Px(16.0);
+        s.line_height = rustkit_css::LineHeight::Px(24.0);
+        s
+    }
+
+    fn n53_label(text: &str) -> LayoutBox {
+        let mut s = n53_row_style();
+        s.display = rustkit_css::Display::InlineBlock;
+        s.width = Length::Px(120.0);
+        s.font_size = Length::Px(12.0);
+        s.line_height = rustkit_css::LineHeight::Px(18.0);
+        let mut label = LayoutBox::new(BoxType::Block, s.clone());
+        let mut text_style = s;
+        text_style.display = rustkit_css::Display::Inline;
+        text_style.width = Length::Auto;
+        label
+            .children
+            .push(LayoutBox::new(BoxType::Text(text.to_string()), text_style));
+        label
+    }
+
+    /// A bare control as the engine's UA arm styles it: inline-block, the
+    /// 13.333px Arial control font, the page's inherited line-height 1.5.
+    fn n53_control(control: FormControlType) -> LayoutBox {
+        let mut s = ComputedStyle::new();
+        s.display = rustkit_css::Display::InlineBlock;
+        s.font_family = "Arial".to_string();
+        s.font_size = Length::Px(13.333);
+        s.line_height = rustkit_css::LineHeight::Number(1.5);
+        LayoutBox::new(BoxType::FormControl(control), s)
+    }
+
+    fn n53_text_input() -> LayoutBox {
+        n53_control(FormControlType::TextInput {
+            value: String::new(),
+            placeholder: "Default size".to_string(),
+            input_type: "text".to_string(),
+        })
+    }
+
+    #[test]
+    fn inline_block_with_text_sits_on_its_last_line_baseline() {
+        // form-controls (n53): `label { display: inline-block; width: 120px;
+        // font-size: 12px }` beside a bare input in a 16px/24px row. Chrome
+        // 148: row 24 tall, label top at +5 (its 12px text's baseline meets
+        // the line baseline), input top at +4. RustKit placed the label at
+        // the row top (+0) on all twelve rows of the page — the alignment
+        // pass skipped every inline-block that had children.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 736.0, 0.0);
+        let mut row = LayoutBox::new(BoxType::Block, n53_row_style());
+        row.children.push(n53_label("Text:"));
+        row.children.push(LayoutBox::new(
+            BoxType::Text(" ".to_string()),
+            n53_row_style(),
+        ));
+        row.children.push(n53_text_input());
+        row.layout(&cb);
+
+        let row_top = row.dimensions.content.y;
+        let label_top = row.children[0].dimensions.border_box().y - row_top;
+        let input_top = row.children[2].dimensions.border_box().y - row_top;
+        assert!(
+            (label_top - 5.0).abs() <= 1.5,
+            "label must sit on the line baseline: Chrome +5, got +{label_top}"
+        );
+        assert!(
+            (input_top - 4.0).abs() <= 2.0,
+            "input keeps its hang-model seat: Chrome +4, got +{input_top}"
+        );
+        assert!(
+            (row.dimensions.content.height - 24.0).abs() <= 1.0,
+            "row stays one 24px line, got {}",
+            row.dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn a_line_with_no_text_member_still_carries_the_strut() {
+        // n54: `<label>Text:</label><input>` with NO whitespace between — the
+        // same row as above without the text node that used to be the only
+        // way the strut reached a line. CSS2 §10.8.1: every line box starts
+        // with the container's strut, and its height is the largest extent
+        // above the baseline plus the largest below, not the tallest member.
+        // Chrome 148: 24; the tallest-member advance built 19 (the input).
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 736.0, 0.0);
+        let mut row = LayoutBox::new(BoxType::Block, n53_row_style());
+        row.children.push(n53_label("Text:"));
+        row.children.push(n53_text_input());
+        row.layout(&cb);
+
+        assert!(
+            (row.dimensions.content.height - 24.0).abs() <= 1.0,
+            "an inline-block-only row is still one 24px line, got {}",
+            row.dimensions.content.height
+        );
+        let mut with_ws = LayoutBox::new(BoxType::Block, n53_row_style());
+        with_ws.children.push(n53_label("Text:"));
+        with_ws.children.push(LayoutBox::new(
+            BoxType::Text(" ".to_string()),
+            n53_row_style(),
+        ));
+        with_ws.children.push(n53_text_input());
+        with_ws.layout(&cb);
+        assert!(
+            (row.dimensions.content.height - with_ws.dimensions.content.height).abs() <= 0.01,
+            "whitespace between the members must not change the line's height: {} vs {}",
+            row.dimensions.content.height,
+            with_ws.dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn a_line_sums_whole_pixel_ascents_like_blink() {
+        // form-controls §5 (n54): the row whose second label wraps to two
+        // 18px lines. The line's ascent is that label's last-line baseline,
+        // 18 + 13, and the 16px/24px strut hangs 6 below: Chrome 148 builds
+        // 37. Raw metrics (13.54 / 5.95) summed to 37.58, and rounding the
+        // label's geometric baseline UP built 38.
+        assert_eq!(LayoutBox::text_line_box_extents(&n53_row_style()), (18.0, 6.0));
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 736.0, 0.0);
+        let mut row = LayoutBox::new(BoxType::Block, n53_row_style());
+        let ws = || LayoutBox::new(BoxType::Text(" ".to_string()), n53_row_style());
+        row.children
+            .push(n53_control(FormControlType::Checkbox { checked: false }));
+        row.children.push(ws());
+        row.children.push(n53_label("Checkbox 2 (checked)"));
+        row.layout(&cb);
+        assert!(
+            (row.dimensions.content.height - 37.0).abs() <= 0.05,
+            "wrapped-label row: Chrome 37, got {}",
+            row.dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn a_fixed_height_button_centres_its_line_about_the_baseline() {
+        // form-controls §4 (n54): `button { width: 200px; height: 50px }`
+        // alone in a 16px/24px container is a 50px line in Chrome 148 — its
+        // label is centred, so ~20px of the box hangs below the baseline and
+        // swallows the strut's 6. Seating the label at the box bottom left
+        // 5.4 below: the strut poked out and the line read 50.6.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 736.0, 0.0);
+        let mut block = LayoutBox::new(BoxType::Block, n53_row_style());
+        let mut button = n53_control(FormControlType::Button {
+            label: "Fixed size".to_string(),
+            button_type: "button".to_string(),
+        });
+        button.style.width = Length::Px(200.0);
+        button.style.height = Length::Px(50.0);
+        block.children.push(button);
+        block.layout(&cb);
+        assert!(
+            (block.dimensions.content.height - 50.0).abs() <= 0.05,
+            "fixed 50px button line: Chrome 50, got {}",
+            block.dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn a_text_only_line_is_exactly_one_line_height() {
+        // The strut and a text member of the container's own font split the
+        // SAME line-height about the baseline: summing them must not grow a
+        // plain text line by the rounding sliver between a face's ascent +
+        // descent and its `normal` line-height.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 736.0, 0.0);
+        for style in [ComputedStyle::new(), n53_row_style()] {
+            let mut block = LayoutBox::new(BoxType::Block, style.clone());
+            block
+                .children
+                .push(LayoutBox::new(BoxType::Text("Hi".to_string()), style.clone()));
+            block
+                .children
+                .push(LayoutBox::new(BoxType::Text(" there".to_string()), style));
+            block.layout(&cb);
+            let lh = block.children[0].get_line_height();
+            assert!(
+                (block.dimensions.content.height - lh).abs() <= 0.01,
+                "two runs on one line are one line-height ({lh}), got {}",
+                block.dimensions.content.height
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_inline_block_hangs_the_line_off_its_last_line() {
+        // form-controls §5 (n53): `<input type=checkbox> <label>Checkbox 1
+        // </label> <input type=checkbox> <label>Checkbox 2 (checked)</label>`
+        // in a 120px-label row — the second label wraps to two 18px lines.
+        // Chrome 148: the line's baseline is that label's SECOND line's, so
+        // the checkboxes (bottom-edge baseline) and the one-line label all
+        // sit at +18 from the row top; the wrapped label at +0.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 736.0, 0.0);
+        let mut row = LayoutBox::new(BoxType::Block, n53_row_style());
+        let cb_box = || n53_control(FormControlType::Checkbox { checked: false });
+        let ws = || LayoutBox::new(BoxType::Text(" ".to_string()), n53_row_style());
+        row.children.push(cb_box());
+        row.children.push(ws());
+        row.children.push(n53_label("Checkbox 1"));
+        row.children.push(ws());
+        row.children.push(cb_box());
+        row.children.push(ws());
+        row.children.push(n53_label("Checkbox 2 (checked)"));
+        row.layout(&cb);
+
+        let row_top = row.dimensions.content.y;
+        let top = |i: usize| row.children[i].dimensions.border_box().y - row_top;
+        let wrapped = &row.children[6];
+        assert!(
+            (wrapped.dimensions.border_box().height - 36.0).abs() <= 1.0,
+            "the long label must wrap to two 18px lines, got {}",
+            wrapped.dimensions.border_box().height
+        );
+        assert!(
+            top(6).abs() <= 1.0,
+            "the wrapped label defines the line's ascent and stays at the top, got +{}",
+            top(6)
+        );
+        for (i, what) in [
+            (0, "first checkbox"),
+            (2, "one-line label"),
+            (4, "second checkbox"),
+        ] {
+            assert!(
+                (top(i) - 18.0).abs() <= 1.5,
+                "{what} must hang off the wrapped label's second line: Chrome +18, got +{}",
+                top(i)
+            );
+        }
+    }
+
+    #[test]
+    fn textarea_alone_on_a_line_hangs_the_strut_descent_below_it() {
+        // form-controls §7 (n53): a bare 32px textarea as the only child of a
+        // 16px/24px container. Chrome 148 builds a 38px line — the textarea
+        // is a scroll container, its baseline is its bottom margin edge, and
+        // the strut's descent + half-leading (6px here) hangs below. The hang
+        // model built 32 and every section under it slid up by 6.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 736.0, 0.0);
+        let mut block = LayoutBox::new(BoxType::Block, n53_row_style());
+        block.children.push(n53_control(FormControlType::TextArea {
+            value: String::new(),
+            placeholder: "Default textarea".to_string(),
+            rows: 2,
+            cols: 20,
+        }));
+        block.layout(&cb);
+
+        let ta = &block.children[0].dimensions;
+        assert!(
+            (ta.border_box().height - 32.0).abs() <= 1.0,
+            "bare two-row textarea stays 32px, got {}",
+            ta.border_box().height
+        );
+        assert!(
+            (ta.border_box().y - block.dimensions.content.y).abs() <= 0.5,
+            "textarea top is the line top, got +{}",
+            ta.border_box().y - block.dimensions.content.y
+        );
+        let sd = block.inline_strut_descent();
+        let expected = 32.0 + sd;
+        assert!(
+            (block.dimensions.content.height - expected).abs() <= 0.5,
+            "line = textarea + strut descent ({expected}; Chrome 38), got {}",
+            block.dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn bare_control_widths_match_chrome() {
+        // n53 form-controls y-table vs Chrome 148 at the UA control font:
+        // text input 149 (was the 12em blob, 160); textarea cols=20 178 and
+        // cols=40 338 (0.6em per col + 18 border/scrollbar gutter; was 160 /
+        // 320); a listbox is its widest option + 2 (39 for "Item 4"; was
+        // 133), a dropdown its widest option + 24 (137 for "A longer option
+        // text", 60 for "Select"; was 133).
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 736.0, 0.0);
+        let width = |mut b: LayoutBox| {
+            b.layout(&cb);
+            b.dimensions.border_box().width
+        };
+        let w = width(n53_text_input());
+        assert!(
+            (w - 149.0).abs() <= 0.5,
+            "bare text input width: Chrome 149, got {w}"
+        );
+
+        let ta = |cols: u32| {
+            n53_control(FormControlType::TextArea {
+                value: String::new(),
+                placeholder: String::new(),
+                rows: 2,
+                cols,
+            })
+        };
+        let w20 = width(ta(20));
+        let w40 = width(ta(40));
+        assert!(
+            (w20 - 178.0).abs() <= 1.0,
+            "textarea cols=20: Chrome 178, got {w20}"
+        );
+        assert!(
+            (w40 - 338.0).abs() <= 1.0,
+            "textarea cols=40: Chrome 338, got {w40}"
+        );
+
+        let sel = |options: &[&str], size: u32| {
+            n53_control(FormControlType::Select {
+                options: options.iter().map(|o| o.to_string()).collect(),
+                selected_index: None,
+                size,
+            })
+        };
+        let listbox = width(sel(&["Item 1", "Item 2", "Item 3", "Item 4"], 3));
+        assert!(
+            (listbox - 39.0).abs() <= 3.0,
+            "listbox = widest option + 2: Chrome 39, got {listbox}"
+        );
+        let dropdown = width(sel(&["Option 1", "Option 2", "A longer option text"], 0));
+        assert!(
+            (dropdown - 137.0).abs() <= 2.0,
+            "dropdown = widest option + 24: Chrome 137, got {dropdown}"
+        );
+        let short = width(sel(&["Select"], 0));
+        assert!(
+            (short - 60.0).abs() <= 3.0,
+            "dropdown 'Select': Chrome 60, got {short}"
+        );
+    }
+
     #[test]
     fn test_inline_block_auto_width_shrinks_to_fit() {
         // CSS2 §10.3.9: an atomic inline with width:auto shrinks to its
@@ -8748,6 +10827,30 @@ mod tests {
         cb.content = Rect::new(0.0, 0.0, cb_width, 600.0);
         b.calculate_block_width(&cb);
         b.dimensions.content.width
+    }
+
+    #[test]
+    fn an_inset_stretch_never_overrides_a_specified_height() {
+        // CSS2 §10.6.4 stretches an out-of-flow box between `top` and
+        // `bottom` only where `height` is auto; with a height specified the
+        // constraint is over-determined and `bottom` is the one that gives.
+        // `inset_definite_content_height` is the single copy of that rule
+        // and BOTH its callers depend on the check: the positioning path
+        // would otherwise resize a 40px overlay to its containing block.
+        let mut style = ComputedStyle::new();
+        style.height = Length::Px(40.0);
+        let mut b = LayoutBox::with_position(BoxType::Block, style, Position::Absolute);
+        b.set_offsets(Some(0.0), None, Some(0.0), None);
+        b.dimensions.content.height = 40.0;
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 300.0, 200.0),
+            ..Default::default()
+        };
+        b.apply_position_offsets(&cb);
+        assert_eq!(
+            b.dimensions.content.height, 40.0,
+            "a specified height survives inset: 0"
+        );
     }
 
     #[test]
@@ -9476,6 +11579,37 @@ mod tests {
     }
 
     #[test]
+    fn dashed_border_matches_blinks_dash_gap_selection() {
+        // backgrounds test 3: 10px dashed on a 200x100 border box. Chrome:
+        // top side 7 dashes of 20 with 10px gaps (7*20 + 6*10 = 200), left
+        // side 4 dashes of 20 with gaps of 20/3.
+        use rustkit_css::BorderStyle::{Dashed, Solid};
+        assert_eq!(border_dash_pattern(Dashed, 10.0, 200.0), Some((20.0, 10.0)));
+        let (dash, gap) = border_dash_pattern(Dashed, 10.0, 100.0).unwrap();
+        assert_eq!(dash, 20.0);
+        assert!((gap - 20.0 / 3.0).abs() < 1e-4, "gap {}", gap);
+        assert_eq!(border_dash_pattern(Solid, 10.0, 200.0), None);
+        assert_eq!(border_dash_pattern(Dashed, 10.0, 40.0), None, "too short: solid");
+
+        let mut style = ComputedStyle::new();
+        style.border_top_style = Dashed;
+        style.border_top_color = Color::from_rgb(51, 51, 51);
+        let mut b = LayoutBox::new(BoxType::Block, style);
+        b.dimensions.content = Rect::new(10.0, 10.0, 180.0, 80.0);
+        b.dimensions.border = EdgeSizes { top: 10.0, right: 0.0, bottom: 0.0, left: 10.0 };
+        let list = DisplayList::build(&b);
+        let top_dashes = list
+            .commands
+            .iter()
+            .filter(|c| {
+                matches!(c, DisplayCommand::SolidColor(_, r)
+                    if r.y == 0.0 && r.height == 10.0 && r.width == 20.0)
+            })
+            .count();
+        assert_eq!(top_dashes, 7);
+    }
+
+    #[test]
     fn test_float_context() {
         let mut ctx = FloatContext::new();
 
@@ -9695,6 +11829,621 @@ mod tests {
         assert_eq!(layout_box.offsets.bottom, None);
     }
 
+
+    /// The containing block a flow child is handed carries the parent's
+    /// CURSOR in `content.height` (the static-position trick), so a
+    /// percentage height read 0 and `calculate_block_height` fell back to the
+    /// VIEWPORT. websuite/micro/rounded-corners test 7 is the corpus
+    /// instance: `.test-box { height: 100px }` holding
+    /// `.inner { height: 100% }` came out 1000 — the case's viewport height —
+    /// against Chrome's 100, the largest single geometry error in the 26-case
+    /// corpus. T-RED without the fix: 1000.
+    #[test]
+    fn a_percentage_height_child_resolves_against_its_definite_parent() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(150.0);
+        parent_style.height = Length::Px(100.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut inner_style = ComputedStyle::new();
+        inner_style.width = Length::Percent(100.0);
+        inner_style.height = Length::Percent(100.0);
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, inner_style));
+        parent.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+
+        let inner = &parent.children[0];
+        assert_eq!(
+            inner.dimensions.content.height, 100.0,
+            "height:100% of a 100px parent is 100"
+        );
+        assert!(
+            (inner.dimensions.content.height - 1000.0).abs() > 0.5,
+            "it must not be the viewport height"
+        );
+        assert_eq!(inner.dimensions.content.width, 150.0);
+        assert_eq!(
+            parent.dimensions.content.height, 100.0,
+            "the parent keeps its own specified height"
+        );
+    }
+
+    /// The same box inside an INLINE-BLOCK, which is the shape the corpus
+    /// actually has (`.test-box { display: inline-block; height: 100px }`).
+    /// The inline-block branch builds its own containing block with
+    /// `content.height = 0` before laying the child out, so it needs the
+    /// definite height passed explicitly too.
+    #[test]
+    fn a_percentage_height_child_of_an_inline_block_takes_the_inline_blocks_height() {
+        let mut wrapper_style = ComputedStyle::new();
+        wrapper_style.width = Length::Px(900.0);
+        let mut wrapper = LayoutBox::new(BoxType::Block, wrapper_style);
+
+        let mut box_style = ComputedStyle::new();
+        box_style.display = rustkit_css::Display::InlineBlock;
+        box_style.width = Length::Px(150.0);
+        box_style.height = Length::Px(100.0);
+        let mut test_box = LayoutBox::new(BoxType::Block, box_style);
+
+        let mut inner_style = ComputedStyle::new();
+        inner_style.width = Length::Percent(100.0);
+        inner_style.height = Length::Percent(100.0);
+        test_box
+            .children
+            .push(LayoutBox::new(BoxType::Block, inner_style));
+        wrapper.children.push(test_box);
+        wrapper.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        let mut mc = MarginCollapseContext::new();
+        let mut fc = FloatContext::new();
+        wrapper.layout_with_collapse(&viewport, &mut mc, &mut fc);
+
+        let inner = &wrapper.children[0].children[0];
+        assert_eq!(inner.dimensions.content.height, 100.0);
+        assert_eq!(
+            wrapper.children[0].dimensions.content.height, 100.0,
+            "the inline-block keeps its own height"
+        );
+    }
+
+    /// `box-sizing: border-box` on the parent: the specified 100px is the
+    /// BORDER box, so the content box a percentage child fills is
+    /// 100 - padding - border. A fix that handed the child the specified
+    /// length instead of the content height reads 100 here.
+    #[test]
+    fn a_percentage_height_child_fills_a_border_box_parents_content_box() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(150.0);
+        parent_style.height = Length::Px(100.0);
+        parent_style.box_sizing = BoxSizing::BorderBox;
+        parent_style.padding_top = Length::Px(8.0);
+        parent_style.padding_bottom = Length::Px(8.0);
+        parent_style.border_top_width = Length::Px(2.0);
+        parent_style.border_bottom_width = Length::Px(2.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut inner_style = ComputedStyle::new();
+        inner_style.height = Length::Percent(50.0);
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, inner_style));
+        parent.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+
+        assert_eq!(parent.dimensions.content.height, 80.0);
+        assert_eq!(
+            parent.children[0].dimensions.content.height, 40.0,
+            "50% of the parent's 80px CONTENT box"
+        );
+    }
+
+    /// The boundary the fix must not cross: an auto-height parent's height
+    /// DOES depend on its children, so it hands them no definite base and
+    /// keeps its content height. A fix that handed children a base of 0
+    /// (or the cursor) would collapse this parent to 0.
+    #[test]
+    fn an_auto_height_parent_still_takes_its_childrens_flow() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(150.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut inner_style = ComputedStyle::new();
+        inner_style.height = Length::Px(37.0);
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, inner_style));
+        parent.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+        assert_eq!(parent.dimensions.content.height, 37.0);
+        assert_eq!(parent.children[0].dimensions.content.height, 37.0);
+    }
+
+    /// The other half of the containing block's double duty: `content.height`
+    /// on the child's containing block is still the parent's FLOW CURSOR, so
+    /// two children of a definite-height parent stack instead of overlapping.
+    /// A fix that overwrote the cursor with the definite height would lay the
+    /// second child at the parent's bottom edge.
+    #[test]
+    fn a_definite_height_parent_still_stacks_its_children_on_the_cursor() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(150.0);
+        parent_style.height = Length::Px(100.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        for _ in 0..2 {
+            let mut kid_style = ComputedStyle::new();
+            kid_style.height = Length::Percent(25.0);
+            parent
+                .children
+                .push(LayoutBox::new(BoxType::Block, kid_style));
+        }
+        parent.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+
+        let top = parent.dimensions.content.y;
+        assert_eq!(parent.children[0].dimensions.content.height, 25.0);
+        assert_eq!(parent.children[1].dimensions.content.height, 25.0);
+        assert_eq!(parent.children[0].dimensions.content.y, top);
+        assert_eq!(
+            parent.children[1].dimensions.content.y,
+            top + 25.0,
+            "the second child stacks on the cursor, not on the definite height"
+        );
+    }
+
+    /// The rule, not the example: a parent whose own height is a PERCENTAGE
+    /// of a definite grandparent is itself definite, so the chain resolves
+    /// all the way down. A helper that only answered for `Length::Px` would
+    /// leave this child on the viewport fallback, and every guard written
+    /// against the 100px example would stay green.
+    #[test]
+    fn a_percentage_height_chain_resolves_through_a_percentage_parent() {
+        let mut grand_style = ComputedStyle::new();
+        grand_style.width = Length::Px(150.0);
+        grand_style.height = Length::Px(200.0);
+        let mut grand = LayoutBox::new(BoxType::Block, grand_style);
+
+        let mut parent_style = ComputedStyle::new();
+        parent_style.height = Length::Percent(50.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.height = Length::Percent(50.0);
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, child_style));
+        grand.children.push(parent);
+        grand.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        grand.layout(&viewport);
+
+        assert_eq!(grand.children[0].dimensions.content.height, 100.0);
+        assert_eq!(
+            grand.children[0].children[0].dimensions.content.height,
+            50.0,
+            "50% of the parent's used 100px, not of the viewport"
+        );
+    }
+
+    /// The boundary this change deliberately does NOT cross, pinned so the
+    /// next unit has something to flip. An auto-height parent's height
+    /// depends on its children, so it hands them no definite base — and the
+    /// child then keeps the historical `self.viewport.1` fallback in
+    /// `calculate_block_height`. CSS 2.1 §10.5 says the child computes to
+    /// `auto` here (Chrome gives it its content height, 0), so this
+    /// assertion records a KNOWN-WRONG value on purpose; what it guards is
+    /// that the helper stays silent for `auto`, rather than handing the
+    /// child a base of 0 and making the two cases indistinguishable.
+    #[test]
+    fn an_auto_height_parent_hands_its_percentage_child_no_definite_base() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(150.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.height = Length::Percent(100.0);
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, child_style));
+        parent.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+        assert_eq!(
+            parent.children[0].dimensions.content.height, 1000.0,
+            "unchanged by this unit: the viewport fallback, not a 0 base \
+             (§10.5 wants `auto`, i.e. 0 — that is the next unit)"
+        );
+    }
+
+    /// The inline-block branch builds its own containing block with
+    /// `content.height = 0`, so an inline-block whose OWN height is a
+    /// percentage has nothing to resolve against unless the parent's definite
+    /// height is passed alongside it. The 100px-inline-block guard above
+    /// cannot see this: a box with a `Px` height answers for its children
+    /// whatever base it was handed.
+    #[test]
+    fn a_percentage_height_inline_block_resolves_against_its_definite_parent() {
+        let mut wrapper_style = ComputedStyle::new();
+        wrapper_style.width = Length::Px(900.0);
+        wrapper_style.height = Length::Px(120.0);
+        let mut wrapper = LayoutBox::new(BoxType::Block, wrapper_style);
+
+        let mut box_style = ComputedStyle::new();
+        box_style.display = rustkit_css::Display::InlineBlock;
+        box_style.width = Length::Px(150.0);
+        box_style.height = Length::Percent(50.0);
+        wrapper
+            .children
+            .push(LayoutBox::new(BoxType::Block, box_style));
+        wrapper.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        let mut mc = MarginCollapseContext::new();
+        let mut fc = FloatContext::new();
+        wrapper.layout_with_collapse(&viewport, &mut mc, &mut fc);
+
+        assert_eq!(
+            wrapper.children[0].dimensions.content.height, 60.0,
+            "50% of the wrapper's 120px, not of the viewport"
+        );
+    }
+
+    fn calc_sum(value: &str) -> Length {
+        rustkit_css::parse_length(value).unwrap_or_else(|| panic!("{value} did not parse"))
+    }
+
+    /// chrome_rustkit's `.sidebar`: `position: absolute; top: 84px;
+    /// height: calc(100% - 84px)` in a 1280x100 chrome strip. Chrome gives it
+    /// 16px. RustKit gave it 203 — its content height — because
+    /// `calc(100% - 84px)` did not parse, so the declaration was dropped and
+    /// the height was `auto`.
+    #[test]
+    fn a_calc_height_resolves_against_its_parents_definite_height() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(1280.0);
+        parent_style.height = Length::Px(100.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.width = Length::Px(220.0);
+        child_style.height = calc_sum("calc(100% - 84px)");
+        let mut child = LayoutBox::new(BoxType::Block, child_style);
+        // Content taller than the calc asks for, so an `auto` fallback is
+        // visibly different from the resolved value rather than coincidentally
+        // equal to it.
+        let mut filler_style = ComputedStyle::new();
+        filler_style.height = Length::Px(203.0);
+        child
+            .children
+            .push(LayoutBox::new(BoxType::Block, filler_style));
+        parent.children.push(child);
+        parent.set_viewport(1280.0, 100.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 100.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+
+        assert_eq!(
+            parent.children[0].dimensions.content.height, 16.0,
+            "100% of the parent's 100px minus 84px, not the 203px of content"
+        );
+    }
+
+    /// The percentage half and the absolute half must take the SAME base a
+    /// bare percentage would. An `auto`-height parent hands no definite base,
+    /// and the viewport fallback stands — the behaviour `Length::Percent`
+    /// already has, which is what makes `calc()` a length rather than a
+    /// second rule.
+    #[test]
+    fn a_calc_height_takes_the_same_base_a_bare_percentage_takes() {
+        for (height, expected) in [
+            (Length::Percent(50.0), 500.0),
+            (calc_sum("calc(50% - 10px)"), 490.0),
+        ] {
+            let mut parent_style = ComputedStyle::new();
+            parent_style.width = Length::Px(150.0);
+            let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+            let mut child_style = ComputedStyle::new();
+            child_style.height = height.clone();
+            parent
+                .children
+                .push(LayoutBox::new(BoxType::Block, child_style));
+            parent.set_viewport(900.0, 1000.0);
+
+            let viewport = Dimensions {
+                content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+                ..Default::default()
+            };
+            parent.layout(&viewport);
+            assert_eq!(
+                parent.children[0].dimensions.content.height, expected,
+                "{height:?} must resolve against the same base as the percentage beside it"
+            );
+        }
+    }
+
+    /// A `calc()` with no percentage term is definite wherever it appears —
+    /// including under a parent that has no definite height to offer. Falling
+    /// back to the viewport there would make `calc(2em + 4px)` 1000px.
+    #[test]
+    fn a_calc_with_no_percentage_needs_no_base() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(150.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.font_size = Length::Px(20.0);
+        child_style.height = calc_sum("calc(2em + 4px)");
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, child_style));
+        parent.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+        assert_eq!(parent.children[0].dimensions.content.height, 44.0);
+
+        // …and with no viewport either. Mutation probe M11 (2026-09-21)
+        // survived the case above: where the calc carries no percentage term
+        // the basis cannot change the answer, so the `percent == 0` arm is
+        // unobservable UNTIL the viewport fallback is also gone. This is the
+        // only shape that tells `Some(0.0)` from `None` — and `None` leaves
+        // the height unset, i.e. at its content.
+        let mut bare_parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut bare_child = ComputedStyle::new();
+        bare_child.font_size = Length::Px(20.0);
+        bare_child.height = calc_sum("calc(2em + 4px)");
+        bare_parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, bare_child));
+        bare_parent.set_viewport(0.0, 0.0);
+        bare_parent.layout(&Dimensions::default());
+        assert_eq!(
+            bare_parent.children[0].dimensions.content.height, 44.0,
+            "a calc with no percentage term is definite with no base at all"
+        );
+    }
+
+    /// A calc-sized parent is a definite base for ITS percentage children —
+    /// the rule `a_percentage_height_chain_resolves_through_a_percentage_parent`
+    /// states for percentages, applied to the variant beside it.
+    #[test]
+    fn a_calc_height_parent_is_itself_a_definite_base() {
+        let mut outer_style = ComputedStyle::new();
+        outer_style.width = Length::Px(150.0);
+        outer_style.height = Length::Px(200.0);
+        let mut outer = LayoutBox::new(BoxType::Block, outer_style);
+
+        let mut mid_style = ComputedStyle::new();
+        mid_style.height = calc_sum("calc(100% - 40px)");
+        let mut mid = LayoutBox::new(BoxType::Block, mid_style);
+
+        let mut inner_style = ComputedStyle::new();
+        inner_style.height = Length::Percent(50.0);
+        mid.children
+            .push(LayoutBox::new(BoxType::Block, inner_style));
+        outer.children.push(mid);
+        outer.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        outer.layout(&viewport);
+        assert_eq!(outer.children[0].dimensions.content.height, 160.0);
+        assert_eq!(
+            outer.children[0].children[0].dimensions.content.height, 80.0,
+            "50% of the calc parent's 160px, not of the viewport"
+        );
+    }
+
+    /// The abspos twin of `a_calc_height_resolves_against_its_parents_definite_height`.
+    /// During flow layout an out-of-flow child is handed a stand-in whose
+    /// `content.height` is the parent's flow cursor, so a percentage (or a
+    /// calc carrying one) resolves against "content laid out so far" —
+    /// chrome_rustkit's `.sidebar` read 84 and came out zero tall. Both
+    /// heights are asserted in one test because the rule is one rule: a calc
+    /// must take the same base the bare percentage beside it takes.
+    #[test]
+    fn an_out_of_flow_percentage_height_resolves_against_its_containing_block() {
+        for (height, expected) in [
+            (Length::Percent(100.0), 100.0),
+            (calc_sum("calc(100% - 84px)"), 16.0),
+        ] {
+            let mut parent_style = ComputedStyle::new();
+            parent_style.width = Length::Px(1280.0);
+            parent_style.height = Length::Px(100.0);
+            let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+            // Two in-flow siblings ahead of it, so the flow cursor (84) is a
+            // different number from the containing block's height (100) and
+            // the test can tell which one was used.
+            for h in [40.0_f32, 44.0] {
+                let mut sib = ComputedStyle::new();
+                sib.height = Length::Px(h);
+                parent.children.push(LayoutBox::new(BoxType::Block, sib));
+            }
+
+            let mut sidebar_style = ComputedStyle::new();
+            sidebar_style.position = rustkit_css::Position::Absolute;
+            sidebar_style.top = Some(Length::Px(84.0));
+            sidebar_style.left = Some(Length::Px(0.0));
+            sidebar_style.width = Length::Px(220.0);
+            sidebar_style.height = height.clone();
+            let mut sidebar = LayoutBox::new(BoxType::Block, sidebar_style);
+            sidebar.position = Position::Absolute;
+            parent.children.push(sidebar);
+            parent.set_viewport(1280.0, 100.0);
+
+            let viewport = Dimensions {
+                content: Rect::new(0.0, 0.0, 1280.0, 100.0),
+                ..Default::default()
+            };
+            parent.layout(&viewport);
+
+            assert_eq!(
+                parent.children[2].dimensions.content.height, expected,
+                "{height:?} must resolve against the containing block's 100px, \
+                 not the 84px flow cursor"
+            );
+        }
+    }
+
+    /// `min-height` and `max-height` read a calc through the same basis their
+    /// `Percent` arm uses. Without their own arms a calc min-height is 0 and a
+    /// calc max-height is infinite — both silently absent rather than wrong,
+    /// which is the harder kind to notice.
+    #[test]
+    fn a_calc_min_and_max_height_clamp_like_the_percentage_beside_them() {
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+
+        let mut floored_style = ComputedStyle::new();
+        floored_style.width = Length::Px(150.0);
+        floored_style.height = Length::Px(10.0);
+        floored_style.min_height = calc_sum("calc(50% - 100px)");
+        let mut floored = LayoutBox::new(BoxType::Block, floored_style);
+        floored.set_viewport(900.0, 1000.0);
+        floored.layout(&viewport);
+        assert_eq!(
+            floored.dimensions.content.height, 400.0,
+            "50% of the 1000px viewport minus 100px, the basis the Percent arm uses"
+        );
+
+        let mut capped_style = ComputedStyle::new();
+        capped_style.width = Length::Px(150.0);
+        capped_style.height = Length::Px(900.0);
+        capped_style.max_height = calc_sum("calc(50% - 100px)");
+        let mut capped = LayoutBox::new(BoxType::Block, capped_style);
+        capped.set_viewport(900.0, 1000.0);
+        capped.layout(&viewport);
+        assert_eq!(capped.dimensions.content.height, 400.0);
+    }
+
+    /// A calc width needs no arm of its own — `calculate_block_width` already
+    /// funnels every non-`auto` width through `length_to_px`. Asserted rather
+    /// than assumed, because "it already works" is the claim most likely to
+    /// stop being true silently.
+    #[test]
+    fn a_calc_width_resolves_through_the_existing_width_path() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(400.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.width = calc_sum("calc(100% - 40px)");
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, child_style));
+        parent.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+        assert_eq!(parent.children[0].dimensions.content.width, 360.0);
+    }
+
+    /// A border-box parent whose padding exceeds its specified height has a
+    /// content box of zero, never a negative one — and the base it hands a
+    /// percentage child is that clamped value. Without the floor the child
+    /// comes out NEGATIVE, which no other guard here can reach.
+    #[test]
+    fn a_percentage_child_of_an_over_padded_border_box_parent_is_never_negative() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(150.0);
+        parent_style.height = Length::Px(10.0);
+        parent_style.box_sizing = BoxSizing::BorderBox;
+        parent_style.padding_top = Length::Px(20.0);
+        parent_style.padding_bottom = Length::Px(20.0);
+        let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+        let mut child_style = ComputedStyle::new();
+        child_style.height = Length::Percent(100.0);
+        parent
+            .children
+            .push(LayoutBox::new(BoxType::Block, child_style));
+        parent.set_viewport(900.0, 1000.0);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 1000.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+        assert_eq!(parent.children[0].dimensions.content.height, 0.0);
+    }
+
+    /// The root case the public `f32` entry still has to get right: a
+    /// containing block with NO height at all (the shape
+    /// `layout(&Dimensions::default())` hands the root) is "no definite base",
+    /// not a definite zero, so the viewport fallback stands. Converting it to
+    /// `Some(0.0)` at that boundary would size every percentage-height root
+    /// box to zero.
+    #[test]
+    fn a_zero_height_containing_block_is_absent_not_a_definite_zero() {
+        let mut root_style = ComputedStyle::new();
+        root_style.width = Length::Px(150.0);
+        root_style.height = Length::Percent(100.0);
+        let mut root = LayoutBox::new(BoxType::Block, root_style);
+        root.set_viewport(900.0, 1000.0);
+
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 900.0, 0.0),
+            ..Default::default()
+        };
+        root.layout(&containing);
+        assert_eq!(
+            root.dimensions.content.height, 1000.0,
+            "no containing-block height means the viewport fallback, not 0"
+        );
+    }
+
     /// WPT overflow-wrap-anywhere-001: `::after { position:absolute; inset:0 }`
     /// on a `height: 100px` div holding 54px of flow content was 54px tall —
     /// the abspos child resolved `bottom` against the parent's flow cursor
@@ -9733,11 +12482,116 @@ mod tests {
         assert_eq!(cover.dimensions.content.width, 100.0);
     }
 
+    /// An auto-height parent anchors its abspos child to its FINAL content
+    /// height (30px of flow here) — the same answer the flow cursor gave
+    /// when the child came last, now guaranteed regardless of order.
+    /// image-gallery's `.aspect-box > .content`, driven through the REAL
+    /// entry point rather than through `layout_flex_container` directly.
+    ///
+    /// This guard exists because the flex-side guards cannot see the caller.
+    /// They call `layout_flex_container_in` and pass the containing block
+    /// themselves, so they hold the rule but not the wiring: a `lib.rs` call
+    /// site that hands over `None` puts every item back at the top edge and
+    /// leaves all six of them green. `LayoutBox::layout` is what grid Phase 9
+    /// uses for an out-of-flow grandchild, so this is the path the page takes.
+    ///
+    /// 100px card, `inset: 0` column flex container, `justify-content: center`,
+    /// two items summing 50: the free space is 50 and the stack starts at 25.
+    /// Justifying in the 50px flow cursor instead starts it at 0.
+    #[test]
+    fn an_inset_overlays_flex_line_centres_in_the_card_through_the_layout_entry_point() {
+        let mut card_style = ComputedStyle::new();
+        card_style.width = Length::Px(100.0);
+        card_style.height = Length::Px(100.0);
+        let mut card = LayoutBox::with_position(BoxType::Block, card_style, Position::Relative);
+
+        let mut overlay_style = ComputedStyle::new();
+        overlay_style.display = rustkit_css::Display::Flex;
+        overlay_style.flex_direction = rustkit_css::FlexDirection::Column;
+        overlay_style.justify_content = rustkit_css::JustifyContent::Center;
+        let mut overlay =
+            LayoutBox::with_position(BoxType::Block, overlay_style, Position::Absolute);
+        overlay.set_offsets(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
+        for h in [30.0, 20.0] {
+            let mut item_style = ComputedStyle::new();
+            item_style.height = Length::Px(h);
+            overlay
+                .children
+                .push(LayoutBox::new(BoxType::Block, item_style));
+        }
+        card.children.push(overlay);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        card.layout(&viewport);
+
+        let overlay = &card.children[0];
+        assert_eq!(
+            overlay.dimensions.content.height, 100.0,
+            "the overlay itself must stretch to the card (the precondition)"
+        );
+        let lead = overlay.children[0].dimensions.content.y - overlay.dimensions.content.y;
+        assert!(
+            (lead - 25.0).abs() < 0.01,
+            "50 of content centred in the card's 100 leaves 25 above, not {lead} \
+             — the flex line was justified in the flow cursor"
+        );
+    }
+
+    /// The re-anchor must not resize or re-justify a box that is NOT
+    /// inset-definite. `top: 0` alone leaves the height indefinite (CSS2
+    /// §10.6.4 needs both offsets), so such a flex container stays sized by
+    /// its content and its line keeps the packing it already had — the
+    /// re-justify has to be gated on the rule, not on being a flex container
+    /// that happens to be out of flow.
+    #[test]
+    fn the_reanchor_leaves_a_flex_container_with_only_one_inset_alone() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(100.0);
+        parent_style.height = Length::Px(200.0);
+        let mut parent = LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
+
+        let mut overlay_style = ComputedStyle::new();
+        overlay_style.display = rustkit_css::Display::Flex;
+        overlay_style.flex_direction = rustkit_css::FlexDirection::Column;
+        overlay_style.justify_content = rustkit_css::JustifyContent::Center;
+        let mut overlay =
+            LayoutBox::with_position(BoxType::Block, overlay_style, Position::Absolute);
+        overlay.set_offsets(Some(0.0), None, None, None);
+        for h in [30.0, 20.0] {
+            let mut item_style = ComputedStyle::new();
+            item_style.height = Length::Px(h);
+            overlay
+                .children
+                .push(LayoutBox::new(BoxType::Block, item_style));
+        }
+        parent.children.push(overlay);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+
+        let overlay = &parent.children[0];
+        assert_eq!(
+            overlay.dimensions.content.height, 50.0,
+            "one inset is not a definite height: the container is its content's 50"
+        );
+        let lead = overlay.children[0].dimensions.content.y - overlay.dimensions.content.y;
+        assert!(
+            lead.abs() < 0.01,
+            "no free space in a content-sized container: expected 0, got {lead}"
+        );
+    }
+
     /// The re-anchor must not touch `position: fixed` (viewport containing
     /// block) or a parent whose height is auto (nothing definite to anchor
     /// to — the flow-cursor stand-in stays the best available answer).
     #[test]
-    fn abspos_reanchor_leaves_auto_height_parents_alone() {
+    fn abspos_reanchor_uses_auto_height_parents_final_height() {
         let mut parent_style = ComputedStyle::new();
         parent_style.width = Length::Px(100.0);
         let mut parent = LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
@@ -9757,6 +12611,105 @@ mod tests {
         };
         parent.layout(&viewport);
         assert_eq!(parent.children[1].dimensions.content.height, 30.0);
+    }
+
+    /// n46 (settings' toggle knobs 21px above their sliders): a `bottom: 2px`
+    /// knob inside an `inset: 0` slider inside a 26px-tall positioned box.
+    /// The slider's height comes from its inset stretch, which resolved
+    /// AFTER its children laid out — so the knob's `bottom` was measured
+    /// against a 0px-tall stand-in and sat against the slider's top. T-RED
+    /// without the post-layout re-anchor: knob y = slider.y - 22.
+    #[test]
+    fn abspos_bottom_inside_inset_stretched_parent_anchors_to_stretched_height() {
+        let mut toggle_style = ComputedStyle::new();
+        toggle_style.width = Length::Px(48.0);
+        toggle_style.height = Length::Px(26.0);
+        let mut toggle = LayoutBox::with_position(BoxType::Block, toggle_style, Position::Relative);
+
+        let mut slider_style = ComputedStyle::new();
+        slider_style.border_top_width = Length::Px(1.0);
+        slider_style.border_bottom_width = Length::Px(1.0);
+        slider_style.border_left_width = Length::Px(1.0);
+        slider_style.border_right_width = Length::Px(1.0);
+        let mut slider = LayoutBox::with_position(BoxType::Block, slider_style, Position::Absolute);
+        slider.set_offsets(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
+
+        let mut knob_style = ComputedStyle::new();
+        knob_style.width = Length::Px(20.0);
+        knob_style.height = Length::Px(20.0);
+        let mut knob = LayoutBox::with_position(BoxType::Block, knob_style, Position::Absolute);
+        knob.set_offsets(None, None, Some(2.0), Some(2.0));
+        slider.children.push(knob);
+        toggle.children.push(slider);
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        toggle.layout(&viewport);
+
+        // A bare root lays out at the stand-in's cursor (viewport bottom);
+        // everything below is relative to the toggle's border box.
+        let (tx, ty) = (
+            toggle.dimensions.border_box().x,
+            toggle.dimensions.border_box().y,
+        );
+        let slider = &toggle.children[0];
+        assert_eq!(slider.dimensions.border_box().height, 26.0, "inset:0 fills the toggle");
+        let knob = &slider.children[0];
+        // Chrome 148: padding box of the slider is y 1..25; knob = 25 - 2 - 20 = 3.
+        assert_eq!(
+            knob.dimensions.content.y - ty,
+            3.0,
+            "knob sits 2px above the slider's padding-box bottom"
+        );
+        assert_eq!(knob.dimensions.content.x - tx, 3.0);
+    }
+
+    /// CSS 2.1 §10.1: the containing block is the positioned ancestor's
+    /// PADDING box. A `bottom: 4px` knob in an auto-height parent with
+    /// `padding: 8px 0` holding 48px of flow lands at 8 + 48 + 8 - 4 - 20,
+    /// not 8 + 48 - 24 (content box).
+    #[test]
+    fn abspos_bottom_resolves_against_padding_box_of_auto_height_parent() {
+        let mut parent_style = ComputedStyle::new();
+        parent_style.width = Length::Px(380.0);
+        parent_style.padding_top = Length::Px(8.0);
+        parent_style.padding_bottom = Length::Px(8.0);
+        let mut parent = LayoutBox::with_position(BoxType::Block, parent_style, Position::Relative);
+
+        let mut knob_style = ComputedStyle::new();
+        knob_style.width = Length::Px(20.0);
+        knob_style.height = Length::Px(20.0);
+        let mut knob = LayoutBox::with_position(BoxType::Block, knob_style, Position::Absolute);
+        knob.set_offsets(None, Some(4.0), Some(4.0), None);
+        // The knob comes FIRST so the flow cursor is 0 when it lays out.
+        parent.children.push(knob);
+        for _ in 0..2 {
+            let mut line = ComputedStyle::new();
+            line.height = Length::Px(24.0);
+            parent.children.push(LayoutBox::new(BoxType::Block, line));
+        }
+
+        let viewport = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        parent.layout(&viewport);
+
+        let pb = parent.dimensions.border_box();
+        assert_eq!(pb.height, 64.0);
+        let knob = &parent.children[0];
+        assert_eq!(
+            knob.dimensions.content.y - pb.y,
+            64.0 - 4.0 - 20.0,
+            "bottom: against the padding box"
+        );
+        assert_eq!(
+            knob.dimensions.content.x - pb.x,
+            380.0 - 4.0 - 20.0,
+            "right: against the padding box"
+        );
     }
 
     #[test]
@@ -9782,6 +12735,28 @@ mod tests {
         let display_list = DisplayList::build(&layout_box);
 
         assert!(!display_list.commands.is_empty());
+    }
+
+    #[test]
+    fn text_run_paints_no_background_of_its_own() {
+        // The engine copies box decorations onto text children (the gradient
+        // for gradient text; a pseudo-element's whole style). Only the
+        // element paints them.
+        let mut text_style = ComputedStyle::new();
+        text_style.background_color = Color::from_rgb(255, 0, 0);
+        let mut text = LayoutBox::new(BoxType::Text("🌆".to_string()), text_style);
+        text.dimensions.content = Rect::new(10.0, 10.0, 48.0, 63.0);
+        let mut parent = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        parent.dimensions.content = Rect::new(0.0, 0.0, 200.0, 100.0);
+        parent.children.push(text);
+        let display_list = DisplayList::build(&parent);
+        let fills: Vec<String> = display_list
+            .commands
+            .iter()
+            .map(|c| format!("{:?}", c))
+            .filter(|c| c.starts_with("SolidColor") || c.starts_with("RoundedRect"))
+            .collect();
+        assert!(fills.is_empty(), "text run painted a box fill: {:?}", fills);
     }
 
     #[test]
@@ -10111,6 +13086,125 @@ mod w3_zero_width_wrap_tests {
         }
     }
 
+    /// `<pre>` text: a preserved newline is a forced line break even though
+    /// soft wrapping is off and the run fits its container (css-text-3
+    /// §4.1.1). Before: the `white-space: pre` gate skipped the wrapper, so
+    /// six source lines were one line box.
+    #[test]
+    fn pre_text_breaks_at_preserved_newlines_without_soft_wrapping() {
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 800.0, 0.0);
+        let src = "body {\n    font-family: Georgia;\n\n}";
+        let mut b = text(src, WhiteSpace::Pre, WordBreak::Normal);
+        b.layout_text(src.into(), &cb);
+        let lh = b.get_line_height();
+        assert_eq!(
+            line_texts(&b),
+            ["body {", "    font-family: Georgia;", "", "}"],
+            "one line box per segment, blank line kept, indentation kept"
+        );
+        assert!(
+            (b.dimensions.content.height - 4.0 * lh).abs() < 0.01,
+            "four line boxes, got {}",
+            b.dimensions.content.height / lh
+        );
+
+        // Soft wrapping stays OFF under pre: a segment wider than the
+        // container is still one line (overflow), never re-broken.
+        cb.content = Rect::new(0.0, 0.0, 40.0, 0.0);
+        let mut narrow = text(src, WhiteSpace::Pre, WordBreak::Normal);
+        narrow.layout_text(src.into(), &cb);
+        assert_eq!(line_texts(&narrow).len(), 4, "pre never soft-wraps");
+
+        // A trailing newline ends the last line; it is not a fifth line box.
+        let mut trailing = text("a\nb\n", WhiteSpace::Pre, WordBreak::Normal);
+        trailing.layout_text("a\nb\n".into(), &cb);
+        assert_eq!(line_texts(&trailing), ["a", "b"]);
+    }
+
+    /// `<p style="width:300px"><span>long…</span></p>` and
+    /// `<pre><code>a\nb\nc</code></pre>`: the block must be as tall as the
+    /// inline's wrapped lines, and a following sibling starts below them.
+    /// Before n50 the line advanced by ONE line-height for any inline child,
+    /// whatever its text had wrapped to.
+    #[test]
+    fn a_block_grows_past_an_inline_childs_wrapped_lines() {
+        let make = |ws: WhiteSpace, width: f32, run: &str| {
+            let mut ps = ComputedStyle::new();
+            ps.font_size = Length::Px(16.0);
+            ps.white_space = ws;
+            ps.width = Length::Px(width);
+            let mut p = LayoutBox::new(BoxType::Block, ps);
+            let mut ss = ComputedStyle::new();
+            ss.display = Display::Inline;
+            ss.font_size = Length::Px(16.0);
+            ss.white_space = ws;
+            let mut span = LayoutBox::new(BoxType::Inline, ss);
+            span.children.push(text(run, ws, WordBreak::Normal));
+            p.children.push(span);
+            let mut after = ComputedStyle::new();
+            after.font_size = Length::Px(16.0);
+            let mut sibling = LayoutBox::new(BoxType::Block, after);
+            sibling
+                .children
+                .push(text("after", WhiteSpace::Normal, WordBreak::Normal));
+            let mut body = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+            body.children.push(p);
+            body.children.push(sibling);
+            let mut cb = Dimensions::default();
+            cb.content = Rect::new(0.0, 0.0, 800.0, 0.0);
+            body.layout(&cb);
+            body
+        };
+        let long = "The quick brown fox jumps over the lazy dog again and again \
+                    until the line has no choice but to wrap around";
+        let body = make(WhiteSpace::Normal, 200.0, long);
+        let (p, sib) = (&body.children[0], &body.children[1]);
+        let n = p.children[0].children[0].text_lines.as_ref().unwrap().len();
+        let lh = p.children[0].children[0].get_line_height();
+        assert!(n > 1, "precondition: the span's text wrapped");
+        assert!(
+            (p.dimensions.content.height - n as f32 * lh).abs() < 0.01,
+            "p must be {n} lines tall, got {}",
+            p.dimensions.content.height / lh
+        );
+        assert!(
+            sib.dimensions.content.y >= p.dimensions.content.y + p.dimensions.content.height - 0.01,
+            "the sibling starts below the wrapped span"
+        );
+
+        let body = make(WhiteSpace::Pre, 800.0, "one\ntwo\nthree");
+        let p = &body.children[0];
+        let lh = p.children[0].children[0].get_line_height();
+        assert!(
+            (p.dimensions.content.height - 3.0 * lh).abs() < 0.01,
+            "pre > code with three source lines is three lines tall, got {}",
+            p.dimensions.content.height / lh
+        );
+    }
+
+    /// pre-line / pre-wrap: a newline breaks the line even when the whole
+    /// run would have fit (the old "only wrap what overflows" test).
+    #[test]
+    fn pre_line_and_pre_wrap_break_at_newlines_when_the_run_fits() {
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 800.0, 0.0);
+        for ws in [
+            WhiteSpace::PreLine,
+            WhiteSpace::PreWrap,
+            WhiteSpace::BreakSpaces,
+        ] {
+            let mut b = text("one two\nthree", ws, WordBreak::Normal);
+            b.layout_text("one two\nthree".into(), &cb);
+            assert_eq!(line_texts(&b), ["one two", "three"], "{ws:?}");
+        }
+        // And a control: normal white-space text with no newline (the
+        // engine has already collapsed them) still takes the old path.
+        let mut normal = text("one two three", WhiteSpace::Normal, WordBreak::Normal);
+        normal.layout_text("one two three".into(), &cb);
+        assert!(normal.text_lines.is_none());
+    }
+
     #[test]
     fn a_bare_zero_container_width_is_still_the_intrinsic_guard() {
         // The block path must keep reading an UNQUALIFIED 0 as "no resolved
@@ -10127,5 +13221,49 @@ mod w3_zero_width_wrap_tests {
         let mut definite = text("abc", WhiteSpace::Normal, WordBreak::BreakAll);
         definite.layout_text_with_zero_wrap("abc".into(), &cb, true);
         assert_eq!(line_texts(&definite), ["a", "b", "c"]);
+    }
+
+    /// n51: a text input's author padding composes with its content line
+    /// in EVERY absolute unit. The unit closure took px and em only, so
+    /// `padding: 1rem 1.5rem` (new_tab's search box, and most styled search
+    /// fields) read as no author padding and the control fell to the bare
+    /// 19px blob; Chrome builds 18 + 32 + 2 = 52.
+    #[test]
+    fn a_text_input_with_rem_padding_composes_it_into_its_height() {
+        fn input(pad: Length) -> LayoutBox {
+            let mut s = ComputedStyle::new();
+            s.font_size = Length::Px(16.0);
+            s.padding_top = pad.clone();
+            s.padding_bottom = pad;
+            s.border_top_width = Length::Px(1.0);
+            s.border_bottom_width = Length::Px(1.0);
+            LayoutBox::new(
+                BoxType::FormControl(FormControlType::TextInput {
+                    value: String::new(),
+                    placeholder: String::new(),
+                    input_type: "text".to_string(),
+                }),
+                s,
+            )
+        }
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 500.0, 0.0),
+            ..Default::default()
+        };
+        let mut px = input(Length::Px(16.0));
+        px.layout(&cb);
+        let mut rem = input(Length::Rem(1.0));
+        rem.layout(&cb);
+        let want = px.dimensions.content.height;
+        assert!(
+            want > 40.0,
+            "setup: px padding must compose (17 + 32 + 2 = 51), got {want}"
+        );
+        assert!(
+            (rem.dimensions.content.height - want).abs() < 0.01,
+            "1rem padding must size the control like 16px padding ({want}), got {} \
+             (19 is the bare blob: the rem was dropped)",
+            rem.dimensions.content.height
+        );
     }
 }

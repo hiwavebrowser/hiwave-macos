@@ -31,6 +31,9 @@ use rustkit_layout::{
 use std::cell::Cell;
 use rustkit_net::{LoaderConfig, NetError, Request, ResourceLoader};
 use rustkit_renderer::Renderer;
+pub use rustkit_renderer::RenderStats;
+#[cfg(windows)]
+pub use rustkit_renderer::CaptureMetadata as ScreenshotMetadata;
 use rustkit_viewhost::{Bounds, ViewHost, ViewHostTrait, ViewId, WindowHandle};
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -149,6 +152,29 @@ struct ViewState {
     #[allow(dead_code)]
     bindings: Option<DomBindings>,
     navigation: NavigationStateMachine,
+    /// Monotonic navigation generation, bumped by `Engine::stop` and by each
+    /// new `load_url`.
+    ///
+    /// This is how STOP works, and the shape is deliberate. `load_url` is an
+    /// `async fn` that awaits the network; there is no way to reach inside a
+    /// future that is already suspended. So instead of trying to kill the
+    /// task, the load CAPTURES this counter before it awaits and re-checks it
+    /// after every await point. A `stop` (or a newer navigation) bumps the
+    /// counter, the in-flight load notices it is stale at the next boundary,
+    /// and abandons without touching view state.
+    ///
+    /// The alternative — an `AbortHandle` per load — needs the load to own a
+    /// spawned task, which it does not: `load_url` borrows `&mut self`. A
+    /// generation counter needs no task ownership and cannot leave a
+    /// half-applied navigation behind, because every mutation is gated on it.
+    ///
+    /// NOTE: this stops the ENGINE applying the result. It does not abort the
+    /// socket — `rustkit-net`'s `fetch` has no cancellation surface today, so
+    /// the request still completes in the background and its bytes are
+    /// discarded. Stated rather than implied: this is stop-as-observed, not
+    /// stop-as-transport. Closing that needs a cancel token threaded into the
+    /// loader and is a separate unit.
+    nav_generation: u64,
     #[allow(dead_code)]
     nav_event_rx: mpsc::UnboundedReceiver<LoadEvent>,
     /// Currently focused DOM node.
@@ -333,7 +359,10 @@ fn resolve_font_source(base: Option<&Url>, src: &str) -> FontSource {
     let document_is_local = base
         .map(|b| matches!(b.scheme(), "about" | "file"))
         .unwrap_or(true);
-    if let Ok(url) = Url::parse(src) {
+    // `C:\fonts\x.ttf` parses as a URL with scheme `c` on every platform,
+    // which used to send a Windows absolute path down the "unsupported URL
+    // scheme" arm. Real schemes are at least two characters.
+    if let Some(url) = Url::parse(src).ok().filter(|u| u.scheme().len() > 1) {
         return match url.scheme() {
             "http" | "https" => FontSource::Remote(url),
             "file" if document_is_local => url
@@ -399,6 +428,36 @@ fn percent_decode(s: &str) -> Vec<u8> {
     out
 }
 
+/// Where an element sits among its siblings, for the tree-structural
+/// pseudo-classes (Selectors 4 §14): `index`/`count` among all element
+/// siblings, `type_index`/`type_count` among siblings sharing its tag, and
+/// whether it has any element or text child (`:empty`). Counts DOM elements,
+/// not layout boxes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SiblingContext {
+    pub index: usize,
+    pub count: usize,
+    pub type_index: usize,
+    pub type_count: usize,
+    pub has_children: bool,
+}
+
+impl SiblingContext {
+    /// An element with no siblings and no children (roots, ad-hoc builds).
+    pub const SOLE: SiblingContext = SiblingContext {
+        index: 0,
+        count: 1,
+        type_index: 0,
+        type_count: 1,
+        has_children: false,
+    };
+
+    pub fn with_children(mut self, has_children: bool) -> Self {
+        self.has_children = has_children;
+        self
+    }
+}
+
 /// The main browser engine.
 pub struct Engine {
     config: EngineConfig,
@@ -446,6 +505,22 @@ pub struct Engine {
     svg_cache: std::collections::HashMap<String, rustkit_svg::SvgDocument>,
 }
 
+/// Split a trailing `!important` (ASCII case-insensitive, whitespace allowed
+/// between `!` and `important`) off a declaration value. Stylesheet rules get
+/// this from the parser; inline `style=` values arrive raw.
+fn split_important(value: &str) -> (&str, bool) {
+    let trimmed = value.trim_end();
+    let bytes = trimmed.as_bytes();
+    const KW: &[u8] = b"important";
+    if bytes.len() >= KW.len() && bytes[bytes.len() - KW.len()..].eq_ignore_ascii_case(KW) {
+        let before = trimmed[..trimmed.len() - KW.len()].trim_end();
+        if let Some(rest) = before.strip_suffix('!') {
+            return (rest.trim_end(), true);
+        }
+    }
+    (trimmed, false)
+}
+
 /// One author declaration that MATCHED an element, win or lose.
 ///
 /// Losers are kept deliberately. "Parsed but dead" is the bug class this
@@ -467,9 +542,10 @@ pub struct DeclarationRecord {
     pub origin: &'static str,
     /// Whether the declaration carried `!important`.
     ///
-    /// Recorded but NOT acted on: this cascade orders by specificity alone.
-    /// An `!important` declaration that lost is therefore a real engine bug,
-    /// and reporting the flag is how the tool shows it instead of hiding it.
+    /// Honoured since n64: important declarations apply in a second pass
+    /// after every normal one (inline included), so they carry a higher
+    /// `order`. An `!important` declaration that lost to a normal one is
+    /// therefore a real engine bug, and the flag is how the tool shows it.
     pub important: bool,
     /// Position in application order. The highest `order` for a given
     /// property is the winner, because it wrote the field last.
@@ -683,6 +759,7 @@ impl Engine {
             display_list: None,
             bindings: None,
             navigation,
+            nav_generation: 0,
             nav_event_rx: nav_rx,
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
@@ -738,6 +815,7 @@ impl Engine {
             display_list: None,
             bindings: None,
             navigation,
+            nav_generation: 0,
             nav_event_rx: nav_rx,
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
@@ -802,6 +880,7 @@ impl Engine {
             display_list: None,
             bindings: None,
             navigation,
+            nav_generation: 0,
             nav_event_rx: nav_rx,
             focused_node: None,
             edit_states: std::collections::HashMap::new(),
@@ -1313,18 +1392,50 @@ impl Engine {
 
     /// Load a URL in a view.
     pub async fn load_url(&mut self, id: EngineViewId, url: Url) -> Result<(), EngineError> {
+        self.load_url_with_disposition(id, url, false).await
+    }
+
+    /// Load a URL, optionally REPLACING the current history entry instead of
+    /// pushing a new one.
+    ///
+    /// `replace = true` is how history traversal works end to end: go_back /
+    /// go_forward / reload move the SessionHistory cursor (or keep it, for
+    /// reload) and then arrive here as a replace-load against the entry they
+    /// landed on. Replacing an entry with its own URL is a no-op that
+    /// PRESERVES the entry's state objects — which is exactly why traversal
+    /// must never come through the pushing path: pushing would truncate the
+    /// forward stack the user is trying to walk.
+    async fn load_url_with_disposition(
+        &mut self,
+        id: EngineViewId,
+        url: Url,
+        replace: bool,
+    ) -> Result<(), EngineError> {
         let view = self
             .views
             .get_mut(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
 
-        info!(?id, %url, "Loading URL");
+        info!(?id, %url, replace, "Loading URL");
 
         // Start navigation
-        let request = NavigationRequest::new(url.clone());
+        let request = if replace {
+            NavigationRequest::new(url.clone()).with_replace()
+        } else {
+            NavigationRequest::new(url.clone())
+        };
         view.navigation
             .start_navigation(request)
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
+
+        // STOP support: take this load's generation BEFORE the first await.
+        // Anything that bumps the view's generation while we are suspended
+        // (Engine::stop, or a newer load) makes this load stale, and a
+        // stale load must not touch view state.
+        let generation = {
+            view.nav_generation = view.nav_generation.wrapping_add(1);
+            view.nav_generation
+        };
 
         // Emit event
         let _ = self.event_tx.send(EngineEvent::NavigationStarted {
@@ -1335,6 +1446,12 @@ impl Engine {
         // Fetch the URL
         let request = Request::get(url.clone());
         let response = self.loader.fetch(request).await?;
+
+        // First await boundary crossed — are we still the current navigation?
+        if self.nav_superseded(id, generation) {
+            debug!(?id, %url, "Navigation abandoned: superseded or stopped");
+            return Ok(());
+        }
 
         if !response.ok() {
             let error = format!("HTTP {}", response.status);
@@ -1373,6 +1490,12 @@ impl Engine {
 
         // Parse HTML
         let html = response.text().await?;
+
+        // Body fully read — still current?
+        if self.nav_superseded(id, generation) {
+            debug!(?id, %url, "Navigation abandoned after body read");
+            return Ok(());
+        }
         let document =
             Document::parse_html(&html).map_err(|e| EngineError::RenderError(e.to_string()))?;
         let document = Rc::new(document);
@@ -1422,6 +1545,13 @@ impl Engine {
             view.bindings = Some(bindings);
         }
 
+        // LAST GATE before we mutate anything visible: a stop that landed
+        // while the body was parsed must not fall through into layout.
+        if self.nav_superseded(id, generation) {
+            debug!(?id, %url, "Navigation abandoned before layout");
+            return Ok(());
+        }
+
         // Initial layout and render (inline data:-sourced faces first; the
         // remote ones arrive with the other subresources below)
         self.load_local_web_fonts(id);
@@ -1432,6 +1562,14 @@ impl Engine {
         if let Err(e) = self.load_subresources(id).await {
             warn!(?e, "Failed to load some subresources");
             // Continue even if some resources fail to load
+        }
+
+        // Subresource loading awaited the network too: a stop during a
+        // stylesheet or image fetch must not finish the navigation, push the
+        // history entry, or announce PageLoaded for a page the user cancelled.
+        if self.nav_superseded(id, generation) {
+            debug!(?id, %url, "Navigation abandoned after subresources");
+            return Ok(());
         }
 
         // Finish navigation
@@ -1781,13 +1919,23 @@ impl Engine {
                     _ => {}
                 }
                 match &cmd {
-                    rustkit_layout::DisplayCommand::Image { url, dest_rect, .. } => {
+                    rustkit_layout::DisplayCommand::Image {
+                        url,
+                        dest_rect,
+                        current_color,
+                        ..
+                    } => {
                         if let Some(svg) = self.svg_cache.get(url) {
-                            expanded.extend(svg.render(
+                            // The box's CSS color is what `currentColor`
+                            // resolves to inside an inline <svg>; an <img>'s
+                            // color is the initial black either way, so the
+                            // raster lane is unaffected by passing it through.
+                            expanded.extend(svg.render_with_color(
                                 dest_rect.x,
                                 dest_rect.y,
                                 dest_rect.width,
                                 dest_rect.height,
+                                *current_color,
                             ));
                             continue;
                         }
@@ -2103,8 +2251,7 @@ impl Engine {
                     &css_vars,
                     &[],
                     &[],
-                    0,
-                    1,
+                    SiblingContext::SOLE.with_children(true),
                     None,
                 ))
             } else {
@@ -2125,8 +2272,7 @@ impl Engine {
                 &[],
                 html_style.as_ref(),
                 &[],
-                0,
-                1,
+                SiblingContext::SOLE.with_children(Self::node_has_children(&body)),
                 "body",
                 &element_ids,
                 false,
@@ -2369,12 +2515,22 @@ impl Engine {
             ancestors,
             None,
             &[],
-            0,
-            1,
+            SiblingContext::SOLE.with_children(Self::node_has_children(node)),
             "",
             &Cell::new(0),
             false,
         )
+    }
+
+    /// `:empty` input: any element or text child (whitespace included —
+    /// Selectors 4 §14.5 counts it); comments do not count.
+    fn node_has_children(node: &Rc<Node>) -> bool {
+        node.children().iter().any(|c| {
+            matches!(
+                c.node_type,
+                NodeType::Element { .. } | NodeType::Text(_)
+            )
+        })
     }
 
     /// Build a layout box, additionally threading the element-identity context
@@ -2397,8 +2553,7 @@ impl Engine {
         ancestors: &[(String, Vec<String>, Option<String>)],
         parent_style: Option<&ComputedStyle>,
         siblings_before: &[(String, Vec<String>, Option<String>)],
-        element_index: usize,
-        sibling_count: usize,
+        sib: SiblingContext,
         selector_path: &str,
         element_ids: &Cell<usize>,
         in_foreign_content: bool,
@@ -2430,8 +2585,7 @@ impl Engine {
                     css_vars,
                     ancestors,
                     siblings_before,
-                    element_index,
-                    sibling_count,
+                    sib,
                     parent_style,
                 );
 
@@ -2664,6 +2818,24 @@ impl Engine {
                             checked: attributes.contains_key("checked"),
                             name: attributes.get("name").cloned().unwrap_or_default(),
                         },
+                        // Button-type inputs are push buttons sized to their
+                        // label (HTML §4.10.5.1.20–22; Chrome: "Submit" 45.5px,
+                        // "Reset" 38.8px) — n53 form-controls built each as a
+                        // 160px text field.
+                        "submit" | "reset" | "button" => {
+                            let label = match attributes.get("value") {
+                                Some(v) => v.clone(),
+                                None => match input_type.as_str() {
+                                    "submit" => "Submit".to_string(),
+                                    "reset" => "Reset".to_string(),
+                                    _ => String::new(),
+                                },
+                            };
+                            rustkit_layout::FormControlType::Button {
+                                label,
+                                button_type: input_type,
+                            }
+                        }
                         _ => rustkit_layout::FormControlType::TextInput {
                             value,
                             placeholder,
@@ -2781,17 +2953,18 @@ impl Engine {
 
                 if tag_lower == "select" {
                     // Get options from children
-                    let options: Vec<String> = node
+                    let entries: Vec<(String, bool)> = node
                         .children()
                         .into_iter()
                         .filter_map(|child| {
-                            if let rustkit_dom::NodeType::Element { tag_name, .. } =
-                                &child.node_type
+                            if let rustkit_dom::NodeType::Element {
+                                tag_name, attributes, ..
+                            } = &child.node_type
                             {
                                 if tag_name.to_lowercase() == "option" {
                                     let text = child.text_content();
                                     if !text.is_empty() {
-                                        return Some(text);
+                                        return Some((text, attributes.contains_key("selected")));
                                     }
                                 }
                             }
@@ -2799,7 +2972,17 @@ impl Engine {
                         })
                         .collect();
 
-                    let selected_index = if options.is_empty() { None } else { Some(0) };
+                    // HTML §4.10.10 selectedness: the option carrying
+                    // `selected` (the last one, if several) is displayed.
+                    // Index 0 was hardcoded, so settings' Tab Decay unit
+                    // showed "hours" where `<option value="days" selected>`
+                    // makes Chrome show "days".
+                    let selected_index = if entries.is_empty() {
+                        None
+                    } else {
+                        Some(entries.iter().rposition(|(_, s)| *s).unwrap_or(0))
+                    };
+                    let options: Vec<String> = entries.into_iter().map(|(t, _)| t).collect();
 
                     // size > 1 (or `multiple` without size, which Chrome
                     // shows as a 4-row listbox) renders inline rows.
@@ -2913,6 +3096,8 @@ impl Engine {
                     stylesheets,
                     css_vars,
                     ancestors,
+                    siblings_before,
+                    sib,
                     "::before",
                 ) {
                     layout_box.children.push(before_box);
@@ -2935,11 +3120,33 @@ impl Engine {
                     in_foreign_content || Self::enters_foreign_content(&tag_lower);
                 let child_segments =
                     Self::child_selector_segments(&child_nodes, children_are_foreign);
+                // Same-tag totals feed the `-of-type` pseudo-classes.
+                let mut type_totals: HashMap<String, usize> = HashMap::new();
+                for c in child_nodes.iter() {
+                    if let NodeType::Element { tag_name, .. } = &c.node_type {
+                        *type_totals.entry(tag_name.to_lowercase()).or_insert(0) += 1;
+                    }
+                }
+                let mut type_seen: HashMap<String, usize> = HashMap::new();
                 for (child_index, child) in child_nodes.iter().enumerate() {
                     let child_path = Self::child_selector_path(
                         selector_path,
                         child_segments.get(child_index).and_then(|s| s.as_deref()),
                     );
+                    let child_sib = match &child.node_type {
+                        NodeType::Element { tag_name, .. } => {
+                            let t = tag_name.to_lowercase();
+                            let type_index = *type_seen.get(&t).unwrap_or(&0);
+                            SiblingContext {
+                                index: preceding_siblings.len(),
+                                count: child_element_count,
+                                type_index,
+                                type_count: type_totals.get(&t).copied().unwrap_or(1),
+                                has_children: Self::node_has_children(child),
+                            }
+                        }
+                        _ => SiblingContext::SOLE,
+                    };
                     let child_box = self.build_layout_from_parent_style_and_path(
                         child,
                         stylesheets,
@@ -2947,8 +3154,7 @@ impl Engine {
                         &child_ancestors,
                         Some(&style),
                         &preceding_siblings,
-                        preceding_siblings.len(),
-                        child_element_count,
+                        child_sib,
                         &child_path,
                         element_ids,
                         children_are_foreign,
@@ -2963,11 +3169,9 @@ impl Engine {
                             .get("class")
                             .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
                             .unwrap_or_default();
-                        preceding_siblings.push((
-                            tag_name.to_lowercase(),
-                            child_classes,
-                            attributes.get("id").cloned(),
-                        ));
+                        let t = tag_name.to_lowercase();
+                        *type_seen.entry(t.clone()).or_insert(0) += 1;
+                        preceding_siblings.push((t, child_classes, attributes.get("id").cloned()));
                     }
 
                     // Determine if box should be included in layout tree
@@ -3001,6 +3205,8 @@ impl Engine {
                     stylesheets,
                     css_vars,
                     ancestors,
+                    siblings_before,
+                    sib,
                     "::after",
                 ) {
                     layout_box.children.push(after_box);
@@ -3202,6 +3408,7 @@ impl Engine {
     }
 
     /// Create a pseudo-element (::before or ::after) if applicable.
+    #[allow(clippy::too_many_arguments)]
     fn create_pseudo_element(
         &self,
         tag_name: &str,
@@ -3209,6 +3416,8 @@ impl Engine {
         stylesheets: &[Stylesheet],
         _css_vars: &HashMap<String, String>,
         ancestors: &[(String, Vec<String>, Option<String>)],
+        siblings_before: &[(String, Vec<String>, Option<String>)],
+        sib: SiblingContext,
         pseudo: &str,
     ) -> Option<LayoutBox> {
         // Compute style for the pseudo-element by matching selectors with the pseudo suffix
@@ -3229,16 +3438,16 @@ impl Engine {
                         .trim_end_matches(pseudo)
                         .trim_end_matches(&pseudo.replace("::", ":"));
 
-                    // Check if base selector matches this element
-                    // Use 0, 1 for element_index, sibling_count since we don't need sibling selectors for pseudo-elements
+                    // Check if base selector matches this element, with the
+                    // host's real sibling context (`li:first-child::before`,
+                    // `.slot:empty::before { content: "…" }`).
                     if self.selector_matches(
                         base_selector.trim(),
                         tag_name,
                         attributes,
                         ancestors,
-                        &[],
-                        0,
-                        1,
+                        siblings_before,
+                        sib,
                     ) {
                         let specificity = self.selector_specificity(selector);
                         matching_rules.push((specificity, rule));
@@ -3255,15 +3464,25 @@ impl Engine {
         // Sort by specificity (a, b, c)
         matching_rules.sort_by_key(|(spec, _)| *spec);
 
-        // Apply matching rules
-        for (_, rule) in matching_rules {
-            for declaration in &rule.declarations {
-                let value_str = match &declaration.value {
-                    rustkit_css::PropertyValue::Specified(s) => s.as_str(),
-                    rustkit_css::PropertyValue::Inherit => continue,
-                    rustkit_css::PropertyValue::Initial => continue,
-                };
-                self.apply_style_property(&mut pseudo_style, &declaration.property, value_str);
+        // Apply matching rules: normal declarations, then `!important` ones
+        // (CSS Cascade 4 §6.1), specificity order within each.
+        for important_pass in [false, true] {
+            for (_, rule) in &matching_rules {
+                for declaration in &rule.declarations {
+                    if declaration.important != important_pass {
+                        continue;
+                    }
+                    let value_str = match &declaration.value {
+                        rustkit_css::PropertyValue::Specified(s) => s.as_str(),
+                        rustkit_css::PropertyValue::Inherit => continue,
+                        rustkit_css::PropertyValue::Initial => continue,
+                    };
+                    self.apply_style_property(
+                        &mut pseudo_style,
+                        &declaration.property,
+                        value_str,
+                    );
+                }
             }
         }
 
@@ -3296,8 +3515,7 @@ impl Engine {
         css_vars: &HashMap<String, String>,
         ancestors: &[(String, Vec<String>, Option<String>)],
         siblings_before: &[(String, Vec<String>, Option<String>)],
-        element_index: usize,
-        sibling_count: usize,
+        sib: SiblingContext,
         parent_style: Option<&ComputedStyle>,
     ) -> ComputedStyle {
         let mut style = ComputedStyle::new();
@@ -3470,7 +3688,12 @@ impl Engine {
                 // interstitial whitespace text runs each taking a line.
                 style.display = rustkit_css::Display::InlineBlock;
                 style.font_size = rustkit_css::Length::Px(13.333);
-                style.font_family = "system-ui".to_string();
+                // The pinned oracle (Chrome CfT-148 on this seat) computes
+                // `font-family: Arial` for every unstyled control on every
+                // board case (n53 census over baselines/chrome-148); its
+                // labels measure as Arial to the tenth ("Submit" 41.5px).
+                // system-ui (SF) ran every control label 5–8% wide.
+                style.font_family = "Arial".to_string();
                 // UA default background lives HERE, not in the painter: paint
                 // used to substitute WHITE whenever computed alpha was 0,
                 // which cannot tell "author said nothing" from "author said
@@ -3514,7 +3737,19 @@ impl Engine {
                 style.font_family = "monospace".to_string();
                 style.margin_top = rustkit_css::Length::Px(16.0); // 1em
                 style.margin_bottom = rustkit_css::Length::Px(16.0);
-                // white-space: pre (not implemented)
+                // HTML §15.3.9 UA sheet: `pre { white-space: pre }`. This
+                // was "(not implemented)" — every `<pre>` block without an
+                // author white-space rule collapsed its newlines and
+                // indentation and wrapped like a paragraph (a six-line code
+                // block on article-typography laid out as one wrapped run).
+                style.white_space = rustkit_css::WhiteSpace::Pre;
+            }
+            "listing" | "xmp" | "plaintext" => {
+                style.display = rustkit_css::Display::Block;
+                style.font_family = "monospace".to_string();
+                style.margin_top = rustkit_css::Length::Px(16.0);
+                style.margin_bottom = rustkit_css::Length::Px(16.0);
+                style.white_space = rustkit_css::WhiteSpace::Pre;
             }
             "code" | "kbd" | "samp" | "tt" => {
                 style.display = rustkit_css::Display::Inline;
@@ -3682,15 +3917,16 @@ impl Engine {
 
         for stylesheet in stylesheets {
             for rule in &stylesheet.rules {
-                if self.selector_matches(
-                    &rule.selector,
-                    tag_name,
-                    attributes,
-                    ancestors,
-                    siblings_before,
-                    element_index,
-                    sibling_count,
-                ) {
+                if self.rule_may_match(&rule.selector, tag_name, attributes)
+                    && self.selector_matches(
+                        &rule.selector,
+                        tag_name,
+                        attributes,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                    )
+                {
                     let specificity = self.selector_specificity(&rule.selector);
                     matching_rules.push((rule, specificity, rule_index));
                 }
@@ -3716,52 +3952,83 @@ impl Engine {
         // until the whole cascade has run — collect, then replay below.
         let mut ch_pending = ChPending::default();
 
-        // Apply matching rules in order
-        for (rule, specificity, _) in matching_rules {
-            for decl in &rule.declarations {
-                // Extract string value from PropertyValue
-                let value_str = match &decl.value {
-                    rustkit_css::PropertyValue::Specified(s) => s.clone(),
-                    rustkit_css::PropertyValue::Inherit => continue, // Skip inherit for now
-                    rustkit_css::PropertyValue::Initial => continue, // Skip initial for now
-                };
-                let resolved_value = self.resolve_css_variables(&value_str, css_vars);
-                if value_str != resolved_value {
-                    trace!(
-                        property = decl.property.as_str(),
-                        original = value_str.as_str(),
-                        resolved = resolved_value.as_str(),
-                        "Resolved CSS variable"
-                    );
-                }
-                ch_pending.note(&decl.property, &resolved_value);
-                self.apply_style_property(&mut style, &decl.property, &resolved_value);
-                if recording {
-                    records.push(DeclarationRecord {
-                        property: decl.property.clone(),
-                        value: resolved_value,
-                        selector: rule.selector.clone(),
-                        specificity,
-                        origin: "author",
-                        important: decl.important,
-                        order,
-                    });
-                    order += 1;
+        // CSS Cascade 4 §6.1: importance outranks specificity. Author normal
+        // rules, then the inline style's normal declarations, then author
+        // `!important` rules (same specificity order among themselves), then
+        // inline `!important`. Until n64 this loop ordered by specificity
+        // alone: `.test5 { background: red !important }` lost to
+        // `#test5 { background: green }` (specificity box 5), and an inline
+        // `style="color: red !important"` handed "red !important" to the
+        // value parser, which dropped the declaration.
+        for important_pass in [false, true] {
+            for (rule, specificity, _) in &matching_rules {
+                for decl in &rule.declarations {
+                    if decl.important != important_pass {
+                        continue;
+                    }
+                    // Extract string value from PropertyValue
+                    let value_str = match &decl.value {
+                        rustkit_css::PropertyValue::Specified(s) => s.clone(),
+                        rustkit_css::PropertyValue::Inherit => continue, // Skip inherit for now
+                        rustkit_css::PropertyValue::Initial => continue, // Skip initial for now
+                    };
+                    let resolved_value = self.resolve_css_variables(&value_str, css_vars);
+                    if value_str != resolved_value {
+                        trace!(
+                            property = decl.property.as_str(),
+                            original = value_str.as_str(),
+                            resolved = resolved_value.as_str(),
+                            "Resolved CSS variable"
+                        );
+                    }
+                    ch_pending.note(&decl.property, &resolved_value);
+                    self.apply_cascaded(&mut style, parent_style, &decl.property, &resolved_value);
+                    if recording {
+                        records.push(DeclarationRecord {
+                            property: decl.property.clone(),
+                            value: resolved_value,
+                            selector: rule.selector.clone(),
+                            specificity: *specificity,
+                            origin: "author",
+                            important: decl.important,
+                            order,
+                        });
+                        order += 1;
+                    }
                 }
             }
-        }
 
-        // Parse inline style attribute if present (highest specificity)
-        if let Some(style_attr) = attributes.get("style") {
-            self.apply_inline_style(&mut style, style_attr, css_vars, &mut ch_pending);
-            if recording {
-                self.record_inline_style(style_attr, css_vars, &mut records, &mut order);
+            // Inline style attribute: above every selector within its
+            // importance level.
+            if let Some(style_attr) = attributes.get("style") {
+                self.apply_inline_style(
+                    &mut style,
+                    parent_style,
+                    style_attr,
+                    css_vars,
+                    &mut ch_pending,
+                    important_pass,
+                );
+                if recording {
+                    self.record_inline_style(
+                        style_attr,
+                        css_vars,
+                        &mut records,
+                        &mut order,
+                        important_pass,
+                    );
+                }
             }
         }
 
         // The font is final now; `ch` lengths that the cascade dropped for
         // want of a font can finally be applied.
         self.resolve_ch_lengths(&mut style, &ch_pending);
+
+        // A `none`/`hidden` side has a zero used width, whichever of width
+        // and style was declared last (`border: 5px solid; border-style: none`
+        // used to keep the 5px frame).
+        zero_width_of_borderless_sides(&mut style);
 
         if recording {
             let id = attributes.get("id").cloned();
@@ -3802,6 +4069,7 @@ impl Engine {
         css_vars: &HashMap<String, String>,
         records: &mut Vec<DeclarationRecord>,
         order: &mut usize,
+        important_pass: bool,
     ) {
         for declaration in style_attr.split(';') {
             let declaration = declaration.trim();
@@ -3809,15 +4077,19 @@ impl Engine {
                 continue;
             }
             if let Some((property, value)) = declaration.split_once(':') {
+                let (value, important) = split_important(value.trim());
+                if important != important_pass {
+                    continue;
+                }
                 records.push(DeclarationRecord {
                     property: property.trim().to_lowercase(),
-                    value: self.resolve_css_variables(value.trim(), css_vars),
+                    value: self.resolve_css_variables(value, css_vars),
                     selector: "style=".to_string(),
                     // An inline declaration outranks any selector; CSS gives
                     // it a specificity above (1,0,0) rather than a tuple.
                     specificity: (usize::MAX, 0, 0),
                     origin: "author-inline",
-                    important: false,
+                    important,
                     order: *order,
                 });
                 *order += 1;
@@ -3885,9 +4157,11 @@ impl Engine {
     fn apply_inline_style(
         &self,
         style: &mut ComputedStyle,
+        parent_style: Option<&ComputedStyle>,
         style_attr: &str,
         css_vars: &HashMap<String, String>,
         ch_pending: &mut ChPending,
+        important_pass: bool,
     ) {
         for declaration in style_attr.split(';') {
             let declaration = declaration.trim();
@@ -3896,13 +4170,36 @@ impl Engine {
             }
             if let Some((property, value)) = declaration.split_once(':') {
                 let property = property.trim().to_lowercase();
-                let value = value.trim();
+                let (value, important) = split_important(value.trim());
+                if important != important_pass {
+                    continue;
+                }
                 // Resolve CSS variables in the value
                 let resolved_value = self.resolve_css_variables(value, css_vars);
                 ch_pending.note(&property, &resolved_value);
-                self.apply_style_property(style, &property, &resolved_value);
+                self.apply_cascaded(style, parent_style, &property, &resolved_value);
             }
         }
+    }
+
+    /// One cascaded declaration: `inherit` copies the parent's computed
+    /// value where `inherit_property` knows the property; everything else
+    /// goes through `apply_style_property`.
+    fn apply_cascaded(
+        &self,
+        style: &mut ComputedStyle,
+        parent_style: Option<&ComputedStyle>,
+        property: &str,
+        value: &str,
+    ) {
+        if value.trim().eq_ignore_ascii_case("inherit") {
+            if let Some(parent) = parent_style {
+                if Self::inherit_property(style, parent, property) {
+                    return;
+                }
+            }
+        }
+        self.apply_style_property(style, property, value);
     }
 
     /// Re-apply the cascade's `ch`-bearing winners now that the font is known.
@@ -3935,6 +4232,60 @@ impl Engine {
     }
 
     /// Apply a single CSS property to a computed style.
+    /// `property: inherit` — copy the parent's computed value (CSS Cascade 4
+    /// §7.3.1). Returns false for a property this does not know, which then
+    /// falls through to `apply_style_property`'s old keep-what-you-have
+    /// behaviour.
+    ///
+    /// Keeping what you have was only right when nothing had overwritten the
+    /// parent seed. The UA arm overwrites it for links (`a { color: inherit }`
+    /// stayed #0000EE) and form controls (`input { font-family: inherit }`
+    /// stayed Arial), and a lower-specificity author value survived too.
+    fn inherit_property(
+        style: &mut ComputedStyle,
+        parent: &ComputedStyle,
+        property: &str,
+    ) -> bool {
+        match property {
+            "color" => style.color = parent.color,
+            "font-family" => style.font_family = parent.font_family.clone(),
+            "font-size" => style.font_size = parent.font_size.clone(),
+            "font-weight" => style.font_weight = parent.font_weight,
+            "font-style" => style.font_style = parent.font_style,
+            "font-stretch" => style.font_stretch = parent.font_stretch,
+            "line-height" => style.line_height = parent.line_height.clone(),
+            "font" => {
+                style.font_family = parent.font_family.clone();
+                style.font_size = parent.font_size.clone();
+                style.font_weight = parent.font_weight;
+                style.font_style = parent.font_style;
+                style.font_stretch = parent.font_stretch;
+                style.line_height = parent.line_height.clone();
+            }
+            "letter-spacing" => style.letter_spacing = parent.letter_spacing.clone(),
+            "word-spacing" => style.word_spacing = parent.word_spacing.clone(),
+            "text-align" => style.text_align = parent.text_align,
+            "text-transform" => style.text_transform = parent.text_transform,
+            "white-space" => style.white_space = parent.white_space,
+            "word-break" => style.word_break = parent.word_break,
+            "overflow-wrap" | "word-wrap" => style.overflow_wrap = parent.overflow_wrap,
+            "line-break" => style.line_break = parent.line_break,
+            "background-color" => style.background_color = parent.background_color,
+            "border-color" => {
+                style.border_top_color = parent.border_top_color;
+                style.border_right_color = parent.border_right_color;
+                style.border_bottom_color = parent.border_bottom_color;
+                style.border_left_color = parent.border_left_color;
+            }
+            "border-top-color" => style.border_top_color = parent.border_top_color,
+            "border-right-color" => style.border_right_color = parent.border_right_color,
+            "border-bottom-color" => style.border_bottom_color = parent.border_bottom_color,
+            "border-left-color" => style.border_left_color = parent.border_left_color,
+            _ => return false,
+        }
+        true
+    }
+
     fn apply_style_property(&self, style: &mut ComputedStyle, property: &str, value: &str) {
         let value = value.trim();
 
@@ -4239,6 +4590,11 @@ impl Engine {
                 // whole value to parse_length, so `border: 2px solid #333` was
                 // silently dropped and only a bare `border: 2px` ever applied.
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    let border_style = border_style_keyword(value);
+                    style.border_top_style = border_style;
+                    style.border_right_style = border_style;
+                    style.border_bottom_style = border_style;
+                    style.border_left_style = border_style;
                     style.border_top_width = width.clone();
                     style.border_right_width = width.clone();
                     style.border_bottom_width = width.clone();
@@ -4248,6 +4604,36 @@ impl Engine {
                         style.border_right_color = color;
                         style.border_bottom_color = color;
                         style.border_left_color = color;
+                    }
+                }
+            }
+            "border-style" => {
+                // 1–4 keywords, standard sides expansion. `none`/`hidden`
+                // widths are zeroed after the cascade (zero_width_of_borderless_sides).
+                let styles: Vec<rustkit_css::BorderStyle> = value
+                    .split_whitespace()
+                    .filter_map(rustkit_css::BorderStyle::from_keyword)
+                    .collect();
+                let (t, r, b, l) = match styles[..] {
+                    [a] => (a, a, a, a),
+                    [a, b] => (a, b, a, b),
+                    [a, b, c] => (a, b, c, b),
+                    [a, b, c, d] => (a, b, c, d),
+                    _ => return,
+                };
+                style.border_top_style = t;
+                style.border_right_style = r;
+                style.border_bottom_style = b;
+                style.border_left_style = l;
+            }
+            "border-top-style" | "border-right-style" | "border-bottom-style"
+            | "border-left-style" => {
+                if let Some(s) = rustkit_css::BorderStyle::from_keyword(value.trim()) {
+                    match property {
+                        "border-top-style" => style.border_top_style = s,
+                        "border-right-style" => style.border_right_style = s,
+                        "border-bottom-style" => style.border_bottom_style = s,
+                        _ => style.border_left_style = s,
                     }
                 }
             }
@@ -4262,6 +4648,7 @@ impl Engine {
             }
             "border-top" => {
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    style.border_top_style = border_style_keyword(value);
                     style.border_top_width = width;
                     if let Some(color) = color {
                         style.border_top_color = color;
@@ -4270,6 +4657,7 @@ impl Engine {
             }
             "border-right" => {
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    style.border_right_style = border_style_keyword(value);
                     style.border_right_width = width;
                     if let Some(color) = color {
                         style.border_right_color = color;
@@ -4278,6 +4666,7 @@ impl Engine {
             }
             "border-bottom" => {
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    style.border_bottom_style = border_style_keyword(value);
                     style.border_bottom_width = width;
                     if let Some(color) = color {
                         style.border_bottom_color = color;
@@ -4286,6 +4675,7 @@ impl Engine {
             }
             "border-left" => {
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    style.border_left_style = border_style_keyword(value);
                     style.border_left_width = width;
                     if let Some(color) = color {
                         style.border_left_color = color;
@@ -4334,30 +4724,38 @@ impl Engine {
                 }
             }
             "flex" => {
-                // Shorthand: flex: <grow> [<shrink>] [<basis>]
+                // Shorthand: flex: <grow> [<shrink>] [<basis>].
+                //
+                // Two rules the naive positional read got wrong (hiwave-windows
+                // #66): `flex: <number>` sets basis to 0, not auto — that is
+                // what makes `flex: 1` divide the container instead of sizing
+                // to content — and CSS allows `flex: <grow> <basis>`, so a
+                // second value that does NOT parse as a bare number is the
+                // basis, not a shrink of 200.
                 let parts: Vec<&str> = value.split_whitespace().collect();
-                if parts.len() >= 1 {
-                    if let Ok(grow) = parts[0].parse::<f32>() {
+                if let Some(first) = parts.first() {
+                    if let Ok(grow) = first.parse::<f32>() {
                         style.flex_grow = grow;
+                        if parts.len() == 1 {
+                            style.flex_shrink = 1.0;
+                            style.flex_basis = rustkit_css::FlexBasis::Length(0.0);
+                        }
                     }
                 }
                 if parts.len() >= 2 {
-                    if let Ok(shrink) = parts[1].parse::<f32>() {
-                        style.flex_shrink = shrink;
+                    match parts[1].parse::<f32>() {
+                        Ok(shrink) => {
+                            style.flex_shrink = shrink;
+                            style.flex_basis = rustkit_css::FlexBasis::Length(0.0);
+                        }
+                        Err(_) => {
+                            style.flex_shrink = 1.0;
+                            style.flex_basis = parse_flex_basis(parts[1]);
+                        }
                     }
                 }
                 if parts.len() >= 3 {
-                    if let Some(length) = parse_length(parts[2]) {
-                        match length {
-                            rustkit_css::Length::Px(px) => {
-                                style.flex_basis = rustkit_css::FlexBasis::Length(px)
-                            }
-                            rustkit_css::Length::Percent(pct) => {
-                                style.flex_basis = rustkit_css::FlexBasis::Percent(pct)
-                            }
-                            _ => {}
-                        }
-                    }
+                    style.flex_basis = parse_flex_basis(parts[2]);
                 }
             }
             "flex-direction" => {
@@ -4437,6 +4835,14 @@ impl Engine {
                     style.column_gap = length;
                 }
             }
+            "column-count" => match value.trim() {
+                "auto" => style.column_count = None,
+                v => {
+                    if let Some(n) = v.parse::<u32>().ok().filter(|n| *n >= 1) {
+                        style.column_count = Some(n);
+                    }
+                }
+            },
             "order" => {
                 if let Ok(order) = value.parse::<i32>() {
                     style.order = order;
@@ -4492,12 +4898,18 @@ impl Engine {
                 };
             }
             "border-radius" => {
-                // Parse border-radius (shorthand: all corners same)
-                if let Some(length) = rustkit_css::parse_length(value) {
-                    style.border_top_left_radius = length.clone();
-                    style.border_top_right_radius = length.clone();
-                    style.border_bottom_right_radius = length.clone();
-                    style.border_bottom_left_radius = length;
+                // 1–4 values in box order: top-left, top-right,
+                // bottom-right, bottom-left (CSS Backgrounds 3 §5.1). Only
+                // the one-value form used to parse; `8px 8px 0 0` (the
+                // top-rounded card/tab idiom) failed parse_length and the
+                // whole declaration was dropped, leaving square corners.
+                // The `h / v` elliptical form stays unparsed: radii are one
+                // scalar per corner (ledgered).
+                if let Some([tl, tr, br, bl]) = parse_border_radius_shorthand(value) {
+                    style.border_top_left_radius = tl;
+                    style.border_top_right_radius = tr;
+                    style.border_bottom_right_radius = br;
+                    style.border_bottom_left_radius = bl;
                 }
             }
             "border-top-left-radius" => {
@@ -4659,30 +5071,36 @@ impl Engine {
                 }
             }
             "text-decoration" | "text-decoration-line" => {
-                match value.trim().to_lowercase().as_str() {
-                    "none" => style.text_decoration_line = rustkit_css::TextDecorationLine::NONE,
-                    "underline" => {
-                        style.text_decoration_line = rustkit_css::TextDecorationLine::UNDERLINE
-                    }
-                    "overline" => {
-                        style.text_decoration_line = rustkit_css::TextDecorationLine::OVERLINE
-                    }
-                    "line-through" => {
-                        style.text_decoration_line = rustkit_css::TextDecorationLine::LINE_THROUGH
-                    }
-                    _ => {
-                        // Handle combined values like "underline line-through"
-                        let mut decoration = rustkit_css::TextDecorationLine::NONE;
-                        for part in value.split_whitespace() {
-                            match part.to_lowercase().as_str() {
-                                "underline" => decoration.underline = true,
-                                "overline" => decoration.overline = true,
-                                "line-through" => decoration.line_through = true,
-                                _ => {}
-                            }
+                // `text-decoration` is a shorthand and may carry a colour and
+                // a style as well as the line. Only the line is read here; a
+                // value naming no line keyword at all (a colour on its own)
+                // leaves the existing line alone instead of clearing it
+                // (hiwave-windows #64).
+                let mut line = rustkit_css::TextDecorationLine::NONE;
+                let mut saw_line_keyword = false;
+                for part in value.split_whitespace() {
+                    match part.to_lowercase().as_str() {
+                        "underline" => {
+                            line.underline = true;
+                            saw_line_keyword = true;
                         }
-                        style.text_decoration_line = decoration;
+                        "overline" => {
+                            line.overline = true;
+                            saw_line_keyword = true;
+                        }
+                        "line-through" => {
+                            line.line_through = true;
+                            saw_line_keyword = true;
+                        }
+                        "none" => {
+                            line = rustkit_css::TextDecorationLine::NONE;
+                            saw_line_keyword = true;
+                        }
+                        _ => {}
                     }
+                }
+                if saw_line_keyword {
+                    style.text_decoration_line = line;
                 }
             }
             "text-decoration-color" => {
@@ -5125,6 +5543,133 @@ impl Engine {
                 // Unknown property, do nothing
             }
         }
+    }
+
+    /// Stop the in-flight navigation for a view.
+    ///
+    /// Returns `true` if the view exists. Safe and idempotent when nothing is
+    /// loading — stopping an idle view simply bumps the generation, which no
+    /// in-flight load is holding.
+    ///
+    /// WHAT THIS DOES AND DOES NOT DO, because the distinction is the whole
+    /// honesty of the feature:
+    ///  - DOES: guarantee the engine will not apply the result of the
+    ///    abandoned load. No document swap, no layout, no paint, no
+    ///    NavigationCompleted event, no history entry.
+    ///  - DOES NOT: abort the underlying socket. `rustkit-net`'s `fetch` has
+    ///    no cancellation surface today, so the request completes in the
+    ///    background and its bytes are dropped. That is a separate unit
+    ///    (thread a cancel token through the loader) and is NOT claimed here.
+    ///
+    /// This is deliberately NOT the `DownloadManager` cancel path in
+    /// rustkit-net — that one cancels FILE DOWNLOADS and has nothing to do
+    /// with page loads. Conflating them was the first wrong turn on this unit.
+    pub fn stop(&mut self, id: EngineViewId) -> bool {
+        match self.views.get_mut(&id) {
+            Some(view) => {
+                view.nav_generation = view.nav_generation.wrapping_add(1);
+                // Only a load that was actually in flight has anything to
+                // report: the state machine must leave Provisional/Committed
+                // (or `is_loading` stays true until the next start), and UI
+                // listeners must not see "stopped" spam from a Stop mash on
+                // an idle view.
+                if view.navigation.is_loading() {
+                    info!(?id, "Navigation stopped");
+                    let _ = view.navigation.fail_navigation("stopped".to_string());
+                    let _ = self.event_tx.send(EngineEvent::NavigationFailed {
+                        view_id: id,
+                        url: view.url.clone().unwrap_or_else(|| {
+                            Url::parse("about:blank").expect("about:blank parses")
+                        }),
+                        error: "stopped".to_string(),
+                    });
+                } else {
+                    trace!(?id, "Stop on an idle view: generation bumped, nothing to cancel");
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Has this navigation been superseded by a `stop` or a newer load?
+    ///
+    /// A view that vanished mid-load counts as superseded — the alternative is
+    /// writing into a view that no longer exists.
+    fn nav_superseded(&self, id: EngineViewId, generation: u64) -> bool {
+        match self.views.get(&id) {
+            Some(view) => view.nav_generation != generation,
+            None => true,
+        }
+    }
+
+    /// Go back one entry in the view's session history and load it.
+    ///
+    /// Returns `Ok(false)` when there is nowhere to go — pressing Back on the
+    /// first page is a no-op, not an error. The cursor moves FIRST, then the
+    /// landed-on entry is loaded as a REPLACE against itself, so the traversal
+    /// neither pushes a duplicate nor truncates the forward stack the user is
+    /// walking, and the entry's pushState state survives.
+    ///
+    /// This is the capability the hybrid shell rents from Chromium as
+    /// `evaluate_script("history.back()")`. Here it is ours: SessionHistory
+    /// cursor + our own loader, no JavaScript, no WebView2.
+    pub async fn go_back(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
+        let target = {
+            let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+            view.navigation.go_back().cloned()
+        };
+        match target {
+            Some(url) => {
+                self.load_url_with_disposition(id, url, true).await?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Go forward one entry. Mirror of [`Engine::go_back`] in every respect.
+    pub async fn go_forward(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
+        let target = {
+            let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+            view.navigation.go_forward().cloned()
+        };
+        match target {
+            Some(url) => {
+                self.load_url_with_disposition(id, url, true).await?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Re-load the current history entry. `Ok(false)` if the view has never
+    /// finished a navigation (nothing to reload). A reload is a REPLACE — it
+    /// must not push a duplicate of the page onto its own back stack.
+    pub async fn reload(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
+        let target = {
+            let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+            view.navigation.current_url().cloned()
+        };
+        match target {
+            Some(url) => {
+                self.load_url_with_disposition(id, url, true).await?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Test hook: advance a view's navigation generation and return the new
+    /// value, exactly as `load_url` does before its first await.
+    ///
+    /// Exists so the stop CONTRACT can be tested without standing up a network
+    /// fetch. Kept `cfg(test)` so it cannot become a production back door.
+    #[cfg(test)]
+    fn bump_nav_generation_for_test(&mut self, id: EngineViewId) -> u64 {
+        let view = self.views.get_mut(&id).expect("view exists");
+        view.nav_generation = view.nav_generation.wrapping_add(1);
+        view.nav_generation
     }
 
     /// Extract CSS text from <style> elements in the document.
@@ -5754,26 +6299,38 @@ impl Engine {
             }
         }
 
-        let mut loaded = 0;
-        for (key, family, url) in targets {
+        // Fetch concurrently. One at a time, YouTube's 135 declared faces
+        // took 23s — most of the page's 31s and past the real-site board's
+        // 30s LOADS budget. `buffered` (not unordered) keeps results in rule
+        // order, so the cache is filled exactly as the sequential loop did.
+        use futures::stream::{self, StreamExt};
+        const MAX_IN_FLIGHT: usize = 16;
+        let loader = &self.loader;
+        let fetched: Vec<_> = stream::iter(targets.into_iter().map(|(key, family, url)| async move {
             info!(%family, %url, "Loading web font");
-            match self.loader.fetch(Request::get(url.clone())).await {
+            let outcome = match loader.fetch(Request::get(url.clone())).await {
                 Ok(response) if response.ok() => match response.bytes().await {
-                    Ok(bytes) => {
-                        self.font_loader.insert_loaded(key, bytes.to_vec());
-                        loaded += 1;
-                    }
-                    Err(e) => {
-                        warn!(%family, %url, ?e, "Failed to read web font body");
-                        self.font_loader.mark_failed(key);
-                    }
+                    Ok(bytes) => Ok(bytes.to_vec()),
+                    Err(e) => Err(format!("Failed to read web font body: {e:?}")),
                 },
-                Ok(response) => {
-                    warn!(%family, %url, status = %response.status, "Failed to fetch web font");
-                    self.font_loader.mark_failed(key);
+                Ok(response) => Err(format!("Failed to fetch web font: status {}", response.status)),
+                Err(e) => Err(format!("Failed to fetch web font: {e:?}")),
+            };
+            (key, family, url, outcome)
+        }))
+        .buffered(MAX_IN_FLIGHT)
+        .collect()
+        .await;
+
+        let mut loaded = 0;
+        for (key, family, url, outcome) in fetched {
+            match outcome {
+                Ok(bytes) => {
+                    self.font_loader.insert_loaded(key, bytes);
+                    loaded += 1;
                 }
-                Err(e) => {
-                    warn!(%family, %url, ?e, "Failed to fetch web font");
+                Err(reason) => {
+                    warn!(%family, %url, %reason, "Web font not loaded");
                     self.font_loader.mark_failed(key);
                 }
             }
@@ -5878,8 +6435,146 @@ impl Engine {
     ///
     /// `ancestors` is a list of (tag_name, classes, id) tuples from parent to root.
     /// `siblings_before` is a list of (tag_name, classes, id) tuples for preceding siblings.
-    /// `element_index` is the 0-based index of this element among its siblings.
-    /// `sibling_count` is the total number of siblings.
+    /// `sib` carries the element's position among its siblings (see
+    /// [`SiblingContext`]).
+    /// Cheap necessary condition for `selector_matches`: can this selector's
+    /// SUBJECT (the last compound of any list member) possibly be this
+    /// element? `false` means `selector_matches` would return false too, so
+    /// the cascade can skip the full matcher.
+    ///
+    /// Why it exists: the cascade tests every rule against every element,
+    /// and `selector_matches` re-validates, re-splits and re-tokenizes the
+    /// selector string on each call. Wikipedia (~3k rules x ~4k elements)
+    /// spent 33-41s per style pass there, so every real site with a real
+    /// stylesheet failed the 30s load budget on the real-site board.
+    ///
+    /// The key is derived with the matcher's OWN validity check, comma split,
+    /// pseudo-element guard and tokenizer, and only from constraints
+    /// `simple_selector_matches_with_pseudo` enforces unconditionally on the
+    /// subject (its id, its leading class, its tag), so it can never reject
+    /// a rule the matcher would accept. Keys are cached per selector string.
+    fn rule_may_match(
+        &self,
+        selector: &str,
+        tag_name: &str,
+        attributes: &HashMap<String, String>,
+    ) -> bool {
+        /// One list member's subject requirements; `None` fields are
+        /// unconstrained.
+        #[derive(Default)]
+        struct SubjectKey {
+            id: Option<String>,
+            tag: Option<String>,
+            class: Option<String>,
+        }
+
+        thread_local! {
+            static KEYS: std::cell::RefCell<HashMap<String, Rc<Vec<SubjectKey>>>> =
+                std::cell::RefCell::new(HashMap::new());
+        }
+
+        // Mirrors the per-branch requirements of
+        // simple_selector_matches_with_pseudo for the subject compound.
+        fn key_for_compound(compound: &str) -> SubjectKey {
+            if compound == "*" || compound == ":root" {
+                return SubjectKey::default();
+            }
+            if let Some(id) = compound.strip_prefix('#') {
+                // The matcher compares the WHOLE remainder to the id.
+                return SubjectKey {
+                    id: Some(id.to_string()),
+                    ..Default::default()
+                };
+            }
+            let stop = |c: char| c == '.' || c == '#' || c == ':' || c == '[';
+            if compound.starts_with('.')
+                && !compound.contains(|c| c == '#' || c == '[' || c == ':')
+            {
+                // Every listed class is required; the first one suffices.
+                return SubjectKey {
+                    class: compound[1..]
+                        .split('.')
+                        .find(|s| !s.is_empty())
+                        .map(str::to_string),
+                    ..Default::default()
+                };
+            }
+            let tag_end = compound.find(stop).unwrap_or(compound.len());
+            let tag_part = &compound[..tag_end];
+            let rest = &compound[tag_end..];
+            let class = rest.strip_prefix('.').map(|r| {
+                let end = r.find(stop).unwrap_or(r.len());
+                r[..end].to_string()
+            });
+            SubjectKey {
+                id: None,
+                tag: (!tag_part.is_empty()).then(|| tag_part.to_ascii_lowercase()),
+                class,
+            }
+        }
+
+        fn keys_for(engine: &Engine, selector: &str, out: &mut Vec<SubjectKey>) {
+            let selector = selector.trim();
+            if !Engine::selector_list_is_valid(selector) {
+                return;
+            }
+            if selector.contains(',') {
+                let members = Engine::split_top_level_commas(selector);
+                if members.len() != 1 || members[0] != selector {
+                    for m in members {
+                        keys_for(engine, m, out);
+                    }
+                    return;
+                }
+            }
+            if selector.contains("::")
+                || selector.ends_with(":before")
+                || selector.ends_with(":after")
+                || selector.contains(":before ")
+                || selector.contains(":after ")
+            {
+                return;
+            }
+            let tokens = engine.tokenize_selector(selector);
+            match tokens.last() {
+                Some((compound, combinator)) if combinator.is_empty() => {
+                    out.push(key_for_compound(compound))
+                }
+                _ => {}
+            }
+        }
+
+        let keys = KEYS.with(|cache| {
+            if let Some(k) = cache.borrow().get(selector) {
+                return k.clone();
+            }
+            let mut v = Vec::new();
+            keys_for(self, selector, &mut v);
+            let v = Rc::new(v);
+            let mut cache = cache.borrow_mut();
+            // Selectors are page-controlled; keep a runaway page from
+            // growing this without bound.
+            if cache.len() > 100_000 {
+                cache.clear();
+            }
+            cache.insert(selector.to_string(), v.clone());
+            v
+        });
+
+        keys.iter().any(|k| {
+            k.id.as_deref()
+                .map_or(true, |id| attributes.get("id").map(String::as_str) == Some(id))
+                && k.tag
+                    .as_deref()
+                    .map_or(true, |t| t.eq_ignore_ascii_case(tag_name))
+                && k.class.as_deref().map_or(true, |c| {
+                    attributes
+                        .get("class")
+                        .is_some_and(|cl| cl.split_whitespace().any(|x| x == c))
+                })
+        })
+    }
+
     fn selector_matches(
         &self,
         selector: &str,
@@ -5887,24 +6582,29 @@ impl Engine {
         attributes: &HashMap<String, String>,
         ancestors: &[(String, Vec<String>, Option<String>)],
         siblings_before: &[(String, Vec<String>, Option<String>)],
-        element_index: usize,
-        sibling_count: usize,
+        sib: SiblingContext,
     ) -> bool {
+        #[cfg(test)]
+        FULL_SELECTOR_MATCHES.with(|n| n.set(n.get() + 1));
         let selector = selector.trim();
 
-        // Handle multiple selectors (comma-separated)
+        // Selectors 4 §3.9: a selector list containing an invalid selector is
+        // invalid as a whole and the rule is dropped — `.a:frobnicate, .b {}`
+        // styles NOTHING, not `.b`. An unknown pseudo-class used to fall to
+        // the matcher's `_ => true` arm and match every element instead.
+        if !Self::selector_list_is_valid(selector) {
+            return false;
+        }
+
+        // Handle multiple selectors (comma-separated at the top level —
+        // `:is(a, b)` is one member).
         if selector.contains(',') {
-            return selector.split(',').any(|s| {
-                self.selector_matches(
-                    s.trim(),
-                    tag_name,
-                    attributes,
-                    ancestors,
-                    siblings_before,
-                    element_index,
-                    sibling_count,
-                )
-            });
+            let members = Self::split_top_level_commas(selector);
+            if members.len() != 1 || members[0] != selector {
+                return members.into_iter().any(|s| {
+                    self.selector_matches(s, tag_name, attributes, ancestors, siblings_before, sib)
+                });
+            }
         }
 
         // A pseudo-ELEMENT selector styles a generated box, never its host:
@@ -5938,13 +6638,7 @@ impl Engine {
             return false; // Simplified - we'll handle this below
         }
 
-        if !self.simple_selector_matches_with_pseudo(
-            &last_token.0,
-            tag_name,
-            attributes,
-            element_index,
-            sibling_count,
-        ) {
+        if !self.simple_selector_matches_with_pseudo(&last_token.0, tag_name, attributes, sib) {
             return false;
         }
 
@@ -6054,6 +6748,10 @@ impl Engine {
         let mut in_brackets = false;
         let mut in_quotes = false;
         let mut quote_char = ' ';
+        // Functional pseudo-class arguments (`:is(a, b)`, `:not(.x > .y)`)
+        // are part of the compound: whitespace and combinator characters
+        // inside parentheses must not split the token.
+        let mut paren_depth = 0usize;
 
         while let Some(c) = chars.next() {
             if in_quotes {
@@ -6084,6 +6782,23 @@ impl Engine {
             }
 
             if in_brackets {
+                current.push(c);
+                continue;
+            }
+
+            if c == '(' {
+                paren_depth += 1;
+                current.push(c);
+                continue;
+            }
+
+            if c == ')' {
+                paren_depth = paren_depth.saturating_sub(1);
+                current.push(c);
+                continue;
+            }
+
+            if paren_depth > 0 {
                 current.push(c);
                 continue;
             }
@@ -6142,8 +6857,7 @@ impl Engine {
         selector: &str,
         tag_name: &str,
         attributes: &HashMap<String, String>,
-        element_index: usize,
-        sibling_count: usize,
+        sib: SiblingContext,
     ) -> bool {
         // Universal selector
         if selector == "*" {
@@ -6239,8 +6953,7 @@ impl Engine {
                     &pseudo_name,
                     pseudo_arg.as_deref(),
                     tag_name,
-                    element_index,
-                    sibling_count,
+                    sib,
                     attributes,
                 ) {
                     return false;
@@ -6332,61 +7045,372 @@ impl Engine {
         }
     }
 
+    /// Pseudo-classes that are false for every element of the first static
+    /// frame: nothing is hovered, pressed, focused, or fragment-targeted,
+    /// and no link has been visited. Shared by the subject matcher and the
+    /// ancestor/sibling matcher so a compound like `.card:hover` fails in
+    /// either position.
+    fn pseudo_class_is_static_false(name: &str) -> bool {
+        matches!(
+            name,
+            "hover"
+                | "focus"
+                | "focus-within"
+                | "focus-visible"
+                | "active"
+                | "visited"
+                | "target"
+                | "target-within"
+        )
+    }
+
+    /// Pseudo-classes the matcher can decide. Anything else makes the
+    /// selector invalid (see `selector_list_is_valid`).
+    fn pseudo_class_is_supported(name: &str) -> bool {
+        Self::pseudo_class_is_static_false(name)
+            || matches!(
+                name,
+                "root"
+                    | "scope"
+                    | "first-child"
+                    | "last-child"
+                    | "only-child"
+                    | "nth-child"
+                    | "nth-last-child"
+                    | "first-of-type"
+                    | "last-of-type"
+                    | "only-of-type"
+                    | "nth-of-type"
+                    | "nth-last-of-type"
+                    | "empty"
+                    | "not"
+                    | "is"
+                    | "where"
+                    | "matches"
+                    | "-webkit-any"
+                    | "has"
+                    | "link"
+                    | "any-link"
+                    | "disabled"
+                    | "enabled"
+                    | "checked"
+                    | "indeterminate"
+                    | "default"
+                    | "required"
+                    | "optional"
+                    | "read-only"
+                    | "read-write"
+                    | "placeholder-shown"
+                    | "valid"
+                    | "invalid"
+                    | "user-valid"
+                    | "user-invalid"
+                    | "in-range"
+                    | "out-of-range"
+                    | "autofill"
+                    | "defined"
+                    | "lang"
+                    | "dir"
+                    | "fullscreen"
+                    | "modal"
+                    | "popover-open"
+                    | "picture-in-picture"
+                    | "playing"
+                    | "paused"
+                    | "muted"
+                    | "host"
+                    | "host-context"
+                    | "first-line"
+                    | "first-letter"
+            )
+    }
+
+    /// Selectors 4 §3.9 validity, restricted to what the matcher decides
+    /// here: every pseudo-class in the list (outside `:is()`/`:where()`,
+    /// which are forgiving) must be one the engine knows. Pseudo-elements
+    /// (`::x`) and attribute/quoted content are skipped. Chrome drops a rule
+    /// whose selector list carries an unknown pseudo-class, including a
+    /// vendor-prefixed one from another engine (`:-moz-focusring`).
+    fn selector_list_is_valid(selector: &str) -> bool {
+        let chars: Vec<char> = selector.chars().collect();
+        let mut i = 0;
+        let mut in_brackets = false;
+        let mut quote: Option<char> = None;
+        // Depth inside a forgiving selector list (`:is(...)`/`:where(...)`),
+        // where unknown names are ignored rather than fatal.
+        let mut forgiving_depth = 0usize;
+        let mut paren_depth: Vec<bool> = Vec::new(); // true = this paren is forgiving
+        while i < chars.len() {
+            let c = chars[i];
+            if let Some(q) = quote {
+                if c == q {
+                    quote = None;
+                }
+                i += 1;
+                continue;
+            }
+            match c {
+                '"' | '\'' => quote = Some(c),
+                '[' => in_brackets = true,
+                ']' => in_brackets = false,
+                '(' => paren_depth.push(false),
+                ')' => {
+                    if paren_depth.pop() == Some(true) {
+                        forgiving_depth -= 1;
+                    }
+                }
+                ':' if !in_brackets => {
+                    if chars.get(i + 1) == Some(&':') {
+                        // Pseudo-element: skip its name.
+                        i += 2;
+                        while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '-') {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    let start = i + 1;
+                    let mut end = start;
+                    while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '-')
+                    {
+                        end += 1;
+                    }
+                    let name: String = chars[start..end].iter().collect();
+                    let functional = chars.get(end) == Some(&'(');
+                    let name_l = name.to_ascii_lowercase();
+                    // Legacy single-colon pseudo-elements are valid selectors
+                    // (they style a generated box; the host guard above
+                    // keeps them off the element itself).
+                    let known = Self::pseudo_class_is_supported(&name_l)
+                        || matches!(name_l.as_str(), "before" | "after");
+                    if !known && forgiving_depth == 0 {
+                        return false;
+                    }
+                    if functional {
+                        let forgiving = matches!(
+                            name_l.as_str(),
+                            "is" | "where" | "matches" | "-webkit-any"
+                        );
+                        if forgiving {
+                            forgiving_depth += 1;
+                        }
+                        paren_depth.push(forgiving);
+                        i = end + 1;
+                        continue;
+                    }
+                    i = end;
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        true
+    }
+
+    /// Split a selector list on the commas that are not inside parentheses,
+    /// brackets, or quotes — `:is(a, b), c` is two members, not three.
+    fn split_top_level_commas(selector: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        let mut depth = 0i32;
+        let mut in_brackets = false;
+        let mut quote: Option<char> = None;
+        let mut start = 0;
+        for (i, c) in selector.char_indices() {
+            if let Some(q) = quote {
+                if c == q {
+                    quote = None;
+                }
+                continue;
+            }
+            match c {
+                '"' | '\'' => quote = Some(c),
+                '[' => in_brackets = true,
+                ']' => in_brackets = false,
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 && !in_brackets => {
+                    let part = selector[start..i].trim();
+                    if !part.is_empty() {
+                        out.push(part);
+                    }
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        let part = selector[start..].trim();
+        if !part.is_empty() {
+            out.push(part);
+        }
+        out
+    }
+
+    /// `:is()`/`:where()`/`:not()` argument: a selector list of compound
+    /// selectors, evaluated against the subject. A member with a combinator
+    /// needs the ancestor chain this matcher does not carry and counts as
+    /// not matching (under-match, ledgered) rather than matching everything.
+    fn any_compound_in_list_matches(
+        &self,
+        list: &str,
+        tag_name: &str,
+        attributes: &HashMap<String, String>,
+        sib: SiblingContext,
+    ) -> bool {
+        Self::split_top_level_commas(list).into_iter().any(|member| {
+            if Self::selector_has_combinator(member) {
+                return false;
+            }
+            self.simple_selector_matches_with_pseudo(member, tag_name, attributes, sib)
+        })
+    }
+
+    /// True when a selector has a descendant/child/sibling combinator
+    /// outside parentheses and brackets.
+    fn selector_has_combinator(selector: &str) -> bool {
+        let mut depth = 0i32;
+        let mut in_brackets = false;
+        for c in selector.trim().chars() {
+            match c {
+                '[' => in_brackets = true,
+                ']' => in_brackets = false,
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ' ' | '>' | '+' | '~' if depth == 0 && !in_brackets => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn is_form_control_tag(tag_name: &str) -> bool {
+        matches!(tag_name, "input" | "textarea" | "select" | "button")
+    }
+
     /// Match a pseudo-class.
     fn match_pseudo_class(
         &self,
         name: &str,
         arg: Option<&str>,
         tag_name: &str,
-        element_index: usize,
-        sibling_count: usize,
+        sib: SiblingContext,
         attributes: &HashMap<String, String>,
     ) -> bool {
+        let tag = tag_name.to_ascii_lowercase();
+        let tag = tag.as_str();
+        let input_type = attributes
+            .get("type")
+            .map(|t| t.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        let is_control = Self::is_form_control_tag(tag);
+        let value_is_empty = attributes.get("value").map_or(true, |v| v.is_empty());
         match name {
-            "first-child" => element_index == 0,
-            "last-child" => element_index == sibling_count.saturating_sub(1),
-            "only-child" => sibling_count == 1,
-            "nth-child" => {
-                if let Some(arg) = arg {
-                    self.match_nth(arg, element_index + 1) // nth-child is 1-indexed
-                } else {
-                    false
-                }
+            "first-child" => sib.index == 0,
+            "last-child" => sib.index == sib.count.saturating_sub(1),
+            "only-child" => sib.count == 1,
+            "nth-child" => arg.is_some_and(|a| self.match_nth(a, sib.index + 1)),
+            "nth-last-child" => arg.is_some_and(|a| self.match_nth(a, sib.count - sib.index)),
+            // Typed variants (Selectors 4 §14.4): position among siblings
+            // that share the element's tag. These used to fall to the
+            // catch-all and match EVERY element — `h2:first-of-type` styled
+            // every h2, `li:nth-of-type(2n)` every li.
+            "first-of-type" => sib.type_index == 0,
+            "last-of-type" => sib.type_index == sib.type_count.saturating_sub(1),
+            "only-of-type" => sib.type_count == 1,
+            "nth-of-type" => arg.is_some_and(|a| self.match_nth(a, sib.type_index + 1)),
+            "nth-last-of-type" => {
+                arg.is_some_and(|a| self.match_nth(a, sib.type_count - sib.type_index))
             }
-            "nth-last-child" => {
-                if let Some(arg) = arg {
-                    let from_end = sibling_count - element_index;
-                    self.match_nth(arg, from_end)
-                } else {
-                    false
-                }
+            // :not() takes a selector list; none of the members may match.
+            "not" => arg.map_or(true, |a| {
+                !self.any_compound_in_list_matches(a, tag_name, attributes, sib)
+            }),
+            // :is()/:where() select exactly their arguments. They used to
+            // match everything, so `:where(ul, ol) { padding: 0 }` (every
+            // modern reset) zeroed padding on every element.
+            "is" | "where" | "matches" | "-webkit-any" => arg.is_some_and(|a| {
+                self.any_compound_in_list_matches(a, tag_name, attributes, sib)
+            }),
+            // Relational: needs the subtree; under-match rather than style
+            // every element. Ledgered.
+            "has" => false,
+            // User-action and target pseudo-classes: nothing is hovered,
+            // focused, or targeted in the first static frame. `focus-within`
+            // and `focus-visible` used to fall to the catch-all below and
+            // MATCH EVERYTHING, so `.wrapper:focus-within .icon { color }`
+            // styled every icon as if its input were focused.
+            n if Self::pseudo_class_is_static_false(n) => false,
+            // Link pseudo-classes: an <a>/<area> with an href.
+            "link" | "any-link" => matches!(tag, "a" | "area") && attributes.contains_key("href"),
+            "disabled" => is_control && attributes.contains_key("disabled"),
+            "enabled" => is_control && !attributes.contains_key("disabled"),
+            "checked" => {
+                (tag == "input"
+                    && matches!(input_type.as_str(), "checkbox" | "radio")
+                    && attributes.contains_key("checked"))
+                    || (tag == "option" && attributes.contains_key("selected"))
             }
-            "not" => {
-                if let Some(arg) = arg {
-                    // :not() negates the inner selector
-                    // Pass element_index and sibling_count for pseudo-class support inside :not()
-                    // This enables :not(:first-child), :not(:nth-child(2)), etc.
-                    !self.simple_selector_matches_with_pseudo(
-                        arg,
-                        tag_name,
-                        attributes,
-                        element_index,
-                        sibling_count,
-                    )
-                } else {
-                    true
-                }
+            "indeterminate" | "default" | "autofill" | "user-valid" | "user-invalid" => false,
+            "required" => is_control && attributes.contains_key("required"),
+            "optional" => is_control && !attributes.contains_key("required"),
+            "read-write" => {
+                (matches!(tag, "input" | "textarea")
+                    && !attributes.contains_key("readonly")
+                    && !attributes.contains_key("disabled"))
+                    || attributes
+                        .get("contenteditable")
+                        .is_some_and(|v| v.is_empty() || v.eq_ignore_ascii_case("true"))
             }
-            "hover" | "focus" | "active" | "visited" => {
-                // Dynamic pseudo-classes - always false in static rendering
-                false
+            "read-only" => !self.match_pseudo_class("read-write", None, tag_name, sib, attributes),
+            // A text control showing its placeholder: has one and no value.
+            "placeholder-shown" => {
+                attributes.get("placeholder").is_some_and(|p| !p.is_empty())
+                    && ((tag == "input" && value_is_empty)
+                        || (tag == "textarea" && !sib.has_children))
             }
-            "disabled" => attributes.contains_key("disabled"),
-            "enabled" => !attributes.contains_key("disabled"),
-            "checked" => attributes.contains_key("checked"),
-            "empty" => false, // Would need DOM context
-            "root" => false,  // Handled separately
-            _ => true,        // Unknown pseudo-classes pass through
+            // Constraint validation on the static frame: the only constraint
+            // the parser sees is `required` on an empty control.
+            "invalid" => is_control && attributes.contains_key("required") && value_is_empty,
+            "valid" => is_control && !(attributes.contains_key("required") && value_is_empty),
+            "in-range" => {
+                tag == "input" && (attributes.contains_key("min") || attributes.contains_key("max"))
+            }
+            "out-of-range" => false,
+            // Selectors 4 §14.5: no children at all (whitespace text counts
+            // as a child; comments do not).
+            "empty" => !sib.has_children,
+            // Custom elements are undefined until script upgrades them;
+            // every built-in element is defined.
+            "defined" => !tag.contains('-'),
+            "lang" => arg.is_some_and(|a| {
+                let want = a
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_ascii_lowercase();
+                attributes.get("lang").is_some_and(|l| {
+                    let l = l.to_ascii_lowercase();
+                    l == want || l.starts_with(&format!("{want}-"))
+                })
+            }),
+            "dir" => arg.is_some_and(|a| {
+                let want = a.trim().to_ascii_lowercase();
+                let own = attributes
+                    .get("dir")
+                    .map(|d| d.to_ascii_lowercase())
+                    .unwrap_or_else(|| "ltr".to_string());
+                own == want
+            }),
+            "fullscreen" | "modal" | "popover-open" | "picture-in-picture" | "playing"
+            | "muted" | "host" | "host-context" => false,
+            "paused" => matches!(tag, "audio" | "video"),
+            // Legacy single-colon pseudo-elements style a generated box, not
+            // the host (`p:first-line { color }` must not recolor the p).
+            "first-line" | "first-letter" => false,
+            "root" | "scope" => tag == "html",
+            // Unknown pseudo-classes never reach here: the selector list is
+            // rejected as invalid up front (Selectors 4 §3.9), which is what
+            // Chrome does with the rule.
+            _ => false,
         }
     }
 
@@ -6517,8 +7541,28 @@ impl Engine {
                         }
                         current_start = i;
                         continue;
-                    } else if chars[i] == ':' || chars[i] == '[' {
-                        // Skip pseudo-classes and attribute selectors for ancestor matching
+                    } else if chars[i] == ':' {
+                        // Structural pseudo-classes need sibling context the
+                        // ancestor tuple does not carry, so they stay
+                        // permissive. User-action / target pseudo-classes
+                        // are decidable here — nothing is hovered, focused
+                        // or targeted in the static frame — and used to be
+                        // skipped along with them, so `.card:hover .title`
+                        // and `.wrapper:focus-within .icon` styled every
+                        // descendant as if the state were on.
+                        let start = i + 1;
+                        let mut end = start;
+                        while end < chars.len()
+                            && (chars[end].is_alphanumeric() || chars[end] == '-')
+                        {
+                            end += 1;
+                        }
+                        if Self::pseudo_class_is_static_false(&selector[start..end]) {
+                            return false;
+                        }
+                        break;
+                    } else if chars[i] == '[' {
+                        // Skip attribute selectors for ancestor matching
                         break;
                     }
                 }
@@ -6994,13 +8038,15 @@ impl Engine {
                     dest_rect,
                     object_fit,
                     opacity,
+                    current_color,
                 } => serde_json::json!({
                     "op": "image",
                     "url": url,
                     "src_rect": src_rect.as_ref().map(rect),
                     "dest_rect": rect(dest_rect),
                     "object_fit": format!("{:?}", object_fit),
-                    "opacity": opacity
+                    "opacity": opacity,
+                    "current_color": color(current_color)
                 }),
                 Cmd::BackgroundImage {
                     url,
@@ -7195,9 +8241,9 @@ impl Engine {
     ///   is a hardcoded Rust `match` on tag name, not parsed rules, so a
     ///   UA-set property has no selector to cite. Properties with no author
     ///   declaration carry `"winner": null` and `"origin": "user-agent-or-initial"`.
-    /// - **`!important` is recorded but not honoured by the cascade**, which
-    ///   orders by specificity alone. An `important: true` declaration that
-    ///   is not the winner is a real engine bug, and it is visible here.
+    /// - **`!important` is honoured** (normal pass, then important pass,
+    ///   inline last within each). An `important: true` declaration that
+    ///   loses to a normal one is a real engine bug, and it is visible here.
     pub fn export_style_json(
         &self,
         id: EngineViewId,
@@ -7308,9 +8354,10 @@ impl Engine {
                 "origins": "author and author-inline only — the UA stylesheet is a \
                             hardcoded match on tag name, not parsed rules, so it has no \
                             selector to cite",
-                "important": "recorded but NOT honoured by this cascade, which orders by \
-                              specificity alone; an important declaration that is not the \
-                              winner is an engine bug, not a reporting artefact",
+                "important": "honoured: important declarations apply after every normal \
+                              one (inline last within each level); an important declaration \
+                              that loses to a normal one is an engine bug, not a reporting \
+                              artefact",
                 "computed_properties": Self::COMPUTED_PROPERTIES,
             }
         });
@@ -7352,6 +8399,64 @@ impl Engine {
             .find(|(k, _)| k == property)
             .map(|(_, v)| serde_json::Value::String(v.clone()))
             .unwrap_or(serde_json::Value::Null)
+    }
+
+    /// Batch sizes and stack depths of the last frame (shell diagnostics /
+    /// screenshot harness).
+    pub fn get_render_stats(&self) -> RenderStats {
+        self.renderer
+            .as_ref()
+            .map(|r| r.get_render_stats())
+            .unwrap_or_default()
+    }
+
+    /// Render a view's current display list to `output_path` as PNG (plus a
+    /// JSON sidecar) and return the capture metadata.
+    #[cfg(windows)]
+    pub fn capture_view_screenshot(
+        &mut self,
+        id: EngineViewId,
+        output_path: &std::path::Path,
+    ) -> Result<ScreenshotMetadata, EngineError> {
+        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+        let display_list = view.display_list.as_ref();
+        let viewhost_id = view.viewhost_id;
+
+        let bounds = if let Some(headless_bounds) = view.headless_bounds {
+            headless_bounds
+        } else {
+            self.viewhost
+                .get_bounds(viewhost_id)
+                .map_err(|e| EngineError::ViewError(e.to_string()))?
+        };
+
+        if bounds.width == 0 || bounds.height == 0 {
+            return Err(EngineError::RenderError(format!(
+                "Cannot capture screenshot of zero-sized view: {}x{}",
+                bounds.width, bounds.height
+            )));
+        }
+
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_viewport_size(bounds.width, bounds.height);
+            let commands = display_list
+                .map(|dl| dl.commands.as_slice())
+                .unwrap_or(&[]);
+            renderer
+                .execute_and_capture(commands, output_path)
+                .map_err(|e| EngineError::RenderError(e.to_string()))
+        } else {
+            Err(EngineError::RenderError("No renderer available".to_string()))
+        }
+    }
+
+    /// Get the native window handle (HWND) for a view.
+    #[cfg(windows)]
+    pub fn get_view_hwnd(&self, id: EngineViewId) -> Result<HWND, EngineError> {
+        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+        self.viewhost
+            .get_hwnd(view.viewhost_id)
+            .map_err(|e| EngineError::ViewError(e.to_string()))
     }
 
     /// Render a view (internal).
@@ -7843,27 +8948,18 @@ impl Engine {
                 let event_type_str = match event.event_type {
                     KeyEventType::KeyDown => "keydown",
                     KeyEventType::KeyUp => "keyup",
-                    KeyEventType::Char => "keypress",
+                    KeyEventType::Input => "keypress",
                 };
 
-                let key_str = match event.key_code {
-                    KeyCode::Enter => "Enter".to_string(),
-                    KeyCode::Tab => "Tab".to_string(),
-                    KeyCode::Backspace => "Backspace".to_string(),
-                    KeyCode::Escape => "Escape".to_string(),
-                    KeyCode::Space => " ".to_string(),
-                    KeyCode::Left => "ArrowLeft".to_string(),
-                    KeyCode::Right => "ArrowRight".to_string(),
-                    KeyCode::Up => "ArrowUp".to_string(),
-                    KeyCode::Down => "ArrowDown".to_string(),
-                    KeyCode::Home => "Home".to_string(),
-                    KeyCode::End => "End".to_string(),
-                    KeyCode::PageUp => "PageUp".to_string(),
-                    KeyCode::PageDown => "PageDown".to_string(),
-                    KeyCode::Delete => "Delete".to_string(),
-                    KeyCode::Insert => "Insert".to_string(),
-                    KeyCode::Char(c) => c.to_string(),
-                    _ => format!("{:?}", event.key_code),
+                // rustkit-core's KeyEvent already carries the DOM `key`
+                // value (the view host fills it from the platform event);
+                // the old per-variant table referenced KeyCode variants
+                // (`Char`, `Left`, ...) that do not exist and had never
+                // compiled on Windows.
+                let key_str = if event.key.is_empty() {
+                    format!("{:?}", event.key_code)
+                } else {
+                    event.key.clone()
                 };
 
                 let keyboard_event = Event::new_trusted(event_type_str, true, true);
@@ -8272,15 +9368,65 @@ fn parse_radial_gradient(value: &str, repeating: bool) -> Option<rustkit_css::Gr
     }
 
     let mut shape = rustkit_css::RadialShape::Ellipse;
-    let size = rustkit_css::RadialSize::FarthestCorner;
+    let mut size = rustkit_css::RadialSize::FarthestCorner;
     let mut center = (0.5, 0.5);
     let mut stops_start = 0;
 
+    let size_keyword = |t: &str| match t {
+        "closest-side" => Some(rustkit_css::RadialSize::ClosestSide),
+        "farthest-side" => Some(rustkit_css::RadialSize::FarthestSide),
+        "closest-corner" => Some(rustkit_css::RadialSize::ClosestCorner),
+        "farthest-corner" => Some(rustkit_css::RadialSize::FarthestCorner),
+        _ => None,
+    };
+    let px_radius = |t: &str| t.strip_suffix("px").and_then(|v| v.parse::<f32>().ok());
+
     // Check for shape/size/position in first part
     let first = parts[0].trim().to_lowercase();
-    if first.contains("circle") || first.contains("ellipse") || first.contains("at ") {
-        if first.contains("circle") {
-            shape = rustkit_css::RadialShape::Circle;
+    let first_token = first.split_whitespace().next().unwrap_or("");
+    if first.contains("circle")
+        || first.contains("ellipse")
+        || first.contains("at ")
+        || size_keyword(first_token).is_some()
+        || px_radius(first_token).is_some()
+    {
+        // css-images-3 §3.3.2 `[ <radial-shape> || <radial-size> ]`: the
+        // size was never read — every radial gradient was farthest-corner,
+        // so `closest-side at top` (a zero-height ellipse, solid last
+        // colour in Chrome) painted a full cyan-to-blue ramp.
+        let shape_and_size = if first.starts_with("at ") {
+            ""
+        } else {
+            first.split(" at ").next().unwrap_or("")
+        };
+        let mut radii = Vec::new();
+        let mut shape_given = false;
+        for tok in shape_and_size.split_whitespace() {
+            match tok {
+                "circle" => {
+                    shape = rustkit_css::RadialShape::Circle;
+                    shape_given = true;
+                }
+                "ellipse" => shape_given = true,
+                t => {
+                    if let Some(s) = size_keyword(t) {
+                        size = s;
+                    } else if let Some(r) = px_radius(t) {
+                        radii.push(r);
+                    }
+                }
+            }
+        }
+        match radii[..] {
+            // One length with no shape is a circle (§3.3.2).
+            [r] => {
+                if !shape_given {
+                    shape = rustkit_css::RadialShape::Circle;
+                }
+                size = rustkit_css::RadialSize::Explicit(r, r);
+            }
+            [rx, ry] => size = rustkit_css::RadialSize::Explicit(rx, ry),
+            _ => {}
         }
         // Parse "at" position
         if let Some(at_idx) = first.find(" at ") {
@@ -8896,6 +10042,31 @@ fn ch_advance_px(style: &ComputedStyle) -> f32 {
 
 /// Parse a shorthand value with 1-4 parts (like margin, padding).
 /// Returns (top, right, bottom, left).
+/// Zero the width of every `none`/`hidden` border side. Runs after the whole
+/// cascade so declaration order between width and style cannot matter.
+fn zero_width_of_borderless_sides(style: &mut ComputedStyle) {
+    use rustkit_css::{BorderStyle, Length};
+    for (side_style, width) in [
+        (style.border_top_style, &mut style.border_top_width),
+        (style.border_right_style, &mut style.border_right_width),
+        (style.border_bottom_style, &mut style.border_bottom_width),
+        (style.border_left_style, &mut style.border_left_width),
+    ] {
+        if side_style == BorderStyle::None {
+            *width = Length::Zero;
+        }
+    }
+}
+
+/// The border style a `border` / `border-<side>` shorthand names; a
+/// shorthand without one keeps `Solid` (see rustkit_css::BorderStyle).
+fn border_style_keyword(value: &str) -> rustkit_css::BorderStyle {
+    value
+        .split_whitespace()
+        .find_map(rustkit_css::BorderStyle::from_keyword)
+        .unwrap_or_default()
+}
+
 /// Parse a `border` / `border-<side>` shorthand: `<width> || <style> || <color>`.
 /// ComputedStyle has no border-style field, so the style keyword only matters
 /// for `none`/`hidden` (which force a zero width, matching how the box would
@@ -9008,6 +10179,26 @@ fn is_inherited_property(property: &str) -> bool {
             | "direction"
             | "writing-mode"
     )
+}
+
+/// `border-radius` shorthand without the `/` part: 1–4 lengths expanded to
+/// `[top-left, top-right, bottom-right, bottom-left]`. None for anything it
+/// cannot read whole (a `/`, a bad token, more than four values).
+fn parse_border_radius_shorthand(value: &str) -> Option<[rustkit_css::Length; 4]> {
+    if value.contains('/') {
+        return None;
+    }
+    let v: Vec<rustkit_css::Length> = value
+        .split_whitespace()
+        .map(rustkit_css::parse_length)
+        .collect::<Option<_>>()?;
+    Some(match v.as_slice() {
+        [a] => [a.clone(), a.clone(), a.clone(), a.clone()],
+        [a, b] => [a.clone(), b.clone(), a.clone(), b.clone()],
+        [a, b, c] => [a.clone(), b.clone(), c.clone(), b.clone()],
+        [a, b, c, d] => [a.clone(), b.clone(), c.clone(), d.clone()],
+        _ => return None,
+    })
 }
 
 /// Parse a box-shadow value from CSS.
@@ -9124,6 +10315,22 @@ fn parse_time(value: &str) -> Option<f32> {
 }
 
 /// Parse a CSS timing function.
+/// `flex-basis` value: `auto`, `content`, a length, or a percentage.
+fn parse_flex_basis(value: &str) -> rustkit_css::FlexBasis {
+    let v = value.trim();
+    if v.eq_ignore_ascii_case("auto") {
+        return rustkit_css::FlexBasis::Auto;
+    }
+    if v.eq_ignore_ascii_case("content") {
+        return rustkit_css::FlexBasis::Content;
+    }
+    match parse_length(v) {
+        Some(rustkit_css::Length::Px(px)) => rustkit_css::FlexBasis::Length(px),
+        Some(rustkit_css::Length::Percent(pct)) => rustkit_css::FlexBasis::Percent(pct),
+        _ => rustkit_css::FlexBasis::Auto,
+    }
+}
+
 fn parse_timing_function(value: &str) -> rustkit_css::TimingFunction {
     let value = value.trim();
     match value {
@@ -10324,6 +11531,180 @@ mod tests {
             "continuation pieces must not duplicate the element identity"
         );
         assert_eq!(div.children[0].node_id, div.children[2].node_id);
+    }
+
+    #[test]
+    fn test_focus_within_does_not_match_in_the_static_frame() {
+        // The shelf's search icon: `.wrapper:focus-within .icon { color: accent }`.
+        // Nothing is focused when the frame is captured, so the icon keeps
+        // its resting color. `:focus-within` fell through the matcher's
+        // unknown-pseudo-class arm, which returns true, and every such icon
+        // took its focused color.
+        let html = r#"<!DOCTYPE html>
+            <html>
+            <head><style>
+                .icon { color: rgb(148, 163, 184); }
+                .wrap:focus-within .icon { color: rgb(34, 211, 238); }
+                .wrap:focus-visible { background: rgb(1, 2, 3); }
+                .card:hover .title { color: rgb(9, 9, 9); }
+                .title { color: rgb(10, 20, 30); }
+            </style></head>
+            <body>
+                <div class="wrap"><input><span class="icon">i</span></div>
+                <div class="card"><span class="title">t</span></div>
+            </body>
+            </html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+
+        let compositor = match Compositor::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            viewhost: ViewHost::new(),
+            compositor,
+            renderer: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            render_failing: std::collections::HashSet::new(),
+            svg_cache: std::collections::HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        };
+
+        let layout = engine.build_layout_from_document(&document, &[]);
+        let wrap = &layout.children[0].children[0];
+        let icon = wrap.children.last().expect("icon box");
+        let c = icon.style.color;
+        assert_eq!(
+            (c.r, c.g, c.b),
+            (148, 163, 184),
+            ":focus-within must not match an unfocused wrapper"
+        );
+        let bg = wrap.style.background_color;
+        assert_ne!(
+            (bg.r, bg.g, bg.b),
+            (1, 2, 3),
+            ":focus-visible must not match in the static frame"
+        );
+
+        // The ancestor matcher used to skip every pseudo-class on an
+        // ancestor compound, so `.card:hover .title` matched unhovered.
+        let card = &layout.children[0].children[1];
+        let title = card.children.last().expect("title box");
+        let t = title.style.color;
+        assert_eq!(
+            (t.r, t.g, t.b),
+            (10, 20, 30),
+            ".card:hover .title must not match an unhovered card"
+        );
+    }
+
+    /// Build `<body><div id="row">…</div></body>` from `css` + `row_html`
+    /// (no whitespace between children) and return the row's child boxes'
+    /// (r, g, b) background colours in order.
+    fn swatch_backgrounds(css: &str, row_html: &str) -> Vec<(u8, u8, u8)> {
+        let html = format!(
+            "<!DOCTYPE html><html><head><style>\
+             .sw {{ display: inline-block; width: 40px; height: 40px; background: rgb(0, 0, 255); }}\
+             {css}</style></head><body><div id=\"row\">{row_html}</div></body></html>"
+        );
+        let document = Rc::new(Document::parse_html(&html).expect("parse"));
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let layout = engine.build_layout_from_document(&document, &[]);
+        let row = &layout.children[0].children[0];
+        row.children
+            .iter()
+            .map(|b| {
+                let c = b.style.background_color;
+                (c.r, c.g, c.b)
+            })
+            .collect()
+    }
+
+    const RED: (u8, u8, u8) = (255, 0, 0);
+    const BLUE: (u8, u8, u8) = (0, 0, 255);
+    const GREEN: (u8, u8, u8) = (0, 255, 0);
+
+    #[test]
+    fn test_unknown_pseudo_class_invalidates_the_whole_rule() {
+        // Selectors 4 §3.9: `.a:frobnicate, .keep {}` styles NOTHING in
+        // Chrome — the unknown pseudo-class invalidates the list. The
+        // matcher's `_ => true` arm used to make `.sw:frobnicate` match
+        // every element instead.
+        let got = swatch_backgrounds(
+            ".sw:frobnicate { background: rgb(255, 0, 0); }\
+             .sw:frobnicate, .keep { background: rgb(255, 0, 0); }\
+             .sw:-moz-focusring { background: rgb(255, 0, 0); }\
+             .sw:first-line { background: rgb(255, 0, 0); }",
+            r#"<span class="sw"></span><span class="sw keep"></span>"#,
+        );
+        assert_eq!(got, vec![BLUE, BLUE]);
+    }
+
+    #[test]
+    fn test_is_and_where_select_only_their_arguments() {
+        let got = swatch_backgrounds(
+            "#row :is(.pick, .other) { background: rgb(255, 0, 0); }\
+             #row :where(.two) { background: rgb(0, 255, 0); }\
+             .sw:not(.pick, .two) { background: rgb(9, 9, 9); }",
+            r#"<span class="sw pick"></span><span class="sw two"></span><span class="sw"></span>"#,
+        );
+        assert_eq!(got, vec![RED, GREEN, (9, 9, 9)]);
+    }
+
+    #[test]
+    fn test_of_type_pseudo_classes_use_the_typed_sibling_index() {
+        // `span:first-of-type` matched EVERY span (and `div:nth-of-type(2)`
+        // every div) before the typed index existed.
+        let got = swatch_backgrounds(
+            "#row span:first-of-type { background: rgb(255, 0, 0); }\
+             #row span:last-of-type { background: rgb(255, 0, 0); }\
+             #row div:nth-of-type(2) { background: rgb(0, 255, 0); }\
+             #row div:only-of-type { background: rgb(9, 9, 9); }",
+            r#"<span class="sw"></span><span class="sw"></span><span class="sw"></span><div class="sw"></div><div class="sw"></div>"#,
+        );
+        assert_eq!(got, vec![RED, BLUE, RED, BLUE, GREEN]);
+    }
+
+    #[test]
+    fn test_link_placeholder_shown_and_empty() {
+        let got = swatch_backgrounds(
+            ".sw:placeholder-shown { background: rgb(255, 0, 0); }\
+             .sw:link { background: rgb(255, 0, 0); }\
+             .sw:any-link { background: rgb(255, 0, 0); }\
+             .sw:empty { background: rgb(0, 255, 0); }",
+            r##"<span class="sw">x</span><a class="sw" href="#x">y</a><span class="sw"></span><span class="sw"> </span>"##,
+        );
+        // span with text: nothing; a[href]: link; empty span: :empty;
+        // whitespace-only span: NOT empty (Selectors 4 §14.5).
+        assert_eq!(got, vec![BLUE, RED, GREEN, BLUE]);
+    }
+
+    #[test]
+    fn test_selector_list_validity_and_top_level_commas() {
+        assert!(Engine::selector_list_is_valid(
+            ".a:hover, li:nth-child(2n+1) > a"
+        ));
+        assert!(Engine::selector_list_is_valid(":is(.a, :frobnicate) .b"));
+        assert!(Engine::selector_list_is_valid("a[title=\":x\"]::after"));
+        assert!(!Engine::selector_list_is_valid(".a:frobnicate, .b"));
+        assert!(!Engine::selector_list_is_valid(".a:not(:frobnicate)"));
+        assert!(!Engine::selector_list_is_valid("input:-moz-focusring"));
+        assert_eq!(
+            Engine::split_top_level_commas(":is(a, b) c, d[x=\"1,2\"], e"),
+            vec![":is(a, b) c", "d[x=\"1,2\"]", "e"]
+        );
     }
 
     #[test]
@@ -11741,6 +13122,30 @@ mod tests {
     }
 
     #[test]
+    fn radial_gradient_size_is_parsed() {
+        use rustkit_css::{RadialShape as S, RadialSize as Z};
+        let cases = [
+            ("radial-gradient(ellipse closest-side at top, cyan, blue)", S::Ellipse, Z::ClosestSide),
+            ("radial-gradient(ellipse farthest-side at top, cyan, blue)", S::Ellipse, Z::FarthestSide),
+            ("radial-gradient(closest-corner, cyan, blue)", S::Ellipse, Z::ClosestCorner),
+            ("radial-gradient(circle farthest-side, cyan, blue)", S::Circle, Z::FarthestSide),
+            ("radial-gradient(40px, cyan, blue)", S::Circle, Z::Explicit(40.0, 40.0)),
+            ("radial-gradient(60px 30px at 10% 20%, cyan, blue)", S::Ellipse, Z::Explicit(60.0, 30.0)),
+            ("radial-gradient(at top, cyan, blue)", S::Ellipse, Z::FarthestCorner),
+            ("radial-gradient(cyan, blue)", S::Ellipse, Z::FarthestCorner),
+        ];
+        for (css, shape, size) in cases {
+            match parse_gradient(css) {
+                Some(rustkit_css::Gradient::Radial(r)) => {
+                    assert_eq!((r.shape, r.size), (shape, size), "{}", css);
+                    assert_eq!(r.stops.len(), 2, "{}", css);
+                }
+                other => panic!("{}: {:?}", css, other),
+            }
+        }
+    }
+
+    #[test]
     fn test_parse_radial_gradient() {
         // Test simple radial gradient
         let gradient =
@@ -11860,6 +13265,26 @@ mod tests {
             stop.position,
             Some(rustkit_css::StopPosition::Percent(0.25))
         );
+    }
+
+    #[test]
+    fn border_radius_shorthand_expands_one_to_four_values() {
+        use rustkit_css::Length::Px;
+        assert_eq!(parse_border_radius_shorthand("8px"), Some([Px(8.0), Px(8.0), Px(8.0), Px(8.0)]));
+        assert_eq!(
+            parse_border_radius_shorthand("8px 8px 0 0"),
+            Some([Px(8.0), Px(8.0), rustkit_css::Length::Zero, rustkit_css::Length::Zero])
+        );
+        assert_eq!(
+            parse_border_radius_shorthand("1px 2px"),
+            Some([Px(1.0), Px(2.0), Px(1.0), Px(2.0)])
+        );
+        assert_eq!(
+            parse_border_radius_shorthand("1px 2px 3px"),
+            Some([Px(1.0), Px(2.0), Px(3.0), Px(2.0)])
+        );
+        assert_eq!(parse_border_radius_shorthand("50px / 25px"), None);
+        assert_eq!(parse_border_radius_shorthand("1px 2px 3px 4px 5px"), None);
     }
 
     #[test]
@@ -12051,7 +13476,16 @@ mod element_identity_tests {
         let empty = std::collections::HashMap::new();
         let vars = HashMap::new();
         let style_of = |tag: &str| {
-            engine.compute_style_for_element(tag, &empty, &[], &vars, &[], &[], 0, 1, None)
+            engine.compute_style_for_element(
+                tag,
+                &empty,
+                &[],
+                &vars,
+                &[],
+                &[],
+                SiblingContext::SOLE,
+                None,
+            )
         };
 
         let input = style_of("input");
@@ -12067,6 +13501,112 @@ mod element_identity_tests {
         // the grouped-arm-only version had no backgrounds anywhere, and the
         // dead-arm version can never fire. Buttons are ButtonFace-themed.
         assert_ne!(style_of("button").background_color, rustkit_css::Color::WHITE);
+    }
+
+    #[test]
+    fn split_important_strips_the_flag() {
+        assert_eq!(split_important("red !important"), ("red", true));
+        assert_eq!(split_important("red ! IMPORTANT "), ("red", true));
+        assert_eq!(split_important("red!important"), ("red", true));
+        assert_eq!(split_important("red"), ("red", false));
+        // `important` without the bang is a value token, not the flag.
+        assert_eq!(split_important("important"), ("important", false));
+    }
+
+    /// CSS Cascade 4 §6.1: importance outranks specificity, and inline
+    /// normal < author important < inline important. Mirrors specificity
+    /// box 5, which painted green for Chrome's red until n64.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn important_outranks_specificity_and_inline() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let sheet = Stylesheet::parse(
+            "#t { background: green; color: green; } \
+             .t { background: red !important; } \
+             div { color: blue !important; }",
+        )
+        .expect("sheet");
+        let vars = HashMap::new();
+        let style_with = |inline: Option<&str>| {
+            let mut a = attrs(&[("id", "t"), ("class", "t")]);
+            if let Some(s) = inline {
+                a.insert("style".to_string(), s.to_string());
+            }
+            engine.compute_style_for_element(
+                "div",
+                &a,
+                std::slice::from_ref(&sheet),
+                &vars,
+                &[],
+                &[],
+                SiblingContext::SOLE,
+                None,
+            )
+        };
+        let red = rustkit_css::Color::new(255, 0, 0, 1.0);
+        let blue = rustkit_css::Color::new(0, 0, 255, 1.0);
+        let lime = rustkit_css::Color::new(0, 255, 0, 1.0);
+
+        let s = style_with(None);
+        assert_eq!(s.background_color, red, "(0,1,0) !important beats (1,0,0)");
+        assert_eq!(s.color, blue, "(0,0,1) !important beats (1,0,0)");
+
+        // Inline normal loses to author important.
+        let s = style_with(Some("color: lime; background: lime"));
+        assert_eq!(s.color, blue);
+        assert_eq!(s.background_color, red);
+
+        // Inline important wins over everything, and parses.
+        let s = style_with(Some("color: lime !important"));
+        assert_eq!(s.color, lime);
+    }
+
+    /// `inherit` copies the parent's computed value even where the UA arm
+    /// or a lower-specificity rule overwrote the inherited seed.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn inherit_keyword_takes_the_parent_value_over_ua_and_earlier_rules() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let sheet = Stylesheet::parse(
+            "a { color: inherit; } \
+             input { font-family: inherit; font-size: inherit; } \
+             div { border-color: red; } \
+             .k { border-color: inherit; }",
+        )
+        .expect("sheet");
+        let vars = HashMap::new();
+        let mut parent = ComputedStyle::new();
+        parent.color = rustkit_css::Color::new(10, 20, 30, 1.0);
+        parent.font_family = "system-ui".to_string();
+        parent.font_size = rustkit_css::Length::Px(14.0);
+        parent.border_top_color = rustkit_css::Color::new(1, 2, 3, 1.0);
+        let style = |tag: &str, a: HashMap<String, String>| {
+            engine.compute_style_for_element(
+                tag,
+                &a,
+                std::slice::from_ref(&sheet),
+                &vars,
+                &[],
+                &[],
+                SiblingContext::SOLE,
+                Some(&parent),
+            )
+        };
+
+        assert_eq!(style("a", attrs(&[])).color, parent.color, "not the UA link blue");
+        let input = style("input", attrs(&[]));
+        assert_eq!(input.font_family, "system-ui", "not the UA control Arial");
+        assert_eq!(input.font_size, rustkit_css::Length::Px(14.0));
+        assert_eq!(
+            style("div", attrs(&[("class", "k")])).border_top_color,
+            parent.border_top_color,
+            "a non-inherited property takes the parent's value, not the earlier rule's"
+        );
+        assert_eq!(
+            style("div", attrs(&[("style", "color: inherit")])).color,
+            parent.color,
+            "inline inherit"
+        );
     }
 
     #[test]
@@ -12520,8 +14060,7 @@ mod button_children_tests {
             &[],
             None,
             &[],
-            0,
-            1,
+            SiblingContext::SOLE.with_children(true),
             "button",
             &Cell::new(0),
             false,
@@ -12612,8 +14151,7 @@ mod svg_image_tests {
             &[],
             None,
             &[],
-            0,
-            1,
+            SiblingContext::SOLE,
             "img",
             &Cell::new(0),
             false,
@@ -12759,18 +14297,37 @@ mod web_font_tests {
         // about:blank is what load_html uses; parity-capture and the WPT
         // runner hand us absolute paths that way (staged from /fonts/...).
         let about = Url::parse("about:blank").unwrap();
+        // An absolute path is absolute on the platform under test:
+        // `/tmp/Ahem.ttf` has no drive letter and is relative on Windows.
+        #[cfg(not(windows))]
+        let staged = "/tmp/Ahem.ttf";
+        #[cfg(windows)]
+        let staged = r"C:\tmp\Ahem.ttf";
         assert!(matches!(
-            resolve_font_source(Some(&about), "/tmp/Ahem.ttf"),
-            FontSource::File(p) if p == std::path::Path::new("/tmp/Ahem.ttf")
+            resolve_font_source(Some(&about), staged),
+            FontSource::File(p) if p == std::path::Path::new(staged)
         ));
         assert!(matches!(
             resolve_font_source(Some(&about), "fonts/Ahem.ttf"),
             FontSource::Blocked(_)
         ), "a relative path has nothing to resolve against for inline content");
-        let file = Url::parse("file:///srv/site/index.html").unwrap();
+        // A file: document resolves relative sources against its own
+        // directory. The URL must be a valid local path on the platform
+        // under test: `file:///srv/...` has no drive letter, and
+        // Url::to_file_path() rightly refuses it on Windows.
+        #[cfg(not(windows))]
+        let (file, expected) = (
+            Url::parse("file:///srv/site/index.html").unwrap(),
+            std::path::PathBuf::from("/srv/site/fonts/Ahem.ttf"),
+        );
+        #[cfg(windows)]
+        let (file, expected) = (
+            Url::parse("file:///C:/srv/site/index.html").unwrap(),
+            std::path::PathBuf::from(r"C:\srv\site\fonts\Ahem.ttf"),
+        );
         assert!(matches!(
             resolve_font_source(Some(&file), "fonts/Ahem.ttf"),
-            FontSource::File(p) if p == std::path::Path::new("/srv/site/fonts/Ahem.ttf")
+            FontSource::File(p) if p == expected
         ));
     }
 
@@ -12823,7 +14380,27 @@ mod web_font_tests {
         w
     }
 
-    fn test_engine() -> Option<Engine> {
+    /// An engine plus a lock held for the whole test. `install_web_fonts_for`
+    /// writes process-global font state, so a test installing
+    /// `EngineTestAhem` could land between another test's no-@font-face
+    /// control and its measurement (seen n64: the control read Ahem's 100px
+    /// in two of three full-suite runs once one more Engine test existed).
+    struct LockedEngine {
+        engine: Engine,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl std::ops::Deref for LockedEngine {
+        type Target = Engine;
+        fn deref(&self) -> &Engine {
+            &self.engine
+        }
+    }
+
+    static WEB_FONT_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn test_engine() -> Option<LockedEngine> {
+        let guard = WEB_FONT_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let compositor = match Compositor::new() {
             Ok(c) => c,
             Err(e) => {
@@ -12832,7 +14409,7 @@ mod web_font_tests {
             }
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        Some(Engine {
+        let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
             font_loader: Arc::new(FontLoader::new()),
@@ -12848,6 +14425,10 @@ mod web_font_tests {
             svg_cache: std::collections::HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
+        };
+        Some(LockedEngine {
+            engine,
+            _guard: guard,
         })
     }
 
@@ -13135,6 +14716,74 @@ mod web_font_tests {
     }
 
     #[test]
+    fn a_none_or_hidden_border_side_has_zero_width_in_either_declaration_order() {
+        // Prometheus R1 HOLD on #217: `none`/`hidden` only zeroed the width
+        // inside the `border` shorthand, so a width set by an earlier
+        // declaration survived `border-style: none` and painted a frame.
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <div style="border: 5px solid red; border-style: none">a</div>
+            <div style="border-style: hidden; border-width: 5px">b</div>
+            <div style="border: 5px solid red; border-left-style: none">c</div>
+            <div style="border: 5px dashed red">d</div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+        fn style_around(b: &LayoutBox, text: &str) -> Option<ComputedStyle> {
+            if b.children
+                .iter()
+                .any(|c| matches!(&c.box_type, BoxType::Text(t) if t.trim() == text))
+            {
+                return Some(b.style.clone());
+            }
+            b.children.iter().find_map(|c| style_around(c, text))
+        }
+        use rustkit_css::Length::{Px, Zero};
+        let widths = |s: &ComputedStyle| {
+            [
+                s.border_top_width.clone(),
+                s.border_right_width.clone(),
+                s.border_bottom_width.clone(),
+                s.border_left_width.clone(),
+            ]
+        };
+        let a = style_around(&layout, "a").expect("a");
+        assert_eq!(widths(&a), [Zero, Zero, Zero, Zero], "style after width");
+        let b = style_around(&layout, "b").expect("b");
+        assert_eq!(widths(&b), [Zero, Zero, Zero, Zero], "width after style");
+        let c = style_around(&layout, "c").expect("c");
+        assert_eq!(widths(&c), [Px(5.0), Px(5.0), Px(5.0), Zero], "one side only");
+        let d = style_around(&layout, "d").expect("d");
+        assert_eq!(widths(&d), [Px(5.0), Px(5.0), Px(5.0), Px(5.0)], "control");
+        assert_eq!(d.border_top_style, rustkit_css::BorderStyle::Dashed);
+    }
+
+    #[test]
+    fn a_select_shows_its_selected_option() {
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><body>
+            <select><option>hours</option><option selected>days</option><option>weeks</option></select>
+            <select><option>a</option><option>b</option></select>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+        fn selects(b: &LayoutBox, out: &mut Vec<Option<usize>>) {
+            if let BoxType::FormControl(rustkit_layout::FormControlType::Select {
+                selected_index, ..
+            }) = &b.box_type
+            {
+                out.push(*selected_index);
+            }
+            for c in &b.children {
+                selects(c, out);
+            }
+        }
+        let mut got = Vec::new();
+        selects(&layout, &mut got);
+        assert_eq!(got, vec![Some(1), Some(0)]);
+    }
+
+    #[test]
     fn z_index_reaches_the_layout_box_of_a_positioned_element() {
         // Found under Ahem: the WPT css-text idiom puts red text in an
         // absolutely positioned `z-index: -1` box and green in-flow text
@@ -13201,6 +14850,8 @@ mod web_font_tests {
 
         // Same face via a filesystem path — the WPT runner's shape. A fresh
         // engine so the data: load above cannot be what satisfies this.
+        // (Drop the first one explicitly: it holds the web-font lock.)
+        drop(engine);
         let Some(engine) = test_engine() else { return };
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../rustkit-text/tests/fixtures/Ahem.ttf");
         let via_file = probe_width(
@@ -13983,6 +15634,501 @@ mod visual_rect_tests {
             (x - 100.5025).abs() < 0.01 && (y - 70.5025).abs() < 0.01,
             "the bound stays centred on the box's centre (150, 120): expected \
              (100.50, 70.50), got ({x}, {y})"
+        );
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times the full selector matcher ran on this thread.
+    static FULL_SELECTOR_MATCHES: Cell<u64> = const { Cell::new(0) };
+}
+
+// Real Engine (Compositor wants a device) — macOS only, like
+// element_identity_tests.
+#[cfg(all(test, target_os = "macos"))]
+mod rule_prefilter_tests {
+    use super::*;
+
+    fn attrs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn cascade_skips_the_full_matcher_for_rules_whose_subject_cannot_match() {
+        // A real-site stylesheet is thousands of class rules; any one element
+        // matches a handful. Running the string matcher on every pair was
+        // 33-41s per style pass on Wikipedia (real-site board, LOADS 30s).
+        let mut css = String::new();
+        for i in 0..500 {
+            css.push_str(&format!(".miss-{i} {{ color: red }}\n"));
+        }
+        css.push_str(".hit { color: blue }\n");
+        let sheet = Stylesheet::parse(&css).expect("css");
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let vars = HashMap::new();
+
+        FULL_SELECTOR_MATCHES.with(|n| n.set(0));
+        let style = engine.compute_style_for_element(
+            "div",
+            &attrs(&[("class", "hit")]),
+            std::slice::from_ref(&sheet),
+            &vars,
+            &[],
+            &[],
+            SiblingContext::SOLE,
+            None,
+        );
+        let full = FULL_SELECTOR_MATCHES.with(|n| n.get());
+
+        assert_eq!(style.color, rustkit_css::Color::new(0, 0, 255, 1.0));
+        assert!(
+            full <= 1,
+            "the 500 .miss-N rules must be rejected before the full matcher; \
+             it ran {full} times"
+        );
+    }
+
+    #[test]
+    fn prefilter_never_rejects_a_selector_the_matcher_accepts() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let selectors = [
+            "*", ":root", "div", "DIV", "div.a", "div.a.b", ".a", ".a.b", ".b.a", ".a:hover",
+            ".a[data-x]", "#main", "#main.a", "div#main", "p", "p, .a", ".z, div",
+            ".z, #main", "body div", "body > div.a", "ul li + div", "section ~ .a",
+            ":is(.a, .z)", "div:not(.z)", ".a:first-child", "div[data-x=\"1\"]",
+            "*.a", "div::before", ".a:after", "[data-x]", ":nth-child(2n+1)",
+            "a:hover, div.b", "svg|rect", ".a\\:b", "html body .a",
+        ];
+        let elements = [
+            ("div", attrs(&[("class", "a b"), ("id", "main"), ("data-x", "1")])),
+            ("div", attrs(&[("class", "b")])),
+            ("DIV", attrs(&[("class", "a")])),
+            ("p", attrs(&[])),
+            ("html", attrs(&[])),
+            ("span", attrs(&[("id", "main.a")])),
+        ];
+        let ancestors = vec![
+            ("section".to_string(), vec!["a".to_string()], None),
+            ("body".to_string(), vec![], None),
+            ("html".to_string(), vec![], None),
+        ];
+        let siblings = vec![("section".to_string(), vec![], None)];
+        for sel in selectors {
+            for (tag, a) in &elements {
+                let full = engine.selector_matches(
+                    sel,
+                    tag,
+                    a,
+                    &ancestors,
+                    &siblings,
+                    SiblingContext::SOLE,
+                );
+                if full {
+                    assert!(
+                        engine.rule_may_match(sel, tag, a),
+                        "prefilter rejected `{sel}` for <{tag} {a:?}>, which the matcher accepts"
+                    );
+                }
+            }
+        }
+        // And it does reject the plain impossible cases.
+        assert!(!engine.rule_may_match(".z", "div", &attrs(&[("class", "a")])));
+        assert!(!engine.rule_may_match("p.a", "div", &attrs(&[("class", "a")])));
+        assert!(!engine.rule_may_match("#nope", "div", &attrs(&[("id", "main")])));
+    }
+}
+
+// ── ported from hiwave-windows (transform/animation/position/overflow/
+//    text-decoration/flex wiring tests, #48-#50, #62, #64, #66) ──
+//
+// The Windows tree called a receiver-less `Engine::apply_declaration`; here
+// the production path is `Engine::apply_style_property(&self, ..)`, so each
+// test builds one Engine behind the init mutex (Compositor::new performs
+// wgpu adapter init, which must not run concurrently — hiwave-windows #51).
+#[cfg(test)]
+mod cascade_wire_tests {
+    use super::*;
+
+    fn engine() -> Engine {
+        static ENGINE_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _init_guard = ENGINE_INIT.lock().unwrap_or_else(|e| e.into_inner());
+        Engine::new(EngineConfig::default()).expect("engine")
+    }
+
+    fn find<'a>(b: &'a LayoutBox, pred: &dyn Fn(&LayoutBox) -> bool) -> Option<&'a LayoutBox> {
+        if pred(b) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| find(c, pred))
+    }
+
+    // transform (#48)
+    #[test]
+    fn an_invalid_transform_leaves_the_previous_value_untouched() {
+        let e = engine();
+        let mut style = ComputedStyle::default();
+        e.apply_style_property(&mut style, "transform", "scale(2)");
+        let before = style.transform.ops.len();
+        e.apply_style_property(&mut style, "transform", "!!!garbage!!!");
+        assert_eq!(
+            style.transform.ops.len(),
+            before,
+            "invalid value must not clobber the computed transform"
+        );
+    }
+
+    // animation (#50)
+    #[test]
+    fn an_unknown_timing_function_falls_back_to_the_css_initial() {
+        assert_eq!(
+            parse_timing_function("not-a-function"),
+            rustkit_css::TimingFunction::Ease
+        );
+    }
+
+    // position (#62)
+    #[test]
+    fn an_unknown_keyword_falls_back_to_static_rather_than_keeping_the_old_value() {
+        let e = engine();
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "position", "absolute");
+        e.apply_style_property(&mut s, "position", "notakeyword");
+        assert_eq!(
+            s.position,
+            rustkit_css::Position::Static,
+            "an invalid keyword must reset to the CSS initial, not silently \
+             leave the element absolutely positioned"
+        );
+    }
+
+    #[test]
+    fn a_percentage_offset_is_refused_rather_than_approximated() {
+        let e = engine();
+        let html = "<html><body><div style=\"position: absolute; top: 50%\">x</div></body></html>";
+        let d = Document::parse_html(html).expect("parse");
+        let layout = e.build_layout_from_document(&d, &[]);
+        let positioned = find(&layout, &|b| b.position == rustkit_layout::Position::Absolute)
+            .expect("element should still be absolutely positioned");
+        assert_eq!(
+            positioned.offsets.top, None,
+            "a percentage offset must resolve to None, not an invented pixel value"
+        );
+    }
+
+    // overflow / text-decoration (#64)
+    #[test]
+    fn the_overflow_shorthand_sets_both_axes() {
+        let e = engine();
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "overflow", "hidden");
+        assert_eq!(s.overflow_x, rustkit_css::Overflow::Hidden);
+        assert_eq!(s.overflow_y, rustkit_css::Overflow::Hidden);
+    }
+
+    #[test]
+    fn the_axis_longhands_are_independent() {
+        let e = engine();
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "overflow-x", "scroll");
+        e.apply_style_property(&mut s, "overflow-y", "hidden");
+        assert_eq!(s.overflow_x, rustkit_css::Overflow::Scroll);
+        assert_eq!(
+            s.overflow_y,
+            rustkit_css::Overflow::Hidden,
+            "setting one axis must not clobber the other"
+        );
+    }
+
+    #[test]
+    fn a_shorthand_carrying_a_colour_still_sets_the_line() {
+        let e = engine();
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "text-decoration", "underline red");
+        assert!(
+            s.text_decoration_line.underline,
+            "a shorthand naming a colour as well as a line must still set the line"
+        );
+    }
+
+    #[test]
+    fn a_value_naming_no_line_keyword_leaves_the_line_alone() {
+        let e = engine();
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "text-decoration", "underline");
+        e.apply_style_property(&mut s, "text-decoration", "red");
+        assert!(
+            s.text_decoration_line.underline,
+            "a colour-only value must not clear an already-set line"
+        );
+    }
+
+    // flex item properties (#66)
+    #[test]
+    fn the_single_number_shorthand_zeroes_the_basis() {
+        let e = engine();
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "flex", "1");
+        assert_eq!(s.flex_grow, 1.0);
+        assert_eq!(s.flex_shrink, 1.0);
+        assert_eq!(
+            s.flex_basis,
+            rustkit_css::FlexBasis::Length(0.0),
+            "flex: 1 must zero the basis or the container is not divided"
+        );
+    }
+
+    #[test]
+    fn a_two_value_shorthand_distinguishes_shrink_from_basis() {
+        let e = engine();
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "flex", "1 200px");
+        assert_eq!(s.flex_grow, 1.0);
+        assert_eq!(
+            s.flex_basis,
+            rustkit_css::FlexBasis::Length(200.0),
+            "a length in position 2 is the BASIS"
+        );
+        let mut s2 = ComputedStyle::default();
+        e.apply_style_property(&mut s2, "flex", "2 3");
+        assert_eq!(s2.flex_grow, 2.0);
+        assert_eq!(s2.flex_shrink, 3.0, "a bare number in position 2 is the SHRINK");
+    }
+}
+
+// Needs Engine::create_headless_view, which only exists with the
+// `headless` feature (cargo test --workspace enables it via parity-capture;
+// a bare `-p rustkit-engine` does not).
+#[cfg(all(test, feature = "headless"))]
+mod history_traversal_tests {
+    //! Engine-level contract for go_back / go_forward / reload.
+    //!
+    //! The full round trip (load A, load B, go_back lands on A) requires the
+    //! network and lives at the core layer, where the NSM tests drive
+    //! start/commit/finish directly. What the ENGINE owns — and what these
+    //! pin — is the edge contract: traversal on a view with nowhere to go is
+    //! Ok(false), never an error and never a panic, because mashing Back on
+    //! the first page is a user gesture, not a fault.
+    use super::*;
+
+    fn engine_with_view() -> (Engine, EngineViewId) {
+        let mut e = Engine::new(EngineConfig::default()).expect("engine");
+        let id = e
+            .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
+            .expect("headless view");
+        (e, id)
+    }
+
+    #[tokio::test]
+    async fn back_on_a_fresh_view_is_a_quiet_no_op() {
+        let (mut e, id) = engine_with_view();
+        assert_eq!(e.go_back(id).await.unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn forward_on_a_fresh_view_is_a_quiet_no_op() {
+        let (mut e, id) = engine_with_view();
+        assert_eq!(e.go_forward(id).await.unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn reload_with_no_history_is_a_quiet_no_op() {
+        let (mut e, id) = engine_with_view();
+        assert_eq!(e.reload(id).await.unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn traversal_on_a_missing_view_is_an_error_not_a_panic() {
+        let (mut e, _id) = engine_with_view();
+        let ghost = EngineViewId::new();
+        assert!(e.go_back(ghost).await.is_err());
+        assert!(e.go_forward(ghost).await.is_err());
+        assert!(e.reload(ghost).await.is_err());
+    }
+
+    /// NON-VACUITY: prove the no-op result is reachable as TRUE too — after
+    /// load_html (which pushes about:blank... no, load_html does not push) —
+    /// instead: reload becomes Ok(true)-capable once history has an entry.
+    /// We seed history through the NSM directly, no network.
+    #[tokio::test]
+    async fn reload_fires_once_history_has_an_entry() {
+        let (mut e, id) = engine_with_view();
+        // Seed one committed entry through the canonical stack.
+        {
+            let view = e.views.get_mut(&id).unwrap();
+            let url = Url::parse("https://seeded.example/").unwrap();
+            view.navigation.start_navigation(
+                rustkit_core::NavigationRequest::new(url)).unwrap();
+            view.navigation.commit_navigation().unwrap();
+            view.navigation.finish_navigation().unwrap();
+        }
+        // Reload now attempts a real load of the seeded URL. The fetch will
+        // fail (no such host in tests) — the CONTRACT here is only that the
+        // engine took the Ok(true) path, i.e. it found an entry and tried.
+        let r = e.reload(id).await;
+        assert!(
+            !matches!(r, Ok(false)),
+            "with history present, reload must not report nothing-to-do"
+        );
+    }
+}
+
+// Needs Engine::create_headless_view, which only exists with the
+// `headless` feature (cargo test --workspace enables it via parity-capture;
+// a bare `-p rustkit-engine` does not).
+#[cfg(all(test, feature = "headless"))]
+mod stop_navigation_tests {
+    //! STOP: cancel an in-flight navigation.
+    //!
+    //! The load path is an `async fn` holding `&mut self`, so there is no task
+    //! to abort and no handle to cancel. Stop therefore works by GENERATION:
+    //! a load captures the view's counter before its first await and re-checks
+    //! it after every await; `stop` bumps the counter, and the stale load
+    //! abandons without touching view state.
+    //!
+    //! These tests pin the CONTRACT, not the mechanism, so a future switch to
+    //! a real cancel token does not have to rewrite them.
+    use super::*;
+
+    fn engine_with_view() -> (Engine, EngineViewId) {
+        let mut e = Engine::new(EngineConfig::default()).expect("engine");
+        let id = e
+            .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
+            .expect("headless view");
+        (e, id)
+    }
+
+    /// Stopping a view that exists reports success and is idempotent — a user
+    /// mashing Stop on an idle page must not error.
+    #[test]
+    fn stop_is_safe_and_idempotent_on_an_idle_view() {
+        let (mut e, id) = engine_with_view();
+        assert!(e.stop(id), "first stop");
+        assert!(e.stop(id), "second stop");
+        assert!(e.stop(id), "third stop");
+    }
+
+    /// Stopping a view that does not exist is false, not a panic.
+    #[test]
+    fn stop_on_a_missing_view_is_false_not_a_panic() {
+        let (mut e, _id) = engine_with_view();
+        assert!(!e.stop(EngineViewId::new()));
+    }
+
+    /// THE PRODUCT: after a stop, a navigation that captured the earlier
+    /// generation is superseded and must abandon.
+    #[test]
+    fn a_stop_supersedes_an_in_flight_navigation() {
+        let (mut e, id) = engine_with_view();
+        // Simulate a load that captured its generation before awaiting.
+        let captured = e.bump_nav_generation_for_test(id);
+        assert!(!e.nav_superseded(id, captured), "not stale before stop");
+        e.stop(id);
+        assert!(e.nav_superseded(id, captured), "MUST be stale after stop");
+    }
+
+    /// A NEWER NAVIGATION also supersedes an older one. Without this, two
+    /// rapid navigations race and the slower response wins — the classic
+    /// back-button-shows-the-wrong-page defect.
+    #[test]
+    fn a_newer_navigation_supersedes_an_older_one() {
+        let (mut e, id) = engine_with_view();
+        let first = e.bump_nav_generation_for_test(id);
+        let second = e.bump_nav_generation_for_test(id);
+        assert_ne!(first, second);
+        assert!(e.nav_superseded(id, first), "older load must be stale");
+        assert!(!e.nav_superseded(id, second), "newest load must be live");
+    }
+
+    /// A vanished view counts as superseded — the alternative is writing into
+    /// a view that no longer exists.
+    #[test]
+    fn a_destroyed_view_supersedes_its_own_in_flight_load() {
+        let (mut e, id) = engine_with_view();
+        let g = e.bump_nav_generation_for_test(id);
+        e.destroy_view(id).ok();
+        assert!(e.nav_superseded(id, g));
+    }
+
+    /// NON-VACUITY: the helper must actually move the counter, or every test
+    /// above passes against a no-op.
+    #[test]
+    fn the_generation_actually_advances() {
+        let (mut e, id) = engine_with_view();
+        let a = e.bump_nav_generation_for_test(id);
+        let b = e.bump_nav_generation_for_test(id);
+        assert_eq!(b, a + 1, "generation must advance by one");
+    }
+}
+
+// Needs a headless view: `cargo test -p rustkit-engine --features headless`.
+#[cfg(all(test, target_os = "macos", feature = "headless"))]
+mod remote_font_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
+
+    /// Serve every request after `delay`, one thread per connection.
+    fn slow_font_server(delay: Duration) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut buf = [0u8; 4096];
+                    let _ = stream.read(&mut buf);
+                    std::thread::sleep(delay);
+                    let body = b"not-a-real-font";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: font/ttf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(body);
+                });
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn remote_web_fonts_are_fetched_concurrently() {
+        // YouTube declares 135 faces; fetched one at a time they took 23s of
+        // a 31s load (real-site board LOADS budget: 30s).
+        const FACES: usize = 8;
+        let delay = Duration::from_millis(300);
+        let port = slow_font_server(delay);
+
+        let mut css = String::new();
+        for i in 0..FACES {
+            css.push_str(&format!(
+                "@font-face {{ font-family: f{i}; src: url(http://127.0.0.1:{port}/f{i}.ttf); }}\n"
+            ));
+        }
+        let html = format!("<html><head><style>{css}</style></head><body>x</body></html>");
+
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        engine.load_html(view, &html).expect("load");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let started = Instant::now();
+        let loaded = rt.block_on(engine.load_remote_web_fonts(view));
+        let elapsed = started.elapsed();
+
+        assert_eq!(loaded, FACES, "every face should be fetched");
+        assert!(
+            elapsed < delay * (FACES as u32) / 2,
+            "{FACES} faces at {delay:?} each took {elapsed:?}: fetched sequentially"
         );
     }
 }

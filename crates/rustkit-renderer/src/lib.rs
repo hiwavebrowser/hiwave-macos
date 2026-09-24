@@ -52,6 +52,8 @@ pub mod dither;
 mod glyph;
 mod pipeline;
 pub mod screenshot;
+#[cfg(windows)]
+pub use screenshot::CaptureMetadata;
 mod shaders;
 
 pub use glyph::*;
@@ -645,6 +647,76 @@ impl Renderer {
     }
 
     /// Set the viewport size.
+    /// Render `commands` to an offscreen target and save it as PNG plus a
+    /// JSON sidecar. The native-win32 shell's screenshot harness and
+    /// hiwave-smoke drive this; parity-capture uses the PPM path instead.
+    #[cfg(windows)]
+    pub fn execute_and_capture(
+        &mut self,
+        commands: &[DisplayCommand],
+        output_path: impl AsRef<std::path::Path>,
+    ) -> Result<CaptureMetadata, RendererError> {
+        let (width, height) = self.viewport_size;
+        let capture_format = self.surface_format;
+
+        let (texture, view) =
+            screenshot::create_offscreen_target(&self.device, width, height, capture_format);
+        self.execute(commands, &view)?;
+
+        let readback = screenshot::GpuReadbackBuffer::new(&self.device, width, height);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Screenshot Copy Encoder"),
+            });
+        readback.copy_from_texture(&mut encoder, &texture);
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        let mut pixels = readback
+            .read_data_sync(&self.device)
+            .map_err(|e| RendererError::TextureUpload(e.to_string()))?;
+
+        // A BGRA capture target is swizzled to RGBA for PNG encoding.
+        match capture_format {
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => {
+                for px in pixels.chunks_exact_mut(4) {
+                    px.swap(0, 2);
+                }
+            }
+            _ => {}
+        }
+
+        screenshot::save_png(&output_path, width, height, &pixels)
+            .map_err(|e| RendererError::TextureUpload(e.to_string()))?;
+
+        let metadata = CaptureMetadata {
+            width,
+            height,
+            adapter: "Unknown".to_string(),
+            format: format!("{:?}", capture_format),
+            timestamp: chrono_lite_timestamp(),
+            color_vertex_count: self.color_vertices.len(),
+            texture_vertex_count: self.texture_vertices.len(),
+        };
+        let metadata_path = output_path.as_ref().with_extension("json");
+        screenshot::save_capture_metadata(&metadata_path, &metadata)
+            .map_err(|e| RendererError::TextureUpload(e.to_string()))?;
+        Ok(metadata)
+    }
+
+    /// Batch sizes and stack depths of the last executed frame (shell
+    /// diagnostics).
+    pub fn get_render_stats(&self) -> RenderStats {
+        RenderStats {
+            color_vertex_count: self.color_vertices.len(),
+            color_index_count: self.color_indices.len(),
+            texture_vertex_count: self.texture_vertices.len(),
+            texture_index_count: self.texture_indices.len(),
+            clip_stack_depth: self.clip_stack.len(),
+            stacking_context_depth: self.stacking_contexts.len(),
+        }
+    }
+
     pub fn set_viewport_size(&mut self, width: u32, height: u32) {
         self.viewport_size = (width, height);
 
@@ -1922,6 +1994,10 @@ impl Renderer {
                 self.draw_border(*rect, *color, *top, *right, *bottom, *left);
             }
 
+            DisplayCommand::RoundedBorder { rect, widths, colors, radius } => {
+                self.draw_rounded_border(*rect, *widths, *colors, *radius);
+            }
+
             DisplayCommand::Text {
                 text,
                 x,
@@ -1969,6 +2045,7 @@ impl Renderer {
                 dest_rect,
                 object_fit: _,
                 opacity: _,
+                current_color: _,
             } => {
                 self.draw_image(url, *dest_rect);
             }
@@ -2132,16 +2209,13 @@ impl Renderer {
             }
 
             DisplayCommand::StrokeCircle { cx, cy, radius, color, width } => {
-                // Draw stroked circle as two filled circles (outer and inner)
-                // Outer circle
-                self.draw_fill_circle(*cx, *cy, *radius, *color);
-                // Inner circle (background colored to create stroke effect)
-                // Note: This is a simplified approach; proper implementation would
-                // require a separate background color or compositing
-                if *radius > *width {
-                    let bg_color = Color::new(255, 255, 255, 1.0); // White background
-                    self.draw_fill_circle(*cx, *cy, radius - width, bg_color);
-                }
+                // A stroke is centred on the geometry (SVG 2 §13.4): the ring
+                // spans r ± w/2. Painted as an annulus so the interior stays
+                // whatever is underneath — the old two-disc trick filled it
+                // with opaque white, which put a white disc inside every
+                // `fill="none"` icon ring on a dark toolbar.
+                let half = width * 0.5;
+                self.draw_ring(*cx, *cy, radius + half, (radius - half).max(0.0), *color);
             }
 
             DisplayCommand::FillEllipse { rect, color } => {
@@ -2302,6 +2376,14 @@ impl Renderer {
     /// The rectangular half is unchanged from before rounded clips existed. The
     /// rounded half only runs when a rounded clip is actually on the stack, so
     /// a page without one emits exactly the vertices it always did.
+    ///
+    /// The clip stack is in SCREEN space (see `push_clip_rounded`), so the quad
+    /// is taken to screen space first and clipped where it actually lands.
+    /// Until this, the quad was clipped in document space and transformed
+    /// afterwards, so a transformed descendant escaped its ancestor's
+    /// `overflow: hidden`: `.btn::before { inset: 0; transform:
+    /// translateX(-100%) }` painted as a shine bar LEFT of the button Chrome
+    /// clips it inside (about, n46).
     fn draw_clipped_quad(&mut self, rect: Rect, color: [f32; 4]) {
         // Borrowed out and put back so the immutable borrow of `clip_stack`
         // inside `collect_clipped_pieces` does not collide with the mutable
@@ -2309,12 +2391,20 @@ impl Renderer {
         // because gradients call this once per cell — up to 100k times a frame.
         let mut pieces = std::mem::take(&mut self.clip_pieces);
         pieces.clear();
-        collect_clipped_pieces(self.clip_stack.last(), rect, &mut pieces);
+        let space = clip_quad_under(
+            self.current_transform(),
+            self.clip_stack.last(),
+            rect,
+            &mut pieces,
+        );
 
         for &(piece, coverage) in &pieces {
             let mut faded = color;
             faded[3] *= coverage;
-            self.push_color_quad(piece, faded);
+            match space {
+                QuadSpace::Screen => self.push_screen_quad(piece, faded),
+                QuadSpace::Document => self.push_color_quad(piece, faded),
+            }
         }
 
         self.clip_pieces = pieces;
@@ -2327,13 +2417,28 @@ impl Renderer {
             return;
         }
 
-        let base = self.color_vertices.len() as u32;
-
         // Apply transform to corners
         let (x0, y0) = self.transform_point(rect.x, rect.y);
         let (x1, y1) = self.transform_point(rect.x + rect.width, rect.y);
         let (x2, y2) = self.transform_point(rect.x + rect.width, rect.y + rect.height);
         let (x3, y3) = self.transform_point(rect.x, rect.y + rect.height);
+        self.push_screen_corners([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], c);
+    }
+
+    /// Append one quad that is ALREADY in screen space — no transform, no
+    /// clipping.
+    fn push_screen_quad(&mut self, rect: Rect, c: [f32; 4]) {
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+        let (x0, y0) = (rect.x, rect.y);
+        let (x1, y1) = (rect.x + rect.width, rect.y + rect.height);
+        self.push_screen_corners([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], c);
+    }
+
+    fn push_screen_corners(&mut self, p: [[f32; 2]; 4], c: [f32; 4]) {
+        let base = self.color_vertices.len() as u32;
+        let [[x0, y0], [x1, y1], [x2, y2], [x3, y3]] = p;
 
         self.color_vertices.extend_from_slice(&[
             ColorVertex { position: [x0, y0], color: c },
@@ -2588,6 +2693,47 @@ impl Renderer {
         }
     }
 
+    /// Draw an annulus between `outer` and `inner` radii as a triangle strip.
+    /// `inner` of zero degrades to a plain disc.
+    fn draw_ring(&mut self, cx: f32, cy: f32, outer: f32, inner: f32, color: Color) {
+        if outer <= 0.0 {
+            return;
+        }
+        if inner <= 0.0 {
+            self.draw_fill_circle(cx, cy, outer, color);
+            return;
+        }
+
+        let segments = ((outer / 2.0).sqrt() * 8.0).round().max(16.0).min(64.0) as u32;
+        let c = [
+            color.r as f32 / 255.0,
+            color.g as f32 / 255.0,
+            color.b as f32 / 255.0,
+            color.a,
+        ];
+        let base = self.color_vertices.len() as u32;
+
+        use std::f32::consts::PI;
+        // Vertex pairs (outer, inner) around the circumference, closed by
+        // repeating the first pair at i == segments.
+        for i in 0..=segments {
+            let angle = 2.0 * PI * (i as f32) / (segments as f32);
+            let (cos, sin) = (angle.cos(), angle.sin());
+            let (ox, oy) = self.transform_point(cx + outer * cos, cy + outer * sin);
+            let (ix, iy) = self.transform_point(cx + inner * cos, cy + inner * sin);
+            self.color_vertices.push(ColorVertex { position: [ox, oy], color: c });
+            self.color_vertices.push(ColorVertex { position: [ix, iy], color: c });
+        }
+        for i in 0..segments {
+            let o0 = base + 2 * i;
+            let i0 = o0 + 1;
+            let o1 = o0 + 2;
+            let i1 = o0 + 3;
+            self.color_indices
+                .extend_from_slice(&[o0, i0, o1, i0, i1, o1]);
+        }
+    }
+
     /// Draw a filled ellipse using triangle fan.
     fn draw_fill_ellipse(&mut self, rect: Rect, color: Color) {
         let cx = rect.x + rect.width / 2.0;
@@ -2677,6 +2823,137 @@ impl Renderer {
         }
     }
     
+    /// Draw solid borders whose corners are rounded.
+    ///
+    /// `widths`/`colors` are `[top, right, bottom, left]`. Radii are clamped
+    /// exactly as `draw_rounded_rect` clamps the background, so the ring and
+    /// the fill it sits on share one outer curve. Each corner box is
+    /// `max(radius, side width)` on each axis and is painted per pixel:
+    /// coverage = outer curve − inner (padding-edge) curve, where the inner
+    /// curve is the ellipse `(r − vertical width, r − horizontal width)`
+    /// about the same centre (CSS Backgrounds 3 §5.2), square when either
+    /// is ≤ 0. Between corner boxes each side is a plain strip. A corner
+    /// pixel takes the colour of the side on its half of the line from the
+    /// outer corner to the inner corner.
+    fn draw_rounded_border(
+        &mut self,
+        rect: Rect,
+        widths: [f32; 4],
+        colors: [Color; 4],
+        radius: rustkit_layout::BorderRadius,
+    ) {
+        let [t, r, b, l] = widths;
+        if rect.width < 4.0 || rect.height < 4.0 {
+            let sides = [
+                (t, colors[0], Rect::new(rect.x, rect.y, rect.width, t)),
+                (r, colors[1], Rect::new(rect.x + rect.width - r, rect.y, r, rect.height)),
+                (b, colors[2], Rect::new(rect.x, rect.y + rect.height - b, rect.width, b)),
+                (l, colors[3], Rect::new(rect.x, rect.y, l, rect.height)),
+            ];
+            for (w, c, s) in sides {
+                if w > 0.0 {
+                    self.draw_solid_rect(s, c);
+                }
+            }
+            return;
+        }
+
+        let max_r = (rect.width / 2.0).min(rect.height / 2.0);
+        let half_w = rect.width / 2.0;
+        let half_h = rect.height / 2.0;
+        // (radius, vertical side width, horizontal side width,
+        //  vertical colour, horizontal colour, corner index)
+        let corners = [
+            (radius.top_left.min(max_r), l, t, colors[3], colors[0], 0u8),
+            (radius.top_right.min(max_r), r, t, colors[1], colors[0], 1u8),
+            (radius.bottom_right.min(max_r), r, b, colors[1], colors[2], 2u8),
+            (radius.bottom_left.min(max_r), l, b, colors[3], colors[2], 3u8),
+        ];
+        // Corner box extents: width along x, height along y.
+        let cw = |rad: f32, vw: f32| rad.max(vw).min(half_w);
+        let ch = |rad: f32, hw: f32| rad.max(hw).min(half_h);
+        let (tl_w, tl_h) = (cw(corners[0].0, l), ch(corners[0].0, t));
+        let (tr_w, tr_h) = (cw(corners[1].0, r), ch(corners[1].0, t));
+        let (br_w, br_h) = (cw(corners[2].0, r), ch(corners[2].0, b));
+        let (bl_w, bl_h) = (cw(corners[3].0, l), ch(corners[3].0, b));
+
+        // Straight strips between the corner boxes.
+        let right = rect.x + rect.width;
+        let bottom = rect.y + rect.height;
+        if t > 0.0 && rect.width > tl_w + tr_w {
+            self.draw_solid_rect(
+                Rect::new(rect.x + tl_w, rect.y, rect.width - tl_w - tr_w, t),
+                colors[0],
+            );
+        }
+        if b > 0.0 && rect.width > bl_w + br_w {
+            self.draw_solid_rect(
+                Rect::new(rect.x + bl_w, bottom - b, rect.width - bl_w - br_w, b),
+                colors[2],
+            );
+        }
+        if l > 0.0 && rect.height > tl_h + bl_h {
+            self.draw_solid_rect(
+                Rect::new(rect.x, rect.y + tl_h, l, rect.height - tl_h - bl_h),
+                colors[3],
+            );
+        }
+        if r > 0.0 && rect.height > tr_h + br_h {
+            self.draw_solid_rect(
+                Rect::new(right - r, rect.y + tr_h, r, rect.height - tr_h - br_h),
+                colors[1],
+            );
+        }
+
+        let boxes = [(tl_w, tl_h), (tr_w, tr_h), (br_w, br_h), (bl_w, bl_h)];
+        for ((rad, vw, hw, vcol, hcol, q), (bw, bh)) in corners.into_iter().zip(boxes) {
+            if bw <= 0.0 || bh <= 0.0 {
+                continue;
+            }
+            let box_x = if q == 0 || q == 3 { rect.x } else { right - bw };
+            let box_y = if q == 0 || q == 1 { rect.y } else { bottom - bh };
+            let (rx, ry) = (rad - vw, rad - hw);
+            let mut py = box_y;
+            while py < box_y + bh - 0.001 {
+                let ph = (box_y + bh - py).min(1.0);
+                let mut px = box_x;
+                while px < box_x + bw - 0.001 {
+                    let pw = (box_x + bw - px).min(1.0);
+                    let (cx, cy) = (px + pw * 0.5, py + ph * 0.5);
+                    // Distances from the corner's two outer edges.
+                    let ex = if q == 0 || q == 3 { cx - rect.x } else { right - cx };
+                    let ey = if q == 0 || q == 1 { cy - rect.y } else { bottom - cy };
+
+                    let outer = if rad > 0.0 && ex < rad && ey < rad {
+                        let d = ((rad - ex).powi(2) + (rad - ey).powi(2)).sqrt();
+                        ((rad - d) * 0.5 + 0.5).clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    let inner = if rx > 0.0 && ry > 0.0 && ex < rad && ey < rad {
+                        let k = (((rad - ex) / rx).powi(2) + ((rad - ey) / ry).powi(2)).sqrt();
+                        ((1.0 - k) * rx.min(ry) * 0.5 + 0.5).clamp(0.0, 1.0)
+                    } else {
+                        (ex - vw + 0.5).clamp(0.0, 1.0) * (ey - hw + 0.5).clamp(0.0, 1.0)
+                    };
+                    let coverage = (outer - inner).clamp(0.0, 1.0);
+                    if coverage > 0.01 {
+                        // Horizontal side owns the pixel when it lies on the
+                        // edge side of the outer→inner corner diagonal.
+                        let horizontal = vw <= 0.0 || (hw > 0.0 && ey * vw < ex * hw);
+                        let c = if horizontal { hcol } else { vcol };
+                        self.draw_solid_rect(
+                            Rect::new(px, py, pw, ph),
+                            Color::new(c.r, c.g, c.b, c.a * coverage),
+                        );
+                    }
+                    px += 1.0;
+                }
+                py += 1.0;
+            }
+        }
+    }
+
     /// Draw a box shadow.
     /// 
     /// For now, this uses a simplified approach:
@@ -4704,18 +4981,14 @@ impl Renderer {
                         .and_then(|a| a.get(char_idx).copied())
                         .unwrap_or(entry.advance);
 
-                    let Some((g, tex)) = clip_textured_rect(
-                        self.current_clip(),
-                        Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
-                        entry.tex_coords,
-                    ) else {
+                    let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex)) = self
+                        .textured_corners(
+                            Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
+                            entry.tex_coords,
+                        )
+                    else {
                         continue;
                     };
-
-                    let (x0, y0) = self.transform_point(g.x, g.y);
-                    let (x1, y1) = self.transform_point(g.x + g.width, g.y);
-                    let (x2, y2) = self.transform_point(g.x + g.width, g.y + g.height);
-                    let (x3, y3) = self.transform_point(g.x, g.y + g.height);
 
                     // White vertex color: the blit pipeline multiplies, so this
                     // passes the emoji's own colors through untinted. Preserve
@@ -4765,19 +5038,14 @@ impl Renderer {
                     .unwrap_or(entry.advance);
 
                 // `overflow: hidden` clips glyphs like everything else.
-                let Some((g, tex)) = clip_textured_rect(
-                    self.current_clip(),
-                    Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
-                    entry.tex_coords,
-                ) else {
+                let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex)) = self
+                    .textured_corners(
+                        Rect::new(glyph_x, glyph_y, glyph_w, glyph_h),
+                        entry.tex_coords,
+                    )
+                else {
                     continue;
                 };
-
-                // Apply transform to glyph corners
-                let (x0, y0) = self.transform_point(g.x, g.y);
-                let (x1, y1) = self.transform_point(g.x + g.width, g.y);
-                let (x2, y2) = self.transform_point(g.x + g.width, g.y + g.height);
-                let (x3, y3) = self.transform_point(g.x, g.y + g.height);
 
                 let base = self.texture_vertices.len() as u32;
 
@@ -4821,17 +5089,11 @@ impl Renderer {
     fn draw_image(&mut self, url: &str, rect: Rect) {
         if self.texture_cache.contains(url) {
             // `overflow: hidden` clips replaced content like everything else.
-            let Some((rect, tex)) =
-                clip_textured_rect(self.current_clip(), rect, [0.0, 0.0, 1.0, 1.0])
+            let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], tex)) =
+                self.textured_corners(rect, [0.0, 0.0, 1.0, 1.0])
             else {
                 return;
             };
-
-            // Apply transform to image corners
-            let (x0, y0) = self.transform_point(rect.x, rect.y);
-            let (x1, y1) = self.transform_point(rect.x + rect.width, rect.y);
-            let (x2, y2) = self.transform_point(rect.x + rect.width, rect.y + rect.height);
-            let (x3, y3) = self.transform_point(rect.x, rect.y + rect.height);
 
             self.push_image_quad(
                 url,
@@ -5057,19 +5319,11 @@ impl Renderer {
         let tex_bottom = 1.0 - clip_bottom / tile_rect.height;
 
         // Then the overflow clip on top of the container clip.
-        let Some((draw_rect, [tex_left, tex_top, tex_right, tex_bottom])) = clip_textured_rect(
-            self.current_clip(),
-            draw_rect,
-            [tex_left, tex_top, tex_right, tex_bottom],
-        ) else {
+        let Some(([[x0, y0], [x1, y1], [x2, y2], [x3, y3]], [tex_left, tex_top, tex_right, tex_bottom])) =
+            self.textured_corners(draw_rect, [tex_left, tex_top, tex_right, tex_bottom])
+        else {
             return;
         };
-
-        // Apply transform to image corners
-        let (x0, y0) = self.transform_point(draw_rect.x, draw_rect.y);
-        let (x1, y1) = self.transform_point(draw_rect.x + draw_rect.width, draw_rect.y);
-        let (x2, y2) = self.transform_point(draw_rect.x + draw_rect.width, draw_rect.y + draw_rect.height);
-        let (x3, y3) = self.transform_point(draw_rect.x, draw_rect.y + draw_rect.height);
 
         self.push_image_quad(
             url,
@@ -5150,8 +5404,14 @@ impl Renderer {
     /// The rect half intersects as it always did. The rounded half accumulates:
     /// a nested rounded clip does not replace its parent, because a point has to
     /// be inside both.
+    ///
+    /// The entry is stored in SCREEN space: the command's rect is in document
+    /// space and is mapped through the transform in force when the clip is
+    /// pushed, so a clip inside a transformed box moves with the box, and a
+    /// descendant transformed AFTER the clip was pushed is clipped where it
+    /// lands rather than where it would have been without its transform.
     fn push_clip_rounded(&mut self, rect: Rect, radius: rustkit_layout::BorderRadius) {
-        let entry = clip_entry_for(self.clip_stack.last(), rect, radius);
+        let entry = clip_entry_under(self.clip_stack.last(), self.current_transform(), rect, radius);
         self.clip_stack.push(entry);
     }
 
@@ -5160,9 +5420,35 @@ impl Renderer {
         self.clip_stack.pop();
     }
 
-    /// Get the current clip rectangle.
+    /// Get the current clip rectangle (screen space).
     fn current_clip(&self) -> Option<Rect> {
         self.clip_stack.last().map(|entry| entry.rect)
+    }
+
+    /// A textured quad (glyph, image) cut to the current clip and taken to
+    /// screen space: the four corner positions in emit order (top-left,
+    /// top-right, bottom-right, bottom-left) and the texture coordinates of
+    /// the surviving part. `None` when nothing survives. One rule for every
+    /// textured site so text, images and tiles are clipped under a transform
+    /// exactly as color quads are.
+    fn textured_corners(&self, rect: Rect, tex: [f32; 4]) -> Option<([[f32; 2]; 4], [f32; 4])> {
+        let (g, tex, space) = clip_textured_under(self.current_transform(), self.current_clip(), rect, tex)?;
+        let corners = match space {
+            QuadSpace::Screen => [
+                [g.x, g.y],
+                [g.x + g.width, g.y],
+                [g.x + g.width, g.y + g.height],
+                [g.x, g.y + g.height],
+            ],
+            QuadSpace::Document => {
+                let (x0, y0) = self.transform_point(g.x, g.y);
+                let (x1, y1) = self.transform_point(g.x + g.width, g.y);
+                let (x2, y2) = self.transform_point(g.x + g.width, g.y + g.height);
+                let (x3, y3) = self.transform_point(g.x, g.y + g.height);
+                [[x0, y0], [x1, y1], [x2, y2], [x3, y3]]
+            }
+        };
+        Some((corners, tex))
     }
 
 
@@ -5183,21 +5469,13 @@ impl Renderer {
             return [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]; // Identity
         }
 
-        // Compose all transforms on the stack
+        // Compose all transforms on the stack: an outer (earlier) transform
+        // applies to what an inner one produces, so the page-space affine is
+        // `outer · inner` in the column-vector convention `multiply_matrices_2d`
+        // uses.
         let mut result = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
         for (matrix, origin) in &self.transform_stack {
-            // Apply origin offset: translate(-origin) * matrix * translate(origin)
-            // First, translate to origin
-            let t1 = [1.0, 0.0, 0.0, 1.0, -origin.0, -origin.1];
-            // Then the transform
-            let m = *matrix;
-            // Then translate back
-            let t2 = [1.0, 0.0, 0.0, 1.0, origin.0, origin.1];
-
-            // Compose: result = result * t1 * m * t2
-            let temp1 = multiply_matrices_2d(result, t1);
-            let temp2 = multiply_matrices_2d(temp1, m);
-            result = multiply_matrices_2d(temp2, t2);
+            result = multiply_matrices_2d(result, affine_about_origin(*matrix, *origin));
         }
         result
     }
@@ -5575,6 +5853,172 @@ fn clip_entry_for(
     }
 }
 
+const IDENTITY_2D: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+/// Which space a clipped piece comes back in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuadSpace {
+    /// Already mapped through the transform; emit the corners as they are.
+    Screen,
+    /// Still in document space; the emitter applies the transform.
+    Document,
+}
+
+/// `rect` mapped through `m` when `m` has no rotation or skew — the mapped
+/// rect is still a rect, so it can be clipped exactly. `None` otherwise.
+fn map_rect_axis_aligned(m: [f32; 6], rect: Rect) -> Option<Rect> {
+    if m[1] != 0.0 || m[2] != 0.0 {
+        return None;
+    }
+    let x0 = m[0] * rect.x + m[4];
+    let x1 = m[0] * (rect.x + rect.width) + m[4];
+    let y0 = m[3] * rect.y + m[5];
+    let y1 = m[3] * (rect.y + rect.height) + m[5];
+    Some(Rect::new(x0.min(x1), y0.min(y1), (x1 - x0).abs(), (y1 - y0).abs()))
+}
+
+/// The bounding box of `rect`'s corners mapped through `m`.
+fn map_rect_bounds(m: [f32; 6], rect: Rect) -> Rect {
+    let corners = [
+        (rect.x, rect.y),
+        (rect.x + rect.width, rect.y),
+        (rect.x + rect.width, rect.y + rect.height),
+        (rect.x, rect.y + rect.height),
+    ];
+    let mut x0 = f32::MAX;
+    let mut y0 = f32::MAX;
+    let mut x1 = f32::MIN;
+    let mut y1 = f32::MIN;
+    for (x, y) in corners {
+        let px = m[0] * x + m[2] * y + m[4];
+        let py = m[1] * x + m[3] * y + m[5];
+        x0 = x0.min(px);
+        y0 = y0.min(py);
+        x1 = x1.max(px);
+        y1 = y1.max(py);
+    }
+    Rect::new(x0, y0, x1 - x0, y1 - y0)
+}
+
+/// Inverse of a 2D affine matrix, `None` when it is singular (a zero scale).
+fn invert_matrix_2d(m: [f32; 6]) -> Option<[f32; 6]> {
+    let det = m[0] * m[3] - m[1] * m[2];
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let inv_det = 1.0 / det;
+    let a = m[3] * inv_det;
+    let b = -m[1] * inv_det;
+    let c = -m[2] * inv_det;
+    let d = m[0] * inv_det;
+    Some([a, b, c, d, -(a * m[4] + c * m[5]), -(b * m[4] + d * m[5])])
+}
+
+/// The clip entry a `PushClip`/`PushClipRounded` issued under transform `m`
+/// produces on top of `current`. The command's `rect` is in document space;
+/// the entry is in screen space, so a clip and the quads drawn under it are
+/// compared where they both land.
+///
+/// Under a rotation or skew the clip's rounded part is kept only as a
+/// bounding box (a rotated rounded rect is not a rounded rect) — a ledgered
+/// approximation; no board case rotates an `overflow: hidden` box.
+fn clip_entry_under(
+    current: Option<&ClipEntry>,
+    m: [f32; 6],
+    rect: Rect,
+    radius: rustkit_layout::BorderRadius,
+) -> ClipEntry {
+    if m == IDENTITY_2D {
+        return clip_entry_for(current, rect, radius);
+    }
+    match map_rect_axis_aligned(m, rect) {
+        Some(screen) => {
+            let scale = (m[0] * m[3]).abs().sqrt();
+            let radius = rustkit_layout::BorderRadius {
+                top_left: radius.top_left * scale,
+                top_right: radius.top_right * scale,
+                bottom_right: radius.bottom_right * scale,
+                bottom_left: radius.bottom_left * scale,
+            };
+            clip_entry_for(current, screen, radius)
+        }
+        None => clip_entry_for(current, map_rect_bounds(m, rect), radius),
+    }
+}
+
+/// Everything a document-space `rect` drawn under transform `m` becomes under
+/// the screen-space `clip`, appended to `out` as `(piece, coverage)`; the
+/// return value says which space the pieces are in.
+///
+/// Without a transform this is `collect_clipped_pieces` and emits exactly the
+/// vertices it always did. With an axis-aligned transform the quad is mapped
+/// first and clipped where it lands. With a rotation or skew the quad cannot be
+/// clipped as a rect after mapping, so the clip's rectangular part is brought
+/// back to document space (as a bounding box) and the quad is clipped before
+/// the transform — the pre-existing behaviour, kept as the fallback.
+fn clip_quad_under(
+    m: [f32; 6],
+    clip: Option<&ClipEntry>,
+    rect: Rect,
+    out: &mut Vec<(Rect, f32)>,
+) -> QuadSpace {
+    if m == IDENTITY_2D {
+        collect_clipped_pieces(clip, rect, out);
+        return QuadSpace::Screen;
+    }
+    if let Some(screen) = map_rect_axis_aligned(m, rect) {
+        collect_clipped_pieces(clip, screen, out);
+        return QuadSpace::Screen;
+    }
+    match clip {
+        None => out.push((rect, 1.0)),
+        Some(entry) => {
+            if let Some(inv) = invert_matrix_2d(m) {
+                let fallback = ClipEntry {
+                    rect: map_rect_bounds(inv, entry.rect),
+                    rounded: Vec::new(),
+                };
+                collect_clipped_pieces(Some(&fallback), rect, out);
+            }
+            // A singular transform paints nothing visible.
+        }
+    }
+    QuadSpace::Document
+}
+
+/// `clip_textured_rect` under transform `m`, on the same law as
+/// `clip_quad_under`: the surviving rect, its texture coordinates, and the
+/// space the rect is in.
+fn clip_textured_under(
+    m: [f32; 6],
+    clip: Option<Rect>,
+    rect: Rect,
+    tex: [f32; 4],
+) -> Option<(Rect, [f32; 4], QuadSpace)> {
+    if m == IDENTITY_2D {
+        let (r, t) = clip_textured_rect(clip, rect, tex)?;
+        return Some((r, t, QuadSpace::Screen));
+    }
+    if let Some(screen) = map_rect_axis_aligned(m, rect) {
+        // A negative scale flips the texels; keep them in the same order as
+        // the mapped corners by flipping the coordinates too.
+        let tex = [
+            if m[0] < 0.0 { tex[2] } else { tex[0] },
+            if m[3] < 0.0 { tex[3] } else { tex[1] },
+            if m[0] < 0.0 { tex[0] } else { tex[2] },
+            if m[3] < 0.0 { tex[1] } else { tex[3] },
+        ];
+        let (r, t) = clip_textured_rect(clip, screen, tex)?;
+        return Some((r, t, QuadSpace::Screen));
+    }
+    let doc_clip = match clip {
+        None => None,
+        Some(c) => Some(map_rect_bounds(invert_matrix_2d(m)?, c)),
+    };
+    let (r, t) = clip_textured_rect(doc_clip, rect, tex)?;
+    Some((r, t, QuadSpace::Document))
+}
+
 /// A textured quad (glyph, image tile) cut to the rectangular part of the
 /// current clip: the surviving rect and its texture coordinates, scaled so the
 /// texels stay where they were. `None` when nothing survives.
@@ -5691,18 +6135,40 @@ fn rounded_row_span(rect: Rect, radius: rustkit_layout::BorderRadius, y: f32) ->
 }
 
 /// Push one row's span as up to three pieces: a fully covered interior and an
-/// antialiased cell at each fractional end.
+/// antialiased cell at each end THE ARC ACTUALLY CUT.
 ///
 /// The partial cells are what keep a clipped corner from reading as a hard
 /// staircase. They use the same "coverage multiplies alpha" convention as
 /// `draw_rounded_corner`, so a clipped corner and a painted rounded corner
 /// antialias the same way.
-fn push_row_pieces(out: &mut Vec<(Rect, f32)>, left: f32, right: f32, y: f32, height: f32) {
+///
+/// `left_cut`/`right_cut` say whether that end came from an arc or is the
+/// quad's own edge, and only a cut end is snapped. An uncut end must pass
+/// through exactly as the no-clip path would emit it — `collect_clipped_pieces`
+/// returns `(rect, 1.0)` when there is no rounding at all, and a rounded clip
+/// somewhere else on the box is not a reason for this edge to move.
+///
+/// Snapping an uncut end is invisible on a quad whose edge is a real edge, and
+/// wrong on a quad that TILES: a gradient paints as a grid of cells, and two
+/// neighbouring cells' partial-coverage slivers each blend against what is
+/// under them instead of summing to one. Measured on gradient-backgrounds'
+/// `.linear-6`, that seamed 2164 interior pixels of a 227x180 card — a stipple
+/// every cell across the rows the arc band covers, 1309 of them out of Gate B's
+/// tolerance — while the corner notches the clip exists to cut were 353.
+fn push_row_pieces(
+    out: &mut Vec<(Rect, f32)>,
+    left: f32,
+    right: f32,
+    y: f32,
+    height: f32,
+    left_cut: bool,
+    right_cut: bool,
+) {
     if height <= 0.0 || right <= left {
         return;
     }
-    let inner_left = left.ceil();
-    let inner_right = right.floor();
+    let inner_left = if left_cut { left.ceil() } else { left };
+    let inner_right = if right_cut { right.floor() } else { right };
 
     if inner_right <= inner_left {
         // Span narrower than one pixel column: one cell carrying its coverage.
@@ -5788,12 +6254,19 @@ fn clip_quad_to_rounded(
             let centre = y + height * 0.5;
             let mut left = quad.x;
             let mut right = quad.right();
+            let (mut left_cut, mut right_cut) = (false, false);
             let mut inside = true;
             for (rect, radius) in rounded {
                 match rounded_row_span(*rect, *radius, centre) {
                     Some((l, r)) => {
-                        left = left.max(l);
-                        right = right.min(r);
+                        if l > left {
+                            left = l;
+                            left_cut = true;
+                        }
+                        if r < right {
+                            right = r;
+                            right_cut = true;
+                        }
                     }
                     None => {
                         inside = false;
@@ -5802,7 +6275,7 @@ fn clip_quad_to_rounded(
                 }
             }
             if inside {
-                push_row_pieces(out, left, right, y, height);
+                push_row_pieces(out, left, right, y, height, left_cut, right_cut);
             }
             y += height;
         }
@@ -5826,6 +6299,29 @@ fn clip_quad_to_rounded(
 
 // ==================== Transform Helpers ====================
 
+/// The page-space affine a `PushTransform { matrix, origin }` command means:
+/// `matrix` applied about `origin` (css-transforms-1 §6), which is
+/// `T(origin) · matrix · T(-origin)` — move the origin to (0,0), transform,
+/// move it back — in the column-vector convention `multiply_matrices_2d` uses
+/// (`a · b` applies `b` first). The origin is a fixed point of the result.
+///
+/// Until n48 the two translations were composed the other way round,
+/// `T(-origin) · matrix · T(origin)`, so a point went `p ↦ M·(p + o) − o`
+/// instead of `M·(p − o) + o`. Translations commute with each other, so every
+/// `translate()` on every board case was unaffected and the bug hid for the
+/// whole campaign; a `scale()` or `rotate()` landed its box at `M·o − o` away
+/// from where it belonged — a 60×20 card at (110, 20) with `scale(2);
+/// transform-origin: 0 0` painted at (330, 60), and n47's repro section E
+/// "painted nothing" because its box went to y = 900, off the frame. The
+/// engine's geometry oracle (`own_transform_affine`) had the right order all
+/// along, so the exported layout rect and the painted pixels disagreed for
+/// every scaled or rotated box.
+fn affine_about_origin(matrix: [f32; 6], origin: (f32, f32)) -> [f32; 6] {
+    let to_origin = [1.0, 0.0, 0.0, 1.0, -origin.0, -origin.1];
+    let from_origin = [1.0, 0.0, 0.0, 1.0, origin.0, origin.1];
+    multiply_matrices_2d(from_origin, multiply_matrices_2d(matrix, to_origin))
+}
+
 /// Multiply two 2D affine matrices.
 /// Matrix format: [a, b, c, d, e, f] representing:
 /// | a c e |
@@ -5845,6 +6341,71 @@ fn multiply_matrices_2d(a: [f32; 6], b: [f32; 6]) -> [f32; 6] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ==================== Transform origin (n48) ====================
+
+    fn map(m: [f32; 6], x: f32, y: f32) -> (f32, f32) {
+        (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
+    }
+
+    /// A rect's corners mapped through an axis-aligned affine, as
+    /// `(x, y, width, height)`.
+    fn map_box(m: [f32; 6], x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
+        let (x0, y0) = map(m, x, y);
+        let (x1, y1) = map(m, x + w, y + h);
+        (x0.min(x1), y0.min(y1), (x1 - x0).abs(), (y1 - y0).abs())
+    }
+
+    #[test]
+    fn a_scale_keeps_its_transform_origin_fixed() {
+        // A 60x20 card at (110, 20) with `scale(2); transform-origin: 0 0`
+        // (n47's repro section E, scale-variants row 1): the top-left corner
+        // is the origin and must not move; the far corner doubles away from
+        // it. The old order sent the box to (330, 60) — and section E to
+        // y = 900, off the frame.
+        let m = affine_about_origin([2.0, 0.0, 0.0, 2.0, 0.0, 0.0], (110.0, 20.0));
+        assert_eq!(map(m, 110.0, 20.0), (110.0, 20.0));
+        assert_eq!(map(m, 170.0, 40.0), (230.0, 60.0));
+        assert_eq!(map_box(m, 110.0, 20.0, 60.0, 20.0), (110.0, 20.0, 120.0, 40.0));
+    }
+
+    #[test]
+    fn a_scale_about_the_centre_grows_evenly() {
+        // `transform-origin: 50% 50%` (the default): the centre is fixed and
+        // the box grows the same amount on every side.
+        let m = affine_about_origin([2.0, 0.0, 0.0, 2.0, 0.0, 0.0], (140.0, 30.0));
+        assert_eq!(map_box(m, 110.0, 20.0, 60.0, 20.0), (80.0, 10.0, 120.0, 40.0));
+    }
+
+    #[test]
+    fn a_rotation_turns_about_its_origin() {
+        // rotate(90deg) about (100, 100): (100, 0) — straight above the
+        // origin — goes to (200, 100), straight to its right.
+        let m = affine_about_origin([0.0, 1.0, -1.0, 0.0, 0.0, 0.0], (100.0, 100.0));
+        let (x, y) = map(m, 100.0, 0.0);
+        assert!((x - 200.0).abs() < 1e-4 && (y - 100.0).abs() < 1e-4, "{x} {y}");
+    }
+
+    #[test]
+    fn a_translate_ignores_its_origin() {
+        // Translations commute, so the origin never mattered for them — the
+        // pixels every translate() board case emitted stay exactly the same.
+        let t = [1.0, 0.0, 0.0, 1.0, 40.0, -7.0];
+        assert_eq!(affine_about_origin(t, (0.0, 0.0)), t);
+        assert_eq!(affine_about_origin(t, (123.0, 456.0)), t);
+    }
+
+    #[test]
+    fn nested_transforms_apply_inner_first() {
+        // A scaled child inside a translated parent: the child scales about
+        // its own origin in page space, then the parent's translate moves the
+        // result — `outer · inner`, as `current_transform` composes the stack.
+        let outer = affine_about_origin([1.0, 0.0, 0.0, 1.0, 50.0, 0.0], (0.0, 0.0));
+        let inner = affine_about_origin([2.0, 0.0, 0.0, 2.0, 0.0, 0.0], (110.0, 20.0));
+        let m = multiply_matrices_2d(outer, inner);
+        assert_eq!(map(m, 110.0, 20.0), (160.0, 20.0));
+        assert_eq!(map(m, 170.0, 40.0), (280.0, 60.0));
+    }
 
     // ==================== Textured-quad clipping (n35) ====================
 
@@ -6038,6 +6599,131 @@ mod tests {
         assert!(pieces_under(Some(&inner), Rect::new(0.0, 0.0, 50.0, 50.0)).is_empty());
     }
 
+    // ==================== Clip vs transform order ====================
+    //
+    // The clip stack is in screen space and quads are mapped before they are
+    // clipped. These pin the order with the about page's own idiom:
+    // `.sponsor-btn { overflow: hidden }` holding
+    // `::before { inset: 0; transform: translateX(-100%) }`.
+
+    fn translate(x: f32, y: f32) -> [f32; 6] {
+        [1.0, 0.0, 0.0, 1.0, x, y]
+    }
+
+    fn quad_pieces_under(m: [f32; 6], clip: Option<&ClipEntry>, rect: Rect) -> (Vec<(Rect, f32)>, QuadSpace) {
+        let mut out = Vec::new();
+        let space = clip_quad_under(m, clip, rect, &mut out);
+        (out, space)
+    }
+
+    #[test]
+    fn a_descendant_translated_out_of_its_clipper_paints_nothing() {
+        // The shine bar: the button clips to its own box under identity, the
+        // pseudo box is the button's size and translated a full width left.
+        // Before this it was clipped in document space (fully inside) and
+        // then moved — a 230x50 bar painted left of the button.
+        let button = Rect::new(300.0, 240.0, 230.0, 50.0);
+        let clip = clip_entry_under(None, IDENTITY_2D, button, radius(8.0));
+        let (pieces, _) = quad_pieces_under(translate(-230.0, 0.0), Some(&clip), button);
+        assert!(
+            pieces.is_empty(),
+            "a quad translated wholly outside its clipper must emit nothing, got {pieces:?}"
+        );
+    }
+
+    #[test]
+    fn a_partly_translated_descendant_keeps_only_the_part_inside_and_in_screen_space() {
+        let button = Rect::new(0.0, 0.0, 200.0, 50.0);
+        let clip = clip_entry_under(None, IDENTITY_2D, button, radius(0.0));
+        let (pieces, space) = quad_pieces_under(translate(-150.0, 0.0), Some(&clip), button);
+        assert_eq!(space, QuadSpace::Screen);
+        assert_eq!(pieces.len(), 1);
+        let (piece, cov) = pieces[0];
+        assert_eq!(cov, 1.0);
+        assert_eq!((piece.x, piece.width), (0.0, 50.0), "screen-space piece: the 50px that overlap");
+    }
+
+    #[test]
+    fn a_clip_pushed_under_a_transform_moves_with_it() {
+        // The other half of the rule: a transformed box that clips its own
+        // children clips them where the box is, not where it was laid out.
+        let entry = clip_entry_under(None, translate(100.0, 20.0), Rect::new(0.0, 0.0, 50.0, 50.0), radius(0.0));
+        assert_eq!((entry.rect.x, entry.rect.y), (100.0, 20.0));
+        // A child drawn under the same transform lands inside it.
+        let (pieces, _) = quad_pieces_under(translate(100.0, 20.0), Some(&entry), Rect::new(10.0, 10.0, 10.0, 10.0));
+        assert_eq!(pieces.len(), 1);
+        assert_eq!((pieces[0].0.x, pieces[0].0.y), (110.0, 30.0));
+    }
+
+    #[test]
+    fn a_scaled_clip_scales_its_corner_radius() {
+        let entry = clip_entry_under(None, [2.0, 0.0, 0.0, 2.0, 0.0, 0.0], Rect::new(0.0, 0.0, 50.0, 50.0), radius(10.0));
+        assert_eq!(entry.rect.width, 100.0);
+        assert_eq!(entry.rounded.len(), 1);
+        assert_eq!(entry.rounded[0].1.top_left, 20.0);
+    }
+
+    #[test]
+    fn without_a_transform_the_pieces_are_exactly_the_old_ones() {
+        // The no-transform page must emit the vertices it always did.
+        let clip = clip_entry_for(None, Rect::new(0.0, 0.0, 100.0, 100.0), radius(12.0));
+        let rect = Rect::new(-10.0, -10.0, 60.0, 60.0);
+        let old = pieces_under(Some(&clip), rect);
+        let (new, space) = quad_pieces_under(IDENTITY_2D, Some(&clip), rect);
+        assert_eq!(space, QuadSpace::Screen);
+        assert_eq!(old.len(), new.len());
+        for (a, b) in old.iter().zip(new.iter()) {
+            assert_eq!((a.0.x, a.0.y, a.0.width, a.0.height, a.1), (b.0.x, b.0.y, b.0.width, b.0.height, b.1));
+        }
+    }
+
+    #[test]
+    fn a_rotated_quad_falls_back_to_document_space_clipping() {
+        // 90 degrees about the origin: not axis-aligned, so the quad is
+        // clipped against the clip's document-space bounds and handed back for
+        // the emitter to transform — no worse than before this existed.
+        let rot = [0.0, 1.0, -1.0, 0.0, 0.0, 0.0];
+        let clip = clip_entry_under(None, IDENTITY_2D, Rect::new(-100.0, 0.0, 100.0, 100.0), radius(0.0));
+        // x' = -y, y' = x: the screen clip maps back to x in [0, 100],
+        // y in [0, 100]. A quad at y in [-200, -100] misses it entirely.
+        let (pieces, space) = quad_pieces_under(rot, Some(&clip), Rect::new(0.0, -200.0, 50.0, 100.0));
+        assert_eq!(space, QuadSpace::Document);
+        assert!(pieces.is_empty(), "{pieces:?}");
+        // A quad at y in [-50, 50] keeps its [0, 50] half.
+        let (pieces, _) = quad_pieces_under(rot, Some(&clip), Rect::new(0.0, -50.0, 50.0, 100.0));
+        assert_eq!(pieces.len(), 1);
+        assert_eq!((pieces[0].0.y, pieces[0].0.height), (0.0, 50.0));
+    }
+
+    #[test]
+    fn invert_matrix_2d_round_trips() {
+        let m = [2.0, 0.5, -0.25, 3.0, 40.0, -7.0];
+        let inv = invert_matrix_2d(m).unwrap();
+        let id = multiply_matrices_2d(m, inv);
+        for (a, b) in id.iter().zip(IDENTITY_2D.iter()) {
+            assert!((a - b).abs() < 1e-5, "{id:?}");
+        }
+        assert!(invert_matrix_2d([0.0, 0.0, 0.0, 0.0, 1.0, 1.0]).is_none());
+    }
+
+    #[test]
+    fn a_translated_glyph_is_clipped_where_it_lands() {
+        // Text under a transformed descendant follows the same law as color.
+        let clip = Some(Rect::new(0.0, 0.0, 100.0, 50.0));
+        let glyph = Rect::new(90.0, 10.0, 20.0, 20.0);
+        // Untransformed: half the glyph survives.
+        let (r, _, space) = clip_textured_under(IDENTITY_2D, clip, glyph, [0.0, 0.0, 1.0, 1.0]).unwrap();
+        assert_eq!(space, QuadSpace::Screen);
+        assert_eq!(r.width, 10.0);
+        // Moved 20px right: nothing does.
+        assert!(clip_textured_under(translate(20.0, 0.0), clip, glyph, [0.0, 0.0, 1.0, 1.0]).is_none());
+        // Moved 20px left: whole glyph, in screen space, texels intact.
+        let (r, t, space) = clip_textured_under(translate(-20.0, 0.0), clip, glyph, [0.0, 0.0, 1.0, 1.0]).unwrap();
+        assert_eq!(space, QuadSpace::Screen);
+        assert_eq!((r.x, r.width), (70.0, 20.0));
+        assert_eq!(t, [0.0, 0.0, 1.0, 1.0]);
+    }
+
     #[test]
     fn no_rounded_constraint_passes_the_quad_through_untouched() {
         let quad = Rect::new(10.0, 10.0, 100.0, 50.0);
@@ -6096,6 +6782,96 @@ mod tests {
                 "({x}, {y}) should be fully painted"
             );
         }
+    }
+
+    // ---------- an end the arc did not cut is not the arc's to move ----------
+    //
+    // A gradient paints as a grid of cells. Put a rounded clip over one and
+    // every cell inside the arc band got both its ends snapped to the pixel
+    // grid and re-emitted as partial-coverage slivers — so two neighbours'
+    // slivers each blended against what was under them instead of summing to
+    // one, and the card stippled every cell. On gradient-backgrounds'
+    // `.linear-6` that was 2164 interior pixels against 353 in the notches the
+    // clip exists to cut.
+
+    /// One cell of a tiled paint source, sitting well inside the arc's span.
+    const TILE_W: f32 = 3.0;
+
+    #[test]
+    fn an_end_the_arc_did_not_cut_keeps_the_quads_own_edge() {
+        let clip = Rect::new(0.0, 0.0, 200.0, 200.0);
+        // A row inside the top arc band (y < 20), but an x-span the arc at
+        // that row does not reach: the corner only bites the first ~20px.
+        let tile = Rect::new(100.3, 4.0, TILE_W, 1.0);
+        let pieces = clip_quad_to_rounded(tile, &[(clip, radius(20.0))]);
+
+        assert_eq!(
+            pieces.len(),
+            1,
+            "an uncut row must emit ONE piece, not a snapped interior plus two \
+             slivers: {pieces:?}"
+        );
+        let (rect, cov) = pieces[0];
+        assert_eq!(cov, 1.0, "an uncut row is fully covered");
+        assert!(
+            (rect.x - tile.x).abs() < 1e-4 && (rect.width - tile.width).abs() < 1e-4,
+            "the quad's own fractional edges must survive: {rect:?} vs {tile:?}"
+        );
+    }
+
+    #[test]
+    fn neighbouring_tiles_under_a_rounded_clip_do_not_seam() {
+        // The defect in the form it shipped: adjacent cells must tile exactly,
+        // with no partial-coverage pixel between them. Their pieces sum to the
+        // full area of both, and nothing lands at less than full coverage.
+        let clip = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let a = Rect::new(100.3, 4.0, TILE_W, 1.0);
+        let b = Rect::new(100.3 + TILE_W, 4.0, TILE_W, 1.0);
+
+        let mut pieces = clip_quad_to_rounded(a, &[(clip, radius(20.0))]);
+        pieces.extend(clip_quad_to_rounded(b, &[(clip, radius(20.0))]));
+
+        assert!(
+            pieces.iter().all(|(_, cov)| *cov == 1.0),
+            "no cell of an uncut row may carry partial coverage: {pieces:?}"
+        );
+        let area: f32 = pieces.iter().map(|(r, cov)| r.width * r.height * cov).sum();
+        assert!(
+            (area - 2.0 * TILE_W).abs() < 1e-3,
+            "the two tiles must cover exactly their own area, got {area}"
+        );
+    }
+
+    #[test]
+    fn a_cut_end_is_still_antialiased_at_both_ends() {
+        // The control the fix must not buy its way out of: where the arc DOES
+        // cut the row, the sliver stays, or a clipped corner reads as a
+        // staircase again.
+        //
+        // Asserted per END, not "some piece is partial". A row crossing both
+        // top arcs is cut twice, so a check that only asks whether ANY partial
+        // piece exists is satisfied by whichever end still works — and it
+        // passed with the left end's antialiasing deleted, and again with the
+        // right end's. This campaign's recurring survivor shape: the guard
+        // written against the example rather than against the rule.
+        let clip = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let pieces = clip_quad_to_rounded(Rect::new(0.0, 4.0, 200.0, 1.0), &[(clip, radius(20.0))]);
+
+        let (left, right) =
+            rounded_row_span(clip, radius(20.0), 4.5).expect("row crosses the rounded rect");
+        let partial_at = |x: f32| {
+            pieces
+                .iter()
+                .any(|(r, cov)| *cov > 0.0 && *cov < 1.0 && r.contains(x, 4.5))
+        };
+        assert!(
+            partial_at(left + 0.01),
+            "the arc-cut LEFT end must stay antialiased: {pieces:?}"
+        );
+        assert!(
+            partial_at(right - 0.01),
+            "the arc-cut RIGHT end must stay antialiased: {pieces:?}"
+        );
     }
 
     #[test]
@@ -6743,4 +7519,38 @@ mod form_text_seat_tests {
         assert!(((ascent + descent) - content_h).abs() <= 1.5,
             "line box {} vs composed content {}", ascent + descent, content_h);
     }
+}
+
+/// Statistics about the last render pass (shell diagnostics).
+#[derive(Debug, Clone, Default)]
+pub struct RenderStats {
+    pub color_vertex_count: usize,
+    pub color_index_count: usize,
+    pub texture_vertex_count: usize,
+    pub texture_index_count: usize,
+    pub clip_stack_depth: usize,
+    pub stacking_context_depth: usize,
+}
+
+/// ISO8601-ish timestamp without a chrono dependency (approximate calendar;
+/// good enough for a capture sidecar).
+#[cfg(windows)]
+fn chrono_lite_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let days = secs / 86400;
+    let years = 1970 + days / 365;
+    let remaining = (days % 365) as u32;
+    let month = remaining / 30 + 1;
+    let day = remaining % 30 + 1;
+    let hours = (secs % 86400) / 3600;
+    let minutes = (secs % 3600) / 60;
+    let seconds = secs % 60;
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        years, month, day, hours, minutes, seconds
+    )
 }

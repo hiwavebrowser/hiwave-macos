@@ -13,15 +13,32 @@ use rustkit_viewhost::Bounds;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, Instant};
 use tracing::{error, warn};
+use url::Url;
 
 #[derive(Parser, Debug)]
 #[command(name = "parity-capture")]
 #[command(about = "Headless frame capture for parity testing")]
+#[command(group(clap::ArgGroup::new("source").required(true).args(["html_file", "url"])))]
 struct Args {
     /// Path to HTML file to render
     #[arg(long)]
-    html_file: String,
+    html_file: Option<String>,
+
+    /// Live URL to load through `Engine::load_url` (document + subresources
+    /// over the network), for the real-site board
+    #[arg(long)]
+    url: Option<String>,
+
+    /// Hard wall-clock limit for the whole capture, in milliseconds. On
+    /// expiry the process prints a `timeout` result and exits 3.
+    #[arg(long, default_value = "30000")]
+    timeout_ms: u64,
+
+    /// Output path for display-list JSON (paint commands, including text runs)
+    #[arg(long)]
+    dump_display_list: Option<String>,
 
     /// Viewport width
     #[arg(long, default_value = "1280")]
@@ -47,13 +64,43 @@ struct Args {
 #[derive(Serialize, Deserialize)]
 struct CaptureResult {
     status: String,
-    html_file: String,
+    html_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    url: Option<String>,
     width: u32,
     height: u32,
     frame_path: Option<String>,
     layout_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    display_list_path: Option<String>,
     layout_stats: Option<LayoutStats>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    elapsed_ms: Option<u64>,
     error: Option<String>,
+}
+
+impl CaptureResult {
+    fn new(args: &Args) -> Self {
+        CaptureResult {
+            status: "ok".to_string(),
+            html_file: args.html_file.clone(),
+            url: args.url.clone(),
+            width: args.width,
+            height: args.height,
+            frame_path: None,
+            layout_path: None,
+            display_list_path: None,
+            layout_stats: None,
+            elapsed_ms: None,
+            error: None,
+        }
+    }
+
+    fn failed(mut self, status: &str, error: String) -> Self {
+        self.status = status.to_string();
+        self.error = Some(error);
+        self
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -75,13 +122,32 @@ fn main() {
     let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| default_filter.to_string());
     tracing_subscriber::fmt()
         .with_env_filter(&filter)
+        .with_writer(std::io::stderr)
         .init();
 
-    let result = run_capture(&args);
-    
+    // Hard wall-clock limit. A live page can stall the engine anywhere
+    // (network, layout, paint) and nothing inside the engine can be trusted
+    // to give up, so the limit is enforced from outside the capture thread.
+    {
+        let limit = Duration::from_millis(args.timeout_ms);
+        let timeout_result = CaptureResult::new(&args).failed(
+            "timeout",
+            format!("capture exceeded {} ms", args.timeout_ms),
+        );
+        std::thread::spawn(move || {
+            std::thread::sleep(limit);
+            println!("{}", serde_json::to_string(&timeout_result).unwrap());
+            std::process::exit(3);
+        });
+    }
+
+    let started = Instant::now();
+    let mut result = run_capture(&args);
+    result.elapsed_ms = Some(started.elapsed().as_millis() as u64);
+
     // Output JSON result
     println!("{}", serde_json::to_string(&result).unwrap());
-    
+
     // Exit with appropriate code
     if result.status == "ok" {
         std::process::exit(0);
@@ -90,45 +156,49 @@ fn main() {
     }
 }
 
+/// The user agent the shipping RustKit content view sends
+/// (hiwave-app/src/webview_rustkit.rs). Live sites branch on it, so a URL
+/// capture must present as the product does, not as a test tool.
+const PRODUCT_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15 HiWave/1.0";
+
 fn run_capture(args: &Args) -> CaptureResult {
-    // Read HTML file
-    let html_content = match fs::read_to_string(&args.html_file) {
-        Ok(content) => preprocess_html(&content, Path::new(&args.html_file)),
-        Err(e) => {
-            return CaptureResult {
-                status: "error".to_string(),
-                html_file: args.html_file.clone(),
-                width: args.width,
-                height: args.height,
-                frame_path: None,
-                layout_path: None,
-                layout_stats: None,
-                error: Some(format!("Failed to read HTML file: {}", e)),
-            };
-        }
+    let mut result = CaptureResult::new(args);
+
+    // Read HTML file (URL mode fetches inside the engine instead)
+    let html_content = match &args.html_file {
+        Some(html_file) => match fs::read_to_string(html_file) {
+            Ok(content) => Some(preprocess_html(&content, Path::new(html_file))),
+            Err(e) => {
+                return result.failed("error", format!("Failed to read HTML file: {}", e));
+            }
+        },
+        None => None,
+    };
+    let url = match &args.url {
+        Some(raw) => match Url::parse(raw) {
+            Ok(u) => Some(u),
+            Err(e) => return result.failed("error", format!("Invalid URL: {}", e)),
+        },
+        None => None,
     };
 
-    // Create engine with parity testing config (animations disabled)
+    // Create engine with parity testing config (animations disabled).
+    // Fixture mode keeps its historical test-tool UA; URL mode sends the
+    // product's.
+    let user_agent = if url.is_some() {
+        PRODUCT_USER_AGENT
+    } else {
+        "ParityCapture/1.0"
+    };
     let engine_result = EngineBuilder::new()
         .with_config(EngineConfig::for_parity_testing())
-        .user_agent("ParityCapture/1.0")
+        .user_agent(user_agent)
         .javascript_enabled(false)
         .build();
 
     let mut engine = match engine_result {
         Ok(e) => e,
-        Err(e) => {
-            return CaptureResult {
-                status: "error".to_string(),
-                html_file: args.html_file.clone(),
-                width: args.width,
-                height: args.height,
-                frame_path: None,
-                layout_path: None,
-                layout_stats: None,
-                error: Some(format!("Failed to create engine: {:?}", e)),
-            };
-        }
+        Err(e) => return result.failed("error", format!("Failed to create engine: {:?}", e)),
     };
 
     // Create headless view
@@ -142,97 +212,71 @@ fn run_capture(args: &Args) -> CaptureResult {
     let view_id = match engine.create_headless_view(bounds) {
         Ok(id) => id,
         Err(e) => {
-            return CaptureResult {
-                status: "error".to_string(),
-                html_file: args.html_file.clone(),
-                width: args.width,
-                height: args.height,
-                frame_path: None,
-                layout_path: None,
-                layout_stats: None,
-                error: Some(format!("Failed to create headless view: {:?}", e)),
-            };
+            return result.failed("error", format!("Failed to create headless view: {:?}", e));
         }
     };
 
-    // Load HTML
-    if let Err(e) = engine.load_html(view_id, &html_content) {
-        return CaptureResult {
-            status: "error".to_string(),
-            html_file: args.html_file.clone(),
-            width: args.width,
-            height: args.height,
-            frame_path: None,
-            layout_path: None,
-            layout_stats: None,
-            error: Some(format!("Failed to load HTML: {:?}", e)),
+    // Load: either the fixture HTML, or the live URL through the same
+    // navigation path the browser uses (document fetch, then stylesheets,
+    // fonts and images via load_subresources).
+    if let Some(url) = url {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => return result.failed("error", format!("Failed to create runtime: {}", e)),
         };
+        if let Err(e) = rt.block_on(engine.load_url(view_id, url)) {
+            return result.failed("error", format!("Failed to load URL: {:?}", e));
+        }
+    } else if let Some(html) = html_content {
+        if let Err(e) = engine.load_html(view_id, &html) {
+            return result.failed("error", format!("Failed to load HTML: {:?}", e));
+        }
     }
 
     // Render
     if let Err(e) = engine.render_view(view_id) {
-        return CaptureResult {
-            status: "error".to_string(),
-            html_file: args.html_file.clone(),
-            width: args.width,
-            height: args.height,
-            frame_path: None,
-            layout_path: None,
-            layout_stats: None,
-            error: Some(format!("Failed to render: {:?}", e)),
-        };
+        return result.failed("error", format!("Failed to render: {:?}", e));
     }
 
     // Capture frame if requested
-    let frame_path = if let Some(ref path) = args.dump_frame {
+    if let Some(ref path) = args.dump_frame {
         if let Err(e) = engine.capture_frame(view_id, path) {
             error!("Failed to capture frame: {:?}", e);
-            None
         } else {
-            Some(path.clone())
+            result.frame_path = Some(path.clone());
         }
-    } else {
-        None
-    };
+    }
 
     // Export layout if requested
-    let (layout_path, layout_stats) = if let Some(ref path) = args.dump_layout {
+    if let Some(ref path) = args.dump_layout {
         match engine.export_layout_json(view_id, path) {
             Ok(()) => {
+                result.layout_path = Some(path.clone());
                 // Read back the file to analyze
                 match fs::read_to_string(path) {
-                    Ok(layout_json) => {
-                        let stats = analyze_layout_json(&layout_json);
-                        (Some(path.clone()), stats)
-                    }
-                    Err(e) => {
-                        error!("Failed to read layout file: {:?}", e);
-                        (Some(path.clone()), None)
-                    }
+                    Ok(layout_json) => result.layout_stats = analyze_layout_json(&layout_json),
+                    Err(e) => error!("Failed to read layout file: {:?}", e),
                 }
             }
-            Err(e) => {
-                error!("Failed to export layout: {:?}", e);
-                (None, None)
-            }
+            Err(e) => error!("Failed to export layout: {:?}", e),
         }
-    } else {
-        (None, None)
-    };
+    }
+
+    // Export display list if requested
+    if let Some(ref path) = args.dump_display_list {
+        match engine.export_display_list_json(view_id, path) {
+            Ok(()) => result.display_list_path = Some(path.clone()),
+            Err(e) => error!("Failed to export display list: {:?}", e),
+        }
+    }
 
     // Clean up
     let _ = engine.destroy_view(view_id);
 
-    CaptureResult {
-        status: "ok".to_string(),
-        html_file: args.html_file.clone(),
-        width: args.width,
-        height: args.height,
-        frame_path,
-        layout_path,
-        layout_stats,
-        error: None,
-    }
+    result
 }
 
 /// Mirror the Chrome capture pipeline's CSS inputs for a file loaded via
