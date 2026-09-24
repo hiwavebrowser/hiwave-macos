@@ -11437,3 +11437,28 @@ rather than asserted, because "no engine change" is a claim.
 - **`rustkit-engine --lib` is 74 tests on `master` and 90 on `develop`.** 09-19
   wondered whether the 80-vs-87 gap it saw was platform-gated tests; it is
   simply which branch is checked out. Not a defect, and one fewer open question.
+
+### Addendum — tonight's commits are NOT cherry-copied onto this branch, on purpose
+
+09-23 cherry-copied the census onto this branch so the trench seat could run it.
+I tried the same for #224 and stopped: **neither `scripts/seat_control_report.py`
+nor its test exists on this branch at all.** Its merge-base with `master` is
+`e2dba9c` (2026-08-09) and the seat control was built on 09-06, so a cherry-pick
+is not a copy of a fix — it is introducing the whole instrument, in a second
+place, on a stale base. That is the failure mode #224 exists to fix, arriving as
+my own housekeeping. The instrument lives on `develop`/`master`; this branch
+carries the digest.
+
+Tonight's board was therefore taken from a `develop a66c159` checkout
+(`n63-base`), not from this branch, and the branch was touched only for this
+entry.
+
+One thing that fell out of checking: **this branch's `crates/` is not
+byte-identical to `master`,** and not only because it is behind. It still carries
+the four engine commits from nights 7 and 9 that the branch law was written after
+— `c9c9464`, `cfd4951` (grid margin box) and `6c7c6f3`, `a2e9d5a` (rounded
+overflow clip). They landed on `develop` through their own PRs long ago, so
+nothing is unshipped, and rewriting them off a shared branch is forbidden. It is
+recorded here so no future night reads "branch law" and then reads a `git diff`
+that contradicts it. The law holds where it is enforceable: no engine change has
+landed on this branch since, and #224's own branch is clean.
