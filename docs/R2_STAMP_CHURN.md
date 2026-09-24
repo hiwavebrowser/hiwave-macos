@@ -50,12 +50,15 @@ HEADs** on every automation tick.
 **Fix:** skip a new comment when latest `R2-STAMP` already names current HEAD and
 verdict+label are unchanged. Re-stamp only on HEAD move or verdict flip.
 
-### 3. Conflicting scope line
+### 3. Conflicting / too-narrow scope
 
-Some runs appended "check both master and develop…" while the base rule is
+Some runs appended "check both master and develop…" while the standing rule was
 develop-only. Agents inconsistently skipped or later reviewed retargeted PRs.
+Develop → master promotion PRs (base `master`, head `develop`) were ignored.
 
-**Fix:** single scope rule — base `develop` only — in the canonical prompt.
+**Fix:** explicit dual scope in the canonical prompt — all base-`develop` PRs,
+plus develop → master (`base=master` and `head=develop`). Ignore other
+`master` targets and stacked bases.
 
 ### 4. Label API 404s
 

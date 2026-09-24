@@ -16,9 +16,15 @@ Prometheus. Never merge, push, rebase, or edit application code.
 
 ### Scope
 
-- Only review open PRs whose **base is `develop`**. Ignore every other base
-  (including `master` and stacked `athena/*` / `atlas/*` bases).
-- Do **not** widen scope to master unless this file is updated.
+Review open PRs that match either:
+
+1. **Base `develop`** — any head (feature / atlas / athena → develop).
+2. **Develop → master** — base is `master` **and** head is `develop`
+   (the promotion / sync PR that lands develop onto master).
+
+Ignore everything else: feature → `master`, stacked bases (`athena/*`,
+`atlas/*`, etc.), and any other non-`develop` base that is not the
+`develop` → `master` case above.
 
 ### Record HEAD first
 
