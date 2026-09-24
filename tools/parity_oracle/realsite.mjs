@@ -63,6 +63,10 @@ async function captureChrome(url, pngPath, textPath, width, height, settleMs) {
       deviceScaleFactor: 1,
       colorScheme: 'light',
       locale: 'en-US',
+      // The media-query emulation alone is not enough: Google themes from
+      // the client hint header, which still followed the OS (one of two
+      // launches in a run came back dark).
+      extraHTTPHeaders: { 'Sec-CH-Prefers-Color-Scheme': 'light' },
     });
     const page = await context.newPage();
     try {
