@@ -311,8 +311,13 @@ fn script_timing(node: &Node) -> Option<Result<ScriptTiming, &'static str>> {
         "module" => return Some(Err("type=module unsupported")),
         _ => return None,
     }
-    // The engine has no module support, so it is exactly the "legacy
-    // browser" `nomodule` scripts exist for: those run.
+    // `nomodule` scripts are skipped, as Chrome skips them. They are the
+    // legacy half of a module/nomodule pair: in practice polyfill bundles
+    // (Next.js ships ~110 KB of them) that a modern engine does not need,
+    // and one of them never returns under Boa (yahoo, weather.com).
+    if node.get_attribute("nomodule").is_some() {
+        return Some(Err("nomodule (skipped, as in module-capable browsers)"));
+    }
     let external = node.get_attribute("src").is_some();
     Some(Ok(if external && node.get_attribute("async").is_some() {
         ScriptTiming::Async
@@ -1647,6 +1652,7 @@ impl Engine {
                 });
                 continue;
             }
+            info!(source = %label, bytes = text.len(), "Running page script");
             let record = run(label, text.len(), &|| {
                 bindings.evaluate(&text).map(|_| ()).map_err(strip)
             });
@@ -1682,6 +1688,7 @@ impl Engine {
             }),
         ];
         for (source, step) in steps {
+            info!(%source, "Running page lifecycle step");
             let record = run(source.to_string(), 0, step);
             // Only an escaped error (the loop limit, a panic) is worth a
             // record of its own; a clean step is not a script.
@@ -16531,6 +16538,7 @@ window.addEventListener('load', function () {
 <script src="/classic.js"></script>
 <script type="module">order.push('module');</script>
 <script type="application/ld+json">{"not": "a script"}</script>
+<script nomodule>order.push('nomodule');</script>
 <script>order.push('inline2'); missingFunction();</script>
 <script src="/missing.js"></script>
 </head><body>hi</body></html>"#;
@@ -16558,12 +16566,16 @@ window.addEventListener('load', function () {
         assert_eq!(outcome("classic.js"), ScriptOutcome::Ran);
         assert_eq!(outcome("missing.js"), ScriptOutcome::FetchFailed("HTTP 404 Not Found".into()));
         assert_eq!(outcome("inline#5"), ScriptOutcome::Skipped("type=module unsupported"));
-        match outcome("inline#6") {
+        assert!(
+            matches!(outcome("inline#6"), ScriptOutcome::Skipped(why) if why.starts_with("nomodule")),
+            "{log:#?}"
+        );
+        match outcome("inline#7") {
             ScriptOutcome::Threw(m) => assert!(m.contains("missingFunction"), "{m}"),
-            other => panic!("inline#6: {other:?}"),
+            other => panic!("inline#7: {other:?}"),
         }
         // The JSON data block is not a script at all.
-        assert_eq!(log.len(), 7, "{log:#?}");
+        assert_eq!(log.len(), 8, "{log:#?}");
     }
 
     #[test]
