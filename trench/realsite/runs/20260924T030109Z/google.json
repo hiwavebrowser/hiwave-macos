@@ -1,0 +1,63 @@
+{
+  "id": "google",
+  "url": "https://www.google.com/",
+  "chrome": [
+    {
+      "url": "https://www.google.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.google.com/",
+      "title": "Google",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T030109Z/google/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T030109Z/google/chrome-a.png",
+      "elapsed_ms": 11907
+    },
+    {
+      "url": "https://www.google.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.google.com/",
+      "title": "Google",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T030109Z/google/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T030109Z/google/chrome-b.png",
+      "elapsed_ms": 13166
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.google.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T030109Z/google/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T030109Z/google/rustkit-display-list.json",
+    "layout_stats": null,
+    "elapsed_ms": 9673,
+    "error": null,
+    "wall_ms": 9709,
+    "non_background_fraction": 0.1186
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 24,
+    "rustkit_words": 30,
+    "ratio": 1.0,
+    "missing_sample": []
+  },
+  "looks_right": {
+    "pass": true,
+    "chrome_self_diff": 0.18759765625,
+    "diff": 13.22880859375
+  },
+  "points": 3
+}

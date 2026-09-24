@@ -1,0 +1,84 @@
+{
+  "id": "microsoft",
+  "url": "https://www.microsoft.com/en-us",
+  "chrome": [
+    {
+      "url": "https://www.microsoft.com/en-us",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.microsoft.com/en-us",
+      "title": "Microsoft \u2013 AI, Cloud, Productivity, Computing, Gaming & Apps",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T030109Z/microsoft/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T030109Z/microsoft/chrome-a.png",
+      "elapsed_ms": 33465
+    },
+    {
+      "url": "https://www.microsoft.com/en-us",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.microsoft.com/en-us",
+      "title": "Microsoft \u2013 AI, Cloud, Productivity, Computing, Gaming & Apps",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T030109Z/microsoft/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T030109Z/microsoft/chrome-b.png",
+      "elapsed_ms": 32117
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.microsoft.com/en-us",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T030109Z/microsoft/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T030109Z/microsoft/rustkit-display-list.json",
+    "layout_stats": null,
+    "elapsed_ms": 17833,
+    "error": null,
+    "wall_ms": 17880,
+    "non_background_fraction": 0.0458
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 27,
+    "rustkit_words": 48,
+    "ratio": 0.2593,
+    "missing_sample": [
+      "all",
+      "available",
+      "azure",
+      "business",
+      "content",
+      "deals",
+      "explore",
+      "for",
+      "lineup",
+      "main",
+      "me",
+      "most",
+      "now",
+      "order",
+      "portable",
+      "pre",
+      "skip",
+      "small",
+      "the",
+      "xbox"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0.40107421875000004,
+    "diff": 92.15107421875
+  },
+  "points": 1
+}

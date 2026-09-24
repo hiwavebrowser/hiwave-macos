@@ -17,8 +17,10 @@ pr_head_prefix: atlas/rs-
 `websuite/realsite-top20.json`.
 
 ```
-BASELINE (2026-09-23):  0 / 60   — instrument not built yet: parity-capture
-                                   takes --html-file only and cannot load a URL.
+BASELINE (2026-09-23 23:01 EDT):  12 / 60   loads 8 · readable 2 · looks-right 2
+  run trench/realsite/runs/20260924T030109Z, engine = origin/develop ec02a7f
+  (parity-capture --url on top), Chrome for Testing 148.0.7778.216.
+  Oracle failed (0 points, reported): weather.
 ```
 
 A site earns one point for each check it passes. All three are scored against
@@ -61,3 +63,27 @@ Whichever comes first:
 ## Changes
 
 - 2026-09-23 — board defined. Baseline 0/60 pending instrument.
+- 2026-09-23 — instrument built (`parity-capture --url`, `scripts/realsite_board.py`,
+  `tools/parity_oracle/realsite.mjs`); measured baseline **12/60**. How the
+  instrument reads the definitions above (none of these move a threshold):
+  - *Blank*: < 2% of pixels differ (any channel > 8/255) from the frame's
+    dominant colour.
+  - *RustKit text runs*: display-list `text` ops whose box intersects the
+    first viewport. *Chrome words*: visible text nodes (`checkVisibility`)
+    with a client rect in the first viewport. Words = `\w+`, casefolded, deduped.
+  - Chrome page with **no** first-viewport text: READABLE is `n/a`, 0 points,
+    listed in `readable_unscored`.
+  - *Oracle*: the first of the two Chrome captures that succeeded. If both
+    fail (swiftshader screenshot timeouts on heavy pages), READABLE and
+    LOOKS RIGHT count 0 and the site is listed in `oracle_failed`.
+  - Chrome is pinned to light colour scheme and en-US (media emulation +
+    `Sec-CH-Prefers-Color-Scheme: light`). Unpinned, it followed this seat's
+    dark OS appearance on some launches (Google came back dark). The
+    shakedown run 20260924T022252Z predates this pin; it scored 10/60 and is
+    kept only as a record.
+  - The oracle does **not** apply parity-freeze.js or the parity reset (those
+    normalise fixtures; on a live site they change what the page does).
+  - RustKit loads with the product's user agent (hiwave-app's Safari-like
+    UA), so sites serve it what they serve HiWave users.
+  - RustKit executes no page `<script>` on any load path today; the board
+    measures that truthfully rather than simulating script execution.

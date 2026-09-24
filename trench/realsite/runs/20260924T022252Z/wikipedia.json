@@ -1,0 +1,85 @@
+{
+  "id": "wikipedia",
+  "url": "https://en.wikipedia.org/wiki/Web_browser",
+  "chrome": [
+    {
+      "url": "https://en.wikipedia.org/wiki/Web_browser",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://en.wikipedia.org/wiki/Web_browser",
+      "title": "Web browser - Wikipedia",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T022252Z/wikipedia/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T022252Z/wikipedia/chrome-a.png",
+      "elapsed_ms": 21521
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Web_browser",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "final_url": "https://en.wikipedia.org/wiki/Web_browser",
+      "title": "Web browser - Wikipedia",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T022252Z/wikipedia/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T022252Z/wikipedia/chrome-b.png",
+      "elapsed_ms": 69362
+    }
+  ],
+  "rustkit": {
+    "status": "timeout",
+    "html_file": null,
+    "url": "https://en.wikipedia.org/wiki/Web_browser",
+    "width": 1280,
+    "height": 800,
+    "frame_path": null,
+    "layout_path": null,
+    "layout_stats": null,
+    "error": "capture exceeded 30000 ms",
+    "wall_ms": 30233
+  },
+  "loads": {
+    "pass": false,
+    "why": "capture exceeded 30000 ms"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 178,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "0",
+      "1",
+      "145",
+      "16",
+      "2",
+      "2023",
+      "2026",
+      "24",
+      "3",
+      "4",
+      "5",
+      "6",
+      "69",
+      "a",
+      "abbreviated",
+      "accessing",
+      "account",
+      "address",
+      "all",
+      "also",
+      "an",
+      "and",
+      "appearance",
+      "application",
+      "are"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 2.41298828125,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

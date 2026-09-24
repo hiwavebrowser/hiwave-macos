@@ -1,0 +1,61 @@
+{
+  "id": "nytimes",
+  "url": "https://www.nytimes.com/",
+  "chrome": [
+    {
+      "url": "https://www.nytimes.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.nytimes.com/",
+      "title": "nytimes.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T030109Z/nytimes/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T030109Z/nytimes/chrome-a.png",
+      "elapsed_ms": 15674
+    },
+    {
+      "url": "https://www.nytimes.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.nytimes.com/",
+      "title": "nytimes.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T030109Z/nytimes/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T030109Z/nytimes/chrome-b.png",
+      "elapsed_ms": 14345
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "error",
+    "html_file": null,
+    "url": "https://www.nytimes.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": null,
+    "layout_path": null,
+    "layout_stats": null,
+    "elapsed_ms": 312,
+    "error": "Failed to load URL: NavigationError(\"HTTP error\")",
+    "wall_ms": 345
+  },
+  "loads": {
+    "pass": false,
+    "why": "Failed to load URL: NavigationError(\"HTTP error\")"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 0,
+    "rustkit_words": 0,
+    "why": "chrome shows no text in first viewport (unscored, 0 points)",
+    "unscored": true
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0.16845703125,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

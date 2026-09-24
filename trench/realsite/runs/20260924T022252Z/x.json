@@ -1,0 +1,79 @@
+{
+  "id": "x",
+  "url": "https://x.com/",
+  "chrome": [
+    {
+      "url": "https://x.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://x.com/",
+      "final_url": "chrome-error://chromewebdata/",
+      "title": "x.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T022252Z/x/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T022252Z/x/chrome-a.png",
+      "elapsed_ms": 9730
+    },
+    {
+      "url": "https://x.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://x.com/",
+      "final_url": "chrome-error://chromewebdata/",
+      "title": "x.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T022252Z/x/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T022252Z/x/chrome-b.png",
+      "elapsed_ms": 8622
+    }
+  ],
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://x.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T022252Z/x/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T022252Z/x/rustkit-display-list.json",
+    "layout_stats": null,
+    "elapsed_ms": 8270,
+    "error": null,
+    "wall_ms": 8301,
+    "non_background_fraction": 0.0738
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 18,
+    "rustkit_words": 24,
+    "ratio": 0.1111,
+    "missing_sample": [
+      "403",
+      "access",
+      "authorization",
+      "com",
+      "denied",
+      "don",
+      "error",
+      "have",
+      "http",
+      "page",
+      "reload",
+      "t",
+      "this",
+      "view",
+      "was",
+      "x"
+    ]
+  },
+  "looks_right": {
+    "pass": true,
+    "chrome_self_diff": 0,
+    "diff": 7.9263671874999995
+  },
+  "points": 2
+}
