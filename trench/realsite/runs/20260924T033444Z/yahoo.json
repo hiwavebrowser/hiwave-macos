@@ -1,0 +1,83 @@
+{
+  "id": "yahoo",
+  "url": "https://www.yahoo.com/",
+  "chrome": [
+    {
+      "url": "https://www.yahoo.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.yahoo.com/",
+      "title": "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/yahoo/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/yahoo/chrome-a.png",
+      "elapsed_ms": 66854
+    },
+    {
+      "url": "https://www.yahoo.com/",
+      "status": "error",
+      "error": "page.screenshot: Timeout 30000ms exceeded.",
+      "nav_error": null,
+      "elapsed_ms": 53436
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.yahoo.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/yahoo/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/yahoo/rustkit-display-list.json",
+    "layout_stats": null,
+    "elapsed_ms": 15791,
+    "error": null,
+    "wall_ms": 15842,
+    "non_background_fraction": 0.0253
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 121,
+    "rustkit_words": 37,
+    "ratio": 0.0661,
+    "missing_sample": [
+      "00",
+      "1",
+      "11",
+      "15",
+      "2",
+      "23",
+      "24",
+      "3",
+      "4",
+      "44",
+      "47",
+      "5th",
+      "8",
+      "a",
+      "accuweather",
+      "action",
+      "after",
+      "against",
+      "ai",
+      "air",
+      "am",
+      "arrested",
+      "autumn",
+      "balls",
+      "be"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "diff": 23.371875
+  },
+  "points": 1
+}

@@ -1,0 +1,89 @@
+{
+  "id": "instagram",
+  "url": "https://www.instagram.com/",
+  "chrome": [
+    {
+      "url": "https://www.instagram.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.instagram.com/",
+      "title": "Instagram",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/instagram/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/instagram/chrome-a.png",
+      "elapsed_ms": 14068
+    },
+    {
+      "url": "https://www.instagram.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.instagram.com/",
+      "title": "Instagram",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/instagram/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/instagram/chrome-b.png",
+      "elapsed_ms": 16335
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.instagram.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/instagram/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/instagram/rustkit-display-list.json",
+    "layout_stats": null,
+    "elapsed_ms": 21297,
+    "error": null,
+    "wall_ms": 21340,
+    "non_background_fraction": 0.0205
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 46,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "2026",
+      "about",
+      "account",
+      "ai",
+      "api",
+      "blog",
+      "close",
+      "consumer",
+      "contact",
+      "create",
+      "email",
+      "english",
+      "everyday",
+      "facebook",
+      "forgot",
+      "friends",
+      "from",
+      "health",
+      "help",
+      "in",
+      "instagram",
+      "into",
+      "jobs",
+      "lite",
+      "locations"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 10.919238281250001,
+    "diff": 16.4224609375
+  },
+  "points": 1
+}

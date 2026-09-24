@@ -1,0 +1,84 @@
+{
+  "id": "reddit",
+  "url": "https://www.reddit.com/",
+  "chrome": [
+    {
+      "url": "https://www.reddit.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.reddit.com/?solution=57c1a4ea174c69f657c1a4ea174c69f6&js_challenge=1&jsc_token=2824be10929bdc604753c70a67a1c3315686b070b576e78dfc0e605f01bb6ebc&jsc_orig_r=",
+      "title": "",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/reddit/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/reddit/chrome-a.png",
+      "elapsed_ms": 13602
+    },
+    {
+      "url": "https://www.reddit.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.reddit.com/?solution=d2b497fbb162f9f2d2b497fbb162f9f2&js_challenge=1&jsc_token=2824be10929bdc604753c70a67a1c331dd9428160d216fd7560c84da87912923&jsc_orig_r=",
+      "title": "",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/reddit/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/reddit/chrome-b.png",
+      "elapsed_ms": 13925
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.reddit.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/reddit/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/reddit/rustkit-display-list.json",
+    "layout_stats": null,
+    "elapsed_ms": 663,
+    "error": null,
+    "wall_ms": 707,
+    "non_background_fraction": 0.0143
+  },
+  "loads": {
+    "pass": false,
+    "why": "blank frame (1.43% non-background)"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 20,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "a",
+      "and",
+      "been",
+      "below",
+      "blocked",
+      "by",
+      "file",
+      "if",
+      "into",
+      "it",
+      "ll",
+      "look",
+      "mistake",
+      "network",
+      "security",
+      "think",
+      "ticket",
+      "ve",
+      "we",
+      "you"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

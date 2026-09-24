@@ -1,0 +1,89 @@
+{
+  "id": "weather",
+  "url": "https://weather.com/",
+  "chrome": [
+    {
+      "url": "https://weather.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "final_url": "https://weather.com/",
+      "title": "National and Local Weather Radar, Daily Forecast, Hurricane and information from The Weather Channel and weather.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/weather/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/weather/chrome-a.png",
+      "elapsed_ms": 49475
+    },
+    {
+      "url": "https://weather.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "final_url": "https://weather.com/",
+      "title": "National and Local Weather Radar, Daily Forecast, Hurricane and information from The Weather Channel and weather.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/weather/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/weather/chrome-b.png",
+      "elapsed_ms": 70102
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://weather.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/weather/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/weather/rustkit-display-list.json",
+    "layout_stats": null,
+    "elapsed_ms": 8924,
+    "error": null,
+    "wall_ms": 8973,
+    "non_background_fraction": 0.1891
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 71,
+    "rustkit_words": 26,
+    "ratio": 0.0563,
+    "missing_sample": [
+      "0",
+      "10",
+      "11",
+      "14s",
+      "3",
+      "41",
+      "45",
+      "46",
+      "47",
+      "4m",
+      "54",
+      "66",
+      "advertisement",
+      "air",
+      "allergies",
+      "as",
+      "bolt",
+      "chance",
+      "clear",
+      "cold",
+      "danger",
+      "day",
+      "edt",
+      "feels",
+      "feet"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "diff": 32.22412109375
+  },
+  "points": 1
+}

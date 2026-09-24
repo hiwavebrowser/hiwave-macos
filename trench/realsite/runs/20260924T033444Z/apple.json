@@ -1,0 +1,86 @@
+{
+  "id": "apple",
+  "url": "https://www.apple.com/",
+  "chrome": [
+    {
+      "url": "https://www.apple.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.apple.com/",
+      "title": "Apple",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/apple/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/apple/chrome-a.png",
+      "elapsed_ms": 13364
+    },
+    {
+      "url": "https://www.apple.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.apple.com/",
+      "title": "Apple",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/apple/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/apple/chrome-b.png",
+      "elapsed_ms": 12608
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "timeout",
+    "html_file": null,
+    "url": "https://www.apple.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": null,
+    "layout_path": null,
+    "layout_stats": null,
+    "error": "capture exceeded 30000 ms",
+    "wall_ms": 30240
+  },
+  "loads": {
+    "pass": false,
+    "why": "capture exceeded 30000 ms"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 33,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "100",
+      "150",
+      "24",
+      "9",
+      "a",
+      "accessories",
+      "airpods",
+      "apple",
+      "buy",
+      "card",
+      "chance",
+      "education",
+      "ends",
+      "entertainment",
+      "from",
+      "get",
+      "gift",
+      "home",
+      "ipad",
+      "iphone",
+      "last",
+      "mac",
+      "offer",
+      "or",
+      "savings"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

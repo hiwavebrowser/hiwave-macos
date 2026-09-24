@@ -1,0 +1,87 @@
+{
+  "id": "ebay",
+  "url": "https://www.ebay.com/",
+  "chrome": [
+    {
+      "url": "https://www.ebay.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.ebay.com/",
+      "title": "Error Page | eBay",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/ebay/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/ebay/chrome-a.png",
+      "elapsed_ms": 12709
+    },
+    {
+      "url": "https://www.ebay.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.ebay.com/",
+      "title": "Error Page | eBay",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/ebay/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/ebay/chrome-b.png",
+      "elapsed_ms": 11867
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "error",
+    "html_file": null,
+    "url": "https://www.ebay.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": null,
+    "layout_path": null,
+    "layout_stats": null,
+    "elapsed_ms": 413,
+    "error": "Failed to load URL: NavigationError(\"HTTP error\")",
+    "wall_ms": 459
+  },
+  "loads": {
+    "pass": false,
+    "why": "Failed to load URL: NavigationError(\"HTTP error\")"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 28,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "0",
+      "1079f7f7",
+      "117fd117",
+      "1790222019",
+      "1995",
+      "2026",
+      "again",
+      "all",
+      "and",
+      "back",
+      "copyright",
+      "ebay",
+      "end",
+      "go",
+      "homepage",
+      "inc",
+      "on",
+      "or",
+      "our",
+      "please",
+      "reserved",
+      "rights",
+      "something",
+      "sorry",
+      "to"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0.06259765625,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

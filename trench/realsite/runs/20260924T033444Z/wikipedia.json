@@ -1,0 +1,89 @@
+{
+  "id": "wikipedia",
+  "url": "https://en.wikipedia.org/wiki/Web_browser",
+  "chrome": [
+    {
+      "url": "https://en.wikipedia.org/wiki/Web_browser",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://en.wikipedia.org/wiki/Web_browser",
+      "title": "Web browser - Wikipedia",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/wikipedia/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/wikipedia/chrome-a.png",
+      "elapsed_ms": 22315
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Web_browser",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://en.wikipedia.org/wiki/Web_browser",
+      "title": "Web browser - Wikipedia",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/wikipedia/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/wikipedia/chrome-b.png",
+      "elapsed_ms": 21279
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://en.wikipedia.org/wiki/Web_browser",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/wikipedia/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260924T033444Z/wikipedia/rustkit-display-list.json",
+    "layout_stats": null,
+    "elapsed_ms": 29881,
+    "error": null,
+    "wall_ms": 29927,
+    "non_background_fraction": 0.133
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 178,
+    "rustkit_words": 209,
+    "ratio": 0.7247,
+    "missing_sample": [
+      "0",
+      "145",
+      "24",
+      "account",
+      "appearance",
+      "article",
+      "automatic",
+      "by",
+      "color",
+      "contents",
+      "create",
+      "dark",
+      "displaying",
+      "donate",
+      "duration",
+      "english",
+      "external",
+      "features",
+      "hide",
+      "history",
+      "jump",
+      "languages",
+      "light",
+      "links",
+      "log"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "diff": 19.55966796875
+  },
+  "points": 1
+}
