@@ -2919,7 +2919,11 @@ impl LayoutBox {
             // balance over the columns (see multicol).
             let full_width = self.dimensions.content.width;
             self.dimensions.content.width = cols.width;
-            self.layout_block_children_with_collapse(&mut child_margin_context, float_context);
+            self.layout_block_children_with_collapse(
+                &mut child_margin_context,
+                float_context,
+                definite_for_children,
+            );
             self.dimensions.content.width = full_width;
             multicol::balance_columns(self, &cols);
         } else {
