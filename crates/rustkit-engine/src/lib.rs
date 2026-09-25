@@ -2609,6 +2609,10 @@ impl Engine {
 
         let css_vars = self.extract_css_variables(&stylesheets);
 
+        // Every element's cascade below consults this; it is dropped (and
+        // uninstalled) when the build returns.
+        let _rule_index = RuleIndexScope::install(self.build_rule_index(&stylesheets));
+
         // A trace describes ONE build. Keeping entries from the previous
         // page would let `hiwave_style` answer with a stale element that no
         // longer exists — the same class of lie as a gate reading a stale
@@ -3825,21 +3829,38 @@ impl Engine {
         // Use (a, b, c) specificity tuple converted to u32 for sorting
         let mut matching_rules: Vec<((usize, usize, usize), &Rule)> = Vec::new();
 
-        for stylesheet in stylesheets {
-            for rule in &stylesheet.rules {
+        // Hoisted: this used to allocate twice per rule per element.
+        let single_colon = pseudo.replace("::", ":");
+        let index = active_rule_index(stylesheets);
+        let indexed = index.as_ref().and_then(|ix| match pseudo {
+            "::before" => Some(&ix.before),
+            "::after" => Some(&ix.after),
+            _ => None,
+        });
+        let rules: Box<dyn Iterator<Item = &Rule>> = match (index.as_ref(), indexed) {
+            (Some(ix), Some(list)) => Box::new(list.iter().map(|&g| ix.rule(stylesheets, g))),
+            _ => Box::new(stylesheets.iter().flat_map(|s| s.rules.iter())),
+        };
+
+        for rule in rules {
+            {
                 let selector = &rule.selector;
 
                 // Check for explicit pseudo-element in selector
-                if selector.ends_with(pseudo) || selector.ends_with(&pseudo.replace("::", ":")) {
+                if selector.ends_with(pseudo) || selector.ends_with(single_colon.as_str()) {
                     // Get the base selector (without pseudo)
                     let base_selector = selector
                         .trim_end_matches(pseudo)
-                        .trim_end_matches(&pseudo.replace("::", ":"));
+                        .trim_end_matches(single_colon.as_str());
 
                     // Check if base selector matches this element, with the
                     // host's real sibling context (`li:first-child::before`,
-                    // `.slot:empty::before { content: "…" }`).
-                    if self.selector_matches(
+                    // `.slot:empty::before { content: "…" }`). The cheap
+                    // subject prefilter first, exactly as the cascade does.
+                    // A bare `::before` has no subject to prefilter on.
+                    if (base_selector.trim().is_empty()
+                        || self.rule_may_match(base_selector.trim(), tag_name, attributes))
+                        && self.selector_matches(
                         base_selector.trim(),
                         tag_name,
                         attributes,
@@ -4311,24 +4332,32 @@ impl Engine {
 
         // Collect matching rules with specificity for ordering
         let mut matching_rules: Vec<(&Rule, (usize, usize, usize), usize)> = Vec::new();
-        let mut rule_index = 0;
+        // With a rule index installed, only the rules filed under this
+        // element's id, classes, tag or the universal bucket can pass
+        // `rule_may_match`; the rest are never visited.
+        let index = active_rule_index(stylesheets);
+        let rules: Box<dyn Iterator<Item = (usize, &Rule)>> = match index.as_ref() {
+            Some(ix) => Box::new(
+                ix.candidates(tag_name, attributes)
+                    .into_iter()
+                    .map(|g| (g as usize, ix.rule(stylesheets, g))),
+            ),
+            None => Box::new(stylesheets.iter().flat_map(|s| s.rules.iter()).enumerate()),
+        };
 
-        for stylesheet in stylesheets {
-            for rule in &stylesheet.rules {
-                if self.rule_may_match(&rule.selector, tag_name, attributes)
-                    && self.selector_matches(
-                        &rule.selector,
-                        tag_name,
-                        attributes,
-                        ancestors,
-                        siblings_before,
-                        sib,
-                    )
-                {
-                    let specificity = self.selector_specificity(&rule.selector);
-                    matching_rules.push((rule, specificity, rule_index));
-                }
-                rule_index += 1;
+        for (rule_index, rule) in rules {
+            if self.rule_may_match(&rule.selector, tag_name, attributes)
+                && self.selector_matches(
+                    &rule.selector,
+                    tag_name,
+                    attributes,
+                    ancestors,
+                    siblings_before,
+                    sib,
+                )
+            {
+                let specificity = self.selector_specificity(&rule.selector);
+                matching_rules.push((rule, specificity, rule_index));
             }
         }
 
@@ -6851,21 +6880,77 @@ impl Engine {
     /// `simple_selector_matches_with_pseudo` enforces unconditionally on the
     /// subject (its id, its leading class, its tag), so it can never reject
     /// a rule the matcher would accept. Keys are cached per selector string.
+    fn build_rule_index(&self, stylesheets: &[Stylesheet]) -> RuleIndex {
+        let mut ix = RuleIndex {
+            source: RuleIndex::source_of(stylesheets),
+            rules: Vec::new(),
+            by_id: HashMap::new(),
+            by_class: HashMap::new(),
+            by_tag: HashMap::new(),
+            universal: Vec::new(),
+            before: Vec::new(),
+            after: Vec::new(),
+        };
+        for (s, sheet) in stylesheets.iter().enumerate() {
+            for (r, rule) in sheet.rules.iter().enumerate() {
+                let g = ix.rules.len() as u32;
+                ix.rules.push((s as u32, r as u32));
+                for key in self.subject_keys(&rule.selector).iter() {
+                    // Any one required field is enough to file under: an
+                    // element lacking it fails that key in rule_may_match.
+                    let bucket = if let Some(id) = &key.id {
+                        ix.by_id.entry(id.clone()).or_default()
+                    } else if let Some(class) = &key.class {
+                        ix.by_class.entry(class.clone()).or_default()
+                    } else if let Some(tag) = &key.tag {
+                        ix.by_tag.entry(tag.clone()).or_default()
+                    } else {
+                        &mut ix.universal
+                    };
+                    if bucket.last() != Some(&g) {
+                        bucket.push(g);
+                    }
+                }
+                // Same test as create_pseudo_element's (the single-colon
+                // form covers the double-colon one).
+                if rule.selector.ends_with(":before") {
+                    ix.before.push(g);
+                }
+                if rule.selector.ends_with(":after") {
+                    ix.after.push(g);
+                }
+            }
+        }
+        ix
+    }
+
     fn rule_may_match(
         &self,
         selector: &str,
         tag_name: &str,
         attributes: &HashMap<String, String>,
     ) -> bool {
-        /// One list member's subject requirements; `None` fields are
-        /// unconstrained.
-        #[derive(Default)]
-        struct SubjectKey {
-            id: Option<String>,
-            tag: Option<String>,
-            class: Option<String>,
-        }
+        #[cfg(test)]
+        PREFILTER_VISITS.with(|n| n.set(n.get() + 1));
+        self.subject_keys(selector).iter().any(|k| {
+            k.id.as_deref()
+                .map_or(true, |id| attributes.get("id").map(String::as_str) == Some(id))
+                && k.tag
+                    .as_deref()
+                    .map_or(true, |t| t.eq_ignore_ascii_case(tag_name))
+                && k.class.as_deref().map_or(true, |c| {
+                    attributes
+                        .get("class")
+                        .is_some_and(|cl| cl.split_whitespace().any(|x| x == c))
+                })
+        })
+    }
 
+    /// The subject requirements of each member of a selector list, cached
+    /// per selector string. `rule_may_match` is true for an element only if
+    /// some key's id/tag/class all hold, and the rule index buckets rules by
+    /// the same keys, so the two can never disagree about a candidate.
+    fn subject_keys(&self, selector: &str) -> Rc<Vec<SubjectKey>> {
         thread_local! {
             static KEYS: std::cell::RefCell<HashMap<String, Rc<Vec<SubjectKey>>>> =
                 std::cell::RefCell::new(HashMap::new());
@@ -6942,7 +7027,7 @@ impl Engine {
             }
         }
 
-        let keys = KEYS.with(|cache| {
+        KEYS.with(|cache| {
             if let Some(k) = cache.borrow().get(selector) {
                 return k.clone();
             }
@@ -6957,19 +7042,6 @@ impl Engine {
             }
             cache.insert(selector.to_string(), v.clone());
             v
-        });
-
-        keys.iter().any(|k| {
-            k.id.as_deref()
-                .map_or(true, |id| attributes.get("id").map(String::as_str) == Some(id))
-                && k.tag
-                    .as_deref()
-                    .map_or(true, |t| t.eq_ignore_ascii_case(tag_name))
-                && k.class.as_deref().map_or(true, |c| {
-                    attributes
-                        .get("class")
-                        .is_some_and(|cl| cl.split_whitespace().any(|x| x == c))
-                })
         })
     }
 
@@ -16175,6 +16247,8 @@ mod visual_rect_tests {
 thread_local! {
     /// How many times the full selector matcher ran on this thread.
     static FULL_SELECTOR_MATCHES: Cell<u64> = const { Cell::new(0) };
+    /// How many rules the subject prefilter was asked about on this thread.
+    static PREFILTER_VISITS: Cell<u64> = const { Cell::new(0) };
 }
 
 // Real Engine (Compositor wants a device) — macOS only, like
@@ -16223,6 +16297,146 @@ mod rule_prefilter_tests {
             "the 500 .miss-N rules must be rejected before the full matcher; \
              it ran {full} times"
         );
+    }
+
+    #[test]
+    fn an_indexed_cascade_never_visits_rules_filed_under_other_subjects() {
+        // facebook ships 30,705 rules; even the cheap prefilter on every
+        // rule, for every element, was 6 s of each relayout (and ::before /
+        // ::after walked the whole list twice more). With the build's index
+        // installed an element visits only the rules filed under its own
+        // id, classes and tag, plus the universal ones.
+        let mut css = String::new();
+        for i in 0..500 {
+            css.push_str(&format!(".miss-{i} {{ color: red }}\n"));
+            css.push_str(&format!("#miss-{i} {{ color: red }}\n"));
+            css.push_str(&format!("x-miss-{i} {{ color: red }}\n"));
+        }
+        css.push_str(".hit { color: blue }\n");
+        let sheet = Stylesheet::parse(&css).expect("css");
+        let sheets = std::slice::from_ref(&sheet);
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let vars = HashMap::new();
+
+        let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
+        PREFILTER_VISITS.with(|n| n.set(0));
+        let style = engine.compute_style_for_element(
+            "div",
+            &attrs(&[("class", "hit"), ("id", "main")]),
+            sheets,
+            &vars,
+            &[],
+            &[],
+            SiblingContext::SOLE,
+            None,
+        );
+        let visits = PREFILTER_VISITS.with(|n| n.get());
+
+        assert_eq!(style.color, rustkit_css::Color::new(0, 0, 255, 1.0));
+        assert!(
+            visits <= 1,
+            "1,500 rules filed under other subjects must not be visited; \
+             the prefilter ran {visits} times"
+        );
+    }
+
+    #[test]
+    fn pseudo_elements_only_run_the_matcher_on_rules_that_can_apply() {
+        // create_pseudo_element walked every rule and ran the FULL matcher on
+        // each `…::before` base selector, allocating twice per rule.
+        let mut css = String::new();
+        for i in 0..500 {
+            css.push_str(&format!(".miss-{i}::before {{ content: \"x\" }}\n"));
+            css.push_str(&format!(".miss-{i} {{ color: red }}\n"));
+        }
+        css.push_str(".hit::before { content: \"ok\" }\n");
+        let sheet = Stylesheet::parse(&css).expect("css");
+        let sheets = std::slice::from_ref(&sheet);
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let vars = HashMap::new();
+
+        let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
+        FULL_SELECTOR_MATCHES.with(|n| n.set(0));
+        let before = engine.create_pseudo_element(
+            "div",
+            &attrs(&[("class", "hit")]),
+            sheets,
+            &vars,
+            &[],
+            &[],
+            SiblingContext::SOLE,
+            "::before",
+        );
+        let full = FULL_SELECTOR_MATCHES.with(|n| n.get());
+
+        assert!(before.is_some(), ".hit::before must still generate its box");
+        assert!(
+            full <= 1,
+            "the 500 .miss-N::before rules must be rejected before the full \
+             matcher; it ran {full} times"
+        );
+    }
+
+    #[test]
+    fn the_index_changes_which_rules_are_visited_never_which_ones_win() {
+        // Every shape the prefilter keys on, plus ones it cannot key
+        // (attribute-only, pseudo-class-only, lists mixing both), and
+        // specificity/order ties the sort must break identically.
+        let css = r#"
+            * { margin-left: 1px }
+            div { color: red; margin-left: 2px }
+            DIV.card { color: green }
+            .card { padding-left: 3px }
+            .card.wide { padding-left: 4px }
+            #main { padding-right: 5px }
+            div#main.card { margin-right: 6px }
+            [data-x] { margin-top: 7px }
+            :not(.other) { margin-bottom: 8px }
+            span, .card { padding-top: 9px }
+            section .card { padding-bottom: 10px }
+            .card:first-child { border-left-width: 11px }
+            .card { color: blue }
+            p::before { content: "no" }
+        "#;
+        let sheet = Stylesheet::parse(css).expect("css");
+        let sheets = std::slice::from_ref(&sheet);
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let vars = HashMap::new();
+        let ancestors = vec![("section".to_string(), vec![], None)];
+        let elements = [
+            ("div", attrs(&[("class", "card wide"), ("id", "main"), ("data-x", "1")])),
+            ("div", attrs(&[("class", "card")])),
+            ("span", attrs(&[("class", "other")])),
+            ("p", attrs(&[])),
+            ("DIV", attrs(&[("class", "card")])),
+        ];
+        let styles = |engine: &Engine| -> Vec<String> {
+            elements
+                .iter()
+                .map(|(tag, a)| {
+                    let s = engine.compute_style_for_element(
+                        tag,
+                        a,
+                        sheets,
+                        &vars,
+                        &ancestors,
+                        &[],
+                        SiblingContext::SOLE,
+                        None,
+                    );
+                    format!("{s:?}")
+                })
+                .collect()
+        };
+
+        let unindexed = styles(&engine);
+        let indexed = {
+            let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
+            styles(&engine)
+        };
+        assert_eq!(indexed, unindexed);
+        // The scope uninstalls itself.
+        assert!(active_rule_index(sheets).is_none());
     }
 
     #[test]
@@ -16886,4 +17100,115 @@ window.addEventListener('load', function () {
             "{log:#?}"
         );
     }
+}
+
+/// One selector-list member's subject requirements; `None` fields are
+/// unconstrained.
+#[derive(Default)]
+struct SubjectKey {
+    id: Option<String>,
+    tag: Option<String>,
+    class: Option<String>,
+}
+
+/// The rules of one layout build, bucketed by their subject keys.
+///
+/// Real sites ship tens of thousands of rules (facebook: 30,705 in one
+/// atomic-CSS sheet) and the cascade used to test every rule against every
+/// element, three times over (the element plus `::before` and `::after`):
+/// 6–10 s per relayout on facebook, microsoft, apple and wikipedia, and past
+/// the 30 s load budget on github and cnn. An element can only match a rule
+/// through one of its subject keys (see `Engine::subject_keys`), so the rules
+/// filed under the element's id, classes, tag and the universal bucket are a
+/// superset of the rules `rule_may_match` admits. Each candidate still goes
+/// through the same `rule_may_match` + `selector_matches`, in rule order, so
+/// the cascade's answer does not change; only the rules it could never have
+/// admitted are skipped.
+struct RuleIndex {
+    /// Identity of the stylesheet slice the index was built from: address,
+    /// sheet count and rule count. The index is only consulted for that slice.
+    source: (usize, usize, usize),
+    /// Global rule index -> (sheet, rule within sheet).
+    rules: Vec<(u32, u32)>,
+    by_id: HashMap<String, Vec<u32>>,
+    by_class: HashMap<String, Vec<u32>>,
+    by_tag: HashMap<String, Vec<u32>>,
+    universal: Vec<u32>,
+    /// Rules whose selector ends in `:before`/`::before` (resp. after), in
+    /// rule order: the only rules `create_pseudo_element` can use.
+    before: Vec<u32>,
+    after: Vec<u32>,
+}
+
+impl RuleIndex {
+    fn source_of(stylesheets: &[Stylesheet]) -> (usize, usize, usize) {
+        (
+            stylesheets.as_ptr() as usize,
+            stylesheets.len(),
+            stylesheets.iter().map(|s| s.rules.len()).sum(),
+        )
+    }
+
+    /// Candidate global rule indices for an element, ascending, no repeats.
+    fn candidates(&self, tag_name: &str, attributes: &HashMap<String, String>) -> Vec<u32> {
+        let mut out: Vec<u32> = self.universal.clone();
+        if let Some(id) = attributes.get("id") {
+            if let Some(v) = self.by_id.get(id.as_str()) {
+                out.extend_from_slice(v);
+            }
+        }
+        if let Some(classes) = attributes.get("class") {
+            for c in classes.split_whitespace() {
+                if let Some(v) = self.by_class.get(c) {
+                    out.extend_from_slice(v);
+                }
+            }
+        }
+        if let Some(v) = self.by_tag.get(tag_name.to_ascii_lowercase().as_str()) {
+            out.extend_from_slice(v);
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    fn rule<'a>(&self, stylesheets: &'a [Stylesheet], g: u32) -> &'a Rule {
+        let (s, r) = self.rules[g as usize];
+        &stylesheets[s as usize].rules[r as usize]
+    }
+}
+
+thread_local! {
+    /// The index for the layout build in progress on this thread; set and
+    /// cleared by `RuleIndexScope`.
+    static RULE_INDEX: std::cell::RefCell<Option<Rc<RuleIndex>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Installs a rule index for the duration of one layout build. Dropping it
+/// (also on unwind) restores the previous one, so an index can never outlive
+/// the stylesheet slice it describes.
+struct RuleIndexScope(Option<Rc<RuleIndex>>);
+
+impl RuleIndexScope {
+    fn install(index: RuleIndex) -> Self {
+        RuleIndexScope(RULE_INDEX.with(|c| c.replace(Some(Rc::new(index)))))
+    }
+}
+
+impl Drop for RuleIndexScope {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        RULE_INDEX.with(|c| *c.borrow_mut() = previous);
+    }
+}
+
+/// The installed index, if it was built from exactly this stylesheet slice.
+fn active_rule_index(stylesheets: &[Stylesheet]) -> Option<Rc<RuleIndex>> {
+    RULE_INDEX.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|ix| ix.source == RuleIndex::source_of(stylesheets))
+            .cloned()
+    })
 }
