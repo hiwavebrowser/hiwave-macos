@@ -233,6 +233,12 @@ pub struct EngineConfig {
     /// throws an error the script cannot catch. Boa has no wall-clock
     /// interrupt; this is what stops `while (true) {}` from hanging a load.
     pub script_loop_iteration_limit: u64,
+    /// Wall-clock budget for each subresource phase of a load (stylesheets,
+    /// then web fonts, then images). A fetch not finished when its phase's
+    /// budget runs out is dropped, and the page renders without it. The
+    /// network client's own timeout (30s) equals the real-site board's
+    /// whole capture budget, so one stalled stylesheet used to blank the page.
+    pub subresource_budget_ms: u64,
 }
 
 impl Default for EngineConfig {
@@ -246,6 +252,7 @@ impl Default for EngineConfig {
             script_budget_ms: 5_000,
             timer_horizon_ms: 5_000,
             script_loop_iteration_limit: 10_000_000,
+            subresource_budget_ms: 8_000,
         }
     }
 }
@@ -6421,39 +6428,46 @@ impl Engine {
         const MAX_CONCURRENT_CSS_LOADS: usize = 6;
 
         let loader = self.loader.clone();
+        let deadline = self.subresource_deadline();
         let fetched: Vec<Option<Stylesheet>> = futures::stream::iter(urls.into_iter().map(|url| {
             let loader = loader.clone();
             async move {
                 info!(%url, "Loading external stylesheet");
-                match loader.fetch(Request::get(url.clone())).await {
-                    Ok(response) => {
-                        if response.ok() {
-                            match response.text().await {
-                                Ok(css_text) => match Stylesheet::parse(&css_text) {
-                                    Ok(stylesheet) => {
-                                        debug!(rules = stylesheet.rules.len(), %url, "Parsed external stylesheet");
-                                        Some(stylesheet)
-                                    }
+                let load = async {
+                    match loader.fetch(Request::get(url.clone())).await {
+                        Ok(response) => {
+                            if response.ok() {
+                                match response.text().await {
+                                    Ok(css_text) => match Stylesheet::parse(&css_text) {
+                                        Ok(stylesheet) => {
+                                            debug!(rules = stylesheet.rules.len(), %url, "Parsed external stylesheet");
+                                            Some(stylesheet)
+                                        }
+                                        Err(e) => {
+                                            warn!(?e, %url, "Failed to parse external stylesheet");
+                                            None
+                                        }
+                                    },
                                     Err(e) => {
-                                        warn!(?e, %url, "Failed to parse external stylesheet");
+                                        warn!(?e, %url, "Failed to read stylesheet body");
                                         None
                                     }
-                                },
-                                Err(e) => {
-                                    warn!(?e, %url, "Failed to read stylesheet body");
-                                    None
                                 }
+                            } else {
+                                warn!(status = %response.status, %url, "Failed to fetch stylesheet");
+                                None
                             }
-                        } else {
-                            warn!(status = %response.status, %url, "Failed to fetch stylesheet");
+                        }
+                        Err(e) => {
+                            warn!(?e, %url, "Failed to fetch stylesheet");
                             None
                         }
                     }
-                    Err(e) => {
-                        warn!(?e, %url, "Failed to fetch stylesheet");
-                        None
-                    }
-                }
+                };
+                tokio::time::timeout_at(deadline, load).await.unwrap_or_else(|_| {
+                    warn!(%url, "Stylesheet over the subresource budget; rendering without it");
+                    None
+                })
             }
         }))
         .buffered(MAX_CONCURRENT_CSS_LOADS)
@@ -6509,6 +6523,8 @@ impl Engine {
         // serial while images were parallelized). Parsing happens inside the
         // futures; only the cache insert is serialized afterwards, because
         // &mut self cannot be held across them.
+        let budget = std::time::Duration::from_millis(self.config.subresource_budget_ms);
+        let deadline = self.subresource_deadline();
         {
             use futures::stream::StreamExt;
             let loader = self.loader.clone();
@@ -6517,7 +6533,10 @@ impl Engine {
                     let loader = loader.clone();
                     async move {
                         info!(%url, "Loading SVG image");
-                        match loader.fetch(Request::get(url.clone())).await {
+                        let fetched = tokio::time::timeout_at(deadline, loader.fetch(Request::get(url.clone())))
+                            .await
+                            .unwrap_or(Err(NetError::Timeout(budget)));
+                        match fetched {
                             Ok(response) if response.ok() => match response.text().await {
                                 Ok(xml) => match rustkit_svg::SvgDocument::parse(&xml) {
                                     Ok(doc) => Some((url.to_string(), doc)),
@@ -6556,7 +6575,11 @@ impl Engine {
             let image_manager = image_manager.clone();
             async move {
                 info!(%url, "Loading image via ImageManager");
-                match image_manager.load(url.clone()).await {
+                let Ok(loaded) = tokio::time::timeout_at(deadline, image_manager.load(url.clone())).await else {
+                    warn!(%url, "Image over the subresource budget; rendering without it");
+                    return false;
+                };
+                match loaded {
                     Ok(image) => {
                         debug!(
                             %url,
@@ -6580,6 +6603,12 @@ impl Engine {
         loaded += results.into_iter().filter(|ok| *ok).count();
 
         Ok(loaded)
+    }
+
+    /// When a subresource phase starting now must be done by
+    /// (`subresource_budget_ms`).
+    fn subresource_deadline(&self) -> tokio::time::Instant {
+        tokio::time::Instant::now() + std::time::Duration::from_millis(self.config.subresource_budget_ms)
     }
 
     /// Load all subresources (stylesheets, images) for a view.
@@ -6780,16 +6809,22 @@ impl Engine {
         use futures::stream::{self, StreamExt};
         const MAX_IN_FLIGHT: usize = 16;
         let loader = &self.loader;
+        let deadline = self.subresource_deadline();
         let fetched: Vec<_> = stream::iter(targets.into_iter().map(|(key, family, url)| async move {
             info!(%family, %url, "Loading web font");
-            let outcome = match loader.fetch(Request::get(url.clone())).await {
-                Ok(response) if response.ok() => match response.bytes().await {
-                    Ok(bytes) => Ok(bytes.to_vec()),
-                    Err(e) => Err(format!("Failed to read web font body: {e:?}")),
-                },
-                Ok(response) => Err(format!("Failed to fetch web font: status {}", response.status)),
-                Err(e) => Err(format!("Failed to fetch web font: {e:?}")),
+            let load = async {
+                match loader.fetch(Request::get(url.clone())).await {
+                    Ok(response) if response.ok() => match response.bytes().await {
+                        Ok(bytes) => Ok(bytes.to_vec()),
+                        Err(e) => Err(format!("Failed to read web font body: {e:?}")),
+                    },
+                    Ok(response) => Err(format!("Failed to fetch web font: status {}", response.status)),
+                    Err(e) => Err(format!("Failed to fetch web font: {e:?}")),
+                }
             };
+            let outcome = tokio::time::timeout_at(deadline, load)
+                .await
+                .unwrap_or_else(|_| Err("Web font over the subresource budget".to_string()));
             (key, family, url, outcome)
         }))
         .buffered(MAX_IN_FLIGHT)
@@ -17272,6 +17307,34 @@ window.addEventListener('load', function () {
         let log = engine.script_log(view).unwrap();
         assert_eq!(log[0].outcome, ScriptOutcome::Ran, "{log:#?}");
         assert_eq!(engine.execute_script(view, "slow").unwrap(), "Boolean(true)");
+    }
+
+    #[test]
+    fn a_stalled_subresource_is_dropped_at_the_subresource_budget() {
+        // apple.com on the real-site board: one stylesheet never answered,
+        // and the network client's 30s timeout ate the whole capture.
+        let page = r#"<html><head>
+<link rel="stylesheet" href="/slow.css">
+<link rel="stylesheet" href="/fast.css">
+</head><body><img src="/slow.png"><img src="/slow.svg">hi</body></html>"#;
+        let port = serve(vec![
+            ("/", "text/html", page.to_string()),
+            ("/slow.css", "text/css", "body { color: red }".into()),
+            ("/fast.css", "text/css", "body { color: blue }".into()),
+        ]);
+        let config = EngineConfig {
+            subresource_budget_ms: 500,
+            ..EngineConfig::default()
+        };
+        let started = std::time::Instant::now();
+        let (engine, view) = load(config, port);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(2_500),
+            "waited for the stalled subresources: {:?}",
+            started.elapsed()
+        );
+        // The sheet that did arrive still applies.
+        assert_eq!(engine.views[&view].external_stylesheets.len(), 1);
     }
 
     #[test]
