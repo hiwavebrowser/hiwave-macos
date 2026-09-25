@@ -1840,7 +1840,12 @@ impl LayoutBox {
                 ..
             } => {
                 // Replaced element: use intrinsic dimensions or explicit sizing
-                self.layout_image(*natural_width, *natural_height, containing_block);
+                self.layout_image_in(
+                    *natural_width,
+                    *natural_height,
+                    containing_block,
+                    definite_height,
+                );
             }
             BoxType::FormControl(ref control) => {
                 // Form controls are replaced elements with intrinsic sizing
@@ -2342,12 +2347,35 @@ impl LayoutBox {
         (line_count, last_width)
     }
 
-    /// Layout a replaced element (image).
+    /// Layout a replaced element (image), resolving percentage heights
+    /// against `containing_block.content.height`.
     fn layout_image(
         &mut self,
         natural_width: f32,
         natural_height: f32,
         containing_block: &Dimensions,
+    ) {
+        self.layout_image_in(
+            natural_width,
+            natural_height,
+            containing_block,
+            Some(containing_block.content.height),
+        );
+    }
+
+    /// Layout a replaced element (image). `percent_height_base` is the
+    /// containing block's DEFINITE content height; `None` means it has none.
+    /// On the flow path `containing_block.content.height` is the parent's
+    /// cursor, not its height, so a percentage read from it resolved against
+    /// the line position: google's logo (`max-height: 100%`, first in its
+    /// block) came out 0x0. A percentage of an indefinite height is `auto`
+    /// for `height` and `none` for `max-height` (CSS 2.1 §10.5, §10.7).
+    fn layout_image_in(
+        &mut self,
+        natural_width: f32,
+        natural_height: f32,
+        containing_block: &Dimensions,
+        percent_height_base: Option<f32>,
     ) {
         // A replaced element carries its own box decoration. Until 2026-08-22
         // this function left margin/border/padding at zero, so `border_box()`
@@ -2401,7 +2429,7 @@ impl LayoutBox {
         let explicit_height = replaced_content_size(
             match self.style.height {
                 Length::Px(px) => Some(px),
-                Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.height),
+                Length::Percent(pct) => percent_height_base.map(|base| pct / 100.0 * base),
                 _ => None,
             },
             vertical_decoration,
@@ -2457,7 +2485,7 @@ impl LayoutBox {
         let max_height = replaced_content_size(
             match self.style.max_height {
                 Length::Px(px) => Some(px),
-                Length::Percent(pct) => Some(pct / 100.0 * containing_block.content.height),
+                Length::Percent(pct) => percent_height_base.map(|base| pct / 100.0 * base),
                 _ => None,
             },
             vertical_decoration,
@@ -2975,7 +3003,12 @@ impl LayoutBox {
                 natural_height,
                 ..
             } => {
-                self.layout_image(*natural_width, *natural_height, containing_block);
+                self.layout_image_in(
+                    *natural_width,
+                    *natural_height,
+                    containing_block,
+                    percent_height_base,
+                );
             }
             BoxType::FormControl(ref control) => {
                 self.layout_form_control(control.clone(), containing_block);
@@ -12354,6 +12387,54 @@ mod tests {
             parent.children[0].dimensions.content.height, 16.0,
             "100% of the parent's 100px minus 84px, not the 203px of content"
         );
+    }
+
+    /// google's logo: an image first in its block with `max-height: 100%`.
+    /// The percentage read the parent's flow cursor (0 at the top of the
+    /// block), so the image came out 0x0 whatever the parent's height was.
+    #[test]
+    fn an_image_max_height_percentage_resolves_against_the_parent_not_its_cursor() {
+        for (parent_height, expected) in [
+            // Definite 50px parent: 100% is 50px, the ratio gives the width.
+            (Length::Px(50.0), (50.0 * 272.0 / 92.0, 50.0)),
+            // Auto-height parent: the percentage has no base and constrains
+            // nothing, so the natural size stands.
+            (Length::Auto, (272.0, 92.0)),
+        ] {
+            let mut parent_style = ComputedStyle::new();
+            parent_style.width = Length::Px(1000.0);
+            parent_style.height = parent_height.clone();
+            let mut parent = LayoutBox::new(BoxType::Block, parent_style);
+
+            let mut image_style = ComputedStyle::new();
+            image_style.max_height = Length::Percent(100.0);
+            parent.children.push(LayoutBox::new(
+                BoxType::Image {
+                    url: String::new(),
+                    natural_width: 272.0,
+                    natural_height: 92.0,
+                },
+                image_style,
+            ));
+            parent.set_viewport(1280.0, 800.0);
+
+            let viewport = Dimensions {
+                content: Rect::new(0.0, 0.0, 1280.0, 800.0),
+                ..Default::default()
+            };
+            parent.layout(&viewport);
+
+            let image = &parent.children[0].dimensions.content;
+            assert!(
+                (image.width - expected.0).abs() < 0.01
+                    && (image.height - expected.1).abs() < 0.01,
+                "parent height {parent_height:?}: image {}x{}, expected {}x{}",
+                image.width,
+                image.height,
+                expected.0,
+                expected.1
+            );
+        }
     }
 
     /// The percentage half and the absolute half must take the SAME base a
