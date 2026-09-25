@@ -141,3 +141,5 @@ someone has reviewed** without saying so in the PR.
 - Do not ping anyone. The noon digest delivers.
 - Never edit the site list or thresholds to move the number.
 - **Security findings stay private.** hiwave-macos is public. If a site exposes a security defect (sandbox, cross-site cache or cookie leaks, TLS/cert handling, script isolation), do NOT describe the mechanism in a PR body, commit message, or digest. Write "security fix, details withheld" and add one line for Pete under decisions.
+  - Low-severity hardening whose diff is self-explanatory (e.g. rejecting malformed input that could crash the process): a normal `rs-` PR titled "security fix, details withheld" is fine, since the diff is public anyway. Land it fast.
+  - Anything that exposes data, crosses origins, or runs attacker code: do NOT open a public PR. Note it for Pete in the digest decisions (one line, no mechanism). Atlas moves it to a GitHub private security advisory.
