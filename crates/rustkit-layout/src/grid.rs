@@ -2036,6 +2036,43 @@ pub fn layout_grid_container(
                         continue;
                     }
 
+                    // The grandchild's used width in the grid item's box. A
+                    // block box gets the ordinary block-width rules (§10.3.3:
+                    // a specified width, min/max, box-sizing, auto margins,
+                    // shrink-to-fit for inline-blocks) against the ITEM's
+                    // width. This loop used to give every grandchild the
+                    // item's full width, so `<div style="width:100px">` in a
+                    // 600px item came out 600 wide, and a `margin: 0 auto`
+                    // child was never centred. A replaced element keeps the
+                    // size its own layout gave it: google's logo (a 272px
+                    // inline SVG) was stretched to its 1072px grid item.
+                    // Text and inline boxes keep the historical fill.
+                    let stale_width = grandchild.dimensions.content.width;
+                    match grandchild.box_type {
+                        crate::BoxType::Block | crate::BoxType::AnonymousBlock => {
+                            let item_box = crate::Dimensions {
+                                content: crate::Rect::new(
+                                    grid_item_x,
+                                    current_y,
+                                    grid_item_width,
+                                    grid_item_height,
+                                ),
+                                ..Default::default()
+                            };
+                            grandchild.calculate_block_width(&item_box);
+                        }
+                        crate::BoxType::Image { .. } => {}
+                        _ => {
+                            grandchild.dimensions.content.width = grid_item_width
+                                - grandchild.dimensions.margin.left
+                                - grandchild.dimensions.border.left
+                                - grandchild.dimensions.padding.left
+                                - grandchild.dimensions.margin.right
+                                - grandchild.dimensions.border.right
+                                - grandchild.dimensions.padding.right;
+                        }
+                    }
+
                     // Calculate the grandchild's margin box offsets
                     let margin_top = grandchild.dimensions.margin.top;
                     let border_top = grandchild.dimensions.border.top;
@@ -2064,9 +2101,6 @@ pub fn layout_grid_container(
                             crate::flex::translate_subtree(gc_child, dx, dy);
                         }
                     }
-                    let stale_width = grandchild.dimensions.content.width;
-                    grandchild.dimensions.content.width = grid_item_width - margin_left - border_left - padding_left
-                        - grandchild.dimensions.margin.right - grandchild.dimensions.border.right - grandchild.dimensions.padding.right;
 
                     // The block pre-pass laid this whole subtree out against
                     // the GRID CONTAINER's content width, because grid item
@@ -6742,6 +6776,64 @@ mod tests {
 
     /// A grid item's GRANDchildren size against the item, not against the
     /// grid container the pre-pass measured them with.
+    #[test]
+    fn a_grid_items_children_keep_their_own_width_in_the_item() {
+        // Phase 9 gave every child of a grid item the item's full width: a
+        // `width:100px` box came out 600 wide, a `margin: 0 auto` box was
+        // never centred, and google's 272px logo (an inline SVG) was
+        // stretched across its 1072px item.
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Px(600.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+        let mut item = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+
+        let mut fixed_style = ComputedStyle::new();
+        fixed_style.width = Length::Px(100.0);
+        fixed_style.height = Length::Px(20.0);
+        let mut centred_style = ComputedStyle::new();
+        centred_style.width = Length::Px(200.0);
+        centred_style.height = Length::Px(20.0);
+        centred_style.margin_left = Length::Auto;
+        centred_style.margin_right = Length::Auto;
+        let mut fixed = LayoutBox::new(BoxType::Block, fixed_style);
+        let mut centred = LayoutBox::new(BoxType::Block, centred_style);
+        let mut logo = LayoutBox::new(
+            BoxType::Image {
+                url: String::new(),
+                natural_width: 272.0,
+                natural_height: 92.0,
+            },
+            ComputedStyle::new(),
+        );
+        // The block pre-pass's sizes, measured against the container.
+        fixed.dimensions.content.width = 100.0;
+        centred.dimensions.content.width = 200.0;
+        logo.dimensions.content.width = 272.0;
+        logo.dimensions.content.height = 92.0;
+        item.children.push(fixed);
+        item.children.push(centred);
+        item.children.push(logo);
+        container.children.push(item);
+
+        layout_grid_container(&mut container, 600.0, 400.0);
+
+        let item = &container.children[0];
+        let item_x = item.dimensions.content.x;
+        let widths: Vec<f32> = item
+            .children
+            .iter()
+            .map(|c| c.dimensions.content.width)
+            .collect();
+        assert_eq!(widths, vec![100.0, 200.0, 272.0], "each child keeps its own width");
+        let centred_offset = item.children[1].dimensions.content.x - item_x;
+        assert!(
+            (centred_offset - 200.0).abs() < 0.01,
+            "margin: 0 auto centres a 200px box in the 600px item: offset {centred_offset}"
+        );
+    }
+
     #[test]
     fn a_grid_items_grandchildren_resize_with_the_item_not_the_container() {
         const CONTAINER_WIDTH: f32 = 1000.0;
