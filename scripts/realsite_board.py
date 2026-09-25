@@ -56,14 +56,20 @@ def words(text):
     return {w.casefold() for w in WORD_RE.findall(text or "")}
 
 
-def run_json(cmd, timeout, env=None):
-    """Run a command that prints one JSON object on its last stdout line."""
+def run_json(cmd, timeout, env=None, stderr_path=None):
+    """Run a command that prints one JSON object on its last stdout line.
+    With stderr_path, its stderr (the engine's log) is kept there."""
     try:
         p = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, env=env, cwd=REPO
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
+        if stderr_path and e.stderr:
+            Path(stderr_path).write_bytes(e.stderr if isinstance(e.stderr, bytes)
+                                          else e.stderr.encode())
         return None, "killed after %ds" % timeout, None
+    if stderr_path:
+        Path(stderr_path).write_text(p.stderr or "")
     lines = [l for l in p.stdout.splitlines() if l.strip().startswith("{")]
     if not lines:
         tail = (p.stderr or p.stdout).strip().splitlines()[-3:]
@@ -224,8 +230,10 @@ def score_site(site, capture_bin, outdir, width, height, env):
     rk, rk_err, rk_code = run_json(
         [str(capture_bin), "--url", url, "--width", str(width), "--height", str(height),
          "--timeout-ms", str(LOAD_TIMEOUT_MS), "--dump-frame", str(rk_frame),
-         "--dump-display-list", str(rk_dl)],
+         "--dump-display-list", str(rk_dl), "--verbose"],
         timeout=LOAD_TIMEOUT_MS // 1000 + 15,
+        # The engine's info log, timestamped: where a slow load spent its 30s.
+        stderr_path=d / "rustkit-stderr.log",
     )
     rec["rustkit"] = rk if rk is not None else {"status": "crash", "error": rk_err,
                                                 "exit_code": rk_code}

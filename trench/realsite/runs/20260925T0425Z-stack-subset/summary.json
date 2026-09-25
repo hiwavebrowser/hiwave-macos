@@ -1,0 +1,28 @@
+{
+  "ts": "20260925T042138Z",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "sites": 6,
+  "points": 3,
+  "max_points": 18,
+  "loads": 2,
+  "readable": 1,
+  "looks_right": 0,
+  "looks_right_unstable": [
+    "wikipedia"
+  ],
+  "readable_unscored": [],
+  "oracle_failed": [],
+  "blocked": {},
+  "per_site": {
+    "facebook": 0,
+    "wikipedia": 0,
+    "linkedin": 2,
+    "microsoft": 0,
+    "apple": 1,
+    "netflix": 0
+  }
+}

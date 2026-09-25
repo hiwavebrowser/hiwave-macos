@@ -1,0 +1,104 @@
+{
+  "id": "amazon",
+  "url": "https://www.amazon.com/",
+  "chrome": [
+    {
+      "url": "https://www.amazon.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.amazon.com/",
+      "title": "Amazon.com. Spend less. Smile more.",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/amazon/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/amazon/chrome-a.png",
+      "elapsed_ms": 40795
+    },
+    {
+      "url": "https://www.amazon.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.amazon.com/",
+      "title": "Amazon.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/amazon/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/amazon/chrome-b.png",
+      "elapsed_ms": 14637
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.amazon.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/amazon/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/amazon/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 0,
+      "threw": 0,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 0,
+      "elapsed_ms": 0
+    },
+    "elapsed_ms": 336,
+    "error": null,
+    "wall_ms": 384,
+    "non_background_fraction": 0.0
+  },
+  "access": {
+    "status": 202,
+    "vendor": "aws-waf",
+    "blocked": true
+  },
+  "loads": {
+    "pass": false,
+    "why": "blocked:aws-waf (HTTP 202) \u2014 blank frame (0.00% non-background)"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 121,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "0",
+      "03053",
+      "1",
+      "360",
+      "9",
+      "account",
+      "additional",
+      "ai",
+      "alexa",
+      "all",
+      "amazon",
+      "apply",
+      "audible",
+      "audio",
+      "automotive",
+      "baby",
+      "basics",
+      "beats",
+      "beauty",
+      "best",
+      "books",
+      "can",
+      "cards",
+      "care",
+      "cart"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 72.78857421875,
+    "why": "chrome-vs-chrome 72.8% > 15% (unstable, 0 points)",
+    "unstable": true
+  },
+  "points": 0
+}

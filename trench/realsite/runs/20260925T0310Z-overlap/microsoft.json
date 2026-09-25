@@ -1,0 +1,97 @@
+{
+  "id": "microsoft",
+  "url": "https://www.microsoft.com/en-us",
+  "chrome": [
+    {
+      "url": "https://www.microsoft.com/en-us",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.microsoft.com/en-us",
+      "title": "Microsoft \u2013 AI, Cloud, Productivity, Computing, Gaming & Apps",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/microsoft/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/microsoft/chrome-a.png",
+      "elapsed_ms": 25638
+    },
+    {
+      "url": "https://www.microsoft.com/en-us",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.microsoft.com/en-us",
+      "title": "Microsoft \u2013 AI, Cloud, Productivity, Computing, Gaming & Apps",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/microsoft/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/microsoft/chrome-b.png",
+      "elapsed_ms": 24310
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.microsoft.com/en-us",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/microsoft/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/microsoft/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 2,
+      "threw": 4,
+      "skipped": 0,
+      "fetch_failed": 2,
+      "over_budget": 0,
+      "bytes": 134250,
+      "elapsed_ms": 103
+    },
+    "elapsed_ms": 6166,
+    "error": null,
+    "wall_ms": 6226,
+    "non_background_fraction": 0.0682
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 39,
+    "rustkit_words": 89,
+    "ratio": 0.5128,
+    "missing_sample": [
+      "24",
+      "7",
+      "assistant",
+      "available",
+      "can",
+      "chat",
+      "explore",
+      "help",
+      "lineup",
+      "me",
+      "most",
+      "no",
+      "now",
+      "portable",
+      "pre",
+      "thanks",
+      "the",
+      "we",
+      "you"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 5.68095703125,
+    "diff": 91.33544921875
+  },
+  "points": 1
+}

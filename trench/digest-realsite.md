@@ -101,3 +101,59 @@ on 6 sites; likely one missing stub property. (3) Real DOM bindings (Rust DOM at
 2. **Seat permissions still bite:** `git merge`, `git -C <other dir>`, `cargo fmt`, `gh pr comment`, EnterWorktree
    and heredocs with quoted braces all need approval. I worked around them by switching branches inside the hub worktree.
    The PRs are unformatted by `cargo fmt`, and I said so in each.
+
+## 2026-09-25 00:35 — the timeouts are layout, not network: font-resolution cache 12 → 15
+
+**Points: 12 → 15 / 60** (best single-fix run; each fix measured alone against the same night's before).
+
+| run | engine | points | loads | readable | looks-right |
+|---|---|---|---|---|---|
+| `20260925T0220Z-before` | develop 2d3e2bb (#244 + #245 merged) | **12** | 8 | 2 | 2 |
+| `20260925T0310Z-overlap` | + #252 script overlap + size guard | 11 | 8 | 1 | 2 |
+| `20260925T0350Z-fontcache` | + #251 font-resolution cache | **15** | 11 | 2 | 2 |
+| `20260925T0400Z-encoding` | + #254 Accept-Encoding | 12 | 8 | 2 | 2 |
+| `20260925T0425Z-stack-subset` | #254 + #251, 6 sites only | 3/18 | 2 | 1 | 0 |
+
+The before is 12, not last session's 14: apple and netflix timed out on the network, and linkedin's LOOKS RIGHT was unstable.
+**Font cache:** apple LOADS (its two big relayouts 11.9s → 7.0s and 11.5s → 7.6s: this fix), wikipedia LOADS (first layout
+6.1s → 2.9s: mostly this fix), netflix LOADS (network: it also loaded in the overlap run).
+**Encoding:** wikipedia LOADS (stylesheets 6.1s → 0.25s); microsoft −1, because it now gets its **real** page instead of the bot page and then times out in layout.
+**Noise warning:** in the stacked subset, wikipedia missed 30s by 0.09s, and identical code ran layout ~50% slower than
+in the font-cache run. This Mac is shared with other seats. LOADS for anything near 30s flips run to run; one board run can't
+attribute a ±1. (Last session's guess, that overlapping script fetches would win back wikipedia, was wrong. Its time is layout.)
+Passing all 3: google. Blocked (0 pts): amazon aws-waf/202, chatgpt cloudflare/403, ebay akamai/403, nytimes datadome/403.
+**Reddit is effectively blocked too:** pinned Chrome gets reddit's "blocked by network security" page from this seat, and RustKit gets reddit's
+JS challenge (a form `requestSubmit`). The access probe misses it (HTTP 200).
+
+**New instrument (hub only):** the board keeps each capture's `--verbose` engine log (`<site>/rustkit-stderr.log`; kept locally,
+not committed). "capture exceeded 30000 ms" is now a timeline. **The remaining timeouts are layout-bound:** wikipedia
+spent 6–10s per relayout (×3), facebook 18s+ in the relayout after its web fonts, apple ~12s per relayout, microsoft 8.6s.
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- #251 `atlas/rs-font-resolve-cache` @ ab7d56e: memoize `create_ct_font_with_traits` per thread, invalidated by a new
+  `webfonts::generation()`. Every shape/metrics call re-ran Core Text descriptor matching (or built a CTFont from a CGFont), uncached. **12 → 15.**
+- #252 `atlas/rs-overlap-script-fetch` @ 798f861: script fetches overlap subresource loading; scripts over 4 MiB are
+  skipped (once youtube's 10.8 MB bundle arrived inside the budget, Boa ran it for 16s+). 0 points on its own; its −1 is linkedin timing out in layout before any script.
+- #253 `atlas/rs-font-face-guard` @ 8703e2d: security fix, details withheld (low-severity hardening, per the plan's new rule).
+- #254 `atlas/rs-accept-encoding` @ 5830c3f: `Accept-Encoding: gzip, deflate` + decoding. microsoft.com serves an
+  "automated process" page without it (curl-verified). Documents are 4–7× smaller (cnn 6.4 MB → 0.98 MB). Net 0 points.
+- Gates: each new test fails without its fix (verified: 6.4s vs <5s; body "automated bot"; ≤4 vs 400 resolutions; the
+  guard's input crashed a test process before the fix). Page-script 5/5, rustkit-http 9/9, layout font tests 2/2, webfonts 6/6.
+  **Campaign `parity_test.py` and WPT tier1 not run:** five board runs used the session. Each PR says so.
+
+**Cheapest next points** (from a static-HTML triage: the share of Chrome's first-viewport words present in the served HTML outside scripts):
+1. **facebook** (100% static; timeout): profile the post-web-font relayout. It isn't font resolution.
+2. **microsoft** (85% static, now the real page; timeout), **github**, **cnn**: the same layout-bound treatment. The logs are in the run dirs.
+3. Everything else READABLE (yahoo 52% static, bing 35%, x 22%, instagram 2%, youtube 5%) needs JS on the real DOM (sprint step 3).
+
+Housekeeping: `~/Repos/.worktrees/rs-concurrent-scripts` is a stale worktree from this session (its branch was deleted; a Cargo.lock
+build change blocks `git worktree remove` without --force). The local `scratch/stack-enc-font` branch is a throwaway. Both are safe to delete.
+
+**Decisions for Pete:**
+1. **Profiling permission.** The next timeout points are CPU-bound inside layout. This seat can't run the capture binary
+   directly or attach `sample`, so every diagnosis costs a 25-minute board run. Allowing `target/release/parity-capture` and `sample` for the
+   trench seat would cut that to minutes.
+2. **LOADS noise.** On a shared Mac, the 30s line flips sites run to run (wikipedia by 0.09s). Should the board score LOADS as the best
+   of 2 RustKit captures (Chrome already gets 2), or keep one capture and accept the noise? It's a rules change, so it's your call.
+3. **Reddit's oracle is blocked** (Chrome gets a network-security block page from this IP). Record it as `blocked:reddit`, as the other four are,
+   or keep scoring it as-is?

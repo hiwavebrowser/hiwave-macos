@@ -1,0 +1,103 @@
+{
+  "id": "yahoo",
+  "url": "https://www.yahoo.com/",
+  "chrome": [
+    {
+      "url": "https://www.yahoo.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.yahoo.com/",
+      "title": "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0350Z-fontcache/yahoo/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0350Z-fontcache/yahoo/chrome-a.png",
+      "elapsed_ms": 60046
+    },
+    {
+      "url": "https://www.yahoo.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.yahoo.com/",
+      "title": "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0350Z-fontcache/yahoo/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0350Z-fontcache/yahoo/chrome-b.png",
+      "elapsed_ms": 68787
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.yahoo.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0350Z-fontcache/yahoo/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0350Z-fontcache/yahoo/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 147,
+      "threw": 2,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 2853026,
+      "elapsed_ms": 1862
+    },
+    "elapsed_ms": 12547,
+    "error": null,
+    "wall_ms": 12685,
+    "non_background_fraction": 0.0249
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 155,
+    "rustkit_words": 37,
+    "ratio": 0.0645,
+    "missing_sample": [
+      "00",
+      "1",
+      "10",
+      "11",
+      "15",
+      "2",
+      "24",
+      "25",
+      "250",
+      "3",
+      "4",
+      "45",
+      "47",
+      "5th",
+      "6",
+      "7",
+      "772",
+      "a",
+      "accuweather",
+      "action",
+      "ad",
+      "adjustment",
+      "am",
+      "americans",
+      "are"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 8.18876953125,
+    "diff": 23.638281250000002
+  },
+  "points": 1
+}

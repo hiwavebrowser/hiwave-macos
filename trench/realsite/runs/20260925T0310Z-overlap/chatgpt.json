@@ -1,0 +1,77 @@
+{
+  "id": "chatgpt",
+  "url": "https://chatgpt.com/",
+  "chrome": [
+    {
+      "url": "https://chatgpt.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://chatgpt.com/",
+      "title": "Just a moment...",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/chatgpt/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/chatgpt/chrome-a.png",
+      "elapsed_ms": 15705
+    },
+    {
+      "url": "https://chatgpt.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://chatgpt.com/",
+      "title": "Just a moment...",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/chatgpt/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/chatgpt/chrome-b.png",
+      "elapsed_ms": 13493
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://chatgpt.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/chatgpt/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/chatgpt/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 9,
+      "threw": 5,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 6385,
+      "elapsed_ms": 3
+    },
+    "elapsed_ms": 16411,
+    "error": null,
+    "wall_ms": 16472,
+    "non_background_fraction": 0.0122
+  },
+  "access": {
+    "status": 403,
+    "vendor": "cloudflare",
+    "blocked": true
+  },
+  "loads": {
+    "pass": false,
+    "why": "blocked:cloudflare (HTTP 403) \u2014 blank frame (1.22% non-background)"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 0,
+    "rustkit_words": 0,
+    "why": "chrome shows no text in first viewport (unscored, 0 points)",
+    "unscored": true
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

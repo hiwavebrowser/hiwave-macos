@@ -1,0 +1,81 @@
+{
+  "id": "linkedin",
+  "url": "https://www.linkedin.com/",
+  "chrome": [
+    {
+      "url": "https://www.linkedin.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.linkedin.com/",
+      "title": "LinkedIn: Log In or Sign Up",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0425Z-stack-subset/linkedin/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0425Z-stack-subset/linkedin/chrome-a.png",
+      "elapsed_ms": 17485
+    },
+    {
+      "url": "https://www.linkedin.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.linkedin.com/",
+      "title": "LinkedIn: Log In or Sign Up",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0425Z-stack-subset/linkedin/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0425Z-stack-subset/linkedin/chrome-b.png",
+      "elapsed_ms": 16751
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.linkedin.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0425Z-stack-subset/linkedin/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0425Z-stack-subset/linkedin/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 4,
+      "threw": 2,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 830599,
+      "elapsed_ms": 1189
+    },
+    "elapsed_ms": 5998,
+    "error": null,
+    "wall_ms": 6065,
+    "non_background_fraction": 0.0613
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 35,
+    "rustkit_words": 42,
+    "ratio": 0.9143,
+    "missing_sample": [
+      "finance",
+      "google",
+      "productivity"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "diff": 21.732324218749998
+  },
+  "points": 2
+}

@@ -1,0 +1,82 @@
+{
+  "id": "google",
+  "url": "https://www.google.com/",
+  "chrome": [
+    {
+      "url": "https://www.google.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.google.com/?zx=1790306841601",
+      "title": "Google",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0350Z-fontcache/google/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0350Z-fontcache/google/chrome-a.png",
+      "elapsed_ms": 12798
+    },
+    {
+      "url": "https://www.google.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.google.com/?zx=1790306855172",
+      "title": "Google",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0350Z-fontcache/google/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0350Z-fontcache/google/chrome-b.png",
+      "elapsed_ms": 15498
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.google.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0350Z-fontcache/google/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0350Z-fontcache/google/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 7,
+      "threw": 7,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 1466919,
+      "elapsed_ms": 2225
+    },
+    "elapsed_ms": 9223,
+    "error": null,
+    "wall_ms": 9937,
+    "non_background_fraction": 0.1007
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 28,
+    "rustkit_words": 30,
+    "ratio": 0.8571,
+    "missing_sample": [
+      "learn",
+      "month",
+      "national",
+      "recovery"
+    ]
+  },
+  "looks_right": {
+    "pass": true,
+    "chrome_self_diff": 0,
+    "diff": 10.27578125
+  },
+  "points": 3
+}

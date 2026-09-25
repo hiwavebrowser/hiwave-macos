@@ -1,0 +1,103 @@
+{
+  "id": "yahoo",
+  "url": "https://www.yahoo.com/",
+  "chrome": [
+    {
+      "url": "https://www.yahoo.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.yahoo.com/",
+      "title": "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/yahoo/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/yahoo/chrome-a.png",
+      "elapsed_ms": 28152
+    },
+    {
+      "url": "https://www.yahoo.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.yahoo.com/",
+      "title": "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/yahoo/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/yahoo/chrome-b.png",
+      "elapsed_ms": 44480
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.yahoo.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/yahoo/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0310Z-overlap/yahoo/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 146,
+      "threw": 2,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 2852896,
+      "elapsed_ms": 1943
+    },
+    "elapsed_ms": 9525,
+    "error": null,
+    "wall_ms": 9664,
+    "non_background_fraction": 0.0249
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 73,
+    "rustkit_words": 37,
+    "ratio": 0.0685,
+    "missing_sample": [
+      "1",
+      "15",
+      "2",
+      "250",
+      "3",
+      "30",
+      "4",
+      "45",
+      "48",
+      "a",
+      "accuweather",
+      "ad",
+      "adults",
+      "ai",
+      "at",
+      "by",
+      "calls",
+      "canada",
+      "cindy",
+      "clear",
+      "clooneys",
+      "close",
+      "comfort",
+      "control",
+      "crawford"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 13.84931640625,
+    "diff": 23.3673828125
+  },
+  "points": 1
+}

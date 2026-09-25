@@ -1,0 +1,83 @@
+{
+  "id": "linkedin",
+  "url": "https://www.linkedin.com/",
+  "chrome": [
+    {
+      "url": "https://www.linkedin.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.linkedin.com/",
+      "title": "LinkedIn: Log In or Sign Up",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0220Z-before/linkedin/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0220Z-before/linkedin/chrome-a.png",
+      "elapsed_ms": 15549
+    },
+    {
+      "url": "https://www.linkedin.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.linkedin.com/",
+      "title": "Log In or Sign Up | LinkedIn",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0220Z-before/linkedin/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0220Z-before/linkedin/chrome-b.png",
+      "elapsed_ms": 14649
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.linkedin.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0220Z-before/linkedin/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260925T0220Z-before/linkedin/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 4,
+      "threw": 2,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 830599,
+      "elapsed_ms": 1299
+    },
+    "elapsed_ms": 9977,
+    "error": null,
+    "wall_ms": 10065,
+    "non_background_fraction": 0.0631
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 34,
+    "rustkit_words": 44,
+    "ratio": 0.9118,
+    "missing_sample": [
+      "finance",
+      "opportunities",
+      "productivity"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 23.74140625,
+    "diff": 21.90703125,
+    "unstable": true,
+    "why": "chrome-vs-chrome 23.7% > 15% (unstable, 0 points)"
+  },
+  "points": 2
+}
