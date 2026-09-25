@@ -266,6 +266,14 @@ enum ScriptTiming {
     Async,
 }
 
+/// The largest page script `run_page_scripts` starts. Instagram's 3.9 MB
+/// bundle ran in 3.3s; youtube's 10.8 MB one did not finish in 16s.
+const MAX_PAGE_SCRIPT_BYTES: usize = 4 * 1024 * 1024;
+
+/// One `<script>` after fetching: its log label, then its source text or
+/// the reason it will not run.
+type FetchedScript = (String, Result<(ScriptTiming, String), ScriptOutcome>);
+
 /// What happened to one piece of page script on the load path.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScriptOutcome {
@@ -1496,17 +1504,18 @@ impl Engine {
         self.views.get(&id).map(|v| v.script_log.as_slice())
     }
 
-    /// Run the document's `<script>`s: classic scripts in document order,
-    /// then `defer`, then `async`; then `DOMContentLoaded`, `load`, and the
-    /// page's timers up to `timer_horizon_ms` of virtual time. Every
-    /// outcome lands in the view's script log.
-    ///
-    /// The document is fully parsed before any script runs, so a script
-    /// sees the whole tree rather than the part above it.
-    async fn run_page_scripts(&mut self, id: EngineViewId, base: &Url) {
-        let Some(document) = self.views.get(&id).and_then(|v| v.document.clone()) else {
-            return;
-        };
+    /// Collect the document's `<script>`s in document order and start
+    /// fetching the external ones. The returned future borrows nothing from
+    /// the engine, so `load_url` polls it alongside `load_subresources`:
+    /// script bytes arrive while stylesheets, images and fonts do, instead
+    /// of after them. A fetch not finished `script_budget_ms` after this
+    /// call is over budget.
+    fn fetch_page_scripts(
+        &self,
+        id: EngineViewId,
+        base: &Url,
+    ) -> Option<futures::future::LocalBoxFuture<'static, Vec<FetchedScript>>> {
+        let document = self.views.get(&id).and_then(|v| v.document.clone())?;
 
         // Collect in document order.
         enum Body {
@@ -1536,22 +1545,18 @@ impl Engine {
             entries.push((label, entry));
         });
         if entries.is_empty() {
-            return;
+            return None;
         }
 
-        // One budget covers fetching and running: a page with 46 external
-        // scripts (instagram) spent most of it on the network. A fetch that
-        // hasn't finished by the deadline is over budget.
         let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
-        let started = std::time::Instant::now();
         let deadline = tokio::time::Instant::now() + budget;
 
         // Fetch every external script concurrently, keeping document order.
-        use futures::stream::StreamExt;
+        use futures::{stream::StreamExt, FutureExt};
         const MAX_CONCURRENT_SCRIPT_LOADS: usize = 8;
         let loader = self.loader.clone();
-        let fetched: Vec<(String, Result<(ScriptTiming, String), ScriptOutcome>)> =
-            futures::stream::iter(entries.into_iter().map(|(label, entry)| {
+        Some(
+            futures::stream::iter(entries.into_iter().map(move |(label, entry)| {
                 let loader = loader.clone();
                 async move {
                     let result = match entry {
@@ -1580,9 +1585,26 @@ impl Engine {
                 }
             }))
             .buffered(MAX_CONCURRENT_SCRIPT_LOADS)
-            .collect()
-            .await;
+            .collect::<Vec<_>>()
+            .boxed_local(),
+        )
+    }
 
+    /// Run the fetched `<script>`s: classic scripts in document order,
+    /// then `defer`, then `async`; then `DOMContentLoaded`, `load`, and the
+    /// page's timers up to `timer_horizon_ms` of virtual time. Every
+    /// outcome lands in the view's script log. A script not started within
+    /// `budget` is over budget.
+    ///
+    /// The document is fully parsed before any script runs, so a script
+    /// sees the whole tree rather than the part above it.
+    fn run_page_scripts(
+        &mut self,
+        id: EngineViewId,
+        fetched: Vec<FetchedScript>,
+        budget: std::time::Duration,
+    ) {
+        let started = std::time::Instant::now();
         let horizon_ms = self.config.timer_horizon_ms;
         let loop_limit = self.config.script_loop_iteration_limit;
         let Some(view) = self.views.get_mut(&id) else { return };
@@ -1649,6 +1671,19 @@ impl Engine {
                     } else {
                         ScriptOutcome::OverBudget
                     },
+                });
+                continue;
+            }
+            // Boa cannot be interrupted mid-script, so the budget can only
+            // be enforced between scripts. Boa takes about 1s per MB here,
+            // and more on app bundles: youtube's 10.8 MB bundle ran for 16s+
+            // and hung the capture. A script that big is not started.
+            if text.len() > MAX_PAGE_SCRIPT_BYTES {
+                log.push(ScriptRecord {
+                    source: label,
+                    bytes: text.len(),
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::Skipped("too large to run inside the script budget"),
                 });
                 continue;
             }
@@ -1876,9 +1911,27 @@ impl Engine {
         self.load_local_web_fonts(id);
         self.relayout(id)?;
 
-        // Load external resources (stylesheets, images)
+        // Load external resources (stylesheets, images, fonts), and fetch
+        // the page's scripts at the same time. Scripts still run after the
+        // subresources; only their network time overlaps.
+        let script_fetch = if self.config.javascript_enabled {
+            self.fetch_page_scripts(id, &url)
+        } else {
+            None
+        };
+        let subresources = async {
+            let result = self.load_subresources(id).await;
+            (result, std::time::Instant::now())
+        };
+        let scripts = async move {
+            match script_fetch {
+                Some(fetch) => Some((fetch.await, std::time::Instant::now())),
+                None => None,
+            }
+        };
+        let ((subresources, subresources_done), scripts) = futures::join!(subresources, scripts);
         // This will trigger additional relayouts as resources arrive
-        if let Err(e) = self.load_subresources(id).await {
+        if let Err(e) = subresources {
             warn!(?e, "Failed to load some subresources");
             // Continue even if some resources fail to load
         }
@@ -1894,10 +1947,22 @@ impl Engine {
         // Page scripts, then DOMContentLoaded / load and the timers they
         // schedule. Script failures are the page's, not the navigation's:
         // they go to the view's script log.
-        if self.config.javascript_enabled {
-            self.run_page_scripts(id, &url).await;
-            // Scripts await the network and timers too: a stop while they
-            // run abandons the navigation exactly like one during subresources.
+        //
+        // One budget covers what scripts add to the load: script fetching
+        // that outlasted the subresources spends it before any script runs
+        // (a page with 46 external scripts, instagram, spent most of it on
+        // the network). A fetch that hit the deadline spent all of it.
+        if let Some((fetched, fetch_done)) = scripts {
+            let timed_out = fetched
+                .iter()
+                .any(|(_, r)| matches!(r, Err(ScriptOutcome::OverBudget)));
+            let budget = if timed_out {
+                std::time::Duration::ZERO
+            } else {
+                std::time::Duration::from_millis(self.config.script_budget_ms)
+                    .saturating_sub(fetch_done.saturating_duration_since(subresources_done))
+            };
+            self.run_page_scripts(id, fetched, budget);
             if self.nav_superseded(id, generation) {
                 debug!(?id, %url, "Navigation abandoned after page scripts");
                 return Ok(());
@@ -16473,36 +16538,41 @@ mod page_script_tests {
     use std::net::TcpListener;
 
     /// Serve `routes` (path -> body) on 127.0.0.1 until the test exits;
-    /// anything else is a 404.
+    /// anything else is a 404. Paths starting `/slow` answer after 3s.
+    /// Each connection gets its own thread, so concurrent fetches overlap.
     fn serve(routes: Vec<(&'static str, &'static str, String)>) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        let routes = std::sync::Arc::new(routes);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
-                let mut request = Vec::new();
-                let mut buf = [0u8; 1024];
-                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-                    match stream.read(&mut buf) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                let routes = routes.clone();
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
                     }
-                }
-                let request = String::from_utf8_lossy(&request);
-                let path = request.split_whitespace().nth(1).unwrap_or("/");
-                if path.starts_with("/slow") {
-                    std::thread::sleep(std::time::Duration::from_secs(3));
-                }
-                let (status, content_type, body) = routes
-                    .iter()
-                    .find(|(p, _, _)| *p == path)
-                    .map(|(_, ct, body)| ("200 OK", *ct, body.clone()))
-                    .unwrap_or(("404 Not Found", "text/plain", String::new()));
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
+                    let request = String::from_utf8_lossy(&request);
+                    let path = request.split_whitespace().nth(1).unwrap_or("/");
+                    if path.starts_with("/slow") {
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                    }
+                    let (status, content_type, body) = routes
+                        .iter()
+                        .find(|(p, _, _)| *p == path)
+                        .map(|(_, ct, body)| ("200 OK", *ct, body.clone()))
+                        .unwrap_or(("404 Not Found", "text/plain", String::new()));
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
             }
         });
         port
@@ -16605,6 +16675,52 @@ window.addEventListener('load', function () {
         // not started either.
         assert_eq!(log[1].outcome, ScriptOutcome::OverBudget, "{log:#?}");
         assert_eq!(engine.execute_script(view, "typeof slow").unwrap(), r#"String("undefined")"#);
+    }
+
+    #[test]
+    fn scripts_are_fetched_while_the_subresources_load() {
+        // A 3s stylesheet and a 3s script: fetched one after the other the
+        // load takes 6s; overlapped, 3s.
+        let page = r#"<html><head>
+<link rel="stylesheet" href="/slow.css">
+<script src="/slow.js"></script>
+</head><body>hi</body></html>"#;
+        let port = serve(vec![
+            ("/", "text/html", page.to_string()),
+            ("/slow.css", "text/css", "body { color: red }".into()),
+            ("/slow.js", "text/javascript", "var slow = true;".into()),
+        ]);
+        let started = std::time::Instant::now();
+        let (mut engine, view) = load(EngineConfig::default(), port);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(5_000),
+            "script fetch waited for the stylesheet: {:?}",
+            started.elapsed()
+        );
+        let log = engine.script_log(view).unwrap();
+        assert_eq!(log[0].outcome, ScriptOutcome::Ran, "{log:#?}");
+        assert_eq!(engine.execute_script(view, "slow").unwrap(), "Boolean(true)");
+    }
+
+    #[test]
+    fn a_script_too_large_for_the_budget_is_not_started() {
+        let page = r#"<html><head>
+<script src="/huge.js"></script>
+<script>var after = true;</script>
+</head><body>hi</body></html>"#;
+        let huge = format!("var huge = true;\n{}", "// padding\n".repeat(MAX_PAGE_SCRIPT_BYTES / 11 + 1));
+        let port = serve(vec![
+            ("/", "text/html", page.to_string()),
+            ("/huge.js", "text/javascript", huge),
+        ]);
+        let (mut engine, view) = load(EngineConfig::default(), port);
+        let log = engine.script_log(view).unwrap();
+        assert!(
+            matches!(log[0].outcome, ScriptOutcome::Skipped(why) if why.starts_with("too large")),
+            "{log:#?}"
+        );
+        assert_eq!(engine.execute_script(view, "typeof huge").unwrap(), r#"String("undefined")"#);
+        assert_eq!(engine.execute_script(view, "after").unwrap(), "Boolean(true)");
     }
 
     #[test]
