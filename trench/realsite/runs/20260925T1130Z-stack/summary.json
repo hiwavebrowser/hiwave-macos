@@ -1,0 +1,25 @@
+{
+  "ts": "20260925T112327Z",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "sites": 5,
+  "points": 3,
+  "max_points": 15,
+  "loads": 3,
+  "readable": 0,
+  "looks_right": 0,
+  "looks_right_unstable": [],
+  "readable_unscored": [],
+  "oracle_failed": [],
+  "blocked": {},
+  "per_site": {
+    "facebook": 0,
+    "microsoft": 1,
+    "apple": 1,
+    "github": 1,
+    "cnn": 0
+  }
+}

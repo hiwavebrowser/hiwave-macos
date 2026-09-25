@@ -204,3 +204,40 @@ this seat's sanctioned tool) and am flagging it here so it's visible, not quiet.
    2026-09-24, now with a site it blocks.
 2. **Board runs are chunked.** A full board is over 10 minutes and this seat's foreground cap is 10, so runs go 5 sites at a time into one dir
    (`summary.json` rebuilt, marked `chunked: true`). Fine as is, or would you rather the board get a `--resume`/summary-only mode in a hub commit?
+
+## 2026-09-25 08:35 — cascade 26.6 s → 3.5 s on github (#257, #258, both merged); `@media` had no block structure (#259)
+
+**Points: 12 → 14 / 60** (develop before; after = #257 + #258 + #259 stacked, same morning, runs chunked 5 sites at a time).
+
+| run | engine | points | loads | readable | looks-right |
+|---|---|---|---|---|---|
+| `20260925T0725Z-cascade` | develop 9aa5d40-equivalent (#256) | **12** | 8 | 2 | 2 |
+| `20260925T1230Z-all` | + #257 + #258 + #259 | **14** | 9 | 3 | 2 |
+
+Per site: **apple +1** (READABLE 70% → 100%: #259, its nav was unstyled below the fold) and **yahoo +1** (LOADS; yahoo has drifted both ways before, not claimed).
+Targeted A/Bs, back to back:
+- **github and microsoft LOADS flip with #257 + #258** (`1130Z-stack`: github 22.6 s, microsoft 12.1 s). They time out with develop (`1140Z-ab2-256`) and with #257 alone (`1145Z-ab2-attr`); #258 alone flips microsoft (`1205Z-memo`).
+- In the full run both missed again:
+  - **github**: #259 applies its desktop `@media` grid rules, and its layout pass went 4.5 s → 13.4 s (correct CSS exposing slow grid layout).
+  - **microsoft**: the log stops at 14.6 s with nothing after it (unlogged; likely Boa).
+
+Passing all 3: google. Blocked (0 pts): amazon aws-waf/202, chatgpt cloudflare/403, ebay akamai/403, nytimes datadome/403.
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- #257 `atlas/rs-cascade-attr-index` @ b89f27f, **merged**: the rule index files attribute-first, `:root` and `:is`/`:where` subjects (github had ~2,100 rules in the universal bucket). github offline cascade 26.6 → 11.1 s, frame byte-identical.
+- #258 `atlas/rs-selector-memo` @ 0969f2d, **merged**: each selector string is prepared once (validity, list members, tokens, pre-parsed ancestor compounds) instead of per element and per ancestor. github offline cascade 6.4 s alone, **3.5 s with #257**, frame byte-identical.
+- #259 `atlas/rs-css-media` @ c71f1eb, **open**: see finding 1. Campaign 26/26, every case identical to develop, for all three PRs. WPT not run (no `third_party/wpt` on this seat).
+
+**Findings:**
+1. **The CSS parser had no `@media` structure.** In `@media (x){.a{} .b{}} .c{}`, `.b` (every rule after the first in each block) leaked out and applied at every width, and `.c` (the first rule after every `@media` block, and after `@charset`) was dropped. The engine evaluated no media queries at all. #259 parses at-rule blocks, adds a Media Queries 4 evaluator pinned like the board's Chrome, and filters by the view's viewport. Every real site on the board ships `@media`, so this probably moves LOOKS RIGHT broadly once layout can keep up.
+2. **google's 3/3 isn't earned.** Some google variants make RustKit paint a big blue promo panel (a mis-render), and that panel is what lifts the frame over the 2% blank line. On the plain variant google scores 0 (`1215Z-media`), because the Google logo (an inline SVG, `max-width:100%; width:auto`, in a shrink-to-fit parent) collapses to zero size. It paints fine in isolation. That's the next fix, and it makes google's points real.
+3. **Profiling works now:** `sample <pid>` needs no approval. Release is `strip = true`, so build with `--config profile.release.strip=false --target-dir …/target-prof` for symbols. After #257 + #258, github's time is split between cascade and flex/grid layout, with no single hotspot. cnn is layout-bound (8.4 s).
+
+**Cheapest next points:** (1) the replaced-SVG shrink-to-fit sizing (google's logo, and probably logos elsewhere); (2) grid layout cost (github with #259); (3) cnn/facebook flex layout (#256 digest item 2).
+
+Housekeeping: worktrees `rs-cascade-attr-index` (holds `target-prof`, ~GBs), `rs-selector-memo`, `rs-stack` (scratch, uncommitted cherry-picks) are safe to delete. Keep `rs-css-media` until #259 lands.
+
+**Decisions for Pete:**
+1. **#259 lands correct CSS but costs github's LOADS for now** (desktop grid rules make its layout 3× slower). I'd land it: applying mobile rules on desktop is wrong everywhere. Prometheus merges; flagging it so the github miss after it lands isn't a surprise.
+2. **Security fix, details withheld:** one low-severity crash (page-controlled input) was removed in passing in #258. The diff is public, the description isn't. Nothing to escalate.
+3. **Should google's unearned 3/3 stay on the board?** The honesty rules say score what renders, and I did. The alternative is a note-only annotation per run. I recommend keeping it as-is and fixing the logo (next).
