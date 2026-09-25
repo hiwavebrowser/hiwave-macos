@@ -241,3 +241,34 @@ Housekeeping: worktrees `rs-cascade-attr-index` (holds `target-prof`, ~GBs), `rs
 1. **#259 lands correct CSS but costs github's LOADS for now** (desktop grid rules make its layout 3× slower). I'd land it: applying mobile rules on desktop is wrong everywhere. Prometheus merges; flagging it so the github miss after it lands isn't a surprise.
 2. **Security fix, details withheld:** one low-severity crash (page-controlled input) was removed in passing in #258. The diff is public, the description isn't. Nothing to escalate.
 3. **Should google's unearned 3/3 stay on the board?** The honesty rules say score what renders, and I did. The alternative is a note-only annotation per run. I recommend keeping it as-is and fixing the logo (next).
+
+## 2026-09-25 12:25 — google's logo was 0x0 (#260), grid children lost their widths (#261, merged), justify-* never parsed (#262). Board 14 → 15 (microsoft, not credited)
+
+**Points: 14 → 15 / 60.** Before is `20260925T1230Z-all` (develop ae8bacb). After is `20260925T1540Z-gridw`, which is exactly today's develop (ae8bacb + #261 = 01448f2). `20260925T1500Z-imgpct` (#260 alone) also scored 15.
+
+| run | engine | points | loads | readable | looks-right |
+|---|---|---|---|---|---|
+| `20260925T1230Z-all` | develop ae8bacb | **14** | 9 | 3 | 2 |
+| `20260925T1500Z-imgpct` | + #260 | **15** | 10 | 3 | 2 |
+| `20260925T1540Z-gridw` | + #261 (= develop now) | **15** | 10 | 3 | 2 |
+| `20260925T1610Z-justify` | + #262, 5 grid sites only | 9/15 (same as before) | | | |
+
+**The only row that moved is microsoft LOADS +1, and I don't credit it to any PR.** A back-to-back A/B (`1530Z-ab-dev` vs `1535Z-ab-fix`) went develop fail / #260 pass, but develop's log stalls on an image fetch that never returns. Across today's 14 microsoft captures, it stalls in a Boa script (`clientlibs-polyfills`) 6 times and in that image fetch once. It's a coin flip.
+Passing all 3: google (still the promo variant: its blue panel carries the frame). Blocked: ebay akamai/403, nytimes datadome/403, plus amazon/chatgpt depending on the run. The access probe got HTTP 200 from both in `1500Z` while RustKit still got a blank frame or a navigation error, so the `blocked` list varies run to run.
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- #260 `atlas/rs-img-pct-height` @ 1273756, **open**: `layout_image` read percentage `height`/`max-height` from the flow **cursor** (`cb.content.height`), so `max-height:100%` first in a block resolved to 0. google's logo was **0x0**. It now takes the definite percentage base (auto/none when indefinite). Test fails without it (`image 0x0, expected 147.8x50`).
+- #261 `atlas/rs-grid-item-child-width` @ ef14a89, **merged**: grid Phase 9 gave every child of a grid item the item's full width (`width:100px` → 600; `margin:0 auto` never centred; the 272px logo → 1072px). Now uses `calculate_block_width` against the item; replaced elements keep their size. **weather LOOKS RIGHT diff 66.6% → 49.1%.**
+- #262 `atlas/rs-justify-items` @ a0c27d5, **open**: `justify-items`/`justify-self` had no parse arm at all, and a centred auto-width item still took the whole cell. Both are parsed now, and non-stretched auto items are fit-content. Its test was moved off #261's insertion point, so it should merge cleanly on today's develop.
+- Gates, all three: each new test fails without its fix (verified), rustkit-layout 502/502, rustkit-engine 117/117, **campaign 26/26 avg 1.257% = develop** (only `settings` wiggles 2.0856 → 2.0854, identically on all three branches: noise). WPT not run (no `third_party/wpt` on this seat).
+
+**Cheapest next points:**
+1. **google's logo alignment:** a grid container that is a **flex-column item** loses its item alignment. Repro `scratch/logo_flexparent.py`: block parent → item 272 @ +504 (right); flex-column parent → 1072 @ +104. google nests its logo grid in `.plsC5e{display:flex;flex-direction:column}`. Likely the flex pass re-lays the grid's children out as blocks. With #260 + #262 on top, that's the last layout bug on the logo (SVG path holes aren't cut either).
+2. **microsoft's image-fetch stall:** a per-subresource fetch deadline would turn one of its two stall modes into a clean miss-the-image. Small `rs-` PR.
+3. **wikipedia** (READABLE 57%, LOOKS RIGHT 18.9%) didn't move with any grid fix. Its content is pushed down and the side columns overflow; not diagnosed yet.
+
+Housekeeping: `d2c28c8` (moves a pre-existing doc comment back onto its own test; #261's new test was inserted between them) was pushed to #261's branch after the merge, so it's orphaned. Fold it into the next grid PR. Local-only branch `scratch/stack-0925pm` (the three fixes stacked) is safe to delete. The `rs-base` worktree is now detached at ae8bacb.
+
+**Decisions for Pete:**
+1. **LOADS noise is now visible in the headline:** microsoft flipped 3 times today on identical code, and today's +1 is that noise. Best-of-2 RustKit captures for LOADS (the open question from 2026-09-24), or keep one capture?
+2. **This seat still can't run `git merge`, `git merge-tree`, or `rustfmt`/`cargo fmt` without approval**, so stacking needs cherry-pick workarounds and I can't format-check PRs. Allowing those three would remove the workarounds. Your call.

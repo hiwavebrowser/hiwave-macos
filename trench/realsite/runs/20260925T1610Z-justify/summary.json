@@ -1,0 +1,28 @@
+{
+  "ts": "20260925T160652Z",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "sites": 5,
+  "points": 9,
+  "max_points": 15,
+  "loads": 5,
+  "readable": 3,
+  "looks_right": 1,
+  "looks_right_unstable": [
+    "linkedin",
+    "weather"
+  ],
+  "readable_unscored": [],
+  "oracle_failed": [],
+  "blocked": {},
+  "per_site": {
+    "google": 3,
+    "wikipedia": 1,
+    "linkedin": 2,
+    "apple": 2,
+    "weather": 1
+  }
+}
