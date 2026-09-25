@@ -11866,3 +11866,87 @@ so far has been run without that step.
   recovered the rustfmt output for my own regions from it and reverted the
   rest; the shipped diff is 4 files. Anyone running `cargo fmt` on this repo
   expecting it to be scoped will get the same surprise.
+
+### Addendum — #255's macOS receipt: metric holds at `3/26`, geometry green **9 → 14**
+
+Run [36100178666](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/36100178666),
+`macos-14` (arm64, CoreText and Metal), #255's Parity Gate on
+`refs/pull/255/merge`. All 14 checks green; R2 stamped PASS at `7bdde34`;
+merge CLEAN; ratchet exit 2 (holds, nothing regressed, 21 tighten-eligible).
+
+```
+Finish line — N/26 finish-line-green
+  metric:     3/26 cases pass all four conditions
+  measured:   26/26 scored on all four  (0 not fully measured)
+    geometry  14/26 green, 26/26 measured
+    paint      3/26 green, 26/26 measured
+    stability 26/26 green, 26/26 measured
+    discrete  26/26 green, 26/26 measured
+
+  GREEN  bg-pure · bg-solid · gradients
+  Gate C   mean raw 13.7748%  (diagnostic only)
+```
+
+**The metric did not move and the green set is identical to 09-23's and
+09-24's.** Geometry green went **9 → 14** and Gate C's mean 14.4034 → 13.7748.
+
+**None of the geometry move is mine, and I am claiming none of it rather than
+some of it.** Both cases my change touches — `article-typography` and
+`settings` — are still geometry-RED here (46 and 255 failures), so it flipped
+nothing green. The move belongs to the 80 commits `develop` took on between
+`a66c159` and `cdbd22d`. The one thing I cannot prove from this run is that
+my macOS-side element set is the same two elements it is on Linux — different
+font metrics wrap at different points — so the conservative claim is the one
+above. What is certain is that the metric is unchanged, so nothing I did moved
+it either way.
+
+`unit-suites` green on the macOS runner, incidentally, confirms the night's
+claim that this seat's 5 + 13 Rust failures are CoreText-dependent and not
+mine.
+
+#### This roughly doubles decision 4's premise: **11 cases, not 6, are blocked by paint alone**
+
+Geometry-, discrete- and stability-green, short of the 0.99 paint bar and
+nothing else:
+
+| case | paint | short by | Gate C class |
+|---|---:|---:|---|
+| images-intrinsic | 0.98936 | **0.064pp** | mixed |
+| gpu-gradient-regression | 0.98716 | 0.284pp | aa-noise |
+| gradient-no-radius | 0.98536 | 0.464pp | aa-noise |
+| gradient-backgrounds | 0.98348 | 0.652pp | aa-noise |
+| pseudo-classes | 0.98301 | 0.699pp | mixed |
+| specificity | 0.98074 | 0.926pp | mixed |
+| combinators | 0.97984 | 1.016pp | mixed |
+| backgrounds | 0.97871 | 1.129pp | mixed |
+| rounded-corners | 0.97614 | 2.386pp | structural |
+| flex-positioning | 0.95596 | 3.404pp | mixed |
+| card-grid | 0.82478 | 16.522pp | mixed |
+
+On 09-24 this list was six long and its closest row was 0.38pp.
+**`images-intrinsic` is now 0.064pp — six hundredths of a point — from being
+the fourth green case**, and four cases sit inside 0.7pp.
+
+Two things I would want Pete to weigh alongside that, because the list is more
+attractive than it is straightforward:
+
+- **Three of the four closest rows are Gate C `aa-noise`.** The pinned ±5
+  tolerance is supposed to absorb anti-aliasing, and these are above it
+  anyway (1.28–1.65% of pixels over tolerance), so they are not *definitionally*
+  noise — but a queue that opens with three gradient cases whose forensic class
+  is "aa-noise" is the shape that invites a tolerance argument, and the
+  tolerance is the one pinned constant this campaign does not reopen.
+- **`card-grid` at 16.5pp is on this list too**, which is the reminder that
+  "blocked by paint alone" is a statement about which oracle fails, not about
+  how close the case is. Six of the eleven are within 1.2pp; the spread runs to
+  16.5.
+
+So decision 4 stands, and its honest form has sharpened: **turning to paint
+now would be chasing a 0.064pp row, and the four nearest rows would plausibly
+take the metric to 7/26 in one or two nights — against 621-ish geometry
+failures still standing, 255 of them in `settings` alone.** That is either the
+campaign's best week or exactly the Goodhart move it was opened to prevent,
+and which one it is depends on whether those four paint gaps are defects or
+rasterizer difference. Nobody has measured that yet, and it is a night's work
+to find out — possibly the right next night, since it is the question the
+decision actually turns on.
