@@ -11640,3 +11640,229 @@ Check-ins stopped; watch released.
 - Recorded next unit: the multi-line-inline fragment-union mismatch in Gate A —
   `article-typography` `pre > code`, `settings` `.setting-label > span`, 6 axes,
   406px. Its branch must be cut from **`develop`**, not `master`.
+
+## 2026-09-25
+
+**Metric: `3/26` on macOS, carried forward and NOT re-measured by me.** Last
+measured by run 35960587374 on 09-24 against `develop a66c159`'s engine.
+`develop` is now `cdbd22d` — 80 commits later, including engine changes I did
+not read — so the carry-forward is a statement about what I know, not a claim
+that the number is still 3. PR #255's own Parity Gate is a macOS lane on the
+merge ref and will measure it; that is the check, not this entry. What blocks
+me re-measuring here is unchanged and structural: no CoreText, no Metal.
+
+**P-item: the unit 09-24 recorded as "the obvious next unit" — the
+multi-line-inline fragment-union mismatch. COMPLETE**, on branch
+`atlas/n65-inline-fragment-union`, **PR #255** against `develop`.
+
+### What the defect was
+
+Chrome's `getBoundingClientRect()` for an inline is the union of its line
+fragments. RustKit has no inline fragment model, so for some inlines the box is
+ONE fragment, one line tall, and the rest of the text hangs outside it:
+
+```
+  article-typography  pre > code                    box 16.32  text 152.06  Chrome 148.38
+  settings  .setting-label:nth-of-type(6) > span    box 13.18  text  57.60  Chrome  55.38
+```
+
+Gate A scored the first as a 132px geometry failure on text that is in the
+right place, and ranked it first on the whole board. Same class as the
+post-transform rect, answered the same way: emit the corresponding quantity
+ALONGSIDE the layout rect (`fragment_union_border_box`, next to
+`visual_border_box`) and let the oracle prefer it. `border_box` keeps its
+meaning for every other reader.
+
+09-24's decision 3 asked whether to fix this as an **export** or as **layout**
+(a real inline fragment model). It is unanswered, so I took the export —
+it is the same shape as the correction Gate A already carries for transforms,
+it is a night rather than a feature, and it is reversible if Pete wants the
+layout answer instead. Stated as an assumption rather than a resolution:
+**decision 3 still stands.**
+
+### Commits
+
+- `c990d0c` — the shared fragment rule (`TextLine::fragment_rect`, which
+  `render_text` now calls instead of open-coding), `inline_fragment_union`, and
+  the export.
+- `7bdde34` — Gate A prefers the union, below `visual_border_box` and above the
+  layout rect.
+
+### Measured — Linux/SwiftShader, 26 cases. MECHANICS, NOT A RECEIPT
+
+Same captures scored with and without the new rect in Gate A's chain. The A/B
+is exact rather than approximate: no box in the corpus carries both this rect
+and a visual rect (checked: 15 unions, 34 visual rects, 0 both), so removing
+the union from the chain reproduces the old scoring bit-for-bit.
+
+```
+  geometry failures  2580 -> 2580      geometry-green  3/26 -> 3/26
+  sum|delta|    45025.39 -> 44860.27   (-165.12)
+  axes better 2   axes worse 0   failures appeared 0   disappeared 0
+  Gate B admitted elements  273 -> 273, no case's set changed
+```
+
+| case | element | axis | before | after |
+|---|---|---|---:|---:|
+| article-typography | `pre > code` | height | −132.06 | **−5.34** |
+| settings | `.setting-label > span` | height | −42.19 | **−3.79** |
+
+The other 24 cases are bit-identical on every axis. **The failure COUNT does
+not move**, and that is the honest headline: both residuals are line-height
+disagreement, which is real and is P4's, where the 132px and 42px were nobody's.
+This removes a phantom from the board's top row; it does not make a case green
+and was never going to.
+
+### The three things the board caught that the unit tests did not
+
+I shipped none of these, but I wrote all three, and each was green on a full
+unit suite before the 26 cases refused it. Recording them in order because the
+order is the point: three successive versions of one function, each one
+plausible, each one wrong, and the same instrument caught all three in about
+fifteen minutes each.
+
+1. **Trigger by magnitude.** My first instinct was "the union is bigger than
+   the box". 09-24 had already measured that this flags 34 elements of which
+   most are single-line inlines whose text child is a LINE BOX and therefore
+   taller than the inline's content area. I used the structural test (a text
+   descendant on more than one line) from the start because that measurement
+   existed. **This is the one case tonight where reading the previous night's
+   digest did the work.**
+
+2. **Union the line boxes.** Shipped to the board and the board said no: the
+   union started a half-leading ABOVE the element (`article-typography`
+   1249.52 against the box's 1254.03), so `y` got WORSE on both affected
+   elements while `height` got better — 1.83 → 2.68 and 164.35 → 167.36. A
+   non-replaced inline's fragment rect is its content area plus padding and
+   border; it is NOT line-height tall, which is why `about`'s `span.highlight`
+   measures 17.00 in Chrome under a 28.16 line box. The fix is to anchor at the
+   element and step by the line height.
+
+3. **Step every wrapped inline down.** That regressed THREE cases that the
+   previous version had left alone: `about` +54.00, `gradient-radius-only`
+   +40.80, `new_tab` +10.00. Cause: **RustKit does not size wrapped inlines one
+   way.** `about`'s and `new_tab`'s wrapped spans are already as tall as their
+   text (28.00 against two 14px lines) — their one box already spans both line
+   boxes — while `pre > code` and `settings`' span are one line tall against
+   six and three. Stepping the first group down again is not a correction, it
+   is a second copy of a fragment the box already has. The trigger is now that
+   the element's box does not REACH the text inside it, which is exactly the
+   missing-fragment condition and nothing more.
+
+Version 3 is the one that matters for this campaign's thesis, because it was a
+change that improved the metric (−60.32 net) **while regressing three cases**.
+Net-better with per-case-worse is precisely the shape the stop rule exists to
+catch, and a board that reported only the total would have passed it.
+
+### Stop rule
+
+Checked PER BOX, every axis, all 26 cases, on the shipped version: **zero boxes
+worsened**, no case gained or lost a green, no failure appeared or disappeared,
+and Gate B's admitted set is bit-identical. The rule did not fire on what
+shipped. It DID fire on version 3 above, which is why version 3 is in this
+digest and not in the PR.
+
+One residual worth naming because it is below anyone's tolerance and I fixed it
+anyway: deriving an unextended axis as `right - left` moved `pre > code`'s
+width by 1.5e-5px. Nothing, in itself. But a second rect whose untouched axes
+are merely almost the first one's gives every future reader a difference to
+explain. Unextended axes are now copied verbatim.
+
+### Mutation-check results
+
+**17 probes, 17 RED, 0 survivors at the end. Two survived a first sweep.**
+Control green before and after; every probe applied from the committed tree and
+restored from a checked-in copy.
+
+| probe | caught by |
+|---|---|
+| M1 the inline-only guard dropped | `a_block_never_grows_to_its_overflowing_text` |
+| M2 `len()>1` relaxed to `!is_empty()` | `a_single_line_inline_gets_no_union…` |
+| M3 the walk descends into blocks | `the_walk_does_not_descend_into_a_block_descendant` |
+| M4 union anchored at the line box | 2 guards |
+| M5 line height re-derived from the style | `line_fragments_stack_at_the_height…` |
+| M6 unwrapped text returns an empty list | `an_unwrapped_text_box_has_no_fragment_list` |
+| M7 `fragment_rect` ignores `x_offset` | `a_fragment_sits_at_its_own_line_offset` |
+| M8 `fragment_rect` drops justify ink | `a_justified_fragment_is_as_wide_as_the_ink…` |
+| M9 `render_text` restates the rule, DRIFTED | 2 guards |
+| M9b `render_text` restates it CORRECTLY | `paint_calls_the_fragment_rule_rather_than_restating_it` |
+| M10 the export emits nothing | `a_wrapped_inline_exports_the_rect_chrome_measures` |
+| M11 the transform is applied to the box | `a_transformed_wrapped_inline_transforms_its_union` |
+| M12 the union dropped from Gate A's chain | `a_wrapped_inline_joins_on_its_fragment_union…` |
+| M13 the union preferred over the visual rect | `the_visual_rect_outranks_the_fragment_union` |
+| M14 the union demoted below the layout rect | `a_wrapped_inline_joins_on_its_fragment_union…` |
+| M15 the reach condition dropped | `an_inline_already_as_tall_as_its_text_gets_no_union` |
+| M16 an unextended axis re-derived | `an_axis_the_fragments_do_not_extend_is_the_border_boxs_verbatim` |
+
+**M9b is 09-24's survivor, pre-empted.** That sweep's M2 was "import dropped,
+extraction restated CORRECTLY as a local copy", and it survived because a
+correct copy behaves identically. A correct copy is the state every drifted
+rule was in once, so it is the thing to refuse, not the drift. The behavioural
+guard (`paint_seats_every_line_where_the_fragment_rule_puts_it`) catches M9 and
+cannot catch M9b, so a second guard reads the source and asserts that
+`render_text` CALLS `fragment_rect`. This is decision 2's shape applied inside
+one crate, and it is the first time in this campaign that the survivor of a
+previous sweep was closed before it appeared rather than after.
+
+**M16 survived its first sweep, and for the fifth time the cause was the
+fixture.** I wrote the guard with the element's real `x` of 280.00, at which
+the f32 round trip `(x + width) − x` happens to land back on the same width —
+so the re-derivation the board had actually shown drifting passed the guard.
+280.03 drifts; the guard now uses it. Night 09-24 called this class "the guard
+written against the example rather than against the rule". This is a narrower
+sub-case and worth naming separately: **the guard written against the rule, on
+an example that cannot express it.** M9b was caught by writing the rule; M16
+needed the rule AND an input the rule could fail on.
+
+**A sweep-validity bug, found by accident and worth banking.** After the gate
+probes I ran the control and it came back RED. The file was byte-identical to
+`HEAD`. Cause: Python caches bytecode keyed on mtime and SIZE, and M13/M14 are
+same-length edits, so `layout_oracle_gate.pyc` survived the restore. The
+control recovered under `python3 -B` with `__pycache__` cleared. It happened to
+fail safe here, but the same mechanism can make a probe report GREEN-SURVIVOR
+against a stale module — a mutation sweep on a Python module is not valid
+without clearing the cache between probes. Every Python sweep in this campaign
+so far has been run without that step.
+
+### Decisions needed from Pete
+
+1. **Decision 3 from 09-24 is still open and I proceeded on the export
+   answer** — is the export (`fragment_union_border_box`, the shape Gate A
+   already uses for transforms) the accepted answer, or should this be redone
+   as a real inline fragment model in layout?
+2. **RustKit sizes wrapped inlines two different ways** (`about`'s spans span
+   their lines, `pre > code`'s does not) and tonight's export detects which
+   rather than fixing it — is unifying that an engine unit worth queueing, or
+   is the detection good enough while P4 is unstarted?
+3. Decision 4 from 09-24 (six cases geometry-clean and short of the paint bar
+   by 0.38–3.15pp: does the queue turn to paint?) is **still unanswered**, and
+   tonight's unit did not touch it. It is the one that decides the next night.
+
+### Surprises
+
+- **The unit was ranked first on the board and is worth 0.37% of it.** −165.12
+  of 45,025. It was the right unit because the number it removed was a lie, not
+  because it was big, and a night chosen by magnitude alone would still pick
+  `settings` tomorrow. That is the queue's honest state: the top-ranked
+  *defect* and the top-ranked *debt* are not the same row and have not been for
+  three nights.
+- **Three wrong versions, three catches, all from the same 26 cases in one
+  night.** The unit suite was green at each. The board is doing what the plan
+  said it would, and the cost of running it on this seat is 47s to build and
+  7.4s to capture — I had expected the capture loop to be the night's expensive
+  part and budgeted it accordingly, which was wrong by about an hour.
+- **`rustkit-engine --lib` and `rustkit-layout --lib` are RED on `develop` on
+  this seat, before I touch anything** — 13 and 5 failures, all
+  CoreText-dependent by name (`bare_control_widths_match_chrome`,
+  `a_line_sums_whole_pixel_ascents_like_blink`, the `cascade_wire_tests`
+  block). I committed against that baseline after confirming the failure sets
+  are identical in name and count on the untouched tree. The night order says
+  "never commit red"; on this seat that rule cannot be satisfied literally, and
+  the substitute I used is "the failure set does not change". Flagging it
+  rather than quietly redefining the rule.
+- **`cargo fmt --all` reformats 8 files it was not asked about**, because
+  rustfmt follows `mod` declarations, and `develop` is not fmt-clean. My first
+  attempt at formatting two files produced a 2,398-line diff across ten. I
+  recovered the rustfmt output for my own regions from it and reverted the
+  rest; the shipped diff is 4 files. Anyone running `cargo fmt` on this repo
+  expecting it to be scoped will get the same surprise.
