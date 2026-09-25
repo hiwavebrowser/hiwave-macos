@@ -253,11 +253,28 @@ def border_box(box: Dict[str, Any]) -> Optional[Dict[str, float]]:
     effect on the box or an ancestor. Prefer it: it is the same quantity
     Chrome's baseline is. Absent, the layout rect IS the visual rect.
 
+    An inline whose text wrapped is the SAME class of mismatch one layer
+    along. Chrome's rect for such an inline is the union of its line
+    fragments; RustKit has no inline fragment model, so its box is one
+    fragment tall and the rest of the content hangs outside it. Scored
+    against `border_box`, `article-typography`'s `pre > code` read 16.32
+    against Chrome's 148.38 — a 132px geometry defect on text that is laid
+    out over 152.06, i.e. in the right place. The engine emits
+    `fragment_union_border_box` exactly where an inline has a text
+    descendant on more than one line; prefer it over the layout rect for the
+    same reason, and below `visual_border_box`, which the engine already
+    computes FROM the union when both apply.
+
     Text and image boxes emit a flat `rect` instead of the four box-model
     rects; they have no identity so the gate never reaches them through the
     join, but the fallback keeps this function total.
     """
-    rect = box.get("visual_border_box") or box.get("border_box") or box.get("rect")
+    rect = (
+        box.get("visual_border_box")
+        or box.get("fragment_union_border_box")
+        or box.get("border_box")
+        or box.get("rect")
+    )
     if not isinstance(rect, dict):
         return None
     return rect

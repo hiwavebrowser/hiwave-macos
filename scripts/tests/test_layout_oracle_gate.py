@@ -221,6 +221,61 @@ def test_a_wrong_visual_rect_is_not_excused_by_a_right_layout_rect():
     assert axes == {"width", "height"}, axes
 
 
+def test_a_wrapped_inline_joins_on_its_fragment_union_not_its_one_box():
+    """Chrome's rect for a wrapped inline is the union of its line fragments.
+
+    RustKit has no inline fragment model: the inline is ONE box, one line
+    tall. `article-typography`'s `pre > code` exported a height of 16.32
+    against Chrome's 148.38 while its text was laid out over 152.06 — the
+    board's top-ranked defect, on content that is in the right place. The
+    engine emits the union alongside; this is the gate preferring it.
+    """
+    chrome = chrome_doc(chrome_el("pre > code", "code", rect(24, 100, 400, 148.38)))
+    box = rk_box("pre > code", "code", rect(24, 100, 400, 16.32))
+    box["fragment_union_border_box"] = rect(24, 100, 400, 148.38)
+    assert compare_case("t", chrome, rk_doc(box))["green"]
+
+
+def test_an_inline_with_one_fragment_still_joins_on_its_border_box():
+    """The preference must not become a requirement.
+
+    Only a multi-fragment inline carries the union. Every other box in the
+    corpus would go unscored if its absence stopped the join — the same
+    guard `visual_border_box` carries, restated because a second optional
+    rect is a second way to lose the fallback.
+    """
+    chrome = chrome_doc(chrome_el("body > span", "span", rect(0, 0, 100, 20)))
+    box = rk_box("body > span", "span", rect(0, 0, 100, 20))
+    assert "fragment_union_border_box" not in box
+    assert compare_case("t", chrome, rk_doc(box))["green"]
+
+
+def test_a_wrong_fragment_union_is_not_excused_by_a_right_border_box():
+    """The union REPLACES the layout rect for this join; it does not join
+    alongside it. Falling back on failure would make every wrapped inline
+    unfailable, which is worse than the 132px phantom it replaces.
+    """
+    chrome = chrome_doc(chrome_el("pre > code", "code", rect(0, 0, 400, 148)))
+    box = rk_box("pre > code", "code", rect(0, 0, 400, 148))
+    box["fragment_union_border_box"] = rect(0, 0, 400, 200)
+    result = compare_case("t", chrome, rk_doc(box))
+    assert not result["green"]
+    assert {f["axis"] for f in result["failures"]} == {"height"}
+
+
+def test_the_visual_rect_outranks_the_fragment_union():
+    """Both corrections answer 'which quantity is Chrome's rect', and the
+    engine composes them by transforming the union. So where both are
+    present the visual rect is the composed answer and the union is an
+    intermediate; a gate that preferred the union would undo the transform.
+    """
+    chrome = chrome_doc(chrome_el("pre > code", "code", rect(50, 50, 400, 148)))
+    box = rk_box("pre > code", "code", rect(0, 0, 400, 16))
+    box["fragment_union_border_box"] = rect(0, 0, 400, 148)
+    box["visual_border_box"] = rect(50, 50, 400, 148)
+    assert compare_case("t", chrome, rk_doc(box))["green"]
+
+
 # ---------------------------------------------------------------------------
 # The ways a box could go unscored
 # ---------------------------------------------------------------------------
