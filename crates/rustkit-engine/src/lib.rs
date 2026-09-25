@@ -2979,7 +2979,7 @@ impl Engine {
         css_vars: &HashMap<String, String>,
         ancestors: &[(String, Vec<String>, Option<String>)],
         parent_style: Option<&ComputedStyle>,
-        siblings_before: &[(String, Vec<String>, Option<String>)],
+        siblings_before: &[SiblingKey],
         sib: SiblingContext,
         selector_path: &str,
         element_ids: &Cell<usize>,
@@ -3539,7 +3539,7 @@ impl Engine {
                     .iter()
                     .filter(|c| matches!(c.node_type, NodeType::Element { .. }))
                     .count();
-                let mut preceding_siblings: Vec<(String, Vec<String>, Option<String>)> =
+                let mut preceding_siblings: Vec<SiblingKey> =
                     Vec::with_capacity(child_element_count);
                 // Selector segments are computed here, not in the child, because
                 // `:nth-of-type` needs the full same-tag sibling count.
@@ -3598,7 +3598,8 @@ impl Engine {
                             .unwrap_or_default();
                         let t = tag_name.to_lowercase();
                         *type_seen.entry(t.clone()).or_insert(0) += 1;
-                        preceding_siblings.push((t, child_classes, attributes.get("id").cloned()));
+                        let state = ElementState::of(&t, attributes);
+                        preceding_siblings.push((t, child_classes, attributes.get("id").cloned(), state));
                     }
 
                     // Determine if box should be included in layout tree
@@ -3843,7 +3844,7 @@ impl Engine {
         stylesheets: &[Stylesheet],
         _css_vars: &HashMap<String, String>,
         ancestors: &[(String, Vec<String>, Option<String>)],
-        siblings_before: &[(String, Vec<String>, Option<String>)],
+        siblings_before: &[SiblingKey],
         sib: SiblingContext,
         pseudo: &str,
     ) -> Option<LayoutBox> {
@@ -3958,7 +3959,7 @@ impl Engine {
         stylesheets: &[Stylesheet],
         css_vars: &HashMap<String, String>,
         ancestors: &[(String, Vec<String>, Option<String>)],
-        siblings_before: &[(String, Vec<String>, Option<String>)],
+        siblings_before: &[SiblingKey],
         sib: SiblingContext,
         parent_style: Option<&ComputedStyle>,
     ) -> ComputedStyle {
@@ -7131,7 +7132,7 @@ impl Engine {
         tag_name: &str,
         attributes: &HashMap<String, String>,
         ancestors: &[(String, Vec<String>, Option<String>)],
-        siblings_before: &[(String, Vec<String>, Option<String>)],
+        siblings_before: &[SiblingKey],
         sib: SiblingContext,
     ) -> bool {
         #[cfg(test)]
@@ -7200,24 +7201,13 @@ impl Engine {
                 "+" => {
                     // Adjacent sibling combinator: immediate previous sibling must match
                     // Note: sibling combinators only apply at the element level, not up the tree
-                    if let Some((prev_tag, prev_classes, prev_id)) = siblings_before.last() {
-                        if !compound.matches(prev_tag, prev_classes, prev_id.as_ref()) {
-                            return false;
-                        }
-                    } else {
+                    if !siblings_before.last().is_some_and(|prev| compound.matches_sibling(prev)) {
                         return false;
                     }
                 }
                 "~" => {
                     // General sibling combinator: any previous sibling must match
-                    let mut found = false;
-                    for (sib_tag, sib_classes, sib_id) in siblings_before {
-                        if compound.matches(sib_tag, sib_classes, sib_id.as_ref()) {
-                            found = true;
-                            break;
-                        }
-                    }
-                    if !found {
+                    if !siblings_before.iter().any(|prev| compound.matches_sibling(prev)) {
                         return false;
                     }
                 }
@@ -7878,10 +7868,6 @@ impl Engine {
     ) -> bool {
         let tag = tag_name.to_ascii_lowercase();
         let tag = tag.as_str();
-        let input_type = attributes
-            .get("type")
-            .map(|t| t.trim().to_ascii_lowercase())
-            .unwrap_or_default();
         let is_control = Self::is_form_control_tag(tag);
         let value_is_empty = attributes.get("value").map_or(true, |v| v.is_empty());
         match name {
@@ -7922,14 +7908,16 @@ impl Engine {
             n if Self::pseudo_class_is_static_false(n) => false,
             // Link pseudo-classes: an <a>/<area> with an href.
             "link" | "any-link" => matches!(tag, "a" | "area") && attributes.contains_key("href"),
-            "disabled" => is_control && attributes.contains_key("disabled"),
-            "enabled" => is_control && !attributes.contains_key("disabled"),
-            "checked" => {
-                (tag == "input"
-                    && matches!(input_type.as_str(), "checkbox" | "radio")
-                    && attributes.contains_key("checked"))
-                    || (tag == "option" && attributes.contains_key("selected"))
+            // One definition with the sibling path (`ElementState`).
+            "disabled" => {
+                let s = ElementState::of(tag, attributes);
+                s.control && s.disabled
             }
+            "enabled" => {
+                let s = ElementState::of(tag, attributes);
+                s.control && !s.disabled
+            }
+            "checked" => ElementState::of(tag, attributes).checked,
             "indeterminate" | "default" | "autofill" | "user-valid" | "user-invalid" => false,
             "required" => is_control && attributes.contains_key("required"),
             "optional" => is_control && !attributes.contains_key("required"),
@@ -16297,6 +16285,44 @@ mod rule_prefilter_tests {
     }
 
     #[test]
+    fn a_sibling_compound_checks_the_siblings_form_state() {
+        // wikipedia's dropdowns: `.dd .checkbox:checked ~ .content { display:
+        // block }`. The sibling compound was matched by tag/class/id only,
+        // so `:checked` was ignored and every closed menu painted open.
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let sibling = |attributes: &[(&str, &str)]| -> Vec<SiblingKey> {
+            let a = attrs(attributes);
+            vec![("input".to_string(), vec!["cb".to_string()], None, ElementState::of("input", &a))]
+        };
+        let unchecked = sibling(&[("type", "checkbox"), ("class", "cb")]);
+        let checked = sibling(&[("type", "checkbox"), ("class", "cb"), ("checked", "")]);
+        let disabled = sibling(&[("type", "checkbox"), ("class", "cb"), ("disabled", "")]);
+        let cases: &[(&str, &Vec<SiblingKey>, bool)] = &[
+            (".cb:checked ~ .content", &unchecked, false),
+            (".cb:checked ~ .content", &checked, true),
+            ("input.cb:checked + .content", &unchecked, false),
+            ("input.cb:checked + .content", &checked, true),
+            (".cb:checked:disabled ~ .content", &checked, false),
+            (".cb:disabled ~ .content", &disabled, true),
+            (".cb:enabled ~ .content", &disabled, false),
+            (".cb:enabled ~ .content", &unchecked, true),
+            // Not decidable from the state flags: still permissive.
+            (".cb:first-child ~ .content", &unchecked, true),
+        ];
+        for (selector, siblings, want) in cases {
+            let got = engine.selector_matches(
+                selector,
+                "div",
+                &attrs(&[("class", "content")]),
+                &[],
+                siblings,
+                SiblingContext::SOLE,
+            );
+            assert_eq!(got, *want, "{selector} with {:?}", siblings[0].3);
+        }
+    }
+
+    #[test]
     fn prepared_selectors_match_like_the_string_matcher_did() {
         let engine = Engine::new(EngineConfig::default()).expect("engine");
         let chain = vec![
@@ -16304,7 +16330,10 @@ mod rule_prefilter_tests {
             ancestor("body", &[], None),
             ancestor("html", &[], None),
         ];
-        let prev = vec![ancestor("p", &["lead"], None), ancestor("hr", &[], Some("rule"))];
+        let prev: Vec<SiblingKey> = [ancestor("p", &["lead"], None), ancestor("hr", &[], Some("rule"))]
+            .into_iter()
+            .map(|(t, c, id)| (t, c, id, ElementState::default()))
+            .collect();
         let cases: &[(&str, bool)] = &[
             ("section .t", true),
             ("SECTION.card.wide#main > .t", true),
@@ -16656,7 +16685,7 @@ mod rule_prefilter_tests {
             ("body".to_string(), vec![], None),
             ("html".to_string(), vec![], None),
         ];
-        let siblings = vec![("section".to_string(), vec![], None)];
+        let siblings = vec![("section".to_string(), vec![], None, ElementState::default())];
         for sel in selectors {
             for (tag, a) in &elements {
                 let full = engine.selector_matches(
@@ -17341,9 +17370,47 @@ enum PreparedSelector {
     },
 }
 
+/// An earlier sibling as `+` / `~` see it: tag, classes, id, and the form
+/// state its attributes decide.
+type SiblingKey = (String, Vec<String>, Option<String>, ElementState);
+
+/// The form-control state an element's own attributes decide, for
+/// `:checked` / `:disabled` / `:enabled` on a compound left of a sibling
+/// combinator. Flags, not the attribute map: siblings are recorded for every
+/// element in the cascade.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct ElementState {
+    checked: bool,
+    control: bool,
+    disabled: bool,
+}
+
+impl ElementState {
+    fn of(tag_lower: &str, attributes: &HashMap<String, String>) -> Self {
+        let input_type = attributes.get("type").map(|t| t.trim().to_ascii_lowercase());
+        ElementState {
+            checked: (tag_lower == "input"
+                && matches!(input_type.as_deref(), Some("checkbox" | "radio"))
+                && attributes.contains_key("checked"))
+                || (tag_lower == "option" && attributes.contains_key("selected")),
+            control: Engine::is_form_control_tag(tag_lower),
+            disabled: attributes.contains_key("disabled"),
+        }
+    }
+}
+
+/// A state pseudo-class a sibling compound can decide from [`ElementState`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum StatePseudo {
+    Checked,
+    Disabled,
+    Enabled,
+}
+
 /// What a compound left of a combinator requires of an ancestor or earlier
-/// sibling, which is known only by tag, classes and id. Parsed once per
-/// selector instead of once per element walked.
+/// sibling, which is known only by tag, classes and id (plus, for a sibling,
+/// its [`ElementState`]). Parsed once per selector instead of once per
+/// element walked.
 #[derive(Default)]
 struct AncestorCompound {
     /// A user-action / target pseudo-class: nothing is hovered, focused or
@@ -17352,6 +17419,9 @@ struct AncestorCompound {
     tag: Option<String>,
     classes: Vec<String>,
     id: Option<String>,
+    /// `:checked` / `:disabled` / `:enabled`. Checked against a sibling's
+    /// state; an ancestor carries none, so it stays permissive there.
+    state: Vec<StatePseudo>,
 }
 
 impl AncestorCompound {
@@ -17409,7 +17479,25 @@ impl AncestorCompound {
                         {
                             end += 1;
                         }
-                        out.never = Engine::pseudo_class_is_static_false(&text(start, end));
+                        let name = text(start, end).to_ascii_lowercase();
+                        // Form state is decidable for a sibling (wikipedia's
+                        // dropdowns: `.checkbox:checked ~ .content`). Keep
+                        // scanning: more of the compound may follow.
+                        let state = match name.as_str() {
+                            "checked" => Some(StatePseudo::Checked),
+                            "disabled" => Some(StatePseudo::Disabled),
+                            "enabled" => Some(StatePseudo::Enabled),
+                            _ => None,
+                        };
+                        if let Some(state) = state {
+                            if end == chars.len() || is_delimiter(chars[end]) {
+                                out.state.push(state);
+                                i = end;
+                                current_start = end;
+                                continue;
+                            }
+                        }
+                        out.never = Engine::pseudo_class_is_static_false(&name);
                         break;
                     } else {
                         // Skip attribute selectors for ancestor matching
@@ -17427,6 +17515,16 @@ impl AncestorCompound {
             && self.tag.as_deref().map_or(true, |t| t.eq_ignore_ascii_case(tag_name))
             && self.classes.iter().all(|req| classes.iter().any(|c| c == req))
             && self.id.as_deref().map_or(true, |req| id.is_some_and(|el| el == req))
+    }
+
+    /// [`Self::matches`] for an earlier sibling, whose form state is known.
+    fn matches_sibling(&self, (tag, classes, id, state): &SiblingKey) -> bool {
+        self.matches(tag, classes, id.as_ref())
+            && self.state.iter().all(|want| match want {
+                StatePseudo::Checked => state.checked,
+                StatePseudo::Disabled => state.control && state.disabled,
+                StatePseudo::Enabled => state.control && !state.disabled,
+            })
     }
 }
 
