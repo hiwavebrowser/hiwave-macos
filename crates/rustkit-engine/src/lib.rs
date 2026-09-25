@@ -15189,6 +15189,36 @@ mod web_font_tests {
     }
 
     #[test]
+    fn object_fit_reaches_the_computed_style() {
+        // Paint honoured every keyword, but no declaration ever set it:
+        // `object-fit: cover` thumbnails painted stretched.
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><head><style>
+            .c { object-fit: cover } .n { object-fit: contain; object-fit: bogus }
+        </style></head><body>
+            <div class="c">a</div>
+            <div class="n">b</div>
+            <div style="object-fit: SCALE-DOWN">c</div>
+            <div>d</div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+        fn fit_around(b: &LayoutBox, text: &str) -> Option<String> {
+            if b.children
+                .iter()
+                .any(|c| matches!(&c.box_type, BoxType::Text(t) if t.trim() == text))
+            {
+                return Some(b.style.object_fit.clone());
+            }
+            b.children.iter().find_map(|c| fit_around(c, text))
+        }
+        assert_eq!(fit_around(&layout, "a").as_deref(), Some("cover"));
+        assert_eq!(fit_around(&layout, "b").as_deref(), Some("contain"), "an invalid value is ignored");
+        assert_eq!(fit_around(&layout, "c").as_deref(), Some("scale-down"));
+        assert_ne!(fit_around(&layout, "d").as_deref(), Some("cover"));
+    }
+
+    #[test]
     fn the_font_shorthand_sets_every_longhand_it_names() {
         assert_eq!(
             split_font_shorthand("italic bold 20px/1.5 'Foo Bar', serif"),
@@ -15232,36 +15262,6 @@ mod web_font_tests {
             rustkit_css::FontWeight(400),
             "the shorthand resets an earlier font-weight it does not name"
         );
-    }
-
-    #[test]
-    fn object_fit_reaches_the_computed_style() {
-        // Paint honoured every keyword, but no declaration ever set it:
-        // `object-fit: cover` thumbnails painted stretched.
-        let Some(engine) = test_engine() else { return };
-        let html = r#"<!DOCTYPE html><html><head><style>
-            .c { object-fit: cover } .n { object-fit: contain; object-fit: bogus }
-        </style></head><body>
-            <div class="c">a</div>
-            <div class="n">b</div>
-            <div style="object-fit: SCALE-DOWN">c</div>
-            <div>d</div>
-        </body></html>"#;
-        let document = Rc::new(Document::parse_html(html).expect("parse"));
-        let layout = engine.build_layout_from_document(&document, &[]);
-        fn fit_around(b: &LayoutBox, text: &str) -> Option<String> {
-            if b.children
-                .iter()
-                .any(|c| matches!(&c.box_type, BoxType::Text(t) if t.trim() == text))
-            {
-                return Some(b.style.object_fit.clone());
-            }
-            b.children.iter().find_map(|c| fit_around(c, text))
-        }
-        assert_eq!(fit_around(&layout, "a").as_deref(), Some("cover"));
-        assert_eq!(fit_around(&layout, "b").as_deref(), Some("contain"), "an invalid value is ignored");
-        assert_eq!(fit_around(&layout, "c").as_deref(), Some("scale-down"));
-        assert_ne!(fit_around(&layout, "d").as_deref(), Some("cover"));
     }
 
     #[test]
