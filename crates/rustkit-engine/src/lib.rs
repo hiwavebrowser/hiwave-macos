@@ -11461,6 +11461,19 @@ fn layout_box_body_to_json(
         "children": children
     });
 
+    // An inline whose text wrapped has SEVERAL fragments in Chrome and one
+    // box here; `getBoundingClientRect()` returns their union. Emitted
+    // alongside `border_box` for the same reason `visual_border_box` is: the
+    // layout rect keeps its meaning for every other reader, and the oracle
+    // gets the quantity Chrome's baseline actually is. See
+    // `LayoutBox::inline_fragment_union` for the measurement that motivated
+    // it. Absent on everything else, so a box with one fragment has no second
+    // rect to disagree about.
+    let fragment_union = layout_box.inline_fragment_union();
+    if let (Some(u), Some(object)) = (fragment_union, json.as_object_mut()) {
+        object.insert("fragment_union_border_box".into(), rect_to_json(&u));
+    }
+
     // CSS transforms do not change layout, so `border_box` above stays the
     // LAYOUT rect — Gate B's attributable join and the scroll-extent readers
     // want that box, and quietly redefining it would move them all.
@@ -11472,14 +11485,15 @@ fn layout_box_body_to_json(
     // place while its layout position was correct. So the visual rect is
     // emitted ALONGSIDE, and only where a transform is actually in effect —
     // an untransformed box has no second rect to disagree about.
+    //
+    // The rect the transform is applied TO is the fragment union where there
+    // is one: both corrections answer "which quantity is Chrome's rect", and
+    // applying one of them to the pre-correction box would hand the oracle a
+    // rect that is right about the transform and wrong about the fragments.
     if let (Some(m), Some(object)) = (effective_transform, json.as_object_mut()) {
-        let (vx, vy, vw, vh) = transformed_bounds(
-            m,
-            border_box.x,
-            border_box.y,
-            border_box.width,
-            border_box.height,
-        );
+        let source = fragment_union.unwrap_or(border_box);
+        let (vx, vy, vw, vh) =
+            transformed_bounds(m, source.x, source.y, source.width, source.height);
         object.insert(
             "visual_border_box".into(),
             serde_json::json!({ "x": vx, "y": vy, "width": vw, "height": vh }),
@@ -16032,6 +16046,127 @@ mod visual_rect_tests {
             (x - 100.5025).abs() < 0.01 && (y - 70.5025).abs() < 0.01,
             "the bound stays centred on the box's centre (150, 120): expected \
              (100.50, 70.50), got ({x}, {y})"
+        );
+    }
+
+    // ---- the wrapped-inline fragment union ----
+
+    fn union(value: &serde_json::Value) -> Option<(f32, f32, f32, f32)> {
+        let v = value.get("fragment_union_border_box")?;
+        Some((
+            v["x"].as_f64()? as f32,
+            v["y"].as_f64()? as f32,
+            v["width"].as_f64()? as f32,
+            v["height"].as_f64()? as f32,
+        ))
+    }
+
+    /// `element_height` is the inline's own content area, which is NOT the
+    /// line height: the text child's line boxes start a half-leading above
+    /// the element, exactly as they do on the real
+    /// `article-typography`/`settings` elements.
+    fn wrapped_inline(
+        lines: usize,
+        element_height: f32,
+        line_height: f32,
+        width: f32,
+    ) -> LayoutBox {
+        let mut inline = LayoutBox::new(BoxType::Inline, rustkit_css::ComputedStyle::new());
+        inline.dimensions.content = rustkit_layout::Rect::new(24.0, 100.0, width, element_height);
+        let mut text = LayoutBox::new(
+            BoxType::Text("fn main".into()),
+            rustkit_css::ComputedStyle::new(),
+        );
+        let half_leading = (line_height - element_height) / 2.0;
+        text.dimensions.content = rustkit_layout::Rect::new(
+            24.0,
+            100.0 - half_leading,
+            width,
+            line_height * lines as f32,
+        );
+        text.text_lines = Some(
+            (0..lines)
+                .map(|_| rustkit_layout::TextLine {
+                    text: "fn main".into(),
+                    width,
+                    x_offset: 0.0,
+                    justify_space: 0.0,
+                })
+                .collect(),
+        );
+        inline.children.push(text);
+        inline
+    }
+
+    /// T-RED. `article-typography`'s `pre > code` exports a 16.32px box
+    /// against Chrome's 148.38 while its text occupies 152.06 — the board's
+    /// top-ranked geometry defect, on content that is in the right place.
+    /// Without this rect the oracle has no way to see that.
+    #[test]
+    fn a_wrapped_inline_exports_the_rect_chrome_measures() {
+        // article-typography's `pre > code`: a 16.32 element on 25.343px
+        // lines, six of them. 16.32 + 5 * 25.343 = 143.04.
+        let json = layout_box_to_json(&wrapped_inline(6, 16.32, 25.343, 253.44));
+        let (_, y, _, h) = union(&json).expect("a wrapped inline must export its union");
+        assert_eq!(
+            y, 100.0,
+            "the union must start at the element, not at the line box above it"
+        );
+        assert!(
+            (h - 143.04).abs() < 0.01,
+            "union height {h} is not six of this element's fragments"
+        );
+        assert!(
+            (json["border_box"]["height"].as_f64().unwrap() - 16.32).abs() < 0.01,
+            "border_box must stay the LAYOUT rect — Gate B's attributable \
+             join and the scroll-extent readers want that box"
+        );
+    }
+
+    /// The second rect exists only where the two quantities differ. An inline
+    /// with one fragment that exported a union would give every consumer a
+    /// second rect to disagree about for no gain, and would make the
+    /// oracle's fallback path dead code that nothing exercises.
+    #[test]
+    fn an_unwrapped_inline_exports_no_second_rect() {
+        let mut inline = LayoutBox::new(BoxType::Inline, rustkit_css::ComputedStyle::new());
+        inline.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 60.0, 18.13);
+        let mut text = LayoutBox::new(
+            BoxType::Text("hi".into()),
+            rustkit_css::ComputedStyle::new(),
+        );
+        // A single-line inline's text child IS a line box and is routinely
+        // TALLER than the inline's content area (`about`'s `span.highlight`:
+        // 18.13 against 28.16). That is leading, not a fragment.
+        text.dimensions.content = rustkit_layout::Rect::new(0.0, 0.0, 60.0, 28.16);
+        inline.children.push(text);
+        let json = layout_box_to_json(&inline);
+        assert!(
+            json.get("fragment_union_border_box").is_none(),
+            "a one-fragment inline exported a union: {json}"
+        );
+    }
+
+    /// Both corrections answer "which quantity is Chrome's rect". Applying the
+    /// transform to the PRE-correction box would emit a visual rect that is
+    /// right about the translate and wrong about the fragments, and the gate
+    /// prefers the visual rect — so the union would be silently discarded on
+    /// exactly the boxes that need both.
+    #[test]
+    fn a_transformed_wrapped_inline_transforms_its_union() {
+        let mut inline = wrapped_inline(3, 20.0, 20.0, 400.0);
+        inline.style.transform = rustkit_css::TransformList {
+            ops: vec![rustkit_css::TransformOp::Translate(
+                rustkit_css::Length::Px(10.0),
+                rustkit_css::Length::Px(5.0),
+            )],
+        };
+        let json = layout_box_to_json(&inline);
+        let (x, y, _, h) = visual(&json).expect("transformed box exports a visual rect");
+        assert_eq!((x, y), (34.0, 105.0));
+        assert_eq!(
+            h, 60.0,
+            "the visual rect was taken from the one-fragment box, not the union"
         );
     }
 }
