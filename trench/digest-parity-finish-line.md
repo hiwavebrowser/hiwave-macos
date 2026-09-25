@@ -11950,3 +11950,40 @@ and which one it is depends on whether those four paint gaps are defects or
 rasterizer difference. Nobody has measured that yet, and it is a night's work
 to find out — possibly the right next night, since it is the question the
 decision actually turns on.
+
+### Addendum — #255 MERGED (2026-09-25 06:04 UTC), `develop 8d64722`
+
+The night's P-item is on the mainline. Verified rather than taken from the
+webhook: `7bdde34` is an ancestor of `origin/develop`, and the merge commit's
+diff against its first parent is **+840 / −15 across exactly four files**
+(`crates/rustkit-layout/src/lib.rs`, `crates/rustkit-engine/src/lib.rs`,
+`scripts/layout_oracle_gate.py`, `scripts/tests/test_layout_oracle_gate.py`) —
+bit-for-bit the PR's diffstat, so nothing was lost or re-resolved on the way
+in.
+
+Gate A and the layout export now agree about what a wrapped inline's rect is,
+on every PR and every nightly. Check-ins cancelled; watch released.
+
+**State at end of night, for whoever reads this next:**
+
+- Metric **3/26** on macOS (run 36100178666, `refs/pull/255/merge`). `develop`
+  is `8d64722`; that run measured `cdbd22d`'s engine plus this PR, and the PR
+  moved no case's verdict, so 3/26 holds on the current tip.
+- Geometry green is **14/26**, up from 9 on 09-24, and none of that is this
+  PR's. `settings` is still 255 of the geometry debt and is still the largest
+  single row.
+- **Eleven** cases are geometry-, discrete- and stability-green and blocked by
+  paint alone (six on 09-24). `images-intrinsic` is **0.064pp** short.
+- **Decision 4 is still unanswered and now decides more than it did.** The
+  table and the two caveats are in the addendum above.
+- **Recorded next unit, and it is the measurement decision 4 turns on rather
+  than a fix:** are the four sub-0.7pp paint gaps
+  (`images-intrinsic`, `gpu-gradient-regression`, `gradient-no-radius`,
+  `gradient-backgrounds`) defects or rasterizer difference? Three are Gate C
+  `aa-noise`. Answering it costs a night, needs no engine change, and turns
+  decision 4 from a judgement call into a measurement — which is this
+  campaign's whole method. Its branch, if it grows code, must be cut from
+  **`develop`**.
+- Decisions 1 and 2 from tonight (export vs layout for the fragment union; the
+  two inline-sizing behaviours in RustKit) are open and neither blocks the next
+  night.
