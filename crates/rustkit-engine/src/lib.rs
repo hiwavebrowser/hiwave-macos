@@ -7636,7 +7636,8 @@ impl Engine {
             let paren_start = name_end + 1;
             let mut depth = 1;
             let mut paren_end = paren_start;
-            for (i, c) in rest[paren_start..].chars().enumerate() {
+            // `i` must be a byte offset: it slices `rest` below.
+            for (i, c) in rest[paren_start..].char_indices() {
                 match c {
                     '(' => depth += 1,
                     ')' => {
@@ -16322,6 +16323,7 @@ thread_local! {
 #[cfg(all(test, target_os = "macos"))]
 mod rule_prefilter_tests {
     use super::*;
+
 
     fn attrs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
