@@ -1410,6 +1410,17 @@ impl Engine {
         self.resolve_resource_url_in(id, raw)
     }
 
+    /// A view's viewport in CSS px, as `relayout` sizes it: the headless
+    /// bounds if it has them, otherwise its host surface.
+    fn view_viewport(&self, id: EngineViewId) -> Option<(f32, f32)> {
+        let view = self.views.get(&id)?;
+        let bounds = match view.headless_bounds {
+            Some(b) => b,
+            None => self.viewhost.get_bounds(view.viewhost_id).ok()?,
+        };
+        Some((bounds.width as f32, bounds.height as f32))
+    }
+
     /// Same, against a named view. Used where the build scope has already
     /// been cleared (display-list assembly runs after the layout build).
     fn resolve_resource_url_in(&self, id: EngineViewId, raw: &str) -> Option<Url> {
@@ -2606,6 +2617,20 @@ impl Engine {
 
         // Add external stylesheets (loaded from <link> elements)
         stylesheets.extend(external_stylesheets.iter().cloned());
+
+        // `@media` rules apply only where their queries match this view's
+        // viewport. Without a view (ad-hoc builds) there is no viewport to
+        // ask, so conditional rules stay out rather than guessing a size.
+        let viewport = self
+            .building_view
+            .get()
+            .and_then(|id| self.view_viewport(id));
+        for sheet in &mut stylesheets {
+            sheet.rules.retain(|rule| {
+                rule.media.is_empty()
+                    || viewport.is_some_and(|(w, h)| rule.applies_at(w, h))
+            });
+        }
 
         let css_vars = self.extract_css_variables(&stylesheets);
 

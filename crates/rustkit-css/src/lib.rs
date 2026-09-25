@@ -2517,6 +2517,19 @@ pub struct Declaration {
 pub struct Rule {
     pub selector: String,
     pub declarations: Vec<Declaration>,
+    /// Media query lists of the enclosing `@media` blocks, outermost first;
+    /// the rule applies only where all of them match (`Rule::applies_at`).
+    pub media: Vec<String>,
+}
+
+impl Rule {
+    /// Whether the rule's `@media` conditions hold for a viewport of
+    /// `width` x `height` CSS px.
+    pub fn applies_at(&self, width: f32, height: f32) -> bool {
+        self.media
+            .iter()
+            .all(|m| media::media_query_list_matches(m, width, height))
+    }
 }
 
 /// A complete stylesheet.
@@ -2540,6 +2553,7 @@ impl Stylesheet {
             .rules
             .into_iter()
             .map(|r| Rule {
+                media: r.media,
                 selector: r.selector,
                 declarations: r
                     .declarations
@@ -2565,6 +2579,9 @@ impl Stylesheet {
 
 pub mod font_face;
 pub use font_face::{parse_font_face, FontDisplayValue, FontFaceRule};
+
+pub mod media;
+pub use media::media_query_list_matches;
 
 /// Parse a color value.
 pub fn parse_color(value: &str) -> Option<Color> {
