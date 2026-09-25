@@ -3394,6 +3394,14 @@ fn apply_justify_self(
     // Check if width is explicitly set (not auto)
     let has_explicit_width = !matches!(child.style.width, Length::Auto);
     let child_width = match child.style.width {
+        // css-align-3 §6.1: an auto-width item that is NOT stretched sizes
+        // as fit-content, min(max-content, max(min-content, cell)). Using
+        // the whole cell made `justify-items: center` a no-op on every
+        // auto-width item: google's logo wrapper filled its 1088px cell and
+        // the logo sat at the left edge. The estimators give border boxes,
+        // which is the size this helper returns.
+        Length::Auto if align != JustifySelf::Stretch => estimate_max_content_width(child)
+            .min(cell_width.max(estimate_min_content_width(child))),
         Length::Auto => cell_width,
         Length::Px(w) => w,
         Length::Percent(p) => cell_width * p / 100.0,
@@ -6742,6 +6750,34 @@ mod tests {
 
     /// A grid item's GRANDchildren size against the item, not against the
     /// grid container the pre-pass measured them with.
+    #[test]
+    fn a_centred_auto_width_grid_item_shrinks_to_fit_its_content() {
+        // `justify-items: center` on an auto-width item used the whole cell
+        // as the item's width, so centring moved nothing.
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.justify_items = JustifyItems::Center;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Px(600.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+        let mut item = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut child_style = ComputedStyle::new();
+        child_style.width = Length::Px(100.0);
+        child_style.height = Length::Px(20.0);
+        item.children.push(LayoutBox::new(BoxType::Block, child_style));
+        container.children.push(item);
+
+        layout_grid_container(&mut container, 600.0, 400.0);
+
+        let item = container.children[0].dimensions.border_box();
+        let offset = item.x - container.dimensions.content.x;
+        assert!(
+            (item.width - 100.0).abs() < 0.01 && (offset - 250.0).abs() < 0.01,
+            "expected a 100px item centred at +250, got {}px at +{offset}",
+            item.width
+        );
+    }
+
     #[test]
     fn a_grid_items_grandchildren_resize_with_the_item_not_the_container() {
         const CONTAINER_WIDTH: f32 = 1000.0;
