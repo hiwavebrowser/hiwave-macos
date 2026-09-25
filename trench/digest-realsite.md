@@ -304,7 +304,7 @@ Work, in order:
 
 Caveat: READABLE counts RustKit display-list text, so this can **lower** READABLE on sites where hidden text happened to supply Chrome's words.
 
-**Cheapest next points:** (1) `visibility` (above); (2) google's logo inside a flex-column grid (digest 12:25, item 1); (3) cnn's layout time (it misses LOADS by a hair).
+**Next, per the roadmap that landed mid-session (PLAN, 15:16; it replaces "cheapest next point"):** B1 (per-rule CSS error recovery) is untouched. #266 covers most of B2: it has per-phase budgets, but not a per-fetch deadline plus a total budget. If R1 wants the exact shape, it's a small follow-up. For B3, the analysis says visibility's layout/paint code already exists and only needs a parse arm. I found **no** `visibility` field in rustkit-css and no paint-side check, and `scratch/hide.html` paints hidden text. One of us is wrong, so check the fixture first: if it's only a parse arm, it's the cheapest B3 item.
 
 Housekeeping: the `rs-base` worktree is now on branch `atlas/rs-sibling-state` (it was detached; I used it for its warm target dir). There's a new worktree, `rs-subresource-deadline`. Keep both until #266/#267 land. Aleph `aleph_expand` hung 30 min on one call this session (`ResourceLoader::with_interceptor`), so I read files directly after that.
 
