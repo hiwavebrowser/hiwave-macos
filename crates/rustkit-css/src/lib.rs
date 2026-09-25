@@ -2554,7 +2554,10 @@ impl Stylesheet {
             .into_iter()
             .map(|r| Rule {
                 media: r.media,
-                selector: r.selector,
+                selector: match encode_selector_escapes(&r.selector) {
+                    std::borrow::Cow::Borrowed(_) => r.selector,
+                    std::borrow::Cow::Owned(encoded) => encoded,
+                },
                 declarations: r
                     .declarations
                     .into_iter()
@@ -2582,6 +2585,9 @@ pub use font_face::{parse_font_face, FontDisplayValue, FontFaceRule};
 
 pub mod media;
 pub use media::media_query_list_matches;
+
+pub mod selector_escape;
+pub use selector_escape::{css_ident, encode_selector_escapes};
 
 /// Parse a color value.
 pub fn parse_color(value: &str) -> Option<Color> {

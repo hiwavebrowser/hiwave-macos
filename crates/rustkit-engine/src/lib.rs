@@ -20,7 +20,7 @@ use rustkit_bindings::DomBindings;
 pub use rustkit_bindings::IpcMessage;
 use rustkit_compositor::Compositor;
 use rustkit_core::{LoadEvent, NavigationRequest, NavigationStateMachine};
-use rustkit_css::{parse_display, ComputedStyle, Rule, Stylesheet};
+use rustkit_css::{css_ident, parse_display, ComputedStyle, Rule, Stylesheet};
 use rustkit_dom::{Document, Node, NodeType};
 use rustkit_image::ImageManager;
 use rustkit_js::JsRuntime;
@@ -7057,7 +7057,7 @@ impl Engine {
             if let Some(id) = compound.strip_prefix('#') {
                 // The matcher compares the WHOLE remainder to the id.
                 return out.push(SubjectKey {
-                    id: Some(id.to_string()),
+                    id: Some(css_ident(id).into_owned()),
                     ..Default::default()
                 });
             }
@@ -7070,7 +7070,7 @@ impl Engine {
                     class: compound[1..]
                         .split('.')
                         .find(|s| !s.is_empty())
-                        .map(str::to_string),
+                        .map(|c| css_ident(c).into_owned()),
                     ..Default::default()
                 });
             }
@@ -7079,7 +7079,7 @@ impl Engine {
             let rest = &compound[tag_end..];
             let class = rest.strip_prefix('.').map(|r| {
                 let end = r.find(stop).unwrap_or(r.len());
-                r[..end].to_string()
+                css_ident(&r[..end]).into_owned()
             });
             let mut key = SubjectKey {
                 tag: (!tag_part.is_empty()).then(|| tag_part.to_ascii_lowercase()),
@@ -7471,17 +7471,19 @@ impl Engine {
         // ID selector: #id
         if let Some(id) = selector.strip_prefix('#') {
             if let Some(el_id) = attributes.get("id") {
-                return el_id == id;
+                return *el_id == css_ident(id);
             }
             return false;
         }
 
         // Class selector: .class (can be chained: .a.b)
         if selector.starts_with('.') && !selector.contains(|c| c == '#' || c == '[' || c == ':') {
-            let classes: Vec<&str> = selector[1..].split('.').filter(|s| !s.is_empty()).collect();
             if let Some(el_class) = attributes.get("class") {
                 let el_classes: Vec<&str> = el_class.split_whitespace().collect();
-                return classes.iter().all(|c| el_classes.contains(c));
+                return selector[1..]
+                    .split('.')
+                    .filter(|s| !s.is_empty())
+                    .all(|c| el_classes.contains(&&*css_ident(c)));
             }
             return false;
         }
@@ -7509,7 +7511,7 @@ impl Engine {
                 let class_end = rest
                     .find(|c| c == '.' || c == '#' || c == ':' || c == '[')
                     .unwrap_or(rest.len());
-                let class_name = &rest[..class_end];
+                let class_name = css_ident(&rest[..class_end]);
                 remaining = &rest[class_end..];
 
                 if let Some(el_class) = attributes.get("class") {
@@ -7524,10 +7526,10 @@ impl Engine {
                 let id_end = rest
                     .find(|c| c == '.' || c == '#' || c == ':' || c == '[')
                     .unwrap_or(rest.len());
-                let id_name = &rest[..id_end];
+                let id_name = css_ident(&rest[..id_end]);
                 remaining = &rest[id_end..];
 
-                if attributes.get("id").map(|s| s.as_str()) != Some(id_name) {
+                if attributes.get("id").map(|s| s.as_str()) != Some(&*id_name) {
                     return false;
                 }
             } else if let Some(rest) = remaining.strip_prefix('[') {
@@ -7634,7 +7636,8 @@ impl Engine {
             let paren_start = name_end + 1;
             let mut depth = 1;
             let mut paren_end = paren_start;
-            for (i, c) in rest[paren_start..].chars().enumerate() {
+            // `i` must be a byte offset: it slices `rest` below.
+            for (i, c) in rest[paren_start..].char_indices() {
                 match c {
                     '(' => depth += 1,
                     ')' => {
@@ -15222,6 +15225,46 @@ mod web_font_tests {
     }
 
     #[test]
+    fn escaped_class_and_id_selectors_match_the_literal_names() {
+        // Tailwind names: `.sm\:text-lg` read as class `sm\` + unknown
+        // pseudo-class `:text-lg`, so the list was dropped as invalid; `\/`,
+        // `\!` and `\.` never equalled the element's `/`, `!` and `.`. About
+        // two thirds of x's, yahoo's and weather's selectors are like this.
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><head><style>
+            .sm\:text-lg { font-size: 21px }
+            div.w-1\/2 span { font-size: 22px }
+            p.\!big { font-size: 23px }
+            #a\.b { font-size: 24px }
+            .\31 0x { font-size: 25px }
+            .sm { font-size: 30px }
+            .hover\:big:hover { font-size: 31px }
+        </style></head><body>
+            <p class="sm:text-lg">a</p>
+            <div class="w-1/2"><span>b</span></div>
+            <p class="!big">c</p>
+            <p id="a.b">d</p>
+            <p class="10x">e</p>
+            <p class="hover:big">f</p>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+        fn size_of(b: &LayoutBox, text: &str) -> Option<rustkit_css::Length> {
+            if matches!(&b.box_type, BoxType::Text(t) if t.trim() == text) {
+                return Some(b.style.font_size.clone());
+            }
+            b.children.iter().find_map(|c| size_of(c, text))
+        }
+        use rustkit_css::Length::Px;
+        assert_eq!(size_of(&layout, "a"), Some(Px(21.0)), "class with \\:");
+        assert_eq!(size_of(&layout, "b"), Some(Px(22.0)), "ancestor class with \\/");
+        assert_eq!(size_of(&layout, "c"), Some(Px(23.0)), "tag + class with \\!");
+        assert_eq!(size_of(&layout, "d"), Some(Px(24.0)), "id with \\.");
+        assert_eq!(size_of(&layout, "e"), Some(Px(25.0)), "hex escape");
+        assert_ne!(size_of(&layout, "f"), Some(Px(31.0)), "the real :hover still applies");
+    }
+
+    #[test]
     fn a_none_or_hidden_border_side_has_zero_width_in_either_declaration_order() {
         // Prometheus R1 HOLD on #217: `none`/`hidden` only zeroed the width
         // inside the `border` shorthand, so a width set by an earlier
@@ -16280,6 +16323,7 @@ thread_local! {
 #[cfg(all(test, target_os = "macos"))]
 mod rule_prefilter_tests {
     use super::*;
+
 
     fn attrs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
@@ -17521,10 +17565,11 @@ impl AncestorCompound {
                             i += 1;
                         }
                         if i > start {
+                            let name = css_ident(&text(start, i)).into_owned();
                             if chars[start - 1] == '.' {
-                                out.classes.push(text(start, i));
+                                out.classes.push(name);
                             } else {
-                                out.id = Some(text(start, i));
+                                out.id = Some(name);
                             }
                         }
                         current_start = i;
