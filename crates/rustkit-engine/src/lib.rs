@@ -7056,58 +7056,18 @@ impl Engine {
     ) -> bool {
         #[cfg(test)]
         FULL_SELECTOR_MATCHES.with(|n| n.set(n.get() + 1));
-        let selector = selector.trim();
-
-        // Selectors 4 §3.9: a selector list containing an invalid selector is
-        // invalid as a whole and the rule is dropped — `.a:frobnicate, .b {}`
-        // styles NOTHING, not `.b`. An unknown pseudo-class used to fall to
-        // the matcher's `_ => true` arm and match every element instead.
-        if !Self::selector_list_is_valid(selector) {
-            return false;
-        }
-
-        // Handle multiple selectors (comma-separated at the top level —
-        // `:is(a, b)` is one member).
-        if selector.contains(',') {
-            let members = Self::split_top_level_commas(selector);
-            if members.len() != 1 || members[0] != selector {
-                return members.into_iter().any(|s| {
+        let prepared = self.prepared_selector(selector.trim());
+        let (tokens, compounds) = match &*prepared {
+            PreparedSelector::Never => return false,
+            PreparedSelector::List(members) => {
+                return members.iter().any(|s| {
                     self.selector_matches(s, tag_name, attributes, ancestors, siblings_before, sib)
                 });
             }
-        }
+            PreparedSelector::Complex { tokens, compounds } => (tokens, compounds),
+        };
 
-        // A pseudo-ELEMENT selector styles a generated box, never its host:
-        // `.card::before { position:absolute }` must not absolutize `.card`.
-        // Before this guard, pseudo rules bled onto host elements — harmless
-        // while box.position was never honored, catastrophic the day it was
-        // (about.html: every card/feature/quote left normal flow at once).
-        // Pseudo boxes get these rules through create_pseudo_element's own
-        // suffix-matching path; the normal cascade must skip them entirely.
-        let sel_lower = selector;
-        if sel_lower.contains("::")
-            || sel_lower.ends_with(":before")
-            || sel_lower.ends_with(":after")
-            || sel_lower.contains(":before ")
-            || sel_lower.contains(":after ")
-        {
-            return false;
-        }
-
-        // Tokenize selector into parts and combinators
-        let tokens = self.tokenize_selector(selector);
-
-        if tokens.is_empty() {
-            return false;
-        }
-
-        // The last token must match the current element
         let last_token = &tokens[tokens.len() - 1];
-        if !last_token.1.is_empty() {
-            // There's a combinator before this - we need to handle it
-            return false; // Simplified - we'll handle this below
-        }
-
         if !self.simple_selector_matches_with_pseudo(&last_token.0, tag_name, attributes, sib) {
             return false;
         }
@@ -7122,7 +7082,8 @@ impl Engine {
         let mut ancestor_idx = 0;
 
         for i in (0..tokens.len() - 1).rev() {
-            let (sel_part, combinator) = &tokens[i];
+            let combinator = &tokens[i].1;
+            let compound = &compounds[i];
 
             match combinator.as_str() {
                 " " => {
@@ -7132,12 +7093,7 @@ impl Engine {
                     for (idx, (anc_tag, anc_classes, anc_id)) in
                         ancestors.iter().enumerate().skip(ancestor_idx)
                     {
-                        if self.simple_selector_matches_ancestor(
-                            sel_part,
-                            anc_tag,
-                            anc_classes,
-                            anc_id.as_ref(),
-                        ) {
+                        if compound.matches(anc_tag, anc_classes, anc_id.as_ref()) {
                             found = true;
                             found_idx = idx + 1; // Next position after this ancestor
                             break;
@@ -7153,12 +7109,7 @@ impl Engine {
                     if let Some((parent_tag, parent_classes, parent_id)) =
                         ancestors.get(ancestor_idx)
                     {
-                        if !self.simple_selector_matches_ancestor(
-                            sel_part,
-                            parent_tag,
-                            parent_classes,
-                            parent_id.as_ref(),
-                        ) {
+                        if !compound.matches(parent_tag, parent_classes, parent_id.as_ref()) {
                             return false;
                         }
                         ancestor_idx += 1; // Move to next ancestor
@@ -7170,12 +7121,7 @@ impl Engine {
                     // Adjacent sibling combinator: immediate previous sibling must match
                     // Note: sibling combinators only apply at the element level, not up the tree
                     if let Some((prev_tag, prev_classes, prev_id)) = siblings_before.last() {
-                        if !self.simple_selector_matches_ancestor(
-                            sel_part,
-                            prev_tag,
-                            prev_classes,
-                            prev_id.as_ref(),
-                        ) {
+                        if !compound.matches(prev_tag, prev_classes, prev_id.as_ref()) {
                             return false;
                         }
                     } else {
@@ -7186,12 +7132,7 @@ impl Engine {
                     // General sibling combinator: any previous sibling must match
                     let mut found = false;
                     for (sib_tag, sib_classes, sib_id) in siblings_before {
-                        if self.simple_selector_matches_ancestor(
-                            sel_part,
-                            sib_tag,
-                            sib_classes,
-                            sib_id.as_ref(),
-                        ) {
+                        if compound.matches(sib_tag, sib_classes, sib_id.as_ref()) {
                             found = true;
                             break;
                         }
@@ -7209,9 +7150,89 @@ impl Engine {
         true
     }
 
+    /// Everything `selector_matches` derives from the selector string alone,
+    /// computed once per string. The cascade asks about the same few thousand
+    /// selectors for every element; re-validating, re-splitting and
+    /// re-tokenizing each one per call (and re-parsing each compound once per
+    /// ancestor walked) is what kept github's cascade at 11 s after the rule
+    /// index (#256, #257).
+    fn prepared_selector(&self, selector: &str) -> Rc<PreparedSelector> {
+        thread_local! {
+            static PREPARED: std::cell::RefCell<HashMap<String, Rc<PreparedSelector>>> =
+                std::cell::RefCell::new(HashMap::new());
+        }
+
+        let prepare = || {
+            // Selectors 4 §3.9: a selector list containing an invalid selector is
+            // invalid as a whole and the rule is dropped — `.a:frobnicate, .b {}`
+            // styles NOTHING, not `.b`. An unknown pseudo-class used to fall to
+            // the matcher's `_ => true` arm and match every element instead.
+            if !Self::selector_list_is_valid(selector) {
+                return PreparedSelector::Never;
+            }
+
+            // Handle multiple selectors (comma-separated at the top level —
+            // `:is(a, b)` is one member).
+            if selector.contains(',') {
+                let members = Self::split_top_level_commas(selector);
+                if members.len() != 1 || members[0] != selector {
+                    return PreparedSelector::List(
+                        members.into_iter().map(str::to_string).collect(),
+                    );
+                }
+            }
+
+            // A pseudo-ELEMENT selector styles a generated box, never its host:
+            // `.card::before { position:absolute }` must not absolutize `.card`.
+            // Before this guard, pseudo rules bled onto host elements — harmless
+            // while box.position was never honored, catastrophic the day it was
+            // (about.html: every card/feature/quote left normal flow at once).
+            // Pseudo boxes get these rules through create_pseudo_element's own
+            // suffix-matching path; the normal cascade must skip them entirely.
+            if selector.contains("::")
+                || selector.ends_with(":before")
+                || selector.ends_with(":after")
+                || selector.contains(":before ")
+                || selector.contains(":after ")
+            {
+                return PreparedSelector::Never;
+            }
+
+            // Tokenize selector into parts and combinators
+            let tokens = self.tokenize_selector(selector);
+            // The last token must be the subject, with no combinator after it.
+            match tokens.last() {
+                Some((_, combinator)) if combinator.is_empty() => {}
+                _ => return PreparedSelector::Never,
+            }
+            let compounds = tokens
+                .iter()
+                .map(|(part, _)| AncestorCompound::parse(part))
+                .collect();
+            PreparedSelector::Complex { tokens, compounds }
+        };
+
+        PREPARED.with(|cache| {
+            if let Some(p) = cache.borrow().get(selector) {
+                return p.clone();
+            }
+            let p = Rc::new(prepare());
+            let mut cache = cache.borrow_mut();
+            // Selectors are page-controlled; keep a runaway page from
+            // growing this without bound.
+            if cache.len() > 100_000 {
+                cache.clear();
+            }
+            cache.insert(selector.to_string(), p.clone());
+            p
+        })
+    }
+
     /// Tokenize a selector into (simple_selector, combinator) pairs.
     /// The combinator is the one that follows this selector part.
     fn tokenize_selector(&self, selector: &str) -> Vec<(String, String)> {
+        #[cfg(test)]
+        SELECTOR_TOKENIZATIONS.with(|n| n.set(n.get() + 1));
         let mut tokens = Vec::new();
         let mut current = String::new();
         let mut chars = selector.chars().peekable();
@@ -7938,131 +7959,6 @@ impl Engine {
         } else {
             diff <= 0 && diff % a == 0
         }
-    }
-
-    /// Match a simple selector against an ancestor/sibling with full info.
-    fn simple_selector_matches_ancestor(
-        &self,
-        selector: &str,
-        tag_name: &str,
-        classes: &[String],
-        id: Option<&String>,
-    ) -> bool {
-        // Universal selector
-        if selector == "*" {
-            return true;
-        }
-
-        // Parse selector parts: tag, classes, id
-        let mut required_tag: Option<&str> = None;
-        let mut required_classes: Vec<&str> = Vec::new();
-        let mut required_id: Option<&str> = None;
-
-        let mut i = 0;
-        let chars: Vec<char> = selector.chars().collect();
-        let mut current_start = 0;
-
-        while i <= chars.len() {
-            let at_end = i == chars.len();
-            let is_delimiter = !at_end
-                && (chars[i] == '.' || chars[i] == '#' || chars[i] == ':' || chars[i] == '[');
-
-            if at_end || is_delimiter {
-                if i > current_start {
-                    let part = &selector[current_start..i];
-                    if current_start == 0 && !part.starts_with('.') && !part.starts_with('#') {
-                        // Tag name at the start
-                        required_tag = Some(part);
-                    }
-                }
-
-                if !at_end {
-                    if chars[i] == '.' {
-                        // Find class name
-                        let start = i + 1;
-                        i += 1;
-                        while i < chars.len()
-                            && chars[i] != '.'
-                            && chars[i] != '#'
-                            && chars[i] != ':'
-                            && chars[i] != '['
-                        {
-                            i += 1;
-                        }
-                        if i > start {
-                            required_classes.push(&selector[start..i]);
-                        }
-                        current_start = i;
-                        continue;
-                    } else if chars[i] == '#' {
-                        // Find ID
-                        let start = i + 1;
-                        i += 1;
-                        while i < chars.len()
-                            && chars[i] != '.'
-                            && chars[i] != '#'
-                            && chars[i] != ':'
-                            && chars[i] != '['
-                        {
-                            i += 1;
-                        }
-                        if i > start {
-                            required_id = Some(&selector[start..i]);
-                        }
-                        current_start = i;
-                        continue;
-                    } else if chars[i] == ':' {
-                        // Structural pseudo-classes need sibling context the
-                        // ancestor tuple does not carry, so they stay
-                        // permissive. User-action / target pseudo-classes
-                        // are decidable here — nothing is hovered, focused
-                        // or targeted in the static frame — and used to be
-                        // skipped along with them, so `.card:hover .title`
-                        // and `.wrapper:focus-within .icon` styled every
-                        // descendant as if the state were on.
-                        let start = i + 1;
-                        let mut end = start;
-                        while end < chars.len()
-                            && (chars[end].is_alphanumeric() || chars[end] == '-')
-                        {
-                            end += 1;
-                        }
-                        if Self::pseudo_class_is_static_false(&selector[start..end]) {
-                            return false;
-                        }
-                        break;
-                    } else if chars[i] == '[' {
-                        // Skip attribute selectors for ancestor matching
-                        break;
-                    }
-                }
-            }
-            i += 1;
-        }
-
-        // Check tag match
-        if let Some(req_tag) = required_tag {
-            if !req_tag.eq_ignore_ascii_case(tag_name) {
-                return false;
-            }
-        }
-
-        // Check class match
-        for req_class in required_classes {
-            if !classes.iter().any(|c| c == req_class) {
-                return false;
-            }
-        }
-
-        // Check ID match
-        if let Some(req_id) = required_id {
-            match id {
-                Some(el_id) if el_id == req_id => {}
-                _ => return false,
-            }
-        }
-
-        true
     }
 
     /// Calculate selector specificity for ordering.
@@ -16249,6 +16145,8 @@ thread_local! {
     static FULL_SELECTOR_MATCHES: Cell<u64> = const { Cell::new(0) };
     /// How many rules the subject prefilter was asked about on this thread.
     static PREFILTER_VISITS: Cell<u64> = const { Cell::new(0) };
+    /// How many times a selector string was tokenized on this thread.
+    static SELECTOR_TOKENIZATIONS: Cell<u64> = const { Cell::new(0) };
 }
 
 // Real Engine (Compositor wants a device) — macOS only, like
@@ -16262,6 +16160,98 @@ mod rule_prefilter_tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    fn ancestor(tag: &str, classes: &[&str], id: Option<&str>) -> (String, Vec<String>, Option<String>) {
+        (
+            tag.to_string(),
+            classes.iter().map(|c| c.to_string()).collect(),
+            id.map(str::to_string),
+        )
+    }
+
+    #[test]
+    fn a_selector_is_parsed_once_not_once_per_element() {
+        // After the rule index, github's cascade was still 11 s: every
+        // candidate re-validated and re-tokenized its selector string for
+        // every element, and re-parsed each compound for every ancestor.
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let ancestors: Vec<_> = (0..30).map(|_| ancestor("div", &["x"], None)).collect();
+        let selector = "main.page section .card > .title";
+        SELECTOR_TOKENIZATIONS.with(|n| n.set(0));
+        for _ in 0..200 {
+            assert!(!engine.selector_matches(
+                selector,
+                "h2",
+                &attrs(&[("class", "title")]),
+                &ancestors,
+                &[],
+                SiblingContext::SOLE,
+            ));
+        }
+        let tokenized = SELECTOR_TOKENIZATIONS.with(|n| n.get());
+        assert!(
+            tokenized <= 1,
+            "200 elements asked about one selector; it was tokenized {tokenized} times"
+        );
+    }
+
+    #[test]
+    fn prepared_selectors_match_like_the_string_matcher_did() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let chain = vec![
+            ancestor("section", &["card", "wide"], Some("main")),
+            ancestor("body", &[], None),
+            ancestor("html", &[], None),
+        ];
+        let prev = vec![ancestor("p", &["lead"], None), ancestor("hr", &[], Some("rule"))];
+        let cases: &[(&str, bool)] = &[
+            ("section .t", true),
+            ("SECTION.card.wide#main > .t", true),
+            ("section.card.narrow .t", false),
+            ("#main .t", true),
+            ("#other .t", false),
+            ("html body > section > .t", true),
+            ("html > section .t", false),
+            ("* .t", true),
+            ("section:hover .t", false),
+            ("section:first-child .t", true),
+            ("section[data-x] .t", true),
+            ("p.lead ~ .t", true),
+            ("hr#rule + .t", true),
+            ("p + .t", false),
+            (".café .t", false),
+            ("section .t, .nope", true),
+            (".nope, .t::before", false),
+            (".t:frobnicate, section .t", false),
+            ("section >", false),
+        ];
+        for (selector, want) in cases {
+            for _ in 0..2 {
+                // Second pass is served from the cache.
+                assert_eq!(
+                    engine.selector_matches(
+                        selector,
+                        "div",
+                        &attrs(&[("class", "t")]),
+                        &chain,
+                        &prev,
+                        SiblingContext::SOLE,
+                    ),
+                    *want,
+                    "{selector}"
+                );
+            }
+        }
+        let accented = vec![ancestor("div", &["café"], None)];
+        assert!(engine.selector_matches(
+            ".café .t",
+            "div",
+            &attrs(&[("class", "t")]),
+            &accented,
+            &[],
+            SiblingContext::SOLE,
+        ));
     }
 
     #[test]
@@ -17099,6 +17089,111 @@ window.addEventListener('load', function () {
                 && matches!(&r.outcome, ScriptOutcome::Threw(m) if m.contains("in load"))),
             "{log:#?}"
         );
+    }
+}
+
+/// A selector string as `Engine::selector_matches` uses it, prepared once
+/// (see `Engine::prepared_selector`).
+enum PreparedSelector {
+    /// Invalid, a pseudo-element selector, or no subject: matches nothing.
+    Never,
+    /// A top-level selector list; matches if any member does.
+    List(Vec<String>),
+    /// One complex selector: `(compound, following combinator)` tokens, the
+    /// subject last, and each token's compound parsed for the ancestor and
+    /// sibling walk (same index).
+    Complex {
+        tokens: Vec<(String, String)>,
+        compounds: Vec<AncestorCompound>,
+    },
+}
+
+/// What a compound left of a combinator requires of an ancestor or earlier
+/// sibling, which is known only by tag, classes and id. Parsed once per
+/// selector instead of once per element walked.
+#[derive(Default)]
+struct AncestorCompound {
+    /// A user-action / target pseudo-class: nothing is hovered, focused or
+    /// targeted in the static frame, so no element matches.
+    never: bool,
+    tag: Option<String>,
+    classes: Vec<String>,
+    id: Option<String>,
+}
+
+impl AncestorCompound {
+    fn parse(selector: &str) -> Self {
+        let mut out = AncestorCompound::default();
+        // Universal selector
+        if selector == "*" {
+            return out;
+        }
+
+        let chars: Vec<char> = selector.chars().collect();
+        let text = |from: usize, to: usize| chars[from..to].iter().collect::<String>();
+        let is_delimiter = |c: char| c == '.' || c == '#' || c == ':' || c == '[';
+        let mut i = 0;
+        let mut current_start = 0;
+
+        while i <= chars.len() {
+            let at_end = i == chars.len();
+            if at_end || is_delimiter(chars[i]) {
+                // Tag name at the start
+                if i > current_start && current_start == 0 && chars[0] != '.' && chars[0] != '#' {
+                    out.tag = Some(text(0, i));
+                }
+
+                if !at_end {
+                    if chars[i] == '.' || chars[i] == '#' {
+                        // Class or id name
+                        let start = i + 1;
+                        i += 1;
+                        while i < chars.len() && !is_delimiter(chars[i]) {
+                            i += 1;
+                        }
+                        if i > start {
+                            if chars[start - 1] == '.' {
+                                out.classes.push(text(start, i));
+                            } else {
+                                out.id = Some(text(start, i));
+                            }
+                        }
+                        current_start = i;
+                        continue;
+                    } else if chars[i] == ':' {
+                        // Structural pseudo-classes need sibling context the
+                        // ancestor tuple does not carry, so they stay
+                        // permissive. User-action / target pseudo-classes
+                        // are decidable here — nothing is hovered, focused
+                        // or targeted in the static frame — and used to be
+                        // skipped along with them, so `.card:hover .title`
+                        // and `.wrapper:focus-within .icon` styled every
+                        // descendant as if the state were on.
+                        let start = i + 1;
+                        let mut end = start;
+                        while end < chars.len()
+                            && (chars[end].is_alphanumeric() || chars[end] == '-')
+                        {
+                            end += 1;
+                        }
+                        out.never = Engine::pseudo_class_is_static_false(&text(start, end));
+                        break;
+                    } else {
+                        // Skip attribute selectors for ancestor matching
+                        break;
+                    }
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    fn matches(&self, tag_name: &str, classes: &[String], id: Option<&String>) -> bool {
+        !self.never
+            && self.tag.as_deref().map_or(true, |t| t.eq_ignore_ascii_case(tag_name))
+            && self.classes.iter().all(|req| classes.iter().any(|c| c == req))
+            && self.id.as_deref().map_or(true, |req| id.is_some_and(|el| el == req))
     }
 }
 
