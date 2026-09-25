@@ -83,6 +83,10 @@ mod imp {
         let mut families: HashMap<String, Vec<Face>> = HashMap::new();
         let mut accepted = 0usize;
         for face in faces {
+            // An sfnt container starts with a 12-byte table directory.
+            if face.data.len() < 12 {
+                continue;
+            }
             let provider = CGDataProvider::from_buffer(face.data.clone());
             let Ok(cgfont) = CGFont::from_data_provider(provider) else {
                 continue;
@@ -285,6 +289,19 @@ mod tests {
             partial.len(),
             &partial[..partial.len().min(12)]
         );
+    }
+
+    #[test]
+    fn a_face_shorter_than_a_table_directory_is_rejected() {
+        let _slot = slot_guard();
+        let short = |n: usize| WebFontFace {
+            family: "WebfontsTestShort".to_string(),
+            weight: 400,
+            italic: false,
+            data: Arc::new(vec![0u8; n]),
+        };
+        assert_eq!(install("t6", &[short(0), short(11)]), 0);
+        assert!(!is_installed("WebfontsTestShort"));
     }
 
     #[test]
