@@ -87,3 +87,9 @@ Whichever comes first:
     UA), so sites serve it what they serve HiWave users.
   - RustKit executes no page `<script>` on any load path today; the board
     measures that truthfully rather than simulating script execution.
+- 2026-09-25 — scorer brought in line with PLAN "Access blocks": a site the
+  access probe marks blocked scores LOADS = 0 (so READABLE / LOOKS RIGHT 0)
+  even when RustKit paints something. Before, chatgpt scored 2 in
+  `20260925T1925Z-subdl` for matching Cloudflare's interstitial, which Chrome got
+  too. That record was rescored to 0 (marked `rescored`); no earlier run credited
+  a blocked site. Old rule applied to that run: 17; new rule: 15.

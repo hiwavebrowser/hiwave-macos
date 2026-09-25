@@ -272,3 +272,42 @@ Housekeeping: `d2c28c8` (moves a pre-existing doc comment back onto its own test
 **Decisions for Pete:**
 1. **LOADS noise is now visible in the headline:** microsoft flipped 3 times today on identical code, and today's +1 is that noise. Best-of-2 RustKit captures for LOADS (the open question from 2026-09-24), or keep one capture?
 2. **This seat still can't run `git merge`, `git merge-tree`, or `rustfmt`/`cargo fmt` without approval**, so stacking needs cherry-pick workarounds and I can't format-check PRs. Allowing those three would remove the workarounds. Your call.
+
+## 2026-09-25 16:10 — RustKit has no CSS `visibility`; a stalled stylesheet blanked apple (#266); `:checked ~` fixed (#267). Board 14 → 15 (apple, not credited)
+
+**Points: 14 → 15 / 60.** Before is `20260925T1810Z-dev` (develop ec39b5c: #260 and #262 now merged). After is `20260925T1925Z-subdl` (+ #266). Both runs chunked, 5 sites at a time.
+
+| run | engine | points | loads | readable | looks-right |
+|---|---|---|---|---|---|
+| `20260925T1810Z-dev` | develop ec39b5c | **14** | 10 | 2 | 2 |
+| `20260925T1925Z-subdl` | + #266 | **15** | 10 | 3 | 2 |
+
+Rows that moved, **none credited to a PR**:
+- **apple +2.** On develop it timed out: 9 `Loading external stylesheet` lines, then nothing for 29 s. A rerun on the same binary scored 2/3. #266's budget fired on no site in the after run, so the +2 is the stall not recurring.
+- **cnn −1.** It timed out in `build_layout_tree` after all 117 images loaded, which is its known layout cost.
+
+Passing all 3: google (still the promo variant). Blocked (0 pts): amazon aws-waf/202, chatgpt cloudflare/403, ebay akamai/403, nytimes datadome/403.
+
+**Scorer fix (hub, this commit):** a blocked site now scores LOADS = 0 even when RustKit paints something, as PLAN "Access blocks" says. chatgpt scored **2** in `1925Z` because RustKit and Chrome both painted Cloudflare's "Just a moment..." interstitial, and they matched. I rescored that one record (the only case in any run; marked `rescored`). The raw after number was 17.
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- #266 `atlas/rs-subresource-deadline` @ e954056: stylesheets, web fonts and images each get `subresource_budget_ms` (default 8 s) per phase. A late fetch is dropped, and the page renders without it. Before this, their only bound was the network client's 30 s timeout, which equals the whole capture budget. Page scripts already had a budget. The test (a stalled sheet + a stalled PNG + a stalled SVG, 500 ms budget) fails without the fix (9.6 s vs < 2.5 s).
+- #267 `atlas/rs-sibling-state` @ 7f28d19: a compound left of `+`/`~` now checks the sibling's `:checked` / `:disabled` / `:enabled`. Earlier siblings were recorded as `(tag, classes, id)`, so `.cb:checked ~ .content` matched an unchecked box. The test (9 cases) fails without the fix. **wikipedia A/B is unchanged** (`2000Z-ab-dev` vs `2002Z-ab-sibstate`, both READABLE 57.3%, LOOKS RIGHT 18.9%). Its menus still paint open, for the reason in the finding below.
+- Gates, both PRs: rustkit-engine 151/151, **campaign 26/26 avg 1.3%, every case byte-identical to develop** (`scratch/campcmp3.py`). WPT not run (no `third_party/wpt` on this seat). A flaky `web_font_tests::a_declared_web_font_is_the_face_the_text_is_measured_in` failed 1 run in 3 on each branch. It passes alone and loads no network font. I believe it's pre-existing but haven't checked it on develop.
+
+**Finding (the lead for next session): RustKit doesn't implement CSS `visibility` at all.** `ComputedStyle` has no field for it, and the engine only lists the name. Offline fixture `scratch/hide.html`: `visibility:hidden`, `opacity:0`, and `height:0; overflow:hidden` **all paint their text**, and only `display:none` hides. wikipedia's closed menus are `opacity:0; height:0; visibility:hidden; overflow:hidden auto` (`scratch/hide2.html` reproduces them). Every site on the board hides menus, dialogs and skip-links this way, so this is probably the broadest LOOKS RIGHT fix left.
+
+Work, in order:
+1. A `visibility` field in rustkit-css (inherited; `visible` / `hidden` / `collapse`) and the engine's property arm.
+2. Skip a hidden box's own background, border and text at display-list build (children can set `visible`).
+3. Check why `opacity:0` and the zero-height overflow clip still paint in the fixture.
+
+Caveat: READABLE counts RustKit display-list text, so this can **lower** READABLE on sites where hidden text happened to supply Chrome's words.
+
+**Cheapest next points:** (1) `visibility` (above); (2) google's logo inside a flex-column grid (digest 12:25, item 1); (3) cnn's layout time (it misses LOADS by a hair).
+
+Housekeeping: the `rs-base` worktree is now on branch `atlas/rs-sibling-state` (it was detached; I used it for its warm target dir). There's a new worktree, `rs-subresource-deadline`. Keep both until #266/#267 land. Aleph `aleph_expand` hung 30 min on one call this session (`ResourceLoader::with_interceptor`), so I read files directly after that.
+
+**Decisions for Pete:**
+1. **Scorer change:** a blocked site can no longer score by painting the vendor's challenge page that Chrome also got. That enforces the written PLAN rule, and it's why the after number is 15, not 17. Say if you'd rather have it reverted and put under **Changes** in BASELINE instead.
+2. **LOADS noise, again.** apple (this session) and microsoft (last session) each flipped on identical code because of network stalls. #266 turns one stall mode into a missing resource, but the board still takes one RustKit capture. Best-of-2 for LOADS is still open from 2026-09-24.

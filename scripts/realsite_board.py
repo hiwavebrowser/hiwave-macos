@@ -254,7 +254,13 @@ def score_site(site, capture_bin, outdir, width, height, env):
             loads = True
     access = probe_access(url)
     rec["access"] = access
-    if not loads and access["blocked"]:
+    # A blocked site scores LOADS=0 (PLAN-realsite.md, "Access blocks") even
+    # when RustKit paints something: that something is the vendor's challenge
+    # page, which Chrome gets too, so it would also "look right" (chatgpt,
+    # 20260925T1925Z-subdl: 2 points for matching Cloudflare's interstitial).
+    if access["blocked"]:
+        if loads:
+            loads, loads_why = False, "painted the challenge page"
         loads_why = "blocked:%s (HTTP %s) — %s" % (access["vendor"], access["status"], loads_why)
     rec["loads"] = {"pass": loads, "why": loads_why}
 
