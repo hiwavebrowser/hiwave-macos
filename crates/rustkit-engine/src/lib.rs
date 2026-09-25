@@ -6886,6 +6886,7 @@ impl Engine {
             rules: Vec::new(),
             by_id: HashMap::new(),
             by_class: HashMap::new(),
+            by_attr: HashMap::new(),
             by_tag: HashMap::new(),
             universal: Vec::new(),
             before: Vec::new(),
@@ -6902,6 +6903,8 @@ impl Engine {
                         ix.by_id.entry(id.clone()).or_default()
                     } else if let Some(class) = &key.class {
                         ix.by_class.entry(class.clone()).or_default()
+                    } else if let Some(attr) = &key.attr {
+                        ix.by_attr.entry(attr.clone()).or_default()
                     } else if let Some(tag) = &key.tag {
                         ix.by_tag.entry(tag.clone()).or_default()
                     } else {
@@ -6943,6 +6946,7 @@ impl Engine {
                         .get("class")
                         .is_some_and(|cl| cl.split_whitespace().any(|x| x == c))
                 })
+                && k.attr.as_deref().map_or(true, |a| attributes.contains_key(a))
         })
     }
 
@@ -6957,30 +6961,32 @@ impl Engine {
         }
 
         // Mirrors the per-branch requirements of
-        // simple_selector_matches_with_pseudo for the subject compound.
-        fn key_for_compound(compound: &str) -> SubjectKey {
-            if compound == "*" || compound == ":root" {
-                return SubjectKey::default();
+        // simple_selector_matches_with_pseudo for the subject compound. The
+        // compound matches an element only if one of the keys pushed holds;
+        // pushing none means the matcher can never accept it.
+        fn keys_for_compound(engine: &Engine, compound: &str, out: &mut Vec<SubjectKey>) {
+            if compound == "*" {
+                return out.push(SubjectKey::default());
             }
             if let Some(id) = compound.strip_prefix('#') {
                 // The matcher compares the WHOLE remainder to the id.
-                return SubjectKey {
+                return out.push(SubjectKey {
                     id: Some(id.to_string()),
                     ..Default::default()
-                };
+                });
             }
             let stop = |c: char| c == '.' || c == '#' || c == ':' || c == '[';
             if compound.starts_with('.')
                 && !compound.contains(|c| c == '#' || c == '[' || c == ':')
             {
                 // Every listed class is required; the first one suffices.
-                return SubjectKey {
+                return out.push(SubjectKey {
                     class: compound[1..]
                         .split('.')
                         .find(|s| !s.is_empty())
                         .map(str::to_string),
                     ..Default::default()
-                };
+                });
             }
             let tag_end = compound.find(stop).unwrap_or(compound.len());
             let tag_part = &compound[..tag_end];
@@ -6989,11 +6995,38 @@ impl Engine {
                 let end = r.find(stop).unwrap_or(r.len());
                 r[..end].to_string()
             });
-            SubjectKey {
-                id: None,
+            let mut key = SubjectKey {
                 tag: (!tag_part.is_empty()).then(|| tag_part.to_ascii_lowercase()),
                 class,
+                ..Default::default()
+            };
+            if let Some(r) = rest.strip_prefix('[') {
+                // The matcher's first check after the tag: the element must
+                // carry the attribute match_attribute_selector looks up.
+                let end = r.find(']').unwrap_or(r.len());
+                key.attr = Some(Engine::attr_selector_name(&r[..end]).to_string());
+            } else if key.tag.is_none() {
+                if let Some(r) = rest.strip_prefix(':') {
+                    // The matcher's first check: this pseudo-class.
+                    let (name, arg, _) = engine.parse_pseudo_class(r);
+                    match (name.as_str(), arg) {
+                        ("root" | "scope", _) => key.tag = Some("html".to_string()),
+                        ("is" | "where" | "matches" | "-webkit-any", Some(arg)) => {
+                            // Some member compound must match the element
+                            // (any_compound_in_list_matches); members with
+                            // a combinator never do.
+                            for member in Engine::split_top_level_commas(&arg) {
+                                if !Engine::selector_has_combinator(member) {
+                                    keys_for_compound(engine, member, out);
+                                }
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
             }
+            out.push(key)
         }
 
         fn keys_for(engine: &Engine, selector: &str, out: &mut Vec<SubjectKey>) {
@@ -7021,7 +7054,7 @@ impl Engine {
             let tokens = engine.tokenize_selector(selector);
             match tokens.last() {
                 Some((compound, combinator)) if combinator.is_empty() => {
-                    out.push(key_for_compound(compound))
+                    keys_for_compound(engine, compound, out)
                 }
                 _ => {}
             }
@@ -7443,12 +7476,9 @@ impl Engine {
         attr_selector: &str,
         attributes: &HashMap<String, String>,
     ) -> bool {
-        // Determine the operator
-        let operators = ["~=", "|=", "^=", "$=", "*=", "="];
-
-        for op in &operators {
+        let attr_name = Self::attr_selector_name(attr_selector);
+        for op in &Self::ATTR_OPERATORS {
             if let Some(pos) = attr_selector.find(op) {
-                let attr_name = attr_selector[..pos].trim();
                 let mut attr_value = attr_selector[pos + op.len()..].trim();
 
                 // Remove quotes if present
@@ -7478,8 +7508,21 @@ impl Engine {
         }
 
         // Just [attr] - check presence
-        let attr_name = attr_selector.trim();
         attributes.contains_key(attr_name)
+    }
+
+    /// Checked in this order; the first one found splits name from value.
+    const ATTR_OPERATORS: [&'static str; 6] = ["~=", "|=", "^=", "$=", "*=", "="];
+
+    /// The attribute an `[...]` selector looks up. Every form, with or
+    /// without an operator, fails on an element that lacks it, which is
+    /// what lets the rule index file attribute-first rules under it.
+    fn attr_selector_name(attr_selector: &str) -> &str {
+        Self::ATTR_OPERATORS
+            .iter()
+            .find_map(|op| attr_selector.find(op))
+            .map_or(attr_selector, |pos| &attr_selector[..pos])
+            .trim()
     }
 
     /// Parse a pseudo-class, returning (name, optional_arg, chars_consumed).
@@ -16440,6 +16483,109 @@ mod rule_prefilter_tests {
     }
 
     #[test]
+    fn attribute_root_and_where_subjects_are_filed_not_universal() {
+        // github ships ~2,100 rules the index could not file (936 attribute-
+        // first like `[data-color-mode=light][data-light-theme=light]`, 353
+        // `:where(.x)`, 286 `:root`), so every element visited all of them:
+        // ~1,000 prefilter visits per element and 26 s of cascade live.
+        let mut css = String::new();
+        for i in 0..300 {
+            css.push_str(&format!("[data-miss-{i}] {{ color: red }}\n"));
+            css.push_str(&format!("[data-mode=m{i}][data-theme] {{ color: red }}\n"));
+            css.push_str(&format!(":where(.miss-{i}, x-miss-{i}) {{ color: red }}\n"));
+            css.push_str(&format!(":root {{ --v{i}: 1px }}\n"));
+            css.push_str(&format!(":is(.miss-{i}):hover {{ color: red }}\n"));
+        }
+        css.push_str("[data-hit] { color: blue }\n");
+        let sheet = Stylesheet::parse(&css).expect("css");
+        let sheets = std::slice::from_ref(&sheet);
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let vars = HashMap::new();
+
+        let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
+        PREFILTER_VISITS.with(|n| n.set(0));
+        let style = engine.compute_style_for_element(
+            "div",
+            &attrs(&[("data-hit", ""), ("class", "card")]),
+            sheets,
+            &vars,
+            &[],
+            &[],
+            SiblingContext::SOLE,
+            None,
+        );
+        let visits = PREFILTER_VISITS.with(|n| n.get());
+
+        assert_eq!(style.color, rustkit_css::Color::new(0, 0, 255, 1.0));
+        assert!(
+            visits <= 1,
+            "1,500 attribute / :where / :is / :root rules the element can't \
+             match must not be visited; the prefilter ran {visits} times"
+        );
+    }
+
+    #[test]
+    fn filing_attribute_and_pseudo_first_subjects_never_changes_a_style() {
+        // The shapes the index now files by attribute, by `html`, or by the
+        // union of an :is()/:where() list, next to ones it still can't key.
+        let css = r#"
+            :root { margin-left: 1px }
+            :root[data-theme] { margin-right: 2px }
+            :scope { padding-left: 3px }
+            [data-x] { margin-top: 4px }
+            [data-x="1"] { color: green }
+            [data-mode=dark][data-theme] { padding-right: 5px }
+            [ data-y ~= "a" ] { border-left-width: 6px }
+            [data-z|=en] { border-right-width: 7px }
+            input[type=text] { padding-top: 8px }
+            [href^="https"].card { padding-bottom: 9px }
+            :where(.card, ul) { margin-bottom: 10px }
+            :is(section .card, span) { border-top-width: 11px }
+            :where(section .card) { border-bottom-width: 12px }
+            :where(:where(.wide)) { color: purple }
+            :is([data-x]):not(.other) { margin-left: 13px }
+            :not(.other) { outline-width: 14px }
+            :first-child { color: orange }
+            * { font-size: 15px }
+        "#;
+        let sheet = Stylesheet::parse(css).expect("css");
+        let sheets = std::slice::from_ref(&sheet);
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let vars = HashMap::new();
+        let ancestors = vec![("section".to_string(), vec![], None)];
+        let elements = [
+            ("html", attrs(&[("data-theme", "t"), ("data-mode", "dark")])),
+            ("div", attrs(&[("class", "card wide"), ("data-x", "1")])),
+            ("div", attrs(&[("data-y", "b a"), ("data-z", "en-US")])),
+            ("input", attrs(&[("type", "text")])),
+            ("a", attrs(&[("href", "https://x"), ("class", "card")])),
+            ("span", attrs(&[("class", "other"), ("data-x", "2")])),
+            ("ul", attrs(&[])),
+            ("p", attrs(&[])),
+        ];
+        let styles = |engine: &Engine, sib: SiblingContext| -> Vec<String> {
+            elements
+                .iter()
+                .map(|(tag, a)| {
+                    let s = engine.compute_style_for_element(
+                        tag, a, sheets, &vars, &ancestors, &[], sib, None,
+                    );
+                    format!("{s:?}")
+                })
+                .collect()
+        };
+        let not_first = SiblingContext { index: 1, count: 2, ..SiblingContext::SOLE };
+        for sib in [SiblingContext::SOLE, not_first] {
+            let unindexed = styles(&engine, sib);
+            let indexed = {
+                let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
+                styles(&engine, sib)
+            };
+            assert_eq!(indexed, unindexed);
+        }
+    }
+
+    #[test]
     fn prefilter_never_rejects_a_selector_the_matcher_accepts() {
         let engine = Engine::new(EngineConfig::default()).expect("engine");
         let selectors = [
@@ -17109,6 +17255,8 @@ struct SubjectKey {
     id: Option<String>,
     tag: Option<String>,
     class: Option<String>,
+    /// An attribute the element must carry (any value).
+    attr: Option<String>,
 }
 
 /// The rules of one layout build, bucketed by their subject keys.
@@ -17119,7 +17267,7 @@ struct SubjectKey {
 /// 6–10 s per relayout on facebook, microsoft, apple and wikipedia, and past
 /// the 30 s load budget on github and cnn. An element can only match a rule
 /// through one of its subject keys (see `Engine::subject_keys`), so the rules
-/// filed under the element's id, classes, tag and the universal bucket are a
+/// filed under the element's id, classes, attribute names, tag and the universal bucket are a
 /// superset of the rules `rule_may_match` admits. Each candidate still goes
 /// through the same `rule_may_match` + `selector_matches`, in rule order, so
 /// the cascade's answer does not change; only the rules it could never have
@@ -17132,6 +17280,8 @@ struct RuleIndex {
     rules: Vec<(u32, u32)>,
     by_id: HashMap<String, Vec<u32>>,
     by_class: HashMap<String, Vec<u32>>,
+    /// Keyed by the attribute name an attribute-first subject requires.
+    by_attr: HashMap<String, Vec<u32>>,
     by_tag: HashMap<String, Vec<u32>>,
     universal: Vec<u32>,
     /// Rules whose selector ends in `:before`/`::before` (resp. after), in
@@ -17160,6 +17310,13 @@ impl RuleIndex {
         if let Some(classes) = attributes.get("class") {
             for c in classes.split_whitespace() {
                 if let Some(v) = self.by_class.get(c) {
+                    out.extend_from_slice(v);
+                }
+            }
+        }
+        if !self.by_attr.is_empty() {
+            for name in attributes.keys() {
+                if let Some(v) = self.by_attr.get(name.as_str()) {
                     out.extend_from_slice(v);
                 }
             }
