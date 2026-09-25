@@ -5248,6 +5248,28 @@ impl Engine {
                     _ => rustkit_css::AlignItems::Stretch,
                 };
             }
+            // Grid's inline-axis alignment. Neither property was parsed, so
+            // every grid item stretched across its cell whatever the page
+            // asked for (google's centred logo sat at the cell's left edge).
+            // `safe`/`unsafe` only change overflow behaviour; `normal` on a
+            // grid item behaves as `stretch`; `legacy` is treated as `normal`.
+            "justify-items" => {
+                style.justify_items = match justify_keyword(value) {
+                    "start" | "flex-start" | "self-start" | "left" => rustkit_css::JustifyItems::Start,
+                    "end" | "flex-end" | "self-end" | "right" => rustkit_css::JustifyItems::End,
+                    "center" => rustkit_css::JustifyItems::Center,
+                    _ => rustkit_css::JustifyItems::Stretch,
+                };
+            }
+            "justify-self" => {
+                style.justify_self = match justify_keyword(value) {
+                    "start" | "flex-start" | "self-start" | "left" => rustkit_css::JustifySelf::Start,
+                    "end" | "flex-end" | "self-end" | "right" => rustkit_css::JustifySelf::End,
+                    "center" => rustkit_css::JustifySelf::Center,
+                    "stretch" => rustkit_css::JustifySelf::Stretch,
+                    _ => rustkit_css::JustifySelf::Auto,
+                };
+            }
             "align-content" => {
                 style.align_content = match value.trim() {
                     "flex-start" | "start" => rustkit_css::AlignContent::FlexStart,
@@ -10746,6 +10768,16 @@ fn parse_time(value: &str) -> Option<f32> {
     } else {
         None
     }
+}
+
+/// The alignment keyword of a `justify-items` / `justify-self` value, without
+/// the `safe` / `unsafe` / `legacy` modifiers (`safe center` → `center`).
+fn justify_keyword(value: &str) -> &str {
+    value
+        .split_whitespace()
+        .filter(|t| !matches!(*t, "safe" | "unsafe" | "legacy"))
+        .last()
+        .unwrap_or("")
 }
 
 /// Parse a CSS timing function.
@@ -16804,6 +16836,36 @@ mod cascade_wire_tests {
         e.apply_style_property(&mut s2, "flex", "2 3");
         assert_eq!(s2.flex_grow, 2.0);
         assert_eq!(s2.flex_shrink, 3.0, "a bare number in position 2 is the SHRINK");
+    }
+
+    // Neither property was parsed: every grid item stretched across its cell.
+    #[test]
+    fn justify_items_and_justify_self_are_parsed() {
+        use rustkit_css::{JustifyItems, JustifySelf};
+        let e = engine();
+        for (value, expected) in [
+            ("center", JustifyItems::Center),
+            ("safe center", JustifyItems::Center),
+            ("start", JustifyItems::Start),
+            ("end", JustifyItems::End),
+            ("normal", JustifyItems::Stretch),
+            ("legacy", JustifyItems::Stretch),
+        ] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, "justify-items", value);
+            assert_eq!(s.justify_items, expected, "justify-items: {value}");
+        }
+        for (value, expected) in [
+            ("center", JustifySelf::Center),
+            ("unsafe end", JustifySelf::End),
+            ("stretch", JustifySelf::Stretch),
+            ("auto", JustifySelf::Auto),
+            ("normal", JustifySelf::Auto),
+        ] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, "justify-self", value);
+            assert_eq!(s.justify_self, expected, "justify-self: {value}");
+        }
     }
 }
 
