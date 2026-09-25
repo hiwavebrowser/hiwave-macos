@@ -1,0 +1,91 @@
+{
+  "id": "microsoft",
+  "url": "https://www.microsoft.com/en-us",
+  "chrome": [
+    {
+      "url": "https://www.microsoft.com/en-us",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.microsoft.com/en-us",
+      "title": "Microsoft \u2013 AI, Cloud, Productivity, Computing, Gaming & Apps",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260925T0620Z-before/microsoft/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260925T0620Z-before/microsoft/chrome-a.png",
+      "elapsed_ms": 27099
+    },
+    {
+      "url": "https://www.microsoft.com/en-us",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.microsoft.com/en-us",
+      "title": "Microsoft \u2013 AI, Cloud, Productivity, Computing, Gaming & Apps",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260925T0620Z-before/microsoft/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260925T0620Z-before/microsoft/chrome-b.png",
+      "elapsed_ms": 23960
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "timeout",
+    "html_file": null,
+    "url": "https://www.microsoft.com/en-us",
+    "width": 1280,
+    "height": 800,
+    "frame_path": null,
+    "layout_path": null,
+    "layout_stats": null,
+    "error": "capture exceeded 30000 ms",
+    "wall_ms": 30465
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": false,
+    "why": "capture exceeded 30000 ms"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 39,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "24",
+      "365",
+      "7",
+      "all",
+      "assistant",
+      "available",
+      "azure",
+      "business",
+      "can",
+      "chat",
+      "content",
+      "copilot",
+      "deals",
+      "explore",
+      "for",
+      "help",
+      "is",
+      "lineup",
+      "main",
+      "me",
+      "microsoft",
+      "most",
+      "no",
+      "now",
+      "order"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 5.68095703125,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

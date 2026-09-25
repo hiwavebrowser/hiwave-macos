@@ -1,0 +1,103 @@
+{
+  "id": "facebook",
+  "url": "https://www.facebook.com/",
+  "chrome": [
+    {
+      "url": "https://www.facebook.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.facebook.com/",
+      "title": "Facebook",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260925T0725Z-cascade/facebook/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260925T0725Z-cascade/facebook/chrome-a.png",
+      "elapsed_ms": 15889
+    },
+    {
+      "url": "https://www.facebook.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.facebook.com/",
+      "title": "Facebook",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260925T0725Z-cascade/facebook/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260925T0725Z-cascade/facebook/chrome-b.png",
+      "elapsed_ms": 15658
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.facebook.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260925T0725Z-cascade/facebook/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260925T0725Z-cascade/facebook/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 1,
+      "threw": 0,
+      "skipped": 0,
+      "fetch_failed": 47,
+      "over_budget": 0,
+      "bytes": 0,
+      "elapsed_ms": 0
+    },
+    "elapsed_ms": 16693,
+    "error": null,
+    "wall_ms": 16770,
+    "non_background_fraction": 0.0101
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": false,
+    "why": "blank frame (1.01% non-background)"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 46,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "account",
+      "ai",
+      "ban",
+      "brasil",
+      "create",
+      "email",
+      "english",
+      "espa\u00f1ol",
+      "explore",
+      "facebook",
+      "forgot",
+      "france",
+      "fran\u00e7ais",
+      "in",
+      "instagram",
+      "into",
+      "italiano",
+      "languages",
+      "lite",
+      "log",
+      "love",
+      "messenger",
+      "meta",
+      "mobile",
+      "more"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0.015625,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

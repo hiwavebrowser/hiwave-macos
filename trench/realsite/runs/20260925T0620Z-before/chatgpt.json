@@ -1,0 +1,66 @@
+{
+  "id": "chatgpt",
+  "url": "https://chatgpt.com/",
+  "chrome": [
+    {
+      "url": "https://chatgpt.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://chatgpt.com/",
+      "title": "Just a moment...",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260925T0620Z-before/chatgpt/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260925T0620Z-before/chatgpt/chrome-a.png",
+      "elapsed_ms": 15606
+    },
+    {
+      "url": "https://chatgpt.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://chatgpt.com/",
+      "title": "Just a moment...",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260925T0620Z-before/chatgpt/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260925T0620Z-before/chatgpt/chrome-b.png",
+      "elapsed_ms": 14443
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "error",
+    "html_file": null,
+    "url": "https://chatgpt.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": null,
+    "layout_path": null,
+    "layout_stats": null,
+    "elapsed_ms": 284,
+    "error": "Failed to load URL: NavigationError(\"HTTP error\")",
+    "wall_ms": 313
+  },
+  "access": {
+    "status": 403,
+    "vendor": "cloudflare",
+    "blocked": true
+  },
+  "loads": {
+    "pass": false,
+    "why": "blocked:cloudflare (HTTP 403) \u2014 Failed to load URL: NavigationError(\"HTTP error\")"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 0,
+    "rustkit_words": 0,
+    "why": "chrome shows no text in first viewport (unscored, 0 points)",
+    "unscored": true
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

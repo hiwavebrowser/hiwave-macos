@@ -1,0 +1,77 @@
+{
+  "id": "google",
+  "url": "https://www.google.com/",
+  "chrome": [
+    {
+      "url": "https://www.google.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.google.com/",
+      "title": "Google",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260925T0725Z-cascade/google/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260925T0725Z-cascade/google/chrome-a.png",
+      "elapsed_ms": 13201
+    },
+    {
+      "url": "https://www.google.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.google.com/",
+      "title": "Google",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260925T0725Z-cascade/google/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260925T0725Z-cascade/google/chrome-b.png",
+      "elapsed_ms": 12227
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.google.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260925T0725Z-cascade/google/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260925T0725Z-cascade/google/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 7,
+      "threw": 7,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 1433699,
+      "elapsed_ms": 2274
+    },
+    "elapsed_ms": 4162,
+    "error": null,
+    "wall_ms": 4888,
+    "non_background_fraction": 0.0909
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 24,
+    "rustkit_words": 37,
+    "ratio": 1.0,
+    "missing_sample": []
+  },
+  "looks_right": {
+    "pass": true,
+    "chrome_self_diff": 0,
+    "diff": 9.22802734375
+  },
+  "points": 3
+}

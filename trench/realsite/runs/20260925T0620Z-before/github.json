@@ -1,0 +1,91 @@
+{
+  "id": "github",
+  "url": "https://github.com/",
+  "chrome": [
+    {
+      "url": "https://github.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://github.com/",
+      "title": "GitHub \u00b7 Change is constant. GitHub keeps you ahead. \u00b7 GitHub",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260925T0620Z-before/github/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260925T0620Z-before/github/chrome-a.png",
+      "elapsed_ms": 32265
+    },
+    {
+      "url": "https://github.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://github.com/",
+      "title": "GitHub \u00b7 Change is constant. GitHub keeps you ahead. \u00b7 GitHub",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260925T0620Z-before/github/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260925T0620Z-before/github/chrome-b.png",
+      "elapsed_ms": 30535
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "timeout",
+    "html_file": null,
+    "url": "https://github.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": null,
+    "layout_path": null,
+    "layout_stats": null,
+    "error": "capture exceeded 30000 ms",
+    "wall_ms": 30215
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": false,
+    "why": "capture exceeded 30000 ms"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 60,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "a",
+      "accompanied",
+      "agents",
+      "and",
+      "app",
+      "behind",
+      "building",
+      "but",
+      "by",
+      "code",
+      "collaboration",
+      "come",
+      "content",
+      "copilot",
+      "demo",
+      "developers",
+      "download",
+      "ducky",
+      "email",
+      "endures",
+      "enter",
+      "enterprise",
+      "evolve",
+      "float",
+      "for"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 10.10224609375,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

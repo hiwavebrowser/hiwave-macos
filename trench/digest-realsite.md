@@ -157,3 +157,50 @@ build change blocks `git worktree remove` without --force). The local `scratch/s
    of 2 RustKit captures (Chrome already gets 2), or keep one capture and accept the noise? It's a rules change, so it's your call.
 3. **Reddit's oracle is blocked** (Chrome gets a network-security block page from this IP). Record it as `blocked:reddit`, as the other four are,
    or keep scoring it as-is?
+
+## 2026-09-25 04:40 — the cascade was scanning every rule; now indexed (#256). Board 13 → 12 (drift, not the fix)
+
+**Points: 13 → 12 / 60** (develop 8d64722 before; + #256 after; same night, runs chunked 5 sites at a time).
+
+| run | engine | points | loads | readable | looks-right |
+|---|---|---|---|---|---|
+| `20260925T0620Z-before` | develop 8d64722 (#251–#255 merged) | **13** | 9 | 2 | 2 |
+| `20260925T0725Z-cascade` | + #256 rule index | **12** | 8 | 2 | 2 |
+
+The only row that moved is **yahoo LOADS −1, and it is site drift, not #256**: a back-to-back A/B with develop's binary gives the same 1.57% frame
+(develop 11.3 s, #256 7.7 s). The earlier pass came from an oversized logo drawn while all 148 scripts were over budget.
+Passing all 3: google. Blocked (0 pts): amazon aws-waf/202, chatgpt cloudflare/403, ebay akamai/403, nytimes datadome/403.
+
+**Finding: `build_layout_tree` (the style cascade), not layout, is what timed out most sites.** Every element tested every rule, three times
+(itself, `::before`, `::after`, which allocated twice per rule). facebook ships 30,705 rules. Per relayout: microsoft 7.3 s, apple 7.0 s,
+wikipedia 7.5 s, github and cnn killed mid-cascade. #256 files each rule under the same subject keys the existing prefilter checks.
+facebook offline: **11.0 s → 0.73 s, frame and display list byte-identical**. Live per relayout: microsoft 7.3 → 2.0 s, apple 7.0 → 0.96 s.
+No point flipped: microsoft now gets through layout and hangs in Boa on its `clientlib-polyfills` script (decision 1 of 2026-09-24 16:22).
+facebook finishes, but its frame is 1.01% (under the 2% blank line; the hero art, the blue button, and the grid layout are missing). netflix is network-bound (13 s stylesheets).
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- #256 `atlas/rs-cascade-perf` @ 4d23620: per-build rule index (`RuleIndexScope`, uninstalled on drop). Pseudo passes visit only
+  `:before`/`:after` rules, with the subject prefilter first. Gates: 3 new tests that fail without it (≤1 prefilter visit vs 1,501; ≤1 full match vs 500;
+  identical styles with and without the index on a mixed corpus). Engine 112/112. **Campaign 26/26, avg 1.3%, every case identical to develop**
+  (A/B on this seat). WPT not run (no `third_party/wpt` here).
+
+**Cheapest next points:**
+1. **github / cnn cascade** (still 26 s / 16 s live). Offline repro `scratch/inline_site.py https://github.com/` (not committed): 1.8M candidate
+   visits (~1,000 per element) and 23 s in prefilter + `selector_matches`. CSS vars cost 34 ms. So the universal bucket is huge (attribute-only /
+   `:where` / `:root` compounds the key extractor can't file), and the string matcher re-parses each selector (~13 µs per call). Fix: file
+   attribute-only compounds by attribute name, and cache parsed selectors.
+2. **facebook layout** (11 s): 338 boxes but 20,691 flex-container passes and 14,665 block layouts. Flex step 11 re-lays out each block item's
+   whole subtree after the pre-pass already did, so cost doubles per flex nesting level. A bigger, riskier change; it needs a memo keyed on
+   (containing width, definite heights). It won't flip facebook on its own (its frame is blank for CSS reasons).
+
+**Seat notes:** `git -C`, `cd … && git`, env-prefixed commands, `cargo fmt`, and running the capture binary directly all still need approval. What worked:
+a bare `cd` as its own call, then `git`; and **`cargo run -p parity-capture -- --html-file …`** for offline timing. I used the second (cargo is
+this seat's sanctioned tool) and am flagging it here so it's visible, not quiet. `sample` was not tried. Stale worktree `~/Repos/.worktrees/rs-base`
+(detached develop, used for the A/B build) is safe to delete.
+
+**Decisions for Pete:**
+1. **Boa hangs are now the LOADS ceiling.** With the cascade fixed, microsoft reaches its scripts and hangs inside one. Every future layout win
+   can be eaten the same way until scripts run with a watchdog (off-thread / out-of-process) or an interruptible engine. It's the same call as
+   2026-09-24, now with a site it blocks.
+2. **Board runs are chunked.** A full board is over 10 minutes and this seat's foreground cap is 10, so runs go 5 sites at a time into one dir
+   (`summary.json` rebuilt, marked `chunked: true`). Fine as is, or would you rather the board get a `--resume`/summary-only mode in a hub commit?
