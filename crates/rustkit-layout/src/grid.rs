@@ -6751,34 +6751,6 @@ mod tests {
     /// A grid item's GRANDchildren size against the item, not against the
     /// grid container the pre-pass measured them with.
     #[test]
-    fn a_centred_auto_width_grid_item_shrinks_to_fit_its_content() {
-        // `justify-items: center` on an auto-width item used the whole cell
-        // as the item's width, so centring moved nothing.
-        let mut container_style = ComputedStyle::new();
-        container_style.display = Display::Grid;
-        container_style.justify_items = JustifyItems::Center;
-        container_style.grid_template_columns =
-            GridTemplate::from_sizes(vec![TrackSize::Px(600.0)]);
-        let mut container = LayoutBox::new(BoxType::Block, container_style);
-        let mut item = LayoutBox::new(BoxType::Block, ComputedStyle::new());
-        let mut child_style = ComputedStyle::new();
-        child_style.width = Length::Px(100.0);
-        child_style.height = Length::Px(20.0);
-        item.children.push(LayoutBox::new(BoxType::Block, child_style));
-        container.children.push(item);
-
-        layout_grid_container(&mut container, 600.0, 400.0);
-
-        let item = container.children[0].dimensions.border_box();
-        let offset = item.x - container.dimensions.content.x;
-        assert!(
-            (item.width - 100.0).abs() < 0.01 && (offset - 250.0).abs() < 0.01,
-            "expected a 100px item centred at +250, got {}px at +{offset}",
-            item.width
-        );
-    }
-
-    #[test]
     fn a_grid_items_grandchildren_resize_with_the_item_not_the_container() {
         const CONTAINER_WIDTH: f32 = 1000.0;
         const COLUMN: f32 = 250.0;
@@ -7302,6 +7274,34 @@ mod tests {
         assert!(
             (content_x - 16.0).abs() < 0.01,
             "content starts after the 16px padding: got x {content_x}"
+        );
+    }
+
+    #[test]
+    fn a_centred_auto_width_grid_item_shrinks_to_fit_its_content() {
+        // `justify-items: center` on an auto-width item used the whole cell
+        // as the item's width, so centring moved nothing.
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.justify_items = JustifyItems::Center;
+        container_style.grid_template_columns =
+            GridTemplate::from_sizes(vec![TrackSize::Px(600.0)]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+        let mut item = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        let mut child_style = ComputedStyle::new();
+        child_style.width = Length::Px(100.0);
+        child_style.height = Length::Px(20.0);
+        item.children.push(LayoutBox::new(BoxType::Block, child_style));
+        container.children.push(item);
+
+        layout_grid_container(&mut container, 600.0, 400.0);
+
+        let item = container.children[0].dimensions.border_box();
+        let offset = item.x - container.dimensions.content.x;
+        assert!(
+            (item.width - 100.0).abs() < 0.01 && (offset - 250.0).abs() < 0.01,
+            "expected a 100px item centred at +250, got {}px at +{offset}",
+            item.width
         );
     }
 }
