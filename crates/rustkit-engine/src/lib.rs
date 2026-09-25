@@ -266,6 +266,10 @@ enum ScriptTiming {
     Async,
 }
 
+/// The largest page script `run_page_scripts` starts. Instagram's 3.9 MB
+/// bundle ran in 3.3s; youtube's 10.8 MB one did not finish in 16s.
+const MAX_PAGE_SCRIPT_BYTES: usize = 4 * 1024 * 1024;
+
 /// One `<script>` after fetching: its log label, then its source text or
 /// the reason it will not run.
 type FetchedScript = (String, Result<(ScriptTiming, String), ScriptOutcome>);
@@ -1667,6 +1671,19 @@ impl Engine {
                     } else {
                         ScriptOutcome::OverBudget
                     },
+                });
+                continue;
+            }
+            // Boa cannot be interrupted mid-script, so the budget can only
+            // be enforced between scripts. Boa takes about 1s per MB here,
+            // and more on app bundles: youtube's 10.8 MB bundle ran for 16s+
+            // and hung the capture. A script that big is not started.
+            if text.len() > MAX_PAGE_SCRIPT_BYTES {
+                log.push(ScriptRecord {
+                    source: label,
+                    bytes: text.len(),
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::Skipped("too large to run inside the script budget"),
                 });
                 continue;
             }
@@ -16683,6 +16700,27 @@ window.addEventListener('load', function () {
         let log = engine.script_log(view).unwrap();
         assert_eq!(log[0].outcome, ScriptOutcome::Ran, "{log:#?}");
         assert_eq!(engine.execute_script(view, "slow").unwrap(), "Boolean(true)");
+    }
+
+    #[test]
+    fn a_script_too_large_for_the_budget_is_not_started() {
+        let page = r#"<html><head>
+<script src="/huge.js"></script>
+<script>var after = true;</script>
+</head><body>hi</body></html>"#;
+        let huge = format!("var huge = true;\n{}", "// padding\n".repeat(MAX_PAGE_SCRIPT_BYTES / 11 + 1));
+        let port = serve(vec![
+            ("/", "text/html", page.to_string()),
+            ("/huge.js", "text/javascript", huge),
+        ]);
+        let (mut engine, view) = load(EngineConfig::default(), port);
+        let log = engine.script_log(view).unwrap();
+        assert!(
+            matches!(log[0].outcome, ScriptOutcome::Skipped(why) if why.starts_with("too large")),
+            "{log:#?}"
+        );
+        assert_eq!(engine.execute_script(view, "typeof huge").unwrap(), r#"String("undefined")"#);
+        assert_eq!(engine.execute_script(view, "after").unwrap(), "Boolean(true)");
     }
 
     #[test]
