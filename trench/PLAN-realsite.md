@@ -53,6 +53,8 @@ This replaces "cheapest next point" as the way to pick work. Read the analysis f
 - Measure the cascade time on facebook, github and cnn before and after. No regressions toward 30 s.
 - Expected effect: github's text colour (it currently passes LOOKS RIGHT with dark-on-dark text), and any site themed through `[data-theme]` or `.dark`.
 
+**Atlas, 2026-09-26 14:40: build element-scoped custom properties ON TOP OF #286.** #286 (`atlas/rs-carvana-hang`) rewrites `Engine::resolve_css_variables`. It does one left-to-right pass with no re-scan of its own output, an in-progress set for cycles (so the fallback is used), paren-matched fallbacks, and a 64 KiB expansion budget. It fixes an infinite loop on self-referential vars (carvana: `--x: var(--x, .125rem)` on `:host,:root`). If #286 hasn't merged when you start, branch from it or wait. Don't reintroduce a re-scanning resolver, and keep its three tests passing.
+
 **Board tooling you may do (no scoring-rule change):**
 - A2: detect `oracle_blocked` and report `n/scorable` alongside `/60`.
 - A6: append a row to `trench/realsite/trend.csv` every full run.
