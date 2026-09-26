@@ -3812,6 +3812,7 @@ impl Engine {
                         s.overflow_wrap = parent.overflow_wrap;
                         s.line_break = parent.line_break;
                         s.font_stretch = parent.font_stretch;
+                        s.visibility = parent.visibility;
                         // NOT CSS inheritance — feature plumbing: gradient
                         // text (background-clip:text + transparent fill) is
                         // detected on the TEXT box at paint time
@@ -4020,6 +4021,7 @@ impl Engine {
             style.overflow_wrap = parent.overflow_wrap;
             style.line_break = parent.line_break;
             style.text_transform = parent.text_transform;
+            style.visibility = parent.visibility;
         }
 
         // Apply tag-specific default styles (user-agent stylesheet)
@@ -4730,6 +4732,7 @@ impl Engine {
             "word-break" => style.word_break = parent.word_break,
             "overflow-wrap" | "word-wrap" => style.overflow_wrap = parent.overflow_wrap,
             "line-break" => style.line_break = parent.line_break,
+            "visibility" => style.visibility = parent.visibility,
             "background-color" => style.background_color = parent.background_color,
             "border-color" => {
                 style.border_top_color = parent.border_top_color;
@@ -5481,6 +5484,16 @@ impl Engine {
                     _ => rustkit_css::Position::Static,
                 };
             }
+            "visibility" => {
+                // Before this arm, `visibility: hidden` painted: closed menus,
+                // dialogs and skip links showed on nearly every site.
+                match value.trim().to_ascii_lowercase().as_str() {
+                    "visible" => style.visibility = rustkit_css::Visibility::Visible,
+                    "hidden" => style.visibility = rustkit_css::Visibility::Hidden,
+                    "collapse" => style.visibility = rustkit_css::Visibility::Collapse,
+                    _ => {}
+                }
+            }
             "top" => {
                 if let Some(length) = parse_length(value) {
                     style.top = Some(length);
@@ -6033,6 +6046,7 @@ impl Engine {
             "border-bottom-width" => style.border_bottom_width = rustkit_css::Length::Zero,
             "border-left-width" => style.border_left_width = rustkit_css::Length::Zero,
             "width" => style.width = rustkit_css::Length::Auto,
+            "visibility" => style.visibility = rustkit_css::Visibility::Visible,
             "height" => style.height = rustkit_css::Length::Auto,
             "display" => style.display = rustkit_css::Display::Block,
             "opacity" => style.opacity = 1.0,
@@ -15377,6 +15391,33 @@ mod web_font_tests {
         let mut got = Vec::new();
         selects(&layout, &mut got);
         assert_eq!(got, vec![Some(1), Some(0)]);
+    }
+
+    #[test]
+    fn visibility_is_parsed_and_inherited_and_a_child_can_undo_it() {
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><head><style>
+            .menu { visibility: hidden } .menu .open { visibility: visible }
+            .bad { visibility: collapse; visibility: nonsense }
+        </style></head><body>
+            <div class="menu">a<p>b</p><p class="open">c</p></div>
+            <div class="bad">d</div>
+            <div>e</div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+        fn vis_of(b: &LayoutBox, text: &str) -> Option<rustkit_css::Visibility> {
+            if matches!(&b.box_type, BoxType::Text(t) if t.trim() == text) {
+                return Some(b.style.visibility);
+            }
+            b.children.iter().find_map(|c| vis_of(c, text))
+        }
+        use rustkit_css::Visibility::*;
+        assert_eq!(vis_of(&layout, "a"), Some(Hidden));
+        assert_eq!(vis_of(&layout, "b"), Some(Hidden), "inherited");
+        assert_eq!(vis_of(&layout, "c"), Some(Visible), "a child can set visible");
+        assert_eq!(vis_of(&layout, "d"), Some(Collapse), "an invalid value is ignored");
+        assert_eq!(vis_of(&layout, "e"), Some(Visible));
     }
 
     #[test]

@@ -1748,6 +1748,18 @@ pub enum TextAlign {
     Justify,
 }
 
+/// `visibility` (CSS 2.1 §11.2). Inherited. A hidden box still takes up
+/// space; it just paints nothing of its own, and a descendant can set
+/// `visible` again. `collapse` is treated as `hidden` (no table/flex
+/// collapsing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Visibility {
+    #[default]
+    Visible,
+    Hidden,
+    Collapse,
+}
+
 /// Overflow behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Overflow {
@@ -2340,6 +2352,7 @@ pub struct ComputedStyle {
 
     // Visual
     pub opacity: f32,
+    pub visibility: Visibility,
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
     /// css-overflow-3 §5.1; only meaningful when the overflow above clips.
@@ -2480,6 +2493,7 @@ impl ComputedStyle {
             line_break: parent.line_break,
             direction: parent.direction,
             writing_mode: parent.writing_mode,
+            visibility: parent.visibility,
 
             // Text decoration is NOT inherited (each element sets its own)
             text_decoration_line: TextDecorationLine::NONE,

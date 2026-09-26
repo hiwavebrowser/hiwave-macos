@@ -6505,6 +6505,11 @@ impl DisplayList {
 
     /// Render a layout box's own content (shadows, background, borders, text, images).
     fn render_box_content(&mut self, layout_box: &LayoutBox) {
+        // `visibility: hidden` hides the box's own painting only; its
+        // children are still visited and may be `visible` again.
+        if layout_box.style.visibility != rustkit_css::Visibility::Visible {
+            return;
+        }
         // A text run is not an element (CSS 2.1 §14.2: backgrounds, borders
         // and shadows belong to elements), so it paints glyphs only. Its
         // style can still carry box decorations: the engine copies
@@ -13869,6 +13874,54 @@ mod inline_fragment_union_tests {
     /// directly. It goes red if `render_text` stops calling `fragment_rect`
     /// and open-codes the arithmetic again, even if the open-coded version is
     /// correct on the day it is written.
+    #[test]
+    fn a_hidden_box_paints_nothing_of_its_own_but_a_visible_child_does() {
+        // `visibility: hidden` had no field at all, so closed menus, dialogs
+        // and skip links painted on nearly every real site.
+        use rustkit_css::Visibility;
+        let red = Color::new(255, 0, 0, 1.0);
+        let blue = Color::new(0, 0, 255, 1.0);
+        let block = |visibility: Visibility, bg: Color, y: f32| {
+            let mut style = ComputedStyle::new();
+            style.visibility = visibility;
+            style.background_color = bg;
+            let mut b = LayoutBox::new(BoxType::Block, style.clone());
+            b.dimensions.content = Rect::new(0.0, y, 200.0, 20.0);
+            let mut text = LayoutBox::new(BoxType::Text("menu".into()), ComputedStyle::inherit_from(&style));
+            text.dimensions.content = Rect::new(0.0, y, 40.0, 20.0);
+            b.children.push(text);
+            b
+        };
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.dimensions.content = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut hidden = block(Visibility::Hidden, red, 0.0);
+        hidden.children.push(block(Visibility::Visible, blue, 40.0));
+        root.children.push(hidden);
+        root.children.push(block(Visibility::Collapse, red, 80.0));
+
+        let list = DisplayList::build(&root);
+        let fills: Vec<Color> = list
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DisplayCommand::SolidColor(color, _) => Some(*color),
+                _ => None,
+            })
+            .collect();
+        let texts: Vec<f32> = list
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DisplayCommand::Text { y, .. } => Some(*y),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fills, vec![blue], "only the visible child's background paints");
+        assert_eq!(texts.len(), 1, "only the visible child's text paints: {texts:?}");
+        // The child's run, at y 40 less a little half-leading (hidden: 0, collapse: 80).
+        assert!((30.0..60.0).contains(&texts[0]), "{texts:?}");
+    }
+
     #[test]
     fn paint_seats_every_line_where_the_fragment_rule_puts_it() {
         let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
