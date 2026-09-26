@@ -1,0 +1,157 @@
+diff --git a/crates/rustkit-layout/src/text.rs b/crates/rustkit-layout/src/text.rs
+index 6656462..4e30a19 100644
+--- a/crates/rustkit-layout/src/text.rs
++++ b/crates/rustkit-layout/src/text.rs
+@@ -1005,6 +1005,9 @@ impl TextShaper {
+         stretch: FontStretch,
+         size: f32,
+     ) -> Result<ShapedRun, TextError> {
++        #[cfg(test)]
++        font_resolve_tests::SHAPES.with(|n| n.set(n.get() + 1));
++
+         if text.is_empty() {
+             return Ok(ShapedRun {
+                 text: String::new(),
+@@ -2173,17 +2176,14 @@ impl TextShaper {
+         breaker: &LineBreaker,
+         hang_trailing_spaces: bool,
+     ) -> Result<usize, TextError> {
+-        // Get all break opportunities
+-        let break_offsets = breaker.break_offsets(text);
+-
+-        // Find the last break that fits
+-        let mut best_break = 0;
+-
+-        for &offset in &break_offsets {
+-            if offset == 0 {
+-                continue;
+-            }
++        // Break opportunities, ascending.
++        let break_offsets: Vec<usize> = breaker
++            .break_offsets(text)
++            .into_iter()
++            .filter(|&offset| offset != 0)
++            .collect();
+ 
++        let fits = |offset: usize| -> Result<bool, TextError> {
+             // css-text-3 §4.1.3: collapsible spaces at the end of a line are
+             // removed before the line is measured — they HANG past the edge
+             // and never decide the break. Measuring the prefix with its
+@@ -2202,23 +2202,46 @@ impl TextShaper {
+             // always fits (pre-wrap " XXXXX" in 5ch breaks after the leading
+             // space — WPT overflow-wrap-anywhere-004/005 — the space-only
+             // first line is the break, not a skipped opportunity).
+-            let fits = if prefix.is_empty() {
+-                true
+-            } else {
+-                self.shape(prefix, font_chain, weight, style, stretch, size)?
++            Ok(prefix.is_empty()
++                || self
++                    .shape(prefix, font_chain, weight, style, stretch, size)?
+                     .metrics
+                     .width
+-                    <= max_width
+-            };
++                    <= max_width)
++        };
+ 
+-            if fits {
+-                best_break = offset;
++        // The last break that fits. A longer prefix is never narrower, so
++        // `fits` is true up to some break and false after it. The linear
++        // scan this replaces shaped every prefix up to that break: a line of
++        // n words cost n + 1 Core Text shapes (29% of cnn's main thread was
++        // line wrapping). Gallop from the line start (breaks 1, 2, 4, ...)
++        // until one does not fit, then binary-search that bracket: O(log n)
++        // shapes, none longer than about twice the line. A plain binary
++        // search over every break would shape prefixes up to half of the
++        // remaining paragraph.
++        // Invariant: every break before `lo` fits, none from `hi` on.
++        let (mut lo, mut hi) = (0, break_offsets.len());
++        let mut step = 1;
++        while lo < hi {
++            let probe = (lo + step - 1).min(hi - 1);
++            if fits(break_offsets[probe])? {
++                lo = probe + 1;
++                step *= 2;
+             } else {
++                hi = probe;
+                 break;
+             }
+         }
++        while lo < hi {
++            let mid = lo + (hi - lo) / 2;
++            if fits(break_offsets[mid])? {
++                lo = mid + 1;
++            } else {
++                hi = mid;
++            }
++        }
+ 
+-        Ok(best_break)
++        Ok(if lo == 0 { 0 } else { break_offsets[lo - 1] })
+     }
+ }
+ 
+@@ -3473,6 +3496,61 @@ mod font_resolve_tests {
+     thread_local! {
+         /// Uncached font resolutions on this thread.
+         pub(super) static RESOLUTIONS: Cell<usize> = const { Cell::new(0) };
++        /// `TextShaper::shape` calls on this thread.
++        pub(super) static SHAPES: Cell<usize> = const { Cell::new(0) };
++    }
++
++    #[test]
++    fn a_line_break_is_found_in_log_n_shapes_and_is_the_last_fit() {
++        // 400 words wrapped at 300px. Every line but the last must fit and
++        // must not have fit its next word: the break the linear scan found.
++        let shaper = TextShaper::new();
++        let chain = FontFamilyChain::new("Helvetica");
++        let words: Vec<String> = (0..400).map(|i| format!("w{}rd", "o".repeat(i % 7))).collect();
++        let text = words.join(" ");
++        let before = SHAPES.with(Cell::get);
++        let lines = shaper
++            .wrap_text(
++                &text,
++                &chain,
++                FontWeight(400),
++                FontStyle::Normal,
++                FontStretch::Normal,
++                16.0,
++                300.0,
++                CssWordBreak::Normal,
++                CssOverflowWrap::Normal,
++            )
++            .unwrap();
++        let shapes = SHAPES.with(Cell::get) - before;
++        assert!(lines.len() > 50, "{} lines", lines.len());
++        eprintln!("PROBE {shapes} shapes {} lines", lines.len());
++        // Linear: ~ (words per line + 3) shapes per line. Galloping: a
++        // handful. This bound fails on the linear scan (~15 per line).
++        assert!(
++            shapes <= lines.len() * 12,
++            "{shapes} shapes for {} lines",
++            lines.len()
++        );
++
++        let width = |s: &str| {
++            shaper
++                .shape(s, &chain, FontWeight(400), FontStyle::Normal, FontStretch::Normal, 16.0)
++                .unwrap()
++                .metrics
++                .width
++        };
++        for pair in lines.windows(2) {
++            let (line, next) = (&pair[0], &pair[1]);
++            let line_text = text[line.start_offset..line.end_offset].trim_end();
++            assert!(width(line_text) <= 300.0, "{line_text:?} overflows");
++            let next_word = text[next.start_offset..next.end_offset]
++                .split(' ')
++                .next()
++                .unwrap();
++            let with_next = format!("{line_text} {next_word}");
++            assert!(width(&with_next) > 300.0, "{with_next:?} would have fit");
++        }
+     }
+ 
+     #[test]

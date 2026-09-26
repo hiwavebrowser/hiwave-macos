@@ -432,3 +432,38 @@ Housekeeping: the hub worktree was switched to `atlas/rs-float-placement` twice 
 **Decisions for Pete:**
 1. **A2 costs x its LOOKS RIGHT point (14 → 13 on identical code).** Chrome gets a 403 from x.com and reddit from this Mac, so neither can be scored on READABLE or LOOKS RIGHT until the oracle is headed or un-flagged (A1, still waiting on you). Say if you'd rather the oracle retry with a headed Chrome before being ruled blocked.
 2. **Text-measurement memo vs line shortening next?** I recommend the memo: it can move three sites' LOADS at once, while line shortening moves pixels on wikipedia only.
+
+
+## 2026-09-26 08:40 — B5: memoising text shaping takes netflix, github and cnn under 30 s. Board 12 → 17 (+4 from the engine, +1 linkedin drift)
+
+**Points: 12 → 17 / 60** (session develop run → #278). 13 → 17 against last session's close, which is the same engine as develop.
+
+| run | engine | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|
+| `20260926T1100Z-dev` | develop a0176dd | **12** | 9 | 2 | 1 | 11/45 |
+| `20260926T1100Z-memo` | + #277 @ ed0ec40 (chunks alternating with dev) | **16** | 11 | 4 | 1 | 15/45 |
+| `20260926T1245Z-shape` | + #278 @ 8c83f3f | **17** | 12 | 4 | 1 | 16/42 |
+
+Rows that moved:
+- **netflix 0 → 2** (#277 and #278): LOADS, and READABLE 82.9%.
+- **github 0 → 1** (both): LOADS. READABLE 63%.
+- **cnn 0 → 1** (#278 only): LOADS. READABLE 43.6%.
+- linkedin 1 → 2 is **oracle drift**, not the engine. Chrome showed 57 words in the dev arm and 35 later, while RustKit drew 34 in every arm.
+- Passing all 3: google. Blocked: chatgpt, ebay, nytimes, and amazon in the 1245Z run. Oracle blocked: x, reddit, chatgpt, ebay, nytimes; yahoo's oracle failed in 1245Z. LOADS timeouts left: **none**. microsoft is "blank" (custom elements).
+
+**Engine work (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#277 `atlas/rs-text-measure-memo` @ 3a280eb:** per-thread memo in `measure_text_with_spacing`, dropped when the `@font-face` set changes. It came from last session's netflix profile (intrinsic sizing re-measuring the same words). netflix 54.0 → 13.5 s, github 44.1 → 19.7 s, cnn 54.3 → 33.1 s. github's and cnn's frames are byte-identical to develop's.
+  - 3a280eb is a test-only fix pushed after its R2 stamp: a race against another test's process-wide web-font install.
+- **#278 `atlas/rs-shape-memo` @ 8c83f3f, subsumes #277:** memoises `TextShaper::shape` itself (macOS). A cnn profile on #277's build showed 29% of the main thread in line wrapping: thousands of small repeated shapes, because every flex measuring pass re-wraps its text. **cnn 51.8 → 25.7 s, byte-identical frame.** github 17.5 s, netflix 8.5 s.
+- I tried a galloping `find_line_break` (O(log n) prefix shapes per line) and dropped it: 9% fewer shapes at about 5 words per line, and repetition is the cost. Diff in `scratch/line-break-gallop.diff`.
+- Gates on both: layout 518/518, engine 144/144, css 41/41. **Campaign 26/26, avg 1.3%, every case identical to develop.** Each new test fails with its memo bypassed. WPT not run (no `third_party/wpt`).
+
+**Tooling (hub scratch):** `scratch/ab_board.py` (alternating-chunk A/B board in python, since this seat needs approval to run `bash` scripts), `ab_time.py` (A/B wall time plus frame hash), `build_prof.py` (unstripped `sample` build), `build_rel.py`/`campaign_in.py` (build or campaign against a shared target dir), `sample_children.py`. `gh pr comment` and `git -C` need approval on this seat, so the #277 → #278 note is in #278's body and here, not on #277.
+
+**Next:**
+1. READABLE on the newly loading sites: github 63%, cnn 44%. Find out which words are missing and why (JS-rendered, or cut off by layout).
+2. B4 (SVG as image), or custom elements for microsoft (decision 1 from 09-26 00:40, still open).
+3. Style cost: in the cnn profile, `create_pseudo_element` + `compute_style_for_element` + `rule_may_match` are about 35% of the main thread. That is the next LOADS lever if any site regresses toward 30 s.
+
+**Decisions for Pete:**
+1. **#277 or #278?** #278 subsumes #277 and is +1 more (cnn). Landing both is harmless but redundant. I recommend #278 alone and closing #277. I couldn't comment on #277 from this seat (`gh pr comment` needs approval).
