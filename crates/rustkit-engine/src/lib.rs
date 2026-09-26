@@ -5459,6 +5459,18 @@ impl Engine {
                     style.opacity = opacity.clamp(0.0, 1.0);
                 }
             }
+            "object-fit" => {
+                // Layout and paint already honour every keyword; only this
+                // arm was missing, so every `object-fit: cover` painted as
+                // `fill` (stretched). An invalid value is ignored.
+                let keyword = value.trim().to_ascii_lowercase();
+                if matches!(
+                    keyword.as_str(),
+                    "fill" | "contain" | "cover" | "none" | "scale-down"
+                ) {
+                    style.object_fit = keyword;
+                }
+            }
             "position" => {
                 style.position = match value.trim() {
                     "static" => rustkit_css::Position::Static,
@@ -6024,6 +6036,7 @@ impl Engine {
             "height" => style.height = rustkit_css::Length::Auto,
             "display" => style.display = rustkit_css::Display::Block,
             "opacity" => style.opacity = 1.0,
+            "object-fit" => style.object_fit = "fill".to_string(),
             _ => {
                 // Unknown property, do nothing
             }
@@ -15176,6 +15189,36 @@ mod web_font_tests {
             y("p"),
             y("q")
         );
+    }
+
+    #[test]
+    fn object_fit_reaches_the_computed_style() {
+        // Paint honoured every keyword, but no declaration ever set it:
+        // `object-fit: cover` thumbnails painted stretched.
+        let Some(engine) = test_engine() else { return };
+        let html = r#"<!DOCTYPE html><html><head><style>
+            .c { object-fit: cover } .n { object-fit: contain; object-fit: bogus }
+        </style></head><body>
+            <div class="c">a</div>
+            <div class="n">b</div>
+            <div style="object-fit: SCALE-DOWN">c</div>
+            <div>d</div>
+        </body></html>"#;
+        let document = Rc::new(Document::parse_html(html).expect("parse"));
+        let layout = engine.build_layout_from_document(&document, &[]);
+        fn fit_around(b: &LayoutBox, text: &str) -> Option<String> {
+            if b.children
+                .iter()
+                .any(|c| matches!(&c.box_type, BoxType::Text(t) if t.trim() == text))
+            {
+                return Some(b.style.object_fit.clone());
+            }
+            b.children.iter().find_map(|c| fit_around(c, text))
+        }
+        assert_eq!(fit_around(&layout, "a").as_deref(), Some("cover"));
+        assert_eq!(fit_around(&layout, "b").as_deref(), Some("contain"), "an invalid value is ignored");
+        assert_eq!(fit_around(&layout, "c").as_deref(), Some("scale-down"));
+        assert_ne!(fit_around(&layout, "d").as_deref(), Some("cover"));
     }
 
     #[test]
