@@ -121,6 +121,8 @@ echo "Building hiwave-smoke (release)..."
 cargo build --release -p hiwave-smoke 2>&1 | tail -2
 
 SHOWN=0; FAILED=0
+LOAD_BUDGET_S=${LOAD_BUDGET_S:-30}
+declare -a HUNG_SITES=()
 for t in "${TARGETS[@]}"; do
     id=${t%% *}; url=${t#* }
     echo ""
@@ -136,8 +138,22 @@ for t in "${TARGETS[@]}"; do
     fi
     log=$(mktemp /tmp/visual-live-smoke.XXXX)
     ./target/release/hiwave-smoke --url "$url" --width "$WIDTH" --height "$HEIGHT" \
-        --duration-ms "$DURATION_MS" $FULLSCREEN >"$log" 2>&1
-    status=$?
+        --duration-ms "$DURATION_MS" $FULLSCREEN >"$log" 2>&1 &
+    SPID=$!
+    # Watchdog: the page gets LOAD_BUDGET_S to load (the board's 30 s budget)
+    # plus the display duration. A page that hangs RustKit is killed and
+    # reported, and the tour moves on instead of freezing.
+    limit=$(( LOAD_BUDGET_S + DURATION_MS / 1000 ))
+    waited=0; hung=false
+    while kill -0 "$SPID" 2>/dev/null; do
+        if (( waited >= limit )); then
+            hung=true; kill "$SPID" 2>/dev/null; sleep 2; kill -9 "$SPID" 2>/dev/null
+            break
+        fi
+        sleep 1; waited=$((waited + 1))
+    done
+    wait "$SPID" 2>/dev/null; status=$?
+    $hung && { echo "  ✗ HUNG: RustKit did not finish within ${limit}s (killed); worth an engine look"; HUNG_SITES+=("$id"); }
     grep -E 'ERROR|Failed' "$log" | head -3
     rm -f "$log"
     if [[ -n "$CPID" ]]; then kill "$CPID" 2>/dev/null; wait "$CPID" 2>/dev/null; rm -rf "$prof"; fi
@@ -147,4 +163,5 @@ done
 echo ""
 echo "=============================================="
 echo "Shown: $SHOWN, errors: $FAILED"
+(( ${#HUNG_SITES[@]} )) && echo "Hung (killed): ${HUNG_SITES[*]}"
 echo "=============================================="
