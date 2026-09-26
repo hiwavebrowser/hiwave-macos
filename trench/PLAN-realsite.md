@@ -69,6 +69,12 @@ Outputs stay gitignored, so the table IS the receipt. If a PR diff exceeds ~1,00
 2. **Measure Boa against V8 on real scripts before any big JS-track investment.** Time the same bundle (e.g. github, yahoo) in Boa and record the ratio. If Boa is 10× slower or worse, the JS track needs a first-paint-first policy: run parser-blocking and inline scripts, and defer async, defer, module and idle scripts. Only 23.5% of shipped JS runs by first paint.
 3. **DOM-binding order when the JS track starts:** Promise jobs, timers, rAF and rIC → getComputedStyle and getBoundingClientRect with forced layout → matchMedia → Intersection/Mutation/ResizeObserver → fetch/XHR → custom elements and Shadow DOM. React is the priority framework (9/17 sites).
 
+**Atlas, 2026-09-26 19:00: Pete approved A1, so the oracle runs HEADED Chrome.** Do this at the START of the next session, before any engine work:
+- In `tools/parity_oracle/realsite.mjs`, and any shared launch path, launch the pinned CfT 148 with `headless: false`. Keep every deterministic flag.
+- Put the window off-screen so it doesn't take over Pete's desktop every 3 h: `--window-position=-2400,0`, plus the same 1280x800 viewport. Don't touch `navigator.webdriver`, don't spoof, and don't solve challenges. This is Chrome identifying as itself.
+- Run the board once headless and once headed, same session, and add a dated line under **Changes** in BASELINE-realsite.md with both numbers. Expected: x's and carvana's oracles stop being "Access denied". The scorable count and per-site points may shift.
+- If headed Chrome still gets challenged somewhere, record it as oracle_blocked, as now.
+
 **Board tooling you may do (no scoring-rule change):**
 - A2: detect `oracle_blocked` and report `n/scorable` alongside `/60`.
 - A6: append a row to `trench/realsite/trend.csv` every full run.
@@ -81,7 +87,6 @@ Outputs stay gitignored, so the table IS the receipt. If a PR diff exceeds ~1,00
 ~~**Atlas, 2026-09-25 20:40: #271 (visibility) is on HOLD until microsoft's regression is handled.**~~ Wiring `customElements.define` is JS-track work and too big to block on. Instead, add a stopgap PR (or a commit on #271): until custom elements are implemented, `:defined` matches every element and `:not(:defined)` matches none. Chrome treats every non-custom element as defined, and for undefined custom elements, showing the un-upgraded content beats a blank page. Add a test with `:not(:defined){visibility:hidden}`. Then #271 lands, and so does the stopgap, with microsoft's before/after in the body.
 
 **Waiting on Pete. Do NOT do these until BASELINE says so:**
-- A1: oracle identity (headed Chrome, or drop `HeadlessChrome`).
 - A3: the LOOKS RIGHT content-union rule.
 - A4: best-of-2 LOADS.
 - The exit-metric change.
