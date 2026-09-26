@@ -69,6 +69,13 @@ async function captureChrome(url, pngPath, textPath, width, height, settleMs) {
       extraHTTPHeaders: { 'Sec-CH-Prefers-Color-Scheme': 'light' },
     });
     const page = await context.newPage();
+    // Top-level document status, recorded even when goto throws: an error
+    // status is Chrome showing its own error page, not the site (x's 403).
+    page.on('response', (r) => {
+      if (r.request().isNavigationRequest() && r.frame() === page.mainFrame()) {
+        result.http_status = r.status();
+      }
+    });
     try {
       await page.goto(url, { waitUntil: 'load', timeout: NAV_TIMEOUT_MS });
     } catch (e) {

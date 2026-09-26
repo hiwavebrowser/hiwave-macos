@@ -93,3 +93,17 @@ Whichever comes first:
   `20260925T1925Z-subdl` for matching Cloudflare's interstitial, which Chrome got
   too. That record was rescored to 0 (marked `rescored`); no earlier run credited
   a blocked site. Old rule applied to that run: 17; new rule: 15.
+- 2026-09-26 — A2 (PLAN, allowed tooling): a Chrome capture that lands on an
+  error page (`final_url` is `chrome-error://`, or the top-level document is
+  HTTP ≥ 400) is not a *successful* oracle capture. If both captures are like
+  that, the existing oracle-failed rule applies: READABLE and LOOKS RIGHT count
+  0, and the site is listed in `oracle_blocked`. The summary also reports
+  `n/scorable` (points on sites where neither RustKit's access probe nor Chrome's
+  oracle was blocked) next to `/60`, never instead of it. The live case was x:
+  Chrome got "Access to x.com was denied" (HTTP 403), and RustKit's mostly white
+  frame "looked right" against it. Run `20260926T0620Z-dev` (develop a0176dd):
+  old rule 14, new rule **13** (x 2 → 1). Every other site scored the same as
+  `20260926T0340Z-stack-logical`. reddit's oracle is also HTTP 403 now, but it
+  already scored 0.
+- 2026-09-26 — A6: each full run (including a chunked run summarised with
+  `--summarize`) appends a row to `trench/realsite/trend.csv`.
