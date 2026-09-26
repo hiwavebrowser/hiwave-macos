@@ -1,0 +1,40 @@
+{
+  "ts": "20260925T2245Z-cssesc-sel",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "chunked": true,
+  "points": 10,
+  "max_points": 39,
+  "loads": 7,
+  "readable": 2,
+  "looks_right": 1,
+  "looks_right_unstable": [
+    "amazon",
+    "wikipedia"
+  ],
+  "readable_unscored": [
+    "chatgpt"
+  ],
+  "oracle_failed": [],
+  "blocked": {
+    "amazon": "aws-waf/202"
+  },
+  "per_site": {
+    "amazon": 0,
+    "bing": 1,
+    "chatgpt": 0,
+    "facebook": 0,
+    "google": 3,
+    "instagram": 1,
+    "linkedin": 2,
+    "microsoft": 1,
+    "reddit": 0,
+    "wikipedia": 1,
+    "x": 0,
+    "yahoo": 1,
+    "youtube": 0
+  }
+}

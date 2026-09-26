@@ -311,3 +311,39 @@ Housekeeping: the `rs-base` worktree is now on branch `atlas/rs-sibling-state` (
 **Decisions for Pete:**
 1. **Scorer change:** a blocked site can no longer score by painting the vendor's challenge page that Chrome also got. That enforces the written PLAN rule, and it's why the after number is 15, not 17. Say if you'd rather have it reverted and put under **Changes** in BASELINE instead.
 2. **LOADS noise, again.** apple (this session) and microsoft (last session) each flipped on identical code because of network stalls. #266 turns one stall mode into a missing resource, but the board still takes one RustKit capture. Best-of-2 for LOADS is still open from 2026-09-24.
+
+## 2026-09-25 20:25 — B1 landed as two PRs (#268 escapes/EOF, #269 escaped selectors), B3 started (#270 object-fit, #271 visibility). Board 15 → 14 (microsoft, caused by #271: custom elements never upgrade)
+
+**Points: 15 → 14 / 60.** Before is `20260925T2210Z-dev` (develop 4b9530f: #266, #267 merged). After is `20260926T0010Z-stack4` (all four PRs stacked). Both runs chunked, 5 sites at a time.
+
+| run | engine | points | loads | readable | looks-right |
+|---|---|---|---|---|---|
+| `20260925T2210Z-dev` | develop 4b9530f | **15** | 10 | 3 | 2 |
+| `20260925T2310Z-cssesc-sel` | + #268 + #269 | **12** | 8 | 2 | 2 |
+| `20260926T0010Z-stack4` | + #270 + #271 | **14** | 9 | 3 | 2 |
+
+Rows that moved:
+- **microsoft 1 → 0, caused by #271.** Its custom elements are `:not(:defined) { visibility: hidden }`. RustKit never runs `customElements.define`, so they never upgrade, and with `visibility` working they now stay hidden: blank frame, text runs 312 → 116. (In `2310Z` it was a Boa `clientlib-polyfills` stall instead, the known mode.)
+- **linkedin 2 → 0 in `2310Z`, not caused by any PR.** linkedin rotates 3 page variants. That run got a 1.3 MB / 16k-rule sheet with **no** escapes, so #268/#269 parse it the same as develop. develop takes 23.4 s on the sibling heavy variant. A/B on the escape-sheet variant (`2330Z-ab-*`): develop 2/3, fix 2/3 twice. It's back to 2/3 in `stack4`.
+- wikipedia: Chrome got a donation banner in `stack3` (227 words vs 178). RustKit was unchanged. It's back to normal in `stack4`: READABLE 57.3 → 55.1%, LOOKS RIGHT 18.9 → **18.2%** (#271 hides the closed menus).
+- weather LOOKS RIGHT 50.2 → 45.1%; yahoo READABLE 7.0 → 31.8%; x holds 2/3 (LOOKS RIGHT 4.7 → 3.1%). No threshold crossed.
+
+Passing all 3: google. Blocked (0 pts): chatgpt cloudflare/403, ebay akamai/403, nytimes datadome/403; amazon aws-waf/202 in `2210Z`, and a plain blank frame in `stack4`.
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- #268 `atlas/rs-css-escapes` @ 75bd93d, **B1**: `\'` outside a string (Tailwind's `.bg-\[url\(\'...\'\)\]`) opened a phantom string, which swallowed the `@media` block's `}` and ended in `UnexpectedEof`, dropping the **whole sheet**: linkedin's only one (341 KB), x 386 KB, yahoo 585 KB, weather 296 KB. Escapes are now text, and EOF closes open blocks (CSS Syntax §5.4). 4 new tests, each failing on develop.
+- #269 `atlas/rs-css-selector-escapes` @ e0b43f0: once those sheets parse, **65%** of x/yahoo/weather selectors (28% of linkedin's) are escaped Tailwind names, and none could match (`.sm\:flex` read as class `sm\` + pseudo `:flex` → invalid). `Stylesheet::parse` now resolves escapes into private-use stand-ins, and the matchers decode names at comparison. Also fixes `parse_pseudo_class`, which used a char count as a byte offset (it crashed x). A local stress test ran all 16,207 real selectors with no panic.
+- #270 `atlas/rs-object-fit` @ 34ee03c, **B3**: layout/paint already honoured object-fit; the engine had no arm, so `cover` painted as `fill`.
+- #271 `atlas/rs-visibility` @ 6167523, **B3**: RustKit had no `visibility` at all (settles last session's disagreement with the analysis: there was no layout/paint code). Field (inherited), arm, and a paint skip that keeps the space and lets children re-show. `scratch/hide.html`: the three `visibility:hidden` runs are gone.
+- Gates, all four: each new test fails without its fix (verified). cssparser 14/14, css 41/41, layout 516/516, engine 143/143 stacked. **Campaign 26/26 avg 1.2534%, every case identical to develop.** WPT not run (no `third_party/wpt` here). The four PRs insert at distinct anchors, so they should merge in any order.
+
+**Next:**
+1. **Custom elements** (JS track, census order): wire `customElements.define` so `:defined` flips after upgrade. That recovers microsoft, and any site using the same pattern.
+2. B3 continues: `float`/`clear` (the layout enum exists; no ComputedStyle field or arm), logical margin/padding aliases, `list-style`, `display: flow-root|contents|list-item`.
+3. READABLE counts display-list text, including `opacity:0` and zero-height clipped runs (`scratch/hide.html`). Worth an A-track look: the scorer credits text Chrome doesn't show.
+
+Housekeeping: the `rs-css-rule-recovery` worktree holds all four changes stacked (uncommitted; its branch `atlas/rs-css-rule-recovery` has no commits and was never pushed). It's safe to delete once the PRs land. Commits were made from the hub via short branch switches, because `git -C <other worktree>` and `cd && git` need approval on this seat. The partial runs `2245Z` and `0000Z-stack3` carry a `PARTIAL.txt`.
+
+**Decisions for Pete:**
+1. **#271 is correct CSS but costs microsoft its LOADS point until custom elements upgrade.** Options: (a) land #271 as is and do custom elements next (my recommendation); (b) a stopgap that treats every element as `:defined` until custom elements exist. (b) is a spec deviation, but it matches what Chrome shows after JS.
+2. **Security fix, details withheld:** one low-severity crash (page-controlled input) was removed in passing in #269. The diff is public; nothing to escalate.

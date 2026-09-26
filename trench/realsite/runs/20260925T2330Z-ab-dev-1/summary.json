@@ -1,0 +1,21 @@
+{
+  "ts": "20260925T232516Z",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "sites": 1,
+  "points": 1,
+  "max_points": 3,
+  "loads": 1,
+  "readable": 0,
+  "looks_right": 0,
+  "looks_right_unstable": [],
+  "readable_unscored": [],
+  "oracle_failed": [],
+  "blocked": {},
+  "per_site": {
+    "linkedin": 1
+  }
+}

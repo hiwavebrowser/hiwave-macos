@@ -1,0 +1,1 @@
+PARTIAL and superseded: binary had the parse_pseudo_class byte-offset panic (x crashed). Stopped after 13 sites. Use 20260925T2310Z-cssesc-sel.

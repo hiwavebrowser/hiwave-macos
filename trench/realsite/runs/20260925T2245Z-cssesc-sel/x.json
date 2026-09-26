@@ -1,0 +1,78 @@
+{
+  "id": "x",
+  "url": "https://x.com/",
+  "chrome": [
+    {
+      "url": "https://x.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://x.com/",
+      "final_url": "chrome-error://chromewebdata/",
+      "title": "x.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260925T2245Z-cssesc-sel/x/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260925T2245Z-cssesc-sel/x/chrome-a.png",
+      "elapsed_ms": 9355
+    },
+    {
+      "url": "https://x.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://x.com/",
+      "final_url": "chrome-error://chromewebdata/",
+      "title": "x.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260925T2245Z-cssesc-sel/x/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260925T2245Z-cssesc-sel/x/chrome-b.png",
+      "elapsed_ms": 9430
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "crash",
+    "error": "exit 101, no JSON: byte index 43 is not a char boundary; it is inside '\\u{f005d}' (bytes 42..46) of `is(.\udb80\udc2a\udb80\udc2a\udb80\udc3a\udb80\udc5b\udb80\udc5bcmdk-group-heading\udb80\udc5d\udb80\udc5d\udb80\udc3afont-medium *)[cmdk-group-heading]` | note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace | \u001b[2m2026-09-25T22:49:56.657088Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mrustkit_compositor\u001b[0m\u001b[2m:\u001b[0m Compositor dropped",
+    "exit_code": 101,
+    "wall_ms": 1941
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": false,
+    "why": "exit 101, no JSON: byte index 43 is not a char boundary; it is inside '\\u{f005d}' (bytes 42..46) of `is(.\udb80\udc2a\udb80\udc2a\udb80\udc3a\udb80\udc5b\udb80\udc5bcmdk-group-heading\udb80\udc5d\udb80\udc5d\udb80\udc3afont-medium *)[cmdk-group-heading]` | note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace | \u001b[2m2026-09-25T22:49:56.657088Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mrustkit_compositor\u001b[0m\u001b[2m:\u001b[0m Compositor dropped"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 18,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "403",
+      "access",
+      "authorization",
+      "com",
+      "denied",
+      "don",
+      "error",
+      "have",
+      "http",
+      "page",
+      "reload",
+      "t",
+      "this",
+      "to",
+      "view",
+      "was",
+      "x",
+      "you"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

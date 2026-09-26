@@ -1,0 +1,1 @@
+PARTIAL, informational: stopped after 12 sites; chunks 2-3 overlapped a release build. Use 20260926T0010Z-stack4.
