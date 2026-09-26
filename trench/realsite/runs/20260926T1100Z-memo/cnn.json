@@ -1,0 +1,93 @@
+{
+  "id": "cnn",
+  "url": "https://www.cnn.com/",
+  "chrome": [
+    {
+      "url": "https://www.cnn.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 200,
+      "final_url": "https://www.cnn.com/",
+      "title": "Breaking News, Latest News and Videos | CNN",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1100Z-memo/cnn/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260926T1100Z-memo/cnn/chrome-a.png",
+      "elapsed_ms": 30884
+    },
+    {
+      "url": "https://www.cnn.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 200,
+      "final_url": "https://www.cnn.com/",
+      "title": "Breaking News, Latest News and Videos | CNN",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1100Z-memo/cnn/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260926T1100Z-memo/cnn/chrome-b.png",
+      "elapsed_ms": 30916
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "timeout",
+    "html_file": null,
+    "url": "https://www.cnn.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": null,
+    "layout_path": null,
+    "layout_stats": null,
+    "error": "capture exceeded 30000 ms",
+    "wall_ms": 30250
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": false,
+    "why": "capture exceeded 30000 ms"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 132,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "0",
+      "32",
+      "7pm",
+      "a",
+      "accepting",
+      "advent",
+      "agree",
+      "ahead",
+      "ai",
+      "aid",
+      "analysis",
+      "and",
+      "app",
+      "as",
+      "at",
+      "best",
+      "browser",
+      "business",
+      "by",
+      "caleb",
+      "calendars",
+      "catch",
+      "center",
+      "china",
+      "choices"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

@@ -1,0 +1,79 @@
+{
+  "id": "reddit",
+  "url": "https://www.reddit.com/",
+  "chrome": [
+    {
+      "url": "https://www.reddit.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 403,
+      "final_url": "https://www.reddit.com/?solution=9a490e2f614e1d599a490e2f614e1d59&js_challenge=1&jsc_token=2824be10929bdc604753c70a67a1c331f576652dbab140c57928c958140fadb8&jsc_orig_r=",
+      "title": "",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1100Z-memo/reddit/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260926T1100Z-memo/reddit/chrome-a.png",
+      "elapsed_ms": 12340,
+      "oracle_blocked": "top-level document HTTP 403"
+    },
+    {
+      "url": "https://www.reddit.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 403,
+      "final_url": "https://www.reddit.com/?solution=fcf1937d8602c33cfcf1937d8602c33c&js_challenge=1&jsc_token=2824be10929bdc604753c70a67a1c331caf75b577e2817b61c370618ef573f3c&jsc_orig_r=",
+      "title": "",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1100Z-memo/reddit/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260926T1100Z-memo/reddit/chrome-b.png",
+      "elapsed_ms": 21098,
+      "oracle_blocked": "top-level document HTTP 403"
+    }
+  ],
+  "oracle_capture": null,
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.reddit.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260926T1100Z-memo/reddit/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260926T1100Z-memo/reddit/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 1,
+      "threw": 0,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 420,
+      "elapsed_ms": 2
+    },
+    "elapsed_ms": 432,
+    "error": null,
+    "wall_ms": 484,
+    "non_background_fraction": 0.0143
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": false,
+    "why": "blank frame (1.43% non-background)"
+  },
+  "readable": {
+    "pass": false,
+    "why": "chrome capture failed: top-level document HTTP 403",
+    "oracle_failed": true
+  },
+  "looks_right": {
+    "pass": false,
+    "why": "chrome capture failed",
+    "oracle_failed": true
+  },
+  "points": 0
+}

@@ -1,0 +1,102 @@
+{
+  "id": "github",
+  "url": "https://github.com/",
+  "chrome": [
+    {
+      "url": "https://github.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 200,
+      "final_url": "https://github.com/",
+      "title": "GitHub \u00b7 Change is constant. GitHub keeps you ahead. \u00b7 GitHub",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1100Z-memo/github/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260926T1100Z-memo/github/chrome-a.png",
+      "elapsed_ms": 34754
+    },
+    {
+      "url": "https://github.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 200,
+      "final_url": "https://github.com/",
+      "title": "GitHub \u00b7 Change is constant. GitHub keeps you ahead. \u00b7 GitHub",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1100Z-memo/github/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260926T1100Z-memo/github/chrome-b.png",
+      "elapsed_ms": 34755
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://github.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260926T1100Z-memo/github/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260926T1100Z-memo/github/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 0,
+      "threw": 0,
+      "skipped": 8,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 0,
+      "elapsed_ms": 0
+    },
+    "elapsed_ms": 19681,
+    "error": null,
+    "wall_ms": 19754,
+    "non_background_fraction": 0.0878
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 60,
+    "rustkit_words": 47,
+    "ratio": 0.6333,
+    "missing_sample": [
+      "accompanied",
+      "app",
+      "behind",
+      "by",
+      "demo",
+      "download",
+      "ducky",
+      "email",
+      "enter",
+      "float",
+      "for",
+      "from",
+      "glow",
+      "jubilantly",
+      "mona",
+      "octocat",
+      "product",
+      "purple",
+      "scattering",
+      "stars",
+      "upward",
+      "your"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0.01474609375,
+    "diff": 30.92685546875
+  },
+  "points": 1
+}
