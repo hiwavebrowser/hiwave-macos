@@ -69,21 +69,27 @@ fn at_block_kind(prelude: &str) -> AtBlock {
 }
 
 /// Consume a block body up to its matching `}` (which is consumed too),
-/// honouring nested blocks, strings and comments. `None` if the input ends
-/// first.
-fn take_block(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
+/// honouring nested blocks, strings, comments and escapes. If the input
+/// ends first, the block ends there, as CSS Syntax §5.4 closes every open
+/// block at EOF.
+fn take_block(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
     let mut body = String::new();
     let mut depth = 0usize;
     let mut quote: Option<char> = None;
     while let Some(c) = chars.next() {
-        if let Some(q) = quote {
-            if c == '\\' {
-                body.push(c);
-                if let Some(n) = chars.next() {
-                    body.push(n);
-                }
-                continue;
+        // An escape is one code point in or out of a string. Outside one,
+        // Tailwind's arbitrary-value classes are full of them
+        // (`.bg-\[url\(\'https\:...\'\)\]`): read as a quote, `\'` opened a
+        // string that swallowed the block's closing `}`, and the whole sheet
+        // (linkedin's only one, 341 KB) was dropped at EOF.
+        if c == '\\' {
+            body.push(c);
+            if let Some(n) = chars.next() {
+                body.push(n);
             }
+            continue;
+        }
+        if let Some(q) = quote {
             if c == q {
                 quote = None;
             }
@@ -103,13 +109,13 @@ fn take_block(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<St
             }
             '"' | '\'' => quote = Some(c),
             '{' => depth += 1,
-            '}' if depth == 0 => return Some(body),
+            '}' if depth == 0 => return body,
             '}' => depth -= 1,
             _ => {}
         }
         body.push(c);
     }
-    None
+    body
 }
 
 /// A parsed declaration AST.
@@ -172,6 +178,23 @@ pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
             continue;
         }
 
+        // An escaped code point is text, never structure: `\'` must not open
+        // a string, `\;` must not end a declaration (see `take_block`).
+        if c == '\\' {
+            let text = if !in_block {
+                &mut current_selector
+            } else if in_value {
+                &mut current_value
+            } else {
+                &mut current_property
+            };
+            text.push(c);
+            if let Some(n) = chars.next() {
+                text.push(n);
+            }
+            continue;
+        }
+
         if !in_block {
             let at_rule = current_selector.trim_start().starts_with('@');
             if c == ';' && at_rule {
@@ -185,7 +208,7 @@ pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
                 match at_block_kind(&prelude) {
                     AtBlock::Declarations => {}
                     kind => {
-                        let body = take_block(&mut chars).ok_or(ParseError::UnexpectedEof)?;
+                        let body = take_block(&mut chars);
                         if let AtBlock::Rules(media) = kind {
                             for mut rule in parse_stylesheet(&body)?.rules {
                                 if let Some(m) = &media {
@@ -284,8 +307,21 @@ pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
     }
 
     if in_block {
-        // Unclosed block.
-        return Err(ParseError::UnexpectedEof);
+        // EOF closes an unclosed block (CSS Syntax §5.4). Failing here threw
+        // away every rule already parsed; one defect cost the whole sheet.
+        flush_decl(
+            &mut current_property,
+            &mut current_value,
+            &mut current_decls,
+        );
+        let selector = current_selector.trim().to_string();
+        if !selector.is_empty() && !current_decls.is_empty() {
+            out.rules.push(RuleAst {
+                selector,
+                declarations: current_decls,
+                media: Vec::new(),
+            });
+        }
     }
 
     Ok(out)
@@ -395,10 +431,38 @@ mod tests {
     }
 
     #[test]
-    fn unclosed_block_is_error() {
-        let css = "body { color: black;";
-        let err = parse_stylesheet(css).unwrap_err();
-        matches!(err, ParseError::UnexpectedEof);
+    fn eof_closes_an_unclosed_rule_and_keeps_the_rules_before_it() {
+        // Was Err(UnexpectedEof), which dropped `.a` too: one defect anywhere
+        // cost the whole sheet.
+        let css = ".a { color: red } body { color: black;";
+        let ast = parse_stylesheet(css).expect("EOF closes the block");
+        assert_eq!(ast.rules.len(), 2);
+        assert_eq!(ast.rules[1].selector, "body");
+        assert_eq!(ast.rules[1].declarations[0].value, "black");
+    }
+
+    #[test]
+    fn an_escaped_quote_in_a_selector_does_not_open_a_string() {
+        // linkedin, x, yahoo and weather each lost a whole sheet to this:
+        // Tailwind's `\'` read as a quote swallowed the `@media` block's `}`.
+        let css = "@media (min-width: 640px) { .bg-\\[url\\(\\'x\\'\\)\\] { color: red } } .after { color: green }";
+        assert_eq!(
+            summary(css),
+            vec![
+                rule(".bg-\\[url\\(\\'x\\'\\)\\]", &["(min-width: 640px)"]),
+                rule(".after", &[]),
+            ]
+        );
+    }
+
+    #[test]
+    fn escapes_are_text_inside_declarations() {
+        let css = ".a { content: \"x\\\"; y\"; color: red } .b { --v: a\\;b; color: blue }";
+        let ast = parse_stylesheet(css).expect("parse");
+        assert_eq!(ast.rules[0].declarations[0].value, "\"x\\\"; y\"");
+        assert_eq!(ast.rules[0].declarations[1].property, "color");
+        assert_eq!(ast.rules[1].declarations[0].value, "a\\;b");
+        assert_eq!(ast.rules[1].declarations[1].value, "blue");
     }
 
     fn summary(css: &str) -> Vec<(String, Vec<String>)> {
@@ -473,8 +537,11 @@ mod tests {
     }
 
     #[test]
-    fn an_unclosed_media_block_is_an_error_like_an_unclosed_rule() {
-        assert!(parse_stylesheet("@media screen { .a { color: red }").is_err());
+    fn eof_closes_an_unclosed_media_block_like_an_unclosed_rule() {
+        assert_eq!(
+            summary(".z { color: blue } @media screen { .a { color: red }"),
+            vec![rule(".z", &[]), rule(".a", &["screen"])]
+        );
     }
 
     #[test]
