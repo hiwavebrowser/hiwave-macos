@@ -1,0 +1,107 @@
+{
+  "id": "weather",
+  "url": "https://weather.com/",
+  "chrome": [
+    {
+      "url": "https://weather.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "http_status": 200,
+      "final_url": "https://weather.com/",
+      "title": "National and Local Weather Radar, Daily Forecast, Hurricane and information from The Weather Channel and weather.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1245Z-shape/weather/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260926T1245Z-shape/weather/chrome-a.png",
+      "elapsed_ms": 59089
+    },
+    {
+      "url": "https://weather.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "http_status": 200,
+      "final_url": "https://weather.com/",
+      "title": "National and Local Weather Radar, Daily Forecast, Hurricane and information from The Weather Channel and weather.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1245Z-shape/weather/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260926T1245Z-shape/weather/chrome-b.png",
+      "elapsed_ms": 42087
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://weather.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260926T1245Z-shape/weather/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260926T1245Z-shape/weather/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 136,
+      "threw": 2,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 3120742,
+      "elapsed_ms": 1949
+    },
+    "elapsed_ms": 5483,
+    "error": null,
+    "wall_ms": 5622,
+    "non_background_fraction": 0.1077
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 66,
+    "rustkit_words": 36,
+    "ratio": 0.1515,
+    "missing_sample": [
+      "1",
+      "10",
+      "17",
+      "45",
+      "a",
+      "about",
+      "across",
+      "advertisement",
+      "ago",
+      "air",
+      "all",
+      "allergies",
+      "brought",
+      "climb",
+      "coastal",
+      "cold",
+      "coverage",
+      "day",
+      "easter",
+      "easters",
+      "flooding",
+      "flu",
+      "heavy",
+      "high",
+      "hour"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 22.09130859375,
+    "diff": 49.596484375,
+    "unstable": true,
+    "why": "chrome-vs-chrome 22.1% > 15% (unstable, 0 points)"
+  },
+  "points": 1
+}
