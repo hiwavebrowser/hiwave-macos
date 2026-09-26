@@ -17806,6 +17806,11 @@ struct AncestorCompound {
     /// `:checked` / `:disabled` / `:enabled`. Checked against a sibling's
     /// state; an ancestor carries none, so it stays permissive there.
     state: Vec<StatePseudo>,
+    /// One entry per `:is()`/`:where()` in the compound: some alternative
+    /// must match. A member with its own combinator needs an ancestor chain
+    /// this tuple does not carry and is left out (under-match, the same as
+    /// the subject path's `any_compound_in_list_matches`).
+    any_of: Vec<Vec<AncestorCompound>>,
 }
 
 impl AncestorCompound {
@@ -17865,28 +17870,80 @@ impl AncestorCompound {
                             end += 1;
                         }
                         let name = text(start, end).to_ascii_lowercase();
-                        // Form state is decidable for a sibling (wikipedia's
-                        // dropdowns: `.checkbox:checked ~ .content`). Keep
-                        // scanning: more of the compound may follow.
-                        let state = match name.as_str() {
-                            "checked" => Some(StatePseudo::Checked),
-                            "disabled" => Some(StatePseudo::Disabled),
-                            "enabled" => Some(StatePseudo::Enabled),
-                            _ => None,
-                        };
-                        if let Some(state) = state {
-                            if end == chars.len() || is_delimiter(chars[end]) {
-                                out.state.push(state);
-                                i = end;
-                                current_start = end;
-                                continue;
+                        // A functional pseudo-class's argument runs to the
+                        // matching paren. Scanning resumes after it: this
+                        // used to stop at the first pseudo-class, so
+                        // `:is(.a):focus-visible > div` put no constraint on
+                        // the parent at all and styled every div (github's
+                        // TreeView focus ring covered the whole page).
+                        let mut next = end;
+                        let mut arg = None;
+                        if chars.get(end) == Some(&'(') {
+                            let mut depth = 0usize;
+                            let mut j = end;
+                            while j < chars.len() {
+                                match chars[j] {
+                                    '(' => depth += 1,
+                                    ')' => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            break;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                j += 1;
                             }
+                            arg = Some(text(end + 1, j.min(chars.len())));
+                            next = (j + 1).min(chars.len());
                         }
-                        out.never = Engine::pseudo_class_is_static_false(&name);
-                        break;
+                        match (name.as_str(), &arg) {
+                            // Form state is decidable for a sibling
+                            // (wikipedia's dropdowns: `.checkbox:checked ~
+                            // .content`).
+                            ("checked", None) => out.state.push(StatePseudo::Checked),
+                            ("disabled", None) => out.state.push(StatePseudo::Disabled),
+                            ("enabled", None) => out.state.push(StatePseudo::Enabled),
+                            ("is" | "where" | "matches" | "-webkit-any", Some(a)) => {
+                                out.any_of.push(
+                                    Engine::split_top_level_commas(a)
+                                        .into_iter()
+                                        .filter(|m| !Engine::selector_has_combinator(m))
+                                        .map(AncestorCompound::parse)
+                                        .collect(),
+                                );
+                            }
+                            // Relational: the subject path under-matches it
+                            // too.
+                            ("has", _) => out.never = true,
+                            (n, _) if Engine::pseudo_class_is_static_false(n) => out.never = true,
+                            // Structural and the rest need context the tuple
+                            // does not carry: permissive.
+                            _ => {}
+                        }
+                        i = next;
+                        current_start = next;
+                        continue;
                     } else {
-                        // Skip attribute selectors for ancestor matching
-                        break;
+                        // Attribute selectors: the ancestor tuple carries no
+                        // attributes, so they stay permissive. Skip to the
+                        // closing bracket and keep reading the compound.
+                        let mut j = i;
+                        let mut quote = None;
+                        while j < chars.len() {
+                            let c = chars[j];
+                            match quote {
+                                Some(q) if c == q => quote = None,
+                                Some(_) => {}
+                                None if c == '"' || c == '\'' => quote = Some(c),
+                                None if c == ']' => break,
+                                None => {}
+                            }
+                            j += 1;
+                        }
+                        i = (j + 1).min(chars.len());
+                        current_start = i;
+                        continue;
                     }
                 }
             }
@@ -17900,6 +17957,10 @@ impl AncestorCompound {
             && self.tag.as_deref().map_or(true, |t| t.eq_ignore_ascii_case(tag_name))
             && self.classes.iter().all(|req| classes.iter().any(|c| c == req))
             && self.id.as_deref().map_or(true, |req| id.is_some_and(|el| el == req))
+            && self
+                .any_of
+                .iter()
+                .all(|alts| alts.iter().any(|a| a.matches(tag_name, classes, id)))
     }
 
     /// [`Self::matches`] for an earlier sibling, whose form state is known.
@@ -18530,6 +18591,39 @@ mod windows_a_leg_pins {
             Some(rustkit_css::Color::from_rgb(1, 2, 3)),
             "a list with no root item is not collected document-wide"
         );
+    }
+
+    #[test]
+    fn pseudo_classes_on_an_ancestor_compound_constrain_it() {
+        // github: `:is(.TreeViewRootUlStyles .TreeViewItem):focus-visible>div`
+        // gave every div an inset focus ring, because the ancestor compound
+        // stopped parsing at `:is` and matched any parent.
+        let e = engine();
+        let html = "<html><head><style>\
+                    :is(.tree .item):focus-visible>p{color:#ff0000}\
+                    :is(.x):hover>p{color:#ff0000}\
+                    [data-m]:focus>p{color:#ff0000}\
+                    :has(.y) p{color:#ff0000}\
+                    :is(.x, .z)>p{color:#00aa00}\
+                    </style></head><body>\
+                    <div><p>plain</p></div>\
+                    <div class=\"x\"><p>x</p></div>\
+                    <div data-m=\"1\"><p>attr</p></div>\
+                    </body></html>";
+        fn color_of(b: &LayoutBox, text: &str) -> Option<rustkit_css::Color> {
+            if matches!(&b.box_type, BoxType::Text(t) if t.trim() == text) {
+                return Some(b.style.color);
+            }
+            b.children.iter().find_map(|c| color_of(c, text))
+        }
+        let layout = layout_of(&e, html);
+        assert_eq!(color_of(&layout, "plain"), Some(rustkit_css::Color::BLACK));
+        assert_eq!(
+            color_of(&layout, "x"),
+            Some(rustkit_css::Color::from_rgb(0, 0xaa, 0)),
+            ":is(.x, .z) > p matches under .x"
+        );
+        assert_eq!(color_of(&layout, "attr"), Some(rustkit_css::Color::BLACK));
     }
 
     #[test]
