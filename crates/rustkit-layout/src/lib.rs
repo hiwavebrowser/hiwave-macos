@@ -594,24 +594,9 @@ pub enum Position {
     Sticky,
 }
 
-/// CSS float property values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Float {
-    #[default]
-    None,
-    Left,
-    Right,
-}
-
-/// CSS clear property values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Clear {
-    #[default]
-    None,
-    Left,
-    Right,
-    Both,
-}
+/// CSS `float` / `clear` values live on `ComputedStyle`; re-exported so
+/// existing `rustkit_layout::{Float, Clear}` paths keep working.
+pub use rustkit_css::{Clear, Float};
 
 /// Offset values for positioned elements.
 #[derive(Debug, Clone, Copy, Default)]
@@ -3760,6 +3745,10 @@ impl LayoutBox {
                     // function is handed the flow parent. That only matters
                     // when it clamps, i.e. when max-content exceeds `available`.
                     shrink_to_fit_content_width(self, available)
+                } else if self.float != Float::None {
+                    // CSS 2.1 §10.3.5: a float with width:auto shrinks to
+                    // fit; filling the line would leave nothing beside it.
+                    shrink_to_fit_content_width(self, available)
                 } else {
                     // Fill available space (CSS 2.1 §10.3.3)
                     available
@@ -3933,6 +3922,10 @@ impl LayoutBox {
         // IFC Slice B2: phase-5 mid-line splits whose CLOSED lines (line 0
         // + middles) need alignment after the loop: (line_start, text_index).
         let mut split_records: Vec<(usize, usize)> = Vec::new();
+        // Floats placed among these children, in content-box coordinates
+        // (x from 0 at the content edge, y relative to the content top).
+        let mut floats = FloatContext::new();
+        let mut last_float_top = 0.0_f32;
 
         for (i, child) in self.children.iter_mut().enumerate() {
             // Skip absolutely/fixed positioned children for flow layout.
@@ -3943,6 +3936,43 @@ impl LayoutBox {
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y;
                 child.layout(&cb);
+                continue;
+            }
+
+            // CSS 2.1 §9.5.1: a float leaves the flow. Its top is the
+            // current line's top (never above an earlier float); it goes
+            // as far left/right as the floats already placed allow, moving
+            // down until it fits. The flow cursor does not advance. Before
+            // this, a float laid out at x=0 like a block (left and right
+            // floats alike), so a row of `float:left` items stacked on top
+            // of each other.
+            if child.float != Float::None {
+                let mut cb = self.dimensions.clone();
+                cb.content.height = cursor_y;
+                child.layout_with_percent_base(
+                    &cb,
+                    definite_height.or((cb.content.height > 0.0).then_some(cb.content.height)),
+                );
+                let mb = child.dimensions.margin_box();
+                let (fx, fy) = floats.find_float_position(
+                    child.float,
+                    mb.width,
+                    mb.height,
+                    cursor_y.max(last_float_top),
+                    container_width,
+                );
+                crate::flex::translate_subtree(
+                    child,
+                    self.dimensions.content.x + fx - mb.x,
+                    self.dimensions.content.y + fy - mb.y,
+                );
+                let placed = Rect::new(fx, fy, mb.width, mb.height);
+                if child.float == Float::Left {
+                    floats.add_left(placed);
+                } else {
+                    floats.add_right(placed);
+                }
+                last_float_top = fy;
                 continue;
             }
 
@@ -4188,8 +4218,28 @@ impl LayoutBox {
                     line_width = 0.0;
                 }
 
+                // CSS 2.1 §9.5.2: clearance puts the box's border edge
+                // below the floats it clears.
+                if child.clear != Clear::None {
+                    cursor_y = cursor_y.max(floats.clear(child.clear));
+                }
+
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y;
+                // CSS 2.1 §9.5: a block that establishes a formatting
+                // context (overflow other than visible, flex, grid) must
+                // not overlap the floats beside it; it is laid out in the
+                // band they leave free.
+                if !floats.is_empty()
+                    && matches!(child.box_type, BoxType::Block)
+                    && crate::margin_collapse::establishes_bfc(&child.style, child.float)
+                {
+                    let (left, right) = floats.available_width(cursor_y, container_width);
+                    if left > 0.0 || right < container_width {
+                        cb.content.x += left;
+                        cb.content.width = (right - left).max(0.0);
+                    }
+                }
                 match (container_is_definite_zero, &child.box_type) {
                     // Author `width: 0`: block-path text wraps against it
                     // (see layout_text_with_zero_wrap).
@@ -4258,6 +4308,14 @@ impl LayoutBox {
             Self::apply_vertical_align(&mut self.children[start..end], &valign_font);
         }
 
+        // CSS 2.1 §10.6.7: a box that establishes a formatting context
+        // grows to contain its floats (the auto height of a floated card
+        // or an `overflow:hidden` row of floated items). Other boxes let
+        // them overflow; a clearfix clears them above.
+        if !floats.is_empty() && crate::margin_collapse::establishes_bfc(&self.style, self.float) {
+            cursor_y = cursor_y.max(floats.clear_all());
+        }
+
         self.dimensions.content.height = cursor_y;
     }
 
@@ -4278,7 +4336,9 @@ impl LayoutBox {
         let members: Vec<usize> = (0..children.len())
             .filter(|&i| {
                 let c = &children[i];
+                // A float sits in a line's index range but is not on it.
                 !matches!(c.position, Position::Absolute | Position::Fixed)
+                    && c.float == Float::None
                     && c.style.display != rustkit_css::Display::None
             })
             .collect();
@@ -4530,6 +4590,7 @@ impl LayoutBox {
             }
 
             if offset > 0.0
+                && child.float == Float::None
                 && (child.style.display.is_atomic_inline()
                     || matches!(
                         child.box_type,
