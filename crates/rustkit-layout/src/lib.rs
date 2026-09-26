@@ -9409,14 +9409,26 @@ mod tests {
                 0.0,
             )
         };
-        measure();
+        // Other tests install web-font sets on their own threads, and the
+        // generation is process-wide: only judge a hit when it held still.
+        let mut judged = false;
+        for _ in 0..20 {
+            let generation = rustkit_text::webfonts::generation();
+            measure();
+            let before = TEXT_SHAPES.with(std::cell::Cell::get);
+            measure();
+            if rustkit_text::webfonts::generation() == generation {
+                assert_eq!(
+                    TEXT_SHAPES.with(std::cell::Cell::get),
+                    before,
+                    "second measure is a hit"
+                );
+                judged = true;
+                break;
+            }
+        }
+        assert!(judged, "the web-font generation never held still");
         let before = TEXT_SHAPES.with(std::cell::Cell::get);
-        measure();
-        assert_eq!(
-            TEXT_SHAPES.with(std::cell::Cell::get),
-            before,
-            "second measure is a hit"
-        );
         rustkit_text::webfonts::install(
             "text-measure-memo-test",
             &[rustkit_text::webfonts::WebFontFace {
@@ -9427,9 +9439,8 @@ mod tests {
             }],
         );
         measure();
-        assert_eq!(
-            TEXT_SHAPES.with(std::cell::Cell::get),
-            before + 1,
+        assert!(
+            TEXT_SHAPES.with(std::cell::Cell::get) > before,
             "re-shaped after the set changed"
         );
     }
