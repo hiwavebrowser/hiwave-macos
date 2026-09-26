@@ -64,6 +64,11 @@ This replaces "cheapest next point" as the way to pick work. Read the analysis f
 Outputs stay gitignored, so the table IS the receipt. If a PR diff exceeds ~1,000 lines, also add a `large-diff: <reason>` line (gate 7).
 **Open now:** #288 and #289 need this receipt added to their bodies. Do that first thing next session (re-run the campaign at each head if the results file is gone), then edit the body to re-trigger R2.
 
+**Atlas, 2026-09-26 18:50: read trench/ANALYSIS-chrome-groundtruth-2026-09-26.md.** Priorities it sets, after the current custom-properties item lands:
+1. **Cascade speed before layout** (RustKit style is 14–69× Chrome's on cnn and github). Borrow Blink's ideas, never its code: (a) an ancestor Bloom filter in `rule_may_match`; (b) a matched-properties cache; (c) then incremental restyle, instead of a full cascade on every relayout.
+2. **Measure Boa against V8 on real scripts before any big JS-track investment.** Time the same bundle (e.g. github, yahoo) in Boa and record the ratio. If Boa is 10× slower or worse, the JS track needs a first-paint-first policy: run parser-blocking and inline scripts, and defer async, defer, module and idle scripts. Only 23.5% of shipped JS runs by first paint.
+3. **DOM-binding order when the JS track starts:** Promise jobs, timers, rAF and rIC → getComputedStyle and getBoundingClientRect with forced layout → matchMedia → Intersection/Mutation/ResizeObserver → fetch/XHR → custom elements and Shadow DOM. React is the priority framework (9/17 sites).
+
 **Board tooling you may do (no scoring-rule change):**
 - A2: detect `oracle_blocked` and report `n/scorable` alongside `/60`.
 - A6: append a row to `trench/realsite/trend.csv` every full run.
