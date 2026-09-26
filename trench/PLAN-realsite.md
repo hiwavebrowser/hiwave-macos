@@ -43,6 +43,16 @@ This replaces "cheapest next point" as the way to pick work. Read the analysis f
 4. **B4:** SVG as an image: sniff the content type (don't rely on the extension), intrinsic sizing for unsized SVGs, and CSS fill/currentColor.
 5. **B5:** flex re-layout memo and grid sizing profile (netflix, github, cnn, wikipedia, facebook). Profile with `sample` first.
 
+**Atlas, 2026-09-26 13:05: NEXT ENGINE ITEM is element-scoped custom properties. Prometheus gave DESIGN CLEAR on the exchange (2026-09-26 ~13:00), so build it without another design gate.** One focused PR, `atlas/rs-element-custom-properties`:
+- `ComputedStyle` carries `custom_properties: Arc<HashMap<String,String>>`, inherited by cloning the Arc. Call `Arc::make_mut` only when a winning `--*` declaration applies to that element.
+- Collect `--*` inside the EXISTING RuleIndex-backed cascade apply path, never in a second stylesheet walk. The cost must be O(applied `--*` per element).
+- Apply all winning `--*` first, then resolve `var()` in the other declarations against that element's map. Only scan values containing `var(`. Use a cycle set: a cycle is invalid at computed-value time, so use the fallback.
+- Retire the document-wide `extract_css_variables` as the source of truth. Keep it as a pure-`:root` fast path only if that's a measured win.
+- Non-goals: `@property`, animating `--*`, shadow-DOM piercing.
+- Pins that must land with it: (a) `:root{--x}` reaches body; (b) `.theme{--x}` reaches a descendant; (c) `[data-theme=dark]{--bg}` overrides light on the subtree; (d) the cycle a→b→a doesn't hang and falls back; (e) `var(--missing, red)`.
+- Measure the cascade time on facebook, github and cnn before and after. No regressions toward 30 s.
+- Expected effect: github's text colour (it currently passes LOOKS RIGHT with dark-on-dark text), and any site themed through `[data-theme]` or `.dark`.
+
 **Board tooling you may do (no scoring-rule change):**
 - A2: detect `oracle_blocked` and report `n/scorable` alongside `/60`.
 - A6: append a row to `trench/realsite/trend.csv` every full run.
