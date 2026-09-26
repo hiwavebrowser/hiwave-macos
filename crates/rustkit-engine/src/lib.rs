@@ -4773,6 +4773,28 @@ impl Engine {
     fn apply_style_property(&self, style: &mut ComputedStyle, property: &str, value: &str) {
         let value = value.trim();
 
+        // Logical properties (css-logical-1) had no arms, so Tailwind's
+        // `ms-*`/`px-*`/`start-*` utilities and `margin-inline: auto`
+        // centering were dropped. Map them onto the physical sides for
+        // horizontal-tb, ltr (the only writing mode RustKit lays out). A
+        // two-value shorthand is `start end`; one value sets both.
+        if let Some(physical) = logical_to_physical(property) {
+            match physical {
+                LogicalMapping::Side(p) => self.apply_style_property(style, p, value),
+                LogicalMapping::Pair(start, end) => {
+                    let parts: Vec<&str> = value.split_whitespace().collect();
+                    let (a, b) = match parts.as_slice() {
+                        [one] => (*one, *one),
+                        [a, b] => (*a, *b),
+                        _ => return,
+                    };
+                    self.apply_style_property(style, start, a);
+                    self.apply_style_property(style, end, b);
+                }
+            }
+            return;
+        }
+
         // Handle CSS-wide keywords
         // inherit: use the computed value from the parent (already handled by inherit_from)
         // initial: use the property's initial value
@@ -10713,6 +10735,40 @@ fn parse_shorthand_4(
         }
         _ => None,
     }
+}
+
+/// A logical property's physical target(s) in horizontal-tb, ltr.
+enum LogicalMapping {
+    Side(&'static str),
+    /// A two-value shorthand: `(start, end)`.
+    Pair(&'static str, &'static str),
+}
+
+/// css-logical-1 flow-relative margin / padding / inset names, mapped for
+/// horizontal-tb, ltr: inline-start = left, block-start = top.
+fn logical_to_physical(property: &str) -> Option<LogicalMapping> {
+    use LogicalMapping::{Pair, Side};
+    Some(match property {
+        "margin-inline-start" => Side("margin-left"),
+        "margin-inline-end" => Side("margin-right"),
+        "margin-block-start" => Side("margin-top"),
+        "margin-block-end" => Side("margin-bottom"),
+        "margin-inline" => Pair("margin-left", "margin-right"),
+        "margin-block" => Pair("margin-top", "margin-bottom"),
+        "padding-inline-start" => Side("padding-left"),
+        "padding-inline-end" => Side("padding-right"),
+        "padding-block-start" => Side("padding-top"),
+        "padding-block-end" => Side("padding-bottom"),
+        "padding-inline" => Pair("padding-left", "padding-right"),
+        "padding-block" => Pair("padding-top", "padding-bottom"),
+        "inset-inline-start" => Side("left"),
+        "inset-inline-end" => Side("right"),
+        "inset-block-start" => Side("top"),
+        "inset-block-end" => Side("bottom"),
+        "inset-inline" => Pair("left", "right"),
+        "inset-block" => Pair("top", "bottom"),
+        _ => return None,
+    })
 }
 
 /// Check if a CSS property is inherited by default.
@@ -18327,6 +18383,65 @@ mod windows_a_leg_pins {
         let body = &layout.children[0];
         let row = &body.children[0];
         assert_eq!(row.children.len(), 2, "row should have exactly two element children, got {}", row.children.len());
+    }
+}
+
+// ── css-logical-1 margin / padding / inset (realsite B3): the flow-relative
+//    names had no arms, so they were dropped. ──
+#[cfg(test)]
+mod logical_property_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    fn laid_out(html: &str) -> LayoutBox {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        // Height 0, as the engine lays out the root: a block's containing
+        // block height is the flow cursor.
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 0.0),
+            ..Default::default()
+        };
+        root.layout(&cb);
+        root
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    #[test]
+    fn logical_margin_padding_and_inset_map_to_physical_sides() {
+        let root = laid_out(concat!(
+            r#"<body style="margin:0"><div style="width:400px">"#,
+            r#"<div id="c" style="width:100px;height:10px;margin-inline:auto;padding-block:5px 7px"></div>"#,
+            r#"<div id="s" style="width:100px;height:10px;margin-inline-start:20px;padding-inline:3px 4px"></div>"#,
+            r#"<div id="b" style="height:10px;margin-block:6px 0"></div>"#,
+            r#"</div></body>"#,
+        ));
+        let c = by_id(&root, "c").expect("#c");
+        assert_eq!(c.dimensions.border_box().x, 150.0, "margin-inline:auto centres");
+        assert_eq!((c.dimensions.padding.top, c.dimensions.padding.bottom), (5.0, 7.0));
+        let s = by_id(&root, "s").expect("#s");
+        assert_eq!(s.dimensions.margin.left, 20.0, "margin-inline-start is margin-left");
+        assert_eq!((s.dimensions.padding.left, s.dimensions.padding.right), (3.0, 4.0));
+        let b = by_id(&root, "b").expect("#b");
+        assert_eq!((b.dimensions.margin.top, b.dimensions.margin.bottom), (6.0, 0.0));
+
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let mut style = ComputedStyle::new();
+        e.apply_style_property(&mut style, "inset-inline", "1px 2px");
+        e.apply_style_property(&mut style, "inset-block-start", "3px");
+        assert_eq!(style.left, Some(rustkit_css::Length::Px(1.0)));
+        assert_eq!(style.right, Some(rustkit_css::Length::Px(2.0)));
+        assert_eq!(style.top, Some(rustkit_css::Length::Px(3.0)));
+        // Three values is not a valid two-value shorthand: ignored.
+        e.apply_style_property(&mut style, "margin-inline", "1px 2px 3px");
+        assert_eq!(style.margin_left, ComputedStyle::new().margin_left);
     }
 }
 
