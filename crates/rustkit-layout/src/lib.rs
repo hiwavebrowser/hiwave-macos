@@ -1426,6 +1426,12 @@ pub struct LayoutBox {
     /// visual line" — a mid-line first fragment must never be re-aligned
     /// as if it owned its whole line.
     pub text_flow_first_offset: Option<f32>,
+    /// Set by the parent before it lays this box out: the parent's height
+    /// depends on its content, so a percentage `height` here computes to
+    /// `auto` (CSS 2.1 §10.5) instead of taking the viewport fallback. Only
+    /// an auto-height out-of-flow parent (and the auto-height in-flow chain
+    /// under it) sets it today; see `mark_percent_height_bases`.
+    pub(crate) percent_height_is_auto: bool,
 }
 
 impl LayoutBox {
@@ -1452,6 +1458,7 @@ impl LayoutBox {
             node_id: None,
             text_lines: None,
             text_flow_first_offset: None,
+            percent_height_is_auto: false,
         }
     }
 
@@ -3047,6 +3054,7 @@ impl LayoutBox {
         // block they are handed carries the flow cursor instead.
         let definite_for_children =
             self.definite_content_height_for_children(definite_height.unwrap_or(0.0));
+        self.mark_percent_height_bases(definite_for_children, containing_block);
         self.layout_block_children(definite_for_children);
 
         // Height depends on children - use definite_height for percentage resolution
@@ -3123,6 +3131,7 @@ impl LayoutBox {
         let definite_for_children =
             self.definite_content_height_for_children(percent_height_base
                 .unwrap_or(containing_block.content.height));
+        self.mark_percent_height_bases(definite_for_children, containing_block);
 
         let mut child_margin_context = MarginCollapseContext::new();
         child_margin_context.children_are_formatting_roots =
@@ -5178,7 +5187,52 @@ impl LayoutBox {
     /// `min-height`/`max-height` are deliberately not consulted: they clamp
     /// the used height after children flow, which is exactly the "depends on
     /// content" case the spec makes `auto`.
+    /// CSS 2.1 §10.5: when this box's height depends on its content, a
+    /// percentage `height` on an in-flow child computes to `auto`. Before
+    /// this the child fell back to the viewport: github's `position: fixed`
+    /// header holds a `height: 100%` bar, and the header came out 832px tall
+    /// where Chrome sizes it to its content.
+    ///
+    /// Scoped to parents known to be content-sized: an out-of-flow box with
+    /// `height: auto` that `top` + `bottom` do not stretch, and the
+    /// auto-height in-flow boxes beneath it. Other indefinite parents keep
+    /// the historical viewport fallback. Out-of-flow children are never
+    /// marked: their containing block is a padding box, resolved at
+    /// re-anchor time.
+    fn mark_percent_height_bases(
+        &mut self,
+        definite_for_children: Option<f32>,
+        containing_block: &Dimensions,
+    ) {
+        let content_sized = definite_for_children.is_none()
+            && (self.percent_height_is_auto
+                || (matches!(self.position, Position::Absolute | Position::Fixed)
+                    && matches!(self.style.height, Length::Auto)
+                    && {
+                        let offsets = self.resolved_offsets(containing_block);
+                        offsets.top.is_none() || offsets.bottom.is_none()
+                    }));
+        for child in &mut self.children {
+            child.percent_height_is_auto = content_sized
+                && !matches!(child.position, Position::Absolute | Position::Fixed);
+        }
+    }
+
+    /// Whether this box's `height` carries a percentage that
+    /// `percent_height_is_auto` turns into `auto`.
+    fn percent_height_computes_to_auto(&self) -> bool {
+        self.percent_height_is_auto
+            && match &self.style.height {
+                Length::Percent(_) => true,
+                Length::Calc(sum) => sum.percent != 0.0,
+                _ => false,
+            }
+    }
+
     fn definite_content_height_for_children(&self, containing_block_height: f32) -> Option<f32> {
+        if self.percent_height_computes_to_auto() {
+            return None;
+        }
         let specified = match self.style.height {
             Length::Px(px) => px,
             Length::Percent(pct) if containing_block_height > 0.0 => {
@@ -5246,7 +5300,11 @@ impl LayoutBox {
         };
 
         // If height is explicitly set, use it
+        let percent_is_auto = self.percent_height_computes_to_auto();
         match self.style.height {
+            // Content-sized parent: the percentage is `auto` (see
+            // `mark_percent_height_bases`); the children already set it.
+            Length::Percent(_) | Length::Calc(_) if percent_is_auto => {}
             Length::Px(h) => {
                 // With box-sizing: border-box, specified height includes padding and border
                 self.dimensions.content.height = if is_border_box {
@@ -12888,6 +12946,116 @@ mod tests {
             outer.children[0].children[0].dimensions.content.height, 80.0,
             "50% of the calc parent's 160px, not of the viewport"
         );
+    }
+
+    /// `root > header(position, auto height, 16px padding) > [wrap >] bar
+    /// (height: <bar_height>) > 18px leaf`, laid out at 1280x800 through the
+    /// entry the caller picks. Returns (header content height, bar content
+    /// height).
+    fn content_sized_oof_header(
+        position: Position,
+        header_height: Length,
+        wrapped: bool,
+        bar_height: Length,
+        collapse_path: bool,
+    ) -> (f32, f32) {
+        let mut leaf_style = ComputedStyle::new();
+        leaf_style.height = Length::Px(18.0);
+        let mut bar_style = ComputedStyle::new();
+        bar_style.height = bar_height;
+        let mut bar = LayoutBox::new(BoxType::Block, bar_style);
+        bar.children.push(LayoutBox::new(BoxType::Block, leaf_style));
+
+        let mut header_style = ComputedStyle::new();
+        header_style.position = match position {
+            Position::Fixed => rustkit_css::Position::Fixed,
+            _ => rustkit_css::Position::Absolute,
+        };
+        header_style.top = Some(Length::Px(0.0));
+        header_style.left = Some(Length::Px(0.0));
+        header_style.right = Some(Length::Px(0.0));
+        header_style.padding_top = Length::Px(16.0);
+        header_style.padding_bottom = Length::Px(16.0);
+        header_style.height = header_height;
+        let mut header = LayoutBox::new(BoxType::Block, header_style);
+        header.position = position;
+        if wrapped {
+            let mut wrap = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+            wrap.children.push(bar);
+            header.children.push(wrap);
+        } else {
+            header.children.push(bar);
+        }
+
+        let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        root.children.push(header);
+        root.set_viewport(1280.0, 800.0);
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 800.0),
+            ..Default::default()
+        };
+        if collapse_path {
+            let mut mc = MarginCollapseContext::new();
+            let mut fc = FloatContext::new();
+            root.layout_with_collapse(&cb, &mut mc, &mut fc);
+        } else {
+            root.layout(&cb);
+        }
+
+        let header = &root.children[0];
+        let bar = if wrapped {
+            &header.children[0].children[0]
+        } else {
+            &header.children[0]
+        };
+        (header.dimensions.content.height, bar.dimensions.content.height)
+    }
+
+    /// CSS 2.1 §10.5: a percentage height whose containing block's height
+    /// depends on its content computes to `auto`. github's `position: fixed`
+    /// header (auto height, `padding-block: 16px`) holds a `height: 100%`
+    /// bar; RustKit resolved that bar against the 800px viewport, so the
+    /// header was 832px tall and hid the page. Chrome: bar 18, header 18.
+    #[test]
+    fn a_percent_height_child_of_a_content_sized_out_of_flow_box_is_auto() {
+        for collapse_path in [false, true] {
+            for position in [Position::Fixed, Position::Absolute] {
+                for wrapped in [false, true] {
+                    for bar_height in [Length::Percent(100.0), calc_sum("calc(100% - 4px)")] {
+                        let (header, bar) = content_sized_oof_header(
+                            position,
+                            Length::Auto,
+                            wrapped,
+                            bar_height.clone(),
+                            collapse_path,
+                        );
+                        assert_eq!(
+                            (header, bar),
+                            (18.0, 18.0),
+                            "{position:?} header, wrapped={wrapped}, {bar_height:?}, \
+                             collapse_path={collapse_path}: the percentage must be auto, \
+                             not a share of the 800px viewport"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The guard on the rule above: a DEFINITE out-of-flow parent still
+    /// resolves the percentage.
+    #[test]
+    fn a_percent_height_child_of_a_definite_out_of_flow_box_still_resolves() {
+        for collapse_path in [false, true] {
+            let (header, bar) = content_sized_oof_header(
+                Position::Fixed,
+                Length::Px(50.0),
+                false,
+                Length::Percent(100.0),
+                collapse_path,
+            );
+            assert_eq!((header, bar), (50.0, 50.0), "collapse_path={collapse_path}");
+        }
     }
 
     /// The abspos twin of `a_calc_height_resolves_against_its_parents_definite_height`.
