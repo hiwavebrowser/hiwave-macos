@@ -12170,3 +12170,44 @@ can tell that way apart from the right one.** Two pixels could not.
   That is a large improvement that still leaves the answer out of reach, and it
   is the kind of result that would have been easy to write up as a win by
   quoting the improvement and not the residual.
+
+### Addendum — #275 MERGED (2026-09-26 13:10 UTC), `develop f1c5909`
+
+The night's P-item is on the mainline. Verified rather than taken from the
+webhook: `0651db4` is an ancestor of `origin/develop`, and the merge commit's
+diff against its first parent is **+946 / −0 across exactly three files**
+(`scripts/seat_control_paint_report.py`,
+`scripts/tests/test_seat_control_paint_report.py`,
+`trench/forensics/2026-09-26-n66-paint-seat-control-board.md`) — bit-for-bit
+the PR's diffstat, so nothing was lost or re-resolved on the way in.
+
+All 14 check runs green on `macos-14` (11 success, 3 skipped nightly-only jobs),
+R2 stamped PASS at `0651db4`, merge CLEAN. `script-guards` passing on the macOS
+runner is the part worth recording: the 17 guards run in CI, not only on this
+seat. Check-ins cancelled; watch released.
+
+Gate B's percentage can now be attributed on any seat that captures a control.
+
+**State at end of night, for whoever reads this next:**
+
+- Metric **3/26** on macOS, carried forward from run 36100178666 and NOT
+  re-measured tonight. This PR carries no Rust, so it moved nothing.
+  `develop` is now `f1c5909`.
+- **The paint queue cannot be worked from this seat.** Ten of the eleven
+  paint-blocked cases are below its floor; the eleventh is `card-grid`, 17.5
+  points from green. The four cases decision 4 is about are below their floors
+  by 1.77×–2.51×.
+- **Decision 1 of tonight is the one that decides the next night**: do the four
+  close paint cases become macOS-CI experiments (one hypothesis per PR, read off
+  the Parity Gate), or does the queue stay on geometry — 621-ish failures, 255
+  of them in `settings`?
+- **Recorded next unit, if the answer is "stay on geometry":** `settings` is
+  still the largest single row on the board and has been for four nights. If the
+  answer is "turn to paint", the first unit is `images-intrinsic` at 0.064pp,
+  and it must be worked as a CI experiment because this seat cannot see it.
+- Unresolved and cheap to fix: CI artifacts are unreachable from this container
+  (`*.blob.core.windows.net` denied at CONNECT), so no night here can read the
+  macOS gate JSON or Gate C's board. That is tonight's decision 2, and it is
+  what would make the macOS-CI-experiment route affordable.
+- Decisions from 09-24/09-25 (export vs layout for the fragment union; RustKit
+  sizing wrapped inlines two ways) remain open; neither blocks the next night.
