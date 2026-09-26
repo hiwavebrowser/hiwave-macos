@@ -7855,6 +7855,14 @@ pub fn measure_text_advanced(
 ///
 /// This provides accurate text measurement using DirectWrite on Windows,
 /// with support for CSS letter-spacing and word-spacing properties.
+///
+/// Results are memoised per thread. Intrinsic sizing (flex and grid
+/// min/max-content, shrink-to-fit) walks the same subtree once per ancestor
+/// that asks, so a deep flex page measures each word dozens of times:
+/// netflix spent 17 s of its first layout in Core Text shaping, reached
+/// from `own_min_content_width` / `own_max_content_width` again and again.
+/// The answer depends only on the arguments and on the installed
+/// `@font-face` set, so entries are dropped whenever that set changes.
 pub fn measure_text_with_spacing(
     text: &str,
     font_family: &str,
@@ -7864,6 +7872,84 @@ pub fn measure_text_with_spacing(
     letter_spacing: f32,
     word_spacing: f32,
 ) -> TextMetrics {
+    use std::cell::RefCell;
+
+    type Key = (String, String, u32, u16, u8, u32, u32);
+    struct Memo {
+        generation: u64,
+        metrics: std::collections::HashMap<Key, TextMetrics>,
+    }
+    // Bounds memory on a text-heavy page; refilling costs one shape per
+    // entry, which is what every call cost before the memo.
+    const MAX_ENTRIES: usize = 16384;
+    thread_local! {
+        static MEMO: RefCell<Memo> = RefCell::new(Memo {
+            generation: 0,
+            metrics: std::collections::HashMap::new(),
+        });
+    }
+
+    let generation = rustkit_text::webfonts::generation();
+    let key: Key = (
+        text.to_string(),
+        font_family.to_string(),
+        font_size.to_bits(),
+        font_weight.0,
+        font_style as u8,
+        letter_spacing.to_bits(),
+        word_spacing.to_bits(),
+    );
+    let cached = MEMO.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.generation != generation {
+            m.metrics.clear();
+            m.generation = generation;
+        }
+        m.metrics.get(&key).cloned()
+    });
+    if let Some(metrics) = cached {
+        return metrics;
+    }
+    let metrics = shape_text_metrics(
+        text,
+        font_family,
+        font_size,
+        font_weight,
+        font_style,
+        letter_spacing,
+        word_spacing,
+    );
+    MEMO.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.metrics.len() >= MAX_ENTRIES {
+            m.metrics.clear();
+        }
+        m.metrics.insert(key, metrics.clone());
+    });
+    metrics
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Uncached text measurements on this thread (see
+    /// `measure_text_with_spacing`).
+    static TEXT_SHAPES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Shape `text` and return its metrics (uncached; see
+/// `measure_text_with_spacing`).
+fn shape_text_metrics(
+    text: &str,
+    font_family: &str,
+    font_size: f32,
+    font_weight: rustkit_css::FontWeight,
+    font_style: rustkit_css::FontStyle,
+    letter_spacing: f32,
+    word_spacing: f32,
+) -> TextMetrics {
+    #[cfg(test)]
+    TEXT_SHAPES.with(|n| n.set(n.get() + 1));
+
     let shaper = TextShaper::new();
     let chain = FontFamilyChain::from_css_value(font_family);
 
@@ -9258,6 +9344,94 @@ mod tests {
         assert_eq!(r.bottom(), 70.0);
         assert!(r.contains(50.0, 30.0));
         assert!(!r.contains(0.0, 0.0));
+    }
+
+    #[test]
+    fn a_text_measurement_is_shaped_once_not_once_per_call() {
+        // Intrinsic sizing re-measures the same word once per asking
+        // ancestor. 200 identical measurements must shape once, and give
+        // the uncached answer every time.
+        let measure = |letter_spacing: f32| {
+            measure_text_with_spacing(
+                "shaped once per page",
+                "Helvetica, sans-serif",
+                17.0,
+                rustkit_css::FontWeight(700),
+                rustkit_css::FontStyle::Normal,
+                letter_spacing,
+                0.0,
+            )
+            .width
+        };
+        let uncached = shape_text_metrics(
+            "shaped once per page",
+            "Helvetica, sans-serif",
+            17.0,
+            rustkit_css::FontWeight(700),
+            rustkit_css::FontStyle::Normal,
+            0.0,
+            0.0,
+        )
+        .width;
+        let before = TEXT_SHAPES.with(std::cell::Cell::get);
+        let widths: Vec<f32> = (0..200).map(|_| measure(0.0)).collect();
+        // 1 shape; 2 if another test's web-font install bumps the
+        // generation mid-loop.
+        let shaped = TEXT_SHAPES.with(std::cell::Cell::get) - before;
+        assert!(
+            shaped <= 2,
+            "{shaped} shapes for 200 identical measurements"
+        );
+        assert!(uncached > 0.0);
+        assert!(
+            widths.iter().all(|w| *w == uncached),
+            "{} vs {uncached}",
+            widths[0]
+        );
+        // Every argument is part of the key: spacing is not served from the
+        // unspaced entry.
+        assert!(measure(2.0) > uncached + 30.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_new_web_font_set_invalidates_text_measurements() {
+        // The same family name can measure differently once the document's
+        // @font-face set changes, so the memo must not outlive it.
+        let measure = || {
+            measure_text_with_spacing(
+                "x",
+                "Helvetica",
+                16.0,
+                rustkit_css::FontWeight(400),
+                rustkit_css::FontStyle::Normal,
+                0.0,
+                0.0,
+            )
+        };
+        measure();
+        let before = TEXT_SHAPES.with(std::cell::Cell::get);
+        measure();
+        assert_eq!(
+            TEXT_SHAPES.with(std::cell::Cell::get),
+            before,
+            "second measure is a hit"
+        );
+        rustkit_text::webfonts::install(
+            "text-measure-memo-test",
+            &[rustkit_text::webfonts::WebFontFace {
+                family: "TextMeasureMemoTestFace".into(),
+                weight: 400,
+                italic: false,
+                data: std::sync::Arc::new(vec![0u8; 64]),
+            }],
+        );
+        measure();
+        assert_eq!(
+            TEXT_SHAPES.with(std::cell::Cell::get),
+            before + 1,
+            "re-shaped after the set changed"
+        );
     }
 
     #[test]
