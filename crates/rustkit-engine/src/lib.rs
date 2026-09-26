@@ -3061,6 +3061,39 @@ impl Engine {
                         rustkit_css::Length::Px(pct / 100.0 * parent_font_px)
                     }
                     rustkit_css::Length::Rem(rem) => rustkit_css::Length::Px(rem * 16.0),
+                    // Viewport units and math functions (`4.1vw`,
+                    // `calc(2vw + 4px)`, `clamp(2rem, 5vw, 4rem)`) absolutize
+                    // here too, against this view's viewport: left alone they
+                    // hit the same 16px layout fallback. facebook's headline
+                    // is `font-size: 4.1vw`. With no view (ad-hoc builds) the
+                    // viewport is unknown, so they stay as they were.
+                    other @ (rustkit_css::Length::Vw(_)
+                    | rustkit_css::Length::Vh(_)
+                    | rustkit_css::Length::Vmin(_)
+                    | rustkit_css::Length::Vmax(_)
+                    | rustkit_css::Length::Min(_)
+                    | rustkit_css::Length::Max(_)
+                    | rustkit_css::Length::Clamp(_)
+                    | rustkit_css::Length::Calc(_)) => {
+                        let viewport = self
+                            .building_view
+                            .get()
+                            .and_then(|id| self.view_viewport(id));
+                        match viewport {
+                            Some((vw, vh)) => rustkit_css::Length::Px(
+                                other
+                                    .to_px_with_viewport(
+                                        parent_font_px,
+                                        16.0,
+                                        parent_font_px,
+                                        vw,
+                                        vh,
+                                    )
+                                    .max(0.0),
+                            ),
+                            None => other,
+                        }
+                    }
                     other => other,
                 };
 
@@ -15750,6 +15783,48 @@ mod form_typing_tests {
             "the <input>'s FormControl box must carry a node_id; without it a \
              hit test finds a rectangle with no element and focus cannot resolve"
         );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn viewport_relative_font_sizes_resolve_against_the_views_viewport() {
+        // Layout reads font-size only as Px and falls back to 16px on
+        // anything else, so `font-size: 4.1vw` (facebook's headline) and
+        // every calc()/clamp() over vw painted at 16px.
+        let (engine, id) = engine_with_html(
+            r#"<html><body>
+            <p style="font-size: 5vw">vw</p>
+            <p style="font-size: 10vh">vh</p>
+            <p style="font-size: 5vmin">vmin</p>
+            <p style="font-size: calc(2vw + 4px)">calc</p>
+            <p style="font-size: clamp(10px, 4vw, 100px)">clamp</p>
+            <p style="font-size: min(5vw, 30px)">min</p>
+            <div style="font-size: 20px"><p style="font-size: calc(50% + 1vw)">pct</p></div>
+            </body></html>"#,
+        );
+        let layout = engine.views.get(&id).unwrap().layout.as_ref().unwrap();
+        fn size_of(b: &LayoutBox, text: &str) -> Option<rustkit_css::Length> {
+            if matches!(&b.box_type, BoxType::Text(t) if t.trim() == text) {
+                return Some(b.style.font_size.clone());
+            }
+            b.children.iter().find_map(|c| size_of(c, text))
+        }
+        // The view is 800x600.
+        for (text, px) in [
+            ("vw", 40.0),
+            ("vh", 60.0),
+            ("vmin", 30.0),
+            ("calc", 20.0),
+            ("clamp", 32.0),
+            ("min", 30.0),
+            ("pct", 18.0),
+        ] {
+            assert_eq!(
+                size_of(layout, text),
+                Some(rustkit_css::Length::Px(px)),
+                "font-size of {text:?}"
+            );
+        }
     }
 
     #[test]
