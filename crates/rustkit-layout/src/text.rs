@@ -995,6 +995,14 @@ impl TextShaper {
     }
 
     /// Shape text using Core Text on macOS.
+    ///
+    /// Results are memoised per thread. Layout shapes the same strings over
+    /// and over: every flex/grid measuring pass re-wraps its text, and each
+    /// wrap probes a prefix per break opportunity. On cnn, line wrapping was
+    /// 29% of the main thread, spread over thousands of small repeated
+    /// shapes. The answer depends only on the arguments and on the installed
+    /// `@font-face` set, so entries are dropped whenever that set changes
+    /// (the rule `create_ct_font_with_traits` uses).
     #[cfg(target_os = "macos")]
     pub fn shape(
         &self,
@@ -1005,6 +1013,69 @@ impl TextShaper {
         stretch: FontStretch,
         size: f32,
     ) -> Result<ShapedRun, TextError> {
+        use std::cell::RefCell;
+
+        type Key = (String, String, Vec<String>, u16, u8, u8, u32);
+        struct Memo {
+            generation: u64,
+            runs: HashMap<Key, ShapedRun>,
+        }
+        // Bounds memory on a text-heavy page; refilling costs one shape per
+        // entry, which is what every call cost before the memo.
+        const MAX_ENTRIES: usize = 16384;
+        thread_local! {
+            static MEMO: RefCell<Memo> = RefCell::new(Memo {
+                generation: 0,
+                runs: HashMap::new(),
+            });
+        }
+
+        let generation = rustkit_text::webfonts::generation();
+        let key: Key = (
+            text.to_string(),
+            font_chain.primary.clone(),
+            font_chain.fallbacks.clone(),
+            weight.0,
+            style as u8,
+            stretch as u8,
+            size.to_bits(),
+        );
+        let cached = MEMO.with(|m| {
+            let mut m = m.borrow_mut();
+            if m.generation != generation {
+                m.runs.clear();
+                m.generation = generation;
+            }
+            m.runs.get(&key).cloned()
+        });
+        if let Some(run) = cached {
+            return Ok(run);
+        }
+        let run = self.shape_uncached(text, font_chain, weight, style, stretch, size)?;
+        MEMO.with(|m| {
+            let mut m = m.borrow_mut();
+            if m.runs.len() >= MAX_ENTRIES {
+                m.runs.clear();
+            }
+            m.runs.insert(key, run.clone());
+        });
+        Ok(run)
+    }
+
+    /// Shape text using Core Text on macOS (uncached; see `shape`).
+    #[cfg(target_os = "macos")]
+    fn shape_uncached(
+        &self,
+        text: &str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+    ) -> Result<ShapedRun, TextError> {
+        #[cfg(test)]
+        font_resolve_tests::SHAPES.with(|n| n.set(n.get() + 1));
+
         if text.is_empty() {
             return Ok(ShapedRun {
                 text: String::new(),
@@ -3473,6 +3544,85 @@ mod font_resolve_tests {
     thread_local! {
         /// Uncached font resolutions on this thread.
         pub(super) static RESOLUTIONS: Cell<usize> = const { Cell::new(0) };
+        /// Uncached shapes on this thread.
+        pub(super) static SHAPES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    #[test]
+    fn rewrapping_the_same_text_shapes_nothing_new() {
+        // Every flex measuring pass re-wraps its text. The second wrap of
+        // the same paragraph at the same width must come from the memo and
+        // give the same lines.
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::new("Helvetica");
+        let text = (0..60).map(|i| format!("w{}rd", "o".repeat(i % 7))).collect::<Vec<_>>().join(" ");
+        let wrap = || {
+            shaper
+                .wrap_text(
+                    &text,
+                    &chain,
+                    FontWeight(400),
+                    FontStyle::Normal,
+                    FontStretch::Normal,
+                    16.0,
+                    300.0,
+                    CssWordBreak::Normal,
+                    CssOverflowWrap::Normal,
+                )
+                .unwrap()
+        };
+        let first = wrap();
+        let before = SHAPES.with(Cell::get);
+        let second = wrap();
+        // 0; a few more if another test's web-font install bumps the
+        // generation mid-wrap.
+        let shaped = SHAPES.with(Cell::get) - before;
+        assert!(shaped <= 8, "{shaped} new shapes re-wrapping the same text");
+        assert!(first.len() > 3);
+        let offsets = |lines: &[WrappedLine]| {
+            lines
+                .iter()
+                .map(|l| (l.start_offset, l.end_offset, l.width.to_bits()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(offsets(&first), offsets(&second));
+    }
+
+    #[test]
+    fn a_new_web_font_set_invalidates_shaped_runs() {
+        let chain = FontFamilyChain::new("Helvetica");
+        let shape = || {
+            TextShaper::new()
+                .shape("memo", &chain, FontWeight(400), FontStyle::Normal, FontStretch::Normal, 16.0)
+                .unwrap()
+        };
+        // Other tests install web-font sets on their own threads, and the
+        // generation is process-wide: only judge a hit when it held still.
+        let mut judged = false;
+        for _ in 0..20 {
+            let generation = rustkit_text::webfonts::generation();
+            shape();
+            let before = SHAPES.with(Cell::get);
+            shape();
+            if rustkit_text::webfonts::generation() == generation {
+                assert_eq!(SHAPES.with(Cell::get), before, "second shape is a hit");
+                judged = true;
+                break;
+            }
+        }
+        assert!(judged, "the web-font generation never held still");
+        let before = SHAPES.with(Cell::get);
+        rustkit_text::webfonts::install(
+            "shape-memo-test",
+            &[rustkit_text::webfonts::WebFontFace {
+                family: "ShapeMemoTestFace".into(),
+                weight: 400,
+                italic: false,
+                data: std::sync::Arc::new(vec![0u8; 64]),
+            }],
+        );
+        shape();
+        assert!(SHAPES.with(Cell::get) > before, "re-shaped after the set changed");
     }
 
     #[test]
