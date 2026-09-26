@@ -3165,23 +3165,89 @@ fn split_css_function_args(args: &str) -> Vec<&str> {
 }
 
 /// Parse display value.
+///
+/// Besides the legacy single keywords, this takes css-display-3's
+/// `<display-outside> || <display-inside>` plus `list-item` (`flow-root`,
+/// `inline flex`, `block flow list-item`, ...), which were dropped before, so
+/// the element kept its previous display. `flow-root` lays out as a block
+/// (its new formatting context only matters for floats and margin collapse);
+/// `list-item` lays out as its outer display, with no marker. `contents`,
+/// `table*` and `ruby` stay unsupported (`None`).
 pub fn parse_display(value: &str) -> Option<Display> {
-    match value.trim().to_lowercase().as_str() {
-        "block" => Some(Display::Block),
-        "inline" => Some(Display::Inline),
-        "inline-block" => Some(Display::InlineBlock),
-        "flex" => Some(Display::Flex),
-        "inline-flex" => Some(Display::InlineFlex),
-        "grid" => Some(Display::Grid),
-        "inline-grid" => Some(Display::InlineGrid),
-        "none" => Some(Display::None),
-        _ => None,
+    let value = value.trim().to_lowercase();
+    match value.as_str() {
+        "block" => return Some(Display::Block),
+        "inline" => return Some(Display::Inline),
+        "inline-block" => return Some(Display::InlineBlock),
+        "flex" => return Some(Display::Flex),
+        "inline-flex" => return Some(Display::InlineFlex),
+        "grid" => return Some(Display::Grid),
+        "inline-grid" => return Some(Display::InlineGrid),
+        "none" => return Some(Display::None),
+        _ => {}
     }
+    let (mut outer, mut inner, mut list_item) = (None, None, false);
+    for token in value.split_whitespace() {
+        match token {
+            "block" | "inline" if outer.is_none() => outer = Some(token),
+            "flow" | "flow-root" | "flex" | "grid" if inner.is_none() => inner = Some(token),
+            "list-item" if !list_item => list_item = true,
+            _ => return None,
+        }
+    }
+    if outer.is_none() && inner.is_none() && !list_item {
+        return None;
+    }
+    // `list-item` only combines with a flow inner display.
+    if list_item && !matches!(inner, None | Some("flow") | Some("flow-root")) {
+        return None;
+    }
+    let inline = outer == Some("inline");
+    Some(match (inline, inner.unwrap_or("flow")) {
+        (false, "flex") => Display::Flex,
+        (true, "flex") => Display::InlineFlex,
+        (false, "grid") => Display::Grid,
+        (true, "grid") => Display::InlineGrid,
+        (true, "flow-root") => Display::InlineBlock,
+        (true, _) => Display::Inline,
+        (false, _) => Display::Block,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_takes_flow_root_list_item_and_two_value_syntax() {
+        let cases: &[(&str, Option<Display>)] = &[
+            ("flow-root", Some(Display::Block)),
+            ("list-item", Some(Display::Block)),
+            ("flow", Some(Display::Block)),
+            ("block flow-root", Some(Display::Block)),
+            ("inline flow-root", Some(Display::InlineBlock)),
+            ("inline flow", Some(Display::Inline)),
+            ("block flex", Some(Display::Flex)),
+            ("inline flex", Some(Display::InlineFlex)),
+            ("grid inline", Some(Display::InlineGrid)),
+            ("block flow list-item", Some(Display::Block)),
+            ("inline list-item", Some(Display::Inline)),
+            ("Flow-Root", Some(Display::Block)),
+            // Legacy keywords are unchanged.
+            ("inline-block", Some(Display::InlineBlock)),
+            ("none", Some(Display::None)),
+            // Unsupported or invalid: still ignored.
+            ("contents", None),
+            ("table", None),
+            ("block block", None),
+            ("flex list-item", None),
+            ("block wobble", None),
+            ("", None),
+        ];
+        for (value, want) in cases {
+            assert_eq!(parse_display(value), *want, "display: {value:?}");
+        }
+    }
 
     #[test]
     fn test_parse_color_hex() {
