@@ -7031,45 +7031,24 @@ impl Engine {
     }
 
     /// Resolve CSS variable references in a value.
+    ///
+    /// Substitution is recursive (a variable's value may itself use `var()`)
+    /// and cycle-safe: a variable that is already being resolved higher up
+    /// the chain is treated as missing, so its `var()` falls back (CSS
+    /// Variables 1 §2.3, cycles make the property invalid at computed-value
+    /// time). The previous loop re-scanned its own output, so a
+    /// self-reference such as carvana.com's
+    /// `--spacing-xs: var(--spacing-xs, .125rem)` substituted forever and hung
+    /// the first style pass. Fallbacks are delimited by balanced parentheses,
+    /// and the expanded length is capped so fan-out chains cannot grow without
+    /// bound.
     fn resolve_css_variables(&self, value: &str, css_vars: &HashMap<String, String>) -> String {
-        let mut result = value.to_string();
-
-        // Look for var(--name) or var(--name, fallback)
-        while let Some(start) = result.find("var(") {
-            let after_var = &result[start + 4..];
-            if let Some(end) = after_var.find(')') {
-                let var_content = &after_var[..end];
-
-                // Parse variable name and optional fallback
-                let (var_name, fallback) = if let Some(comma_pos) = var_content.find(',') {
-                    (
-                        var_content[..comma_pos].trim(),
-                        Some(var_content[comma_pos + 1..].trim()),
-                    )
-                } else {
-                    (var_content.trim(), None)
-                };
-
-                // Look up variable value
-                let replacement = css_vars
-                    .get(var_name)
-                    .map(|s| s.as_str())
-                    .or(fallback)
-                    .unwrap_or("");
-
-                // Replace var(...) with the resolved value
-                result = format!(
-                    "{}{}{}",
-                    &result[..start],
-                    replacement,
-                    &after_var[end + 1..]
-                );
-            } else {
-                break; // Malformed var(), stop processing
-            }
+        if !value.contains("var(") {
+            return value.to_string();
         }
-
-        result
+        let mut stack: Vec<&str> = Vec::new();
+        let mut budget = VAR_EXPANSION_BUDGET;
+        substitute_css_vars(value, css_vars, &mut stack, &mut budget)
     }
 
     /// Check if a selector matches an element.
@@ -18383,6 +18362,77 @@ mod windows_a_leg_pins {
     }
 
     #[test]
+    fn a_self_referencing_css_variable_falls_back_instead_of_looping() {
+        // carvana.com ships `--spacing-xs: var(--spacing-xs, .125rem)` (13
+        // such declarations). The old resolver re-scanned its own output and
+        // substituted that forever, hanging the first style pass.
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let mut vars = HashMap::new();
+        vars.insert("--spacing-xs".to_string(), "var(--spacing-xs, .125rem)".to_string());
+        vars.insert("--a".to_string(), "var(--b)".to_string());
+        vars.insert("--b".to_string(), "var(--a, 7px)".to_string());
+        vars.insert("--gap".to_string(), "4px".to_string());
+        let r = |v: &str| resolve_bounded(&e, v, &vars);
+        assert_eq!(r("var(--spacing-xs)"), ".125rem");
+        assert_eq!(r("var(--spacing-xs, 9px)"), ".125rem");
+        // A two-variable cycle takes the inner fallback, and terminates.
+        assert_eq!(r("var(--a)"), "7px");
+        // Nested var() inside a fallback resolves; parentheses balance.
+        assert_eq!(r("var(--missing, calc(var(--gap) * 2))"), "calc(4px * 2)");
+        assert_eq!(r("0 var(--missing, rgba(0, 0, 0, var(--missing2, .5)))"), "0 rgba(0, 0, 0, .5)");
+    }
+
+    #[test]
+    fn css_variable_fan_out_is_bounded() {
+        // Each level doubles: 40 levels would be 2^40 copies unbounded.
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let mut vars = HashMap::new();
+        vars.insert("--v0".to_string(), "x".to_string());
+        for i in 1..40 {
+            vars.insert(format!("--v{i}"), format!("var(--v{p}) var(--v{p})", p = i - 1));
+        }
+        let out = resolve_bounded(&e, "var(--v39)", &vars);
+        assert!(out.len() <= 2 * VAR_EXPANSION_BUDGET, "len {}", out.len());
+    }
+
+    #[test]
+    fn a_page_with_a_self_referencing_variable_lays_out() {
+        // End to end, carvana's shape: the self-reference sits on `:host,:root`,
+        // so it lands in the document-wide variable map.
+        let html = concat!(
+            "<html><head><style>",
+            ":host,:root{--spacing-xs:var(--spacing-xs,.125rem)}",
+            ".btn{padding:var(--spacing-xs)}",
+            "</style></head><body><div class=\"btn\">buy</div></body></html>"
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let e = Engine::new(EngineConfig::default()).expect("engine");
+            let d = Document::parse_html(html).expect("parse");
+            let _ = e.build_layout_from_document(&d, &[]);
+            let _ = tx.send(());
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(10)).is_ok(),
+            "style/layout did not finish: var() self-reference loops"
+        );
+    }
+
+    /// Runs the resolver on a worker thread so a regression fails the test
+    /// instead of hanging the suite.
+    fn resolve_bounded(e: &Engine, v: &str, vars: &HashMap<String, String>) -> String {
+        let _ = e;
+        let (v, vars) = (v.to_string(), vars.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let e = Engine::new(EngineConfig::default()).expect("engine");
+            let _ = tx.send(e.resolve_css_variables(&v, &vars));
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("resolve_css_variables did not terminate")
+    }
+
+    #[test]
     fn radial_gradient_positions_parse_to_normalised_centres() {
         let center = |pos: &str| {
             match parse_radial_gradient(&format!("radial-gradient(circle at {pos}, red, blue)"), false) {
@@ -18729,4 +18779,86 @@ mod float_clear_tests {
             assert_eq!(by_id(&root, "p").unwrap().float, rustkit_css::Float::None);
         }
     }
+}
+
+/// Upper bound on the bytes a single `var()` expansion may produce. Real
+/// pages stay far below it (a long box-shadow chain is a few hundred bytes);
+/// it only stops pathological exponential fan-out.
+const VAR_EXPANSION_BUDGET: usize = 64 * 1024;
+
+/// Byte index of the `)` that closes the parenthesis opened just before
+/// `s[0]`, or `None` when unbalanced.
+fn matching_close_paren(s: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 0 => return Some(i),
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Left-to-right `var()` substitution. The text a substitution produces is
+/// already fully resolved, so it is appended and never re-scanned; `stack`
+/// holds the variables being resolved (cycle detection). Every byte written
+/// at every level is charged to `budget`; once it is spent, the expansion
+/// stops, so pathological fan-out costs bounded work, not just bounded output.
+fn substitute_css_vars<'a>(
+    value: &str,
+    vars: &'a HashMap<String, String>,
+    stack: &mut Vec<&'a str>,
+    budget: &mut usize,
+) -> String {
+    fn push(out: &mut String, s: &str, budget: &mut usize) {
+        let n = s.len().min(*budget);
+        // Stay on a char boundary when truncating at the cap.
+        let mut n2 = n;
+        while !s.is_char_boundary(n2) {
+            n2 -= 1;
+        }
+        out.push_str(&s[..n2]);
+        *budget -= n2;
+        if n2 < s.len() {
+            *budget = 0;
+        }
+    }
+    let mut out = String::with_capacity(value.len().min(*budget));
+    let mut rest = value;
+    while let Some(start) = rest.find("var(") {
+        if *budget == 0 {
+            return out;
+        }
+        push(&mut out, &rest[..start], budget);
+        let after = &rest[start + 4..];
+        let Some(end) = matching_close_paren(after) else {
+            // Malformed var(): keep the remainder verbatim, as before.
+            push(&mut out, &rest[start..], budget);
+            return out;
+        };
+        let content = &after[..end];
+        let (name, fallback) = match content.find(',') {
+            Some(i) => (content[..i].trim(), Some(content[i + 1..].trim())),
+            None => (content.trim(), None),
+        };
+        let piece = match vars.get_key_value(name) {
+            Some((key, raw)) if !stack.contains(&key.as_str()) => {
+                stack.push(key.as_str());
+                let r = substitute_css_vars(raw, vars, stack, budget);
+                stack.pop();
+                r
+            }
+            // Missing, or part of a cycle: the fallback applies.
+            _ => fallback
+                .map(|f| substitute_css_vars(f, vars, stack, budget))
+                .unwrap_or_default(),
+        };
+        // The nested call already charged its bytes; appending is free.
+        out.push_str(&piece);
+        rest = &after[end + 1..];
+    }
+    push(&mut out, rest, budget);
+    out
 }
