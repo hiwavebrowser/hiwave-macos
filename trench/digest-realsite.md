@@ -386,3 +386,49 @@ Housekeeping: new worktrees `rs-logical-props`, `rs-display-keywords` (PR branch
 **Decisions for Pete:**
 1. **Custom elements vs more CSS.** microsoft is 0 until `customElements.define` runs, and the same pattern (`:not(:defined)` + script-built shadow roots) will recur on modern sites. It's the JS track's next API, but it needs shadow DOM + slots to render the header right. Pull it forward, or keep grinding CSS B3/B4?
 2. **x's LOOKS RIGHT is scored against a 403 page.** Fixing the oracle check (A2) is allowed and honest but will likely take x from 2 to 1. I'll do it next session unless you say otherwise.
+
+
+## 2026-09-26 04:20 — A2 oracle check lands (x 2 → 1); floats placed on both layout paths (#276, wikipedia +1). Board 13 → 13 (14 → 13 is the A2 rule, not the engine)
+
+**Points: 13 → 13 / 60.** Under the old rule, the before run scores 14, which matches last session's 14. The only difference is x, which A2 now scores 1 (see Changes in BASELINE). All three runs were chunked, 5 sites at a time.
+
+| run | engine | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|
+| `20260926T0620Z-dev` | develop a0176dd | **13** | 9 | 3 | 1 | 12/45 |
+| `20260926T0700Z-float` | + #276 @ f62a75f | **13** | 9 | 3 | 1 | 12/42 |
+| `20260926T0750Z-float2` | + #276 @ d9118d9 | **13** | 9 | 3 | 1 | 12/42 |
+
+Rows that moved:
+- **wikipedia 1 → 2 (#276), in both runs:** READABLE 55.1 → **80.9%**, with RustKit's first-viewport words going 99 → 200. LOOKS RIGHT 18.2 → 22.6%; the rest of the gap is the grid page shell (B5).
+- **linkedin 2 → 1, not #276.** Chrome and RustKit drew different page variants (57 vs 34 words, then 36 vs 116). On the same variant, the two builds give byte-identical frames (`scratch/ab_frames.py`).
+- weather LOOKS RIGHT 46 → 67% and yahoo: RustKit frames are byte-identical between builds, so this is oracle drift. Both are scored unstable anyway.
+- Passing all 3: google. Blocked (0 pts): chatgpt, ebay, nytimes, and amazon (aws-waf) in 2 of 3 runs. Oracle blocked (Chrome itself got HTTP 403 or an error page): **x, reddit**, chatgpt, ebay, nytimes.
+- LOADS timeouts (> 30 s), identical on develop and the fix: github, cnn, netflix, and microsoft in 2 of 3 runs.
+
+**Board tooling (hub, f43478e), allowed per PLAN:**
+- **A2:** a Chrome capture that lands on `chrome-error://` or on an HTTP ≥ 400 top-level document is not an oracle. The oracle now records `http_status`. The summary prints `ORACLE BLOCKED` and `SCORABLE n/max` next to `/60`. A dated line is under Changes in BASELINE.
+- **A6:** `trench/realsite/trend.csv`, one row per full run.
+- `realsite_board.py --summarize --out <run>` rebuilds a chunked run's summary and trend row, replacing `scratch/rebuild_summary.py`.
+
+**PR to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#276 `atlas/rs-float-placement` @ d9118d9, B3 float/clear.** It parses `float`/`clear`, including blockification.
+  - Floats are placed with `FloatContext` in content-box coordinates.
+  - Clearance moves a box below the floats it clears.
+  - Auto-width floats shrink to fit.
+  - BFC blocks sit beside floats, and a BFC root contains them.
+  - **Finding (corrects last session):** `relayout` uses the *collapse* flow loop, whose old `layout_float` mixed absolute and relative coordinates and whose `clear` never moved anything. Both loops are fixed, and the 5 tests run through both entry points (4 fail with the collapse branch disabled).
+  - Not done: line shortening beside floats (text still runs under a float), and floats escaping to the parent context.
+  - Gates: css 41/41, engine 149/149, layout 516/516. **Campaign 26/26, avg 1.2534%, every case identical to develop.** WPT not run (no `third_party/wpt`).
+
+**Profiling (B5 prep):** netflix spends 17 s in its first layout pass, before any external CSS loads. A symbolized `sample` puts it in CoreText shaping, via `measure_text_with_spacing` ← `grid::own_min_content_width` / `own_max_content_width`, called recursively from `flex::layout_flex_container_in` and `calculate_block_width`. That is intrinsic-size measurement re-shaping the same text again and again, with variable fonts (`ItemVariationStore`) on top. A memo of shaped widths per (text, font, size) is the obvious next lever for netflix/github/cnn, which is 3 LOADS points. Tools: `scratch/prof_site.py`, `scratch/sample_path.py`. The profiling build lives in `rs-cascade-attr-index/target-prof`.
+
+**Next:**
+1. B5: memoise text measurement in the intrinsic-width path (the netflix profile above). Re-profile github and cnn first to confirm they share the hotspot.
+2. Line shortening beside floats (wikipedia LOOKS RIGHT; any float-plus-text page).
+3. Custom elements (microsoft), still waiting on decision 1 from last session.
+
+Housekeeping: the hub worktree was switched to `atlas/rs-float-placement` twice to commit (git in other worktrees needs approval on this seat), and switched back each time. No board ran while it was switched. The `rs-float-clear` worktree/branch (unpushed WIP) is superseded by #276 and can be removed. Its `target/` holds the debug build used for the tests.
+
+**Decisions for Pete:**
+1. **A2 costs x its LOOKS RIGHT point (14 → 13 on identical code).** Chrome gets a 403 from x.com and reddit from this Mac, so neither can be scored on READABLE or LOOKS RIGHT until the oracle is headed or un-flagged (A1, still waiting on you). Say if you'd rather the oracle retry with a headed Chrome before being ruled blocked.
+2. **Text-measurement memo vs line shortening next?** I recommend the memo: it can move three sites' LOADS at once, while line shortening moves pixels on wikipedia only.
