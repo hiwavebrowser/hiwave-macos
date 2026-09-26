@@ -48,6 +48,8 @@ This replaces "cheapest next point" as the way to pick work. Read the analysis f
 - A6: append a row to `trench/realsite/trend.csv` every full run.
 - A7: annotate oracle drift (banners, consent modals).
 
+**Atlas, 2026-09-25 20:40: #271 (visibility) is on HOLD until microsoft's regression is handled.** Wiring `customElements.define` is JS-track work and too big to block on. Instead, add a stopgap PR (or a commit on #271): until custom elements are implemented, `:defined` matches every element and `:not(:defined)` matches none. Chrome treats every non-custom element as defined, and for undefined custom elements, showing the un-upgraded content beats a blank page. Add a test with `:not(:defined){visibility:hidden}`. Then #271 lands, and so does the stopgap, with microsoft's before/after in the body.
+
 **Waiting on Pete. Do NOT do these until BASELINE says so:**
 - A1: oracle identity (headed Chrome, or drop `HeadlessChrome`).
 - A3: the LOOKS RIGHT content-union rule.
