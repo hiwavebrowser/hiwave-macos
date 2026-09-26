@@ -1,0 +1,86 @@
+{
+  "id": "netflix",
+  "url": "https://www.netflix.com/",
+  "chrome": [
+    {
+      "url": "https://www.netflix.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 200,
+      "final_url": "https://www.netflix.com/",
+      "title": "Netflix - Watch TV Shows Online, Watch Movies Online",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1510Z-fsv/netflix/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260926T1510Z-fsv/netflix/chrome-a.png",
+      "elapsed_ms": 40444
+    },
+    {
+      "url": "https://www.netflix.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 200,
+      "final_url": "https://www.netflix.com/",
+      "title": "Netflix - Watch TV Shows Online, Watch Movies Online",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1510Z-fsv/netflix/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260926T1510Z-fsv/netflix/chrome-b.png",
+      "elapsed_ms": 65428
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.netflix.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260926T1510Z-fsv/netflix/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260926T1510Z-fsv/netflix/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 7,
+      "threw": 3,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 4300454,
+      "elapsed_ms": 2953
+    },
+    "elapsed_ms": 7146,
+    "error": null,
+    "wall_ms": 7270,
+    "non_background_fraction": 0.6606
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 35,
+    "rustkit_words": 66,
+    "ratio": 0.8286,
+    "missing_sample": [
+      "and",
+      "more",
+      "movies",
+      "shows",
+      "tv",
+      "unlimited"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "diff": 52.366015624999996
+  },
+  "points": 2
+}

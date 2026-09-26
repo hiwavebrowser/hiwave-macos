@@ -1,0 +1,67 @@
+{
+  "id": "x",
+  "url": "https://x.com/",
+  "chrome": [
+    {
+      "url": "https://x.com/",
+      "status": "error",
+      "error": "page.screenshot: Protocol error (Page.captureScreenshot): Unable to capture screenshot",
+      "nav_error": "page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://x.com/",
+      "http_status": 403,
+      "elapsed_ms": 42489
+    },
+    {
+      "url": "https://x.com/",
+      "status": "error",
+      "error": "page.screenshot: Protocol error (Page.captureScreenshot): Unable to capture screenshot",
+      "nav_error": "page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://x.com/",
+      "http_status": 403,
+      "elapsed_ms": 41844
+    }
+  ],
+  "oracle_capture": null,
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://x.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260926T1510Z-fsv/x/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260926T1510Z-fsv/x/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 1,
+      "threw": 6,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 5850,
+      "elapsed_ms": 5
+    },
+    "elapsed_ms": 2963,
+    "error": null,
+    "wall_ms": 3070,
+    "non_background_fraction": 0.0348
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "why": "chrome capture failed: page.screenshot: Protocol error (Page.captureScreenshot): Unable to capture screenshot",
+    "oracle_failed": true
+  },
+  "looks_right": {
+    "pass": false,
+    "why": "chrome capture failed",
+    "oracle_failed": true
+  },
+  "points": 1
+}

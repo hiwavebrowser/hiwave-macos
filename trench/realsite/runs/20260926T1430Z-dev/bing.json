@@ -1,0 +1,105 @@
+{
+  "id": "bing",
+  "url": "https://www.bing.com/",
+  "chrome": [
+    {
+      "url": "https://www.bing.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 200,
+      "final_url": "https://www.bing.com/",
+      "title": "Search - Microsoft Bing",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1430Z-dev/bing/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260926T1430Z-dev/bing/chrome-a.png",
+      "elapsed_ms": 22016
+    },
+    {
+      "url": "https://www.bing.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 200,
+      "final_url": "https://www.bing.com/",
+      "title": "Search - Microsoft Bing",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1430Z-dev/bing/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260926T1430Z-dev/bing/chrome-b.png",
+      "elapsed_ms": 20002
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.bing.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260926T1430Z-dev/bing/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260926T1430Z-dev/bing/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 9,
+      "threw": 2,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 117610,
+      "elapsed_ms": 197
+    },
+    "elapsed_ms": 1288,
+    "error": null,
+    "wall_ms": 1333,
+    "non_background_fraction": 0.3778
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 43,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "1b",
+      "accuser",
+      "across",
+      "back",
+      "bans",
+      "betting",
+      "ceasefire",
+      "claims",
+      "congo",
+      "copilot",
+      "crash",
+      "creator",
+      "cuts",
+      "discover",
+      "earth",
+      "falls",
+      "funding",
+      "image",
+      "images",
+      "in",
+      "iran",
+      "jackson",
+      "land",
+      "lula",
+      "maps"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0.0689453125,
+    "diff": 78.7779296875
+  },
+  "points": 1
+}

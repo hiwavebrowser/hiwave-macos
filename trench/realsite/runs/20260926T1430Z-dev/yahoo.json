@@ -1,0 +1,107 @@
+{
+  "id": "yahoo",
+  "url": "https://www.yahoo.com/",
+  "chrome": [
+    {
+      "url": "https://www.yahoo.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 200,
+      "final_url": "https://www.yahoo.com/",
+      "title": "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1430Z-dev/yahoo/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260926T1430Z-dev/yahoo/chrome-a.png",
+      "elapsed_ms": 38039
+    },
+    {
+      "url": "https://www.yahoo.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 200,
+      "final_url": "https://www.yahoo.com/",
+      "title": "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1430Z-dev/yahoo/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260926T1430Z-dev/yahoo/chrome-b.png",
+      "elapsed_ms": 44495
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.yahoo.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260926T1430Z-dev/yahoo/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260926T1430Z-dev/yahoo/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 152,
+      "threw": 2,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 3115068,
+      "elapsed_ms": 1571
+    },
+    "elapsed_ms": 8607,
+    "error": null,
+    "wall_ms": 8748,
+    "non_background_fraction": 0.0426
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 133,
+    "rustkit_words": 44,
+    "ratio": 0.2857,
+    "missing_sample": [
+      "00",
+      "12",
+      "15",
+      "2026",
+      "26",
+      "324",
+      "58",
+      "61",
+      "90",
+      "a",
+      "accuweather",
+      "adults",
+      "alumni",
+      "american",
+      "as",
+      "better",
+      "boston",
+      "but",
+      "by",
+      "can",
+      "college",
+      "comedy",
+      "daily",
+      "day",
+      "dealing"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 15.814746093750001,
+    "diff": 28.120410156249996,
+    "unstable": true,
+    "why": "chrome-vs-chrome 15.8% > 15% (unstable, 0 points)"
+  },
+  "points": 1
+}
