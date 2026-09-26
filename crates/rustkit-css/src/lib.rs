@@ -2446,6 +2446,12 @@ pub struct ComputedStyle {
     // Background clip for gradient text
     pub background_clip: BackgroundClip,
     pub webkit_text_fill_color: Option<Color>,
+
+    /// Custom properties (`--*`) in effect on this element, with `var()`
+    /// already substituted (CSS Variables 1 §2: they inherit, and resolve at
+    /// computed-value time on the element that declares them). Shared with
+    /// the parent until this element declares a `--*` whose value differs.
+    pub custom_properties: std::sync::Arc<std::collections::HashMap<String, String>>,
 }
 
 impl ComputedStyle {

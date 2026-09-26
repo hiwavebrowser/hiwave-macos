@@ -4456,6 +4456,53 @@ impl Engine {
             a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2))
         });
 
+        // Custom properties first: every `var()` below resolves against THIS
+        // element's map. Winners come from the same matched, sorted rules as
+        // everything else, in the same importance order as the loop below,
+        // so the cost is the element's own `--*` declarations. A parentless
+        // element (html, ad-hoc builds) starts from the document's root
+        // custom properties.
+        let inherited_vars = match parent_style {
+            Some(p) => p.custom_properties.clone(),
+            None => Arc::new(css_vars.clone()),
+        };
+        let inline_style = attributes.get("style");
+        let mut declared_vars: Vec<(&str, Option<&str>)> = Vec::new();
+        for important_pass in [false, true] {
+            for (rule, _, _) in &matching_rules {
+                for decl in &rule.declarations {
+                    if decl.important != important_pass || !decl.property.starts_with("--") {
+                        continue;
+                    }
+                    match &decl.value {
+                        rustkit_css::PropertyValue::Specified(s) => {
+                            declared_vars.push((decl.property.as_str(), Some(s.as_str())))
+                        }
+                        rustkit_css::PropertyValue::Initial => {
+                            declared_vars.push((decl.property.as_str(), None))
+                        }
+                        rustkit_css::PropertyValue::Inherit => {}
+                    }
+                }
+            }
+            if let Some(style_attr) = inline_style {
+                for declaration in style_attr.split(';') {
+                    if let Some((property, value)) = declaration.split_once(':') {
+                        let property = property.trim();
+                        if !property.starts_with("--") {
+                            continue;
+                        }
+                        let (value, important) = split_important(value.trim());
+                        if important == important_pass {
+                            declared_vars.push((property, Some(value)));
+                        }
+                    }
+                }
+            }
+        }
+        let vars = Self::element_custom_properties(&inherited_vars, &declared_vars);
+        let css_vars: &HashMap<String, String> = &vars;
+
         // Provenance is recorded from INSIDE this loop rather than by a
         // separate pass, so "which rule won" is answered by the same code
         // that decided it. A recorder that walked the rules again could
@@ -4488,6 +4535,10 @@ impl Engine {
                         rustkit_css::PropertyValue::Inherit => continue, // Skip inherit for now
                         rustkit_css::PropertyValue::Initial => continue, // Skip initial for now
                     };
+                    if decl.property.starts_with("--") {
+                        // Already applied to `vars` above.
+                        continue;
+                    }
                     let resolved_value = self.resolve_css_variables(&value_str, css_vars);
                     if value_str != resolved_value {
                         trace!(
@@ -4545,6 +4596,8 @@ impl Engine {
         // and style was declared last (`border: 5px solid; border-style: none`
         // used to keep the 5px frame).
         zero_width_of_borderless_sides(&mut style);
+
+        style.custom_properties = vars;
 
         if recording {
             let id = attributes.get("id").cloned();
@@ -7048,7 +7101,88 @@ impl Engine {
         }
         let mut stack: Vec<&str> = Vec::new();
         let mut budget = VAR_EXPANSION_BUDGET;
-        substitute_css_vars(value, css_vars, &mut stack, &mut budget)
+        substitute_css_vars(value, &[css_vars], &mut stack, &mut budget, &mut false)
+    }
+
+    /// The custom properties in effect on one element: the inherited map
+    /// with this element's winning `--*` declarations applied, each resolved
+    /// here, at computed-value time, against this element's own map (so a
+    /// child that redefines `--base` does not change an inherited
+    /// `--c: var(--base)`). `declared` is in cascade order, last one wins;
+    /// `None` is `initial`. A property in a reference cycle is invalid at
+    /// computed-value time (CSS Variables 1 §2.3) and is dropped, so a use
+    /// site's own fallback applies. The inherited Arc is shared unless some
+    /// resolved value actually differs from it: Tailwind sets ~30 `--tw-*`
+    /// on every element via `*`, and those must not copy the map each time.
+    fn element_custom_properties(
+        inherited: &Arc<HashMap<String, String>>,
+        declared: &[(&str, Option<&str>)],
+    ) -> Arc<HashMap<String, String>> {
+        if declared.is_empty() {
+            return inherited.clone();
+        }
+        let mut own: HashMap<String, String> = HashMap::new();
+        let mut unset: Vec<&str> = Vec::new();
+        for &(name, value) in declared {
+            match value {
+                Some(v) => {
+                    own.insert(name.to_string(), v.to_string());
+                    unset.retain(|n| *n != name);
+                }
+                None => {
+                    own.remove(name);
+                    unset.push(name);
+                }
+            }
+        }
+        // `initial` names are hidden from the inherited layer while
+        // resolving the others.
+        let mut visible = inherited.as_ref();
+        let masked;
+        if !unset.is_empty() {
+            let mut m = inherited.as_ref().clone();
+            for n in &unset {
+                m.remove(*n);
+            }
+            masked = m;
+            visible = &masked;
+        }
+        let mut resolved: Vec<(String, Option<String>)> = Vec::with_capacity(own.len());
+        for (name, raw) in &own {
+            let value = if raw.contains("var(") {
+                let mut stack: Vec<&str> = vec![name.as_str()];
+                let mut budget = VAR_EXPANSION_BUDGET;
+                let mut cycle = false;
+                let v = substitute_css_vars(raw, &[&own, visible], &mut stack, &mut budget, &mut cycle);
+                (!cycle).then_some(v)
+            } else {
+                Some(raw.clone())
+            };
+            resolved.push((name.clone(), value));
+        }
+        let changes = unset.iter().any(|n| inherited.contains_key(*n))
+            || resolved
+                .iter()
+                .any(|(n, v)| inherited.get(n).map(String::as_str) != v.as_deref());
+        if !changes {
+            return inherited.clone();
+        }
+        let mut map = inherited.clone();
+        let m = Arc::make_mut(&mut map);
+        for n in unset {
+            m.remove(n);
+        }
+        for (n, v) in resolved {
+            match v {
+                Some(v) => {
+                    m.insert(n, v);
+                }
+                None => {
+                    m.remove(&n);
+                }
+            }
+        }
+        map
     }
 
     /// Check if a selector matches an element.
@@ -18593,6 +18727,114 @@ mod windows_a_leg_pins {
         );
     }
 
+    fn text_color(b: &LayoutBox, text: &str) -> Option<rustkit_css::Color> {
+        if matches!(&b.box_type, BoxType::Text(t) if t.trim() == text) {
+            return Some(b.style.color);
+        }
+        b.children.iter().find_map(|c| text_color(c, text))
+    }
+
+    #[test]
+    fn element_scoped_custom_properties_inherit_down_their_subtree() {
+        // github: foreground vars sit on `[data-color-mode=dark]`, not :root.
+        let e = engine();
+        let html = "<html><head><style>\
+                    :root{--bg:#111111;--fg:#222222}\
+                    .theme{--fg:#333333}\
+                    [data-theme=dark]{--fg:#444444}\
+                    p{color:var(--fg)}\
+                    </style></head><body>\
+                    <p>root</p>\
+                    <div class=\"theme\"><section><p>themed</p></section></div>\
+                    <div data-theme=\"dark\"><div><p>dark</p></div></div>\
+                    <p>after</p></body></html>";
+        let layout = layout_of(&e, html);
+        let rgb = |v: u8| Some(rustkit_css::Color::from_rgb(v, v, v));
+        assert_eq!(text_color(&layout, "root"), rgb(0x22));
+        assert_eq!(text_color(&layout, "themed"), rgb(0x33), ".theme {{--fg}} reaches a descendant");
+        assert_eq!(text_color(&layout, "dark"), rgb(0x44), "[data-theme=dark] overrides the subtree");
+        assert_eq!(text_color(&layout, "after"), rgb(0x22), "a scoped --fg does not leak to siblings");
+    }
+
+    #[test]
+    fn custom_properties_resolve_on_the_element_that_declares_them() {
+        // CSS Variables 1 §2: `--c: var(--base)` is substituted on :root, so
+        // a descendant that redefines --base does not change the inherited --c.
+        let e = engine();
+        let html = "<html><head><style>\
+                    :root{--base:#111111;--c:var(--base)}\
+                    .t{--base:#222222;--own:var(--base)}\
+                    .c{color:var(--c)} .o{color:var(--own)}\
+                    </style></head><body><div class=\"t\">\
+                    <p class=\"c\">inherited</p><p class=\"o\">own</p></div></body></html>";
+        let layout = layout_of(&e, html);
+        let rgb = |v: u8| Some(rustkit_css::Color::from_rgb(v, v, v));
+        assert_eq!(text_color(&layout, "inherited"), rgb(0x11));
+        assert_eq!(text_color(&layout, "own"), rgb(0x22));
+    }
+
+    #[test]
+    fn custom_property_cycles_and_missing_vars_fall_back() {
+        let e = engine();
+        let html = "<html><head><style>\
+                    .cyc{--a:var(--b);--b:var(--a);color:var(--a, #0a0b0c)}\
+                    .self{--x:var(--x, #ffffff);color:var(--x, #0d0e0f)}\
+                    .miss{color:var(--missing, red)}\
+                    </style></head><body>\
+                    <p class=\"cyc\">cycle</p><p class=\"self\">self</p>\
+                    <p class=\"miss\">missing</p></body></html>";
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let e2 = Engine::new(EngineConfig::default()).expect("engine");
+            let layout = layout_of(&e2, html);
+            let _ = tx.send((
+                text_color(&layout, "cycle"),
+                text_color(&layout, "self"),
+                text_color(&layout, "missing"),
+            ));
+        });
+        let _ = e;
+        let (cycle, selfref, missing) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a custom-property cycle hung the style pass");
+        assert_eq!(cycle, Some(rustkit_css::Color::from_rgb(0x0a, 0x0b, 0x0c)));
+        assert_eq!(
+            selfref,
+            Some(rustkit_css::Color::from_rgb(0x0d, 0x0e, 0x0f)),
+            "a self-reference is a cycle: the property is invalid, the use site falls back"
+        );
+        assert_eq!(missing, Some(rustkit_css::Color::from_rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn inline_and_important_custom_properties_follow_the_cascade() {
+        let e = engine();
+        let html = "<html><head><style>\
+                    .i{--k:#111111 !important} .i{--k:#222222} p{color:var(--k)}\
+                    </style></head><body>\
+                    <p class=\"i\">imp</p><p style=\"--k:#333333\">inline</p></body></html>";
+        let layout = layout_of(&e, html);
+        let rgb = |v: u8| Some(rustkit_css::Color::from_rgb(v, v, v));
+        assert_eq!(text_color(&layout, "imp"), rgb(0x11));
+        assert_eq!(text_color(&layout, "inline"), rgb(0x33));
+    }
+
+    #[test]
+    fn an_unchanged_custom_property_shares_the_parent_map() {
+        // Tailwind's `*{--tw-…:0}` re-declares the same values on every
+        // element; that must not copy the map per element.
+        let mut parent = HashMap::new();
+        parent.insert("--tw".to_string(), "0".to_string());
+        let parent = Arc::new(parent);
+        let same = Engine::element_custom_properties(&parent, &[("--tw", Some("0"))]);
+        assert!(Arc::ptr_eq(&parent, &same));
+        let changed = Engine::element_custom_properties(&parent, &[("--tw", Some("1"))]);
+        assert!(!Arc::ptr_eq(&parent, &changed));
+        assert_eq!(changed.get("--tw").map(String::as_str), Some("1"));
+        let unset = Engine::element_custom_properties(&parent, &[("--tw", None)]);
+        assert!(unset.get("--tw").is_none(), "`initial` removes the property");
+    }
+
     #[test]
     fn pseudo_classes_on_an_ancestor_compound_constrain_it() {
         // github: `:is(.TreeViewRootUlStyles .TreeViewItem):focus-visible>div`
@@ -18900,11 +19142,16 @@ fn matching_close_paren(s: &str) -> Option<usize> {
 /// holds the variables being resolved (cycle detection). Every byte written
 /// at every level is charged to `budget`; once it is spent, the expansion
 /// stops, so pathological fan-out costs bounded work, not just bounded output.
+///
+/// `layers` are searched in order, first hit wins (an element's own `--*`
+/// over the ones it inherited). `cycle` is set when a reference was refused
+/// because its variable was already on the stack.
 fn substitute_css_vars<'a>(
     value: &str,
-    vars: &'a HashMap<String, String>,
+    layers: &[&'a HashMap<String, String>],
     stack: &mut Vec<&'a str>,
     budget: &mut usize,
+    cycle: &mut bool,
 ) -> String {
     fn push(out: &mut String, s: &str, budget: &mut usize) {
         let n = s.len().min(*budget);
@@ -18937,17 +19184,23 @@ fn substitute_css_vars<'a>(
             Some(i) => (content[..i].trim(), Some(content[i + 1..].trim())),
             None => (content.trim(), None),
         };
-        let piece = match vars.get_key_value(name) {
+        let found = layers.iter().find_map(|l| l.get_key_value(name));
+        let piece = match found {
             Some((key, raw)) if !stack.contains(&key.as_str()) => {
                 stack.push(key.as_str());
-                let r = substitute_css_vars(raw, vars, stack, budget);
+                let r = substitute_css_vars(raw, layers, stack, budget, cycle);
                 stack.pop();
                 r
             }
             // Missing, or part of a cycle: the fallback applies.
-            _ => fallback
-                .map(|f| substitute_css_vars(f, vars, stack, budget))
-                .unwrap_or_default(),
+            _ => {
+                if found.is_some() {
+                    *cycle = true;
+                }
+                fallback
+                    .map(|f| substitute_css_vars(f, layers, stack, budget, cycle))
+                    .unwrap_or_default()
+            }
         };
         // The nested call already charged its bytes; appending is free.
         out.push_str(&piece);
