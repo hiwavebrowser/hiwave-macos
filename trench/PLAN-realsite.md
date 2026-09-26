@@ -48,7 +48,9 @@ This replaces "cheapest next point" as the way to pick work. Read the analysis f
 - A6: append a row to `trench/realsite/trend.csv` every full run.
 - A7: annotate oracle drift (banners, consent modals).
 
-**Atlas, 2026-09-25 20:40: #271 (visibility) is on HOLD until microsoft's regression is handled.** Wiring `customElements.define` is JS-track work and too big to block on. Instead, add a stopgap PR (or a commit on #271): until custom elements are implemented, `:defined` matches every element and `:not(:defined)` matches none. Chrome treats every non-custom element as defined, and for undefined custom elements, showing the un-upgraded content beats a blank page. Add a test with `:not(:defined){visibility:hidden}`. Then #271 lands, and so does the stopgap, with microsoft's before/after in the body.
+**2026-09-26 00:30: done.** #272 (the stopgap) and #271 both merged (develop a0176dd). The stopgap brings microsoft's content back but not its point: its `uhf-header:not(:defined){height:54px}` placeholder stops applying, and the un-upgraded header pushes the hero out of the first viewport. Only custom elements recover microsoft. **B3 correction:** `float`/`clear` are NOT parse-only. The main flow loop (`layout_block_children`) has no float placement; only the unreached collapse path does. Budget it as layout work (WIP in worktree `rs-float-clear`, unpushed).
+
+~~**Atlas, 2026-09-25 20:40: #271 (visibility) is on HOLD until microsoft's regression is handled.**~~ Wiring `customElements.define` is JS-track work and too big to block on. Instead, add a stopgap PR (or a commit on #271): until custom elements are implemented, `:defined` matches every element and `:not(:defined)` matches none. Chrome treats every non-custom element as defined, and for undefined custom elements, showing the un-upgraded content beats a blank page. Add a test with `:not(:defined){visibility:hidden}`. Then #271 lands, and so does the stopgap, with microsoft's before/after in the body.
 
 **Waiting on Pete. Do NOT do these until BASELINE says so:**
 - A1: oracle identity (headed Chrome, or drop `HeadlessChrome`).

@@ -347,3 +347,42 @@ Housekeeping: the `rs-css-rule-recovery` worktree holds all four changes stacked
 **Decisions for Pete:**
 1. **#271 is correct CSS but costs microsoft its LOADS point until custom elements upgrade.** Options: (a) land #271 as is and do custom elements next (my recommendation); (b) a stopgap that treats every element as `:defined` until custom elements exist. (b) is a spec deviation, but it matches what Chrome shows after JS.
 2. **Security fix, details withheld:** one low-severity crash (page-controlled input) was removed in passing in #269. The diff is public; nothing to escalate.
+
+## 2026-09-26 00:35 — `:defined` stopgap (#272, merged with #271) doesn't recover microsoft; B3 logical props (#273) + display keywords (#274); float is layout work, not a parse arm. Board 14 → 14
+
+**Points: 14 → 14 / 60.** Last session's after (`20260926T0010Z-stack4`) was 14. Every full run this session is 14 (loads 9, readable 3, looks-right 2):
+
+| run | engine | points | loads | readable | looks-right |
+|---|---|---|---|---|---|
+| `20260926T0310Z-vis-0` | develop 75055ae + #271 | **14** | 9 | 3 | 2 |
+| `20260926T0310Z-defined-0` | + #272 (same session, alternating chunks) | **14** | 9 | 3 | 2 |
+| `20260926T0340Z-stack-logical` | develop d1bf064 (#270) + #272 + #271 + #273 | **14** | 9 | 3 | 2 |
+
+Per-site points are identical across all three. LOOKS RIGHT moved without crossing 15%: google 11.3 → 4.0%, yahoo 27.8 → 20.1%, weather 50.7 → 46.3%, bing 96.0 → 90.1% (#270 and #273 together, so not attributed). Passing all 3: google. Blocked (0 pts): amazon aws-waf/202, chatgpt cloudflare/403, ebay akamai/403, nytimes datadome/403.
+
+**microsoft, root cause (the stopgap does not recover it).** Its own CSS has `uhf-header:not(:defined){display:block;height:54px}` (a layout placeholder), plus `uhf-*:not(:defined)` and, in `web-components.css`, `store-*:not(:defined){visibility:hidden;opacity:0}`. Every `store-*` element is the page body.
+- Spec `:defined` + #271: blank (0.00%).
+- With #272: the content comes back (display list identical to develop's, 312 text runs), but the placeholder stops applying and the un-upgraded header's nav expands to about 2100px. The hero leaves the first viewport, giving 1.07%, still "blank" under the 2% rule.
+- No declarative shadow DOM; the header's layout is in a shadow root that script builds. **Only custom elements recover microsoft.** develop's old point came from `visibility` not existing.
+
+**PRs (Prometheus R1 + Cursor R2; not mine to merge):**
+- #272 `atlas/rs-defined-stopgap` @ f064031: every element matches `:defined` until custom elements can upgrade. **Merged** by Prometheus with #271 (develop a0176dd). Microsoft analysis in its body.
+- #273 `atlas/rs-logical-props` @ c4bf947, **B3**: `margin/padding/inset-{inline,block}(-start|-end)` map onto physical sides (horizontal-tb ltr), and `margin-inline:auto` centres. The test fails without it (x = 0 vs 150). x's login column visibly changes (5.8% of pixels; padding/margins now apply).
+- #274 `atlas/rs-display-keywords` @ 2be75fa, **B3**: `display: flow-root` → block, `inline flow-root` → inline-block, `list-item` → outer display, and the two-value syntax. `contents`/`table*`/`ruby` still unsupported. 20-case test.
+- #273 + #274 A/B on the Tailwind sites (`20260926T0420Z-tw-{dev,fix}-0`, develop a0176dd vs + both): **yahoo, linkedin and weather frames are byte-identical between arms.** Their score moves (linkedin 2 → 1: Chrome showed 57 words vs 36) are oracle drift. github timed out in both arms.
+- Gates: engine 142/143 and css 42/42 on each branch; each new test fails without its fix. No fixture, websuite page or UI page uses `:defined`, logical properties or the new display values (scanned), so campaign cases are unaffected by construction. Not re-run. WPT not run (no `third_party/wpt`).
+
+**Finding: `float`/`clear` are NOT parse-only (the analysis's B3 claim, wrong the same way it was for visibility).** `LayoutBox.float` and `.clear`, `FloatContext` and `layout_float` exist, but only `layout_with_collapse_in` uses them, and `LayoutBox::layout()` never reaches that path. The real flow loop (`layout_block_children`) lays a floated block at x=0 and only skips advancing `cursor_y`: no horizontal placement, no clear, no line shortening. Wiring the property alone would overlay following content on every float, so I stopped. WIP (css enums, engine arms, blockification in `transfer_positioning`, 2 tests: parse passes, placement fails as described) is unpushed in worktree `rs-float-clear`, branch `atlas/rs-float-clear`.
+
+**Board finding: x's Chrome oracle is a 403 "Access to x.com was denied" page** (`0420Z-tw-fix-0/x/chrome-a.png`). x's LOOKS RIGHT pass is RustKit's mostly-white frame matching Chrome's mostly-white error page. The access probe checks RustKit's fetch, not Chrome's, so it didn't flag it. This is A2 (`oracle_blocked`), allowed tooling work, and it will likely cost x a point when fixed.
+
+**Next:**
+1. A2: detect a blocked/denied **oracle** (Chrome's page title/status) and report `n/scorable`. x is the live case.
+2. Float placement in `layout_block_children` (real layout work: place left/right on the float row, clear, and shorten line boxes past floats), starting from the `rs-float-clear` WIP. Measure it against the campaign before the board; floats are everywhere in fixtures.
+3. B4 (SVG as image) or custom elements (JS track), which is microsoft's only way back.
+
+Housekeeping: new worktrees `rs-logical-props`, `rs-display-keywords` (PR branches) and `rs-float-clear` (WIP). `rs-defined-stopgap` was removed after committing from the hub. `scratch/board_after.py` from an earlier session was overwritten by a new helper of the same name. The `:not(:defined)` analysis scripts are `scratch/ms_*.py`.
+
+**Decisions for Pete:**
+1. **Custom elements vs more CSS.** microsoft is 0 until `customElements.define` runs, and the same pattern (`:not(:defined)` + script-built shadow roots) will recur on modern sites. It's the JS track's next API, but it needs shadow DOM + slots to render the header right. Pull it forward, or keep grinding CSS B3/B4?
+2. **x's LOOKS RIGHT is scored against a 403 page.** Fixing the oracle check (A2) is allowed and honest but will likely take x from 2 to 1. I'll do it next session unless you say otherwise.

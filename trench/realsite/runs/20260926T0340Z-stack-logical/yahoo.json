@@ -1,0 +1,97 @@
+{
+  "id": "yahoo",
+  "url": "https://www.yahoo.com/",
+  "chrome": [
+    {
+      "url": "https://www.yahoo.com/",
+      "status": "error",
+      "error": "page.screenshot: Timeout 30000ms exceeded.",
+      "nav_error": null,
+      "elapsed_ms": 94913
+    },
+    {
+      "url": "https://www.yahoo.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "final_url": "https://www.yahoo.com/",
+      "title": "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T0340Z-stack-logical/yahoo/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260926T0340Z-stack-logical/yahoo/chrome-b.png",
+      "elapsed_ms": 63178
+    }
+  ],
+  "oracle_capture": "b",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.yahoo.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260926T0340Z-stack-logical/yahoo/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260926T0340Z-stack-logical/yahoo/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 150,
+      "threw": 2,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 3113961,
+      "elapsed_ms": 2136
+    },
+    "elapsed_ms": 12355,
+    "error": null,
+    "wall_ms": 12500,
+    "non_background_fraction": 0.0358
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 135,
+    "rustkit_words": 53,
+    "ratio": 0.3481,
+    "missing_sample": [
+      "00",
+      "11",
+      "15",
+      "2026",
+      "25",
+      "26",
+      "5",
+      "59",
+      "62",
+      "a",
+      "accuweather",
+      "ad",
+      "adventure",
+      "am",
+      "as",
+      "beast",
+      "better",
+      "boston",
+      "bruins",
+      "but",
+      "by",
+      "california",
+      "can",
+      "clemson",
+      "day"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "diff": 20.0830078125
+  },
+  "points": 1
+}

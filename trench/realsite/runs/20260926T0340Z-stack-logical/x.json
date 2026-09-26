@@ -1,0 +1,94 @@
+{
+  "id": "x",
+  "url": "https://x.com/",
+  "chrome": [
+    {
+      "url": "https://x.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://x.com/",
+      "final_url": "chrome-error://chromewebdata/",
+      "title": "x.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T0340Z-stack-logical/x/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260926T0340Z-stack-logical/x/chrome-a.png",
+      "elapsed_ms": 9476
+    },
+    {
+      "url": "https://x.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://x.com/",
+      "final_url": "chrome-error://chromewebdata/",
+      "title": "x.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T0340Z-stack-logical/x/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260926T0340Z-stack-logical/x/chrome-b.png",
+      "elapsed_ms": 9772
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://x.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260926T0340Z-stack-logical/x/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260926T0340Z-stack-logical/x/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 1,
+      "threw": 6,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 5850,
+      "elapsed_ms": 4
+    },
+    "elapsed_ms": 7442,
+    "error": null,
+    "wall_ms": 7513,
+    "non_background_fraction": 0.0348
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 18,
+    "rustkit_words": 24,
+    "ratio": 0.1111,
+    "missing_sample": [
+      "403",
+      "access",
+      "authorization",
+      "com",
+      "denied",
+      "don",
+      "error",
+      "have",
+      "http",
+      "page",
+      "reload",
+      "t",
+      "this",
+      "view",
+      "was",
+      "x"
+    ]
+  },
+  "looks_right": {
+    "pass": true,
+    "chrome_self_diff": 0,
+    "diff": 3.9981445312500004
+  },
+  "points": 2
+}
