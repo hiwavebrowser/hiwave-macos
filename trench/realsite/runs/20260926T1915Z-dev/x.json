@@ -1,0 +1,79 @@
+{
+  "id": "x",
+  "url": "https://x.com/",
+  "chrome": [
+    {
+      "url": "https://x.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://x.com/",
+      "http_status": 403,
+      "final_url": "chrome-error://chromewebdata/",
+      "title": "x.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1915Z-dev/x/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260926T1915Z-dev/x/chrome-a.png",
+      "elapsed_ms": 9384,
+      "oracle_blocked": "chrome error page (page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://x.com/)"
+    },
+    {
+      "url": "https://x.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://x.com/",
+      "http_status": 403,
+      "final_url": "chrome-error://chromewebdata/",
+      "title": "x.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1915Z-dev/x/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260926T1915Z-dev/x/chrome-b.png",
+      "elapsed_ms": 9297,
+      "oracle_blocked": "chrome error page (page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://x.com/)"
+    }
+  ],
+  "oracle_capture": null,
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://x.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260926T1915Z-dev/x/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260926T1915Z-dev/x/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 1,
+      "threw": 6,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 5850,
+      "elapsed_ms": 8
+    },
+    "elapsed_ms": 2516,
+    "error": null,
+    "wall_ms": 2570,
+    "non_background_fraction": 0.0348
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "why": "chrome capture failed: chrome error page (page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://x.com/)",
+    "oracle_failed": true
+  },
+  "looks_right": {
+    "pass": false,
+    "why": "chrome capture failed",
+    "oracle_failed": true
+  },
+  "points": 1
+}

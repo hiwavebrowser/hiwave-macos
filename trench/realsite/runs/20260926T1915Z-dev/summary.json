@@ -1,0 +1,65 @@
+{
+  "ts": "20260926T191033Z",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "sites": 20,
+  "points": 19,
+  "max_points": 60,
+  "loads": 13,
+  "readable": 5,
+  "looks_right": 1,
+  "looks_right_unstable": [
+    "linkedin"
+  ],
+  "readable_unscored": [],
+  "oracle_failed": [
+    "reddit",
+    "x",
+    "yahoo",
+    "chatgpt",
+    "ebay",
+    "nytimes"
+  ],
+  "oracle_blocked": {
+    "reddit": "top-level document HTTP 403",
+    "x": "chrome error page (page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://x.com/)",
+    "chatgpt": "top-level document HTTP 403",
+    "ebay": "top-level document HTTP 403",
+    "nytimes": "top-level document HTTP 403"
+  },
+  "blocked": {
+    "amazon": "aws-waf/202",
+    "chatgpt": "cloudflare/403",
+    "ebay": "akamai/403",
+    "nytimes": "datadome/403"
+  },
+  "per_site": {
+    "google": 3,
+    "youtube": 0,
+    "facebook": 1,
+    "instagram": 1,
+    "wikipedia": 2,
+    "amazon": 0,
+    "reddit": 0,
+    "x": 1,
+    "linkedin": 2,
+    "yahoo": 1,
+    "bing": 1,
+    "chatgpt": 0,
+    "microsoft": 0,
+    "apple": 2,
+    "netflix": 2,
+    "github": 1,
+    "ebay": 0,
+    "nytimes": 0,
+    "cnn": 1,
+    "weather": 1
+  },
+  "scorable_sites": 14,
+  "scorable_points": 18,
+  "scorable_max": 42,
+  "full_run": true
+}

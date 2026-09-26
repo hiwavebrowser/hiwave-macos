@@ -1,0 +1,79 @@
+{
+  "id": "chatgpt",
+  "url": "https://chatgpt.com/",
+  "chrome": [
+    {
+      "url": "https://chatgpt.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 403,
+      "final_url": "https://chatgpt.com/",
+      "title": "Just a moment...",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1915Z-dev/chatgpt/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260926T1915Z-dev/chatgpt/chrome-a.png",
+      "elapsed_ms": 16999,
+      "oracle_blocked": "top-level document HTTP 403"
+    },
+    {
+      "url": "https://chatgpt.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 403,
+      "final_url": "https://chatgpt.com/",
+      "title": "Just a moment...",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1915Z-dev/chatgpt/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260926T1915Z-dev/chatgpt/chrome-b.png",
+      "elapsed_ms": 23354,
+      "oracle_blocked": "top-level document HTTP 403"
+    }
+  ],
+  "oracle_capture": null,
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://chatgpt.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260926T1915Z-dev/chatgpt/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260926T1915Z-dev/chatgpt/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 9,
+      "threw": 5,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 6384,
+      "elapsed_ms": 5
+    },
+    "elapsed_ms": 7989,
+    "error": null,
+    "wall_ms": 8088,
+    "non_background_fraction": 0.0161
+  },
+  "access": {
+    "status": 403,
+    "vendor": "cloudflare",
+    "blocked": true
+  },
+  "loads": {
+    "pass": false,
+    "why": "blocked:cloudflare (HTTP 403) \u2014 blank frame (1.61% non-background)"
+  },
+  "readable": {
+    "pass": false,
+    "why": "chrome capture failed: top-level document HTTP 403",
+    "oracle_failed": true
+  },
+  "looks_right": {
+    "pass": false,
+    "why": "chrome capture failed",
+    "oracle_failed": true
+  },
+  "points": 0
+}
