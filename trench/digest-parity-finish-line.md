@@ -11987,3 +11987,186 @@ on every PR and every nightly. Check-ins cancelled; watch released.
 - Decisions 1 and 2 from tonight (export vs layout for the fragment union; the
   two inline-sizing behaviours in RustKit) are open and neither blocks the next
   night.
+
+## 2026-09-26
+
+**Metric: `3/26` on macOS, carried forward and NOT re-measured by me.** Last
+measured by run 36100178666 on 09-25 against `develop cdbd22d` plus #255.
+`develop` is now `a0176dd` — #256..#271 later, engine changes I did not read —
+so the carry-forward is a statement about what I know. Tonight's PR (#275)
+carries no Rust at all, so its own Parity Gate measures `a0176dd`'s engine and
+nothing of mine; that run is the check, not this entry.
+
+**P-item: the unit 09-25 recorded — are the four sub-0.7pp paint gaps defects or
+rasterizer difference? COMPLETE, and the answer is that this seat cannot tell,
+by a measured factor of 1.77x-2.51x.** Branch
+`atlas/n66-paint-seat-control`, **PR #275** against `develop`.
+
+### What I set out to do, and what I found in the way
+
+The recorded unit was a measurement, not a fix. I could not take it the direct
+way: CI artifacts (`parity-oracle`, which carries `gate-b.json` and Gate C's
+board from the macOS runner) are behind `*.blob.core.windows.net`, which this
+container's network policy denies at CONNECT. So the macOS pixels were not
+available and the question had to be attacked from this seat's own captures.
+
+That immediately raised the prior question nobody had answered: **how much of a
+paint percentage taken on this seat is the seat?** Night 44 built exactly that
+instrument for Gate A's geometry and it has run ever since. Gate B never got
+one. Twenty-two nights of paint figures from this seat have been an
+undecomposed sum, and "roughly indicative" had no number attached to it.
+
+The control already held the pixels. `capture_seat_control.mjs` reuses
+`captureBaseline`, which writes a `baseline.png` per case. Nothing had ever read
+them.
+
+### Commits
+
+- `0651db4` — `scripts/seat_control_paint_report.py`, its 17 guards, and the
+  board in `trench/forensics/2026-09-26-n66-paint-seat-control-board.md`.
+
+### Measured — Linux/SwiftShader, 26/26 cases. MECHANICS, NOT A RECEIPT
+
+Per case: `confound` = Chrome_seat vs Chrome_pinned (no RustKit in it at all),
+`reported` = RustKit_seat vs Chrome_pinned (what Gate B prints), `real` =
+RustKit_seat vs Chrome_seat, `masked` = RustKit's disagreement inside the pixels
+the two Chromes agree on, `floor` = the smaller of `confound` and `masked`.
+
+Against the eleven cases blocked by paint alone (macOS gaps from run
+36100178666):
+
+| case | macOS gap | seat floor | floor ÷ gap |
+|---|---:|---:|---:|
+| images-intrinsic | 1.064% | 1.885% | **1.77×** |
+| gpu-gradient-regression | 1.284% | 2.267% | **1.77×** |
+| gradient-no-radius | 1.464% | 3.086% | **2.11×** |
+| gradient-backgrounds | 1.652% | 4.152% | **2.51×** |
+| pseudo-classes | 1.699% | 4.255% | 2.50× |
+| specificity | 1.926% | 3.401% | 1.77× |
+| combinators | 2.016% | 3.346% | 1.66× |
+| backgrounds | 2.129% | 2.832% | 1.33× |
+| rounded-corners | 2.386% | 3.993% | 1.67× |
+| flex-positioning | 4.404% | 18.512% | 4.20× |
+| card-grid | 17.522% | 7.157% | 0.41× |
+
+**Ten of the eleven are below this seat's floor. The only one above it is
+`card-grid`, at 17.5 points from the bar** — the furthest from green of the
+eleven. The seat can work exactly the case nobody would choose.
+
+The mask is worth having and is not enough. Unmasked, `images-intrinsic` reads
+9.01% here against 1.06% on macOS, a factor of 8.5; masked, 1.89%, a factor of
+1.77. Masking removes the Chrome half of the confound and nothing else —
+RustKit's own seat dependence (SwiftShader not Metal, and no system text backend
+here) is still inside `masked`, which is why it is published as a floor and
+never as an estimate of the macOS number. `gradient-backgrounds` makes that
+plain: `confound` 4.15% but `masked` 12.84%, against a macOS gap of 1.65%.
+
+Full board in the forensics file. Three readings from it worth keeping:
+
+- **The three counts are not additive, and `real` EXCEEDS `reported` on six
+  cases** — `combinators` 7.03 vs 6.79, `form-controls` 16.27 vs 15.19,
+  `gradient-no-radius` 6.08 vs 5.64, `gradient-radius-only` 5.64 vs 5.34,
+  `image-gallery` 22.62 vs 21.70, `sticky-scroll` 5.44 vs 5.39. RustKit lands on
+  the *pinned* value at pixels where it misses the seat's own Chrome, so
+  `Δ_reported − Δ_confound` is negative there. A report that subtracted would
+  print a negative confound and call it a measurement.
+- **`backgrounds` is 11.5798% reported against 11.5649% Chrome-vs-Chrome.**
+  99.87% of what Gate B blames on RustKit for that case on this seat is two
+  Chromes disagreeing with each other. Its masked residual, 2.83%, is the
+  closest agreement with a macOS figure on the whole board (2.13%).
+- **`bg-pure` is 0.0000% on all three comparisons.** macOS Chrome, Linux Chrome
+  and RustKit-on-SwiftShader are bit-identical on it. It is also the case that
+  was finish-line-green first. It is the control that says the pipeline is sound
+  and the confound is font and AA, not a colour-space difference underneath
+  everything.
+
+### Stop rule
+
+Did not fire and could not: the diff contains no Rust. No oracle's numbers
+changed, because nothing the oracles read changed. Confirmed rather than
+assumed — `git show --stat` is three files, two Python and one markdown.
+
+### Mutation-check results
+
+**18 probes, 18 RED, 0 survivors at the end. Two survived a first sweep.**
+Control green before and after; `__pycache__` cleared between probes and every
+probe run under `python3 -B`, which is 09-25's banked sweep-validity finding
+applied for the first time.
+
+| probe | caught by |
+|---|---|
+| M1 confound compares pinned against RustKit, not the control | `the_three_counts_are_each_their_own_pair` |
+| M2 real becomes a second `reported` | same |
+| M3 the mask keeps the pixels the two Chromes DISAGREE on | `the_mask_keeps_only_pixels_the_two_chromes_agree_on` |
+| M4 the masked denominator becomes the whole frame | `the_masked_fraction_is_over_the_mask_not_the_frame` |
+| M5 an empty mask scores 0% instead of refusing | `an_empty_mask_is_unmeasured_not_zero_percent` |
+| M6 frames of different sizes are scored anyway | `frames_of_different_sizes_are_unmeasured_never_scaled` |
+| M7 a fixture that changed since the control is accepted | `a_fixture_that_changed_since_the_control_is_unmeasured` |
+| M8 a case the control does not cover is scored | `a_case_the_control_does_not_cover_is_unmeasured` |
+| M9 a missing RustKit capture is not refused | `a_missing_rustkit_capture_is_unmeasured_not_a_clean_case` |
+| M10 the floor takes the LARGER of the two | `the_floor_is_the_smaller_of_the_confound_and_the_masked_residual` |
+| M11 the report declares itself a receipt | `the_report_carries_no_verdict_a_reader_could_cite_as_a_metric` |
+| M12 a board that measured nothing exits 0 | `a_board_that_measured_nothing_exits_one` |
+| M13 the tolerance is restated here instead of imported | `the_tolerance_is_gate_bs_and_is_not_restated_here` |
+| M14 the per-channel rule becomes an average | `a_pixel_is_outside_tolerance_when_its_worst_channel_is` |
+| M15 `reported` derived as confound + real | `each_published_percentage_is_its_own_count_and_not_derived` |
+| M16 a pixel exactly at the tolerance counts as outside it | `a_pixel_is_outside_tolerance_when_its_worst_channel_is` |
+| M17 `confound_pct` derived from the other two | `each_published_percentage_is_its_own_count_and_not_derived` |
+| M18 `real_pct` derived from the other two | same |
+
+**M15 survived the first sweep, and M17/M18 survived the second — the same
+fault, twice, one layer apart.** Every guard I wrote first exercised
+`three_way_counts`, which counts pixels. Nothing read the *record's*
+percentages against the record's own counts, so `score_case` could publish
+`reported_pct = (confound + real) / total` with all sixteen guards green. I
+closed that with a two-pixel fixture, added the two obvious sibling probes — and
+both survived, because on two pixels `|reported − real|` and
+`reported + confound` happen to equal the right answers. The fixture is now
+eight pixels giving 4 / 5 / 3, where no two of the three counts produce the
+third by adding, subtracting or absolute difference.
+
+09-25 named this class as "the guard written against the rule, on an example
+that cannot express it" and pre-empted its own predecessor's survivor. I did not
+pre-empt it; I reproduced it twice in one night, at two different layers. The
+practical form of the checklist item is narrower than "write the rule": **for
+every published field, name the wrong way to compute it, and check the fixture
+can tell that way apart from the right one.** Two pixels could not.
+
+### Decisions needed from Pete
+
+1. **Decision 4 now has a measurement under it, and it points one way: the
+   paint queue cannot be worked in the trench.** Ten of the eleven paint-blocked
+   cases are below this seat's floor. Do the four sub-0.7pp cases get worked as
+   macOS-CI experiments (one hypothesis per PR, read off the Parity Gate), or
+   does the queue stay on geometry — 621-ish failures, 255 in `settings` — until
+   something changes?
+2. **CI artifacts are unreachable from this container** (`*.blob.core.windows.net`
+   denied at CONNECT), so no night here can read the macOS gate JSON or Gate C's
+   board. Is allowing that host worth it? It would turn every macOS run into
+   something the trench can do forensics on instead of quoting from a digest.
+3. Decision 3 from 09-24 (fragment union as export vs a real inline fragment
+   model) and decision 2 from 09-25 (RustKit sizing wrapped inlines two ways)
+   are both still open; neither blocked tonight.
+
+### Surprises
+
+- **`backgrounds` was never this seat's case to work.** 99.87% confound. It sits
+  on the paint-blocked list at 2.13pp on macOS and it has been visible on this
+  seat's boards for weeks reading 11.58%. Nobody worked it, but nobody could
+  have known not to.
+- **`rustkit-engine --lib` is GREEN on this seat now: 124 passed, 0 failed.** On
+  09-25 it was 13 red and the night recorded "never commit red cannot be
+  satisfied literally on this seat". Something between `cdbd22d` and `a0176dd`
+  fixed or gated them. `rustkit-layout --lib` is 504/3, down from 5 — #713 gated
+  four macOS-calibrated strut tests. The substitute rule that night invented is
+  now needed for three tests instead of eighteen, and all three are text-metric
+  by name.
+- **The expensive part of the night was not the measurement.** The board takes
+  20 seconds over 26 cases; the capture loop is 7 seconds and the release build
+  42. The mutation sweep, twice, was most of it — which is the right ratio and
+  was not the one I planned for.
+- **I expected the mask to be either decisive or useless and it was neither.**
+  It cuts the seat's overstatement from ~8.5× to ~1.8× on the closest case.
+  That is a large improvement that still leaves the answer out of reach, and it
+  is the kind of result that would have been easy to write up as a win by
+  quoting the improvement and not the residual.
