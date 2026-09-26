@@ -1,0 +1,79 @@
+{
+  "id": "netflix",
+  "url": "https://www.netflix.com/",
+  "chrome": [
+    {
+      "url": "https://www.netflix.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 200,
+      "final_url": "https://www.netflix.com/",
+      "title": "Netflix - Watch TV Shows Online, Watch Movies Online",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1510Z-dev/netflix/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260926T1510Z-dev/netflix/chrome-a.png",
+      "elapsed_ms": 30430
+    },
+    {
+      "url": "https://www.netflix.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 200,
+      "final_url": "https://www.netflix.com/",
+      "title": "Netflix - Watch TV Shows Online, Watch Movies Online",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1510Z-dev/netflix/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260926T1510Z-dev/netflix/chrome-b.png",
+      "elapsed_ms": 41433
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.netflix.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260926T1510Z-dev/netflix/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260926T1510Z-dev/netflix/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 7,
+      "threw": 3,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 4300420,
+      "elapsed_ms": 3248
+    },
+    "elapsed_ms": 7054,
+    "error": null,
+    "wall_ms": 7231,
+    "non_background_fraction": 0.6606
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 35,
+    "rustkit_words": 65,
+    "ratio": 1.0,
+    "missing_sample": []
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "diff": 52.37041015625
+  },
+  "points": 2
+}

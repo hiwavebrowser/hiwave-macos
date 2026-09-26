@@ -1,0 +1,67 @@
+{
+  "id": "amazon",
+  "url": "https://www.amazon.com/",
+  "chrome": [
+    {
+      "url": "https://www.amazon.com/",
+      "status": "error",
+      "error": "page.screenshot: Timeout 30000ms exceeded.",
+      "nav_error": null,
+      "http_status": 200,
+      "elapsed_ms": 63733
+    },
+    {
+      "url": "https://www.amazon.com/",
+      "status": "error",
+      "error": "page.screenshot: Timeout 30000ms exceeded.",
+      "nav_error": null,
+      "http_status": 200,
+      "elapsed_ms": 57333
+    }
+  ],
+  "oracle_capture": null,
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.amazon.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260926T1510Z-fsv/amazon/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260926T1510Z-fsv/amazon/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 0,
+      "threw": 0,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 0,
+      "elapsed_ms": 0
+    },
+    "elapsed_ms": 513,
+    "error": null,
+    "wall_ms": 555,
+    "non_background_fraction": 0.0
+  },
+  "access": {
+    "status": 202,
+    "vendor": "aws-waf",
+    "blocked": true
+  },
+  "loads": {
+    "pass": false,
+    "why": "blocked:aws-waf (HTTP 202) \u2014 blank frame (0.00% non-background)"
+  },
+  "readable": {
+    "pass": false,
+    "why": "chrome capture failed: page.screenshot: Timeout 30000ms exceeded.",
+    "oracle_failed": true
+  },
+  "looks_right": {
+    "pass": false,
+    "why": "chrome capture failed",
+    "oracle_failed": true
+  },
+  "points": 0
+}

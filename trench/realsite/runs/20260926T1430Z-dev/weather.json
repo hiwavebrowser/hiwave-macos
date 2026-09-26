@@ -1,0 +1,63 @@
+{
+  "id": "weather",
+  "url": "https://weather.com/",
+  "chrome": [
+    {
+      "status": "error",
+      "error": "killed after 120s"
+    },
+    {
+      "url": "https://weather.com/",
+      "status": "error",
+      "error": "page.screenshot: Timeout 30000ms exceeded.",
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "http_status": 200,
+      "elapsed_ms": 110300
+    }
+  ],
+  "oracle_capture": null,
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://weather.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260926T1430Z-dev/weather/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260926T1430Z-dev/weather/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 0,
+      "threw": 0,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 138,
+      "bytes": 1579117,
+      "elapsed_ms": 0
+    },
+    "elapsed_ms": 7588,
+    "error": null,
+    "wall_ms": 7724,
+    "non_background_fraction": 0.1077
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "why": "chrome capture failed: killed after 120s",
+    "oracle_failed": true
+  },
+  "looks_right": {
+    "pass": false,
+    "why": "chrome capture failed",
+    "oracle_failed": true
+  },
+  "points": 1
+}

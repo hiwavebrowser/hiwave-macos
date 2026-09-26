@@ -1,0 +1,68 @@
+{
+  "id": "nytimes",
+  "url": "https://www.nytimes.com/",
+  "chrome": [
+    {
+      "url": "https://www.nytimes.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 403,
+      "final_url": "https://www.nytimes.com/",
+      "title": "nytimes.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1510Z-dev/nytimes/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260926T1510Z-dev/nytimes/chrome-a.png",
+      "elapsed_ms": 15435,
+      "oracle_blocked": "top-level document HTTP 403"
+    },
+    {
+      "url": "https://www.nytimes.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 403,
+      "final_url": "https://www.nytimes.com/",
+      "title": "nytimes.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1510Z-dev/nytimes/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260926T1510Z-dev/nytimes/chrome-b.png",
+      "elapsed_ms": 14201,
+      "oracle_blocked": "top-level document HTTP 403"
+    }
+  ],
+  "oracle_capture": null,
+  "rustkit": {
+    "status": "error",
+    "html_file": null,
+    "url": "https://www.nytimes.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": null,
+    "layout_path": null,
+    "layout_stats": null,
+    "elapsed_ms": 290,
+    "error": "Failed to load URL: NavigationError(\"HTTP error\")",
+    "wall_ms": 337
+  },
+  "access": {
+    "status": 403,
+    "vendor": "datadome",
+    "blocked": true
+  },
+  "loads": {
+    "pass": false,
+    "why": "blocked:datadome (HTTP 403) \u2014 Failed to load URL: NavigationError(\"HTTP error\")"
+  },
+  "readable": {
+    "pass": false,
+    "why": "chrome capture failed: top-level document HTTP 403",
+    "oracle_failed": true
+  },
+  "looks_right": {
+    "pass": false,
+    "why": "chrome capture failed",
+    "oracle_failed": true
+  },
+  "points": 0
+}
