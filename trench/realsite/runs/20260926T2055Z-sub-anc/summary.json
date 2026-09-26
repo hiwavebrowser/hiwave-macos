@@ -1,0 +1,27 @@
+{
+  "ts": "20260926T203102Z",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "sites": 2,
+  "points": 4,
+  "max_points": 6,
+  "loads": 2,
+  "readable": 2,
+  "looks_right": 0,
+  "looks_right_unstable": [],
+  "readable_unscored": [],
+  "oracle_failed": [],
+  "oracle_blocked": {},
+  "blocked": {},
+  "per_site": {
+    "wikipedia": 2,
+    "netflix": 2
+  },
+  "scorable_sites": 2,
+  "scorable_points": 4,
+  "scorable_max": 6,
+  "full_run": false
+}

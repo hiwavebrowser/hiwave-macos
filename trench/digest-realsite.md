@@ -504,3 +504,30 @@ Housekeeping: new worktrees `rs-font-size-viewport`, `rs-root-var-lists`, `rs-st
 
 **Decisions for Pete:**
 1. **Element-scoped custom properties: go?** It's the fix github and most themed sites need. It's bigger than a trench PR (it touches ComputedStyle and the cascade) and I'd like Prometheus to R1 a short design first. Until then, #280 alone makes github *score* better but *look* worse (dark background, black text). Land #280 now, or hold it for the scoped version? I recommend landing it now: it scores +2 and is correct as far as it goes.
+
+
+## 2026-09-26 17:05 — element-scoped custom properties (#289) and an ancestor-selector fix (#288). github renders its real dark theme, and then fails the blank-frame check because of a header layout bug
+
+**Points: 19 / 60 on develop 31a0eea (full board, `20260926T1915Z-dev`). Neither PR is merged. On a 5-site A/B the stack scores −1 (github), for a reason the PRs don't cause.** New develop high: 16 → 19 since the last digest, from #280/#281/#286 landing (weather, x and yahoo now LOAD).
+
+| run | engine | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|
+| `20260926T1915Z-dev` | develop 31a0eea | **19** | 13 | 5 | 1 | 18/42 |
+| `20260926T2055Z-sub-dev` (5 sites) | develop 31a0eea | 8/15 | | | | |
+| `20260926T2055Z-sub-anc` | + #288 | 7/15 (facebook −1 is oracle drift, frame byte-identical) | | | | |
+| `20260926T2055Z-sub-stack` | + #289 + #288 | 6/15 (github 1 → 0, blank frame) | | | | |
+
+- Passing all 3: google. Blocked: amazon, chatgpt, ebay, nytimes. Oracle blocked: reddit, x (+ chatgpt, ebay, nytimes). linkedin LOOKS RIGHT unstable (cc 23.7%). microsoft and youtube are blank.
+- **github with the stack:** dark canvas and light nav text, the same palette as Chrome. But its fixed header is 832 px tall instead of about 64, so the nav is centred at y≈440 and the hero is out of view. The frame is 99% one colour, which is the blank rule. develop's point there came from a lucky dark-on-dark match (text was black on a dark background).
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#289 `atlas/rs-element-custom-properties` @ 9ad5a15:** the DESIGN CLEAR item, built on #286's resolver. `ComputedStyle.custom_properties: Arc<HashMap>`. `--*` winners come from the existing RuleIndex cascade (same matched rules, same importance order, inline included) and resolve at computed-value time on the declaring element. A cycle makes the property invalid, so the use-site fallback applies. `make_mut` happens only if a value actually differs (keeps Tailwind's `*{--tw-*}` free). `extract_css_variables` now only seeds parentless elements. All 5 pins are in the PR, plus 3 more; 4 of the tests fail with the per-element map bypassed. Wall time within ±7 s run-order noise (github 20.6 → 21.8 s, cnn 26.1 → 27.4 s, facebook 5.2 → 5.6 s).
+- **#288 `atlas/rs-ancestor-pseudo` @ fc9cbf0:** found by #289. `AncestorCompound::parse` stopped at the first pseudo-class, so `:is(.a) > div` constrained nothing and `:is(.a):focus-visible > div` matched every div. github's TreeView focus ring was on html, body and every block; with #289 its colour resolves and covers the page in blue. **#289 needs #288.** The test fails on develop.
+- Gates: engine 160/160 (#289) and 156/156 (#288), css 42/42, layout 520/520. **Campaign on the stack: 26/26, avg 1.2535%, every case identical to develop.** WPT not run (no `third_party/wpt`).
+
+**Next (cheapest point I can see):** a `height: <percent>` child of an **auto-height `position:fixed/absolute`** parent resolves against the viewport. It should behave as `auto` (CSS 2.1 §10.5). Repro: `scratch/ecp/fixed-pct.html`: bar 800 px here, 18 px in Chrome. That is github's header, and it should bring back github's LOADS with the dark theme, likely LOOKS RIGHT with it. Fix it in rustkit-layout, on both entry points (`layout()` and the collapse path, per the 04:15 note).
+
+Tooling (hub scratch): `cargo_in.py` (cargo in a worktree with the shared target dir, filtered output), `neutralize_test.py` (swap a line, run tests, restore: the "fails without the fix" check), `gh_rules.py` / `gh_focus.py` / `gh_ctx.py` (read github's live CSS by class fragment). `scripts/parity_test.py` hardcodes `<repo>/target`, so a worktree needs `target` symlinked to the shared dir (done for `rs-stack-0926b`).
+
+**Decisions for Pete:**
+1. **Land #289 + #288 now, knowing github drops a point until the header fix lands?** The stack is more correct on every themed site. github's lost point is a pre-existing layout bug that the correct theme exposes. I recommend landing both (#288 first) and taking the header fix next session.

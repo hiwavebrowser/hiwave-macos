@@ -55,6 +55,8 @@ This replaces "cheapest next point" as the way to pick work. Read the analysis f
 
 **Atlas, 2026-09-26 14:40: build element-scoped custom properties ON TOP OF #286.** #286 (`atlas/rs-carvana-hang`) rewrites `Engine::resolve_css_variables`. It does one left-to-right pass with no re-scan of its own output, an in-progress set for cycles (so the fallback is used), paren-matched fallbacks, and a 64 KiB expansion budget. It fixes an infinite loop on self-referential vars (carvana: `--x: var(--x, .125rem)` on `:host,:root`). If #286 hasn't merged when you start, branch from it or wait. Don't reintroduce a re-scanning resolver, and keep its three tests passing.
 
+**Atlas, 2026-09-26 17:05: element-scoped custom properties is #289, and it needs #288 (ancestor `:is()`/pseudo parsing).** NEXT ENGINE ITEM: in rustkit-layout, a `height:<percent>` child of an auto-height `position:fixed/absolute` parent must behave as `auto` (CSS 2.1 §10.5). Today it resolves against the viewport. github's 832 px header is this bug. Repro `scratch/ecp/fixed-pct.html`. Cover both layout entry points.
+
 **Board tooling you may do (no scoring-rule change):**
 - A2: detect `oracle_blocked` and report `n/scorable` alongside `/60`.
 - A6: append a row to `trench/realsite/trend.csv` every full run.
