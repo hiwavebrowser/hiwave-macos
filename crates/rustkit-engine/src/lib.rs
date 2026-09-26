@@ -18408,6 +18408,39 @@ mod windows_a_leg_pins {
     }
 
     #[test]
+    fn checked_sibling_content_follows_the_checkbox_state() {
+        // wikipedia's dropdowns use `.checkbox:checked ~ .content`. Exercise
+        // the full DOM-to-layout path so sibling state cannot be dropped while
+        // building the selector context.
+        fn has_text(b: &LayoutBox, text: &str) -> bool {
+            matches!(&b.box_type, BoxType::Text(t) if t.trim() == text)
+                || b.children.iter().any(|child| has_text(child, text))
+        }
+
+        let e = engine();
+        let page = |checked: &str| {
+            format!(
+                "<html><head><style>\
+                 .content{{display:none}}\
+                 .cb:checked ~ .content{{display:block}}\
+                 </style></head><body>\
+                 <input type=\"checkbox\" class=\"cb\" {checked}>\
+                 <div class=\"content\"><p>menu</p></div>\
+                 </body></html>"
+            )
+        };
+
+        assert!(
+            !has_text(&layout_of(&e, &page("")), "menu"),
+            "an unchecked checkbox must keep its sibling content out of layout"
+        );
+        assert!(
+            has_text(&layout_of(&e, &page("checked")), "menu"),
+            "a checked checkbox must reveal its sibling content"
+        );
+    }
+
+    #[test]
     fn text_align_inherits_to_a_block_child() {
         let e = engine();
         let layout = layout_of(&e, "<html><body><div style=\"text-align:center\"><h1>Hi</h1></div></body></html>");
