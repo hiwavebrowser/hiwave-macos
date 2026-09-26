@@ -467,3 +467,40 @@ Rows that moved:
 
 **Decisions for Pete:**
 1. **#277 or #278?** #278 subsumes #277 and is +1 more (cnn). Landing both is harmless but redundant. I recommend #278 alone and closing #277. I couldn't comment on #277 from this seat (`gh pr comment` needs approval).
+
+
+## 2026-09-26 12:30 — facebook's CSS finds two gaps: vw font-size (#281) and `:root` selector lists for custom properties (#280). +2 on the board with both stacked (facebook LOADS, github LOOKS RIGHT)
+
+**Points: 16 → 16 / 60 on develop (full board), and 14 → 16 on a 9-site A/B with both PRs stacked.** Neither PR is merged, so develop's number doesn't move yet. The +2 is measured, not projected: the other 11 sites have byte-identical RustKit frames.
+
+| run | engine | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|
+| `20260926T1430Z-dev` | develop bf806c5 | **16** | 11 | 4 | 1 | 15/42 |
+| `20260926T1510Z-dev` | develop 9a3e2a5 (+#276 floats) | **15** | 11 | 3 | 1 | 14/45 |
+| `20260926T1510Z-fsv` | + #281 @ 02aac09 | **17** | 11 | 5 | 1 | 17/45 |
+| `20260926T1605Z-sub-dev` (9 sites) | develop 3bd15de | 14 | | | | |
+| `20260926T1605Z-sub-stack` (9 sites) | + #281 + #280 | **16** | | | | |
+
+Rows that moved:
+- **facebook 0 → 1 (#280):** its whole palette is on `:root, .__fb-light-mode:root, .__fb-light-mode {…}`, and RustKit only read rules whose entire selector was `:root`. With the palette, the frame goes from 0.97% to 3.9% non-background (LOADS needs 2%). READABLE 30%, LOOKS RIGHT 18.9%.
+- **github 1 → 2 (#280):** LOOKS RIGHT 30.9% → 7.6%. The dark background resolves, but **its text is still black**, because the foreground vars sit on `[data-color-mode=dark]` (element-scoped). The pixels pass; a person would see dark-on-dark. Details in #280.
+- The 15 → 17 in the full #281 A/B is **not #281**. wikipedia and linkedin moved with byte-identical RustKit frames (Chrome variant drift). github and cnn swapped LOADS timeouts: both sit near 30 s, and I was running cargo builds during that board. Lesson: don't build while a board runs. The subset run was clean.
+- #281 itself: facebook's headline renders at 52px and wraps like Chrome's, and google's first-viewport words go 25 → 32. No point moved.
+- Passing all 3: google. Blocked: amazon (1 of 2 runs), chatgpt, ebay, nytimes. Oracle blocked: x, reddit (+ the 3 blocked). cnn and github LOADS hover at 25–30 s.
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#281 `atlas/rs-font-size-viewport` @ 02aac09:** at style time, font-size handled em/%/rem only, and layout falls back to 16px on anything else. vw/vh/vmin/vmax/calc/min/max/clamp now resolve against the view's viewport. Test fails on develop. Engine 186/186, campaign 26/26 identical (avg 1.2534%).
+- **#280 `atlas/rs-root-var-lists` @ 128382a:** a selector list with a `:root` or `html` item contributes custom properties. Test fails on develop. Engine 186/186, campaign 26/26 identical. The two PRs touch different hunks of `rustkit-engine/src/lib.rs` and cherry-pick cleanly together.
+- WPT not run (no `third_party/wpt`).
+
+**Finding:** RustKit has **no element-scoped custom properties at all**. `extract_css_variables` builds one document-wide map from root rules, with no inheritance and no per-element cascade. Any site that themes with `[data-theme]`/`.dark` vars, or sets component-scoped `--x`, gets partial palettes (github above). That is the biggest CSS lever I have seen on this board, and a real design change (ComputedStyle carries an inherited custom-property map, and `var()` resolves per element).
+
+**Next:**
+1. Element-scoped custom properties (above). Worth an R1 design note first.
+2. facebook's logo is a blob: its SVG path uses `S` and packed decimals (`1.727.125`). Probably a path-parser bug; cheap.
+3. `font-size: 0` still paints at 16px (`Length::Zero` hits the same fallback). Small, but check shaping at size 0 first.
+
+Housekeeping: new worktrees `rs-font-size-viewport`, `rs-root-var-lists`, `rs-stack-0926b` (detached stack), and `rs-dev-bf806c5`, whose `target/` is the shared build dir for all of them. `rs-stack` has someone's **staged, uncommitted** css-media work; I left it alone.
+
+**Decisions for Pete:**
+1. **Element-scoped custom properties: go?** It's the fix github and most themed sites need. It's bigger than a trench PR (it touches ComputedStyle and the cascade) and I'd like Prometheus to R1 a short design first. Until then, #280 alone makes github *score* better but *look* worse (dark background, black text). Land #280 now, or hold it for the scoped version? I recommend landing it now: it scores +2 and is correct as far as it goes.

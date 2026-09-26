@@ -1,0 +1,105 @@
+{
+  "id": "facebook",
+  "url": "https://www.facebook.com/",
+  "chrome": [
+    {
+      "url": "https://www.facebook.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 200,
+      "final_url": "https://www.facebook.com/",
+      "title": "Facebook",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1605Z-sub-stack/facebook/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260926T1605Z-sub-stack/facebook/chrome-a.png",
+      "elapsed_ms": 13445
+    },
+    {
+      "url": "https://www.facebook.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 200,
+      "final_url": "https://www.facebook.com/",
+      "title": "Facebook",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1605Z-sub-stack/facebook/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260926T1605Z-sub-stack/facebook/chrome-b.png",
+      "elapsed_ms": 12441
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.facebook.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260926T1605Z-sub-stack/facebook/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260926T1605Z-sub-stack/facebook/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 1,
+      "threw": 0,
+      "skipped": 0,
+      "fetch_failed": 47,
+      "over_budget": 0,
+      "bytes": 0,
+      "elapsed_ms": 0
+    },
+    "elapsed_ms": 8800,
+    "error": null,
+    "wall_ms": 9481,
+    "non_background_fraction": 0.0469
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 46,
+    "rustkit_words": 14,
+    "ratio": 0.3043,
+    "missing_sample": [
+      "ai",
+      "ban",
+      "brasil",
+      "email",
+      "english",
+      "espa\u00f1ol",
+      "france",
+      "fran\u00e7ais",
+      "instagram",
+      "italiano",
+      "languages",
+      "lite",
+      "messenger",
+      "meta",
+      "mobile",
+      "more",
+      "muse",
+      "number",
+      "or",
+      "pay",
+      "portugu\u00eas",
+      "quest",
+      "ray",
+      "sign",
+      "store"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 8.23740234375,
+    "diff": 18.91630859375
+  },
+  "points": 1
+}

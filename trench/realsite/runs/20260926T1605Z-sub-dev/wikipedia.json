@@ -1,0 +1,105 @@
+{
+  "id": "wikipedia",
+  "url": "https://en.wikipedia.org/wiki/Web_browser",
+  "chrome": [
+    {
+      "url": "https://en.wikipedia.org/wiki/Web_browser",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 200,
+      "final_url": "https://en.wikipedia.org/wiki/Web_browser",
+      "title": "Web browser - Wikipedia",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1605Z-sub-dev/wikipedia/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260926T1605Z-sub-dev/wikipedia/chrome-a.png",
+      "elapsed_ms": 17256
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Web_browser",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "http_status": 200,
+      "final_url": "https://en.wikipedia.org/wiki/Web_browser",
+      "title": "Web browser - Wikipedia",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260926T1605Z-sub-dev/wikipedia/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260926T1605Z-sub-dev/wikipedia/chrome-b.png",
+      "elapsed_ms": 17021
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://en.wikipedia.org/wiki/Web_browser",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260926T1605Z-sub-dev/wikipedia/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260926T1605Z-sub-dev/wikipedia/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 2,
+      "threw": 2,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 77179,
+      "elapsed_ms": 85
+    },
+    "elapsed_ms": 5028,
+    "error": null,
+    "wall_ms": 5089,
+    "non_background_fraction": 0.1656
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 178,
+    "rustkit_words": 211,
+    "ratio": 0.809,
+    "missing_sample": [
+      "0",
+      "24",
+      "automatic",
+      "by",
+      "color",
+      "contents",
+      "dark",
+      "displaying",
+      "duration",
+      "english",
+      "external",
+      "features",
+      "hide",
+      "languages",
+      "large",
+      "light",
+      "links",
+      "macbook",
+      "navigating",
+      "privacy",
+      "references",
+      "search",
+      "seconds",
+      "security",
+      "see"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "diff": 22.63056640625
+  },
+  "points": 2
+}
