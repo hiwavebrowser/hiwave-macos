@@ -5,17 +5,19 @@
 # Usage: ./scripts/visual_live_runner.sh [OPTIONS]
 #
 # Options:
-#   --site <id>           One site from websuite/realsite-top20.json (e.g. wikipedia)
+#   --site <id>           One site from the active board list (e.g. wikipedia)
 #   --url <url>           Any URL (overrides --site / the list)
 #   --list                Print the site ids and exit
 #   --duration <ms>       How long to show each page (default: 10000)
 #   --resolution <preset> fhd | macbook | laptop | ipad (default 1280x800, the board viewport)
 #   --compare             Also open pinned Chrome for Testing 148 beside it, same size
+#   --board <top20|wide>  Site list: top20 (default) or wide (80-site board; use with --compare)
 #   --fullscreen          RustKit window fullscreen (ignored with --compare)
 #
 # Examples:
 #   ./scripts/visual_live_runner.sh                       # all 20 board sites
 #   ./scripts/visual_live_runner.sh --site wikipedia --compare
+#   ./scripts/visual_live_runner.sh --compare --board wide
 #   ./scripts/visual_live_runner.sh --url https://news.ycombinator.com --duration 20000
 #
 # Chrome for --compare: $PARITY_CHROME_PATH, else the pinned CfT under a
@@ -35,6 +37,9 @@ FULLSCREEN=""
 WIDTH=1280
 HEIGHT=800
 LIST="websuite/realsite-top20.json"
+LIST_WIDE="websuite/realsite-top80.json"
+BOARD="top20"
+LIST_ONLY=false
 
 declare -a RESOLUTIONS=(
     "fhd:1920:1080"
@@ -51,6 +56,9 @@ while [[ $# -gt 0 ]]; do
         --url) URL="$2"; shift 2 ;;
         --duration) DURATION_MS="$2"; shift 2 ;;
         --compare) COMPARE=true; shift ;;
+        --board)
+            BOARD="$2"
+            shift 2 ;;
         --fullscreen) FULLSCREEN="--fullscreen"; shift ;;
         --resolution)
             found=""
@@ -60,13 +68,25 @@ while [[ $# -gt 0 ]]; do
             done
             [[ -z "$found" ]] && { echo "Unknown resolution preset: $2"; exit 1; }
             shift 2 ;;
-        --list)
-            python3 -c "import json;[print(f\"{s['id']:<12} {s['url']}\") for s in json.load(open('$LIST'))['sites']]"
-            exit 0 ;;
+        --list) LIST_ONLY=true; shift ;;
         --help|-h) usage; exit 0 ;;
         *) echo "Unknown option: $1"; usage; exit 1 ;;
     esac
 done
+
+case "$BOARD" in
+    top20) ;;
+    wide) LIST="$LIST_WIDE" ;;
+    *) echo "Unknown board: $BOARD (use top20 or wide)"; exit 1 ;;
+esac
+if [[ "$BOARD" == "wide" ]] && ! $COMPARE; then
+    echo "Note: --board wide is intended for --compare runs over the extended site list."
+fi
+
+if $LIST_ONLY; then
+    python3 -c "import json;[print(f\"{s['id']:<12} {s['url']}\") for s in json.load(open('$LIST'))['sites']]"
+    exit 0
+fi
 
 # Build the list of (id url) pairs to show.
 declare -a TARGETS=()
