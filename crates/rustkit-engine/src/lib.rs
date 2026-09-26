@@ -8001,9 +8001,13 @@ impl Engine {
             // Selectors 4 §14.5: no children at all (whitespace text counts
             // as a child; comments do not).
             "empty" => !sib.has_children,
-            // Custom elements are undefined until script upgrades them;
-            // every built-in element is defined.
-            "defined" => !tag.contains('-'),
+            // Stopgap: the spec leaves a custom element undefined until script
+            // upgrades it, but nothing here runs `customElements.define`, so
+            // under that rule a `:not(:defined)` guard hides it forever and the
+            // page paints blank. Treat every element as defined until custom
+            // elements are implemented; then restore `!tag.contains('-')` for
+            // names that have not been upgraded.
+            "defined" => true,
             "lang" => arg.is_some_and(|a| {
                 let want = a
                     .trim()
@@ -16444,6 +16448,27 @@ mod rule_prefilter_tests {
                 SiblingContext::SOLE,
             );
             assert_eq!(got, *want, "{selector} with {:?}", siblings[0].3);
+        }
+    }
+
+    #[test]
+    fn every_element_is_defined_until_custom_elements_can_upgrade() {
+        // microsoft: `:not(:defined) { visibility: hidden }` guards its custom
+        // elements until script upgrades them. Nothing here runs
+        // `customElements.define`, so under the spec rule they never upgrade
+        // and the page paints blank. Showing the un-upgraded content is the
+        // closer match to Chrome after script.
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let cases: &[(&str, &str, bool)] = &[
+            (":defined", "div", true),
+            (":not(:defined)", "div", false),
+            (":defined", "ms-header", true),
+            (":not(:defined)", "ms-header", false),
+            ("ms-header:not(:defined)", "ms-header", false),
+        ];
+        for (selector, tag, want) in cases {
+            let got = engine.selector_matches(selector, tag, &attrs(&[]), &[], &[], SiblingContext::SOLE);
+            assert_eq!(got, *want, "{selector} on <{tag}>");
         }
     }
 
