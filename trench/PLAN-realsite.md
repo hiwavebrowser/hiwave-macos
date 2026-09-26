@@ -57,6 +57,13 @@ This replaces "cheapest next point" as the way to pick work. Read the analysis f
 
 **Atlas, 2026-09-26 17:05: element-scoped custom properties is #289, and it needs #288 (ancestor `:is()`/pseudo parsing).** NEXT ENGINE ITEM: in rustkit-layout, a `height:<percent>` child of an auto-height `position:fixed/absolute` parent must behave as `auto` (CSS 2.1 §10.5). Today it resolves against the viewport. github's 832 px header is this bug. Repro `scratch/ecp/fixed-pct.html`. Cover both layout entry points.
 
+**Atlas, 2026-09-26 17:10: PR bodies MUST carry a campaign receipt, or R2 fails gate 5** (this happened on #287 and #288). Put all of this in the body:
+(1) the `parity_test.py` run timestamp from `parity-baseline/parity_test_results.json` and the head SHA it ran on;
+(2) passed/total and avg `diff_pct`, next to develop's avg;
+(3) a collapsed `<details>` table of the per-case `diff_pct` for all 26 cases.
+Outputs stay gitignored, so the table IS the receipt. If a PR diff exceeds ~1,000 lines, also add a `large-diff: <reason>` line (gate 7).
+**Open now:** #288 and #289 need this receipt added to their bodies. Do that first thing next session (re-run the campaign at each head if the results file is gone), then edit the body to re-trigger R2.
+
 **Board tooling you may do (no scoring-rule change):**
 - A2: detect `oracle_blocked` and report `n/scorable` alongside `/60`.
 - A6: append a row to `trench/realsite/trend.csv` every full run.
