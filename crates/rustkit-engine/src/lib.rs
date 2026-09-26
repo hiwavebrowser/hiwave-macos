@@ -6971,8 +6971,12 @@ impl Engine {
 
         for stylesheet in stylesheets {
             for rule in &stylesheet.rules {
-                // Check for :root selector
-                if rule.selector.trim() == ":root" {
+                // Custom properties are collected document-wide, from rules
+                // that select the root element. A selector list counts when
+                // any of its items is `:root` or `html`: facebook declares
+                // its whole palette on `:root, .__fb-light-mode:root,
+                // .__fb-light-mode`, which an exact `== ":root"` test skipped.
+                if selects_the_root(&rule.selector) {
                     for decl in &rule.declarations {
                         // CSS custom properties start with --
                         if decl.property.starts_with("--") {
@@ -10273,6 +10277,15 @@ fn split_by_comma(value: &str) -> Vec<&str> {
     }
 
     parts
+}
+
+/// Whether a selector (list) has an item that selects the root element
+/// unconditionally: `:root` or `html`.
+fn selects_the_root(selector: &str) -> bool {
+    split_by_comma(selector).into_iter().any(|item| {
+        let item = item.trim();
+        item == ":root" || item.eq_ignore_ascii_case("html")
+    })
 }
 
 // ==================== Background Layer Parsing ====================
@@ -18357,6 +18370,41 @@ mod windows_a_leg_pins {
                 || b.children.iter().any(find_colored)
         }
         assert!(find_colored(&layout_of(&e, html)), "var(--brand) from :root should resolve on a body descendant");
+    }
+
+    #[test]
+    fn a_selector_list_naming_the_root_contributes_custom_properties() {
+        // facebook: `:root, .__fb-light-mode:root, .__fb-light-mode {--...}`.
+        // Only a bare `:root` rule was read, so its whole palette was unset.
+        let e = engine();
+        let html = "<html><head><style>\
+                    :root, .__fb-light-mode:root, .__fb-light-mode {--a:#123456}\
+                    html {--b:#654321}\
+                    .theme, :is(.x, .y) {--c:#abcdef}\
+                    </style></head><body>\
+                    <p style=\"color: var(--a)\">a</p>\
+                    <p style=\"color: var(--b)\">b</p>\
+                    <p style=\"color: var(--c, #010203)\">c</p></body></html>";
+        fn color_of(b: &LayoutBox, text: &str) -> Option<rustkit_css::Color> {
+            if matches!(&b.box_type, BoxType::Text(t) if t.trim() == text) {
+                return Some(b.style.color);
+            }
+            b.children.iter().find_map(|c| color_of(c, text))
+        }
+        let layout = layout_of(&e, html);
+        assert_eq!(
+            color_of(&layout, "a"),
+            Some(rustkit_css::Color::from_rgb(0x12, 0x34, 0x56))
+        );
+        assert_eq!(
+            color_of(&layout, "b"),
+            Some(rustkit_css::Color::from_rgb(0x65, 0x43, 0x21))
+        );
+        assert_eq!(
+            color_of(&layout, "c"),
+            Some(rustkit_css::Color::from_rgb(1, 2, 3)),
+            "a list with no root item is not collected document-wide"
+        );
     }
 
     #[test]
