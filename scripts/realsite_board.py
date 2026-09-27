@@ -422,7 +422,12 @@ def main():
     ap.add_argument("--summarize", action="store_true",
                     help="capture nothing; rebuild summary.json from the per-site JSONs "
                          "already in --out (a run done in --site chunks)")
+    ap.add_argument("--oracle-headless", action="store_true",
+                    help="run the Chrome oracle headless (the pre-A1 identity) for a before/after "
+                         "reading; the default is headed, off-screen")
     args = ap.parse_args()
+    if args.oracle_headless:
+        os.environ["REALSITE_ORACLE_HEADLESS"] = "1"
 
     sites_file, trend_name = BOARDS[args.board]
     cfg = json.loads(sites_file.read_text())

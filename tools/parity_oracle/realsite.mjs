@@ -53,8 +53,18 @@ function collectViewportText() {
 
 async function captureChrome(url, pngPath, textPath, width, height, settleMs) {
   const started = Date.now();
-  const browser = await chromium.launch(getDeterministicLaunchOptions());
-  const result = { url, status: 'ok', error: null, nav_error: null };
+  // Headed (Pete, A1, 2026-09-26): the HeadlessChrome identity gets some
+  // oracle pages blocked (x "Access denied", carvana Cloudflare). This is
+  // Chrome identifying as itself, not evasion. The window sits off-screen.
+  // REALSITE_ORACLE_HEADLESS=1 restores headless for before/after readings.
+  const headless = process.env.REALSITE_ORACLE_HEADLESS === '1';
+  const launch = getDeterministicLaunchOptions();
+  launch.headless = headless;
+  if (!headless) {
+    launch.args = [...launch.args, '--window-position=-2400,0', `--window-size=${width},${height}`];
+  }
+  const browser = await chromium.launch(launch);
+  const result = { url, status: 'ok', error: null, nav_error: null, oracle_headless: headless };
   try {
     // colorScheme is pinned: left unset, headless Chrome followed the seat's
     // OS appearance and served Google's dark theme, which RustKit never gets.
