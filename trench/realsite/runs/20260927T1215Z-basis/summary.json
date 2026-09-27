@@ -1,0 +1,38 @@
+{
+  "ts": "20260927T114959Z",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "sites": 5,
+  "points": 3,
+  "max_points": 15,
+  "loads": 3,
+  "readable": 0,
+  "looks_right": 0,
+  "looks_right_unstable": [],
+  "readable_unscored": [],
+  "oracle_failed": [
+    "ebay",
+    "weather"
+  ],
+  "oracle_blocked": {
+    "ebay": "top-level document HTTP 403"
+  },
+  "blocked": {
+    "ebay": "akamai/403",
+    "nytimes": "datadome/403"
+  },
+  "per_site": {
+    "github": 1,
+    "ebay": 0,
+    "nytimes": 0,
+    "cnn": 1,
+    "weather": 1
+  },
+  "scorable_sites": 3,
+  "scorable_points": 3,
+  "scorable_max": 9,
+  "full_run": false
+}
