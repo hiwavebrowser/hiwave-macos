@@ -531,3 +531,30 @@ Tooling (hub scratch): `cargo_in.py` (cargo in a worktree with the shared target
 
 **Decisions for Pete:**
 1. **Land #289 + #288 now, knowing github drops a point until the header fix lands?** The stack is more correct on every themed site. github's lost point is a pre-existing layout bug that the correct theme exposes. I recommend landing both (#288 first) and taking the header fix next session.
+
+
+## 2026-09-26 20:15 — github's 832 px header fixed (#290, +1), linkedin's skip link fixed (#292, +0)
+
+**Points: develop 18/60 (a0e6b0e, with #288/#289 merged, which cost github its lucky point as predicted) → 19/60 with #290. Full board, both arms alternating per chunk.** Neither PR is merged.
+
+| run | engine | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|
+| `20260926T2230Z-dev` | develop a0e6b0e | **18** | 12 | 5 | 1 | 17/42 |
+| `20260926T2230Z-fix` | + #290 | **19** | 13 | 5 | 1 | 18/42 |
+| `20260926T2355Z-dev` / `-offsetvp` (3 sites + 8 frame checks) | + #292 | ±0 (facebook's 1→2 is Chrome drift; frame byte-identical) | | | | |
+
+- **github 0 → 1 (#290):** dark theme, nav, headline, copy and CTAs are now in the first viewport (83.5% non-background, was 1.0%). Still short: READABLE 71.7% (the missing words are a React-rendered hero caption, JS-track), the header is ~2× Chrome's (the nav wraps under the logo), and the hero art is missing.
+- Passing all 3: google. Blocked: amazon, chatgpt, ebay, nytimes. Oracle blocked: reddit, x. Blank: microsoft, youtube, reddit.
+- google/netflix/linkedin/yahoo/cnn RustKit frames change between arms on every run (server-side content variants: different copy and button sets). No point moved on them.
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge). Both carry a campaign receipt: 26/26, avg 1.2534% vs develop's 1.2535%.**
+- **#290 `atlas/rs-fixed-pct-height` @ 8502dad:** CSS 2.1 §10.5. A `%` height under an auto-height abs/fixed box (not stretched by top+bottom), and down the auto-height in-flow chain beneath it, computes to `auto` instead of the viewport. Both layout entry points; 16-combination test fails with the rule off; guard test for a definite parent. layout 522/522.
+- **#292 `atlas/rs-offset-viewport-units` @ ed37f67:** `vw/vh/vmin/vmax/calc/min/max/clamp` offsets were dropped (`top:-100vh` read as auto). linkedin's "Skip to main content" pill no longer paints over its header. Test fails on develop. No point moves; it's a correctness fix.
+- Found: `text::font_resolve_tests::a_new_web_font_set_invalidates_the_cache` flakes under the parallel runner (a shared web-font generation). Pre-existing; noted in #290.
+
+**Survey of the next point (none is cheap):** instagram 16.4% LOOKS RIGHT (needs 15) and facebook/github READABLE are JS-rendered. wikipedia 20.8% needs grid layout (Vector's sidebar grid). facebook hero images are missing and its logo SVG path is a blob (the `S` command / packed decimals note is still open, and the smallest item). Cheapest engine items next session: (1) facebook's logo SVG path parser; (2) github's header nav wrapping (why the nav doesn't fit beside the logo at 1280); (3) grid for wikipedia's layout (bigger).
+
+Tooling notes: in headless mode `git -C <other worktree>` and `ln -s` need approval; `cd <worktree>` as its own command, then plain `git add/commit/push`, works. `cargo fmt` on rustkit-layout rewrites ~250 unrelated hunks (develop is not fmt-clean), so don't run it on a whole crate in a PR.
+
+**Decisions for Pete:**
+1. **develop is not `cargo fmt`-clean** (rustkit-layout alone has ~250 diffs). One mechanical `chore: cargo fmt` PR would stop every future fix from choosing between a noisy diff and skipping fmt. I recommend it, landed when no rs- PRs are open, since it conflicts with all of them.

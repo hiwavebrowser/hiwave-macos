@@ -10,3 +10,5 @@ ts,run,points,max,loads,readable,looks_right,scorable_points,scorable_max,blocke
 20260926T1510Z-dev,20260926T1510Z-dev,15,60,11,3,1,14,45,chatgpt|ebay|nytimes,chatgpt|ebay|nytimes|reddit|x
 20260926T1510Z-fsv,20260926T1510Z-fsv,17,60,11,5,1,17,45,amazon|ebay|nytimes,chatgpt|ebay|nytimes|reddit
 20260926T191033Z,20260926T1915Z-dev,19,60,13,5,1,18,42,amazon|chatgpt|ebay|nytimes,chatgpt|ebay|nytimes|reddit|x
+20260926T2230Z-dev,20260926T2230Z-dev,18,60,12,5,1,17,42,amazon|chatgpt|ebay|nytimes,chatgpt|ebay|nytimes|reddit|x
+20260926T2230Z-fix,20260926T2230Z-fix,19,60,13,5,1,18,42,amazon|chatgpt|ebay|nytimes,chatgpt|ebay|nytimes|reddit|x
