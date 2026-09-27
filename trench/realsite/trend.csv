@@ -24,3 +24,4 @@ ts,run,points,max,loads,readable,looks_right,scorable_points,scorable_max,blocke
 20260927T1645Z-inflow,20260927T1645Z-inflow,19,60,13,5,1,19,48,amazon|chatgpt|ebay|nytimes,
 20260927T1740Z-inflow2,20260927T1740Z-inflow2,21,60,13,6,2,21,51,amazon|ebay|nytimes,ebay
 20260927T2000Z-svgct,20260927T2000Z-svgct,21,60,13,6,2,21,51,amazon|ebay|nytimes,ebay
+20260927T2150Z-dev04dd,20260927T2150Z-dev04dd,19,60,13,5,1,19,48,amazon|chatgpt|ebay|nytimes,
