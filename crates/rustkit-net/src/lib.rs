@@ -94,7 +94,11 @@ pub struct Request {
     pub body: Option<Bytes>,
     pub timeout: Option<Duration>,
     pub credentials: CredentialsMode,
+    /// The URL of the document that made the request. The `Referer` header
+    /// is derived from it through `referrer_policy`; this URL itself is
+    /// never sent as-is.
     pub referrer: Option<Url>,
+    pub referrer_policy: ReferrerPolicy,
 }
 
 impl Request {
@@ -109,6 +113,7 @@ impl Request {
             timeout: Some(Duration::from_secs(30)),
             credentials: CredentialsMode::SameOrigin,
             referrer: None,
+            referrer_policy: ReferrerPolicy::default(),
         }
     }
 
@@ -123,6 +128,7 @@ impl Request {
             timeout: Some(Duration::from_secs(30)),
             credentials: CredentialsMode::SameOrigin,
             referrer: None,
+            referrer_policy: ReferrerPolicy::default(),
         }
     }
 
@@ -141,6 +147,12 @@ impl Request {
     /// Set referrer.
     pub fn referrer(mut self, referrer: Url) -> Self {
         self.referrer = Some(referrer);
+        self
+    }
+
+    /// Set the referrer policy (default strict-origin-when-cross-origin).
+    pub fn referrer_policy(mut self, policy: ReferrerPolicy) -> Self {
+        self.referrer_policy = policy;
         self
     }
 }
@@ -562,9 +574,17 @@ impl ResourceLoader {
             headers.insert(HeaderName::from_static("accept-language"), val);
         }
 
-        // Add referrer
-        if let Some(ref referrer) = request.referrer {
-            if let Ok(val) = HeaderValue::try_from(referrer.as_str()) {
+        // Referer, as the request's policy allows (never the raw referrer
+        // URL, and never a caller-set header that could say more). Redirects
+        // are safe: rustkit-http follows them with fresh headers, so this
+        // value never reaches a redirect target.
+        headers.remove(HeaderName::from_static("referer"));
+        if let Some(value) = request
+            .referrer
+            .as_ref()
+            .and_then(|referrer| request.referrer_policy.compute_referrer(referrer, &request.url))
+        {
+            if let Ok(val) = HeaderValue::try_from(value) {
                 headers.insert(HeaderName::from_static("referer"), val);
             }
         }

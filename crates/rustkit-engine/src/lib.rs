@@ -29,7 +29,7 @@ use rustkit_layout::{
     BoxType, Dimensions, DisplayList, ElementIdentity, LayoutBox, Position, Rect,
 };
 use std::cell::Cell;
-use rustkit_net::{LoaderConfig, NetError, Request, ResourceLoader};
+use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, ResourceLoader};
 use rustkit_renderer::Renderer;
 pub use rustkit_renderer::RenderStats;
 #[cfg(windows)]
@@ -139,6 +139,25 @@ pub enum EngineEvent {
 
 /// View state.
 #[allow(dead_code)]
+/// The document side of a subresource request (see
+/// [`Engine::subresource_referrer`]).
+#[derive(Debug, Clone, Default)]
+struct SubresourceReferrer {
+    url: Option<Url>,
+    policy: ReferrerPolicy,
+}
+
+impl SubresourceReferrer {
+    /// A GET for `url` that carries this referrer and policy.
+    fn get(&self, url: Url) -> Request {
+        let request = Request::get(url).referrer_policy(self.policy);
+        match &self.url {
+            Some(referrer) => request.referrer(referrer.clone()),
+            None => request,
+        }
+    }
+}
+
 struct ViewState {
     id: EngineViewId,
     viewhost_id: ViewId,
@@ -205,6 +224,8 @@ struct ViewState {
     headless_bounds: Option<Bounds>,
     /// What the current document's scripts did on load (see [`ScriptRecord`]).
     script_log: Vec<ScriptRecord>,
+    /// The document response's `Referrer-Policy` header, if it had a valid one.
+    header_referrer_policy: Option<ReferrerPolicy>,
 }
 
 /// Engine configuration.
@@ -879,6 +900,7 @@ impl Engine {
             external_stylesheets: Vec::new(),
             headless_bounds: None,
             script_log: Vec::new(),
+            header_referrer_policy: None,
         };
 
         self.views.insert(id, view_state);
@@ -936,6 +958,7 @@ impl Engine {
             external_stylesheets: Vec::new(),
             headless_bounds: None,
             script_log: Vec::new(),
+            header_referrer_policy: None,
         };
 
         let id = view_state.id;
@@ -1002,6 +1025,7 @@ impl Engine {
             external_stylesheets: Vec::new(),
             headless_bounds: Some(bounds),
             script_log: Vec::new(),
+            header_referrer_policy: None,
         };
 
         self.views.insert(id, view_state);
@@ -1573,16 +1597,18 @@ impl Engine {
         use futures::{stream::StreamExt, FutureExt};
         const MAX_CONCURRENT_SCRIPT_LOADS: usize = 8;
         let loader = self.loader.clone();
+        let referrer = self.subresource_referrer(id);
         Some(
             futures::stream::iter(entries.into_iter().map(move |(label, entry)| {
                 let loader = loader.clone();
+                let referrer = referrer.clone();
                 async move {
                     let result = match entry {
                         Err(reason) => Err(ScriptOutcome::Skipped(reason)),
                         Ok((timing, Body::Inline(text))) => Ok((timing, text)),
                         Ok((timing, Body::External(url))) => {
                             let fetch = async {
-                                match loader.fetch(Request::get(url)).await {
+                                match loader.fetch(referrer.get(url)).await {
                                     Ok(response) if response.ok() => match response.text().await {
                                         Ok(text) => Ok((timing, text)),
                                         Err(e) => Err(ScriptOutcome::FetchFailed(format!("{e}"))),
@@ -1859,6 +1885,12 @@ impl Engine {
             url: url.clone(),
         });
 
+        let header_referrer_policy = response
+            .headers
+            .get("referrer-policy")
+            .and_then(|v| v.to_str().ok())
+            .and_then(ReferrerPolicy::parse_header);
+
         // Parse HTML
         let html = response.text().await?;
 
@@ -1882,6 +1914,7 @@ impl Engine {
         view.url = Some(url.clone());
         view.document = Some(document.clone());
         view.title = title.clone();
+        view.header_referrer_policy = header_referrer_policy;
         // A new document invalidates every per-node side table. NodeId is
         // PER-DOCUMENT (each Document restarts its counter at 1), so a
         // surviving entry keyed by raw id 4 would be read as the NEW page's
@@ -2089,6 +2122,7 @@ impl Engine {
         view.url = Some(url.clone());
         view.document = Some(document.clone());
         view.title = title.clone();
+        view.header_referrer_policy = None;
         // A new document invalidates every per-node side table. NodeId is
         // PER-DOCUMENT (each Document restarts its counter at 1), so a
         // surviving entry keyed by raw id 4 would be read as the NEW page's
@@ -6610,12 +6644,14 @@ impl Engine {
 
         let loader = self.loader.clone();
         let deadline = self.subresource_deadline();
+        let referrer = self.subresource_referrer(id);
+        let referrer = &referrer;
         let fetched: Vec<Option<Stylesheet>> = futures::stream::iter(urls.into_iter().map(|url| {
             let loader = loader.clone();
             async move {
                 info!(%url, "Loading external stylesheet");
                 let load = async {
-                    match loader.fetch(Request::get(url.clone())).await {
+                    match loader.fetch(referrer.get(url.clone())).await {
                         Ok(response) => {
                             if response.ok() {
                                 match response.text().await {
@@ -6706,15 +6742,17 @@ impl Engine {
         // &mut self cannot be held across them.
         let budget = std::time::Duration::from_millis(self.config.subresource_budget_ms);
         let deadline = self.subresource_deadline();
+        let referrer = self.subresource_referrer(id);
         {
             use futures::stream::StreamExt;
             let loader = self.loader.clone();
+            let referrer = &referrer;
             let parsed: Vec<Option<(String, rustkit_svg::SvgDocument)>> =
                 futures::stream::iter(svg_urls.into_iter().map(|url| {
                     let loader = loader.clone();
                     async move {
                         info!(%url, "Loading SVG image");
-                        let fetched = tokio::time::timeout_at(deadline, loader.fetch(Request::get(url.clone())))
+                        let fetched = tokio::time::timeout_at(deadline, loader.fetch(referrer.get(url.clone())))
                             .await
                             .unwrap_or(Err(NetError::Timeout(budget)));
                         match fetched {
@@ -6784,6 +6822,38 @@ impl Engine {
         loaded += results.into_iter().filter(|ok| *ok).count();
 
         Ok(loaded)
+    }
+
+    /// Who a subresource request comes from: the document URL and the
+    /// referrer policy in force. The policy is the last valid
+    /// `<meta name="referrer">` in the document, else the response's
+    /// `Referrer-Policy` header, else Chrome's default
+    /// (strict-origin-when-cross-origin). The loader turns this into the
+    /// `Referer` header; the URL itself is never sent as-is.
+    fn subresource_referrer(&self, id: EngineViewId) -> SubresourceReferrer {
+        let Some(view) = self.views.get(&id) else {
+            return SubresourceReferrer::default();
+        };
+        let meta_policy = view.document.as_ref().and_then(|document| {
+            document
+                .get_elements_by_tag_name("meta")
+                .iter()
+                .filter_map(|meta| match &meta.node_type {
+                    NodeType::Element { attributes, .. }
+                        if attributes
+                            .get("name")
+                            .is_some_and(|n| n.eq_ignore_ascii_case("referrer")) =>
+                    {
+                        attributes.get("content").and_then(|c| c.trim().parse().ok())
+                    }
+                    _ => None,
+                })
+                .last()
+        });
+        SubresourceReferrer {
+            url: view.url.clone(),
+            policy: meta_policy.or(view.header_referrer_policy).unwrap_or_default(),
+        }
     }
 
     /// When a subresource phase starting now must be done by
@@ -6991,10 +7061,12 @@ impl Engine {
         const MAX_IN_FLIGHT: usize = 16;
         let loader = &self.loader;
         let deadline = self.subresource_deadline();
+        let referrer = self.subresource_referrer(id);
+        let referrer = &referrer;
         let fetched: Vec<_> = stream::iter(targets.into_iter().map(|(key, family, url)| async move {
             info!(%family, %url, "Loading web font");
             let load = async {
-                match loader.fetch(Request::get(url.clone())).await {
+                match loader.fetch(referrer.get(url.clone())).await {
                     Ok(response) if response.ok() => match response.bytes().await {
                         Ok(bytes) => Ok(bytes.to_vec()),
                         Err(e) => Err(format!("Failed to read web font body: {e:?}")),
@@ -19208,4 +19280,114 @@ fn substitute_css_vars<'a>(
     }
     push(&mut out, rest, budget);
     out
+}
+
+// Needs a headless view: `cargo test -p rustkit-engine --features headless`.
+#[cfg(all(test, target_os = "macos", feature = "headless"))]
+mod referrer_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    type Seen = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+    /// Serve `/page` as `html` (with `doc_headers`), anything else as a
+    /// stylesheet, and record each subresource request's path and Referer.
+    fn recording_server(html: &str, doc_headers: &'static str) -> (u16, Seen) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen: Seen = Arc::default();
+        let log = seen.clone();
+        let html = html.replace("PORT", &port.to_string());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                let referer = head
+                    .lines()
+                    .filter_map(|l| l.split_once(':'))
+                    .find(|(k, _)| k.eq_ignore_ascii_case("referer"))
+                    .map(|(_, v)| v.trim().to_string());
+                let (ctype, extra, body) = if path.starts_with("/page") {
+                    ("text/html", doc_headers, html.clone())
+                } else {
+                    log.lock().unwrap().push((path, referer));
+                    ("text/css", "", "p{}".to_string())
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (port, seen)
+    }
+
+    /// Load `http://127.0.0.1:<port>/page?q=1#frag` and return the Referer
+    /// each subresource request carried, by path.
+    fn referers(html: &str, doc_headers: &'static str) -> (u16, Vec<(String, Option<String>)>) {
+        let (port, seen) = recording_server(html, doc_headers);
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/page?q=1#frag")).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            engine.load_url(view, url).await.expect("load_url");
+            engine.load_subresources(view).await.expect("subresources");
+        });
+        let mut seen = seen.lock().unwrap().clone();
+        seen.sort();
+        seen.dedup();
+        (port, seen)
+    }
+
+    const TWO_SHEETS: &str = r#"<html><head>
+        <link rel="stylesheet" href="/same.css">
+        <link rel="stylesheet" href="http://localhost:PORT/cross.css">
+        </head><body>x</body></html>"#;
+
+    #[test]
+    fn subresources_carry_a_strict_origin_when_cross_origin_referer() {
+        // apple's /wss/fonts answers 404 to a request with no Referer.
+        let (port, seen) = referers(TWO_SHEETS, "");
+        assert_eq!(
+            seen,
+            vec![
+                ("/cross.css".to_string(), Some(format!("http://127.0.0.1:{port}/"))),
+                ("/same.css".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
+            ],
+            "same-origin: the full URL without its fragment; cross-origin: the origin only"
+        );
+    }
+
+    #[test]
+    fn the_documents_referrer_policy_header_is_respected() {
+        let (_, seen) = referers(TWO_SHEETS, "Referrer-Policy: no-referrer\r\n");
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(seen.iter().all(|(_, r)| r.is_none()), "{seen:?}");
+    }
+
+    #[test]
+    fn a_meta_referrer_overrides_the_header() {
+        let html = TWO_SHEETS.replace(
+            "<head>",
+            r#"<head><meta name="Referrer" content="same-origin"><meta name="referrer" content="bogus">"#,
+        );
+        let (port, seen) = referers(&html, "Referrer-Policy: unsafe-url\r\n");
+        assert_eq!(
+            seen,
+            vec![
+                ("/cross.css".to_string(), None),
+                ("/same.css".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
+            ]
+        );
+    }
 }
