@@ -123,6 +123,8 @@ cargo build --release -p hiwave-smoke 2>&1 | tail -2
 SHOWN=0; FAILED=0
 LOAD_BUDGET_S=${LOAD_BUDGET_S:-30}
 declare -a HUNG_SITES=()
+declare -a BLOCKED_SITES=()
+declare -a LOADFAIL_SITES=()
 for t in "${TARGETS[@]}"; do
     id=${t%% *}; url=${t#* }
     echo ""
@@ -155,13 +157,32 @@ for t in "${TARGETS[@]}"; do
     wait "$SPID" 2>/dev/null; status=$?
     $hung && { echo "  ✗ HUNG: RustKit did not finish within ${limit}s (killed); worth an engine look"; HUNG_SITES+=("$id"); }
     grep -E 'ERROR|Failed' "$log" | head -3
+    # hiwave-smoke exits 0 even when the page itself failed to load (it still
+    # showed a window), so read the outcome from its log.
+    loadfail=""
+    if grep -qE 'Failed to load URL|Navigation failed' "$log"; then
+        code=$(grep -oE 'HTTP [0-9]{3}' "$log" | head -1 | grep -oE '[0-9]{3}')
+        reason=$(grep -oE '\b(error|e)=[A-Za-z]+(\("[^"]*"\))?' "$log" | head -1 | sed -E 's/^(error|e)=//')
+        loadfail="${code:-${reason:-unknown}}"
+    fi
     rm -f "$log"
     if [[ -n "$CPID" ]]; then kill "$CPID" 2>/dev/null; wait "$CPID" 2>/dev/null; rm -rf "$prof"; fi
-    if [[ "$status" -eq 0 ]]; then echo "  ✓ shown"; SHOWN=$((SHOWN+1)); else echo "  ✗ exit $status"; FAILED=$((FAILED+1)); fi
+    if $hung; then
+        :   # reported above
+    elif [[ -n "$loadfail" ]]; then
+        if [[ "$loadfail" =~ ^(401|403|429|503)$ ]]; then
+            echo "  ✗ blocked ($loadfail)"; BLOCKED_SITES+=("$id")
+        else
+            echo "  ✗ load failed ($loadfail)"; LOADFAIL_SITES+=("$id")
+        fi
+    elif [[ "$status" -eq 0 ]]; then echo "  ✓ shown"; SHOWN=$((SHOWN+1))
+    else echo "  ✗ exit $status"; FAILED=$((FAILED+1)); fi
 done
 
 echo ""
 echo "=============================================="
-echo "Shown: $SHOWN, errors: $FAILED"
+echo "Shown: $SHOWN, blocked: ${#BLOCKED_SITES[@]}, load failed: ${#LOADFAIL_SITES[@]}, hung: ${#HUNG_SITES[@]}, errors: $FAILED"
 (( ${#HUNG_SITES[@]} )) && echo "Hung (killed): ${HUNG_SITES[*]}"
+(( ${#BLOCKED_SITES[@]} )) && echo "Blocked: ${BLOCKED_SITES[*]}"
+(( ${#LOADFAIL_SITES[@]} )) && echo "Load failed: ${LOADFAIL_SITES[*]}"
 echo "=============================================="
