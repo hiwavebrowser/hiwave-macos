@@ -200,11 +200,11 @@ fn fractional_grow_factors_take_only_their_fraction_of_free_space() {
     }
 }
 
-/// Guard, not a Chrome match: an auto-height column's `flex: 1` item keeps
-/// at least its content height (the shelf's command palette). Chrome 148 gives
-/// the item its 97px of content through the vertical automatic minimum, which
-/// RustKit doesn't implement yet; before the early return in
-/// `resolve_flexible_lengths`, step 11d's re-run collapsed it to 0.
+/// Guard: an auto-height column's `flex: 1` item keeps at least its content
+/// height (the shelf's command palette). Chrome 148 gives the item its 97px
+/// of content through the vertical automatic minimum (§4.5); before the
+/// early return in `resolve_flexible_lengths`, step 11d's re-run collapsed
+/// it to 0.
 #[test]
 fn a_flex_one_item_in_an_auto_height_column_keeps_its_content() {
     for collapse in [false, true] {
@@ -232,5 +232,86 @@ fn a_flex_one_item_in_an_auto_height_column_keeps_its_content() {
         let root = laid_out(body, collapse);
         let h = root.children[1].dimensions.content.height;
         assert!(h >= 97.0, "the palette holds 97px of content, got {h}");
+    }
+}
+
+fn column(height: f32) -> ComputedStyle {
+    let mut s = ComputedStyle::new();
+    s.display = Display::Flex;
+    s.flex_direction = rustkit_css::FlexDirection::Column;
+    s.height = Length::Px(height);
+    s
+}
+
+/// A `flex: 1 1 0%` item in a 50px column holding a 100px box. Returns the
+/// item's content height.
+fn squeezed_item_height(tweak: impl Fn(&mut ComputedStyle), collapse: bool) -> f32 {
+    let mut s = zero_pct();
+    tweak(&mut s);
+    let mut it = LayoutBox::new(BoxType::Block, s);
+    it.children.push(sized_block(100.0, 100.0));
+    let mut c = LayoutBox::new(BoxType::Block, column(50.0));
+    c.children.push(it);
+    laid_out(c, collapse).children[0].dimensions.content.height
+}
+
+/// §4.5 on the vertical axis: `min-height: auto` floors a column item at its
+/// content, so it overflows the 50px column at 100 rather than shrinking.
+/// `min-height: 0` and a scroll container both opt out and get the 50.
+#[test]
+fn a_column_item_is_not_shrunk_below_its_content() {
+    for collapse in [false, true] {
+        let h = squeezed_item_height(|_| {}, collapse);
+        assert!(
+            (h - 100.0).abs() < 0.5,
+            "min-height:auto: Chrome 148 has 100, got {h}"
+        );
+        let h = squeezed_item_height(|s| s.min_height = Length::Px(0.0), collapse);
+        assert!(
+            (h - 50.0).abs() < 0.5,
+            "min-height:0: Chrome 148 has 50, got {h}"
+        );
+        let h = squeezed_item_height(|s| s.overflow_y = rustkit_css::Overflow::Auto, collapse);
+        assert!(
+            (h - 50.0).abs() < 0.5,
+            "overflow-y:auto: Chrome 148 has 50, got {h}"
+        );
+    }
+}
+
+/// The shelf (hiwave-app `ui/shelf.html`), with Chrome 148's rects from
+/// `baselines/chrome-148/builtins/shelf/layout-rects.json`: a 120px column
+/// body, a 41px header, and a `flex: 1` palette (padding 12) holding a 43px
+/// input row (margin-bottom 12) and a `flex: 1; overflow-y: auto` results
+/// box whose content is 56. The palette's automatic minimum is its content,
+/// 135, so it overflows the body; the results box keeps its 56.
+#[test]
+fn the_shelf_palette_overflows_at_its_content_height() {
+    for collapse in [false, true] {
+        let mut pal_s = zero_pct();
+        pal_s.display = Display::Flex;
+        pal_s.flex_direction = rustkit_css::FlexDirection::Column;
+        pal_s.padding_top = Length::Px(12.0);
+        pal_s.padding_bottom = Length::Px(12.0);
+        let mut pal = LayoutBox::new(BoxType::Block, pal_s);
+        let mut input = sized_block(100.0, 43.0);
+        input.style.margin_bottom = Length::Px(12.0);
+        let mut res_s = zero_pct();
+        res_s.overflow_y = rustkit_css::Overflow::Auto;
+        let mut res = LayoutBox::new(BoxType::Block, res_s);
+        res.children.push(sized_block(100.0, 56.0));
+        pal.children.push(input);
+        pal.children.push(res);
+        let mut body = LayoutBox::new(BoxType::Block, column(120.0));
+        body.children.push(sized_block(100.0, 41.0));
+        body.children.push(pal);
+        let root = laid_out(body, collapse);
+        let pal = &root.children[1];
+        let pal_h = pal.dimensions.border_box().height;
+        let res_h = pal.children[1].dimensions.content.height;
+        assert!(
+            (pal_h - 135.0).abs() < 0.5 && (res_h - 56.0).abs() < 0.5,
+            "Chrome 148: palette 135, results 56; got palette {pal_h}, results {res_h}"
+        );
     }
 }
