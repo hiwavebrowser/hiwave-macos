@@ -25,6 +25,8 @@
 
 ---
 
+> **Mission:** a free, open-source browser with its own Rust engine, outside Google's ecosystem, that is as good as Chrome and better at privacy, security and user control. Read [MISSION.md](MISSION.md).
+
 ## The Problem
 
 Modern browsers are designed to keep you browsing. More tabs, more tracking, more data vultures, more history, more extensions, more complexity. The result? Dozens of open tabs you'll "get to eventually," fractured attention, and digital clutter that drains your focus and steals your privacy.
