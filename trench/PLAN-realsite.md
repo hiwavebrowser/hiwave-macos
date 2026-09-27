@@ -95,6 +95,8 @@ Respect `<meta name="referrer">` and the `Referrer-Policy` header if cheap. appl
 
 **NEXT ENGINE ITEM (11:25): CSS 2.1 §10.5 on the in-flow path.** On x.com, `div.min-h-[440px] (height:auto) > div.h-full` lays out at 800 in RustKit, where Chrome treats the percentage as `auto`. The unit layout path gets it right, so find where the engine path resolves the percentage (Aleph first). Measure x's LOOKS RIGHT (19.9%) before and after. Then instagram (16.3%), then unitless `flex: 1 1 0` at 267 (Chrome 275, `scratch/basis/b-zero.html`).
 
+**2026-09-27 14:05: done.** §10.5 on the in-flow path is #304 (x 2 → 3; board 21/60). Lesson: `diff_pct` alone hid a real Gate B drop on chrome_rustkit. Always diff `ratchet_local.py` output against a develop run of it, not just the campaign table. NEXT: instagram (16.5%), then unitless `flex: 1 1 0` (267 vs 275), then an attribution pass on linkedin (19.3%) and wikipedia (20.8%).
+
 **Board tooling you may do (no scoring-rule change):**
 - A2: detect `oracle_blocked` and report `n/scorable` alongside `/60`.
 - A6: append a row to `trench/realsite/trend.csv` every full run.

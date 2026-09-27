@@ -1,0 +1,56 @@
+{
+  "ts": "20260927T1740Z-inflow2",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "sites": 20,
+  "points": 21,
+  "max_points": 60,
+  "loads": 13,
+  "readable": 6,
+  "looks_right": 2,
+  "looks_right_unstable": [
+    "amazon",
+    "weather"
+  ],
+  "readable_unscored": [],
+  "oracle_failed": [
+    "ebay"
+  ],
+  "oracle_blocked": {
+    "ebay": "top-level document HTTP 403"
+  },
+  "blocked": {
+    "amazon": "aws-waf/202",
+    "ebay": "akamai/403",
+    "nytimes": "datadome/403"
+  },
+  "per_site": {
+    "google": 3,
+    "youtube": 0,
+    "facebook": 1,
+    "instagram": 1,
+    "wikipedia": 2,
+    "amazon": 0,
+    "reddit": 0,
+    "x": 3,
+    "linkedin": 2,
+    "yahoo": 1,
+    "bing": 1,
+    "chatgpt": 0,
+    "microsoft": 0,
+    "apple": 2,
+    "netflix": 2,
+    "github": 1,
+    "ebay": 0,
+    "nytimes": 0,
+    "cnn": 1,
+    "weather": 1
+  },
+  "scorable_sites": 17,
+  "scorable_points": 21,
+  "scorable_max": 51,
+  "full_run": true
+}
