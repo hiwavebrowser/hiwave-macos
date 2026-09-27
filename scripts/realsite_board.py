@@ -35,6 +35,12 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 SITES_FILE = REPO / "websuite" / "realsite-top20.json"
+# --board wide: the 80-site list, scored as its OWN number (out of 240) with its
+# own trend file. It never feeds the 60-point board the trench is measured on.
+BOARDS = {
+    "top20": (SITES_FILE, "trend.csv"),
+    "wide": (REPO / "websuite" / "realsite-top80.json", "trend-wide.csv"),
+}
 ORACLE = REPO / "tools" / "parity_oracle" / "realsite.mjs"
 DEFAULT_CHROME = (
     Path.home()
@@ -391,9 +397,9 @@ def summarize(rows, ts, width, height, all_ids):
     return summary
 
 
-def append_trend(summary, run_name):
-    """PLAN A6: one row in trench/realsite/trend.csv per full run."""
-    trend = REPO / "trench" / "realsite" / "trend.csv"
+def append_trend(summary, run_name, trend_name="trend.csv"):
+    """PLAN A6: one row in trench/realsite/<trend_name> per full run."""
+    trend = REPO / "trench" / "realsite" / trend_name
     new = not trend.exists()
     with trend.open("a") as f:
         if new:
@@ -409,6 +415,8 @@ def append_trend(summary, run_name):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--site", action="append", help="only these site ids")
+    ap.add_argument("--board", choices=sorted(BOARDS), default="top20",
+                    help="top20 (the trench metric, /60) or wide (80 sites, /240, separate trend)")
     ap.add_argument("--capture-bin", default=str(REPO / "target/release/parity-capture"))
     ap.add_argument("--out", help="run directory (default trench/realsite/runs/<ts>)")
     ap.add_argument("--summarize", action="store_true",
@@ -416,7 +424,8 @@ def main():
                          "already in --out (a run done in --site chunks)")
     args = ap.parse_args()
 
-    cfg = json.loads(SITES_FILE.read_text())
+    sites_file, trend_name = BOARDS[args.board]
+    cfg = json.loads(sites_file.read_text())
     width, height = cfg["viewport"]["width"], cfg["viewport"]["height"]
     sites = cfg["sites"]
     all_ids = [s["id"] for s in sites]
@@ -447,7 +456,7 @@ def main():
         env["PARITY_CHROME_PATH"] = chrome_path
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        outdir = Path(args.out) if args.out else REPO / "trench" / "realsite" / "runs" / ts
+        outdir = Path(args.out) if args.out else REPO / "trench" / "realsite" / "runs" / (ts + ("-wide" if args.board == "wide" else ""))
         outdir.mkdir(parents=True, exist_ok=True)
 
         rows = []
@@ -464,7 +473,7 @@ def main():
     summary = summarize(rows, ts, width, height, all_ids)
     (outdir / "summary.json").write_text(json.dumps(summary, indent=2))
     if summary["full_run"]:
-        append_trend(summary, outdir.name)
+        append_trend(summary, outdir.name, trend_name)
     if args.summarize:
         for r in rows:
             print(fmt_row(r))
