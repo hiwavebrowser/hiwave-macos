@@ -2414,17 +2414,40 @@ fn spec_height_to_border_box(b: &LayoutBox, h: f32) -> f32 {
 /// row) its items' own content heights, and anything else takes the extent
 /// of its in-flow children, falling back to its flowed height when there
 /// are none to read.
+///
+/// A percentage height counts as `auto` here: an intrinsic size never
+/// resolves a percentage against the indefinite height it is computing
+/// (CSS 2.1 §10.5). Block-level children are measured the same way rather
+/// than read off their boxes, because a laid-out block is as tall as any
+/// percentage-height descendant made it. x.com's `h-full` login widget
+/// inside an auto-height `min-h-[440px]` wrapper lays out at the 800px
+/// viewport, and reading that as content floored x's `flex-1` main row at
+/// 1011, pushing its footer out of the first viewport.
 fn content_border_height(b: &LayoutBox) -> f32 {
     let d = &b.dimensions;
     let pb = d.padding.vertical() + d.border.vertical();
-    if let Length::Px(h) = b.style.height {
-        return spec_height_to_border_box(b, h);
-    }
+    let pct_height = match b.style.height {
+        Length::Px(h) => return spec_height_to_border_box(b, h),
+        Length::Auto => false,
+        Length::Percent(_) => true,
+        // Any other length (vh, em, calc…) is already resolved.
+        _ => return d.content.height + pb,
+    };
+    let min = match b.style.min_height {
+        Length::Px(h) => spec_height_to_border_box(b, h),
+        _ => 0.0,
+    };
     let in_flow = |c: &&LayoutBox| {
         !matches!(
             c.style.position,
             rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
         ) && !matches!(&c.box_type, crate::BoxType::Text(t) if t.trim().is_empty())
+    };
+    let block_level = |c: &LayoutBox| {
+        matches!(
+            c.box_type,
+            crate::BoxType::Block | crate::BoxType::AnonymousBlock
+        )
     };
     let extent = || {
         b.children
@@ -2432,7 +2455,12 @@ fn content_border_height(b: &LayoutBox) -> f32 {
             .filter(in_flow)
             .map(|c| {
                 let m = c.dimensions.margin_box();
-                m.y + m.height - d.content.y
+                let h = if block_level(c) {
+                    c.dimensions.margin.vertical() + content_border_height(c)
+                } else {
+                    m.height
+                };
+                m.y + h - d.content.y
             })
             .fold(0.0f32, f32::max)
     };
@@ -2453,13 +2481,13 @@ fn content_border_height(b: &LayoutBox) -> f32 {
         }
     } else {
         let e = extent();
-        if e > 0.0 {
+        if e > 0.0 || pct_height {
             e
         } else {
             d.content.height
         }
     };
-    content.max(0.0) + pb
+    (content.max(0.0) + pb).max(min)
 }
 
 /// Get the intrinsic main size for replaced elements (form controls, images).

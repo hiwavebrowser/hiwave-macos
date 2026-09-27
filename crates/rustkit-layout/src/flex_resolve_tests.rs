@@ -315,3 +315,34 @@ fn the_shelf_palette_overflows_at_its_content_height() {
         );
     }
 }
+
+/// x.com's shape: a `flex: 1` main row in a definite column, holding an
+/// auto-height `min-height: 50px` wrapper whose child is `height: 100%`,
+/// then a 20px footer. The percentage behaves as `auto` (CSS 2.1 §10.5), so
+/// the row's automatic minimum is its 50px content: it takes the 180 left
+/// by the footer, and the footer sits at 180 inside the 200 column.
+#[test]
+fn a_percentage_height_descendant_does_not_raise_the_automatic_minimum() {
+    for collapse in [false, true] {
+        let mut full_s = ComputedStyle::new();
+        full_s.height = Length::Percent(100.0);
+        let mut full = LayoutBox::new(BoxType::Block, full_s);
+        full.children.push(sized_block(10.0, 30.0));
+        let mut wrap_s = ComputedStyle::new();
+        wrap_s.min_height = Length::Px(50.0);
+        let mut wrap = LayoutBox::new(BoxType::Block, wrap_s);
+        wrap.children.push(full);
+        let mut main = LayoutBox::new(BoxType::Block, zero_pct());
+        main.children.push(wrap);
+        let mut c = LayoutBox::new(BoxType::Block, column(200.0));
+        c.children.push(main);
+        c.children.push(sized_block(100.0, 20.0));
+        let root = laid_out(c, collapse);
+        let main_h = root.children[0].dimensions.content.height;
+        let footer_y = root.children[1].dimensions.content.y - root.dimensions.content.y;
+        assert!(
+            (main_h - 180.0).abs() < 0.5 && (footer_y - 180.0).abs() < 0.5,
+            "main row 180 with the footer at 180; got main {main_h}, footer at {footer_y}"
+        );
+    }
+}
