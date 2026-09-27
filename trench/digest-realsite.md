@@ -711,3 +711,30 @@ Tooling: hub `scratch/basis/run.py <bin>` (flex-basis variants, red-box origin) 
 Tooling (hub `scratch/shelf302/`): `ratchet_local.py <repo> <label>` runs CI's Gates A and B plus the ratchet over `parity_test.py` captures. `gateb.py` scores one case. `cap.py` wraps parity-capture with `--url` and layout dump for headless mode. `ancestry.py` and `laydiff.py` diff and walk layout dumps. `cmp_runs.py` is a rough per-site comparison.
 
 **Decisions for Pete:** none new. The `<img>`-through-ResourceLoader and `cargo fmt` questions are still open. (`flex.rs` isn't rustfmt-clean on develop, so I formatted only my own hunks.)
+
+
+## 2026-09-27 14:05 — §10.5 in-flow percentage height is #304; x 2 → 3; board 19 → 21/60
+
+**Points: 19/60 (`20260927T1510Z-automin2`, 7b3187b = develop 566b8fa's code) → 21/60 (`20260927T1740Z-inflow2`, #304 @ e1ca446).** #302 merged at the start of the session (develop 566b8fa).
+
+| run | head | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|
+| `20260927T1510Z-automin2` | 7b3187b | 19 | 13 | 6 | 0 | 19/51 |
+| `20260927T1645Z-inflow` | b59e5df | 19 | 13 | 5 | 1 | 19/48 |
+| `20260927T1740Z-inflow2` | **e1ca446** | **21** | 13 | 6 | 2 | 21/51 |
+
+- **x 2 → 3 is #304's point.** LOOKS RIGHT 19.9% → 12.6%, and it held on both builds.
+- **google 2 → 3 is drift, not #304.** Google randomly serves a chips row ("I'm feeling lucky"…). An alternating A/B got it on develop in 1 of 3 captures and on #304 in 2 of 3. That's also why the b59e5df run showed google 1.
+- Passing all 3: x, google. RustKit blocked: amazon, ebay, nytimes. chatgpt fails with an HTTP error. Blank: youtube, reddit, microsoft. Oracle blocked: ebay (HTTP 403).
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#304 `atlas/rs-inflow-pct-height` @ e1ca446** (2 commits from develop 566b8fa):
+  - b59e5df: a percentage `height` under **any** in-flow parent with no definite height computes to `auto` (§10.5). #290 did this only under content-sized abspos/fixed boxes.
+  - e1ca446: the layout root is an anonymous stand-in for `<html>` with an auto style. So b59e5df broke `html, body {height:100%}` (chrome_rustkit body 100 → 84, Gate B 0.969 → 0.942). **The first campaign receipt hid this:** diff_pct moved +0.01 and my layout diff script was blind. The local gates caught it. The root now carries html's height for its children only.
+  - Receipt: failing-first tests on both entry points. Campaign 26/26, identical to develop on every case. **Local CI gates byte-identical to develop's.** `wpt_tier1.py` wasn't run: this worktree's `third_party/wpt` isn't synced. The body says so.
+
+**Next:** (1) instagram (16.5%, needs ≤ 15). (2) unitless `flex: 1 1 0` at 267 where Chrome has 275 (`scratch/basis/b-zero.html`). (3) linkedin LOOKS RIGHT 19.3% and wikipedia 20.8%: both have READABLE, so a layout diff may be one fix away. Worth an attribution pass.
+
+Tooling (hub `scratch/inflow/`): `ab_url.py <url> <needle> <n> label=bin…` does an alternating live A/B across builds, to tell served-variant drift from a regression. `campaign_table.py <dev.json> <pr.json>` prints the receipt table. `dltext.py` prints a display list's text ops with positions.
+
+**Decisions for Pete:** none new. The `<img>`-through-ResourceLoader and `cargo fmt` questions are still open.

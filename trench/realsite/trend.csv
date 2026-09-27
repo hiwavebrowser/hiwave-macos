@@ -21,3 +21,5 @@ ts,run,points,max,loads,readable,looks_right,scorable_points,scorable_max,blocke
 20260927T1215Z-basis-full,20260927T1215Z-basis-full,20,60,13,6,1,20,48,amazon|chatgpt|ebay|nytimes,ebay
 20260927T141041Z,20260927T1430Z-automin,19,60,13,5,1,19,51,amazon|ebay|nytimes,
 20260927T145829Z,20260927T1510Z-automin2,19,60,13,6,0,19,51,amazon|ebay|nytimes,nytimes
+20260927T1645Z-inflow,20260927T1645Z-inflow,19,60,13,5,1,19,48,amazon|chatgpt|ebay|nytimes,
+20260927T1740Z-inflow2,20260927T1740Z-inflow2,21,60,13,6,2,21,51,amazon|ebay|nytimes,ebay

@@ -1,0 +1,107 @@
+{
+  "id": "reddit",
+  "url": "https://www.reddit.com/",
+  "chrome": [
+    {
+      "url": "https://www.reddit.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.reddit.com/?solution=157a895e043d9e2b157a895e043d9e2b&js_challenge=1&jsc_token=2824be10929bdc604753c70a67a1c3317f5c05a3c2e3ddcd7441440de61eef57&jsc_orig_r=",
+      "title": "Reddit - The heart of the internet",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T1645Z-inflow/reddit/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260927T1645Z-inflow/reddit/chrome-a.png",
+      "elapsed_ms": 31844
+    },
+    {
+      "url": "https://www.reddit.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.reddit.com/?solution=cd21812fdffc2903cd21812fdffc2903&js_challenge=1&jsc_token=2824be10929bdc604753c70a67a1c33196fdfd634e95d831d325dc47b2120a67&jsc_orig_r=",
+      "title": "Reddit - The heart of the internet",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T1645Z-inflow/reddit/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260927T1645Z-inflow/reddit/chrome-b.png",
+      "elapsed_ms": 28956
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.reddit.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260927T1645Z-inflow/reddit/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260927T1645Z-inflow/reddit/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 1,
+      "threw": 0,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 420,
+      "elapsed_ms": 1
+    },
+    "elapsed_ms": 443,
+    "error": null,
+    "wall_ms": 492,
+    "non_background_fraction": 0.0119
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": false,
+    "why": "blank frame (1.19% non-background)"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 97,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "1",
+      "187",
+      "2026",
+      "206",
+      "375",
+      "405",
+      "477",
+      "490",
+      "5",
+      "534",
+      "6",
+      "7",
+      "758",
+      "782",
+      "855",
+      "accessibility",
+      "acknowledge",
+      "ad",
+      "advertisement",
+      "ago",
+      "agree",
+      "agreement",
+      "ai",
+      "all",
+      "and"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 1.039453125,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

@@ -1,0 +1,93 @@
+{
+  "id": "google",
+  "url": "https://www.google.com/",
+  "chrome": [
+    {
+      "url": "https://www.google.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.google.com/?zx=1790528739561",
+      "title": "Google",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T1720Z-google-fix/google/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260927T1720Z-google-fix/google/chrome-a.png",
+      "elapsed_ms": 24021
+    },
+    {
+      "url": "https://www.google.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.google.com/?zx=1790528764096",
+      "title": "Google",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T1720Z-google-fix/google/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260927T1720Z-google-fix/google/chrome-b.png",
+      "elapsed_ms": 22895
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.google.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260927T1720Z-google-fix/google/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260927T1720Z-google-fix/google/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 7,
+      "threw": 8,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 1458440,
+      "elapsed_ms": 2426
+    },
+    "elapsed_ms": 4164,
+    "error": null,
+    "wall_ms": 4279,
+    "non_background_fraction": 0.1437
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 36,
+    "rustkit_words": 25,
+    "ratio": 0.6944,
+    "missing_sample": [
+      "28",
+      "ask",
+      "brainstorm",
+      "celebrating",
+      "feeling",
+      "files",
+      "i",
+      "lucky",
+      "m",
+      "of",
+      "years"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "diff": 16.82265625
+  },
+  "points": 1
+}
