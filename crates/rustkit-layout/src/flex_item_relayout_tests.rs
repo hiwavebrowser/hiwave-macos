@@ -112,13 +112,8 @@ fn a_centring_item_in_a_row_grown_into_a_min_height_column_centres_in_the_grown_
         row.children.push(right);
         outer.children.push(row);
         let root = laid_out(outer, collapse);
-        // Only y: Chrome's x is 275, RustKit's 262.5, and that is the
-        // separate `flex: 1 1 0%` basis split between `left` and `right`.
-        let y = root.children[0].children[1].children[0].dimensions.content.y;
-        assert!(
-            (y - 475.0).abs() < 0.5,
-            "x-shape: Chrome 148 puts the box at y=475, got {y} (collapse={collapse})"
-        );
+        let b = &root.children[0].children[1].children[0];
+        assert_at(b, (275.0, 475.0), "x-shape");
     }
 }
 

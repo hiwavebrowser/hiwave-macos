@@ -941,6 +941,9 @@ fn layout_flex_container_at(
                     .max(item.min_main_size)
                     .min(item.max_main_size);
                 if (new_hyp - item.hypothetical_main_size).abs() > 0.01 {
+                    // A content-sized basis IS the content size, so the base
+                    // size the flexing step starts from moves with it.
+                    item.flex_basis = laid_out + item.main_pb();
                     item.hypothetical_main_size = new_hyp;
                     item.target_main_size = new_hyp;
                     any_changed = true;
@@ -1384,7 +1387,7 @@ fn create_flex_item<'a>(
     //
     // `min-width: auto` is the DEFAULT for a flex item, and the spec resolves
     // it to the item's content-based minimum (min-content), not to zero.
-    // Flooring at zero let shrink_items() squeeze items arbitrarily narrow,
+    // Flooring at zero let the shrink step squeeze items arbitrarily narrow,
     // including text: layout believed a run was 9.36px wide while paint drew
     // it at its true 18.66px, because the shaper is downstream of this and
     // never saw the squeeze. That mismatch is what put overlapping keyboard
@@ -1578,101 +1581,147 @@ fn collect_flex_lines<'a>(
     lines
 }
 
-/// Resolve flexible lengths (grow/shrink) for a line.
+/// Resolve flexible lengths (grow/shrink) for a line — css-flexbox-1 §9.7.
+///
+/// Free space is measured from each item's FLEX BASE SIZE, not from its
+/// hypothetical (min/max-clamped) main size. The two differ whenever the
+/// automatic minimum (§4.5) lifts an item above its basis, which is exactly
+/// the `flex: 1 1 0%` idiom: two basis-0 items where one holds a 50px box
+/// both hypothetically start at their min-content, and measuring free space
+/// from those split the row 175/225 where Chrome splits it 200/200. The
+/// minimum is honoured by the violation loop instead: an item whose share
+/// falls below it is frozen at it and the rest is redistributed.
 fn resolve_flexible_lengths(line: &mut FlexLine, container_main: f32, main_gap: f32) {
     if line.items.is_empty() {
         return;
     }
 
-    // Calculate used space
     let total_gaps = main_gap * (line.items.len().saturating_sub(1)) as f32;
-    let used_space: f32 = line
+    let margins = |i: &FlexItem| i.main_margin_start + i.main_margin_end;
+    // Border-box base size. A basis can't make the content box negative, so
+    // it never goes below the item's own padding+border.
+    let base = |i: &FlexItem| i.flex_basis.max(i.main_pb());
+
+    // 1. Use the grow factor when the hypothetical sizes leave space over.
+    let hypothetical_sum: f32 = line
         .items
         .iter()
-        .map(|i| i.hypothetical_main_size + i.main_margin_start + i.main_margin_end)
+        .map(|i| i.hypothetical_main_size + margins(i))
         .sum();
-    let free_space = container_main - used_space - total_gaps;
+    let growing = hypothetical_sum + total_gaps < container_main;
+    let factor = |i: &FlexItem| if growing { i.flex_grow } else { i.flex_shrink };
 
-    if free_space.abs() < 0.01 {
-        // No adjustment needed
-        return;
-    }
-
-    // Reset frozen state
+    // 2. Size inflexible items: a zero factor, or a basis already past the
+    // hypothetical size in the direction of flexing, freezes at the
+    // hypothetical size.
     for item in &mut line.items {
-        item.frozen = false;
         item.target_main_size = item.hypothetical_main_size;
+        let b = base(item);
+        item.frozen = factor(item) <= 0.0
+            || (growing && b > item.hypothetical_main_size)
+            || (!growing && b < item.hypothetical_main_size);
     }
 
-    if free_space > 0.0 {
-        // Grow items
-        grow_items(line, free_space);
-    } else {
-        // Shrink items
-        shrink_items(line, -free_space);
-    }
-}
+    let remaining_free_space = |line: &FlexLine| -> f32 {
+        let used: f32 = line
+            .items
+            .iter()
+            .map(|i| {
+                (if i.frozen {
+                    i.target_main_size
+                } else {
+                    base(i)
+                }) + margins(i)
+            })
+            .sum();
+        container_main - used - total_gaps
+    };
 
-/// Grow items to fill free space.
-fn grow_items(line: &mut FlexLine, free_space: f32) {
-    let total_grow: f32 = line
-        .items
-        .iter()
-        .filter(|i| !i.frozen)
-        .map(|i| i.flex_grow)
-        .sum();
+    // 3. Initial free space.
+    let initial_free_space = remaining_free_space(line);
 
-    if total_grow <= 0.0 {
-        return;
-    }
-
-    let space_per_grow = free_space / total_grow;
-
-    for item in &mut line.items {
-        if item.frozen {
-            continue;
+    // 4. Loop. Each pass freezes at least one item, so it ends within
+    // items.len() passes; the bound is a guard against float stalls.
+    for _ in 0..=line.items.len() {
+        if line.items.iter().all(|i| i.frozen) {
+            break;
         }
 
-        let grow = item.flex_grow * space_per_grow;
-        let new_size = item.target_main_size + grow;
+        // b. Remaining free space, scaled down when the unfrozen factors sum
+        // to less than 1.
+        let mut free_space = remaining_free_space(line);
+        let factor_sum: f32 = line
+            .items
+            .iter()
+            .filter(|i| !i.frozen)
+            .map(|i| factor(i))
+            .sum();
+        if factor_sum < 1.0 {
+            let scaled = initial_free_space * factor_sum;
+            if scaled.abs() < free_space.abs() {
+                free_space = scaled;
+            }
+        }
 
-        if new_size > item.max_main_size {
-            item.target_main_size = item.max_main_size;
-            item.frozen = true;
+        // c. Distribute in proportion to the flex factors.
+        if free_space != 0.0 {
+            if growing {
+                for item in line.items.iter_mut().filter(|i| !i.frozen) {
+                    item.target_main_size = base(item) + free_space * item.flex_grow / factor_sum;
+                }
+            } else {
+                // Shrink in proportion to the scaled shrink factor, which
+                // weights by the INNER base size.
+                let scaled = |i: &FlexItem| i.flex_shrink * (base(i) - i.main_pb());
+                let scaled_sum: f32 = line.items.iter().filter(|i| !i.frozen).map(scaled).sum();
+                for item in line.items.iter_mut().filter(|i| !i.frozen) {
+                    item.target_main_size = if scaled_sum > 0.0 {
+                        base(item) - free_space.abs() * scaled(item) / scaled_sum
+                    } else {
+                        base(item)
+                    };
+                }
+            }
         } else {
-            item.target_main_size = new_size;
-        }
-    }
-}
-
-/// Shrink items to remove overflow.
-fn shrink_items(line: &mut FlexLine, overflow: f32) {
-    let total_shrink_scaled: f32 = line
-        .items
-        .iter()
-        .filter(|i| !i.frozen)
-        .map(|i| i.flex_shrink * i.flex_basis)
-        .sum();
-
-    if total_shrink_scaled <= 0.0 {
-        return;
-    }
-
-    for item in &mut line.items {
-        if item.frozen {
-            continue;
+            for item in line.items.iter_mut().filter(|i| !i.frozen) {
+                item.target_main_size = base(item);
+            }
         }
 
-        let shrink_scaled = item.flex_shrink * item.flex_basis;
-        let shrink_ratio = shrink_scaled / total_shrink_scaled;
-        let shrink = overflow * shrink_ratio;
-        let new_size = (item.target_main_size - shrink).max(item.min_main_size);
+        // d. Clamp to min/max (min wins) and total the violations.
+        let mut total_violation = 0.0f32;
+        let mut clamp = vec![0i8; line.items.len()];
+        for (k, item) in line.items.iter_mut().enumerate() {
+            if item.frozen {
+                continue;
+            }
+            let unclamped = item.target_main_size;
+            let clamped = unclamped
+                .min(item.max_main_size)
+                .max(item.min_main_size)
+                .max(0.0);
+            if clamped > unclamped {
+                clamp[k] = 1;
+            } else if clamped < unclamped {
+                clamp[k] = -1;
+            }
+            item.target_main_size = clamped;
+            total_violation += clamped - unclamped;
+        }
 
-        if new_size <= item.min_main_size {
-            item.target_main_size = item.min_main_size;
-            item.frozen = true;
-        } else {
-            item.target_main_size = new_size;
+        // e. Freeze: all when there's no net violation, else the min (positive)
+        // or max (negative) violators.
+        for (k, item) in line.items.iter_mut().enumerate() {
+            if item.frozen {
+                continue;
+            }
+            item.frozen = if total_violation.abs() < 0.01 {
+                true
+            } else if total_violation > 0.0 {
+                clamp[k] > 0
+            } else {
+                clamp[k] < 0
+            };
         }
     }
 }
