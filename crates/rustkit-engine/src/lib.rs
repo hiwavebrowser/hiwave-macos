@@ -3347,21 +3347,49 @@ impl Engine {
                             .get(name)
                             .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
                     };
+                    let key = Self::inline_svg_key(&Self::serialize_svg_subtree(node));
+                    let cached = self.svg_cache.get(&key);
+                    // A viewBox gives the SVG a ratio but no natural size.
+                    // Such a replaced element is not 300×150: with both
+                    // axes auto it takes the containing block's width
+                    // (CSS 2.1 §10.3.2), and a missing axis follows the
+                    // other across the ratio (§10.6.2). google's apps
+                    // button (`<svg viewbox="0 0 24 24">`, no size, in a
+                    // 24px box) painted its nine dots across 150px.
+                    let ratio = cached
+                        .and_then(|svg| svg.view_box)
+                        .filter(|vb| vb.width > 0.0 && vb.height > 0.0);
+                    let (width_attr, height_attr) = (attr_px("width"), attr_px("height"));
+                    let height_is_auto =
+                        matches!(style.height, rustkit_css::Length::Auto) && height_attr.is_none();
                     if matches!(style.width, rustkit_css::Length::Auto) {
-                        style.width = rustkit_css::Length::Px(attr_px("width").unwrap_or(300.0));
+                        style.width = match (width_attr, ratio) {
+                            (Some(w), _) => rustkit_css::Length::Px(w),
+                            (None, Some(_)) if height_is_auto => rustkit_css::Length::Percent(100.0),
+                            (None, Some(_)) => rustkit_css::Length::Auto,
+                            (None, None) => rustkit_css::Length::Px(300.0),
+                        };
                     }
                     if matches!(style.height, rustkit_css::Length::Auto) {
-                        style.height = rustkit_css::Length::Px(attr_px("height").unwrap_or(150.0));
+                        style.height = match (height_attr, ratio) {
+                            (Some(h), _) => rustkit_css::Length::Px(h),
+                            (None, Some(_)) => rustkit_css::Length::Auto,
+                            (None, None) => rustkit_css::Length::Px(150.0),
+                        };
                     }
                     if style.display == rustkit_css::Display::Inline {
                         style.display = rustkit_css::Display::InlineBlock;
                     }
-                    let key = Self::inline_svg_key(&Self::serialize_svg_subtree(node));
-                    if let Some(svg) = self.svg_cache.get(&key) {
-                        let (natural_width, natural_height) = svg.get_size(
-                            attr_px("width").unwrap_or(300.0),
-                            attr_px("height").unwrap_or(150.0),
-                        );
+                    if let Some(svg) = cached {
+                        // With a ratio, the natural size IS the ratio: an
+                        // auto axis is derived from it in layout_image.
+                        let (natural_width, natural_height) = match ratio {
+                            Some(vb) => (vb.width, vb.height),
+                            None => svg.get_size(
+                                width_attr.unwrap_or(300.0),
+                                height_attr.unwrap_or(150.0),
+                            ),
+                        };
                         let mut svg_box = LayoutBox::new(
                             BoxType::Image {
                                 url: key,
@@ -18658,6 +18686,47 @@ mod windows_a_leg_pins {
         };
         root.layout(&cb);
         root
+    }
+
+    /// An inline `<svg>` with a viewBox but no width=/height= has a ratio and
+    /// no natural size: it fills its containing block's width, and an auto
+    /// axis follows the other across the ratio. Only an svg with neither is
+    /// 300×150. Every size is Chrome 148's for the same markup. google's apps
+    /// button (`viewbox`, lowercase, in a 40px border-box with 8px padding)
+    /// was 150×150.
+    #[test]
+    fn an_inline_svg_with_only_a_viewbox_is_sized_by_its_ratio() {
+        let mut e = engine();
+        let html = r#"<!DOCTYPE html><html><body style="margin:0">
+            <style>.btn{display:inline-block;box-sizing:border-box;width:40px;height:40px;padding:8px}</style>
+            <div style="width:24px"><svg viewBox="0 0 24 24"><rect width="24" height="24"/></svg></div>
+            <div style="width:100px"><svg viewBox="0 0 48 24"><rect width="48" height="24"/></svg></div>
+            <div><svg width="96" viewBox="0 0 48 24"><rect width="48" height="24"/></svg></div>
+            <div><svg style="height:12px" viewBox="0 0 48 24"><rect width="48" height="24"/></svg></div>
+            <div><svg><rect width="10" height="10"/></svg></div>
+            <div><a class="btn"><svg viewbox="0 0 24 24"><rect width="24" height="24"/></svg></a></div>
+            </body></html>"#;
+        let d = Document::parse_html(html).expect("parse");
+        e.cache_inline_svgs(&d);
+        let mut root = e.build_layout_from_document(&d, &[]);
+        root.layout(&Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        });
+        fn sizes(b: &LayoutBox, out: &mut Vec<(f32, f32)>) {
+            if matches!(b.box_type, BoxType::Image { .. }) {
+                out.push((b.dimensions.content.width, b.dimensions.content.height));
+            }
+            for c in &b.children {
+                sizes(c, out);
+            }
+        }
+        let mut got = Vec::new();
+        sizes(&root, &mut got);
+        assert_eq!(
+            got,
+            vec![(24.0, 24.0), (100.0, 50.0), (96.0, 48.0), (24.0, 12.0), (300.0, 150.0), (24.0, 24.0)]
+        );
     }
 
     fn first_text_box_height(e: &Engine, html: &str) -> f32 {
