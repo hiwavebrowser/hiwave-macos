@@ -123,3 +123,8 @@ Whichever comes first:
     for its first half, and 6/38 Chrome captures hit screenshot timeouts (x
     twice, github, yahoo, amazon, chatgpt), against 1/38 headless. That's
     contention, not the headed mode; the next headed runs will say.
+  - Settled the same night: a clean headed run with nothing else on the
+    machine, `20260927T0255Z-headed-dev` (develop 2ab8032), had 1/40 Chrome
+    captures fail (weather), so the timeouts were contention. It scored
+    **20/60**, scorable 20/48. x now scores against the real page (LOOKS
+    RIGHT 13.4%, 1 → 2).

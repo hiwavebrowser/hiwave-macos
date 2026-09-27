@@ -14,3 +14,4 @@ ts,run,points,max,loads,readable,looks_right,scorable_points,scorable_max,blocke
 20260926T2230Z-fix,20260926T2230Z-fix,19,60,13,5,1,18,42,amazon|chatgpt|ebay|nytimes,chatgpt|ebay|nytimes|reddit|x
 20260927T012521Z,20260927T0120Z-headed,18,60,13,4,1,18,48,amazon|chatgpt|ebay|nytimes,
 20260927T015841Z,20260927T0200Z-headless,19,60,13,4,2,18,45,chatgpt|ebay|nytimes,chatgpt|ebay|nytimes|reddit|x
+20260927T025502Z,20260927T0255Z-headed-dev,20,60,13,4,3,20,48,amazon|chatgpt|ebay|nytimes,nytimes
