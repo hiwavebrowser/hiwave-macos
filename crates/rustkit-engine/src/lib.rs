@@ -19,6 +19,22 @@ use rustkit_bindings::DomBindings;
 // Re-export IpcMessage for external use
 pub use rustkit_bindings::IpcMessage;
 use rustkit_compositor::Compositor;
+
+/// Test-only: create a `Compositor` with GPU device creation serialised across
+/// this crate's unit tests.
+///
+/// `Compositor::new` builds a wgpu instance, requests an adapter and a device.
+/// Run from many test threads at once on a machine with a real GPU (seen on
+/// Windows/DX12 with an RTX 4090), those calls can stall the whole process:
+/// the parallel test binary stops making progress with no slow-test warnings,
+/// while `--test-threads=1` always passes. Tests only; `Engine::new` and every
+/// test that builds an engine by hand go through this.
+#[cfg(test)]
+pub(crate) fn test_compositor() -> Result<Compositor, rustkit_compositor::CompositorError> {
+    static GPU_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _gpu_init = GPU_INIT.lock().unwrap_or_else(|e| e.into_inner());
+    Compositor::new()
+}
 use rustkit_core::{LoadEvent, NavigationRequest, NavigationStateMachine};
 use rustkit_css::{css_ident, parse_display, ComputedStyle, Rule, Stylesheet};
 use rustkit_dom::{Document, Node, NodeType};
@@ -846,8 +862,13 @@ impl Engine {
         // Initialize ViewHost
         let viewhost = ViewHost::new();
 
-        // Initialize Compositor
-        let compositor = Compositor::new().map_err(|e| EngineError::RenderError(e.to_string()))?;
+        // Initialize Compositor (unit tests serialise device creation; see
+        // `test_compositor`)
+        #[cfg(test)]
+        let compositor = test_compositor();
+        #[cfg(not(test))]
+        let compositor = Compositor::new();
+        let compositor = compositor.map_err(|e| EngineError::RenderError(e.to_string()))?;
 
         // Initialize ResourceLoader
         let loader_config = LoaderConfig {
@@ -12213,7 +12234,7 @@ mod tests {
     /// that as a pass on a platform where an adapter is guaranteed — see
     /// `a_replaced_element_is_built_with_its_element_identity`.
     fn layout_only_engine() -> Option<Engine> {
-        let compositor = Compositor::new().ok()?;
+        let compositor = crate::test_compositor().ok()?;
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Some(Engine {
             config: EngineConfig::default(),
@@ -12368,7 +12389,7 @@ mod tests {
         assert!(document.body().is_some(), "Document should have a body");
 
         // Create a dummy engine - skip test if GPU is not available
-        let compositor = match Compositor::new() {
+        let compositor = match crate::test_compositor() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Skipping test: GPU not available ({:?})", e);
@@ -12443,7 +12464,7 @@ mod tests {
         let document = Document::parse_html(html).expect("Failed to parse HTML");
         let document = Rc::new(document);
 
-        let compositor = match Compositor::new() {
+        let compositor = match crate::test_compositor() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Skipping test: GPU not available ({:?})", e);
@@ -12534,7 +12555,7 @@ mod tests {
             </html>"#;
         let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
 
-        let compositor = match Compositor::new() {
+        let compositor = match crate::test_compositor() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Skipping test: GPU not available ({:?})", e);
@@ -12719,7 +12740,7 @@ mod tests {
         let document = Document::parse_html(html).expect("Failed to parse HTML");
         let document = Rc::new(document);
 
-        let compositor = match Compositor::new() {
+        let compositor = match crate::test_compositor() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Skipping test: GPU not available ({:?})", e);
@@ -12815,7 +12836,7 @@ mod tests {
         let document = Rc::new(document);
 
         // Skip test if GPU is not available
-        let compositor = match Compositor::new() {
+        let compositor = match crate::test_compositor() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Skipping test: GPU not available ({:?})", e);
@@ -12932,7 +12953,7 @@ mod tests {
         let document = Document::parse_html(html).expect("Failed to parse HTML");
         let document = Rc::new(document);
 
-        let compositor = match Compositor::new() {
+        let compositor = match crate::test_compositor() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Skipping test: GPU not available ({:?})", e);
@@ -13012,7 +13033,7 @@ mod tests {
         let document = Document::parse_html(html).expect("Failed to parse HTML");
         let document = Rc::new(document);
 
-        let compositor = match Compositor::new() {
+        let compositor = match crate::test_compositor() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Skipping test: GPU not available ({:?})", e);
@@ -13086,7 +13107,7 @@ mod tests {
             </body></html>"#;
         let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
 
-        let compositor = match Compositor::new() {
+        let compositor = match crate::test_compositor() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Skipping test: GPU not available ({:?})", e);
@@ -13174,7 +13195,7 @@ mod tests {
             </body></html>"#;
         let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
 
-        let compositor = match Compositor::new() {
+        let compositor = match crate::test_compositor() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Skipping test: GPU not available ({:?})", e);
@@ -13286,7 +13307,7 @@ mod tests {
                 </body></html>"#
             );
             let document = Rc::new(Document::parse_html(&html).expect("Failed to parse HTML"));
-            let compositor = Compositor::new().expect("compositor");
+            let compositor = crate::test_compositor().expect("compositor");
             let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
             let engine = Engine {
                 config: EngineConfig::default(),
@@ -13325,7 +13346,7 @@ mod tests {
             h
         };
 
-        if Compositor::new().is_err() {
+        if crate::test_compositor().is_err() {
             eprintln!("Skipping test: GPU not available");
             return;
         }
@@ -13386,7 +13407,7 @@ mod tests {
             </body></html>"#;
         let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
 
-        let compositor = match Compositor::new() {
+        let compositor = match crate::test_compositor() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Skipping test: GPU not available ({:?})", e);
@@ -13469,7 +13490,7 @@ mod tests {
             </body></html>"#;
         let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
 
-        let compositor = match Compositor::new() {
+        let compositor = match crate::test_compositor() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Skipping test: GPU not available ({:?})", e);
@@ -13555,7 +13576,7 @@ mod tests {
             </body></html>"#;
         let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
 
-        let compositor = match Compositor::new() {
+        let compositor = match crate::test_compositor() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Skipping test: GPU not available ({:?})", e);
@@ -13641,7 +13662,7 @@ mod tests {
             </body></html>"#;
         let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
 
-        let compositor = match Compositor::new() {
+        let compositor = match crate::test_compositor() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Skipping test: GPU not available ({:?})", e);
@@ -13719,7 +13740,7 @@ mod tests {
             </body></html>"##;
         let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
 
-        let compositor = match Compositor::new() {
+        let compositor = match crate::test_compositor() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Skipping test: GPU not available ({:?})", e);
@@ -13800,7 +13821,7 @@ mod tests {
             </html>"#;
         let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
 
-        let compositor = match Compositor::new() {
+        let compositor = match crate::test_compositor() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Skipping test: GPU not available ({:?})", e);
@@ -14282,7 +14303,7 @@ mod tests {
     #[test]
     fn test_selector_specificity() {
         // Create a minimal engine for testing
-        let compositor = match Compositor::new() {
+        let compositor = match crate::test_compositor() {
             Ok(c) => c,
             Err(_) => {
                 eprintln!("Skipping test: GPU not available");
@@ -15379,7 +15400,7 @@ mod web_font_tests {
 
     fn test_engine() -> Option<LockedEngine> {
         let guard = WEB_FONT_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let compositor = match Compositor::new() {
+        let compositor = match crate::test_compositor() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Skipping test: GPU not available ({:?})", e);
@@ -17851,6 +17872,15 @@ mod page_script_tests {
     }
 
     fn load(config: EngineConfig, port: u16) -> (Engine, EngineViewId) {
+        let (engine, view, _) = load_timed(config, port);
+        (engine, view)
+    }
+
+    /// Like `load`, plus how long the navigation itself took. Engine and view
+    /// construction are outside the timed span: under parallel tests they wait
+    /// on `crate::test_compositor`'s GPU-init lock, and that wait is not page
+    /// load time.
+    fn load_timed(config: EngineConfig, port: u16) -> (Engine, EngineViewId, std::time::Duration) {
         let mut engine = Engine::new(config).expect("engine");
         let view = engine
             .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
@@ -17860,8 +17890,10 @@ mod page_script_tests {
             .enable_all()
             .build()
             .unwrap();
+        let started = std::time::Instant::now();
         rt.block_on(engine.load_url(view, url)).expect("load_url");
-        (engine, view)
+        let took = started.elapsed();
+        (engine, view, took)
     }
 
     #[test]
@@ -17934,12 +17966,10 @@ window.addEventListener('load', function () {
             script_budget_ms: 500,
             ..EngineConfig::default()
         };
-        let started = std::time::Instant::now();
-        let (mut engine, view) = load(config, port);
+        let (mut engine, view, took) = load_timed(config, port);
         assert!(
-            started.elapsed() < std::time::Duration::from_millis(2_500),
-            "waited for the slow script: {:?}",
-            started.elapsed()
+            took < std::time::Duration::from_millis(2_500),
+            "waited for the slow script: {took:?}"
         );
         let log = engine.script_log(view).unwrap();
         assert_eq!(log[0].outcome, ScriptOutcome::OverBudget, "{log:#?}");
@@ -17962,12 +17992,10 @@ window.addEventListener('load', function () {
             ("/slow.css", "text/css", "body { color: red }".into()),
             ("/slow.js", "text/javascript", "var slow = true;".into()),
         ]);
-        let started = std::time::Instant::now();
-        let (mut engine, view) = load(EngineConfig::default(), port);
+        let (mut engine, view, took) = load_timed(EngineConfig::default(), port);
         assert!(
-            started.elapsed() < std::time::Duration::from_millis(5_000),
-            "script fetch waited for the stylesheet: {:?}",
-            started.elapsed()
+            took < std::time::Duration::from_millis(5_000),
+            "script fetch waited for the stylesheet: {took:?}"
         );
         let log = engine.script_log(view).unwrap();
         assert_eq!(log[0].outcome, ScriptOutcome::Ran, "{log:#?}");
@@ -17991,12 +18019,10 @@ window.addEventListener('load', function () {
             subresource_budget_ms: 500,
             ..EngineConfig::default()
         };
-        let started = std::time::Instant::now();
-        let (engine, view) = load(config, port);
+        let (engine, view, took) = load_timed(config, port);
         assert!(
-            started.elapsed() < std::time::Duration::from_millis(2_500),
-            "waited for the stalled subresources: {:?}",
-            started.elapsed()
+            took < std::time::Duration::from_millis(2_500),
+            "waited for the stalled subresources: {took:?}"
         );
         // The sheet that did arrive still applies.
         assert_eq!(engine.views[&view].external_stylesheets.len(), 1);
@@ -18034,9 +18060,8 @@ window.addEventListener('load', function () {
             script_loop_iteration_limit: 100_000,
             ..EngineConfig::default()
         };
-        let started = std::time::Instant::now();
-        let (mut engine, view) = load(config, port);
-        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        let (mut engine, view, took) = load_timed(config, port);
+        assert!(took < std::time::Duration::from_secs(20), "{took:?}");
 
         // The next script still ran, and the listener's error was recorded.
         assert_eq!(engine.execute_script(view, "after").unwrap(), "Boolean(true)");
