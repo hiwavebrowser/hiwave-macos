@@ -13258,6 +13258,39 @@ mod tests {
         }
     }
 
+    /// Opposing insets make an auto-height out-of-flow box definite. Its
+    /// percentage-height child must therefore fill the stretched box rather
+    /// than take the content-sized-parent exception above.
+    #[test]
+    fn an_inset_stretched_out_of_flow_box_keeps_percentage_children_definite() {
+        let containing_block = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 800.0),
+            ..Default::default()
+        };
+        for position in [Position::Fixed, Position::Absolute] {
+            let mut child_style = ComputedStyle::new();
+            child_style.height = Length::Percent(100.0);
+
+            let mut overlay_style = ComputedStyle::new();
+            overlay_style.height = Length::Auto;
+            overlay_style.top = Some(Length::Px(0.0));
+            overlay_style.bottom = Some(Length::Px(0.0));
+            let mut overlay = LayoutBox::new(BoxType::Block, overlay_style);
+            overlay.position = position;
+            overlay.set_offsets(Some(0.0), None, Some(0.0), None);
+            overlay
+                .children
+                .push(LayoutBox::new(BoxType::Block, child_style));
+
+            overlay.mark_percent_height_bases(None, &containing_block);
+
+            assert!(
+                !overlay.children[0].percent_height_is_auto,
+                "{position:?}: opposing insets make the parent's height definite"
+            );
+        }
+    }
+
     /// x.com's login column: `div.min-h-[440px]` (height auto) holds a
     /// `div.h-full` with 40px of content. The parent's height depends on its
     /// content (min-height clamps afterwards and does not make it definite),

@@ -65,15 +65,23 @@ It also doesn't start from zero:
 The work is to measure these, extend them (pop-ups, per-site cache and storage
 partitioning, the referrer policy) and give the user clear controls.
 
-## Finish line (proposed, to be ratified)
+## Finish line (ratified 2026-09-27)
 
 - RustKit is the default renderer on macOS and Windows, with no borrowed
   webview underneath. Linux follows.
-- The real-site board reaches **40 of the scorable points** (scorable
-  excludes sites that block the reference Chrome itself). The wide board is at
-  **75%**. Both are measured against the pinned Chrome.
-- Privacy by default: trackers and pop-ups blocked at least as well as Brave's
-  lists allow, and the cache and storage partitioned per site.
+- **Parity:** the real-site board reaches **40 of the scorable points**, and
+  the wide board reaches **75%**. Scorable excludes sites that block the
+  reference Chrome itself.
+- **JavaScript completeness:** custom elements and Shadow DOM work, and
+  JS-rendered board sites (React and similar) render their real content.
+- **Speed:** the style cascade runs within **2–3× of Chrome** on the board
+  sites. It was 14–69× at the 2026-09-26 ground truth.
+- **Privacy is a ship gate:** trackers and pop-ups are blocked at least as
+  well as Brave's lists allow, and the cache and storage are partitioned per
+  site.
+- **Frozen measurement:** the pinned test pages and pinned Chrome for Testing
+  148 define "done". Changing either needs a dated note and Pete's approval,
+  so noise in the numbers can't move the finish line.
 
 Progress is reported weekly. Every number carries its receipt: the command,
 the commit and the run.
