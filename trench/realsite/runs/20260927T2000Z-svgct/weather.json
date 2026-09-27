@@ -1,0 +1,101 @@
+{
+  "id": "weather",
+  "url": "https://weather.com/",
+  "chrome": [
+    {
+      "url": "https://weather.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://weather.com/",
+      "title": "National and Local Weather Radar, Daily Forecast, Hurricane and information from The Weather Channel and weather.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T2000Z-svgct/weather/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260927T2000Z-svgct/weather/chrome-a.png",
+      "elapsed_ms": 67093
+    },
+    {
+      "url": "https://weather.com/",
+      "status": "error",
+      "error": "page.screenshot: Timeout 30000ms exceeded.",
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "oracle_headless": false,
+      "http_status": 200,
+      "elapsed_ms": 77663
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://weather.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260927T2000Z-svgct/weather/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260927T2000Z-svgct/weather/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 137,
+      "threw": 2,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 3118339,
+      "elapsed_ms": 2065
+    },
+    "elapsed_ms": 7114,
+    "error": null,
+    "wall_ms": 7260,
+    "non_background_fraction": 0.1697
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 33,
+    "rustkit_words": 8,
+    "ratio": 0.2121,
+    "missing_sample": [
+      "10",
+      "advertisement",
+      "air",
+      "allergies",
+      "away",
+      "cold",
+      "day",
+      "east",
+      "easter",
+      "flights",
+      "flu",
+      "from",
+      "grounds",
+      "hawaii",
+      "hourly",
+      "hurricane",
+      "monthly",
+      "moves",
+      "nashua",
+      "news",
+      "nolo",
+      "nor",
+      "now",
+      "quality",
+      "read"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "diff": 47.65224609375
+  },
+  "points": 1
+}

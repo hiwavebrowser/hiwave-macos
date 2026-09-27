@@ -738,3 +738,37 @@ Tooling (hub `scratch/shelf302/`): `ratchet_local.py <repo> <label>` runs CI's G
 Tooling (hub `scratch/inflow/`): `ab_url.py <url> <needle> <n> label=bin…` does an alternating live A/B across builds, to tell served-variant drift from a regression. `campaign_table.py <dev.json> <pr.json>` prints the receipt table. `dltext.py` prints a display list's text ops with positions.
 
 **Decisions for Pete:** none new. The `<img>`-through-ResourceLoader and `cargo fmt` questions are still open.
+
+
+## 2026-09-27 16:30 — extensionless SVG images plus inline-style SVG paint is #307; linkedin 2 → 3; board 21/60
+
+**Points: 19/60 (last develop-code run `20260927T1510Z-automin2`) → 21/60 (`20260927T2000Z-svgct`, #307 @ a8e9841 on develop 9f37124, without #304).** #304 merged this session (develop at 20:03Z), so develop now has x's point too. Develop + #304 + #307 should read about 22; that's not measured yet.
+
+| run | head | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|
+| `20260927T1510Z-automin2` | 7b3187b (develop code) | 19 | 13 | 6 | 0 | 19/51 |
+| `20260927T1740Z-inflow2` | #304 e1ca446 | 21 | 13 | 6 | 2 | 21/51 |
+| `20260927T2000Z-svgct` | **#307 a8e9841** | **21** | 13 | 6 | 2 | 21/51 |
+
+- **linkedin 2 → 3 is #307's point.** LOOKS RIGHT 19.0% → 10.5%, Chrome-vs-Chrome 1.7%. An extra single-site run hit the headline A/B variant (Chrome-vs-Chrome 23.7%, `unstable`) and still read 12.2%.
+- **facebook 1 → 2 is drift.** #307 reroutes no image on facebook (0 in its log), and its LOOKS RIGHT swings 5.8–18% run to run.
+- x reads 2 on this run only because #307 is branched without #304.
+- Passing all 3: linkedin. RustKit blocked: amazon, ebay, nytimes. chatgpt fails with an HTTP error. Blank: youtube, reddit, microsoft. Oracle blocked: ebay (HTTP 403).
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#307 `atlas/rs-svg-image-sniff` @ a8e9841** (2 commits from develop 9f37124):
+  - 0ccf512: an `<img>` served as `image/svg+xml` from an extensionless URL goes to the SVG lane. `ImageError::Svg(body)` comes out of `ImageManager`, and the raster lane parses it into `svg_cache`. Routing is by type, never byte-sniffing, matching Chrome: SVG sent as octet-stream stays broken. This closes the "content-type routing" follow-up that `load_images` named.
+  - a8e9841: rustkit-svg reads paint from `style="fill: …"` (the style attribute beats presentation attributes). Without it, the hero loaded as a black silhouette, and linkedin went *down* to 29.8%.
+  - Receipt: failing-first tests (engine headless, svg, image), each confirmed failing with the fix disabled. Campaign 26/26, **identical to develop on every case**. Local CI gates byte-identical to develop's. `wpt_tier1.py` not run (corpus not synced here); the body says so.
+
+**Found, not fixed:**
+- rustkit-svg parses `fill-rule` into `SvgStyle`, but the renderer never uses it. linkedin's chair outline (evenodd) fills solid. The flat SVG parser also doesn't nest `<g>`.
+- microsoft now loads 12 extensionless SVGs through the new lane and is still blank. Its blank page is the un-upgraded custom-element header, unchanged.
+- **wikipedia (21.4%, READABLE passes)** is one layout feature away: Vector 2022's page grid (`grid-template-areas`: TOC | article | Appearance). RustKit stacks it as one full-width column, and nearly all of the diff is that. It's the cheapest remaining LOOKS RIGHT, but it's grid work, which PLAN parks behind JS.
+- instagram (15.7%) isn't a real near-miss: RustKit paints only the logo (a React app, no JS), and the diff is white against mostly white. I didn't chase it.
+
+**Next:** (1) measure develop (#304 + #307 once merged); (2) decide wikipedia's grid-template-areas against the JS-first rule (see decisions); (3) SVG evenodd fill rule (cheap, quality only); (4) unitless `flex: 1 1 0` at 267 vs Chrome 275.
+
+**Decisions for Pete:**
+1. **Grid before JS for one site?** wikipedia's point looks like it needs `grid-template-areas` (named areas on the page container). PLAN says JS before grid. Say yes to a narrowly scoped named-areas PR, or keep the order.
+2. Still open: `<img>` through the ResourceLoader (the raster lane has no Referer and no shield; #307 keeps it that way), and `cargo fmt` on develop.

@@ -1,0 +1,109 @@
+{
+  "id": "bing",
+  "url": "https://www.bing.com/",
+  "chrome": [
+    {
+      "url": "https://www.bing.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.bing.com/",
+      "title": "Search - Microsoft Bing",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T2000Z-svgct/bing/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260927T2000Z-svgct/bing/chrome-a.png",
+      "elapsed_ms": 23491
+    },
+    {
+      "url": "https://www.bing.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.bing.com/",
+      "title": "Search - Microsoft Bing",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T2000Z-svgct/bing/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260927T2000Z-svgct/bing/chrome-b.png",
+      "elapsed_ms": 32284
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.bing.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260927T2000Z-svgct/bing/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260927T2000Z-svgct/bing/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 9,
+      "threw": 2,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 118096,
+      "elapsed_ms": 234
+    },
+    "elapsed_ms": 3149,
+    "error": null,
+    "wall_ms": 3175,
+    "non_background_fraction": 0.3778
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 92,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "1b",
+      "2026",
+      "5",
+      "7b",
+      "about",
+      "accuser",
+      "ads",
+      "advertise",
+      "and",
+      "appearance",
+      "apple",
+      "approves",
+      "arrested",
+      "bar",
+      "base",
+      "bing",
+      "choices",
+      "claims",
+      "collections",
+      "consumer",
+      "cookies",
+      "copilot",
+      "country",
+      "creator",
+      "customize"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 29.213476562500002,
+    "diff": 81.59580078125,
+    "unstable": true,
+    "why": "chrome-vs-chrome 29.2% > 15% (unstable, 0 points)"
+  },
+  "points": 1
+}
