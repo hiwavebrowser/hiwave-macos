@@ -11595,6 +11595,112 @@ mod tests {
         assert_eq!(crate::grid::own_max_content_width(&parent), 0.0);
     }
 
+    // ---- a form control's intrinsic contribution (n67) -------------------
+    //
+    // `settings`' footer is `display: flex; justify-content: space-between`
+    // with a `.btn-group { display: flex; gap: 8px }` as its second item, so
+    // the group's width IS its max-content contribution. Its two buttons
+    // carried none of their labels into that figure: the group measured 68
+    // (34 + 34, the author padding+border of each) against Chrome's 194.70,
+    // and flex-shrink then squeezed the buttons themselves to 38.57 and 34.00
+    // against 117.92 and 68.78.
+
+    fn n67_button(label: &str) -> LayoutBox {
+        // Mirrors `settings`' `.btn`: 0.6rem 1rem padding and a 1px border, so
+        // the author padding+border (34px) is large enough that a contribution
+        // built from it ALONE still looks like a plausible width. A bare
+        // control would not tell the two apart.
+        let mut s = ComputedStyle::new();
+        s.box_sizing = BoxSizing::BorderBox;
+        s.font_size = Length::Px(13.6);
+        s.padding_left = Length::Px(16.0);
+        s.padding_right = Length::Px(16.0);
+        s.border_left_width = Length::Px(1.0);
+        s.border_right_width = Length::Px(1.0);
+        LayoutBox::new(
+            BoxType::FormControl(FormControlType::Button {
+                label: label.to_string(),
+                button_type: "button".to_string(),
+            }),
+            s,
+        )
+    }
+
+    #[test]
+    fn a_form_controls_max_content_contribution_carries_its_label() {
+        let b = n67_button("Save Settings");
+        let intrinsic = match &b.box_type {
+            BoxType::FormControl(c) => crate::form_control_intrinsic_size(&b.style, c).0,
+            _ => unreachable!(),
+        };
+        let padding_border = crate::grid::horizontal_padding_border(&b.style);
+        // The label is what the generic child walk could not see, so assert on
+        // it directly: a contribution equal to the padding box alone is the
+        // defect, and one equal to padding box PLUS the intrinsic is the
+        // double-count (the intrinsic is already a border-box figure).
+        assert!(
+            intrinsic > padding_border + 1.0,
+            "fixture: the label must be worth measuring ({intrinsic} vs {padding_border})"
+        );
+        let got = crate::grid::own_max_content_width(&b);
+        assert!(
+            (got - intrinsic).abs() < 0.01,
+            "a button contributes its intrinsic border-box width {intrinsic}, got {got} \
+             (padding+border alone is {padding_border}, \
+             padding+border plus the intrinsic is {})",
+            padding_border + intrinsic
+        );
+    }
+
+    #[test]
+    fn an_explicit_pixel_width_wins_over_a_form_controls_label() {
+        // The label must not override a specified width — the arm sits BELOW
+        // the `width: Px` check, and moving it above would silently re-size
+        // every explicitly sized control from its text.
+        let mut b = n67_button("Save Settings");
+        b.style.width = Length::Px(40.0);
+        let got = crate::grid::own_max_content_width(&b);
+        assert!(
+            (got - 40.0).abs() < 0.01,
+            "a specified border-box width is the contribution, got {got}"
+        );
+    }
+
+    #[test]
+    fn a_flex_container_of_buttons_measures_the_buttons_and_the_gap() {
+        // The settings-footer shape: the contribution of the GROUP is what
+        // sizes it, so this is the figure the case actually failed on.
+        let (save, close) = (n67_button("Save Settings"), n67_button("Close"));
+        let each: Vec<f32> = [&save, &close]
+            .iter()
+            .map(|b| match &b.box_type {
+                BoxType::FormControl(c) => crate::form_control_intrinsic_size(&b.style, c).0,
+                _ => unreachable!(),
+            })
+            .collect();
+        let mut group = ComputedStyle::new();
+        group.display = rustkit_css::Display::Flex;
+        group.column_gap = Length::Px(8.0);
+        let mut g = LayoutBox::new(BoxType::Block, group);
+        g.children.push(save);
+        g.children.push(close);
+        let want = each[0] + each[1] + 8.0;
+        let got = crate::grid::own_max_content_width(&g);
+        assert!(
+            (got - want).abs() < 0.01,
+            "a row flex container sums its items ({:?}) plus one gap = {want}, got {got}",
+            each
+        );
+        // Named as its own claim: the two labels are the whole difference
+        // between the right answer and the defect, so a contribution that
+        // dropped them is not merely small, it is this exact number.
+        let padding_only = 2.0 * crate::grid::horizontal_padding_border(&g.children[0].style) + 8.0;
+        assert!(
+            got > padding_only + 1.0,
+            "the labels must be inside the sum ({got} vs the padding-only {padding_only})"
+        );
+    }
+
     #[test]
     fn shrink_to_fit_never_returns_a_negative_width() {
         // `own_*_content_width` has early returns that answer WITHOUT adding
