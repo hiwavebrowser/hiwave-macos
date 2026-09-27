@@ -50,40 +50,39 @@ with pixel-level parity capture against Chrome.
 
 | | |
 |---|---|
-| Build | **passing** (`cargo build --workspace`, 0 errors) |
-| Tests | **985 passing**, 0 failing, 5 ignored (76/76 test binaries reported — crashed suites can't hide in these sums) |
-| Rust source | ~96,400 lines across 38 crates |
-| Visual parity vs Chrome | **93.4% average over 26 cases, 26 passing** (avg diff 6.65%) — measured 2026-07-31 on `2fe1dee` |
-| WPT Tier-1 conformance | **6 / 12 scored** (6 pass, 6 fail, 2 blank-frame errors, n=14) — see `trench/wpt/last-run.json` |
+| Build | **passing**. CI compiles every workspace test (`cargo test --workspace --no-run`) and runs each crate's unit suite on every PR. |
+| Real-site parity | **19 / 60** on the top-20 live-site board against pinned Chrome for Testing 148, up from 10 a week earlier (`scripts/realsite_board.py`, `trench/realsite/trend.csv` on the `atlas/trench-realsite` branch, 2026-09-26) |
+| Fixed-page parity | **26 / 26 cases, 1.25% average diff** from Chrome, down from 2.48% on 2026-09-18 (`scripts/parity_test.py`, 2026-09-26) |
+| WPT Tier-1 conformance | 6 / 12 scored at last run (2026-07-31); see `trench/wpt/last-run.json` |
 
-Every campaign case is now within threshold, so the campaign meter is
-**saturated** — it can no longer tell improvement from plateau, which is why
-the WPT row above exists and is the number to watch. The worst remaining
-campaign case is `gradient-backgrounds` at 14.44% diff.
+The fixed-page campaign is saturated: every case passes. It guards against
+regressions. **The real-site board is the number to watch:** it loads live
+sites and scores each one on *loads*, *readable* and *looks right* against the
+same Chrome.
 
-### What landed recently
+### What landed recently (week of 2026-09-19)
 
-- **WPT Tier-1 seed** (#69) — first Web Platform Tests wired into the trench,
-  with the scoring banner fixed (it had been naming the best cases "worst")
-- **CRLF is one mandatory break, not two** (#71) — text breaker fix, both call
-  sites
-- **Post-redirect URL restored** (#70) — a fetch after a redirect reported the
-  pre-redirect URL
-- **The nightly parity gate measured nothing and published 73.36** (#65) —
-  empty captures now score nothing instead of a confident number
-- **hiwave-mcp Phase 0** (#66) — the engine's computed layout served to agents
-  over MCP
-- **Rail D classification** (#63) — 136 engine functions port to other
-  platforms verbatim, 23 need one pin, zero are unportable
+86 PRs merged. The highlights:
+- **Style cascade 7× faster.** Rules are indexed by subject, selectors are
+  prepared once, and text measurement and shaping are cached (#256–#258,
+  #277/#278). netflix, github and cnn now load inside the 30 s budget.
+- **CSS correctness.** Real `@media` blocks (#259), `visibility`, `object-fit`,
+  floats, logical properties and `display` keywords (#270–#276). Per-element
+  custom properties (#289). One bad rule no longer drops a whole stylesheet
+  (#268). `url()` resolves against its stylesheet, which fixes most web-font
+  404s (#291).
+- **Hangs fixed.** A self-referencing CSS variable loop (#286), and a garbage
+  collector cycle in the JS engine that took pages to 13 GB (#287).
+- **Instruments.** A live-site board, a Chrome ground-truth probe and an
+  80-site wide board.
 
 ### Known gaps — stated, not hidden
 
-- **CI does not build or test the workspace.** Every cargo invocation across
-  all three workflows is `cargo build --release -p parity-capture` — one crate
-  of 38 — and there is no `cargo test` anywhere. The test count above is real
-  but is produced by developer machines, not by a gate. This is how
-  `rustkit-svg` stayed uncompilable for 17 days across 40 green merges (#59),
-  and it is the largest open hole in this repo.
+- **JavaScript is partial.** Page scripts run in Boa with a limited set of DOM
+  APIs, so JS-rendered sites (youtube, instagram, bing) show their server HTML
+  only. Custom elements and Shadow DOM aren't implemented yet.
+- **No live-site gate in CI.** Unit suites gate every PR, but the real-site
+  board runs on a dedicated Mac every 3 hours, not in CI.
 - **Animations are parsed, not executed** — transition/animation properties
   compute and survive the cascade; nothing ticks yet
 - **Two WPT cases render blank** (`empty-span-scroll`,
@@ -97,11 +96,8 @@ campaign case is `gradient-backgrounds` at 14.44% diff.
 
 ### How these numbers are produced
 
-**Tests** — `cargo test --workspace`, with the exit status captured before any
-count is read and a started-vs-reported reconciliation (76 binaries running,
-76 result lines, so a crashed suite shows up as a missing name rather than a
-clean sum). **Run on a developer machine, not in CI** — see the first known
-gap above. Treat it as a snapshot, not a continuously-enforced guarantee.
+**Tests**: CI compiles the whole workspace's tests and runs every crate's unit
+suite on each PR (`.github/workflows/parity.yml`).
 
 **Parity** — `scripts/parity_swarm.py` against Chrome baselines, published per
 master commit to
@@ -302,7 +298,10 @@ Your support helps cover:
 
 ## Architecture
 
-HiWave uses a **multi-WebView architecture**:
+Web pages are rendered by **RustKit**, HiWave's own engine, which is the
+default. The browser's own UI (tabs, address bar, sidebar) is still HTML
+rendered by the system WebView through WRY. Moving that UI onto RustKit too,
+so that nothing borrowed remains, is part of the [mission](MISSION.md).
 
 ```
 ┌─────────────────────────────────────────┐
@@ -310,14 +309,15 @@ HiWave uses a **multi-WebView architecture**:
 │  Tabs • Address Bar • Sidebar           │
 ├─────────────────────────────────────────┤
 │                                         │
-│  Content WebView (Web Pages)            │
+│  Content (Web Pages): RustKit engine    │
 │                                         │
 └─────────────────────────────────────────┘
 ```
 
 Built with:
-- **Rust** — Core logic, memory safety
-- **WRY/Tao** — Cross-platform WebView
+- **Rust**: core logic and memory safety
+- **RustKit**: our own engine (HTML, CSS, layout, GPU rendering via wgpu, and JS via Boa)
+- **WRY/Tao**: windowing, and the browser UI's WebView for now
 - **Brave's adblock-rust** — Ad blocking engine
 - **Vanilla JS** — No framework bloat in the UI
 
@@ -340,7 +340,7 @@ For commercial licensing options, see COMMERCIAL-LICENSE.md.
 ## FAQ
 
 **Q: Why not just use Firefox/Brave/Arc?**  
-A: They're great browsers! But none of them have The Shelf, tab decay, or our specific philosophy around reducing cognitive load. HiWave is for people who want a browser that actively helps them browse *less*.
+A: They're great browsers! Brave and Arc are built on Chromium, Google's engine. HiWave has its own engine, written from scratch in Rust, so it sits outside Google's ecosystem. None of them have The Shelf, tab decay, or our focus on reducing cognitive load.
 
 **Q: Is this production-ready?**  
 A: Not yet. We're in alpha. Use it as a secondary browser while we iron out the kinks.

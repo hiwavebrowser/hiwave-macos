@@ -25,7 +25,17 @@ the story too.
 4. **The user controls what they see.** Pop-ups, trackers and ads are reduced
    as the user chooses.
 5. **As good as Chrome, and better.** The parity half is measured against a
-   pinned Chrome. The "better" half is pillars 3 and 4.
+   pinned Chrome. The "better" half is pillars 3, 4 and 6.
+6. **A calmer browser.** HiWave helps you close tabs, not open more: the
+   Shelf, Tab Decay, Workspaces and three levels of automation. Chrome
+   optimises for time-in-browser. HiWave optimises for your attention.
+
+## Platforms
+
+macOS first: it's the reference engine tree and the only platform with
+pixel-level parity capture today. Windows second, following macOS closely.
+Linux later: it shares most of the engine and is expected to track macOS
+closely once the Linux seat is running.
 
 ## Two tracks, run in parallel
 
@@ -37,10 +47,19 @@ the story too.
 The "better" track doesn't wait for parity to finish. It's the reason
 to switch while parity is still being earned.
 
+It also doesn't start from zero:
+- **Flow Shield** blocks ads and trackers with Brave's `adblock-rust`, and in
+  RustKit mode it blocks at the engine, before the request leaves the browser.
+- **Flow Vault** keeps passwords local, with AES-256 encryption.
+- Analytics are local-only.
+
+The work is to measure these, extend them (pop-ups, per-site cache and storage
+partitioning, the referrer policy) and give the user clear controls.
+
 ## Finish line (proposed, to be ratified)
 
-- RustKit is the default renderer on all three platforms, with no borrowed
-  webview underneath.
+- RustKit is the default renderer on macOS and Windows, with no borrowed
+  webview underneath. Linux follows.
 - The real-site board reaches **40 of the scorable points** (scorable
   excludes sites that block the reference Chrome itself). The wide board is at
   **75%**. Both are measured against the pinned Chrome.
