@@ -24,6 +24,9 @@ pub mod multicol;
 pub mod scroll;
 pub mod text;
 
+#[cfg(test)]
+mod flex_item_relayout_tests;
+
 pub use flex::{layout_flex_container, Axis, FlexItem, FlexLine};
 pub use forms::{
     calculate_caret_position, calculate_selection_rects, render_button, render_checkbox,
