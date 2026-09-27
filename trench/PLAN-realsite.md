@@ -83,6 +83,8 @@ Respect `<meta name="referrer">` and the `Referrer-Policy` header if cheap. appl
 
 **2026-09-26 23:00: done.** A1 is live: the oracle runs headed and off-screen, and `--oracle-headless` gives comparisons (BASELINE Changes). Referer is #296, R1 CLEAR. `<img>` still bypasses the ResourceLoader: no Referer, no shield (decision for Pete in the digest). The SVG path renderer dropped `S/T/A` segments; that's #297. Next candidates: instagram (16.5% LOOKS RIGHT, needs 15; its diff is the hero collage image plus the 120×120 logo block), then routing `<img>` through the loader if Pete agrees.
 
+**2026-09-27 02:05: NEXT ENGINE ITEM is flex item re-layout at its used size.** A flex item that is itself a flex container, and that the outer flex stretches (cross) or grows (main), must lay out its own items again against that used size. Today `align-items/justify-content:center` inside it centres against its content height (repro: hub `scratch/svgcase/v-right-stretched.html` and `v-col-stretched.html`, where Chrome puts the box at y=475 and RustKit at 0). Cover both layout entry points, add failing-first tests for row-stretch and column-grow, and A/B x (expect its logo to centre, and LOOKS RIGHT to go back under 15% with #299). #299 (inline-svg ratio sizing) is open.
+
 **Board tooling you may do (no scoring-rule change):**
 - A2: detect `oracle_blocked` and report `n/scorable` alongside `/60`.
 - A6: append a row to `trench/realsite/trend.csv` every full run.

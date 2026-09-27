@@ -1,0 +1,96 @@
+{
+  "id": "nytimes",
+  "url": "https://www.nytimes.com/",
+  "chrome": [
+    {
+      "url": "https://www.nytimes.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.nytimes.com/",
+      "title": "The New York Times - Breaking News, US News, World News and Videos",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T0515Z-svgratio/nytimes/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260927T0515Z-svgratio/nytimes/chrome-a.png",
+      "elapsed_ms": 38405
+    },
+    {
+      "url": "https://www.nytimes.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.nytimes.com/",
+      "title": "The New York Times - Breaking News, US News, World News and Videos",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T0515Z-svgratio/nytimes/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260927T0515Z-svgratio/nytimes/chrome-b.png",
+      "elapsed_ms": 30774
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "error",
+    "html_file": null,
+    "url": "https://www.nytimes.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": null,
+    "layout_path": null,
+    "layout_stats": null,
+    "elapsed_ms": 288,
+    "error": "Failed to load URL: NavigationError(\"HTTP error\")",
+    "wall_ms": 336
+  },
+  "access": {
+    "status": 403,
+    "vendor": "datadome",
+    "blocked": true
+  },
+  "loads": {
+    "pass": false,
+    "why": "blocked:datadome (HTTP 403) \u2014 Failed to load URL: NavigationError(\"HTTP error\")"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 95,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "0",
+      "2",
+      "2026",
+      "27",
+      "3",
+      "500",
+      "51",
+      "advertisement",
+      "agency",
+      "alban",
+      "and",
+      "are",
+      "areas",
+      "arts",
+      "athletic",
+      "batter",
+      "bringing",
+      "business",
+      "canada",
+      "cancellation",
+      "coastal",
+      "content",
+      "cooking",
+      "el",
+      "espa\u00f1ol"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 3.92607421875,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}
