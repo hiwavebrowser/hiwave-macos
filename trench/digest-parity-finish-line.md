@@ -12406,3 +12406,56 @@ gap instead of riding it in.
   night since night 44 has had the seat control and none of them asked the
   cheapest question it can answer: *which axes may I claim at all?* It is the
   difference between choosing `settings` and choosing `settings`' `x` column.
+
+### Addendum — the macOS receipt for #298, and what it can and cannot say
+
+CI green on `717a786`: 14 check runs, 11 success, 3 skipped (nightly-only and
+`commit-gate`). R1 design **CLEAR** (COMMENT, Pete-authored seat), no fix asks,
+`own_min_content_width` accepted as out of scope rather than a HOLD. LAND HOLD
+on R2-STAMP; Atlas/Pete lands, not the bot seat.
+
+**The metric did not move, and this is the predicted reading rather than a
+disappointment.** [Run 36297222671](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/36297222671),
+`macos-14`:
+
+```
+  metric:     3/26      geometry 14/26 green   paint 3/26 green
+                        stability 26/26        discrete 26/26
+  settings: geo_fails=256 paint=0.95069 discrete=0
+```
+
+`3/26` and `14/26` are both unchanged, which is what tonight's A/B said would
+happen: the six axes improve in magnitude and stay above the 0.5px bar, and
+Gate B cannot move because the boxes are below the fold.
+
+**The check I could make, and it is the useful one.** #297's Parity Gate
+([run 36289878203](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/36289878203))
+is a different engine PR *without* this change, and it reads
+`settings: geo_fails=256 paint=0.95069` — identical to five decimals, as is every
+other case's pair. So:
+
+- **No macOS case regressed.** The stop rule holds on macOS, not only on this
+  seat, and that is a measurement rather than an inference from the Linux A/B.
+- **The 255 → 256 drift is not mine.** 09-25 recorded `settings` at 255 against
+  `develop cdbd22d`; a tree without this change reads 256, so the +1 is base
+  drift across #256..#297. I nearly wrote it up as my own regression — the
+  comparison run is the only reason I did not.
+
+**What the macOS lane cannot say, and why that is decision 3 again.** The
+published receipt is `geo_fails` (a count) and `paint` (a fraction). Tonight's
+change is magnitude-only by construction, so **the lane confirms no regression
+and cannot confirm the improvement.** The magnitudes are in
+`parity-results/gate-a.json` inside the `parity-oracle` artifact, and the
+download is `*.blob.core.windows.net`, denied at CONNECT — tested again on this
+run rather than assumed: `curl: (56) CONNECT tunnel failed, response 403`. That
+is the third night this has blocked forensics, and tonight it blocked
+*verification of my own claim on the platform the metric is defined on*, which is
+a sharper cost than "no board to read".
+
+Recorded as a limit on the receipt, not as a reason to doubt the fix: the
+structural argument (68 = 34 + 34 with both labels dropped) is read out of the
+code and reproduced by probe, and it does not depend on either seat.
+
+Also worth banking for whoever reads a green Parity Gate next: **a count-only
+receipt cannot see a magnitude-only change.** Posted on the PR so the badge is
+not read as confirmation it cannot give.
