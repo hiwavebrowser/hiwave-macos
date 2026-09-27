@@ -107,3 +107,19 @@ Whichever comes first:
   already scored 0.
 - 2026-09-26 — A6: each full run (including a chunked run summarised with
   `--summarize`) appends a row to `trench/realsite/trend.csv`.
+- 2026-09-26 — A1 (Pete approved): the Chrome oracle runs **headed** (pinned CfT
+  148, every deterministic flag kept, window off-screen at `-2400,0`, 1280x800).
+  No spoofing and no `navigator.webdriver` change: Chrome identifying as itself.
+  `realsite_board.py --oracle-headless` restores the old identity for
+  comparisons. Same engine (develop 2b6a04e), same evening:
+  - headless `20260927T0200Z-headless`: **19/60**, scorable 18/45. Oracle
+    blocked: reddit (HTTP 403), x (HTTP error page), chatgpt, ebay, nytimes.
+  - headed `20260927T0120Z-headed`: **18/60**, scorable 18/48. Oracle blocked:
+    **none**. x and reddit now get the real site (HTTP 200), and so do chatgpt,
+    ebay and nytimes (RustKit is still access-blocked on those three).
+  - The one site that moved is facebook (LOOKS RIGHT 8.7% headless vs 18.3%
+    headed). That is its usual oracle drift (Chrome-vs-Chrome 8–10% in both);
+    no other check changed. The headed run overlapped a cargo release build
+    for its first half, and 6/38 Chrome captures hit screenshot timeouts (x
+    twice, github, yahoo, amazon, chatgpt), against 1/38 headless. That's
+    contention, not the headed mode; the next headed runs will say.

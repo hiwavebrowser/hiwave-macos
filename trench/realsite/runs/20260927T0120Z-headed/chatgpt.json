@@ -1,0 +1,90 @@
+{
+  "id": "chatgpt",
+  "url": "https://chatgpt.com/",
+  "chrome": [
+    {
+      "url": "https://chatgpt.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://chatgpt.com/",
+      "title": "ChatGPT",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T0120Z-headed/chatgpt/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260927T0120Z-headed/chatgpt/chrome-a.png",
+      "elapsed_ms": 42961
+    },
+    {
+      "url": "https://chatgpt.com/",
+      "status": "error",
+      "error": "page.screenshot: Timeout 30000ms exceeded.",
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "elapsed_ms": 55472
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "error",
+    "html_file": null,
+    "url": "https://chatgpt.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": null,
+    "layout_path": null,
+    "layout_stats": null,
+    "elapsed_ms": 1027,
+    "error": "Failed to load URL: NavigationError(\"HTTP error\")",
+    "wall_ms": 1102
+  },
+  "access": {
+    "status": 403,
+    "vendor": "cloudflare",
+    "blocked": true
+  },
+  "loads": {
+    "pass": false,
+    "why": "blocked:cloudflare (HTTP 403) \u2014 Failed to load URL: NavigationError(\"HTTP error\")"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 60,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "agree",
+      "ai",
+      "and",
+      "answers",
+      "based",
+      "be",
+      "begin",
+      "by",
+      "chat",
+      "chatgpt",
+      "chats",
+      "content",
+      "create",
+      "deep",
+      "files",
+      "for",
+      "free",
+      "get",
+      "help",
+      "history",
+      "images",
+      "improve",
+      "in",
+      "is",
+      "it"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}
