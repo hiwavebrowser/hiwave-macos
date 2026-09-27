@@ -1,0 +1,101 @@
+{
+  "id": "yahoo",
+  "url": "https://www.yahoo.com/",
+  "chrome": [
+    {
+      "url": "https://www.yahoo.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.yahoo.com/",
+      "title": "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T1145Z-basis/yahoo/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260927T1145Z-basis/yahoo/chrome-a.png",
+      "elapsed_ms": 52828
+    },
+    {
+      "url": "https://www.yahoo.com/",
+      "status": "error",
+      "error": "page.screenshot: Timeout 30000ms exceeded.",
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "elapsed_ms": 106504
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.yahoo.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260927T1145Z-basis/yahoo/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260927T1145Z-basis/yahoo/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 150,
+      "threw": 2,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 3114793,
+      "elapsed_ms": 2281
+    },
+    "elapsed_ms": 8826,
+    "error": null,
+    "wall_ms": 8970,
+    "non_background_fraction": 0.1051
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 127,
+    "rustkit_words": 52,
+    "ratio": 0.378,
+    "missing_sample": [
+      "00",
+      "11",
+      "15",
+      "2026",
+      "27",
+      "46",
+      "5",
+      "56",
+      "accuweather",
+      "action",
+      "am",
+      "and",
+      "are",
+      "arizona",
+      "blazing",
+      "boston",
+      "bruins",
+      "by",
+      "career",
+      "communication",
+      "diego",
+      "down",
+      "energy",
+      "especially",
+      "events"
+    ]
+  },
+  "looks_right": {
+    "pass": true,
+    "diff": 9.90048828125
+  },
+  "points": 2
+}

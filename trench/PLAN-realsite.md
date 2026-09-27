@@ -87,6 +87,8 @@ Respect `<meta name="referrer">` and the `Referrer-Policy` header if cheap. appl
 
 **2026-09-27 05:10: done.** Flex re-layout is #300, and `dvh`/`svh`/`lvh` parsing is #301 (x's `min-height:100dvh` was being dropped). Stacked, they score 20/60 (x +1). x's LOOKS RIGHT is 17.3%, not under 15. **NEXT ENGINE ITEM is the `flex: 1 1 0%` basis split.** In `scratch/svgcase/v-dvh.html`, RustKit puts the box at x=262.5 and Chrome at 275: two basis-0 items, one of them with `height:100px`, should split the row 200/200. Then instagram (16.4%).
 
+**2026-09-27 08:10: done.** The basis split is #302, a full §9.7 resolver. It's ±0 on the board (20/60): x's remaining diff isn't geometry from the split. **NEXT ENGINE ITEM is the vertical automatic minimum** (§4.5 `min-height:auto` for column flex items; `min_main` is 0 on the vertical axis today). Step 11d knows each item's laid-out content height, so use it. Target: shelf's palette overflows its 120 body at 135, as in Chrome, and shelf's campaign case (3.23% on #302) comes back under develop's 2.87%. Then instagram (15.9%).
+
 **Board tooling you may do (no scoring-rule change):**
 - A2: detect `oracle_blocked` and report `n/scorable` alongside `/60`.
 - A6: append a row to `trench/realsite/trend.csv` every full run.

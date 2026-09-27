@@ -637,3 +637,48 @@ Tooling (hub scratch): `svgcase/chrome_rects.mjs` (pinned CfT 148 `getBoundingCl
 Tooling: `cd <worktree>` as its own command, then plain commands (`git -C`, env-prefixed cargo, `ln -s`, `gh pr comment` and bash scripts all need approval in headless mode). `cargo --target-dir <shared>` works and saves the 13-minute cold build of a new worktree, but `scripts/parity_test.py` always builds its own worktree's `target/`.
 
 **Decisions for Pete:** none new. The `<img>`-through-ResourceLoader and `cargo fmt` questions from the earlier digests are still open.
+
+
+## 2026-09-27 08:10 — §9.7 flex resolver (#302): 20 → 20/60, the basis split is fixed but it wasn't x's point
+
+**Points: 20/60 (develop-equivalent `20260927T0805Z-stack`; #300 and #301 have since merged, develop 2e6e617) → 20/60 with #302 (`20260927T1215Z-basis-full`, four chunks summarised).** #302 is not merged.
+
+| run | engine | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|
+| `20260927T0805Z-stack` | develop-equivalent | 20 | 13 | 6 | 1 | 20/48 |
+| `20260927T1215Z-basis-full` | + #302 | **20** | 13 | 6 | 1 | 20/48 |
+| x's chunk, same hour: `1145Z-dev` / `1145Z-basis` | develop-eq / + #302 | 5/15 · 6/15 | | | | |
+
+- The only moves are drift. facebook −1 is its usual Chrome-vs-Chrome swing (8.5% ↔ 18.1%). yahoo +1 was `unstable` (Chrome-vs-Chrome 20.8%) in the control arm the same hour.
+- **x is unmoved (LOOKS RIGHT 17.3% → 17.5%).** The x-shape box now sits at Chrome's 275 (it was 262.5), but that geometry wasn't x's remaining diff.
+- Closer to passing: instagram 16.4% → 15.9% (needs ≤15), netflix 60.4% → 55.0%.
+- Passing all 3: none. RustKit blocked: amazon, chatgpt, ebay, nytimes. Blank: youtube, reddit, microsoft.
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#302 `atlas/rs-flex-basis-percent` @ e1b58bd:** `resolve_flexible_lengths` rewritten to css-flexbox-1 §9.7:
+  - Free space is measured from base sizes, not from min/max-clamped hypothetical sizes.
+  - Inflexible items are frozen first.
+  - Factor sums below 1 are scaled.
+  - Shrink is weighted by the inner base size.
+  - A clamp/freeze loop handles min and max violations.
+
+  On develop, 7 tests fail. Chrome's numbers for each are in the table below. Each test runs through both layout entry points.
+
+  | case | Chrome 148 | develop |
+  |---|---|---|
+  | basis-0 split | 200/200 | 175/225 |
+  | min-width violation | 250/75/75 | 300/50/50 (overflows) |
+  | max-width violation | 50/175/175 | 50/133/133 |
+  | shrink min violation | 250/150 | 250/200 |
+  | fractional grow | 100/100 | 200/200 |
+  | x-shape box x | 275 | 262.5 |
+
+  rustkit-layout 537/537 (the font-cache flake passes alone), engine 165/165. **Campaign 26/26, but shelf got worse: 2.87% → 3.23%**. This is stated in the PR body. The cause is the missing vertical automatic minimum (below). A second commit keeps the old zero-free-space early return, which stopped shelf's palette collapsing to 0 (it was 3.94% without it).
+
+**Found: RustKit has no vertical automatic minimum (§4.5 `min-height:auto` for column flex items).** `min_main` is 0 on the vertical axis because there's no min-content height estimator. The old resolver's quirks hid it. A `flex:1` column item can shrink below its content, where Chrome overflows the container instead (shelf's palette: Chrome 135 tall inside a 120 body). Step 11d already knows each item's laid-out content height. The fix is to use it as the automatic minimum for items with `min-height:auto` and `overflow:visible`, with care for items laid out at a used height. This is the next layout item, and it should win back shelf.
+
+**Next:** (1) the vertical automatic minimum (above). (2) instagram at 15.9%. (3) unitless `flex: 1 1 0` lands at 267 where Chrome has 275, even with #302. That's a separate shorthand/basis parse bug, and the repro is hub `scratch/basis/b-zero.html`.
+
+Tooling: hub `scratch/basis/run.py <bin>` (flex-basis variants, red-box origin) and `scratch/basis/cases.html` (the six §9.7 rows, for `svgcase/chrome_rects.mjs`). In headless mode `ln -s` and `cp -R` need approval, so a new worktree's first `parity_test.py` is a cold ~13 min build.
+
+**Decisions for Pete:** none new. The `<img>`-through-ResourceLoader and `cargo fmt` questions from earlier digests are still open.

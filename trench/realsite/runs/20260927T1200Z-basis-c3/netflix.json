@@ -1,0 +1,86 @@
+{
+  "id": "netflix",
+  "url": "https://www.netflix.com/",
+  "chrome": [
+    {
+      "url": "https://www.netflix.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.netflix.com/",
+      "title": "Netflix - Watch TV Shows Online, Watch Movies Online",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T1200Z-basis-c3/netflix/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260927T1200Z-basis-c3/netflix/chrome-a.png",
+      "elapsed_ms": 40263
+    },
+    {
+      "url": "https://www.netflix.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.netflix.com/",
+      "title": "Netflix - Watch TV Shows Online, Watch Movies Online",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T1200Z-basis-c3/netflix/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260927T1200Z-basis-c3/netflix/chrome-b.png",
+      "elapsed_ms": 43171
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.netflix.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260927T1200Z-basis-c3/netflix/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260927T1200Z-basis-c3/netflix/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 7,
+      "threw": 3,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 4300203,
+      "elapsed_ms": 3472
+    },
+    "elapsed_ms": 7885,
+    "error": null,
+    "wall_ms": 8072,
+    "non_background_fraction": 0.6889
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 33,
+    "rustkit_words": 68,
+    "ratio": 0.8788,
+    "missing_sample": [
+      "before",
+      "it",
+      "someone",
+      "spoils"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 3.02109375,
+    "diff": 54.96259765625
+  },
+  "points": 2
+}
