@@ -12211,3 +12211,198 @@ Gate B's percentage can now be attributed on any seat that captures a control.
   what would make the macOS-CI-experiment route affordable.
 - Decisions from 09-24/09-25 (export vs layout for the fragment union; RustKit
   sizing wrapped inlines two ways) remain open; neither blocks the next night.
+
+## 2026-09-27
+
+**Metric: `3/26` on macOS, carried forward and NOT re-measured by me.** Last
+measured by run 36100178666 on 09-25 against `develop cdbd22d` plus #255.
+`develop` is now `c2772b1` — #276..#297 later, engine changes I did not read —
+so the carry-forward is a statement about what I know, not a claim the number
+is still 3. Tonight's PR (#298) carries Rust, so its own Parity Gate on
+`macos-14` measures it; that run is the check, not this entry.
+
+**P-item: the unit 09-26 recorded for the "stay on geometry" branch — `settings`,
+still the largest single geometry row on the board. COMPLETE as a unit; the
+CASE is not finished and was never going to be in one night.** Branch
+`atlas/n67-settings-geometry`, **PR #298** against `develop`.
+
+Decision 1 of 09-26 (paint-as-CI-experiments vs stay on geometry) is unanswered.
+I took the geometry branch because it is the one this seat can measure — 09-26
+measured ten of the eleven paint-blocked cases as below this seat's floor — and
+because the alternative was to open a PR whose hypothesis I could not test here.
+**Stated as an assumption, not a resolution: decision 1 still stands.**
+
+### Before picking anything, I measured what this seat is allowed to claim
+
+Night 44 built the seat control for Gate A and 09-26 built it for Gate B, but
+neither answers *which axes are attributable before you choose a unit*. That is
+Chrome-vs-Chrome only and costs 34 seconds. `trench/tools/n67_confound_census.py`:
+
+```
+                      elements   confounded axes      x     y     w     h   fully clean
+  TOTAL                   1593              2101    258  1062   277   504           273
+  settings                 189               312      8   186    39    79             0
+```
+
+**Zero of `settings`' 189 elements agree between the two Chromes on all four
+axes**, and `y` is confounded on 186 of 189. So the 434-failure `y` staircase
+that dominates the case's count is, on this seat, not attributable by magnitude
+at all — while `x` is clean on 181 of 189. That is what made the choice: the
+unit had to be an `x`/`width` claim.
+
+### What the defect was
+
+Top pure-`real` row on `settings` (confound 0.047px):
+
+```
+  settings  .footer > div.btn-group   x   reported +126.703   real +126.656
+```
+
+`.footer` is `display: flex; justify-content: space-between`, so `.btn-group`
+(itself `display: flex; gap: 8px`) is a flex item and **its width IS its
+max-content contribution**. It measured 68.00 against Chrome's 194.70, and
+`flex-shrink` then squeezed the two buttons inside it to 38.57 and 34.00
+against 117.92 and 68.78.
+
+68 = 34 + 34 + 0: the author padding+border of each button, and none of either
+label. `own_max_content_width` has no arm for `BoxType::FormControl`, and a form
+control's content is not in its children — a `<button>`'s text lives in
+`FormControlType::Button { label }`, a `<select>`'s in its options — so the
+generic child walk finds nothing to measure and answers the padding box alone.
+`form_control_intrinsic_size` (which the flex path already calls, correctly) is
+the quantity that was missing.
+
+Sized by probe rather than by reading, because the first reading was wrong: the
+zero-width label looked like this seat failing to resolve `-apple-system`, and a
+three-button probe killed that in one run — the same button laid out as a
+block-level flex container's item measures 125.0 here, and a `<span>` with the
+same padding measures the same 125.0. The defect needed a flex parent to appear.
+
+### Commits
+
+- `717a786` — the `FormControl` arm in `own_max_content_width`, and its three
+  guards.
+- this commit — the digest entry and `trench/tools/n67_confound_census.py` (trench branch; a commit cannot carry its own SHA).
+
+### Measured — Linux/SwiftShader, 26 cases. MECHANICS, NOT A RECEIPT
+
+```
+  geometry failures   2581 -> 2581      geometry-green   3/26 -> 3/26
+  sum|delta|      40673.75 -> 40153.00  (-520.74, all of it `settings`)
+  axes better 6   axes WORSE 0   appeared 0   disappeared 0
+  Gate B: bit-identical on all 26 cases
+```
+
+| case | element | axis | before | after |
+|---|---|---|---:|---:|
+| settings | `.btn-group` | x | +126.703 | **+4.303** |
+| settings | `.btn-group` | width | −126.703 | **−4.303** |
+| settings | `#saveBtn` | x | +126.703 | **+4.303** |
+| settings | `#saveBtn` | width | −79.350 | **−0.665** |
+| settings | `#closeBtn` | x | +47.353 | **+3.638** |
+| settings | `#closeBtn` | width | −34.781 | **−3.638** |
+
+The other 25 cases are bit-identical on every axis.
+
+**The failure count does not move and no case flips.** All six residuals are
+button label advance widths — P4 — and they are the same residual the `<span>`
+control shows on this seat (+3.81 on the group, +4.61 on the wide item). What
+this change removes is the structural error; what is left is text measurement,
+and it is left ON the board rather than hidden.
+
+**Gate B being bit-identical is an explanation, not a null result.** The footer
+sits at y=2887 and the capture is the 768px viewport, so not one of the six
+boxes is in the frame. This fix cannot move the paint column on this corpus, and
+a night that reported "paint unchanged, geometry improved" without saying why
+would have been reporting a coincidence as a property.
+
+### Stop rule
+
+Checked **per box**, every axis, all 26 cases: zero boxes worsened, no case
+gained a discrete failure, no case lost its green, Gate B regressed on nothing
+(it moved on nothing). The rule did not fire.
+
+### Mutation-check results
+
+**5 probes, 5 RED, control green before and after. One probe was mis-aimed and
+reported a false "caught".**
+
+| probe | caught by |
+|---|---|
+| M1 arm removed entirely | label + flex guards |
+| M2 `+ padding_border` added to the return (double count) | label + flex guards |
+| M3 returns `.1` (the height) instead of `.0` | label + flex guards |
+| M4 arm moved ABOVE the `width: Px` check | explicit-width guard |
+| M5 flex gap dropped from the container sum | flex guard |
+
+**M4's first run is the finding.** `if let Length::Px(w) = style.width { … }` is
+textually identical in `own_min_content_width` and `own_max_content_width`, so a
+first-occurrence replace moved the arm into the wrong function. The sweep printed
+`RED (caught)` — the two content guards failed, because the arm was gone from the
+function under test — while the ordering guard, the only one that probe exists to
+exercise, **stayed green**. Re-aimed at the right call site it is the only guard
+that fails.
+
+09-26's checklist item was *for every published field, name the wrong way to
+compute it, and check the fixture can tell that way apart from the right one.*
+Tonight's is one layer under it: **check the probe changed the code you think it
+changed.** A sweep that mutates the wrong site reports a guard as sound on
+evidence that never touched it, and the summary line is indistinguishable from
+the real thing. The narrow form: assert the mutation is where you aimed it
+before you trust its verdict — for M4 that is one `grep -n`.
+
+### Known, measured, and deliberately NOT landed
+
+`own_min_content_width` has the same hole and it is **not** the same one-line
+fix. Chrome floors a button at its *longest word* plus padding, not its whole
+label, so `form_control_intrinsic_size` there overstates min-content by 40px on
+a two-word label. Probed (`display:flex; width:120px`, two buttons):
+
+```
+  Chrome   84.58 / 69.80        RustKit   72.17 / 39.84
+  float shrink-to-fit in a 60px parent: Chrome 84.58, RustKit 60 with a 125 child
+```
+
+So RustKit shrinks form controls past a floor that should be their text. It
+needs a min-content measure of the label, its own guards and its own A/B.
+Recorded, not half-landed — this is the third night running that names a sibling
+gap instead of riding it in.
+
+### Decisions needed from Pete
+
+1. **Still 09-26's decision 1, and tonight is evidence for the geometry side:**
+   the one case this seat could work produced a −520px, zero-regression fix that
+   moves no column of the metric, because its residual is P4 and its boxes are
+   below the fold. Does geometry stay the queue knowing that shape, or do the
+   four close paint cases become macOS-CI experiments?
+2. **Does `settings` stay the ranked unit at all?** Its count is 186/189
+   `y`-confounded on this seat, so the remaining ~400 failures cannot be
+   attributed here by magnitude; working it further means either a macOS
+   experiment per hypothesis or a structural argument read out of the code with
+   no local number.
+3. Unchanged and cheap: allow `*.blob.core.windows.net` so a night here can read
+   the macOS gate JSON and Gate C's board (09-26 decision 2). It is what would
+   make decisions 1 and 2 affordable either way.
+
+### Surprises
+
+- **The top-ranked pure-`real` row was a real defect this time, and the first
+  explanation for it was still wrong.** `-apple-system` on a fontless seat is
+  exactly the story the last four nights would predict, and it survived about
+  ten minutes — until the probe showed the identical button measuring 125.0 when
+  its parent is not a flex item. The confound instrument said 0.047px and was
+  right; my reading of *why* was the unreliable part, not the number.
+- **A flex container's own contribution and its items' layout use two different
+  measurements of the same box, and only one of them was wrong.** `get_intrinsic_main_size`
+  in `flex.rs` has had the `FormControl` arm all along; `own_max_content_width`
+  in `grid.rs` never did. Both are called on the same button in the same layout.
+  That is a two-copies-of-one-rule defect of the class 09-24's decision 2 is
+  about, and it was found by a corpus row rather than by the cross-instrument
+  guard that decision proposes.
+- **`cargo test -p rustkit-layout --lib` is 511 passed / 3 failed on this seat**,
+  the same three as 09-26 by name, verified as pre-existing by stashing the fix
+  and re-running only those three. `rustkit-engine --lib` is 144/0.
+- **The census cost 34 seconds and should have existed 40 nights ago.** Every
+  night since night 44 has had the seat control and none of them asked the
+  cheapest question it can answer: *which axes may I claim at all?* It is the
+  difference between choosing `settings` and choosing `settings`' `x` column.
