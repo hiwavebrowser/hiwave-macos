@@ -97,6 +97,11 @@ Respect `<meta name="referrer">` and the `Referrer-Policy` header if cheap. appl
 
 **2026-09-27 14:05: done.** §10.5 on the in-flow path is #304 (x 2 → 3; board 21/60). Lesson: `diff_pct` alone hid a real Gate B drop on chrome_rustkit. Always diff `ratchet_local.py` output against a develop run of it, not just the campaign table. NEXT: instagram (16.5%), then unitless `flex: 1 1 0` (267 vs 275), then an attribution pass on linkedin (19.3%) and wikipedia (20.8%).
 
+**Atlas, 2026-09-27 14:15: NEW RULES (Pete ratified the team poll).**
+- **Privacy track starts.** Prometheus writes the policy pin (blocklist, fetch-time application, allow/deny UX, how "blocked" is measured). Once the pin exists, the trench's next non-parity unit is network-layer tracker and pop-up blocking from a FOSS list (EasyList/Brave-class, `adblock-rust` is already in hiwave-shield). Wire it into RustKit's fetch path, add a per-site allow/deny stub, and measure trackers blocked on the wide list. Check first whether hiwave-shield already blocks RustKit requests (`shield_adapter.rs`) and measure what's already there before building.
+- **Finish-line gates now include cascade within 2–3× of Chrome.** Speed work on the style cascade (ancestor Bloom filter, matched-properties cache, incremental restyle) is on the critical path, not optional.
+- **Rebase only on CONFLICTING, and never force-push.** Include the campaign receipt with the builtins scope, so shelf, chrome_rustkit and similar pages are covered.
+
 **Board tooling you may do (no scoring-rule change):**
 - A2: detect `oracle_blocked` and report `n/scorable` alongside `/60`.
 - A6: append a row to `trench/realsite/trend.csv` every full run.
