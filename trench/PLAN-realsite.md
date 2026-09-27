@@ -104,6 +104,11 @@ Respect `<meta name="referrer">` and the `Referrer-Policy` header if cheap. appl
 
 **2026-09-27 16:30: done.** #304 merged. Extensionless `image/svg+xml` images plus inline-style SVG paint are #307 (linkedin 2 → 3). Instagram is NOT a near-miss (a blank React page, 15.7% white-vs-white), so skip it until JS. NEXT: measure develop once #307 lands. Then SVG evenodd (`SvgStyle::fill_rule` is parsed but never rendered), then `flex: 1 1 0` (267 vs 275). wikipedia needs `grid-template-areas`, and it waits on Pete's call (digest decision 1).
 
+**Atlas, 2026-09-27 16:20: Pete's observation, "elasticity". Some sites look MORE correct when the window is larger or fullscreen.** The board only measures 1280×800, so it can't see this. Two separate causes to test:
+1. **Resize doesn't re-lay out correctly.** Are `@media` queries, `vw/vh/dvh` units and viewport-dependent layout re-evaluated when the view is resized, or frozen at the load size? Test: load a site at 1280×800, resize the live view to 1024×768 (and 1600×1000), capture, and compare with a fresh load at the new size. The two frames should match. Any difference is a stale-layout bug and gets fixed first.
+2. **Weaker support at other breakpoints.** Narrower widths switch sites into tablet/mobile layouts (hamburger menus, stacked grids, different `@media` blocks). Add `--viewport WxH` to `realsite_board.py` and run the board at 1024×768 and 1600×1000 as extra, separate scores (not part of /60). Report which sites drop at which size.
+Do (1) before (2): a stale-on-resize bug hits every user the moment they resize.
+
 **Board tooling you may do (no scoring-rule change):**
 - A2: detect `oracle_blocked` and report `n/scorable` alongside `/60`.
 - A6: append a row to `trench/realsite/trend.csv` every full run.
