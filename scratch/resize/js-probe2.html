@@ -1,0 +1,11 @@
+<!doctype html>
+<html><body>
+<div id="a">a0</div>
+<script>throw new Error('doc=' + typeof document);</script>
+<script>throw new Error('body=' + String(document.body));</script>
+<script>throw new Error('gebi=' + String(document.getElementById('a')));</script>
+<script>throw new Error('qs=' + String(document.querySelector('#a')));</script>
+<script>throw new Error('docel=' + String(document.documentElement));</script>
+<script>throw new Error('iw=' + String(window.innerWidth) + ' mm=' + typeof window.matchMedia + ' ael=' + typeof window.addEventListener);</script>
+<script>throw new Error('ce=' + String(document.createElement('div')));</script>
+</body></html>

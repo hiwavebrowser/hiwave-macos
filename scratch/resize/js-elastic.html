@@ -1,0 +1,21 @@
+<!doctype html>
+<html><head><style>
+html, body { margin: 0; }
+#w { font: 32px sans-serif; }
+</style></head><body>
+<div id="w">init</div>
+<div id="r">no-resize</div>
+<div id="mq">mq-unset</div>
+<script>
+function show() {
+  document.getElementById('w').textContent = 'iw' + window.innerWidth + 'x' + window.innerHeight;
+  var mql = window.matchMedia ? window.matchMedia('(max-width: 1100px)') : null;
+  document.getElementById('mq').textContent = mql ? (mql.matches ? 'mq-narrow' : 'mq-wide') : 'mq-none';
+}
+show();
+window.addEventListener('resize', function () {
+  document.getElementById('r').textContent = 'resized';
+  show();
+});
+</script>
+</body></html>

@@ -1,0 +1,109 @@
+{
+  "id": "yahoo",
+  "url": "https://www.yahoo.com/",
+  "chrome": [
+    {
+      "url": "https://www.yahoo.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.yahoo.com/",
+      "title": "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T2150Z-dev04dd/yahoo/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260927T2150Z-dev04dd/yahoo/chrome-a.png",
+      "elapsed_ms": 88495
+    },
+    {
+      "url": "https://www.yahoo.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.yahoo.com/",
+      "title": "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T2150Z-dev04dd/yahoo/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260927T2150Z-dev04dd/yahoo/chrome-b.png",
+      "elapsed_ms": 80791
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.yahoo.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260927T2150Z-dev04dd/yahoo/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260927T2150Z-dev04dd/yahoo/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 0,
+      "threw": 0,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 151,
+      "bytes": 2552163,
+      "elapsed_ms": 0
+    },
+    "elapsed_ms": 8772,
+    "error": null,
+    "wall_ms": 8836,
+    "non_background_fraction": 0.1049
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 148,
+    "rustkit_words": 46,
+    "ratio": 0.2905,
+    "missing_sample": [
+      "00",
+      "14",
+      "15",
+      "16",
+      "174",
+      "2026",
+      "27",
+      "3rd",
+      "52",
+      "57",
+      "7",
+      "9",
+      "a",
+      "accuweather",
+      "action",
+      "ad",
+      "and",
+      "are",
+      "associated",
+      "baltimore",
+      "beach",
+      "blazing",
+      "by",
+      "california",
+      "career"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 15.675390624999999,
+    "diff": 21.64599609375,
+    "unstable": true,
+    "why": "chrome-vs-chrome 15.7% > 15% (unstable, 0 points)"
+  },
+  "points": 1
+}

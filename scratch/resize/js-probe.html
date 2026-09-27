@@ -1,0 +1,9 @@
+<!doctype html>
+<html><body>
+<div id="a">a0</div><div id="b">b0</div><div id="c">c0</div><div id="d">d0</div><div id="e">e0</div>
+<script>var el = document.getElementById('a'); el.textContent = 'a-gebi-ok';</script>
+<script>document.getElementById('b').textContent = 'b' + String(window.innerWidth);</script>
+<script>document.getElementById('c').textContent = 'c' + typeof window.matchMedia;</script>
+<script>document.getElementById('d').textContent = 'd' + String(window.matchMedia('(max-width: 1100px)').matches);</script>
+<script>window.addEventListener('resize', function () {}); document.getElementById('e').textContent = 'e-listen-ok';</script>
+</body></html>

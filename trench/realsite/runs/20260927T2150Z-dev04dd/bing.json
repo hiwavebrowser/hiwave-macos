@@ -1,0 +1,107 @@
+{
+  "id": "bing",
+  "url": "https://www.bing.com/",
+  "chrome": [
+    {
+      "url": "https://www.bing.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.bing.com/",
+      "title": "Search - Microsoft Bing",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T2150Z-dev04dd/bing/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260927T2150Z-dev04dd/bing/chrome-a.png",
+      "elapsed_ms": 24483
+    },
+    {
+      "url": "https://www.bing.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.bing.com/",
+      "title": "Search - Microsoft Bing",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T2150Z-dev04dd/bing/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260927T2150Z-dev04dd/bing/chrome-b.png",
+      "elapsed_ms": 23878
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.bing.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260927T2150Z-dev04dd/bing/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260927T2150Z-dev04dd/bing/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 9,
+      "threw": 2,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 117917,
+      "elapsed_ms": 184
+    },
+    "elapsed_ms": 1108,
+    "error": null,
+    "wall_ms": 1145,
+    "non_background_fraction": 0.3734
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 45,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "1b",
+      "accuser",
+      "africa",
+      "approves",
+      "arrested",
+      "base",
+      "claims",
+      "copilot",
+      "creator",
+      "cuts",
+      "deep",
+      "discover",
+      "from",
+      "fuel",
+      "funding",
+      "garden",
+      "hospital",
+      "housing",
+      "image",
+      "images",
+      "in",
+      "madrid",
+      "maps",
+      "mass",
+      "men"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "diff": 82.80292968750001
+  },
+  "points": 1
+}

@@ -1,0 +1,26 @@
+<!doctype html>
+<html><head><style>
+html, body { margin: 0; height: 100%; }
+.bar { height: 10vh; width: 50vw; background: #c33; }
+.full { min-height: 20dvh; background: #36c; }
+.row { display: flex; gap: 10px; }
+.row > div { flex: 1 1 0; height: 60px; background: #3a3; }
+.pct { width: 40%; height: 30px; background: #999; }
+.big { font-size: 3vw; }
+.narrow-only { display: none; background: #f90; height: 40px; }
+@media (max-width: 1100px) {
+  .row { flex-direction: column; }
+  .narrow-only { display: block; }
+  .wide-only { display: none; }
+}
+@media (min-width: 1500px) { .pct { background: #0cc; } }
+.wide-only { height: 40px; background: #909; }
+</style></head><body>
+<div class="bar"></div>
+<div class="full">dvh</div>
+<div class="row"><div></div><div></div><div></div></div>
+<div class="pct"></div>
+<p class="big">Font in vw units</p>
+<div class="narrow-only">narrow</div>
+<div class="wide-only">wide</div>
+</body></html>
