@@ -1,0 +1,26 @@
+{
+  "ts": "20260927T083524Z",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "sites": 1,
+  "points": 2,
+  "max_points": 3,
+  "loads": 1,
+  "readable": 1,
+  "looks_right": 0,
+  "looks_right_unstable": [],
+  "readable_unscored": [],
+  "oracle_failed": [],
+  "oracle_blocked": {},
+  "blocked": {},
+  "per_site": {
+    "x": 2
+  },
+  "scorable_sites": 1,
+  "scorable_points": 2,
+  "scorable_max": 3,
+  "full_run": false
+}

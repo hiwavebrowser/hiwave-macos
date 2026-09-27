@@ -610,3 +610,30 @@ Tooling (hub scratch): `svgcase/chrome_rects.mjs` (pinned CfT 148 `getBoundingCl
 
 **Decisions for Pete:**
 1. **Land #299 knowing x drops a point until the flex-stretch fix lands?** Same shape as #289. The sizes are right and the lost point comes from a pre-existing centring bug that the correct size exposes. I recommend landing it and taking the flex re-layout fix next session. It's the cheapest item on the board now, with x and likely several others behind it.
+
+
+## 2026-09-27 05:10 — flex item re-layout (#300) and dvh (#301): 18 → 20/60 stacked, x +1
+
+**Points: 18/60 (develop c2772b1 + #299, `20260927T0515Z-svgratio`, the same tree as develop 3fb0ce1 now that #299 has merged) → 20/60 with #300 + #301 stacked (`20260927T0805Z-stack`).** Neither PR is merged. I didn't re-run develop across the full board, because the 0515Z run is the same engine tree. The chunk that holds x (amazon, reddit, x, linkedin, yahoo) was re-run on develop 3fb0ce1 as a control: 3/15.
+
+| run | engine | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|
+| `20260927T0515Z-svgratio` | develop-equivalent 3fb0ce1 | 18 | 13 | 5 | 0 | 18/51 |
+| `20260927T0805Z-stack` | + #300 + #301 | **20** | 13 | 6 | 1 | 20/48 |
+| `0805Z-dev` / `-flex` / `-stack` (x's chunk) | develop / + #300 / + both | 3/15 · 4/15 · 5/15 | | | | |
+
+- **x 1 → 2 (READABLE 55.8 → 95.3%) comes from #301.** The dvh-only arm reads 95.3% on its own. #300 moves x's LOOKS RIGHT 19.6 → 17.3%, which isn't enough to pass yet.
+- facebook 1 → 2 (LOOKS RIGHT 18.3 → 8.5%) is its usual run-to-run oracle drift. Not claimed.
+- github's LOOKS RIGHT went 83.6 → 71.7%, not attributed between the two PRs, and earned no point.
+- Passing all 3: none (google is still on doodle day, 18.5%). RustKit blocked: amazon, chatgpt, ebay, nytimes. Blank: youtube, reddit, microsoft.
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#300 `atlas/rs-flex-item-relayout` @ 856e1b6:** a flex item that is itself a flex container now lays its items out at the height the outer flex gave it (§9.4.11 stretched, §9.8 flexed), where before it used its content height. Step 11 passes the used height when it is known up front. 11c (auto-height re-stretch) and 11d (column re-derivation) re-run the nested container only when they change its height. An indefinite vertical main size is floored at `min-height` on the collapse entry point too. The repro box went from y 0 to 475, matching Chrome's 475. 4 new tests, each through both entry points; all fail on develop. rustkit-layout 527/527. Campaign 26/26 identical (avg 1.2534%), and the receipt is in the body.
+- **#301 `atlas/rs-dynamic-viewport-units` @ 1b3199b:** `100dvh` used to drop its whole declaration, because the `vh` arm parsed `"100d"`. `s/l/d` + `vw/vh/vmin/vmax` are now aliases of their `v` unit, in lengths and in `calc()`. On desktop Chrome these units are equal to `v`. rustkit-css 43/43. Campaign 26/26 identical.
+- Independent: they can merge in either order and don't conflict.
+
+**Next:** (1) the `flex: 1 1 0%` basis split: x-shape's box sits at x 262.5 where Chrome has 275, with two basis-0 items where one has a fixed height. That's x's remaining geometry, repro `scratch/svgcase/v-dvh.html`. (2) instagram at 16.4% LOOKS RIGHT (hero collage plus logo block). (3) The x-shape's `min-height` floor only reads px and vh (`min_inner_main_size`). If a site uses `min-height: calc(..)` or `%`, that's the next gap.
+
+Tooling: `cd <worktree>` as its own command, then plain commands (`git -C`, env-prefixed cargo, `ln -s`, `gh pr comment` and bash scripts all need approval in headless mode). `cargo --target-dir <shared>` works and saves the 13-minute cold build of a new worktree, but `scripts/parity_test.py` always builds its own worktree's `target/`.
+
+**Decisions for Pete:** none new. The `<img>`-through-ResourceLoader and `cargo fmt` questions from the earlier digests are still open.

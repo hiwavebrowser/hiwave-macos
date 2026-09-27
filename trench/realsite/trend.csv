@@ -17,3 +17,4 @@ ts,run,points,max,loads,readable,looks_right,scorable_points,scorable_max,blocke
 20260927T025502Z,20260927T0255Z-headed-dev,20,60,13,4,3,20,48,amazon|chatgpt|ebay|nytimes,nytimes
 20260927T0420Z-dev,20260927T0420Z-dev,18,60,13,4,1,18,51,amazon|ebay|nytimes,
 20260927T0515Z-svgratio,20260927T0515Z-svgratio,18,60,13,5,0,18,51,chatgpt|ebay|nytimes,
+20260927T0805Z-stack,20260927T0805Z-stack,20,60,13,6,1,20,48,amazon|chatgpt|ebay|nytimes,ebay

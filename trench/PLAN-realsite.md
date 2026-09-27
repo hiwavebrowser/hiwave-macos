@@ -85,6 +85,8 @@ Respect `<meta name="referrer">` and the `Referrer-Policy` header if cheap. appl
 
 **2026-09-27 02:05: NEXT ENGINE ITEM is flex item re-layout at its used size.** A flex item that is itself a flex container, and that the outer flex stretches (cross) or grows (main), must lay out its own items again against that used size. Today `align-items/justify-content:center` inside it centres against its content height (repro: hub `scratch/svgcase/v-right-stretched.html` and `v-col-stretched.html`, where Chrome puts the box at y=475 and RustKit at 0). Cover both layout entry points, add failing-first tests for row-stretch and column-grow, and A/B x (expect its logo to centre, and LOOKS RIGHT to go back under 15% with #299). #299 (inline-svg ratio sizing) is open.
 
+**2026-09-27 05:10: done.** Flex re-layout is #300, and `dvh`/`svh`/`lvh` parsing is #301 (x's `min-height:100dvh` was being dropped). Stacked, they score 20/60 (x +1). x's LOOKS RIGHT is 17.3%, not under 15. **NEXT ENGINE ITEM is the `flex: 1 1 0%` basis split.** In `scratch/svgcase/v-dvh.html`, RustKit puts the box at x=262.5 and Chrome at 275: two basis-0 items, one of them with `height:100px`, should split the row 200/200. Then instagram (16.4%).
+
 **Board tooling you may do (no scoring-rule change):**
 - A2: detect `oracle_blocked` and report `n/scorable` alongside `/60`.
 - A6: append a row to `trench/realsite/trend.csv` every full run.

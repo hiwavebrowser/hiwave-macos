@@ -1,0 +1,36 @@
+{
+  "ts": "20260927T080301Z",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "sites": 5,
+  "points": 3,
+  "max_points": 15,
+  "loads": 3,
+  "readable": 0,
+  "looks_right": 0,
+  "looks_right_unstable": [
+    "amazon",
+    "reddit",
+    "linkedin"
+  ],
+  "readable_unscored": [],
+  "oracle_failed": [],
+  "oracle_blocked": {},
+  "blocked": {
+    "amazon": "aws-waf/202"
+  },
+  "per_site": {
+    "amazon": 0,
+    "reddit": 0,
+    "x": 1,
+    "linkedin": 1,
+    "yahoo": 1
+  },
+  "scorable_sites": 4,
+  "scorable_points": 3,
+  "scorable_max": 12,
+  "full_run": false
+}
