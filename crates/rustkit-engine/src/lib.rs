@@ -2883,6 +2883,14 @@ impl Engine {
                 }
             }
             root_box.children.push(body_box);
+            // Percentage heights on body resolve against html's height
+            // (CSS 2.1 §10.5), which the anonymous root stands in for.
+            root_box.root_element_height = Some(
+                html_style
+                    .as_ref()
+                    .map(|s| s.height.clone())
+                    .unwrap_or(rustkit_css::Length::Auto),
+            );
         } else if let Some(html) = document.document_element() {
             // Fallback: use html element if no body
             debug!("No body found, using html element");
