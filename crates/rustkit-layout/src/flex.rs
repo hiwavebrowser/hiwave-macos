@@ -1608,6 +1608,18 @@ fn resolve_flexible_lengths(line: &mut FlexLine, container_main: f32, main_gap: 
         .iter()
         .map(|i| i.hypothetical_main_size + margins(i))
         .sum();
+    // Hypothetical sizes that already fill the line leave nothing to
+    // distribute: §9.7 would end with every item at its hypothetical size.
+    // Returning early keeps the targets the caller holds instead, and step
+    // 11d relies on that. Its indefinite-height re-run sizes the container
+    // to exactly this sum, and a `flex: 1` item's hypothetical height there
+    // is its 0 basis, because the vertical automatic minimum (§4.5) has no
+    // min-content height estimator yet. Resolving would collapse the item
+    // to its padding (the shelf's command palette); keeping the target keeps
+    // the size the first pass gave it.
+    if (container_main - hypothetical_sum - total_gaps).abs() < 0.01 {
+        return;
+    }
     let growing = hypothetical_sum + total_gaps < container_main;
     let factor = |i: &FlexItem| if growing { i.flex_grow } else { i.flex_shrink };
 

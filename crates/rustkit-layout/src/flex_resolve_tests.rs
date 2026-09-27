@@ -199,3 +199,38 @@ fn fractional_grow_factors_take_only_their_fraction_of_free_space() {
         assert_row(&got, &[(0.0, 100.0), (100.0, 100.0)], "fractional grow");
     }
 }
+
+/// Guard, not a Chrome match: an auto-height column's `flex: 1` item keeps
+/// at least its content height (the shelf's command palette). Chrome 148 gives
+/// the item its 97px of content through the vertical automatic minimum, which
+/// RustKit doesn't implement yet; before the early return in
+/// `resolve_flexible_lengths`, step 11d's re-run collapsed it to 0.
+#[test]
+fn a_flex_one_item_in_an_auto_height_column_keeps_its_content() {
+    for collapse in [false, true] {
+        let mut body_s = ComputedStyle::new();
+        body_s.display = Display::Flex;
+        body_s.flex_direction = rustkit_css::FlexDirection::Column;
+        let mut body = LayoutBox::new(BoxType::Block, body_s);
+        let mut hdr_s = ComputedStyle::new();
+        hdr_s.display = Display::Flex;
+        hdr_s.align_items = AlignItems::Center;
+        hdr_s.padding_top = Length::Px(8.0);
+        hdr_s.padding_bottom = Length::Px(8.0);
+        let mut hdr = LayoutBox::new(BoxType::Block, hdr_s);
+        hdr.children.push(sized_block(24.0, 24.0));
+        let mut pal_s = item(1.0, 1.0, FlexBasis::Length(0.0));
+        pal_s.display = Display::Flex;
+        pal_s.flex_direction = rustkit_css::FlexDirection::Column;
+        pal_s.padding_top = Length::Px(12.0);
+        pal_s.padding_bottom = Length::Px(12.0);
+        let mut pal = LayoutBox::new(BoxType::Block, pal_s);
+        pal.children.push(sized_block(100.0, 41.0));
+        pal.children.push(sized_block(100.0, 56.0));
+        body.children.push(hdr);
+        body.children.push(pal);
+        let root = laid_out(body, collapse);
+        let h = root.children[1].dimensions.content.height;
+        assert!(h >= 97.0, "the palette holds 97px of content, got {h}");
+    }
+}
