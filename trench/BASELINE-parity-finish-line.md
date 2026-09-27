@@ -20,9 +20,12 @@ so the third does not:
 - **The queue runs off `develop`, not `master`.** Engine work goes on its own
   branch cut from `develop` and opens its own PR; this branch stays the
   instrument lane (see *Branch law* at the foot of this file).
-- **The standing metric is `2/26`** — night 27's receipt, run 33294082148,
-  `macos-14`, on `develop`. The `1/26` recorded under *The one metric* below is
-  P0b's original receipt and is kept as history, not as current state.
+- **The standing metric is `3/26`** (`bg-pure`, `bg-solid`, `gradients`) — run
+  36100178666, `macos-14`, 2026-09-25. The `1/26` recorded under *The one
+  metric* below is P0b's original receipt and is kept as history, not as
+  current state.
+- **The queue is geometry-first** — ratified 2026-09-27, see the decision block
+  below. Do not open a night on a paint-only case.
 - **This digest was not the whole record.** Nights 10–41 were written to
   `trench/forensics/`, `docs/MACOS_PR*_R1_*.md` and PR bodies; this file's
   entries jumped 2026-08-12 → 2026-09-02 on this branch and 08-12 → 09-03 on
@@ -179,6 +182,32 @@ barely a signal.** Per-box magnitudes on CLEAN boxes are the readable
 instrument; anything on a TEXT box needs the macOS lane to arbitrate.
 
 ---
+
+## Decision RATIFIED by Pete (2026-09-27) — geometry first
+
+**Decision 4 (open since 09-24) is settled: the queue works the geometry
+failures down. It does not turn to paint.** Pete, 2026-09-27, on being asked
+whether to run the close paint cases as macOS-CI experiments or stay on
+geometry: *"if its up to me i'd close those failures."*
+
+What that means for a night:
+
+- **Pick the unit from Gate A, not Gate B.** The next unit is whatever the
+  latest digest entry records — on 2026-09-27 that was the FormControl hole in
+  `own_min_content_width` (a button's min-content floor is its longest word
+  plus padding). `settings` is still the largest geometry row (256 on macOS)
+  but was worked on 09-27 (#298). Run `trench/tools/n67_confound_census.py`
+  before choosing, since most of `settings`' `y` failures are confounded on the
+  Linux seat.
+- **The eleven paint-only cases wait.** They are geometry-, discrete- and
+  stability-green and blocked by paint alone. Ten of them are below the Linux
+  seat's paint floor (2026-09-26, `scripts/seat_control_paint_report.py`), so
+  this seat could not work them anyway. Do not start one here and do not argue
+  the tolerance.
+- **Paint still gets measured, not chased.** Every night still reports geometry
+  and paint as a pair. A geometry fix that moves a case's paint is a finding;
+  a night that picks its unit off the paint column is off-queue.
+- **Engine changes still go on a branch cut from `develop`**, per *Branch law*.
 
 ## Decisions RATIFIED by Pete (2026-08-07 evening) — stop asking, start executing
 

@@ -12505,3 +12505,16 @@ next night's board is not the tree tonight's numbers were taken against.
   531 `y`.
 - Decisions 1–3 of this entry are all still open, and decision 3 (the artifact
   host) is the one that cost verification tonight.
+
+### Addendum — decision 1 RATIFIED (2026-09-27): geometry first
+
+Pete, on 09-26's decision 1, which this entry carried as still open (paint
+cases as macOS-CI experiments, or stay on geometry): *"if its up to me i'd close
+those failures."* Recorded in `trench/BASELINE-parity-finish-line.md` as a
+ratified decision block so the next seat reads it before anything else.
+
+This confirms the assumption tonight worked under; it does not change the
+recorded next unit. **Next unit stays the FormControl hole in
+`own_min_content_width`.** The eleven paint-only cases wait. Decision 1 is
+closed and should not be carried forward again. Decisions 2 and 3 of this entry
+are still open.
