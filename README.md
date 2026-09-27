@@ -210,13 +210,13 @@ WebKit fallback uses Apple's system WebKit for all rendering:
 We don't measure success by how many tabs you open. We measure it by how focused you stay.
 
 ### Simplicity over Extensibility  
-No extension ecosystem. Features are built-in, tested, and integrated. One browser, one experience.
+No extension ecosystem, by design. Plugins are a common path for tracking and malware, and a slower browser. What people use extensions for, like ad blocking and password management, is built in, tested and integrated. One browser, one experience.
 
 ### Privacy by Default
 Tracking protection isn't an add-on, it's foundational. We don't collect your data. Period.
 
 ### Modern Web Only
-We target post-2020 web standards. No legacy cruft, no compatibility hacks for sites that should've been updated years ago.
+We target post-2020 web standards. No legacy cruft in general. The exception is the popular sites on our real-site boards: we support those as they really are, old hacks included, because people use them every day.
 
 ### Opinionated but Respectful
 We have strong opinions about how browsing should work, but we offer three modes so you can choose your level of buy-in.
@@ -349,7 +349,7 @@ A: Not yet. We're in alpha. Use it as a secondary browser while we iron out the 
 A: Eventually! Desktop is the priority for now.
 
 **Q: How do you make money?**  
-A: We don't yet. Future plans include optional Workspace-Sync (paid) and possibly search partnerships. We will never sell your data or show ads.
+A: We don't yet. A possible future option is a paid, optional Workspace Sync. No search partnerships are planned. We will never sell your data or show ads.
 
 ---
 

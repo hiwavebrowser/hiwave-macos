@@ -30,6 +30,15 @@ the story too.
    Shelf, Tab Decay, Workspaces and three levels of automation. Chrome
    optimises for time-in-browser. HiWave optimises for your attention.
 
+## Principles that stay
+
+- **No extensions.** What people use plugins for is built in. We won't clutter
+  the browser with third-party add-ons.
+- **Supported sites are supported as they are.** The popular sites on our
+  boards get whatever compatibility work they need, old hacks included.
+  Otherwise we target the modern web.
+- **No search partnerships planned**, and no selling data or ads, ever.
+
 ## Platforms
 
 macOS first: it's the reference engine tree and the only platform with
