@@ -619,6 +619,25 @@ impl SvgStyle {
 
     /// Parse style attributes.
     pub fn parse_attributes(&mut self, attrs: &HashMap<String, String>) {
+        // An inline `style="fill: #fbf1e2"` sets the same properties as the
+        // presentation attributes and wins over them (SVG 2 §6.8). linkedin's
+        // hero paints all 148 of its shapes this way; without it every one
+        // fell back to the initial black fill.
+        if let Some(style) = attrs.get("style") {
+            let mut merged = attrs.clone();
+            merged.remove("style");
+            for decl in style.split(';') {
+                if let Some((name, value)) = decl.split_once(':') {
+                    let value = value.trim();
+                    let value = value
+                        .strip_suffix("!important")
+                        .map(str::trim_end)
+                        .unwrap_or(value);
+                    merged.insert(name.trim().to_ascii_lowercase(), value.to_string());
+                }
+            }
+            return self.parse_attributes(&merged);
+        }
         if let Some(fill) = attrs.get("fill") {
             self.fill = Paint::parse(fill);
         }
@@ -2299,6 +2318,21 @@ mod tests {
         if let Some(DisplayCommand::Text { x, .. }) = commands.iter().find(|c| matches!(c, DisplayCommand::Text { .. })) {
             assert!(*x < 100.0, "middle anchor must shift the run left: x={x}");
         }
+    }
+
+    #[test]
+    fn test_inline_style_sets_paint_and_beats_presentation_attributes() {
+        // linkedin's hero: `<path d=".." style="fill: #fbf1e2"/>`, 148 times.
+        let doc = SvgDocument::parse(
+            r##"<svg width="10" height="10"><rect width="10" height="10" fill="#0000ff" style="fill: #fbf1e2; stroke:#ff0000 !important;stroke-width: 2"/></svg>"##,
+        )
+        .expect("parse");
+        let SvgElement::Group(root) = &doc.root else { panic!("root is a group") };
+        let SvgElement::Rect(rect) = &root.children[0] else { panic!("rect") };
+        let rgb = |c: Option<Color>| c.map(|c| (c.r, c.g, c.b));
+        assert_eq!(rgb(rect.style.fill_color()), Some((0xfb, 0xf1, 0xe2)));
+        assert_eq!(rgb(rect.style.stroke_color()), Some((0xff, 0, 0)));
+        assert_eq!(rect.style.stroke_width, 2.0);
     }
 
     #[test]

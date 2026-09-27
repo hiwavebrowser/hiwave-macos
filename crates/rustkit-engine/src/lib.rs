@@ -6856,9 +6856,9 @@ impl Engine {
             }
             // SVG is vector content: ImageManager's raster decode rejects it
             // ("Unknown image format", every Wikipedia logo in the live
-            // session). Routed by URL extension; SVG served from
-            // extensionless URLs still falls through to the raster lane
-            // (content-type routing is the named follow-up).
+            // session). Routed by URL extension here; SVG served from an
+            // extensionless URL goes to the raster lane, which hands it
+            // back by its `image/svg+xml` type (ImageError::Svg).
             if url.path().to_ascii_lowercase().ends_with(".svg") {
                 svg_urls.push(url);
             } else {
@@ -6920,13 +6920,16 @@ impl Engine {
             }
         }
 
-        let results: Vec<bool> = futures::stream::iter(pending.into_iter().map(|url| {
+        // Each raster load is loaded (true), failed (false), or turned out to
+        // be SVG by its type and parsed here for the SVG cache.
+        type RasterOutcome = (bool, Option<(String, rustkit_svg::SvgDocument)>);
+        let results: Vec<RasterOutcome> = futures::stream::iter(pending.into_iter().map(|url| {
             let image_manager = image_manager.clone();
             async move {
                 info!(%url, "Loading image via ImageManager");
                 let Ok(loaded) = tokio::time::timeout_at(deadline, image_manager.load(url.clone())).await else {
                     warn!(%url, "Image over the subresource budget; rendering without it");
-                    return false;
+                    return (false, None);
                 };
                 match loaded {
                     Ok(image) => {
@@ -6936,11 +6939,23 @@ impl Engine {
                             height = image.natural_height,
                             "Image loaded and cached"
                         );
-                        true
+                        (true, None)
+                    }
+                    Err(rustkit_image::ImageError::Svg(xml)) => {
+                        match rustkit_svg::SvgDocument::parse(&xml) {
+                            Ok(doc) => {
+                                info!(%url, "Image served as image/svg+xml; using the SVG lane");
+                                (true, Some((url.to_string(), doc)))
+                            }
+                            Err(e) => {
+                                warn!(?e, %url, "Failed to parse SVG image");
+                                (false, None)
+                            }
+                        }
                     }
                     Err(e) => {
                         warn!(?e, %url, "Failed to load image");
-                        false
+                        (false, None)
                     }
                 }
             }
@@ -6949,7 +6964,12 @@ impl Engine {
         .collect()
         .await;
 
-        loaded += results.into_iter().filter(|ok| *ok).count();
+        for (ok, svg) in results {
+            if let Some((url, doc)) = svg {
+                self.svg_cache.insert(url, doc);
+            }
+            loaded += usize::from(ok);
+        }
 
         Ok(loaded)
     }
@@ -19662,5 +19682,63 @@ mod referrer_tests {
                 ("/same.css".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
             ]
         );
+    }
+}
+
+// Needs a headless view: `cargo test -p rustkit-engine --features headless`.
+#[cfg(all(test, feature = "headless"))]
+mod svg_content_type_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    const SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="red"/></svg>"#;
+
+    /// linkedin's hero is `<img src="https://static.licdn.com/aero-v1/sc/h/<hash>">`
+    /// served as `image/svg+xml`: no `.svg` extension, so it went to the
+    /// raster lane and failed as "Unknown image format".
+    #[test]
+    fn an_extensionless_img_is_routed_to_the_svg_lane_by_its_content_type() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                let (ctype, body) = match path.as_str() {
+                    "/page" => (
+                        "text/html",
+                        r#"<html><body><img src="/h/typed"><img src="/h/untyped"></body></html>"#,
+                    ),
+                    "/h/typed" => ("image/svg+xml; charset=utf-8", SVG),
+                    // Chrome doesn't sniff SVG: served as octet-stream it's a broken image.
+                    "/h/untyped" => ("application/octet-stream", SVG),
+                    _ => ("text/plain", ""),
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            engine
+                .load_url(view, Url::parse(&format!("http://127.0.0.1:{port}/page")).unwrap())
+                .await
+                .expect("load_url");
+            engine.load_subresources(view).await.expect("subresources");
+        });
+        let typed = format!("http://127.0.0.1:{port}/h/typed");
+        let untyped = format!("http://127.0.0.1:{port}/h/untyped");
+        let doc = engine.svg_cache.get(&typed).expect("image/svg+xml img must land in the SVG cache");
+        assert_eq!(doc.get_size(0.0, 0.0), (40.0, 20.0));
+        assert!(!engine.svg_cache.contains_key(&untyped), "SVG is never sniffed from bytes");
     }
 }
