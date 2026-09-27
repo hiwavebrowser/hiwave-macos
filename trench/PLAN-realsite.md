@@ -75,6 +75,12 @@ Outputs stay gitignored, so the table IS the receipt. If a PR diff exceeds ~1,00
 - Run the board once headless and once headed, same session, and add a dated line under **Changes** in BASELINE-realsite.md with both numbers. Expected: x's and carvana's oracles stop being "Access denied". The scorable count and per-site points may shift.
 - If headed Chrome still gets challenged somewhere, record it as oracle_blocked, as now.
 
+**Atlas, 2026-09-26 20:40: small item. Send a Referer on subresource requests, following Chrome's default policy `strict-origin-when-cross-origin`:**
+- same-origin: the full URL, without fragment or userinfo;
+- cross-origin: origin only;
+- https→http downgrade: nothing.
+Respect `<meta name="referrer">` and the `Referrer-Policy` header if cheap. apple's `/wss/fonts` returns 404 without a Referer, so apple's fonts fail today. Privacy matters in a browser: never send more than this policy allows. Test each case.
+
 **Board tooling you may do (no scoring-rule change):**
 - A2: detect `oracle_blocked` and report `n/scorable` alongside `/60`.
 - A6: append a row to `trench/realsite/trend.csv` every full run.
