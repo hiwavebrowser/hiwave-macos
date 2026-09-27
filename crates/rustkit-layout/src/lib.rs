@@ -1438,6 +1438,13 @@ pub struct LayoutBox {
     /// an auto-height out-of-flow parent (and the auto-height in-flow chain
     /// under it) sets it today; see `mark_percent_height_bases`.
     pub(crate) percent_height_is_auto: bool,
+    /// Set on the engine's layout root, an anonymous stand-in for `<html>`
+    /// whose own style is the default (html's computed style only feeds
+    /// inheritance): html's specified `height`. The root's children resolve
+    /// percentage heights against it, taken against the initial containing
+    /// block (the viewport), so `html, body { height: 100% }` keeps body at
+    /// the viewport's height while an `auto` html makes body's `100%` auto.
+    pub root_element_height: Option<Length>,
 }
 
 impl LayoutBox {
@@ -1465,6 +1472,7 @@ impl LayoutBox {
             text_lines: None,
             text_flow_first_offset: None,
             percent_height_is_auto: false,
+            root_element_height: None,
         }
     }
 
@@ -2966,7 +2974,7 @@ impl LayoutBox {
     /// `definite_content_height_for_children`). `None` keeps the historical
     /// behaviour: percentages read `containing_block.content.height`, which on
     /// the flow path is the parent's cursor.
-    pub fn layout_with_collapse_in(
+    pub(crate) fn layout_with_collapse_in(
         &mut self,
         containing_block: &Dimensions,
         margin_context: &mut MarginCollapseContext,
@@ -5252,6 +5260,15 @@ impl LayoutBox {
     }
 
     fn definite_content_height_for_children(&self, containing_block_height: f32) -> Option<f32> {
+        if let Some(html_height) = &self.root_element_height {
+            let icb_height = self.viewport.1;
+            return match html_height {
+                Length::Auto => None,
+                Length::Percent(pct) => Some(pct / 100.0 * icb_height),
+                other => Some(self.length_to_px(other, icb_height)),
+            }
+            .map(|h| h.max(0.0));
+        }
         if self.percent_height_computes_to_auto() {
             return None;
         }
@@ -13299,28 +13316,33 @@ mod tests {
     /// a cursor-height containing block plus the ICB height as its base.
     #[test]
     fn html_and_body_at_100_percent_still_fill_the_viewport() {
-        let mut body_style = ComputedStyle::new();
-        body_style.height = Length::Percent(100.0);
-        let mut html_style = ComputedStyle::new();
-        html_style.height = Length::Percent(100.0);
-        let mut html = LayoutBox::new(BoxType::Block, html_style);
-        html.children.push(LayoutBox::new(BoxType::Block, body_style));
-        html.set_viewport(1280.0, 800.0);
-        let cb = Dimensions {
-            content: Rect::new(0.0, 0.0, 1280.0, 0.0),
-            ..Default::default()
-        };
-        let mut mc = MarginCollapseContext::new();
-        mc.children_are_formatting_roots = true;
-        let mut fc = FloatContext::new();
-        html.layout_with_collapse_in(&cb, &mut mc, &mut fc, Some(800.0));
-        assert_eq!(
-            (
-                html.dimensions.content.height,
-                html.children[0].dimensions.content.height
-            ),
-            (800.0, 800.0)
-        );
+        // The engine's root: anonymous, default style, html's height carried
+        // in `root_element_height`, laid out with a cursor-height (0)
+        // containing block.
+        for (html_height, body_expected) in [
+            (Length::Percent(100.0), 800.0),
+            (Length::Px(300.0), 300.0),
+            (Length::Auto, 0.0),
+        ] {
+            let mut body_style = ComputedStyle::new();
+            body_style.height = Length::Percent(100.0);
+            let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+            root.root_element_height = Some(html_height.clone());
+            root.children.push(LayoutBox::new(BoxType::Block, body_style));
+            root.set_viewport(1280.0, 800.0);
+            let cb = Dimensions {
+                content: Rect::new(0.0, 0.0, 1280.0, 0.0),
+                ..Default::default()
+            };
+            let mut mc = MarginCollapseContext::new();
+            mc.children_are_formatting_roots = true;
+            let mut fc = FloatContext::new();
+            root.layout_with_collapse(&cb, &mut mc, &mut fc);
+            assert_eq!(
+                root.children[0].dimensions.content.height, body_expected,
+                "html {{ height: {html_height:?} }}"
+            );
+        }
     }
 
     /// The abspos twin of `a_calc_height_resolves_against_its_parents_definite_height`.
