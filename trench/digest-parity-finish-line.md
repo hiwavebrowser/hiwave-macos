@@ -12459,3 +12459,9 @@ code and reproduced by probe, and it does not depend on either seat.
 Also worth banking for whoever reads a green Parity Gate next: **a count-only
 receipt cannot see a magnitude-only change.** Posted on the PR so the badge is
 not read as confirmation it cannot give.
+
+**#298 is ready to land and waits on a person.** R2-STAMP **PASS** @ `717a786`
+(checks green, merge CLEAN, gates 1–7 ok), label `r2-pass`, `mergeable_state:
+clean` read from the API rather than from the stamp. R1 design CLEAR. Nothing on
+it is mine any more: a push cannot supply a human's merge, and this seat does not
+merge. Verified `crates/` is the two files in the receipt above and nothing else.
