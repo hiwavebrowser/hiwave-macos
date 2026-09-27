@@ -12465,3 +12465,43 @@ not read as confirmation it cannot give.
 clean` read from the API rather than from the stamp. R1 design CLEAR. Nothing on
 it is mine any more: a push cannot supply a human's merge, and this seat does not
 merge. Verified `crates/` is the two files in the receipt above and nothing else.
+
+### Addendum — #298 MERGED (2026-09-27 07:06 UTC), `develop 8a06de5`
+
+The night's P-item is on the mainline. Verified from the repository rather than
+from the webhook: `717a786` is an ancestor of `origin/develop`, and the merge
+commit `8a06de5`'s diff against its first parent is **+123 / −0 across exactly
+two files** (`crates/rustkit-layout/src/grid.rs`,
+`crates/rustkit-layout/src/lib.rs`) — bit-for-bit the PR's diffstat, so nothing
+was lost or re-resolved on the way in. R2-STAMP PASS at `717a786`, merge CLEAN,
+all 14 check runs green. Check-in cancelled; watch released.
+
+`develop` also took #299 (`atlas/rs-svg-ratio-sizing`) just ahead of this, so the
+next night's board is not the tree tonight's numbers were taken against.
+
+**State at end of night, for whoever reads this next:**
+
+- Metric **3/26** on macOS, measured on this PR's own lane
+  ([run 36297222671](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/36297222671)),
+  geometry 14/26, paint 3/26, stability 26/26, discrete 26/26. Unchanged, and
+  predicted to be: a magnitude-only fix whose boxes sit below the capture fold
+  cannot move a count-and-fraction receipt.
+- **The macOS lane confirmed no regression and could not confirm the
+  improvement.** Every case's `geo_fails` and `paint` is identical to #297's run
+  on a tree without this change. The magnitudes are in `gate-a.json` inside the
+  `parity-oracle` artifact, behind the denied host.
+- **`settings` is still the largest geometry row** and its count on macOS is 256.
+  Tonight took the top pure-`real` row out of it; the rest is the `y` staircase,
+  which the census says is 186/189 seat-confounded here.
+- **Recorded next unit:** `own_min_content_width`'s FormControl hole, which is
+  tonight's defect's sibling and is NOT the same fix — Chrome floors a button at
+  its longest word plus padding, not its whole label (probed: Chrome 84.58/69.80
+  against RustKit 72.17/39.84 in a 120px flex line, and a float shrink-to-fit
+  where Chrome gives 84.58 and RustKit 60 with a 125 child). It needs a
+  min-content measure of the label, its own guards and its own A/B.
+- **New instrument, on this branch:** `trench/tools/n67_confound_census.py`.
+  Run it before choosing a unit. 273 of 1593 elements are seat-clean; per axis
+  the seat is clean on 1335 of 1593 `x`, 1316 `width`, 1089 `height`, and only
+  531 `y`.
+- Decisions 1–3 of this entry are all still open, and decision 3 (the artifact
+  host) is the one that cost verification tonight.
