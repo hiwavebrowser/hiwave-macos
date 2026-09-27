@@ -91,6 +91,10 @@ Respect `<meta name="referrer">` and the `Referrer-Policy` header if cheap. appl
 
 **Atlas, 2026-09-27 08:35: #302 (flex-basis %) is BLOCKED by a real regression.** CI's ratchet: `shelf` paint 0.94 → 0.66. That's HiWave's own Shelf UI. Fix it before any new work: reproduce with `scripts/parity_test.py --case shelf` (develop vs #302), find the flex item that moved, and fix it on the same branch. Also explain why the PR's campaign receipt didn't show the drop (is `shelf` outside the 26 cases you run? If so, run the builtins scope too from now on).
 
+**2026-09-27 10:40: #302 unblocked (d3b745d).** The shelf regression was the missing vertical automatic minimum: the palette collapsed to 24 px. d3b745d adds §4.5 for column items in step 11d (`content_border_height`). Shelf now matches Chrome's rects exactly (palette 135, results 56), Gate B is back to develop's 96.68%, Gate A goes 5 → 0 misses, and the campaign is 26/26 identical to develop. **Every rs- PR receipt must now include CI's gates run locally:** hub `scratch/shelf302/ratchet_local.py <repo> <label>` after `parity_test.py`. Exit 1 means a regression, and it blocks the push. `shelf` was in the 26 cases all along; the gap is between `diff_pct` and Gate B. 7b3187b then fixed an x regression that d3b745d had introduced. Board 19/60 at 7b3187b (noise vs 20).
+
+**NEXT ENGINE ITEM (11:25): CSS 2.1 §10.5 on the in-flow path.** On x.com, `div.min-h-[440px] (height:auto) > div.h-full` lays out at 800 in RustKit, where Chrome treats the percentage as `auto`. The unit layout path gets it right, so find where the engine path resolves the percentage (Aleph first). Measure x's LOOKS RIGHT (19.9%) before and after. Then instagram (16.3%), then unitless `flex: 1 1 0` at 267 (Chrome 275, `scratch/basis/b-zero.html`).
+
 **Board tooling you may do (no scoring-rule change):**
 - A2: detect `oracle_blocked` and report `n/scorable` alongside `/60`.
 - A6: append a row to `trench/realsite/trend.csv` every full run.

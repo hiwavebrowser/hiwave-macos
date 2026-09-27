@@ -682,3 +682,32 @@ Tooling: `cd <worktree>` as its own command, then plain commands (`git -C`, env-
 Tooling: hub `scratch/basis/run.py <bin>` (flex-basis variants, red-box origin) and `scratch/basis/cases.html` (the six §9.7 rows, for `svgcase/chrome_rects.mjs`). In headless mode `ln -s` and `cp -R` need approval, so a new worktree's first `parity_test.py` is a cold ~13 min build.
 
 **Decisions for Pete:** none new. The `<img>`-through-ResourceLoader and `cargo fmt` questions from earlier digests are still open.
+
+
+## 2026-09-27 11:25 — #302's shelf regression fixed with the vertical automatic minimum; 20 → 19/60 (noise)
+
+**Points: 20/60 (#302 @ e1b58bd, `20260927T1215Z-basis-full`) → 19/60 (#302 @ 7b3187b, `20260927T1510Z-automin2`).** Develop is unchanged at 2e6e617, and #302 is not merged.
+
+| run | head | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|
+| `20260927T1215Z-basis-full` | e1b58bd | 20 | 13 | 6 | 1 | 20/48 |
+| `20260927T1430Z-automin` | d3b745d | 19 | 13 | 5 | 1 | 19/51 |
+| `20260927T1510Z-automin2` | **7b3187b** | **19** | 13 | 6 | 0 | 19/51 |
+
+- **yahoo 2 → 1** is last session's drift point going back: its control arm was `unstable` then, and its LOOKS RIGHT is 27.6% now. **google 2 / 3 / 2** is its doodle-day LOOKS RIGHT swing (10.5% ↔ 18.1%). Net ±1 is within the noise bound. No point was lost that I can attribute to #302.
+- **x 2 / 1 / 2:** d3b745d cost x its footer words, and 7b3187b gave them back (details below).
+- Passing all 3: none in the final run (google did on d3b745d's run). RustKit blocked: amazon, ebay, nytimes. chatgpt fails with an HTTP error. Blank: youtube, reddit, microsoft. Oracle blocked: nytimes (HTTP 403) in the final run.
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#302 `atlas/rs-flex-basis-percent`: 2 commits added, e1b58bd → d3b745d → 7b3187b.** No force-push.
+  - **d3b745d, the shelf regression (CI ratchet: shelf paint 0.94 → 0.66):** the vertical §4.5 automatic minimum. Column items with `min-height:auto` and `overflow-y:visible` now get a floor in step 11d from `content_border_height`, which reads the item's laid-out subtree. Shelf now matches Chrome's rects exactly (palette 135, results 56). Gate B is back to develop's 96.68% on this seat. Gate A shelf misses go 2 (develop) / 5 (e1b58bd) → 0. Campaign 26/26, **identical to develop on all 26 cases**. CI's `ratchet_gate.py`, run locally over the 26 captures, exits 2 (no regression).
+  - **7b3187b, which fixes the x regression d3b745d introduced:** x's `h-full` login widget lays out at the 800px viewport. That's a pre-existing percentage-height bug, and the new floor carried it up to the main row, putting the footer at y=1011. The measure now treats a percentage height as `auto` (§10.5) and recurses through block children. The footer is back at 752, as in Chrome. The new unit test for this is a **guard, not failing-first**: the unit path doesn't reproduce the 800. The PR body says so.
+- The PR body has the full receipt, including why the old one missed it. `shelf` was in the 26 cases all along; `diff_pct` moved 0.36 points while Gate B moved 31. **New rule in PLAN:** every rs- receipt runs CI's gates locally (`scratch/shelf302/ratchet_local.py`).
+
+**Found:** RustKit resolves `height:100%` inside an auto-height block (x's `min-h-[440px] > h-full`) to 800 (viewport-ish); in Chrome it behaves as `auto`. That's a CSS 2.1 §10.5 bug on the in-flow path, the sibling of the positioned case on `atlas/rs-fixed-pct-height`. The unit path gets it right, so it's an engine-path difference. Repro is the live x.com page; `scratch/shelf302/ancestry.py` on a `--dump-layout` shows it.
+
+**Next:** (1) the §10.5 percentage-height bug above, which is x's LOOKS RIGHT (19.9%). (2) instagram at 16.3%. (3) unitless `flex: 1 1 0` at 267 where Chrome has 275 (`scratch/basis/b-zero.html`).
+
+Tooling (hub `scratch/shelf302/`): `ratchet_local.py <repo> <label>` runs CI's Gates A and B plus the ratchet over `parity_test.py` captures. `gateb.py` scores one case. `cap.py` wraps parity-capture with `--url` and layout dump for headless mode. `ancestry.py` and `laydiff.py` diff and walk layout dumps. `cmp_runs.py` is a rough per-site comparison.
+
+**Decisions for Pete:** none new. The `<img>`-through-ResourceLoader and `cargo fmt` questions are still open. (`flex.rs` isn't rustfmt-clean on develop, so I formatted only my own hunks.)
