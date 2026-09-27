@@ -1,0 +1,107 @@
+{
+  "id": "instagram",
+  "url": "https://www.instagram.com/",
+  "chrome": [
+    {
+      "url": "https://www.instagram.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.instagram.com/",
+      "title": "Instagram",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T0240Z-stack/instagram/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260927T0240Z-stack/instagram/chrome-a.png",
+      "elapsed_ms": 15514
+    },
+    {
+      "url": "https://www.instagram.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.instagram.com/",
+      "title": "Instagram",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T0240Z-stack/instagram/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260927T0240Z-stack/instagram/chrome-b.png",
+      "elapsed_ms": 14982
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.instagram.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260927T0240Z-stack/instagram/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260927T0240Z-stack/instagram/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 13,
+      "threw": 1,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 33,
+      "bytes": 6121964,
+      "elapsed_ms": 5207
+    },
+    "elapsed_ms": 9909,
+    "error": null,
+    "wall_ms": 10188,
+    "non_background_fraction": 0.0208
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 46,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "2026",
+      "about",
+      "account",
+      "ai",
+      "api",
+      "blog",
+      "close",
+      "consumer",
+      "contact",
+      "create",
+      "email",
+      "english",
+      "everyday",
+      "facebook",
+      "forgot",
+      "friends",
+      "from",
+      "health",
+      "help",
+      "in",
+      "instagram",
+      "into",
+      "jobs",
+      "lite",
+      "locations"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 8.05732421875,
+    "diff": 16.45927734375
+  },
+  "points": 1
+}
