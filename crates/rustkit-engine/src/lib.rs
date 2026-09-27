@@ -528,6 +528,79 @@ fn resolve_font_source(base: Option<&Url>, src: &str) -> FontSource {
 
 /// `data:[<mediatype>][;base64],<payload>` → bytes. Fonts ship base64; the
 /// percent-encoded form is decoded too so a valid URI never fails here.
+/// Resolve every relative `url(...)` in an EXTERNAL stylesheet against the
+/// stylesheet's own URL, returning CSS in which those references are absolute.
+///
+/// CSS Values 4 §4.2: a relative URL in a style sheet resolves against the
+/// sheet's URL, not the document's. The engine resolves `@font-face` sources,
+/// background images and the rest against the view's URL later, so a sheet on
+/// a CDN (`github.githubassets.com/assets/x.css` → `url(MonaSans.woff2)`) was
+/// fetched from the page's origin and 404ed. Absolutising at load time fixes
+/// every consumer at once. Comments and quoted strings outside `url(` are
+/// copied untouched; `data:`, already-absolute and fragment-only (`#id`)
+/// references are left as written.
+fn absolutize_css_urls(css: &str, sheet_url: &Url) -> String {
+    let b = css.as_bytes();
+    let mut out = String::with_capacity(css.len() + 64);
+    let mut i = 0;
+    let mut copied = 0;
+    while i < b.len() {
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i = css[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 2);
+            }
+            q @ (b'"' | b'\'') => {
+                let mut j = i + 1;
+                while j < b.len() && b[j] != q {
+                    j += if b[j] == b'\\' { 2 } else { 1 };
+                }
+                i = (j + 1).min(b.len());
+            }
+            b'u' | b'U'
+                if b.len() >= i + 4
+                    && css[i..i + 4].eq_ignore_ascii_case("url(")
+                    && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'-' || b[i - 1] == b'_')) =>
+            {
+                let arg_start = i + 4;
+                let Some(close) = css[arg_start..].find(')').map(|e| arg_start + e) else {
+                    break;
+                };
+                let raw = css[arg_start..close].trim();
+                let (quote, inner) = match raw.as_bytes().first() {
+                    Some(&q @ (b'"' | b'\'')) if raw.len() >= 2 && raw.as_bytes()[raw.len() - 1] == q => {
+                        (Some((q as char).to_string()), &raw[1..raw.len() - 1])
+                    }
+                    _ => (None, raw),
+                };
+                if let Some(abs) = absolutize_one(inner, sheet_url) {
+                    out.push_str(&css[copied..arg_start]);
+                    let q = quote.unwrap_or_else(|| "\"".to_string());
+                    out.push_str(&q);
+                    out.push_str(&abs.replace('\\', "\\\\").replace(&q, &format!("\\{q}")));
+                    out.push_str(&q);
+                    copied = close;
+                }
+                i = close + 1;
+            }
+            _ => i += 1,
+        }
+    }
+    out.push_str(&css[copied.min(css.len())..]);
+    out
+}
+
+fn absolutize_one(reference: &str, base: &Url) -> Option<String> {
+    let r = reference.trim();
+    if r.is_empty() || r.starts_with('#') {
+        return None;
+    }
+    // Already absolute (any scheme, incl. data:) — leave exactly as written.
+    if Url::parse(r).is_ok() {
+        return None;
+    }
+    base.join(r).ok().map(|u| u.to_string())
+}
+
 fn decode_data_url(src: &str) -> Option<Vec<u8>> {
     let rest = src.get(5..)?;
     let (meta, payload) = rest.split_once(',')?;
@@ -6655,7 +6728,7 @@ impl Engine {
                         Ok(response) => {
                             if response.ok() {
                                 match response.text().await {
-                                    Ok(css_text) => match Stylesheet::parse(&css_text) {
+                                    Ok(css_text) => match Stylesheet::parse(&absolutize_css_urls(&css_text, &url)) {
                                         Ok(stylesheet) => {
                                             debug!(rules = stylesheet.rules.len(), %url, "Parsed external stylesheet");
                                             Some(stylesheet)
@@ -19280,6 +19353,104 @@ fn substitute_css_vars<'a>(
     }
     push(&mut out, rest, budget);
     out
+}
+
+// ── url() in an external stylesheet resolves against THAT SHEET's URL
+//    (CSS Values 4 §4.2), not the document's. github's fonts live beside
+//    its CSS on github.githubassets.com and were fetched from github.com. ──
+#[cfg(test)]
+mod css_url_base_tests {
+    use super::*;
+
+    fn abs(css: &str) -> String {
+        absolutize_css_urls(css, &Url::parse("https://cdn.example/assets/a.css").unwrap())
+    }
+
+    #[test]
+    fn relative_urls_resolve_against_the_sheet() {
+        assert_eq!(
+            abs("@font-face{src:url(font.woff2)}"),
+            r#"@font-face{src:url("https://cdn.example/assets/font.woff2")}"#
+        );
+        assert_eq!(
+            abs(r#"a{background:url("../img/x.png")} b{cursor:URL('/c.cur'),auto}"#),
+            r#"a{background:url("https://cdn.example/img/x.png")} b{cursor:URL('https://cdn.example/c.cur'),auto}"#
+        );
+        assert_eq!(
+            abs("i{background-image:url( //other.example/y.svg )}"),
+            r#"i{background-image:url("https://other.example/y.svg")}"#
+        );
+    }
+
+    #[test]
+    fn absolute_data_fragment_comments_and_strings_are_left_alone() {
+        for css in [
+            "a{background:url(https://x.example/a.png)}",
+            "a{background:url(data:image/png;base64,AAAA)}",
+            "a{filter:url(#blur)}",
+            "/* url(nope.png) */ a{}",
+            r#"a::after{content:"url(nope.png)"}"#,
+            "a{--my-url(x):1}",
+        ] {
+            assert_eq!(abs(css), css, "{css}");
+        }
+    }
+
+    #[test]
+    fn an_unterminated_url_does_not_panic_or_loop() {
+        assert_eq!(abs("a{background:url(x.png"), "a{background:url(x.png");
+    }
+}
+
+#[cfg(all(test, feature = "headless"))]
+mod css_url_base_engine_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn a_web_font_named_relative_to_its_stylesheet_is_fetched_from_the_sheets_directory() {
+        let requested: Arc<Mutex<Vec<String>>> = Arc::default();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let log = requested.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let log = log.clone();
+                std::thread::spawn(move || {
+                    let mut req = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => req.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let req = String::from_utf8_lossy(&req);
+                    let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    log.lock().unwrap().push(path.clone());
+                    let (status, ct, body) = match path.as_str() {
+                        "/" => ("200 OK", "text/html", r#"<html><head><link rel="stylesheet" href="/assets/a.css"></head><body style="font-family:W">x</body></html>"#),
+                        "/assets/a.css" => ("200 OK", "text/css", "@font-face{font-family:W;src:url(font.woff2)}"),
+                        _ => ("404 Not Found", "text/plain", ""),
+                    };
+                    let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                });
+            }
+        });
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(engine.load_url(view, Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap()))
+            .expect("load_url");
+        let paths = requested.lock().unwrap().clone();
+        assert!(paths.iter().any(|p| p == "/assets/font.woff2"), "font not fetched from the sheet's directory: {paths:?}");
+        assert!(!paths.iter().any(|p| p == "/font.woff2"), "font fetched against the document URL: {paths:?}");
+    }
 }
 
 // Needs a headless view: `cargo test -p rustkit-engine --features headless`.
