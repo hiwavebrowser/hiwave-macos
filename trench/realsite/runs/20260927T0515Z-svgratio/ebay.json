@@ -1,0 +1,97 @@
+{
+  "id": "ebay",
+  "url": "https://www.ebay.com/",
+  "chrome": [
+    {
+      "url": "https://www.ebay.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.ebay.com/",
+      "title": "Electronics, Cars, Fashion, Collectibles & More | eBay",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T0515Z-svgratio/ebay/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260927T0515Z-svgratio/ebay/chrome-a.png",
+      "elapsed_ms": 29376
+    },
+    {
+      "url": "https://www.ebay.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.ebay.com/",
+      "title": "Electronics, Cars, Fashion, Collectibles & More | eBay",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T0515Z-svgratio/ebay/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260927T0515Z-svgratio/ebay/chrome-b.png",
+      "elapsed_ms": 31198
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "error",
+    "html_file": null,
+    "url": "https://www.ebay.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": null,
+    "layout_path": null,
+    "layout_stats": null,
+    "elapsed_ms": 281,
+    "error": "Failed to load URL: NavigationError(\"HTTP error\")",
+    "wall_ms": 304
+  },
+  "access": {
+    "status": 403,
+    "vendor": "akamai",
+    "blocked": true
+  },
+  "loads": {
+    "pass": false,
+    "why": "blocked:akamai (HTTP 403) \u2014 Failed to load URL: NavigationError(\"HTTP error\")"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 76,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "164",
+      "165",
+      "166",
+      "302",
+      "321",
+      "accessories",
+      "advanced",
+      "all",
+      "amp",
+      "an",
+      "and",
+      "boxes",
+      "brand",
+      "business",
+      "by",
+      "cards",
+      "cars",
+      "cart",
+      "category",
+      "clothing",
+      "collectibles",
+      "collection",
+      "contact",
+      "content",
+      "curate"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 52.7548828125,
+    "why": "chrome-vs-chrome 52.8% > 15% (unstable, 0 points)",
+    "unstable": true
+  },
+  "points": 0
+}

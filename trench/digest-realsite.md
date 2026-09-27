@@ -586,3 +586,27 @@ Tooling (hub): `realsite_board.py --oracle-headless`; scratch `cmp_runs.py` (per
 
 **Decisions for Pete:**
 1. **Raster `<img>` fetches bypass the ResourceLoader.** `ImageManager` has its own rustkit-http client, so images get no shield blocking, no Referer and no cache policy. It's a seam, not a trench fix. I'd route images through the loader as the next net PR, with shield parity as the headline. Go?
+
+
+## 2026-09-27 02:05 — develop 18/60 (google's doodle day); #299 inline-svg ratio sizing (±0: google +1, x −1)
+
+**Points: 20/60 (last digest, develop 2ab8032) → 18/60 on develop c2772b1 (#296 + #297 merged), full headed run `20260927T0420Z-dev`.** With #299: 18/60 (`20260927T0515Z-svgratio`). Not merged.
+
+| run | engine | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|
+| `20260927T0420Z-dev` | develop c2772b1 | **18** | 13 | 4 | 1 | 18/51 |
+| `20260927T0515Z-svgratio` | + #299 | **18** | 13 | 5 | 0 | 18/51 |
+
+- **Why develop fell 20 → 18: google 3 → 1.** Today (Sep 27) is Google's 28th-birthday doodle. Chrome gets "Celebrating 28 years" plus AI-mode chips, and RustKit gets a doodle variant it lays out badly (the doodle image lands at the bottom, stretched). On top of that, **#297 exposed a sizing bug**: now that arcs draw, the apps icon's nine dots painted across 150 px. The rest of the drop is ordinary drift: wikipedia +1 (its oracle is stable again), facebook −1 (its usual Chrome-vs-Chrome drift).
+- **#299 fixes the sizing bug.** google +1 (the dots shrink back, the `+` icon appears). x −1: x's logo is now the right size (~470 px, Chrome ~455), but RustKit puts it at the top of its column where Chrome centres it, and a small logo in the wrong place scored better (13.4%) than a right-size one in the wrong place (19.6%). Same pattern as github/#289.
+- Passing all 3: none on either run (google's doodle). RustKit blocked: amazon/chatgpt (they flicker), ebay, nytimes. Blank: microsoft, youtube, reddit.
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#299 `atlas/rs-svg-ratio-sizing` @ 57bce7c:** an inline `<svg>` with a viewBox but no width=/height= was given the 300×150 fallback. Now it takes the containing block's width with both axes auto, and one auto axis follows the other across the ratio (CSS 2.1 §10.3.2/§10.6.2). Six cases were checked against pinned CfT 148, and all match. The test fails on develop. Engine 165/165, svg 21/21, layout 522/523 (the known font-cache flake, which passes alone). Campaign 26/26 identical (avg 1.2534%), and the receipt is in the body.
+
+**Next engine item (found tonight, repro ready): a flex item that the outer flex stretches or grows doesn't lay out its own flex children again at its used size.** `<div style="display:flex;height:1000px"><div style="display:flex;flex:1;align-items:center;justify-content:center"><div 50×50>` puts the box at y=0; Chrome puts it at y=475. The column version (`flex-direction:column` outer, `flex:1` inner) fails the same way. Repro: hub `scratch/svgcase/v-right-stretched.html`, `v-col-stretched.html`, and `variants.py <bin>`. `dvh` is not the cause (x's `min-h-dvh` behaves the same as px). This is x's logo centring, and it's probably every hero/nav that centres inside a stretched flex item, which is most of the board. Also open: in that fixture RustKit's x offset is 262 vs Chrome's 275 (`flex:1 1 0%` basis split).
+
+Tooling (hub scratch): `svgcase/chrome_rects.mjs` (pinned CfT 148 `getBoundingClientRect` for every `[id]` in a fixture), `svgcase/red_boxes.py` / `variants.py` (RustKit red-box origin per fixture variant). The board runner needs 5-site chunks to stay under the 600 s tool limit.
+
+**Decisions for Pete:**
+1. **Land #299 knowing x drops a point until the flex-stretch fix lands?** Same shape as #289. The sizes are right and the lost point comes from a pre-existing centring bug that the correct size exposes. I recommend landing it and taking the flex re-layout fix next session. It's the cheapest item on the board now, with x and likely several others behind it.
