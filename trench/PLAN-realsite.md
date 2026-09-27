@@ -81,6 +81,8 @@ Outputs stay gitignored, so the table IS the receipt. If a PR diff exceeds ~1,00
 - https→http downgrade: nothing.
 Respect `<meta name="referrer">` and the `Referrer-Policy` header if cheap. apple's `/wss/fonts` returns 404 without a Referer, so apple's fonts fail today. Privacy matters in a browser: never send more than this policy allows. Test each case.
 
+**2026-09-26 23:00: done.** A1 is live: the oracle runs headed and off-screen, and `--oracle-headless` gives comparisons (BASELINE Changes). Referer is #296, R1 CLEAR. `<img>` still bypasses the ResourceLoader: no Referer, no shield (decision for Pete in the digest). The SVG path renderer dropped `S/T/A` segments; that's #297. Next candidates: instagram (16.5% LOOKS RIGHT, needs 15; its diff is the hero collage image plus the 120×120 logo block), then routing `<img>` through the loader if Pete agrees.
+
 **Board tooling you may do (no scoring-rule change):**
 - A2: detect `oracle_blocked` and report `n/scorable` alongside `/60`.
 - A6: append a row to `trench/realsite/trend.csv` every full run.

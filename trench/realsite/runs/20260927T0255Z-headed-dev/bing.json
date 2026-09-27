@@ -1,0 +1,107 @@
+{
+  "id": "bing",
+  "url": "https://www.bing.com/",
+  "chrome": [
+    {
+      "url": "https://www.bing.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.bing.com/",
+      "title": "Search - Microsoft Bing",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T0255Z-headed-dev/bing/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260927T0255Z-headed-dev/bing/chrome-a.png",
+      "elapsed_ms": 21888
+    },
+    {
+      "url": "https://www.bing.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.bing.com/",
+      "title": "Search - Microsoft Bing",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T0255Z-headed-dev/bing/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260927T0255Z-headed-dev/bing/chrome-b.png",
+      "elapsed_ms": 23880
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.bing.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260927T0255Z-headed-dev/bing/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260927T0255Z-headed-dev/bing/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 9,
+      "threw": 2,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 117543,
+      "elapsed_ms": 286
+    },
+    "elapsed_ms": 1378,
+    "error": null,
+    "wall_ms": 1436,
+    "non_background_fraction": 0.3778
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 45,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "1b",
+      "accuser",
+      "across",
+      "arrested",
+      "back",
+      "canceled",
+      "ceasefire",
+      "claims",
+      "creator",
+      "cuts",
+      "discover",
+      "earth",
+      "ed",
+      "falls",
+      "funding",
+      "image",
+      "images",
+      "in",
+      "iran",
+      "jackson",
+      "keke",
+      "land",
+      "maps",
+      "mobile",
+      "nearly"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0.35068359375,
+    "diff": 79.14687500000001
+  },
+  "points": 1
+}

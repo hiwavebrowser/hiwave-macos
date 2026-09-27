@@ -558,3 +558,31 @@ Tooling notes: in headless mode `git -C <other worktree>` and `ln -s` need appro
 
 **Decisions for Pete:**
 1. **develop is not `cargo fmt`-clean** (rustkit-layout alone has ~250 diffs). One mechanical `chore: cargo fmt` PR would stop every future fix from choosing between a noisy diff and skipping fmt. I recommend it, landed when no rs- PRs are open, since it conflicts with all of them.
+
+
+## 2026-09-26 23:25 — headed oracle (A1) live, x scored for real; Referer (#296) and SVG smooth curves/arcs (#297)
+
+**Points: 18/60 (last digest, develop a0e6b0e + #290) → 20/60 on develop 2ab8032, clean headed run `20260927T0255Z-headed-dev`.** New develop high. Neither PR opened tonight is merged; their A/B is ±0.
+
+| run | engine | oracle | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|---|
+| `20260927T0200Z-headless` | develop 2b6a04e | headless | 19 | 13 | 4 | 2 | 18/45 |
+| `20260927T0120Z-headed` | develop 2b6a04e | headed (build running alongside) | 18 | 13 | 4 | 1 | 18/48 |
+| `20260927T0255Z-headed-dev` | develop 2ab8032 | headed, clean | **20** | 13 | 4 | 3 | 20/48 |
+| `20260927T0240Z-dev` / `-stack` (6 sites) | 2ab8032 / + #296 + #297 | headed | 9/18 / 9/18 | | | | |
+
+- **A1 done (Pete's call):** the pinned CfT 148 oracle runs headed, off-screen at `-2400,0`, with every deterministic flag kept and nothing spoofed. Oracle-blocked sites went **5 → 0** in the like-for-like pair (the clean run has only nytimes, at 403). **x now scores against the real page and passes LOOKS RIGHT (13.4%): 1 → 2.** The first headed run's 6/38 screenshot timeouts were my cargo build contending; the clean run had 1/40. `--oracle-headless` gives before/after readings. BASELINE Changes has all three numbers.
+- The other moves between the headed runs: linkedin +1 (READABLE 57 → 97%), facebook +1 (its usual oracle drift), wikipedia −1 (Chrome-vs-Chrome 42.5%, so LOOKS RIGHT was scored unstable: rotating content).
+- Passing all 3: google. RustKit blocked: amazon (flickers), chatgpt, ebay, nytimes. Blank: microsoft, youtube, reddit.
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#296 `atlas/rs-referer-policy` @ 88419e6**, R1 DESIGN CLEAR, CLEAN. Stylesheets, scripts, fonts and SVG send a `Referer` per strict-origin-when-cross-origin, and respect `<meta name=referrer>` and `Referrer-Policy`. The existing but uncalled `compute_referrer` leaked fragments and userinfo and gave file: pages a referrer; it's fixed. apple: `/wss/fonts` 404 → loads, web fonts 0 → 45. No point (apple's gap is hero imagery). Someone pushed a develop merge (88419e6) over the #291 conflict while I was testing mine; the trees are identical, so I kept theirs and didn't push. Engine 204/204, net 46/46, campaign 26/26 identical.
+- **#297 `atlas/rs-svg-path-smooth-arc` @ 75f4a63:** the SVG path flattener sent `S/s`, `T/t` and `A/a` to a catch-all arm that drew nothing and didn't move the current point. Every icon with smooth curves or arcs was a blob or a stub (github's small circles went from 5–9 points to 36–72). The fix adds reflected controls (cubic and quad tracked separately) and SVG F.6 arcs. 4 tests fail on develop. The path parser was fine (facebook's packed decimals are pinned). Campaign 26/26 identical.
+- WPT not run (no `third_party/wpt`).
+
+**Next:** (1) instagram at 16.5% LOOKS RIGHT, 1.5 points from passing. Its diff is the hero collage image and a 120×120 block where the logo goes. (2) `<img>` through the ResourceLoader (see decision 1). (3) wikipedia's Chrome-vs-Chrome is 42%: check whether its oracle needs A7 drift annotation.
+
+Tooling (hub): `realsite_board.py --oracle-headless`; scratch `cmp_runs.py` (per-site A vs B), `oracle_fail_census.py` (Chrome capture failures by time), `frame_cmp.py`, `campaign_receipt.py` (gate-5 receipt with a per-case table against a reference PR). Don't run cargo builds during a board run.
+
+**Decisions for Pete:**
+1. **Raster `<img>` fetches bypass the ResourceLoader.** `ImageManager` has its own rustkit-http client, so images get no shield blocking, no Referer and no cache policy. It's a seam, not a trench fix. I'd route images through the loader as the next net PR, with shield parity as the headline. Go?
