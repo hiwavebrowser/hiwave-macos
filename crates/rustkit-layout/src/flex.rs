@@ -278,11 +278,32 @@ pub fn layout_flex_container_in(
     container_box: &Dimensions,
     positioning_cb: Option<&Dimensions>,
 ) {
+    layout_flex_container_at(container, container_box, positioning_cb, None)
+}
+
+/// As [`layout_flex_container_in`], for a container that is itself a flex
+/// item whose parent flex has already fixed its used inner HEIGHT.
+///
+/// css-flexbox-1 §9.4.11 and §9.8: a stretched item's used cross size, and
+/// an item's post-flexing main size in a container with a definite main
+/// size, are treated as DEFINITE when the item's contents are laid out. An
+/// item that is also a flex container has `height: auto` in style, so
+/// without this the inner pass sized its line by its content and centred
+/// its items in that: `align-items: center` inside a stretched 1000px item
+/// put a 50px box at y=0, where Chrome 148 puts it at y=475 (x's logo
+/// column, and every hero that centres inside a stretched flex item).
+fn layout_flex_container_at(
+    container: &mut LayoutBox,
+    container_box: &Dimensions,
+    positioning_cb: Option<&Dimensions>,
+    used_inner_height: Option<f32>,
+) {
     // Resolved once, up front, and read by both the main-size choice below
     // and step 11d's redistribution: these take `&LayoutBox`, and from the
     // moment the item list borrows `container.children` mutably no whole-box
     // borrow is available again.
-    let style_definite_inner_main = definite_inner_main_size(container);
+    let style_definite_inner_main =
+        used_inner_height.or_else(|| definite_inner_main_size(container));
     let style_min_inner_main = min_inner_main_size(container);
 
     let style = &container.style;
@@ -325,7 +346,13 @@ pub fn layout_flex_container_in(
     // rather than restating the rule.
     let container_main_size = match main_axis {
         Axis::Horizontal => container_box.content.width,
-        Axis::Vertical => style_definite_inner_main.unwrap_or(container_box.content.height),
+        // An indefinite height still has its `min-height` floor
+        // (css-sizing-3 §5.1), and the items grow into it. The collapse
+        // entry point hands over the pre-pass stack, which can sit below
+        // the floor: x's `min-height: 100dvh` column grew its `flex: 1`
+        // row to the 450px stack instead of the 1000px floor.
+        Axis::Vertical => style_definite_inner_main
+            .unwrap_or(container_box.content.height.max(style_min_inner_main)),
     };
     // Deliberately NOT given the same treatment: the cross-axis analogue (an
     // inset-stretched ROW container centring items in a stale cursor) is the
@@ -341,7 +368,9 @@ pub fn layout_flex_container_in(
     // For row direction, cross axis is vertical (height)
     // For column direction, cross axis is horizontal (width)
     let has_definite_cross_size = match cross_axis {
-        Axis::Vertical => !matches!(container.style.height, Length::Auto),
+        Axis::Vertical => {
+            used_inner_height.is_some() || !matches!(container.style.height, Length::Auto)
+        }
         // A block-level flex container with `width: auto` still has a
         // DEFINITE used width — it resolves against its containing block.
         // Treating auto as indefinite sent the stretch path down the
@@ -362,7 +391,9 @@ pub fn layout_flex_container_in(
     // children-stacked height in content.height (logo 38.4 + nav 25.6 = 64
     // inside a height:60px header), which would center every item 2px low.
     // Px lengths resolve here; anything else falls back to the passed size.
-    let definite_inner_cross = if has_definite_cross_size {
+    let definite_inner_cross = if let (Axis::Vertical, Some(h)) = (cross_axis, used_inner_height) {
+        Some(h)
+    } else if has_definite_cross_size {
         let (spec, pb) = match cross_axis {
             Axis::Vertical => (
                 &container.style.height,
@@ -555,9 +586,35 @@ pub fn layout_flex_container_in(
             // If this flex item has children and is a container (flex or block), lay them out
             if !item.layout_box.children.is_empty() {
                 if item.layout_box.style.display.is_flex() {
-                    // Nested flex container: recursively apply flex layout
+                    // Nested flex container: recursively apply flex layout.
+                    // Its height is DEFINITE when this pass already fixed it
+                    // (§9.4.11: stretched in a definite single line; §9.8:
+                    // flexed along a definite vertical main axis), and the
+                    // inner pass aligns and grows against that, not against
+                    // its own content.
+                    let stretched = cross_axis == Axis::Vertical
+                        && wrap == FlexWrap::NoWrap
+                        && definite_inner_cross.is_some()
+                        && !item.has_explicit_cross_size
+                        && resolved_align(item.align_self, style.align_items)
+                            == AlignItems::Stretch;
+                    // A `min-height` floor counts: steps 4–10 already grew
+                    // the items into it (`min-height: 100dvh` columns, x's
+                    // layout), and Chrome 148 lays their contents out at
+                    // that grown size.
+                    let flexed = main_axis == Axis::Vertical
+                        && !item.main_size_from_content
+                        && (style_definite_inner_main.or(inset_inner_main).is_some()
+                            || style_min_inner_main > 0.0);
+                    let used_inner_height = (stretched || flexed)
+                        .then_some(item.layout_box.dimensions.content.height);
                     let child_containing = item.layout_box.dimensions.clone();
-                    layout_flex_container(item.layout_box, &child_containing);
+                    layout_flex_container_at(
+                        item.layout_box,
+                        &child_containing,
+                        None,
+                        used_inner_height,
+                    );
                     // Absolutely positioned children are skipped by the flex
                     // item collection; lay them out against the item's FINAL
                     // dimensions so `inset: 0` overlays position AND stretch
@@ -799,6 +856,21 @@ pub fn layout_flex_container_in(
                 if content_height > item.layout_box.dimensions.content.height {
                     item.cross_size = target;
                     item.layout_box.dimensions.content.height = content_height;
+                    // A nested flex container laid its items out in step 11
+                    // against its content height; §9.4.11 says redo that
+                    // layout with the stretched size as definite, or
+                    // `align-items: center` inside it centres in the old one.
+                    if item.layout_box.style.display.is_flex()
+                        && !item.layout_box.children.is_empty()
+                    {
+                        let child_containing = item.layout_box.dimensions.clone();
+                        layout_flex_container_at(
+                            item.layout_box,
+                            &child_containing,
+                            None,
+                            Some(content_height),
+                        );
+                    }
                     item.layout_box.reanchor_absolute_children();
                 }
             }
@@ -916,8 +988,27 @@ pub fn layout_flex_container_in(
                     if delta != 0.0 {
                         translate_subtree(item.layout_box, 0.0, delta);
                     }
-                    item.layout_box.dimensions.content.height =
-                        (item.target_main_size - item.main_pb()).max(0.0);
+                    let used = (item.target_main_size - item.main_pb()).max(0.0);
+                    let resized = (used - item.layout_box.dimensions.content.height).abs() > 0.01;
+                    item.layout_box.dimensions.content.height = used;
+                    // Step 11 laid a nested flex container out at its old
+                    // height; the flexed one is final now (§9.8), so its
+                    // items align and grow against it. x's logo column is
+                    // this: a `flex: 1 1 0%` row in a `min-height: 100dvh`
+                    // column only reaches 1000px here, and its centred
+                    // child sat in the middle of the pre-grow height.
+                    if resized
+                        && item.layout_box.style.display.is_flex()
+                        && !item.layout_box.children.is_empty()
+                    {
+                        let child_containing = item.layout_box.dimensions.clone();
+                        layout_flex_container_at(
+                            item.layout_box,
+                            &child_containing,
+                            None,
+                            Some(used),
+                        );
+                    }
                 }
             }
         }
@@ -962,7 +1053,11 @@ pub fn layout_flex_container_in(
             Axis::Horizontal => total_cross,
             Axis::Vertical => total_main,
         };
-        if let Some(used_main) = inset_used_main {
+        if let Some(used) = used_inner_height {
+            // The parent flex fixed this height (§9.4.11 / §9.8); the items'
+            // extent neither grows nor shrinks it.
+            container.dimensions.content.height = used;
+        } else if let Some(used_main) = inset_used_main {
             // CSS2 §10.6.4, a third time and in the other direction: an
             // inset-stretched box's `height: auto` does not mean "size me by
             // my content". The constraint equation already fixed the used
@@ -1045,6 +1140,8 @@ pub fn layout_flex_container_in(
         // new_tab's body, and Chrome aligns in the floored 800, not the stack).
         let used_inner_main = if main_is_horizontal {
             content.width
+        } else if let Some(used) = used_inner_height {
+            used
         } else {
             let pb = container.dimensions.padding.vertical() + container.dimensions.border.vertical();
             let is_bb = container.style.box_sizing == rustkit_css::BoxSizing::BorderBox;
