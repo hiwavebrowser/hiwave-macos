@@ -102,6 +102,8 @@ Respect `<meta name="referrer">` and the `Referrer-Policy` header if cheap. appl
 - **Finish-line gates now include cascade within 2–3× of Chrome.** Speed work on the style cascade (ancestor Bloom filter, matched-properties cache, incremental restyle) is on the critical path, not optional.
 - **Rebase only on CONFLICTING, and never force-push.** Include the campaign receipt with the builtins scope, so shelf, chrome_rustkit and similar pages are covered.
 
+**2026-09-27 16:30: done.** #304 merged. Extensionless `image/svg+xml` images plus inline-style SVG paint are #307 (linkedin 2 → 3). Instagram is NOT a near-miss (a blank React page, 15.7% white-vs-white), so skip it until JS. NEXT: measure develop once #307 lands. Then SVG evenodd (`SvgStyle::fill_rule` is parsed but never rendered), then `flex: 1 1 0` (267 vs 275). wikipedia needs `grid-template-areas`, and it waits on Pete's call (digest decision 1).
+
 **Board tooling you may do (no scoring-rule change):**
 - A2: detect `oracle_blocked` and report `n/scorable` alongside `/60`.
 - A6: append a row to `trench/realsite/trend.csv` every full run.

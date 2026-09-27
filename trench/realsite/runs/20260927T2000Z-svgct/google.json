@@ -1,0 +1,86 @@
+{
+  "id": "google",
+  "url": "https://www.google.com/",
+  "chrome": [
+    {
+      "url": "https://www.google.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.google.com/?zx=1790538916389",
+      "title": "Google",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T2000Z-svgct/google/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260927T2000Z-svgct/google/chrome-a.png",
+      "elapsed_ms": 27897
+    },
+    {
+      "url": "https://www.google.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.google.com/?zx=1790538944481",
+      "title": "Google",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T2000Z-svgct/google/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260927T2000Z-svgct/google/chrome-b.png",
+      "elapsed_ms": 25915
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.google.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260927T2000Z-svgct/google/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260927T2000Z-svgct/google/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 7,
+      "threw": 8,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 1466300,
+      "elapsed_ms": 2419
+    },
+    "elapsed_ms": 4174,
+    "error": null,
+    "wall_ms": 4294,
+    "non_background_fraction": 0.1663
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 29,
+    "rustkit_words": 25,
+    "ratio": 0.8621,
+    "missing_sample": [
+      "28",
+      "celebrating",
+      "of",
+      "years"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 3.98408203125,
+    "diff": 18.755078125
+  },
+  "points": 2
+}
