@@ -2966,7 +2966,7 @@ impl LayoutBox {
     /// `definite_content_height_for_children`). `None` keeps the historical
     /// behaviour: percentages read `containing_block.content.height`, which on
     /// the flow path is the parent's cursor.
-    pub(crate) fn layout_with_collapse_in(
+    pub fn layout_with_collapse_in(
         &mut self,
         containing_block: &Dimensions,
         margin_context: &mut MarginCollapseContext,
@@ -5214,12 +5214,14 @@ impl LayoutBox {
     /// header holds a `height: 100%` bar, and the header came out 832px tall
     /// where Chrome sizes it to its content.
     ///
-    /// Scoped to parents known to be content-sized: an out-of-flow box with
-    /// `height: auto` that `top` + `bottom` do not stretch, and the
-    /// auto-height in-flow boxes beneath it. Other indefinite parents keep
-    /// the historical viewport fallback. Out-of-flow children are never
-    /// marked: their containing block is a padding box, resolved at
-    /// re-anchor time.
+    /// Every in-flow parent with no definite height is content-sized (x.com's
+    /// `min-h-[440px] > h-full` column took the viewport's 800 too). The one
+    /// indefinite parent that keeps the historical viewport fallback is an
+    /// auto-height out-of-flow box stretched by `top` + `bottom`, whose
+    /// height is definite but not computed here. The root is handed the
+    /// initial containing block's height by its caller, so `html { height:
+    /// 100% }` stays definite. Out-of-flow children are never marked: their
+    /// containing block is a padding box, resolved at re-anchor time.
     fn mark_percent_height_bases(
         &mut self,
         definite_for_children: Option<f32>,
@@ -5227,12 +5229,11 @@ impl LayoutBox {
     ) {
         let content_sized = definite_for_children.is_none()
             && (self.percent_height_is_auto
-                || (matches!(self.position, Position::Absolute | Position::Fixed)
-                    && matches!(self.style.height, Length::Auto)
-                    && {
-                        let offsets = self.resolved_offsets(containing_block);
-                        offsets.top.is_none() || offsets.bottom.is_none()
-                    }));
+                || !matches!(self.position, Position::Absolute | Position::Fixed)
+                || (matches!(self.style.height, Length::Auto) && {
+                    let offsets = self.resolved_offsets(containing_block);
+                    offsets.top.is_none() || offsets.bottom.is_none()
+                }));
         for child in &mut self.children {
             child.percent_height_is_auto = content_sized
                 && !matches!(child.position, Position::Absolute | Position::Fixed);
@@ -12863,15 +12864,11 @@ mod tests {
         );
     }
 
-    /// The boundary this change deliberately does NOT cross, pinned so the
-    /// next unit has something to flip. An auto-height parent's height
-    /// depends on its children, so it hands them no definite base — and the
-    /// child then keeps the historical `self.viewport.1` fallback in
-    /// `calculate_block_height`. CSS 2.1 §10.5 says the child computes to
-    /// `auto` here (Chrome gives it its content height, 0), so this
-    /// assertion records a KNOWN-WRONG value on purpose; what it guards is
-    /// that the helper stays silent for `auto`, rather than handing the
-    /// child a base of 0 and making the two cases indistinguishable.
+    /// CSS 2.1 §10.5: an auto-height parent's height depends on its
+    /// children, so a percentage `height` child computes to `auto` — Chrome
+    /// gives it its content height, 0 here. It used to take the viewport
+    /// fallback (1000); x.com's `min-h-[440px] > h-full` login column came
+    /// out 800px tall that way.
     #[test]
     fn an_auto_height_parent_hands_its_percentage_child_no_definite_base() {
         let mut parent_style = ComputedStyle::new();
@@ -12891,9 +12888,8 @@ mod tests {
         };
         parent.layout(&viewport);
         assert_eq!(
-            parent.children[0].dimensions.content.height, 1000.0,
-            "unchanged by this unit: the viewport fallback, not a 0 base \
-             (§10.5 wants `auto`, i.e. 0 — that is the next unit)"
+            parent.children[0].dimensions.content.height, 0.0,
+            "a percentage under an auto-height parent is `auto`, not the viewport"
         );
     }
 
@@ -13025,15 +13021,14 @@ mod tests {
     }
 
     /// The percentage half and the absolute half must take the SAME base a
-    /// bare percentage would. An `auto`-height parent hands no definite base,
-    /// and the viewport fallback stands — the behaviour `Length::Percent`
-    /// already has, which is what makes `calc()` a length rather than a
-    /// second rule.
+    /// bare percentage would. Under an `auto`-height parent a bare
+    /// percentage is `auto` (§10.5), and so is a `calc()` carrying one —
+    /// which is what makes `calc()` a length rather than a second rule.
     #[test]
     fn a_calc_height_takes_the_same_base_a_bare_percentage_takes() {
         for (height, expected) in [
-            (Length::Percent(50.0), 500.0),
-            (calc_sum("calc(50% - 10px)"), 490.0),
+            (Length::Percent(50.0), 0.0),
+            (calc_sum("calc(50% - 10px)"), 0.0),
         ] {
             let mut parent_style = ComputedStyle::new();
             parent_style.width = Length::Px(150.0);
@@ -13244,6 +13239,88 @@ mod tests {
             );
             assert_eq!((header, bar), (50.0, 50.0), "collapse_path={collapse_path}");
         }
+    }
+
+    /// x.com's login column: `div.min-h-[440px]` (height auto) holds a
+    /// `div.h-full` with 40px of content. The parent's height depends on its
+    /// content (min-height clamps afterwards and does not make it definite),
+    /// so the percentage is `auto` (CSS 2.1 §10.5). Chrome: h-full 40,
+    /// column 440. RustKit took the viewport fallback: 800 and 800.
+    #[test]
+    fn a_percent_height_child_of_an_in_flow_auto_height_block_is_auto() {
+        for collapse_path in [false, true] {
+            for height in [Length::Percent(100.0), calc_sum("calc(100% - 4px)")] {
+                let mut content_style = ComputedStyle::new();
+                content_style.height = Length::Px(40.0);
+                let mut full_style = ComputedStyle::new();
+                full_style.height = height.clone();
+                let mut full = LayoutBox::new(BoxType::Block, full_style);
+                full.children.push(LayoutBox::new(BoxType::Block, content_style));
+
+                let mut column_style = ComputedStyle::new();
+                column_style.min_height = Length::Px(440.0);
+                let mut column = LayoutBox::new(BoxType::Block, column_style);
+                column.children.push(full);
+
+                let mut root_style = ComputedStyle::new();
+                root_style.height = Length::Px(800.0);
+                let mut root = LayoutBox::new(BoxType::Block, root_style);
+                root.children.push(column);
+                root.set_viewport(1280.0, 800.0);
+                let cb = Dimensions {
+                    content: Rect::new(0.0, 0.0, 1280.0, 800.0),
+                    ..Default::default()
+                };
+                if collapse_path {
+                    let mut mc = MarginCollapseContext::new();
+                    let mut fc = FloatContext::new();
+                    root.layout_with_collapse(&cb, &mut mc, &mut fc);
+                } else {
+                    root.layout(&cb);
+                }
+
+                let column = &root.children[0];
+                assert_eq!(
+                    (
+                        column.dimensions.content.height,
+                        column.children[0].dimensions.content.height
+                    ),
+                    (440.0, 40.0),
+                    "{height:?}, collapse_path={collapse_path}: the percentage must be \
+                     auto, not a share of the 800px viewport"
+                );
+            }
+        }
+    }
+
+    /// The guard on the rule above: the root's containing block is the
+    /// initial containing block, so `html, body { height: 100% }` still
+    /// fills the viewport on the engine's entry point, which hands the root
+    /// a cursor-height containing block plus the ICB height as its base.
+    #[test]
+    fn html_and_body_at_100_percent_still_fill_the_viewport() {
+        let mut body_style = ComputedStyle::new();
+        body_style.height = Length::Percent(100.0);
+        let mut html_style = ComputedStyle::new();
+        html_style.height = Length::Percent(100.0);
+        let mut html = LayoutBox::new(BoxType::Block, html_style);
+        html.children.push(LayoutBox::new(BoxType::Block, body_style));
+        html.set_viewport(1280.0, 800.0);
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 0.0),
+            ..Default::default()
+        };
+        let mut mc = MarginCollapseContext::new();
+        mc.children_are_formatting_roots = true;
+        let mut fc = FloatContext::new();
+        html.layout_with_collapse_in(&cb, &mut mc, &mut fc, Some(800.0));
+        assert_eq!(
+            (
+                html.dimensions.content.height,
+                html.children[0].dimensions.content.height
+            ),
+            (800.0, 800.0)
+        );
     }
 
     /// The abspos twin of `a_calc_height_resolves_against_its_parents_definite_height`.

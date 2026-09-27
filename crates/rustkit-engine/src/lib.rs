@@ -2352,10 +2352,14 @@ impl Engine {
             // collapses with body's siblings and stays under html's top edge.
             margin_context.children_are_formatting_roots = true;
             let mut float_context = rustkit_layout::FloatContext::new();
-            root_box.layout_with_collapse(
+            // The root's containing block is the initial containing block,
+            // whose height is the viewport's: `html { height: 100% }` is
+            // definite, and hands its own percentage children a base.
+            root_box.layout_with_collapse_in(
                 &containing_block,
                 &mut margin_context,
                 &mut float_context,
+                Some(bounds.height as f32),
             );
         }
 
