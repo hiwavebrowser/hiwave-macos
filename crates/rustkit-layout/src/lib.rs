@@ -3320,10 +3320,25 @@ impl LayoutBox {
     /// Build-time transfer can only pre-resolve absolute lengths; percents
     /// (e.g. `left: -100%` off-canvas shimmer overlays) need the containing
     /// block, so they resolve here at apply time from the computed style.
+    ///
+    /// Viewport units and math functions resolve here too: the transfer
+    /// drops them, so `top: -100vh` read as `auto` and linkedin's skip link
+    /// (`.-top-[100vh]`, parked a viewport above the page until focused)
+    /// sat at its static position over the header.
     pub(crate) fn resolved_offsets(&self, containing_block: &Dimensions) -> PositionOffsets {
         let resolve = |pre: Option<f32>, st: &Option<Length>, basis: f32| {
             pre.or(match st {
                 Some(Length::Percent(p)) => Some(p / 100.0 * basis),
+                Some(
+                    l @ (Length::Vw(_)
+                    | Length::Vh(_)
+                    | Length::Vmin(_)
+                    | Length::Vmax(_)
+                    | Length::Calc(_)
+                    | Length::Min(_)
+                    | Length::Max(_)
+                    | Length::Clamp(_)),
+                ) => Some(self.length_to_px(l, basis)),
                 _ => None,
             })
         };
@@ -12447,6 +12462,67 @@ mod tests {
         assert_eq!(layout_box.offsets.left, Some(20.0));
         assert_eq!(layout_box.offsets.right, None);
         assert_eq!(layout_box.offsets.bottom, None);
+    }
+
+    /// linkedin's skip link: `position: absolute; top: -100vh` parks it one
+    /// viewport above the page until it takes focus. The engine's offset
+    /// transfer only pre-resolves px/em/rem, so a `vh` offset read as `auto`
+    /// and the link painted at its static position over the header. Viewport
+    /// units and `calc()` offsets resolve at layout time, on both entry
+    /// points.
+    #[test]
+    fn viewport_unit_and_calc_offsets_position_an_abspos_box() {
+        for collapse_path in [false, true] {
+            let mut link_style = ComputedStyle::new();
+            link_style.position = rustkit_css::Position::Absolute;
+            link_style.top = Some(Length::Vh(-100.0));
+            link_style.left = Some(Length::Vw(10.0));
+            link_style.width = Length::Px(100.0);
+            link_style.height = Length::Px(20.0);
+            let mut link = LayoutBox::new(BoxType::Block, link_style);
+            link.position = Position::Absolute;
+
+            let mut badge_style = ComputedStyle::new();
+            badge_style.position = rustkit_css::Position::Absolute;
+            badge_style.top = Some(calc_sum("calc(50vh - 10px)"));
+            badge_style.left = Some(Length::Px(0.0));
+            badge_style.width = Length::Px(10.0);
+            badge_style.height = Length::Px(10.0);
+            let mut badge = LayoutBox::new(BoxType::Block, badge_style);
+            badge.position = Position::Absolute;
+
+            let mut root = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+            root.children.push(link);
+            root.children.push(badge);
+            root.set_viewport(1280.0, 800.0);
+            let cb = Dimensions {
+                content: Rect::new(0.0, 0.0, 1280.0, 800.0),
+                ..Default::default()
+            };
+            if collapse_path {
+                let mut mc = MarginCollapseContext::new();
+                let mut fc = FloatContext::new();
+                root.layout_with_collapse(&cb, &mut mc, &mut fc);
+            } else {
+                root.layout(&cb);
+            }
+
+            // Offsets are measured from the root's padding box, wherever the
+            // entry point stacked the root.
+            let origin = root.dimensions.content;
+            let link = &root.children[0].dimensions.content;
+            assert_eq!(
+                (link.x - origin.x, link.y - origin.y),
+                (128.0, -800.0),
+                "collapse_path={collapse_path}: left 10vw / top -100vh"
+            );
+            let badge = &root.children[1].dimensions.content;
+            assert_eq!(
+                badge.y - origin.y,
+                390.0,
+                "collapse_path={collapse_path}: top calc(50vh - 10px)"
+            );
+        }
     }
 
 
