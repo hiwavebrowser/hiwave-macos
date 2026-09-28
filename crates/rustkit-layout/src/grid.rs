@@ -247,6 +247,9 @@ impl<'a> GridItem<'a> {
                 trace!("get_height_contribution: Percent {}% of {} = {}", p, container_height, result);
                 return result + margins;
             }
+            l if is_font_or_viewport_relative(l) => {
+                return self.layout_box.length_to_px(l, container_height) + margins;
+            }
             _ => {}
         }
 
@@ -254,6 +257,7 @@ impl<'a> GridItem<'a> {
         let min_height = match &style.min_height {
             Length::Px(h) => *h,
             Length::Percent(p) if container_height > 0.0 => container_height * p / 100.0,
+            l if is_font_or_viewport_relative(l) => self.layout_box.length_to_px(l, container_height),
             _ => 0.0,
         };
 
@@ -401,6 +405,9 @@ impl<'a> GridItem<'a> {
             Length::Percent(p) if container_width > 0.0 => {
                 return container_width * p / 100.0 + margins;
             }
+            l if is_font_or_viewport_relative(l) => {
+                return self.layout_box.length_to_px(l, container_width) + margins;
+            }
             _ => {}
         }
 
@@ -408,6 +415,7 @@ impl<'a> GridItem<'a> {
         let min_width = match &style.min_width {
             Length::Px(w) => *w,
             Length::Percent(p) if container_width > 0.0 => container_width * p / 100.0,
+            l if is_font_or_viewport_relative(l) => self.layout_box.length_to_px(l, container_width),
             _ => 0.0,
         };
 
@@ -2997,6 +3005,18 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
 /// containing block, which is not available at intrinsic-sizing time. That is
 /// a real remaining gap, left explicit here rather than hidden behind the
 /// same silent fallback that caused this bug.
+/// A length that is definite at track-sizing time without a containing block:
+/// font-relative (`em`, `rem`) or viewport-relative. An item's
+/// `width: 12.25rem` is as explicit as `196px`, but the contribution arms only
+/// matched `Px`, so it fell through to the content estimate and a
+/// `min-content` track (wikipedia's page-tools column) came out too narrow.
+fn is_font_or_viewport_relative(l: &Length) -> bool {
+    matches!(
+        l,
+        Length::Em(_) | Length::Rem(_) | Length::Vw(_) | Length::Vh(_) | Length::Vmin(_) | Length::Vmax(_)
+    )
+}
+
 fn intrinsic_len_px(l: &Length, font_size: f32) -> f32 {
     match l {
         Length::Percent(_) => 0.0,

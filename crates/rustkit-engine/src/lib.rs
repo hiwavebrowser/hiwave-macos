@@ -21610,3 +21610,82 @@ mod blockify_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod grid_relative_size_contribution_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    /// Laid out through both entry points: `layout()` and
+    /// `layout_with_collapse` (what `relayout` runs for the page).
+    fn laid_out(html: &str) -> Vec<LayoutBox> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 0.0),
+            ..Default::default()
+        };
+        let mut plain = e.build_layout_from_document(&d, &[]);
+        plain.layout(&cb);
+        let mut engine_path = e.build_layout_from_document(&d, &[]);
+        engine_path.layout_with_collapse(
+            &cb,
+            &mut rustkit_layout::MarginCollapseContext::new(),
+            &mut rustkit_layout::FloatContext::new(),
+        );
+        vec![plain, engine_path]
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    fn rect(root: &LayoutBox, id: &str) -> Rect {
+        by_id(root, id).unwrap_or_else(|| panic!("no box #{id}")).dimensions.border_box()
+    }
+
+    #[test]
+    fn a_rem_width_sizes_a_min_content_column() {
+        // wikipedia's page shell: a `min-content` column holding a
+        // `width: 12.25rem` nav. 12.25rem = 196px, so the 1fr column gets 804.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0;font:14px Arial"><div style="display:grid;width:1000px;"#,
+            r#"grid-template-columns:1fr min-content">"#,
+            r#"<div id="a">Article</div><nav id="n" style="width:12.25rem">Appearance</nav>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "a").width, 804.0);
+            assert_eq!(rect(&root, "n").x, 804.0);
+            assert_eq!(rect(&root, "n").width, 196.0);
+        }
+    }
+
+    #[test]
+    fn an_em_min_width_floors_a_min_content_column() {
+        // 10em at 14px = 140px.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0;font:14px Arial"><div style="display:grid;width:1000px;"#,
+            r#"grid-template-columns:1fr min-content">"#,
+            r#"<div id="a">Article</div><div id="n" style="min-width:10em">x</div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "n").x, 860.0);
+        }
+    }
+
+    #[test]
+    fn a_rem_height_sizes_a_min_content_row() {
+        // 3rem = 48px, so the second row starts at 48.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:grid;width:400px;"#,
+            r#"grid-template-rows:min-content min-content">"#,
+            r#"<div id="a" style="height:3rem"></div><div id="b">below</div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "b").y, 48.0);
+        }
+    }
+}
