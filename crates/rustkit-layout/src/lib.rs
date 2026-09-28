@@ -1366,6 +1366,52 @@ pub struct ElementIdentity {
     pub selector: String,
 }
 
+/// One side of an inline seam: the edge character of a text run and the
+/// font it is shaped in (`LayoutBox::seam_edge`).
+#[derive(Debug, Clone)]
+struct SeamEdge {
+    ch: char,
+    family: String,
+    size: f32,
+    weight: rustkit_css::FontWeight,
+    style: rustkit_css::FontStyle,
+    stretch: rustkit_css::FontStretch,
+}
+
+impl SeamEdge {
+    fn new(ch: char, s: &ComputedStyle) -> Self {
+        Self {
+            ch,
+            family: s.font_family.clone(),
+            size: match s.font_size {
+                Length::Px(px) => px,
+                _ => 16.0,
+            },
+            weight: s.font_weight,
+            style: s.font_style,
+            stretch: s.font_stretch,
+        }
+    }
+
+    fn same_font(&self, other: &SeamEdge) -> bool {
+        self.family == other.family
+            && self.size == other.size
+            && self.weight == other.weight
+            && self.style == other.style
+            && self.stretch == other.stretch
+    }
+}
+
+/// A length that resolves to zero whatever its base (`auto` margins on a
+/// non-replaced inline are zero too).
+fn is_zero_length(l: &Length) -> bool {
+    match l {
+        Length::Zero | Length::Auto => true,
+        Length::Px(v) | Length::Em(v) | Length::Rem(v) | Length::Percent(v) => *v == 0.0,
+        _ => false,
+    }
+}
+
 /// A layout box in the layout tree.
 #[derive(Debug)]
 pub struct LayoutBox {
@@ -1947,8 +1993,12 @@ impl LayoutBox {
         let available_width = containing_block.content.width;
         let mut cursor_x = 0.0;
         let mut max_height = 0.0f32;
+        let mut seam: Option<SeamEdge> = None;
 
         for child in &mut self.children {
+            // Cross-node shaping inside the inline (`seam_kern`).
+            cursor_x += Self::seam_kern(seam.as_ref(), Self::seam_edge(child, false).as_ref());
+            seam = Self::seam_edge(child, true);
             let mut cb = self.dimensions.clone();
             cb.content.x = self.dimensions.content.x + cursor_x;
             cb.content.width = available_width; // Pass parent's available width
@@ -2244,6 +2294,68 @@ impl LayoutBox {
                 child.style.white_space,
                 rustkit_css::WhiteSpace::Nowrap | rustkit_css::WhiteSpace::Pre
             )
+    }
+
+    /// The character at one edge of an inline-level box's text, with its
+    /// font, when shaping would run straight across that edge: the box is a
+    /// text run, or a non-atomic inline with no margin/border/padding on
+    /// that side whose edge child is such a box (recursively). Whitespace
+    /// edges and letter-spaced runs return None.
+    fn seam_edge(b: &LayoutBox, last: bool) -> Option<SeamEdge> {
+        match &b.box_type {
+            BoxType::Text(text) => {
+                if !is_zero_length(&b.style.letter_spacing) {
+                    return None;
+                }
+                let c = if last { text.chars().next_back() } else { text.chars().next() }?;
+                if c.is_whitespace() {
+                    return None;
+                }
+                Some(SeamEdge::new(c, &b.style))
+            }
+            BoxType::Inline if b.style.display == rustkit_css::Display::Inline => {
+                let s = &b.style;
+                let (m, p, w, bs) = if last {
+                    (&s.margin_right, &s.padding_right, &s.border_right_width, s.border_right_style)
+                } else {
+                    (&s.margin_left, &s.padding_left, &s.border_left_width, s.border_left_style)
+                };
+                let no_border = is_zero_length(w) || bs == rustkit_css::BorderStyle::None;
+                if !(is_zero_length(m) && is_zero_length(p) && no_border) {
+                    return None;
+                }
+                let child = if last { b.children.last() } else { b.children.first() }?;
+                Self::seam_edge(child, last)
+            }
+            _ => None,
+        }
+    }
+
+    /// The pair kern between the text left of an inline seam and the text
+    /// right of it. Blink shapes a paragraph's text across element
+    /// boundaries when the font is the same, so `abc<span>xyz</span>def`
+    /// kerns `c|x` and `z|d` exactly as the one run `abcxyzdef` does;
+    /// RustKit shapes per text node, so the seam pair is added here as a
+    /// cursor offset (width("cx") - width("c") - width("x")).
+    fn seam_kern(prev: Option<&SeamEdge>, next: Option<&SeamEdge>) -> f32 {
+        let (Some(a), Some(b)) = (prev, next) else {
+            return 0.0;
+        };
+        if !a.same_font(b) {
+            return 0.0;
+        }
+        let measure = |s: &str| {
+            measure_text_with_spacing(s, &a.family, a.size, a.weight, a.style, 0.0, 0.0).width
+        };
+        let pair: String = [a.ch, b.ch].iter().collect();
+        let k = measure(&pair) - measure(&a.ch.to_string()) - measure(&b.ch.to_string());
+        // Same bound as the shaper's own kerning deltas: anything larger is
+        // not a pair adjustment (a fallback face, a ligature, a probe miss).
+        if k.is_finite() && k.abs() <= a.size * 0.2 {
+            k
+        } else {
+            0.0
+        }
     }
 
     /// Lay out a text box that STARTS MID-LINE in an inline formatting
@@ -4033,6 +4145,9 @@ impl LayoutBox {
         // IFC Slice B2: phase-5 mid-line splits whose CLOSED lines (line 0
         // + middles) need alignment after the loop: (line_start, text_index).
         let mut split_records: Vec<(usize, usize)> = Vec::new();
+        // The edge of the text last placed on the open line, for the
+        // cross-node seam kern (`seam_kern`).
+        let mut seam: Option<SeamEdge> = None;
         // Floats placed among these children, in content-box coordinates
         // (x from 0 at the content edge, y relative to the content top).
         let mut floats = FloatContext::new();
@@ -4073,6 +4188,7 @@ impl LayoutBox {
             // nothing on the line yet, the break still advances by one
             // empty line box.
             if matches!(child.box_type, BoxType::LineBreak) {
+                seam = None;
                 if let Some(start) = line_start_index {
                     lines.push((start, i, line_width));
                 }
@@ -4127,6 +4243,11 @@ impl LayoutBox {
                         || child.text_single_line_width() <= container_width - cursor_x));
 
             if flows_inline {
+                // Cross-node shaping: kern the seam pair with the text
+                // before this child, as one shaped run would.
+                let kern = Self::seam_kern(seam.as_ref(), Self::seam_edge(child, false).as_ref());
+                cursor_x += kern;
+                line_width += kern;
                 // Layout inline-level child to get its dimensions first
                 let mut cb = self.dimensions.clone();
                 cb.content.x = self.dimensions.content.x + cursor_x;
@@ -4224,6 +4345,7 @@ impl LayoutBox {
                         line_below_baseline = 0.0;
                         line_extents = (0.0, 0.0);
                         line_start_index = Some(i);
+                        seam = Self::seam_edge(child, true);
                         continue;
                     }
                 } else {
@@ -4232,6 +4354,7 @@ impl LayoutBox {
                 // Advance cursor
                 cursor_x += child_width;
                 line_width += child_width;
+                seam = Self::seam_edge(child, true);
                 // vertical-align: top|bottom boxes do not anchor to the
                 // baseline at all (CSS2 §10.8): a top-aligned box hangs from
                 // the line-box top, so a tall one SWALLOWS the strut instead
@@ -4272,7 +4395,11 @@ impl LayoutBox {
                 // width instead of dropping to its own block row.
                 let cb = self.dimensions.clone();
                 let line_top = self.dimensions.content.y + cursor_y;
+                let kern = Self::seam_kern(seam.as_ref(), Self::seam_edge(child, false).as_ref());
+                cursor_x += kern;
+                line_width += kern;
                 let (n_lines, last_w) = child.layout_text_in_flow(&cb, line_top, cursor_x);
+                seam = Self::seam_edge(child, true);
                 let lh = child.get_line_height();
                 if n_lines <= 1 {
                     // Degenerate (shaping fallback): continue the line.
@@ -4296,6 +4423,7 @@ impl LayoutBox {
                     line_start_index = Some(i);
                 }
             } else {
+                seam = None;
                 // Regular block layout
                 // First, finish any inline-block line
                 if cursor_x > 0.0 {
@@ -4796,6 +4924,9 @@ impl LayoutBox {
         // IFC Slice B2: phase-5 mid-line splits whose CLOSED lines (line 0
         // + middles) need alignment after the loop: (line_start, text_index).
         let mut split_records: Vec<(usize, usize)> = Vec::new();
+        // The edge of the text last placed on the open line, for the
+        // cross-node seam kern (`seam_kern`).
+        let mut seam: Option<SeamEdge> = None;
 
         // Floats placed among these children (see layout_block_children).
         let mut floats = FloatContext::new();
@@ -4870,6 +5001,7 @@ impl LayoutBox {
 
             // `<br>`: forced line break (see layout_block_children).
             if matches!(child.box_type, BoxType::LineBreak) {
+                seam = None;
                 if let Some(start) = line_start_index {
                     lines.push((start, i, line_width));
                 }
@@ -4918,6 +5050,11 @@ impl LayoutBox {
                         || child.text_single_line_width() <= container_width - cursor_x));
 
             if flows_inline {
+                // Cross-node shaping: kern the seam pair with the text
+                // before this child, as one shaped run would.
+                let kern = Self::seam_kern(seam.as_ref(), Self::seam_edge(child, false).as_ref());
+                cursor_x += kern;
+                line_width += kern;
                 // Inline-level content never collapses margins with siblings
                 // (and an inline-block establishes its own BFC), so lay it
                 // out against a throwaway context instead of leaking margins
@@ -5020,6 +5157,7 @@ impl LayoutBox {
                         line_below_baseline = 0.0;
                         line_extents = (0.0, 0.0);
                         line_start_index = Some(i);
+                        seam = Self::seam_edge(child, true);
                         continue;
                     }
                 } else {
@@ -5028,6 +5166,7 @@ impl LayoutBox {
                 // Advance cursor
                 cursor_x += child_width;
                 line_width += child_width;
+                seam = Self::seam_edge(child, true);
                 // vertical-align: top|bottom boxes do not anchor to the
                 // baseline at all (CSS2 §10.8): a top-aligned box hangs from
                 // the line-box top, so a tall one SWALLOWS the strut instead
@@ -5065,7 +5204,11 @@ impl LayoutBox {
                 // Phase 5 (IFC text splitting) — see layout_block_children.
                 let cb = self.dimensions.clone();
                 let line_top = self.dimensions.content.y + cursor_y;
+                let kern = Self::seam_kern(seam.as_ref(), Self::seam_edge(child, false).as_ref());
+                cursor_x += kern;
+                line_width += kern;
                 let (n_lines, last_w) = child.layout_text_in_flow(&cb, line_top, cursor_x);
+                seam = Self::seam_edge(child, true);
                 let lh = child.get_line_height();
                 if n_lines <= 1 {
                     cursor_x += last_w;
@@ -5084,6 +5227,7 @@ impl LayoutBox {
                     line_start_index = Some(i);
                 }
             } else {
+                seam = None;
                 // Regular block layout with margin collapse
                 // First, finish any inline-block line
                 if cursor_x > 0.0 {
@@ -14901,5 +15045,89 @@ mod border_radius_emit_tests {
         let k = kinds(&box_with(Length::Px(12.0), Color::TRANSPARENT));
         assert!(!k.contains(&"RoundedRect".to_string()), "got {k:?}");
         assert!(!k.contains(&"SolidColor".to_string()), "got {k:?}");
+    }
+}
+
+#[cfg(test)]
+mod seam_kern_tests {
+    use super::*;
+
+    fn seam_style(display_inline: bool) -> ComputedStyle {
+        let mut s = ComputedStyle::new();
+        s.font_family = "system-ui".to_string();
+        s.font_size = Length::Px(32.0);
+        s.white_space = rustkit_css::WhiteSpace::Nowrap;
+        if display_inline {
+            s.display = rustkit_css::Display::Inline;
+        }
+        s
+    }
+
+    fn seam_run_width(text: &str) -> f32 {
+        measure_text_with_spacing(
+            text,
+            "system-ui",
+            32.0,
+            rustkit_css::FontWeight(400),
+            rustkit_css::FontStyle::Normal,
+            0.0,
+            0.0,
+        )
+        .width
+    }
+
+    /// WPT break-boundary-2-chars-002: `abc<span>xyz</span>def` lays out
+    /// exactly as the one run `abcxyzdef` — Blink shapes across same-font
+    /// inline seams, so SF's `c|x` and `z|d` pairs kern.
+    fn seam_parent(span_padding: f32) -> LayoutBox {
+        let mut parent = LayoutBox::new(BoxType::Block, seam_style(false));
+        parent.dimensions.content = Rect::new(0.0, 0.0, 600.0, 0.0);
+        parent.children.push(LayoutBox::new(BoxType::Text("abc".into()), seam_style(false)));
+        let mut span_style = seam_style(true);
+        span_style.padding_left = Length::Px(span_padding);
+        let mut span = LayoutBox::new(BoxType::Inline, span_style);
+        span.children.push(LayoutBox::new(BoxType::Text("xyz".into()), seam_style(false)));
+        parent.children.push(span);
+        parent.children.push(LayoutBox::new(BoxType::Text("def".into()), seam_style(false)));
+        parent.layout_block_children(None);
+        parent
+    }
+
+    #[test]
+    fn text_kerns_across_an_inline_seam_like_one_run() {
+        let parent = seam_parent(0.0);
+        let xyz = &parent.children[1].children[0];
+        let def = &parent.children[2];
+        let one_run_abc = seam_run_width("abcx") - seam_run_width("x");
+        let one_run_abcxyz = seam_run_width("abcxyzd") - seam_run_width("d");
+        assert!(
+            (xyz.dimensions.content.x - one_run_abc).abs() < 0.02,
+            "xyz at {} for one-run {}",
+            xyz.dimensions.content.x,
+            one_run_abc
+        );
+        assert!(
+            (def.dimensions.content.x - one_run_abcxyz).abs() < 0.02,
+            "def at {} for one-run {}",
+            def.dimensions.content.x,
+            one_run_abcxyz
+        );
+        // The seams really do kern in SF (probe: 142.19 vs 142.81 at 32px).
+        let per_node = seam_run_width("abc") + seam_run_width("xyz");
+        assert!(per_node - def.dimensions.content.x > 0.1);
+    }
+
+    #[test]
+    fn a_padded_inline_edge_breaks_the_seam() {
+        let parent = seam_parent(4.0);
+        let span = &parent.children[1];
+        let abc_w = seam_run_width("abc");
+        // The span's margin box starts right after the unkerned run.
+        assert!(
+            (span.dimensions.margin_box().x - abc_w).abs() < 0.02,
+            "span margin box at {} for {}",
+            span.dimensions.margin_box().x,
+            abc_w
+        );
     }
 }
