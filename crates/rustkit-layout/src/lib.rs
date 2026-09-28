@@ -7846,6 +7846,15 @@ impl DisplayList {
         let text_color = layout_box.style.color;
         let bg_color = layout_box.style.background_color;
         let border_color = layout_box.style.border_top_color;
+        // The control's painted frame: 1px (the UA border stand-in) unless
+        // the author removed it. `border: none` on a styled search box drew
+        // a 1px frame anyway and seated the text 1px right of Chrome's
+        // (shelf's command input).
+        let border_width = if layout_box.style.border_top_style == rustkit_css::BorderStyle::None {
+            0.0
+        } else {
+            1.0
+        };
         let font_family = layout_box.style.font_family.clone();
         let font_weight = layout_box.style.font_weight.0;
         // Same resolution layout_form_control composes the box from, so the
@@ -7892,7 +7901,7 @@ impl DisplayList {
                     } else {
                         Color::new(200, 200, 200, 1.0)
                     },
-                    border_width: 1.0,
+                    border_width,
                     // Focus and caret come from the engine's live edit state,
                     // carried on the box via `focused_caret` (unblocked by
                     // LayoutBox::node_id).
@@ -7922,7 +7931,7 @@ impl DisplayList {
                     } else {
                         Color::new(200, 200, 200, 1.0)
                     },
-                    border_width: 1.0,
+                    border_width,
                     focused: layout_box.focused_caret.is_some(),
                     caret_position: layout_box.focused_caret,
                 });
@@ -7950,7 +7959,7 @@ impl DisplayList {
                     } else {
                         Color::new(180, 180, 180, 1.0)
                     },
-                    border_width: 1.0,
+                    border_width,
                     border_radius: 4.0,
                     pressed: false,
                     focused: false,
@@ -8049,7 +8058,7 @@ impl DisplayList {
                     } else {
                         Color::new(200, 200, 200, 1.0)
                     },
-                    border_width: 1.0,
+                    border_width,
                     focused: false,
                     caret_position: None,
                 });
@@ -11003,6 +11012,29 @@ mod tests {
         s.font_size = Length::Px(13.333);
         s.line_height = rustkit_css::LineHeight::Number(1.5);
         LayoutBox::new(BoxType::FormControl(control), s)
+    }
+
+    #[test]
+    fn a_border_none_control_paints_no_frame_and_seats_at_its_edge() {
+        let frame = |control: LayoutBox| {
+            let list = DisplayList::build(&control);
+            list.commands
+                .iter()
+                .find_map(|c| match c {
+                    DisplayCommand::TextInput { border_width, .. } => Some(*border_width),
+                    _ => None,
+                })
+                .expect("a TextInput command")
+        };
+        // Bare control: the 1px UA frame stand-in.
+        let mut bare = n53_text_input();
+        bare.dimensions.content = Rect::new(0.0, 0.0, 149.0, 19.0);
+        assert_eq!(frame(bare), 1.0);
+        // `border: none` (shelf's command input): no frame, no inset.
+        let mut none = n53_text_input();
+        none.style.border_top_style = rustkit_css::BorderStyle::None;
+        none.dimensions.content = Rect::new(0.0, 0.0, 149.0, 19.0);
+        assert_eq!(frame(none), 0.0);
     }
 
     fn n53_text_input() -> LayoutBox {
