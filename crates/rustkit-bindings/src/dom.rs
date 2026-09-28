@@ -17,8 +17,9 @@
 //!
 //! Tree moves (`appendChild`/`insertBefore`/`removeChild`/`remove`) write
 //! the Rust tree and mark the §3 `DomDirty` bucket, which the engine flushes
-//! with one relayout when the script settles. Writes that change a node's
-//! own data (attributes, text, new nodes) wait on a writable rustkit-dom.
+//! with one relayout when the script settles. Writes to a node's own data
+//! (attributes, text) go through `Document::replace_node_data`, which keeps
+//! the NodeId, so wrappers and the identity cache are untouched by them.
 
 use crate::DomDirty;
 use rustkit_dom::{Document, Node, NodeId, NodeType, QuerySelector};
@@ -148,6 +149,114 @@ fn mutate(host: &DomHost, args: &[JsValue]) -> Result<(), &'static str> {
             Ok(())
         }
         Some("remove") => Err("NotFoundError"),
+        _ => Err("NotSupportedError"),
+    }
+}
+
+/// Is `name` usable as an element or attribute name? A simplified XML
+/// `Name` check: non-empty, and none of the characters that end a name in
+/// the HTML tokenizer. Failing it is DOM's InvalidCharacterError.
+fn is_valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.chars().any(|c| {
+            c.is_ascii_whitespace() || matches!(c, '\0' | '/' | '>' | '=' | '"' | '\'' | '<')
+        })
+}
+
+/// `write(gen, op, id, a, b)`: one write to a node's own data, or a node
+/// creation. `Ok` carries what to return to script (a new node's id, or
+/// null) and the §3 bucket the write dirtied.
+fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'static str> {
+    let document = args
+        .first()
+        .and_then(|g| host.document_for(g))
+        .ok_or("NotFoundError")?;
+    let op = string_arg(args, 1).ok_or("NotSupportedError")?;
+    if let Some(kind) = op.strip_prefix("create:") {
+        let data = string_arg(args, 2).unwrap_or("").to_string();
+        let node_type = match kind {
+            "element" if is_valid_name(&data) => NodeType::Element {
+                // An HTML document lowercases the name it is given.
+                tag_name: data.to_ascii_lowercase(),
+                namespace: String::from("http://www.w3.org/1999/xhtml"),
+                attributes: Default::default(),
+            },
+            "element" => return Err("InvalidCharacterError"),
+            "text" => NodeType::Text(data),
+            "comment" => NodeType::Comment(data),
+            _ => return Err("NotSupportedError"),
+        };
+        // A detached node is in no tree, so nothing needs a restyle yet.
+        return Ok((
+            node_id(Some(document.create_node(node_type))),
+            DomDirty::Clean,
+        ));
+    }
+    let node = host.node_at(args, 2).ok_or("NotFoundError")?;
+    match (op, &node.node_type) {
+        (
+            "setAttr" | "removeAttr",
+            NodeType::Element {
+                tag_name,
+                namespace,
+                attributes,
+            },
+        ) => {
+            let name = string_arg(args, 3).ok_or("InvalidCharacterError")?;
+            if !is_valid_name(name) {
+                return Err("InvalidCharacterError");
+            }
+            let name = if is_html_element(&node) {
+                name.to_ascii_lowercase()
+            } else {
+                name.to_string()
+            };
+            let mut attributes = attributes.clone();
+            let changed = if op == "setAttr" {
+                let value = string_arg(args, 4).unwrap_or("").to_string();
+                attributes.insert(name, value.clone()) != Some(value)
+            } else {
+                attributes.remove(&name).is_some()
+            };
+            if !changed {
+                return Ok((JsValue::Null, DomDirty::Clean));
+            }
+            document.replace_node_data(
+                node.id,
+                NodeType::Element {
+                    tag_name: tag_name.clone(),
+                    namespace: namespace.clone(),
+                    attributes,
+                },
+            );
+            // Pin §3.3 restyles `style`/`class`/`id`; any other attribute
+            // restyles too, since attribute selectors can match on it.
+            Ok((JsValue::Null, DomDirty::Style))
+        }
+        ("setText", NodeType::Text(_) | NodeType::Comment(_)) => {
+            let data = string_arg(args, 3).unwrap_or("").to_string();
+            let node_type = match node.node_type {
+                NodeType::Text(_) => NodeType::Text(data),
+                _ => NodeType::Comment(data),
+            };
+            document.replace_node_data(node.id, node_type);
+            // Pin §3.3: a text change relayouts.
+            Ok((JsValue::Null, DomDirty::Layout))
+        }
+        // DOM §4.4 textContent setter on an element: replace all children
+        // with one Text node (none for the empty string).
+        ("setText", NodeType::Element { .. }) => {
+            for child in node.children() {
+                child.remove_from_parent();
+            }
+            let data = string_arg(args, 3).unwrap_or("");
+            if !data.is_empty() {
+                node.append_child(document.create_node(NodeType::Text(data.to_string())));
+            }
+            Ok((JsValue::Null, DomDirty::Style))
+        }
+        // Documents and doctypes ignore textContent writes.
+        ("setText", _) => Ok((JsValue::Null, DomDirty::Clean)),
         _ => Err("NotSupportedError"),
     }
 }
@@ -364,6 +473,22 @@ pub(crate) fn install(
         }),
     )?;
 
+    // write(gen, op, id, a, b): a string answer is the DOMException name
+    // to throw; anything else is the result (a new node's id, or null).
+    let h = host.clone();
+    let d = dirty.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_write",
+        5,
+        Box::new(move |args| match write(&h.borrow(), args) {
+            Ok((result, bucket)) => {
+                d.set(d.get().max(bucket));
+                result
+            }
+            Err(name) => JsValue::String(name.to_string()),
+        }),
+    )?;
+
     runtime.evaluate_script(WRAPPERS_JS)?;
     Ok(())
 }
@@ -375,9 +500,10 @@ const WRAPPERS_JS: &str = r#"
     var N = {
         root: __rustkit_dom_root, byId: __rustkit_dom_by_id,
         collect: __rustkit_dom_collect, info: __rustkit_dom_info,
-        attr: __rustkit_dom_attr, mutate: __rustkit_dom_mutate
+        attr: __rustkit_dom_attr, mutate: __rustkit_dom_mutate,
+        write: __rustkit_dom_write
     };
-    ['root', 'by_id', 'collect', 'info', 'attr', 'mutate'].forEach(function (n) {
+    ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
 
@@ -471,7 +597,30 @@ const WRAPPERS_JS: &str = r#"
 
     getter(Node.prototype, 'nodeType', function () { return info(this, 'type'); });
     getter(Node.prototype, 'nodeName', function () { return info(this, 'name'); });
-    getter(Node.prototype, 'textContent', function () { return info(this, 'text'); });
+    function accessor(proto, name, get, set) {
+        Object.defineProperty(proto, name, { get: get, set: set, configurable: true, enumerable: true });
+    }
+    // Writes to a node's own data. A string answer is the DOMException to
+    // throw; an old-document wrapper names no node (-1) and throws NotFoundError.
+    function setData(o, op, a, b, method) {
+        var s = slotOf(o);
+        var r = N.write(gen, op, s.gen === gen ? s.id : -1, a, b);
+        if (typeof r === 'string') {
+            throw new DOMException("Failed to execute '" + method + "'.", r);
+        }
+        return r;
+    }
+    function create(kind, data, method) {
+        var r = N.write(gen, 'create:' + kind, data);
+        if (typeof r === 'string') {
+            throw new DOMException("Failed to execute '" + method + "' on 'Document'.", r);
+        }
+        return wrap(r);
+    }
+    // textContent = null writes the empty string (DOM: [LegacyNullToEmptyString]).
+    function text(v) { return v === null ? '' : String(v); }
+    accessor(Node.prototype, 'textContent', function () { return info(this, 'text'); },
+        function (v) { setData(this, 'setText', text(v), null, 'textContent'); });
     getter(Node.prototype, 'parentNode', function () { return related(this, 'parent'); });
     getter(Node.prototype, 'parentElement', function () {
         var p = related(this, 'parent'); return p && p.nodeType === 1 ? p : null;
@@ -531,14 +680,18 @@ const WRAPPERS_JS: &str = r#"
         for (var n = other; n; n = n.parentNode) if (n === this) return true;
         return false;
     };
-    getter(CharacterData.prototype, 'data', function () { return info(this, 'text'); });
-    getter(CharacterData.prototype, 'nodeValue', function () { return info(this, 'text'); });
+    ['data', 'nodeValue'].forEach(function (k) {
+        accessor(CharacterData.prototype, k, function () { return info(this, 'text'); },
+            function (v) { setData(this, 'setText', text(v), null, k); });
+    });
     getter(CharacterData.prototype, 'length', function () { return (info(this, 'text') || '').length; });
 
     getter(Element.prototype, 'tagName', function () { return info(this, 'name'); });
     getter(Element.prototype, 'localName', function () { return info(this, 'local'); });
-    getter(Element.prototype, 'id', function () { return this.getAttribute('id') || ''; });
-    getter(Element.prototype, 'className', function () { return this.getAttribute('class') || ''; });
+    [['id', 'id'], ['className', 'class']].forEach(function (p) {
+        accessor(Element.prototype, p[0], function () { return this.getAttribute(p[1]) || ''; },
+            function (v) { this.setAttribute(p[1], v); });
+    });
     getter(Element.prototype, 'children', function () {
         var s = slotOf(this);
         return list(HTMLCollection.prototype, s.gen === gen ? N.info(s.gen, s.id, 'children') : '', true);
@@ -547,6 +700,180 @@ const WRAPPERS_JS: &str = r#"
         var s = slotOf(this); return N.attr(s.gen, s.id, String(name));
     };
     Element.prototype.hasAttribute = function (name) { return this.getAttribute(name) !== null; };
+    Element.prototype.setAttribute = function (name, value) {
+        if (arguments.length < 2) {
+            throw new TypeError("Failed to execute 'setAttribute' on 'Element': 2 arguments required.");
+        }
+        setData(this, 'setAttr', String(name), String(value), 'setAttribute');
+    };
+    Element.prototype.removeAttribute = function (name) {
+        setData(this, 'removeAttr', String(name), null, 'removeAttribute');
+    };
+    Element.prototype.toggleAttribute = function (name, force) {
+        var has = this.hasAttribute(name);
+        var want = force === undefined ? !has : !!force;
+        if (want && !has) this.setAttribute(name, '');
+        if (!want && has) this.removeAttribute(name);
+        return want;
+    };
+
+    // classList: a DOMTokenList over the class attribute, one per element.
+    var DOMTokenList = iface('DOMTokenList');
+    var TOKENS = Symbol('rustkit.tokens');
+    function tokens(list) {
+        var v = list[TOKENS].getAttribute('class') || '';
+        var out = [];
+        v.split(/[\t\n\f\r ]+/).forEach(function (t) { if (t && out.indexOf(t) < 0) out.push(t); });
+        return out;
+    }
+    function checkToken(t, method) {
+        t = String(t);
+        if (t === '') throw new DOMException("Failed to execute '" + method + "' on 'DOMTokenList': The token provided must not be empty.", 'SyntaxError');
+        if (/[\t\n\f\r ]/.test(t)) throw new DOMException("Failed to execute '" + method + "' on 'DOMTokenList': The token provided contains HTML space characters.", 'InvalidCharacterError');
+        return t;
+    }
+    function store(list, ts) { list[TOKENS].setAttribute('class', ts.join(' ')); }
+    getter(DOMTokenList.prototype, 'length', function () { return tokens(this).length; });
+    accessor(DOMTokenList.prototype, 'value', function () { return this[TOKENS].getAttribute('class') || ''; },
+        function (v) { this[TOKENS].setAttribute('class', String(v)); });
+    DOMTokenList.prototype.toString = function () { return this.value; };
+    DOMTokenList.prototype.item = function (i) { var ts = tokens(this); i = i >>> 0; return i < ts.length ? ts[i] : null; };
+    DOMTokenList.prototype.contains = function (t) { return tokens(this).indexOf(String(t)) >= 0; };
+    DOMTokenList.prototype.add = function () {
+        var args = Array.prototype.map.call(arguments, function (t) { return checkToken(t, 'add'); });
+        var ts = tokens(this);
+        args.forEach(function (t) { if (ts.indexOf(t) < 0) ts.push(t); });
+        store(this, ts);
+    };
+    DOMTokenList.prototype.remove = function () {
+        var args = Array.prototype.map.call(arguments, function (t) { return checkToken(t, 'remove'); });
+        var ts = tokens(this).filter(function (t) { return args.indexOf(t) < 0; });
+        // DOM's update steps skip writing a class attribute that isn't there.
+        if (this[TOKENS].hasAttribute('class')) store(this, ts);
+    };
+    DOMTokenList.prototype.toggle = function (t, force) {
+        t = checkToken(t, 'toggle');
+        var ts = tokens(this), i = ts.indexOf(t);
+        if (i >= 0 && force !== true) { ts.splice(i, 1); store(this, ts); return false; }
+        if (i < 0 && force !== false) { ts.push(t); store(this, ts); return true; }
+        return i >= 0;
+    };
+    DOMTokenList.prototype.replace = function (a, b) {
+        a = checkToken(a, 'replace'); b = checkToken(b, 'replace');
+        var ts = tokens(this), i = ts.indexOf(a);
+        if (i < 0) return false;
+        var j = ts.indexOf(b);
+        if (j >= 0 && j !== i) ts.splice(i, 1); else ts[i] = b;
+        store(this, ts);
+        return true;
+    };
+    DOMTokenList.prototype.forEach = function (cb, self) { tokens(this).forEach(cb, self); };
+    DOMTokenList.prototype[Symbol.iterator] = function () { return tokens(this)[Symbol.iterator](); };
+    var classLists = new WeakMap();
+    getter(Element.prototype, 'classList', function () {
+        slotOf(this);
+        var l = classLists.get(this);
+        if (!l) {
+            l = Object.create(DOMTokenList.prototype);
+            Object.defineProperty(l, TOKENS, { value: this });
+            classLists.set(this, l);
+        }
+        return l;
+    });
+
+    // style: a CSSStyleDeclaration over the style attribute, one per
+    // element. Reads parse the attribute; writes reserialize it, so the
+    // cascade sees them through the attribute (and the write marks Style).
+    // A `;` inside a string or url() is not yet split correctly.
+    var CSSStyleDeclaration = iface('CSSStyleDeclaration');
+    var OWNER = Symbol('rustkit.styleOwner');
+    function decls(st) {
+        var out = [];
+        (st[OWNER].getAttribute('style') || '').split(';').forEach(function (d) {
+            var i = d.indexOf(':');
+            if (i < 0) return;
+            var name = d.slice(0, i).trim().toLowerCase(), value = d.slice(i + 1).trim();
+            var important = /!\s*important$/i.test(value);
+            if (important) value = value.replace(/\s*!\s*important$/i, '');
+            if (!name || !value) return;
+            out = out.filter(function (x) { return x.name !== name; });
+            out.push({ name: name, value: value, important: important });
+        });
+        return out;
+    }
+    function storeDecls(st, ds) {
+        st[OWNER].setAttribute('style', ds.map(function (d) {
+            return d.name + ': ' + d.value + (d.important ? ' !important' : '') + ';';
+        }).join(' '));
+    }
+    function cssName(prop) {
+        if (prop === 'cssFloat') return 'float';
+        if (prop.indexOf('-') >= 0) return prop.toLowerCase();
+        return prop.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); })
+                   .replace(/^(webkit|moz|ms)-/, '-$1-');
+    }
+    var styleMethods = {
+        getPropertyValue: function (name) {
+            name = String(name).trim().toLowerCase();
+            var d = decls(this).filter(function (x) { return x.name === name; })[0];
+            return d ? d.value : '';
+        },
+        getPropertyPriority: function (name) {
+            name = String(name).trim().toLowerCase();
+            var d = decls(this).filter(function (x) { return x.name === name; })[0];
+            return d && d.important ? 'important' : '';
+        },
+        setProperty: function (name, value, priority) {
+            name = String(name).trim().toLowerCase();
+            value = value == null ? '' : String(value).trim();
+            if (value === '') { this.removeProperty(name); return; }
+            var ds = decls(this), d = ds.filter(function (x) { return x.name === name; })[0];
+            var important = String(priority || '').toLowerCase() === 'important';
+            if (d) { d.value = value; d.important = important; }
+            else ds.push({ name: name, value: value, important: important });
+            storeDecls(this, ds);
+        },
+        removeProperty: function (name) {
+            name = String(name).trim().toLowerCase();
+            var ds = decls(this), old = this.getPropertyValue(name);
+            var kept = ds.filter(function (x) { return x.name !== name; });
+            if (kept.length !== ds.length) storeDecls(this, kept);
+            return old;
+        },
+        item: function (i) { var ds = decls(this); i = i >>> 0; return i < ds.length ? ds[i].name : ''; }
+    };
+    Object.keys(styleMethods).forEach(function (k) { CSSStyleDeclaration.prototype[k] = styleMethods[k]; });
+    getter(CSSStyleDeclaration.prototype, 'length', function () { return decls(this).length; });
+    accessor(CSSStyleDeclaration.prototype, 'cssText', function () {
+        return this[OWNER].getAttribute('style') ? decls(this).map(function (d) {
+            return d.name + ': ' + d.value + (d.important ? ' !important' : '') + ';';
+        }).join(' ') : '';
+    }, function (v) { this[OWNER].setAttribute('style', v == null ? '' : String(v)); });
+    // Property names (el.style.backgroundColor) go through a Proxy, so any
+    // CSS property reads and writes without a per-property table.
+    var styles = new WeakMap();
+    function styleFor(el) {
+        var st = styles.get(el);
+        if (st) return st;
+        var target = Object.create(CSSStyleDeclaration.prototype);
+        Object.defineProperty(target, OWNER, { value: el });
+        st = new Proxy(target, {
+            get: function (t, p) {
+                if (typeof p !== 'string' || p in t) return Reflect.get(t, p, st);
+                if (/^\d+$/.test(p)) return t.item(Number(p)) || undefined;
+                return t.getPropertyValue(cssName(p));
+            },
+            set: function (t, p, v) {
+                if (typeof p !== 'string' || p in t) return Reflect.set(t, p, v, st);
+                t.setProperty(cssName(p), v);
+                return true;
+            }
+        });
+        styles.set(el, st);
+        return st;
+    }
+    accessor(Element.prototype, 'style', function () { slotOf(this); return styleFor(this); },
+        function (v) { this.style.cssText = v; });
 
     // querySelector/All, getElementsBy* on both Document and Element. The
     // collections are static snapshots (pin §4: live HTMLCollection later).
@@ -569,6 +896,19 @@ const WRAPPERS_JS: &str = r#"
         Element.prototype[k] = queries[k];
         Document.prototype[k] = queries[k];
     });
+    Document.prototype.createElement = function (tag) {
+        tag = String(tag);
+        // Form controls keep their JS stubs for now: their editing state
+        // (value, selection) lives there, not in the Rust DOM.
+        if (/^(input|textarea|form)$/i.test(tag)) return stubCreateElement.call(this, tag);
+        return create('element', tag, 'createElement');
+    };
+    Document.prototype.createTextNode = function (data) {
+        return create('text', String(data), 'createTextNode');
+    };
+    Document.prototype.createComment = function (data) {
+        return create('comment', String(data), 'createComment');
+    };
     Document.prototype.getElementById = function (id) {
         var s = slotOf(this);
         return s.gen === gen ? wrap(N.byId(s.gen, String(id))) : null;
@@ -582,6 +922,10 @@ const WRAPPERS_JS: &str = r#"
     // The global `document` becomes the Document wrapper.
     var doc = g.document;
     Object.setPrototypeOf(doc, Document.prototype);
+    // The stub's own factories would shadow the Rust-backed ones.
+    var stubCreateElement = doc.createElement;
+    delete doc.createElement;
+    delete doc.createTextNode;
 
     g.__rustkit_dom_reset = function (newGen) {
         gen = newGen;

@@ -1865,4 +1865,211 @@ mod tests {
         );
         assert_eq!(b.take_dirty(), DomDirty::Clean);
     }
+
+    // Writes to a node's own data go through replace-on-write in the Rust
+    // DOM: same NodeId, so the wrapper and every identity path are kept.
+    #[test]
+    fn set_attribute_writes_the_rust_node_and_keeps_identity() {
+        let b = bound(PAGE);
+        assert!(eval_bool(
+            &b,
+            "var m = document.getElementById('main'); \
+             m.setAttribute('data-k', 'v'); m.setAttribute('TITLE', 't'); \
+             m.getAttribute('data-k') === 'v' && m.getAttribute('title') === 't' && \
+             document.getElementById('main') === m && \
+             document.querySelector('#main') === m && \
+             m.firstChild.parentNode === m && m.textContent === 'Hello, world!Two'"
+        ));
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+        let doc = b.window.borrow().document.clone().unwrap();
+        let main = doc.get_element_by_id("main").unwrap();
+        assert_eq!(main.get_attribute("data-k"), Some("v"));
+        assert_eq!(main.get_attribute("title"), Some("t"));
+    }
+
+    #[test]
+    fn remove_and_toggle_attribute() {
+        let b = bound(PAGE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var m = document.getElementById('main'); var r = []; \
+                 m.removeAttribute('class'); r.push(m.hasAttribute('class')); \
+                 r.push(m.toggleAttribute('hidden'), m.getAttribute('hidden')); \
+                 r.push(m.toggleAttribute('hidden'), m.hasAttribute('hidden')); \
+                 r.push(m.toggleAttribute('hidden', false)); r.join(',')"
+            ),
+            "false,true,,false,false,false"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_attribute_write_marks_nothing() {
+        let b = bound(PAGE);
+        b.evaluate("document.getElementById('main').setAttribute('class', 'box'); \
+                    document.getElementById('main').removeAttribute('nope');")
+            .unwrap();
+        assert_eq!(b.take_dirty(), DomDirty::Clean);
+    }
+
+    #[test]
+    fn id_and_class_name_setters_move_the_lookups() {
+        let b = bound(PAGE);
+        assert!(eval_bool(
+            &b,
+            "var m = document.getElementById('main'); m.id = 'renamed'; m.className = 'a b'; \
+             document.getElementById('main') === null && \
+             document.getElementById('renamed') === m && m.id === 'renamed' && \
+             document.getElementsByClassName('b')[0] === m && \
+             document.querySelector('.a') === m"
+        ));
+    }
+
+    #[test]
+    fn class_list_edits_the_class_attribute() {
+        let b = bound(PAGE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var m = document.getElementById('main'), c = m.classList, r = []; \
+                 c.add('a', 'b', 'a'); r.push(m.className, c.length, c.contains('b')); \
+                 c.remove('box'); r.push(m.className); \
+                 r.push(c.toggle('z'), c.toggle('z'), c.toggle('a', true)); \
+                 r.push(c.replace('a', 'q'), c.value, c.item(0), String(c.item(9))); \
+                 r.push(m.classList === c, document.querySelector('.q') === m); \
+                 try { c.add(''); } catch (e) { r.push(e.name); } \
+                 try { c.add('x y'); } catch (e) { r.push(e.name); } \
+                 r.join('|')"
+            ),
+            "box a b|3|true|a b|true|false|true|true|q b|q|null|true|true|SyntaxError|InvalidCharacterError"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+    }
+
+    #[test]
+    fn text_content_setter_replaces_an_elements_children() {
+        let b = bound(PAGE);
+        assert!(eval_bool(
+            &b,
+            "var m = document.getElementById('main'), p = m.firstChild; \
+             m.textContent = 'plain'; \
+             m.childNodes.length === 1 && m.firstChild.nodeType === 3 && \
+             m.textContent === 'plain' && p.parentNode === null && \
+             document.querySelectorAll('.x').length === 1"
+        ));
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+        let doc = b.window.borrow().document.clone().unwrap();
+        assert_eq!(doc.get_element_by_id("main").unwrap().text_content(), "plain");
+        assert!(eval_bool(
+            &b,
+            "var m = document.getElementById('main'); m.textContent = ''; \
+             var a = m.firstChild === null; m.textContent = null; \
+             a && m.childNodes.length === 0 && m.textContent === ''"
+        ));
+    }
+
+    #[test]
+    fn character_data_setters_keep_the_text_node() {
+        let b = bound(PAGE);
+        assert!(eval_bool(
+            &b,
+            "var o = document.getElementById('outside'), t = o.firstChild; \
+             t.data = 'Changed'; var a = o.textContent === 'Changed' && o.firstChild === t; \
+             t.nodeValue = 'Again'; t.textContent = 'Last'; \
+             a && t.data === 'Last' && t.length === 4 && o.textContent === 'Last'"
+        ));
+        assert_eq!(b.take_dirty(), DomDirty::Layout);
+    }
+
+    #[test]
+    fn created_nodes_are_detached_until_inserted() {
+        let b = bound(PAGE);
+        assert!(eval_bool(
+            &b,
+            "var li = document.createElement('LI'); \
+             var ok = li.tagName === 'LI' && li.localName === 'li' && li.parentNode === null && \
+                      li instanceof HTMLElement && li.ownerDocument === document; \
+             li.className = 'item'; li.appendChild(document.createTextNode('new')); \
+             li.appendChild(document.createComment('c')); \
+             ok && li.textContent === 'new' && li.childNodes.length === 2 && \
+             document.querySelector('.item') === null"
+        ));
+        assert_eq!(
+            b.take_dirty(),
+            DomDirty::Style,
+            "writes to a detached node are marked but harmless"
+        );
+        assert!(eval_bool(
+            &b,
+            "document.body.appendChild(li) === li && \
+             document.querySelector('.item') === li && \
+             document.body.lastChild === li && document.body.textContent.slice(-3) === 'new'"
+        ));
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+    }
+
+    #[test]
+    fn invalid_names_throw_invalid_character_error() {
+        let b = bound(PAGE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var r = []; \
+                 try { document.createElement(''); } catch (e) { r.push(e.name); } \
+                 try { document.createElement('a b'); } catch (e) { r.push(e.name); } \
+                 try { document.body.setAttribute('a=b', 'x'); } catch (e) { r.push(e.name); } \
+                 try { document.body.setAttribute('x'); } catch (e) { r.push(e.name); } \
+                 r.join(',')"
+            ),
+            "InvalidCharacterError,InvalidCharacterError,InvalidCharacterError,TypeError"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Clean);
+    }
+
+    #[test]
+    fn old_wrappers_cannot_write_data_in_the_next_document() {
+        let b = bound(PAGE);
+        b.evaluate("var old = document.getElementById('main');").unwrap();
+        b.set_document(Rc::new(
+            Document::parse_html("<html><body><div id='main'>New</div></body></html>").unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(
+            eval_string(
+                &b,
+                "var r = []; \
+                 try { old.setAttribute('class', 'x'); } catch (e) { r.push(e.name); } \
+                 try { old.textContent = 'x'; } catch (e) { r.push(e.name); } \
+                 r.push(document.getElementById('main').textContent); r.join(',')"
+            ),
+            "NotFoundError,NotFoundError,New"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Clean);
+    }
+
+    #[test]
+    fn style_reads_and_writes_the_style_attribute() {
+        let b = bound(
+            "<html><body><div id='d' style='color: red; margin-top:4px !important'>x</div></body></html>",
+        );
+        assert_eq!(
+            eval_string(
+                &b,
+                "var d = document.getElementById('d'), s = d.style, r = []; \
+                 r.push(s.color, s.marginTop, s.getPropertyValue('margin-top'), \
+                        s.getPropertyPriority('margin-top'), s.length, s[0], s.fontSize === ''); \
+                 s.backgroundColor = 'blue'; s.color = ''; s.setProperty('float', 'left'); \
+                 r.push(d.getAttribute('style'), s.cssFloat, d.style === s); \
+                 s.cssText = 'width: 10px'; r.push(s.width, s.length); \
+                 d.style = 'height: 5px'; r.push(d.getAttribute('style'), s.removeProperty('height'), s.length); \
+                 r.join('|')"
+            ),
+            "red|4px|4px|important|2|color|true|\
+             margin-top: 4px !important; background-color: blue; float: left;|left|true|\
+             10px|1|height: 5px|5px|0"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+        let doc = b.window.borrow().document.clone().unwrap();
+        assert_eq!(doc.get_element_by_id("d").unwrap().get_attribute("style"), Some(""));
+    }
 }
