@@ -9,6 +9,7 @@
 //! 3. **Performance**: Minimize overhead at the boundary
 //! 4. **Extensibility**: Easy to add new APIs
 
+mod dom;
 pub mod events;
 
 pub use events::{
@@ -19,10 +20,9 @@ pub use events::{
     TransitionEventData, WheelDeltaMode, WheelEventData,
 };
 
-use rustkit_dom::{Document, Node, NodeId};
+use rustkit_dom::{Document, NodeId};
 use rustkit_js::{JsError, JsRuntime, JsValue};
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
@@ -425,7 +425,8 @@ pub struct DomBindings {
     runtime: RefCell<JsRuntime>,
     window: RefCell<WindowState>,
     event_listeners: RefCell<Vec<EventListener>>,
-    node_map: RefCell<HashMap<u64, Rc<Node>>>,
+    /// The document `document`/`Node`/`Element` read from (see `dom`).
+    dom_host: dom::SharedDomHost,
     /// Queue of IPC messages from JavaScript
     _ipc_queue: RefCell<Vec<IpcMessage>>,
 }
@@ -437,12 +438,14 @@ impl DomBindings {
 
         // Inject global objects
         Self::inject_globals(&mut runtime)?;
+        let dom_host = dom::SharedDomHost::default();
+        dom::install(&mut runtime, &dom_host)?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
             window: RefCell::new(WindowState::default()),
             event_listeners: RefCell::new(Vec::new()),
-            node_map: RefCell::new(HashMap::new()),
+            dom_host,
             _ipc_queue: RefCell::new(Vec::new()),
         })
     }
@@ -560,37 +563,16 @@ impl DomBindings {
 
         // Document object stub
         let document_js = r#"
+            // The read surface (getElementById, querySelector[All],
+            // getElementsBy*, documentElement/head/body) is Rust-backed and
+            // installed by `dom::install`.
             var document = {
-                _elements: {},
-                documentElement: null,
-                head: null,
-                body: null,
                 title: '',
                 readyState: 'loading',
                 cookie: '',
                 domain: '',
                 referrer: '',
                 URL: 'about:blank',
-                
-                getElementById: function(id) {
-                    return this._elements[id] || null;
-                },
-                
-                getElementsByTagName: function(tagName) {
-                    return [];
-                },
-                
-                getElementsByClassName: function(className) {
-                    return [];
-                },
-                
-                querySelector: function(selector) {
-                    return null;
-                },
-                
-                querySelectorAll: function(selector) {
-                    return [];
-                },
                 
                 createElement: function(tagName) {
                     return {
@@ -918,15 +900,10 @@ impl DomBindings {
         runtime.evaluate_script(&format!("document.title = {:?};", title))?;
         runtime.evaluate_script("document.readyState = 'complete';")?;
 
-        // Index elements by ID
-        document.traverse(|node| {
-            if let Some(_id) = node.get_attribute("id") {
-                let node_id = node.id.raw();
-                self.node_map
-                    .borrow_mut()
-                    .insert(node_id as u64, node.clone());
-            }
-        });
+        // Rebind the DOM wrappers. Wrappers handed out for a previous
+        // document stop resolving (their generation no longer matches).
+        let generation = self.dom_host.borrow_mut().bind(document);
+        runtime.evaluate_script(&format!("__rustkit_dom_reset({generation});"))?;
 
         debug!("Document bound to JS context");
         Ok(())
@@ -1557,5 +1534,132 @@ mod tests {
         // Past the horizon stays queued.
         assert_eq!(eval_string(&bindings, "order.join(',')"), "a0,i1,b200,i2");
         assert_eq!(bindings.run_timers(120_000, 1_000).unwrap(), 1);
+    }
+
+    fn bound(html: &str) -> DomBindings {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .set_document(Rc::new(Document::parse_html(html).unwrap()))
+            .unwrap();
+        bindings
+    }
+
+    fn eval_bool(bindings: &DomBindings, script: &str) -> bool {
+        match bindings.evaluate(script).unwrap() {
+            JsValue::Boolean(b) => b,
+            other => panic!("{script} evaluated to {other:?}"),
+        }
+    }
+
+    const PAGE: &str = r#"<!DOCTYPE html><html><head><title>T</title></head>
+<body><div id="main" class="box"><p class="x">Hello, <b>world</b>!</p><!--c--><p class="x">Two</p></div>
+<p id="outside" class="x">Out</p></body></html>"#;
+
+    // Pin (a): one wrapper per node, whatever the entry point.
+    #[test]
+    fn get_element_by_id_is_the_same_object_as_query_selector() {
+        let b = bound(PAGE);
+        assert!(eval_bool(
+            &b,
+            "document.getElementById('main') === document.querySelector('#main')"
+        ));
+        assert!(eval_bool(
+            &b,
+            "var m = document.getElementById('main'); \
+             m.firstChild.parentNode === m && m.childNodes[0] === m.firstChild && \
+             document.body.parentNode === document.documentElement && \
+             document.documentElement.parentNode === document"
+        ));
+    }
+
+    // Pin (b): textContent is the Rust DOM's text.
+    #[test]
+    fn text_content_reads_the_rust_dom() {
+        let b = bound(PAGE);
+        assert_eq!(
+            eval_string(&b, "document.getElementById('main').textContent"),
+            "Hello, world!Two"
+        );
+        assert_eq!(
+            eval_string(&b, "document.body.textContent.replace(/\\s+/g, ' ').trim()"),
+            "Hello, world!Two Out"
+        );
+        assert!(eval_bool(&b, "document.textContent === null"));
+    }
+
+    // Pin (c): a missing id is null, not a stub object.
+    #[test]
+    fn missing_id_is_null() {
+        let b = bound(PAGE);
+        assert!(eval_bool(&b, "document.getElementById('nope') === null"));
+        assert!(eval_bool(&b, "document.querySelector('#nope') === null"));
+        assert!(eval_bool(&b, "document.querySelectorAll('.nope').length === 0"));
+    }
+
+    // Pin (d): wrappers from the previous document never read the new one's
+    // nodes, although NodeIds restart per document.
+    #[test]
+    fn old_wrappers_do_not_read_the_next_document() {
+        let b = bound(PAGE);
+        b.evaluate("var old = document.getElementById('main');").unwrap();
+        b.set_document(Rc::new(
+            Document::parse_html("<html><body><div id='main'>New</div></body></html>")
+                .unwrap(),
+        ))
+        .unwrap();
+        assert!(eval_bool(
+            &b,
+            "old.textContent === null && old.firstChild === null && \
+             old.getAttribute('id') === null && old.querySelector('p') === null"
+        ));
+        assert!(eval_bool(&b, "document.getElementById('main') !== old"));
+        assert_eq!(
+            eval_string(&b, "document.getElementById('main').textContent"),
+            "New"
+        );
+    }
+
+    #[test]
+    fn element_reads_and_scoped_queries() {
+        let b = bound(PAGE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var m = document.getElementById('main'); \
+                 [m.tagName, m.localName, m.id, m.className, m.getAttribute('CLASS'), \
+                  m.children.length, m.childNodes.length, m.childNodes[1].nodeType].join('|')"
+            ),
+            "DIV|div|main|box|box|2|3|8"
+        );
+        // Scoped to the element's descendants; document-wide sees all three.
+        assert!(eval_bool(
+            &b,
+            "document.getElementById('main').querySelectorAll('.x').length === 2 && \
+             document.querySelectorAll('.x').length === 3 && \
+             document.getElementsByTagName('p').item(2) === document.getElementById('outside')"
+        ));
+        assert!(eval_bool(
+            &b,
+            "document.body instanceof HTMLElement && document.body instanceof Node && \
+             document instanceof Document && document.head.firstChild.tagName === 'TITLE'"
+        ));
+        assert!(eval_bool(
+            &b,
+            "var n = 0; document.querySelectorAll('p').forEach(function () { n++; }); n === 3"
+        ));
+        assert!(eval_bool(
+            &b,
+            "try { new Node(); false } catch (e) { e instanceof TypeError }"
+        ));
+    }
+
+    #[test]
+    fn unbound_document_reads_are_null() {
+        let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        assert!(eval_bool(
+            &b,
+            "document.body === null && document.getElementById('x') === null && \
+             document.querySelectorAll('p').length === 0"
+        ));
     }
 }
