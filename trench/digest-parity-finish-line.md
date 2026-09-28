@@ -12518,3 +12518,217 @@ recorded next unit. **Next unit stays the FormControl hole in
 `own_min_content_width`.** The eleven paint-only cases wait. Decision 1 is
 closed and should not be carried forward again. Decisions 2 and 3 of this entry
 are still open.
+
+## 2026-09-28
+
+**Metric: `3/26` on macOS, carried forward and NOT re-measured by me.** Last
+measured by run 36297222671 on 09-27 against `develop c2772b1` plus #298.
+`develop` is now `e43a7f1` — #299..#314 later, engine changes I did not read —
+so the carry-forward states what I know, not that the number is still 3.
+Tonight's PR (#316) carries Rust, so its own Parity Gate on `macos-14` measures
+it; that run is the check, not this entry.
+
+**P-item: the unit 09-27 recorded — the `FormControl` hole in
+`own_min_content_width`. COMPLETE as a unit.** Branch
+`atlas/n68-formcontrol-min-content`, **PR #316** against `develop`.
+
+Decision 1 was ratified 09-27 (geometry first), so no choice was needed tonight;
+I worked the recorded next unit as written.
+
+### What the defect was
+
+n67 gave `own_max_content_width` a `BoxType::FormControl` arm and left
+`own_min_content_width` without one, so a control's min-content was its padding
+box alone — `settings`' `.btn { padding: 0.6rem 1rem; border: 1px }` floored at
+**34**, its padding and none of its label.
+
+Min-content is a **floor**, so the symptom is not a narrow preferred width but a
+control allowed to shrink past its own text. The consumers are css-flexbox-1
+§4.5 automatic minimum size and css-sizing-3 shrink-to-fit. Chrome 148, probed:
+two `padding: 8px 16px; border: 1px` buttons in a `display:flex; width:120px`
+line — Chrome floors them at 90.031 / 77.594 and lets the **line** overflow;
+RustKit shrank them to 72.17 / 39.84. A float in a 60px parent: Chrome 90.031,
+RustKit 60 with a 125px child.
+
+**The rule is not a delegation, and the probe is what settled that.** A button
+is the only control whose intrinsic min and max differ, because it is the only
+one whose content is text in a block that can take a soft wrap:
+
+```
+  button "Save Changes"   min  90.031   max 125.844   (word "Changes" 56.047 + 34)
+  button "Cancel"         min  77.594   max  77.594   (one word: min == max)
+  inline-block <span>, same padding and label:  90.031 / 125.844 — IDENTICAL
+  input 185/185   padded input 215/215   select 137/137   textarea 182/182
+```
+
+The `<span>` row is load-bearing: a button's min-content is the **ordinary text
+rule**, so `text_min_content_width` is the right quantity and carries
+`white-space: nowrap | pre` for free. Delegating to
+`form_control_intrinsic_size` — the obvious one-line version, and the one
+09-27 warned about — overstates min-content by 40px on a two-word label.
+
+### Commits
+
+- `5e3a926` — the `FormControl` arm in `own_min_content_width`, the extracted
+  `button_border_box_width` so the padding composition has one copy, and eight
+  guards.
+- this commit — the digest entry and `trench/tools/n68_control_intrinsic_probe.{mjs,html}`.
+
+### Measured — Linux/SwiftShader, 26 cases. MECHANICS, NOT A RECEIPT
+
+```
+  geometry failures   2582 -> 2582      geometry-green   3/26 -> 3/26
+  sum|delta|      40086.45 -> 40083.60  (-2.86, all of it `settings`)
+  axes better 2   axes WORSE 1   crossing the 0.5px bar: none
+  Gate B: bit-identical on all 26 cases; the 26 frames are bit-identical too
+```
+
+| case | element | axis | before | after |
+|---|---|---|---:|---:|
+| settings | `#saveBtn` | width | −0.665 | **−3.522** (worse by 2.857) |
+| settings | `#closeBtn` | width | −3.638 | **−0.781** |
+| settings | `#closeBtn` | x | +3.638 | **+0.781** |
+
+25 cases are bit-identical in `layout.json`. Gate B cannot move because
+`settings`' footer sits at y=2887 against a 768px capture — the same explanation
+as 09-27, stated again because "paint unchanged" without it reads as a
+coincidence rather than a property.
+
+### The one worsened axis, and why I did not revert
+
+**The stop rule did not fire, and I want to be precise about why rather than
+lean on the wording.** The rule bans improving the metric while an oracle
+regresses. The metric did not improve: `3/26 -> 3/26`, count `2582 -> 2582`, no
+axis crossed the bar in either direction. What happened is the inverse of the
+trade the rule exists to stop — correctness improved and one number got worse.
+
+And the worsened number is **a cancellation being removed, not a new error.**
+`.btn-group` has `gap: 0.5rem`, and `own_max_content_width` reads the gap as
+`match style.column_gap { Length::Px(g) => g, _ => 0.0 }` — a rem gap
+contributes **zero**, so the container's contribution is 8px short of its own
+items (190.400 against 122.400 + 8 + 68.000 = 198.400). That 8px becomes
+spurious flex shrink, and the arithmetic closes to three decimals on both sides:
+
+```
+  before  shrink 8.000 split by base size: 8*122.4/190.4 = 5.143 off #saveBtn,
+          8*68.0/190.4 = 2.857 off #closeBtn  ->  117.257 / 65.143  (as captured)
+  after   #closeBtn correctly frozen at its min-content 68.000, so all 8.000
+          comes off #saveBtn                  ->  114.400 / 68.000  (as captured)
+```
+
+That is css-flexbox-1 §9.7 step 4 behaving correctly. The 5.143 the old code
+took off `#saveBtn` happened to cancel most of `#saveBtn`'s own error, which is
+that RustKit **over**-measures "Save Settings" by 4.478 at 13.6px/500 (P4).
+
+**None of −0.665, −3.522 or +4.478 is `#saveBtn`'s own width error.** They are
+three ways of sharing one container deficit, and that is the night's real
+finding: on this case the geometry oracle currently cannot attribute a button's
+width error at all, because a container-level deficit is being redistributed
+across its items by flex-shrink. Fixing either half alone moves the numbers
+without moving the truth.
+
+### Known, measured, and deliberately NOT landed
+
+**The rem-gap hole in `own_max_content_width` — measured, and it must not land
+as it stands.** I applied it, captured, and A/B'd it:
+
+```
+  min-content fix alone:      axes better 2    axes WORSE  1   sum|delta| -2.86
+  min-content + rem-gap fix:  axes better 9    axes WORSE 11   sum|delta| -14.94
+```
+
+The combined version improves `sum|delta|` five times as much **and regresses
+eleven axes** — several boxes swing from a small negative to a larger positive
+(`-3.816 -> +12.184`, `+5.816 -> +13.816`). That is precisely the
+mean-wins-while-correctness-loses trade this campaign exists to end, so it was
+reverted and is recorded rather than half-landed. It is a real defect of the
+n51 class (`padding: 1rem` read as no padding) sitting in the function n67
+added last night, and it needs its own unit, its own guards, and its own A/B —
+probably alongside the P4 advance work, since on `settings` the container
+deficit and the text over-measurement are entangled.
+
+### Mutation-check results
+
+**9 probes, 9 RED, every landing site grep-verified, control green before and
+after.**
+
+| probe | caught by |
+|---|---|
+| M1 arm removed entirely | 7 guards |
+| M2 min built from the WHOLE label | 4 guards |
+| M3 arm moved ABOVE the `width: Px` check | the ordering guard |
+| M4 button delegates to the max-content intrinsic | 4 guards |
+| M5 non-button delegation takes the HEIGHT | the delegation guard |
+| M6 shared composition drops author padding+border | 2 guards |
+| M7 shared composition drops the bare 24px UA well | the bare-button guard |
+| M8 min = label minus its NARROWEST word | the one-word + nowrap guards |
+| M9 widest word computed ignoring `white-space` | the nowrap guard |
+
+**M8 and M9 exist because the first sweep of seven left two guards dying only
+on M1.** A guard that fails only when the whole arm is deleted is testing that
+the arm exists, not that it is right — 09-27's checklist item ("ask which line
+of the change no assertion would miss") applied to the guards themselves rather
+than to the code. M8 is the discriminating case: subtracting the label's
+*narrowest* word is arithmetically correct on a two-word label and collapses a
+one-word button to its padding box, so six of the eight guards cannot tell it
+from the real rule. After M8/M9 every guard is load-bearing for at least one
+probe and there are no survivors.
+
+09-27's other checklist item — check the probe changed the code you aimed it at
+— is now mechanised: the sweep asserts its own landing site and prints
+`aim=OK` / `!!MISAIMED!!` per probe, rather than leaving it to a manual `grep`.
+
+### Decisions needed from Pete
+
+1. **The rem-gap fix is correct and its honest A/B is 9 better / 11 worse** —
+   does it wait for the P4 advance work so the two can be measured together, or
+   land alone with the eleven regressions recorded as expected?
+2. Unchanged and cheap: allow `*.blob.core.windows.net` so a night here can
+   read the macOS `gate-a.json` and Gate C's board (09-26 decision 2, 09-27
+   decision 3). Tonight's change is magnitude-only again, so the macOS lane can
+   confirm no regression and **cannot confirm the improvement** — third night
+   running.
+3. `cargo fmt -p rustkit-layout` rewrites **11 files and ~1550 lines** of
+   pre-existing code, so the crate is not fmt-clean on `develop` and the
+   documented `cargo fmt --all` in CLAUDE.md cannot be run before a commit
+   without burying the diff. Should the crate be fmt-normalised in one
+   standalone PR, or should CLAUDE.md stop advertising it?
+
+### Surprises
+
+- **The night's headline number got worse and that was the correct outcome.**
+  I expected either a clean improvement or a stop-rule revert, and got a third
+  thing: a spec-correct fix that removes an accidental cancellation and so
+  makes one axis read further from Chrome. The only reason I could tell that
+  apart from a regression is that the arithmetic closes exactly — 5.143 and
+  2.857 are `8 × base/total` on the nose, on both sides of the change. Without
+  the ground-truth intrinsics (122.400 / 68.000, printed from a throwaway test)
+  I would have had a plausible story and no proof, and I think I would have
+  reverted a correct fix.
+- **A container deficit makes its items' errors unattributable, and nothing on
+  the board says so.** Gate A reports per-element deltas as if each element's
+  number were its own. Inside a shrinking flex line it is not: one container
+  bug is being spread across the items in proportion to their base sizes, so
+  every item's delta is a mixture. This is the same class as night 8's finding
+  about Gate B reading RustKit's pixels at Chrome's rect — a per-element verdict
+  that is not actually per-element. I have not built anything for it.
+- **`cargo fmt -p rustkit-layout` almost destroyed the PR.** It reformatted the
+  whole crate (11 files, 1548 insertions) on top of my two-file change. I
+  recovered by extracting my five hunks from the formatted output, resetting
+  `crates/` to `develop`, and re-applying — which has the side benefit that the
+  committed hunks are fmt-stable while the rest of the crate is left alone
+  (verified: no `fmt --check` diff falls inside my added line ranges). Worth
+  knowing before anyone follows CLAUDE.md's `cargo fmt --all` literally.
+- **`cargo test -p rustkit-engine --lib` is 53 red on this seat without
+  `VK_ICD_FILENAMES`**, and every failure is `RenderError("No suitable GPU
+  adapter found")` in a test helper, across cascade, floats, selectors,
+  variables and shadows. With the bundled SwiftShader ICD it is **146 passed,
+  0 failed**. The night order says to run that command before every commit; run
+  literally it reads as catastrophic base breakage. There is an
+  `athena/engine-test-gpu-guard` branch on the remote, so this is apparently
+  known elsewhere.
+- **`scripts/finish_line_receipt.py` refused to give me a number, correctly.**
+  With Gate A and Gate B reports but no 3-iteration aggregate it printed *"This
+  receipt measured nothing on all four conditions. That is not 0/26 — it is a
+  receipt that did not run"* and exited 1. The instrument built on night 6 held
+  against a seat that wanted a number tonight.
