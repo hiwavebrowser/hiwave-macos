@@ -20,8 +20,7 @@ use rustkit_bindings::DomBindings;
 pub use rustkit_bindings::IpcMessage;
 use rustkit_compositor::Compositor;
 
-/// Test-only: create a `Compositor` with GPU device creation serialised across
-/// this crate's unit tests.
+/// Test-only: create a `Compositor` while holding this crate's GPU guard.
 ///
 /// `Compositor::new` builds a wgpu instance, requests an adapter and a device.
 /// Run from many test threads at once on a machine with a real GPU (seen on
@@ -29,11 +28,126 @@ use rustkit_compositor::Compositor;
 /// the parallel test binary stops making progress with no slow-test warnings,
 /// while `--test-threads=1` always passes. Tests only; `Engine::new` and every
 /// test that builds an engine by hand go through this.
+///
+/// Serialising only the creation (#306) cut the stalls from 5/5 parallel runs
+/// to 2/35: the remaining hangs were a device being created while another
+/// test's device was still in use or being dropped. So the guard is held for
+/// the rest of the test, not just the call: see [`test_gpu::hold_for_this_test`].
 #[cfg(test)]
 pub(crate) fn test_compositor() -> Result<Compositor, rustkit_compositor::CompositorError> {
-    static GPU_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _gpu_init = GPU_INIT.lock().unwrap_or_else(|e| e.into_inner());
+    test_gpu::hold_for_this_test();
     Compositor::new()
+}
+
+/// Test-only GPU guard: at most one unit test at a time owns GPU devices.
+///
+/// The first device a test thread creates takes the guard; a thread-local
+/// token gives it back when that thread exits. libtest runs every test on its
+/// own thread, so the guard spans the whole test: device creation, use, AND
+/// teardown (locals drop before thread-locals). Tests that never touch the GPU
+/// never take it and still run in parallel.
+///
+/// A second engine on the same thread is free (the thread already holds the
+/// guard). A helper thread that builds its own engine takes the guard for
+/// itself, so a test must not keep a GPU engine alive on its own thread while
+/// waiting for such a helper; that would wait on itself.
+///
+/// Waiting is bounded: after [`test_gpu::MAX_WAIT`] the waiter panics and
+/// names the holder, so a test that hangs while holding the GPU fails the
+/// tests queued behind it loudly instead of stalling the binary silently.
+#[cfg(test)]
+pub(crate) mod test_gpu {
+    use std::cell::RefCell;
+    use std::sync::{Condvar, Mutex};
+    use std::time::Duration;
+
+    pub(crate) const MAX_WAIT: Duration = Duration::from_secs(120);
+
+    /// Name of the thread holding the guard, if any.
+    static HOLDER: Mutex<Option<String>> = Mutex::new(None);
+    static RELEASED: Condvar = Condvar::new();
+
+    /// Dropped when the owning thread exits; that is the release.
+    struct Token;
+
+    impl Drop for Token {
+        fn drop(&mut self) {
+            let mut holder = HOLDER.lock().unwrap_or_else(|e| e.into_inner());
+            *holder = None;
+            RELEASED.notify_all();
+        }
+    }
+
+    thread_local! {
+        static TOKEN: RefCell<Option<Token>> = const { RefCell::new(None) };
+    }
+
+    fn this_thread() -> String {
+        let t = std::thread::current();
+        match t.name() {
+            Some(name) => name.to_string(),
+            None => format!("{:?}", t.id()),
+        }
+    }
+
+    /// Take the guard for the rest of this thread's life, unless it already
+    /// holds it.
+    pub(crate) fn hold_for_this_test() {
+        if TOKEN.with(|t| t.borrow().is_some()) {
+            return;
+        }
+        let me = this_thread();
+        let mut holder = HOLDER.lock().unwrap_or_else(|e| e.into_inner());
+        let deadline = std::time::Instant::now() + MAX_WAIT;
+        while let Some(other) = holder.as_ref() {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                panic!(
+                    "GPU test guard: waited {}s for `{other}` to finish with the GPU; \
+                     that test is hung or kept a GPU engine alive while waiting on a helper thread",
+                    MAX_WAIT.as_secs()
+                );
+            }
+            holder = RELEASED
+                .wait_timeout(holder, deadline - now)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        *holder = Some(me);
+        drop(holder);
+        TOKEN.with(|t| *t.borrow_mut() = Some(Token));
+    }
+
+    /// Run `work` against a fresh engine on a helper thread, and fail with
+    /// `what` if it takes longer than `budget` once that engine EXISTS.
+    ///
+    /// For tests that bound a possible hang (a style pass that loops) with a
+    /// timeout. Building the engine takes the GPU guard, which can mean queueing
+    /// behind other GPU tests; that wait must not count against the hang budget,
+    /// or a busy parallel run fails a test that did nothing wrong.
+    pub(crate) fn on_helper_engine<T: Send + 'static>(
+        budget: Duration,
+        what: &str,
+        work: impl FnOnce(&crate::Engine) -> T + Send + 'static,
+    ) -> T {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let e = crate::Engine::new(crate::EngineConfig::default()).expect("engine");
+            let _ = ready_tx.send(());
+            let _ = done_tx.send(work(&e));
+        });
+        if ready_rx
+            .recv_timeout(MAX_WAIT + Duration::from_secs(30))
+            .is_err()
+        {
+            panic!("{what}: the helper thread never got an engine");
+        }
+        match done_rx.recv_timeout(budget) {
+            Ok(v) => v,
+            Err(_) => panic!("{what}"),
+        }
+    }
 }
 use rustkit_core::{LoadEvent, NavigationRequest, NavigationStateMachine};
 use rustkit_css::{css_ident, parse_display, ComputedStyle, Rule, Stylesheet};
@@ -18945,13 +19059,12 @@ mod windows_a_leg_pins {
         // carvana.com ships `--spacing-xs: var(--spacing-xs, .125rem)` (13
         // such declarations). The old resolver re-scanned its own output and
         // substituted that forever, hanging the first style pass.
-        let e = Engine::new(EngineConfig::default()).expect("engine");
         let mut vars = HashMap::new();
         vars.insert("--spacing-xs".to_string(), "var(--spacing-xs, .125rem)".to_string());
         vars.insert("--a".to_string(), "var(--b)".to_string());
         vars.insert("--b".to_string(), "var(--a, 7px)".to_string());
         vars.insert("--gap".to_string(), "4px".to_string());
-        let r = |v: &str| resolve_bounded(&e, v, &vars);
+        let r = |v: &str| resolve_bounded(v, &vars);
         assert_eq!(r("var(--spacing-xs)"), ".125rem");
         assert_eq!(r("var(--spacing-xs, 9px)"), ".125rem");
         // A two-variable cycle takes the inner fallback, and terminates.
@@ -18964,13 +19077,12 @@ mod windows_a_leg_pins {
     #[test]
     fn css_variable_fan_out_is_bounded() {
         // Each level doubles: 40 levels would be 2^40 copies unbounded.
-        let e = Engine::new(EngineConfig::default()).expect("engine");
         let mut vars = HashMap::new();
         vars.insert("--v0".to_string(), "x".to_string());
         for i in 1..40 {
             vars.insert(format!("--v{i}"), format!("var(--v{p}) var(--v{p})", p = i - 1));
         }
-        let out = resolve_bounded(&e, "var(--v39)", &vars);
+        let out = resolve_bounded("var(--v39)", &vars);
         assert!(out.len() <= 2 * VAR_EXPANSION_BUDGET, "len {}", out.len());
     }
 
@@ -18984,31 +19096,27 @@ mod windows_a_leg_pins {
             ".btn{padding:var(--spacing-xs)}",
             "</style></head><body><div class=\"btn\">buy</div></body></html>"
         );
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let e = Engine::new(EngineConfig::default()).expect("engine");
-            let d = Document::parse_html(html).expect("parse");
-            let _ = e.build_layout_from_document(&d, &[]);
-            let _ = tx.send(());
-        });
-        assert!(
-            rx.recv_timeout(std::time::Duration::from_secs(10)).is_ok(),
-            "style/layout did not finish: var() self-reference loops"
+        crate::test_gpu::on_helper_engine(
+            std::time::Duration::from_secs(10),
+            "style/layout did not finish: var() self-reference loops",
+            move |e| {
+                let d = Document::parse_html(html).expect("parse");
+                let _ = e.build_layout_from_document(&d, &[]);
+            },
         );
     }
 
     /// Runs the resolver on a worker thread so a regression fails the test
-    /// instead of hanging the suite.
-    fn resolve_bounded(e: &Engine, v: &str, vars: &HashMap<String, String>) -> String {
-        let _ = e;
+    /// instead of hanging the suite. The worker builds its own engine; the
+    /// caller must not hold one (the GPU test guard, crate::test_gpu, would
+    /// make the worker wait for the caller's thread).
+    fn resolve_bounded(v: &str, vars: &HashMap<String, String>) -> String {
         let (v, vars) = (v.to_string(), vars.clone());
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let e = Engine::new(EngineConfig::default()).expect("engine");
-            let _ = tx.send(e.resolve_css_variables(&v, &vars));
-        });
-        rx.recv_timeout(std::time::Duration::from_secs(10))
-            .expect("resolve_css_variables did not terminate")
+        crate::test_gpu::on_helper_engine(
+            std::time::Duration::from_secs(10),
+            "resolve_css_variables did not terminate",
+            move |e| e.resolve_css_variables(&v, &vars),
+        )
     }
 
     #[test]
@@ -19159,7 +19267,8 @@ mod windows_a_leg_pins {
 
     #[test]
     fn custom_property_cycles_and_missing_vars_fall_back() {
-        let e = engine();
+        // No engine on this thread: the helper below builds its own, and the
+        // GPU test guard (crate::test_gpu) would make it wait for this thread.
         let html = "<html><head><style>\
                     .cyc{--a:var(--b);--b:var(--a);color:var(--a, #0a0b0c)}\
                     .self{--x:var(--x, #ffffff);color:var(--x, #0d0e0f)}\
@@ -19167,20 +19276,18 @@ mod windows_a_leg_pins {
                     </style></head><body>\
                     <p class=\"cyc\">cycle</p><p class=\"self\">self</p>\
                     <p class=\"miss\">missing</p></body></html>";
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let e2 = Engine::new(EngineConfig::default()).expect("engine");
-            let layout = layout_of(&e2, html);
-            let _ = tx.send((
-                text_color(&layout, "cycle"),
-                text_color(&layout, "self"),
-                text_color(&layout, "missing"),
-            ));
-        });
-        let _ = e;
-        let (cycle, selfref, missing) = rx
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("a custom-property cycle hung the style pass");
+        let (cycle, selfref, missing) = crate::test_gpu::on_helper_engine(
+            std::time::Duration::from_secs(10),
+            "a custom-property cycle hung the style pass",
+            move |e2| {
+                let layout = layout_of(e2, html);
+                (
+                    text_color(&layout, "cycle"),
+                    text_color(&layout, "self"),
+                    text_color(&layout, "missing"),
+                )
+            },
+        );
         assert_eq!(cycle, Some(rustkit_css::Color::from_rgb(0x0a, 0x0b, 0x0c)));
         assert_eq!(
             selfref,
