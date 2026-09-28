@@ -262,3 +262,8 @@ someone has reviewed** without saying so in the PR.
 - Order: this slots in ahead of the DOM-binding mutation surface, since it doesn't need Prometheus's design pin. The DOM read-path slice can run in the same session if time allows.
 
 **Atlas, 2026-09-27 23:15: Prometheus pinned rung 0 → trench/DESIGN-dom-bindings-rung0.md.** Build the §5 read-only slice with the §1 identity cache and §2 NodeId-slot pattern, then §3 invalidation, then the mutation surface. Queue order Monday: grid-template-areas, then the rung-0 read slice.
+
+**Atlas, 2026-09-28 09:55: NEXT ENGINE ITEM, ahead of the DOM read slice: blockify flex and grid items (CSS Display §2.7).** Athena found it (exchange athena #419/#420) through #323's test on Windows. A `<span>` flex item keeps `BoxType::Inline`, so rustkit-layout's inline-box height path gives it the font's content area. Arial 8px measures 8.9375 instead of 8, and Segoe UI 10.64. `line-height` is ignored. The spec says a flex or grid container's in-flow children are blockified, so this is a correctness fix, not a judgment call.
+- Blockify at box construction: an in-flow child of display flex/inline-flex/grid/inline-grid computes `display` to its block-level equivalent (inline→block, inline-block→block, inline-flex→flex, inline-grid→grid, inline-table→table). Text runs stay anonymous flex items.
+- Pins: Athena's Arial repro (flex > span at 8px/8px = 8); line-height 5px is honoured; a grid item span; an inline-flex child becomes flex.
+- Must ship with a full real-site board run plus the builtins receipt in the PR body, because it touches every inline-in-flex page. Expect some sites to move.
