@@ -8737,8 +8737,13 @@ impl Engine {
         sib: SiblingContext,
         attributes: &HashMap<String, String>,
     ) -> bool {
-        let tag = tag_name.to_ascii_lowercase();
-        let tag = tag.as_str();
+        // DOM tag names are already lowercase; allocate only when not.
+        let tag: std::borrow::Cow<str> = if tag_name.bytes().any(|b| b.is_ascii_uppercase()) {
+            tag_name.to_ascii_lowercase().into()
+        } else {
+            tag_name.into()
+        };
+        let tag = tag.as_ref();
         let is_control = Self::is_form_control_tag(tag);
         let value_is_empty = attributes.get("value").map_or(true, |v| v.is_empty());
         match name {
@@ -17701,6 +17706,20 @@ mod rule_prefilter_tests {
             "div:nth-child(1)",
             "div:nth-child(2n+1 of .card)",
             ":not(:is(.a, .b))",
+            // Selector-list arguments, compiled once into `SubjectPart::List`.
+            ":not()",
+            ":is()",
+            ":not(.card, #main)",
+            ":not( .nope ,  .t )",
+            ":is(div > .card, .card)",
+            ":is(div .card)",
+            ":not(div .card)",
+            ":where(:not(.card), html)",
+            "div:is(:first-child):not(:empty)",
+            ":-webkit-any(span, p)",
+            ":matches(DIV.card)",
+            ":is(div[data-x=\"a,b\"], p)",
+            ":has(.card)",
             ":",
             "div:",
             "*.card",
@@ -19012,6 +19031,11 @@ enum SubjectPart {
     Id(String),
     Attr(String),
     Pseudo(String, Option<String>),
+    /// `:not(list)` (`negate`) or `:is`/`:where`/`:matches`/`-webkit-any`
+    /// with its members compiled once, which `any_compound_in_list_matches`
+    /// re-split and re-parsed for every candidate element. A member with a
+    /// combinator is `None`: it never matches, as there.
+    List { negate: bool, members: Vec<Option<SubjectCompound>> },
 }
 
 impl SubjectCompound {
@@ -19055,7 +19079,26 @@ impl SubjectCompound {
                 remaining = if end < rest.len() { &rest[end + 1..] } else { "" };
             } else if let Some(rest) = remaining.strip_prefix(':') {
                 let (name, arg, consumed) = engine.parse_pseudo_class(rest);
-                parts.push(SubjectPart::Pseudo(name, arg));
+                let negate = name == "not";
+                parts.push(match arg {
+                    Some(list)
+                        if negate
+                            || matches!(
+                                name.as_str(),
+                                "is" | "where" | "matches" | "-webkit-any"
+                            ) =>
+                    {
+                        let members = Engine::split_top_level_commas(&list)
+                            .into_iter()
+                            .map(|m| {
+                                (!Engine::selector_has_combinator(m))
+                                    .then(|| SubjectCompound::parse(engine, m))
+                            })
+                            .collect();
+                        SubjectPart::List { negate, members }
+                    }
+                    arg => SubjectPart::Pseudo(name, arg),
+                });
                 remaining = &rest[consumed..];
             } else {
                 break;
@@ -19090,6 +19133,10 @@ impl SubjectCompound {
                     SubjectPart::Attr(attr) => engine.match_attribute_selector(attr, attributes),
                     SubjectPart::Pseudo(name, arg) => {
                         engine.match_pseudo_class(name, arg.as_deref(), tag_name, sib, attributes)
+                    }
+                    SubjectPart::List { negate, members } => {
+                        members.iter().flatten().any(|m| m.matches(engine, tag_name, attributes, sib))
+                            != *negate
                     }
                 })
             }
