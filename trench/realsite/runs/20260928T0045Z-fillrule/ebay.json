@@ -1,0 +1,96 @@
+{
+  "id": "ebay",
+  "url": "https://www.ebay.com/",
+  "chrome": [
+    {
+      "url": "https://www.ebay.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.ebay.com/",
+      "title": "Electronics, Cars, Fashion, Collectibles & More | eBay",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/ebay/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/ebay/chrome-a.png",
+      "elapsed_ms": 28433
+    },
+    {
+      "url": "https://www.ebay.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.ebay.com/",
+      "title": "Electronics, Cars, Fashion, Collectibles & More | eBay",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/ebay/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/ebay/chrome-b.png",
+      "elapsed_ms": 26875
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "error",
+    "html_file": null,
+    "url": "https://www.ebay.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": null,
+    "layout_path": null,
+    "layout_stats": null,
+    "elapsed_ms": 470,
+    "error": "Failed to load URL: NavigationError(\"HTTP error\")",
+    "wall_ms": 509
+  },
+  "access": {
+    "status": 403,
+    "vendor": "akamai",
+    "blocked": true
+  },
+  "loads": {
+    "pass": false,
+    "why": "blocked:akamai (HTTP 403) \u2014 Failed to load URL: NavigationError(\"HTTP error\")"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 74,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "152",
+      "174",
+      "175",
+      "177",
+      "323",
+      "accessories",
+      "advanced",
+      "all",
+      "amp",
+      "an",
+      "and",
+      "boxes",
+      "brand",
+      "by",
+      "cards",
+      "cars",
+      "cart",
+      "category",
+      "clothing",
+      "collectibles",
+      "collection",
+      "contact",
+      "content",
+      "curate",
+      "curated"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0.5658203125,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

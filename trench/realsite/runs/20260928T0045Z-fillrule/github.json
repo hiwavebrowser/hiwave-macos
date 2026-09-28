@@ -1,0 +1,99 @@
+{
+  "id": "github",
+  "url": "https://github.com/",
+  "chrome": [
+    {
+      "url": "https://github.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://github.com/",
+      "title": "GitHub \u00b7 Change is constant. GitHub keeps you ahead. \u00b7 GitHub",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/github/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/github/chrome-a.png",
+      "elapsed_ms": 37490
+    },
+    {
+      "url": "https://github.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://github.com/",
+      "title": "GitHub \u00b7 Change is constant. GitHub keeps you ahead. \u00b7 GitHub",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/github/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/github/chrome-b.png",
+      "elapsed_ms": 36344
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://github.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/github/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/github/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 0,
+      "threw": 0,
+      "skipped": 8,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 0,
+      "elapsed_ms": 0
+    },
+    "elapsed_ms": 27479,
+    "error": null,
+    "wall_ms": 27630,
+    "non_background_fraction": 0.8335
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 60,
+    "rustkit_words": 43,
+    "ratio": 0.7167,
+    "missing_sample": [
+      "a",
+      "accompanied",
+      "behind",
+      "by",
+      "demo",
+      "ducky",
+      "float",
+      "from",
+      "glow",
+      "jubilantly",
+      "mona",
+      "octocat",
+      "product",
+      "purple",
+      "scattering",
+      "stars",
+      "upward"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0.06650390625000001,
+    "diff": 71.74921875
+  },
+  "points": 1
+}

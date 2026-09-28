@@ -1,0 +1,101 @@
+{
+  "id": "yahoo",
+  "url": "https://www.yahoo.com/",
+  "chrome": [
+    {
+      "url": "https://www.yahoo.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.yahoo.com/",
+      "title": "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/yahoo/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/yahoo/chrome-a.png",
+      "elapsed_ms": 46673
+    },
+    {
+      "url": "https://www.yahoo.com/",
+      "status": "error",
+      "error": "page.screenshot: Timeout 30000ms exceeded.",
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "elapsed_ms": 55471
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.yahoo.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/yahoo/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/yahoo/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 0,
+      "threw": 0,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 151,
+      "bytes": 3099644,
+      "elapsed_ms": 0
+    },
+    "elapsed_ms": 8698,
+    "error": null,
+    "wall_ms": 8766,
+    "non_background_fraction": 0.1043
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 76,
+    "rustkit_words": 44,
+    "ratio": 0.5263,
+    "missing_sample": [
+      "15",
+      "331",
+      "53",
+      "56",
+      "6",
+      "accuweather",
+      "best",
+      "bring",
+      "by",
+      "carpenter",
+      "collaboration",
+      "entertainment",
+      "everyone",
+      "forecast",
+      "in",
+      "it",
+      "live",
+      "londonderry",
+      "love",
+      "made",
+      "madonna",
+      "mins",
+      "of",
+      "powered",
+      "realfeel"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "diff": 27.9416015625
+  },
+  "points": 1
+}
