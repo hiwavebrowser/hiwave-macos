@@ -2977,6 +2977,23 @@ impl Engine {
             trace.clear();
         }
 
+        // A replayed style records no trace entries, so a traced build
+        // always cascades in full.
+        let _style_memo = self
+            .style_trace
+            .borrow()
+            .is_none()
+            .then(|| {
+                StyleMemoBuild::begin(StyleMemoKey {
+                    view: self.building_view.get(),
+                    document: document as *const Document,
+                    external_sheets: external_stylesheets.len(),
+                    viewport,
+                    focus: self.building_focus.get(),
+                })
+            })
+            .flatten();
+
         info!(
             inline_count = stylesheets.len() - external_stylesheets.len(),
             external_count = external_stylesheets.len(),
@@ -3002,16 +3019,18 @@ impl Engine {
                 ..
             } = &html.node_type
             {
-                Some(self.compute_style_for_element(
-                    tag_name,
-                    attributes,
-                    &stylesheets,
-                    &css_vars,
-                    &[],
-                    &[],
-                    SiblingContext::SOLE.with_children(true),
-                    None,
-                ))
+                Some(memoized_style(html.id, || {
+                    self.compute_style_for_element(
+                        tag_name,
+                        attributes,
+                        &stylesheets,
+                        &css_vars,
+                        &[],
+                        &[],
+                        SiblingContext::SOLE.with_children(true),
+                        None,
+                    )
+                }))
             } else {
                 None
             }
@@ -3352,16 +3371,18 @@ impl Engine {
                 }
 
                 // Create computed style based on element, attributes, and stylesheets
-                let mut style = self.compute_style_for_element(
-                    tag_name,
-                    attributes,
-                    stylesheets,
-                    css_vars,
-                    ancestors,
-                    siblings_before,
-                    sib,
-                    parent_style,
-                );
+                let mut style = memoized_style(node.id, || {
+                    self.compute_style_for_element(
+                        tag_name,
+                        attributes,
+                        stylesheets,
+                        css_vars,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                        parent_style,
+                    )
+                });
 
                 // CSS computed-value resolution: font-size absolutizes at
                 // style time — em/% against the PARENT's computed font-size,
@@ -7264,6 +7285,12 @@ impl Engine {
         if fonts_loaded > 0 {
             info!(count = fonts_loaded, "Loaded web fonts");
         }
+
+        // Behind RUSTKIT_INCREMENTAL_RESTYLE: the sheets relayout records
+        // each element's cascade and the images relayout below replays it.
+        // Images change box sizes, not styles, and no script runs between
+        // the two builds.
+        let _style_memo = StyleMemoScope::arm();
 
         if count > 0 || had_previous || fonts_loaded > 0 {
             self.relayout(id)?;
@@ -19172,6 +19199,339 @@ fn active_rule_index(stylesheets: &[Stylesheet]) -> Option<Rc<RuleIndex>> {
             .filter(|ix| ix.source == RuleIndex::source_of(stylesheets))
             .cloned()
     })
+}
+
+/// `RUSTKIT_INCREMENTAL_RESTYLE`: `1` lets the images relayout reuse the
+/// sheets relayout's per-element cascade; `verify` recomputes every style
+/// anyway and counts the ones that differ from the memo. Off by default.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RestyleMode {
+    Off,
+    Reuse,
+    Verify,
+}
+
+fn incremental_restyle_mode() -> RestyleMode {
+    static MODE: std::sync::OnceLock<RestyleMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("RUSTKIT_INCREMENTAL_RESTYLE").as_deref() {
+        Ok("verify") => RestyleMode::Verify,
+        Ok(v) if !v.is_empty() && v != "0" => RestyleMode::Reuse,
+        _ => RestyleMode::Off,
+    })
+}
+
+/// Everything a memoized cascade depends on besides the DOM and the sheets.
+/// Neither of those can change between the two builds a memo spans: it is
+/// armed only inside `load_subresources`, after the sheets are assigned and
+/// before any script runs, and it is gone when that returns.
+#[derive(Clone, PartialEq, Debug)]
+struct StyleMemoKey {
+    view: Option<EngineViewId>,
+    document: *const Document,
+    external_sheets: usize,
+    viewport: Option<(f32, f32)>,
+    focus: Option<rustkit_dom::NodeId>,
+}
+
+/// What the build in progress does with the memo.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MemoUse {
+    Record,
+    Replay,
+    Verify,
+}
+
+/// Per-element cascade results from one build, for the next build of the
+/// same page to replay. `key` is None until a build has recorded into it.
+struct StyleMemo {
+    verify: bool,
+    key: Option<StyleMemoKey>,
+    styles: HashMap<rustkit_dom::NodeId, ComputedStyle>,
+    in_build: Option<MemoUse>,
+    hits: usize,
+    mismatches: usize,
+}
+
+thread_local! {
+    /// Set by `StyleMemoScope` for the span of `load_subresources`.
+    static STYLE_MEMO: std::cell::RefCell<Option<StyleMemo>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Arms the memo for the builds inside one `load_subresources`: the first
+/// build records, a later one with an equal key replays. Dropping it (also on
+/// an early `?` return) discards the memo, so no build outside that span —
+/// in particular none after page script has run — can read it.
+struct StyleMemoScope;
+
+impl StyleMemoScope {
+    fn arm() -> Option<Self> {
+        Self::arm_with(incremental_restyle_mode())
+    }
+
+    fn arm_with(mode: RestyleMode) -> Option<Self> {
+        if mode == RestyleMode::Off {
+            return None;
+        }
+        STYLE_MEMO.with(|m| {
+            *m.borrow_mut() = Some(StyleMemo {
+                verify: mode == RestyleMode::Verify,
+                key: None,
+                styles: HashMap::new(),
+                in_build: None,
+                hits: 0,
+                mismatches: 0,
+            })
+        });
+        Some(StyleMemoScope)
+    }
+}
+
+impl Drop for StyleMemoScope {
+    fn drop(&mut self) {
+        STYLE_MEMO.with(|m| *m.borrow_mut() = None);
+    }
+}
+
+/// One build's use of the memo, decided from its key at build start.
+/// Dropping it ends the build: a recording becomes replayable.
+struct StyleMemoBuild;
+
+impl StyleMemoBuild {
+    fn begin(key: StyleMemoKey) -> Option<Self> {
+        STYLE_MEMO.with(|m| {
+            let mut slot = m.borrow_mut();
+            let memo = slot.as_mut()?;
+            let use_ = match &memo.key {
+                None => {
+                    memo.key = Some(key);
+                    MemoUse::Record
+                }
+                Some(recorded) if *recorded == key => match memo.verify {
+                    true => MemoUse::Verify,
+                    false => MemoUse::Replay,
+                },
+                // Something style-relevant moved (a resize, a focus change):
+                // the recording describes a different build.
+                Some(_) => {
+                    *slot = None;
+                    return None;
+                }
+            };
+            memo.in_build = Some(use_);
+            memo.hits = 0;
+            memo.mismatches = 0;
+            Some(StyleMemoBuild)
+        })
+    }
+}
+
+impl Drop for StyleMemoBuild {
+    fn drop(&mut self) {
+        STYLE_MEMO.with(|m| {
+            if let Some(memo) = m.borrow_mut().as_mut() {
+                if let Some(use_) = memo.in_build.take() {
+                    if use_ != MemoUse::Record {
+                        info!(
+                            ?use_,
+                            hits = memo.hits,
+                            mismatches = memo.mismatches,
+                            memoized = memo.styles.len(),
+                            "Incremental restyle"
+                        );
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// The cascade for `node`, through the memo when the build in progress has
+/// one. `compute` is the full cascade; it runs outside the memo's borrow.
+fn memoized_style(
+    node: rustkit_dom::NodeId,
+    compute: impl FnOnce() -> ComputedStyle,
+) -> ComputedStyle {
+    let use_ = STYLE_MEMO.with(|m| m.borrow().as_ref().and_then(|memo| memo.in_build));
+    match use_ {
+        None => compute(),
+        Some(MemoUse::Record) => {
+            let style = compute();
+            STYLE_MEMO.with(|m| {
+                if let Some(memo) = m.borrow_mut().as_mut() {
+                    memo.styles.insert(node, style.clone());
+                }
+            });
+            style
+        }
+        Some(MemoUse::Replay) => {
+            let hit = STYLE_MEMO.with(|m| {
+                let mut slot = m.borrow_mut();
+                let memo = slot.as_mut()?;
+                let style = memo.styles.get(&node).cloned();
+                memo.hits += style.is_some() as usize;
+                style
+            });
+            hit.unwrap_or_else(compute)
+        }
+        Some(MemoUse::Verify) => {
+            let fresh = compute();
+            STYLE_MEMO.with(|m| {
+                if let Some(memo) = m.borrow_mut().as_mut() {
+                    if let Some(recorded) = memo.styles.get(&node) {
+                        memo.hits += 1;
+                        if !same_computed_style(recorded, &fresh) {
+                            memo.mismatches += 1;
+                            warn!(?node, "Incremental restyle: memoized style differs from a fresh cascade");
+                        }
+                    }
+                }
+            });
+            fresh
+        }
+    }
+}
+
+/// Field-for-field equality through `Debug`, with the custom-property map
+/// compared as a map: its `Debug` order depends on each map's hasher seed.
+fn same_computed_style(a: &ComputedStyle, b: &ComputedStyle) -> bool {
+    if a.custom_properties != b.custom_properties {
+        return false;
+    }
+    let strip = |s: &ComputedStyle| {
+        let mut s = s.clone();
+        s.custom_properties = Default::default();
+        format!("{s:?}")
+    };
+    strip(a) == strip(b)
+}
+
+#[cfg(test)]
+mod incremental_restyle_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, DisplayList, Rect};
+
+    fn engine() -> Engine {
+        static ENGINE_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _init_guard = ENGINE_INIT.lock().unwrap_or_else(|e| e.into_inner());
+        Engine::new(EngineConfig::default()).expect("engine")
+    }
+
+    const PAGE: &str = r#"<!DOCTYPE html><html><head><style>
+        :root { --accent: #c00; --gap: 12px; }
+        html { font-size: 15px; line-height: 1.4; }
+        body { margin: 0; font-family: sans-serif; }
+        .card { padding: var(--gap); border: 1px solid var(--accent); width: 30ch; }
+        .card > h2 { font-size: 1.5em; color: var(--accent); }
+        ul li:nth-child(2n) { background: #eee; }
+        ul li + li { margin-top: 4px; }
+        .card:not(.muted) p { font-weight: bold; }
+        .tag::before { content: "*"; color: blue; }
+        </style></head><body>
+        <div class="card"><h2>Title</h2><p>Body <span class="tag">x</span></p></div>
+        <div class="card muted" style="--gap: 20px"><p>Muted</p></div>
+        <ul><li>one</li><li>two</li><li>three</li><li>four</li></ul>
+        </body></html>"#;
+
+    fn paint(e: &Engine, d: &Document) -> String {
+        let mut root = e.build_layout_from_document(d, &[]);
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 800.0, 600.0);
+        root.layout(&cb);
+        DisplayList::build(&root)
+            .commands
+            .iter()
+            .map(|c| format!("{c:?}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn memo_counts() -> Option<(usize, usize, usize)> {
+        STYLE_MEMO.with(|m| {
+            m.borrow()
+                .as_ref()
+                .map(|memo| (memo.hits, memo.mismatches, memo.styles.len()))
+        })
+    }
+
+    #[test]
+    fn a_replayed_build_paints_what_a_full_cascade_paints() {
+        let e = engine();
+        let d = Document::parse_html(PAGE).expect("parse");
+        let full = paint(&e, &d);
+
+        let _scope = StyleMemoScope::arm_with(RestyleMode::Reuse).expect("armed");
+        let recorded = paint(&e, &d);
+        let (_, _, memoized) = memo_counts().expect("memo");
+        let replayed = paint(&e, &d);
+        let (hits, _, _) = memo_counts().expect("memo");
+
+        assert!(memoized > 10, "the recording build memoized {memoized} styles");
+        assert_eq!(hits, memoized, "every element replays");
+        assert_eq!(recorded, full);
+        assert_eq!(replayed, full);
+    }
+
+    #[test]
+    fn verify_mode_finds_no_difference_between_memo_and_fresh_cascade() {
+        let e = engine();
+        let d = Document::parse_html(PAGE).expect("parse");
+        let _scope = StyleMemoScope::arm_with(RestyleMode::Verify).expect("armed");
+        paint(&e, &d);
+        paint(&e, &d);
+        let (hits, mismatches, memoized) = memo_counts().expect("memo");
+        assert_eq!(hits, memoized);
+        assert_eq!(mismatches, 0);
+    }
+
+    #[test]
+    fn a_build_of_another_document_discards_the_memo() {
+        let e = engine();
+        let first = Document::parse_html(PAGE).expect("parse");
+        let other_html = PAGE.replace("#c00", "#0c0");
+        let other = Document::parse_html(&other_html).expect("parse");
+        let other_full = paint(&e, &other);
+
+        let _scope = StyleMemoScope::arm_with(RestyleMode::Reuse).expect("armed");
+        paint(&e, &first);
+        assert_eq!(paint(&e, &other), other_full);
+        assert!(memo_counts().is_none(), "a key mismatch drops the recording");
+    }
+
+    #[test]
+    fn replay_skips_the_cascade_and_an_unrecorded_node_still_cascades() {
+        let key = StyleMemoKey {
+            view: None,
+            document: std::ptr::null(),
+            external_sheets: 0,
+            viewport: None,
+            focus: None,
+        };
+        let recorded_node = rustkit_dom::NodeId::new(7);
+        let fresh_node = rustkit_dom::NodeId::new(8);
+        let mut marked = ComputedStyle::new();
+        marked.z_index = 42;
+
+        let _scope = StyleMemoScope::arm_with(RestyleMode::Reuse).expect("armed");
+        {
+            let _build = StyleMemoBuild::begin(key.clone()).expect("records");
+            memoized_style(recorded_node, || marked.clone());
+        }
+        let _build = StyleMemoBuild::begin(key).expect("replays");
+        let replayed = memoized_style(recorded_node, || panic!("replay must not cascade"));
+        assert_eq!(replayed.z_index, 42);
+        let fresh = memoized_style(fresh_node, ComputedStyle::new);
+        assert_eq!(fresh.z_index, ComputedStyle::new().z_index);
+    }
+
+    #[test]
+    fn nothing_is_memoized_outside_an_armed_scope() {
+        {
+            let _scope = StyleMemoScope::arm_with(RestyleMode::Reuse).expect("armed");
+        }
+        assert!(memo_counts().is_none());
+        assert!(StyleMemoScope::arm_with(RestyleMode::Off).is_none());
+    }
 }
 
 // ── ported from hiwave-windows: paint-order / border-radius / display-list
