@@ -7861,13 +7861,13 @@ impl Engine {
                     self.selector_matches(s, tag_name, attributes, ancestors, siblings_before, sib)
                 });
             }
-            PreparedSelector::Complex { tokens, compounds } => (tokens, compounds),
+            PreparedSelector::Complex { tokens, compounds, subject } => {
+                if !subject.matches(self, tag_name, attributes, sib) {
+                    return false;
+                }
+                (tokens, compounds)
+            }
         };
-
-        let last_token = &tokens[tokens.len() - 1];
-        if !self.simple_selector_matches_with_pseudo(&last_token.0, tag_name, attributes, sib) {
-            return false;
-        }
 
         // If there's only one token, we're done
         if tokens.len() == 1 {
@@ -7995,7 +7995,8 @@ impl Engine {
                 .iter()
                 .map(|(part, _)| AncestorCompound::parse(part))
                 .collect();
-            PreparedSelector::Complex { tokens, compounds }
+            let subject = SubjectCompound::parse(self, &tokens[tokens.len() - 1].0);
+            PreparedSelector::Complex { tokens, compounds, subject }
         };
 
         PREPARED.with(|cache| {
@@ -17316,6 +17317,82 @@ mod rule_prefilter_tests {
         ));
     }
 
+    /// The compiled subject compound must agree with the string matcher it
+    /// replaced on every (selector, element) pair, quirks included.
+    #[test]
+    fn compiled_subject_matches_like_the_string_matcher() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let escaped_class = rustkit_css::encode_selector_escapes(".sm\\:flex").into_owned();
+        let escaped_id = rustkit_css::encode_selector_escapes("#a\\.b").into_owned();
+        let mut selectors: Vec<&str> = vec![
+            "*",
+            ":root",
+            "#main",
+            "#main.card",
+            "#MAIN",
+            ".card",
+            ".card.wide",
+            ".card.narrow",
+            ".",
+            "..card",
+            "div",
+            "DIV",
+            "span",
+            "div.card",
+            "div.card.wide#main",
+            "div#main",
+            "div#other",
+            "div[data-x]",
+            "div[data-x=\"1\"]",
+            "[data-x]",
+            "[data-x=2]",
+            "div[unclosed",
+            ".card[data-x]",
+            "div:first-child",
+            "div:last-child",
+            "div:empty",
+            "div:hover",
+            ":not(.card)",
+            ":not(.nope)",
+            ".card:not(.wide)",
+            ":is(div, span).card",
+            ":where(p)",
+            "div:nth-child(1)",
+            "div:nth-child(2n+1 of .card)",
+            ":not(:is(.a, .b))",
+            ":",
+            "div:",
+            "*.card",
+            "div$weird",
+            "div.card$weird.nope",
+            ".t",
+        ];
+        selectors.push(&escaped_class);
+        selectors.push(&escaped_id);
+        let elements: Vec<(&str, HashMap<String, String>)> = vec![
+            ("div", attrs(&[("class", "card wide"), ("id", "main"), ("data-x", "1")])),
+            ("DIV", attrs(&[("class", "card")])),
+            ("div", attrs(&[])),
+            ("html", attrs(&[])),
+            ("span", attrs(&[("class", "t"), ("id", "other")])),
+            ("div", attrs(&[("class", "sm:flex t"), ("id", "a.b")])),
+            ("p", attrs(&[("class", ""), ("data-x", "2")])),
+        ];
+        let sibs = [SiblingContext::SOLE, SiblingContext::SOLE.with_children(true)];
+        for selector in &selectors {
+            let subject = SubjectCompound::parse(&engine, selector);
+            for (tag, attributes) in &elements {
+                for sib in sibs {
+                    assert_eq!(
+                        subject.matches(&engine, tag, attributes, sib),
+                        engine.simple_selector_matches_with_pseudo(selector, tag, attributes, sib),
+                        "{selector:?} on {tag} {attributes:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn cascade_skips_the_full_matcher_for_rules_whose_subject_cannot_match() {
         // A real-site stylesheet is thousands of class rules; any one element
@@ -18501,7 +18578,118 @@ enum PreparedSelector {
     Complex {
         tokens: Vec<(String, String)>,
         compounds: Vec<AncestorCompound>,
+        subject: SubjectCompound,
     },
+}
+
+/// The subject compound of a prepared selector, split once into the pieces
+/// `simple_selector_matches_with_pseudo` used to re-scan out of the string on
+/// every match: identifiers are already `css_ident`-decoded and pseudo-classes
+/// already parsed. `SubjectCompound::parse` walks the string exactly the way
+/// that function does, so the two agree on every input, quirks included (the
+/// `#id` shape takes the whole rest as the id; an unknown character stops the
+/// walk and ignores what follows).
+enum SubjectCompound {
+    /// `*`
+    Universal,
+    /// `:root`
+    Root,
+    /// `#id` (the whole rest of the string, decoded).
+    IdOnly(String),
+    /// `.a.b` with no `#`, `[` or `:`.
+    ClassesOnly(Vec<String>),
+    /// Anything else: an optional tag, then parts in source order.
+    General { tag: String, parts: Vec<SubjectPart> },
+}
+
+enum SubjectPart {
+    Class(String),
+    Id(String),
+    Attr(String),
+    Pseudo(String, Option<String>),
+}
+
+impl SubjectCompound {
+    fn parse(engine: &Engine, selector: &str) -> Self {
+        if selector == "*" {
+            return Self::Universal;
+        }
+        if selector == ":root" {
+            return Self::Root;
+        }
+        if let Some(id) = selector.strip_prefix('#') {
+            return Self::IdOnly(css_ident(id).into_owned());
+        }
+        if selector.starts_with('.') && !selector.contains(|c| c == '#' || c == '[' || c == ':') {
+            return Self::ClassesOnly(
+                selector[1..]
+                    .split('.')
+                    .filter(|s| !s.is_empty())
+                    .map(|c| css_ident(c).into_owned())
+                    .collect(),
+            );
+        }
+
+        let is_delim = |c| c == '.' || c == '#' || c == ':' || c == '[';
+        let tag_end = selector.find(is_delim).unwrap_or(selector.len());
+        let tag = selector[..tag_end].to_string();
+        let mut remaining = &selector[tag_end..];
+        let mut parts = Vec::new();
+        while !remaining.is_empty() {
+            if let Some(rest) = remaining.strip_prefix('.') {
+                let end = rest.find(is_delim).unwrap_or(rest.len());
+                parts.push(SubjectPart::Class(css_ident(&rest[..end]).into_owned()));
+                remaining = &rest[end..];
+            } else if let Some(rest) = remaining.strip_prefix('#') {
+                let end = rest.find(is_delim).unwrap_or(rest.len());
+                parts.push(SubjectPart::Id(css_ident(&rest[..end]).into_owned()));
+                remaining = &rest[end..];
+            } else if let Some(rest) = remaining.strip_prefix('[') {
+                let end = rest.find(']').unwrap_or(rest.len());
+                parts.push(SubjectPart::Attr(rest[..end].to_string()));
+                remaining = if end < rest.len() { &rest[end + 1..] } else { "" };
+            } else if let Some(rest) = remaining.strip_prefix(':') {
+                let (name, arg, consumed) = engine.parse_pseudo_class(rest);
+                parts.push(SubjectPart::Pseudo(name, arg));
+                remaining = &rest[consumed..];
+            } else {
+                break;
+            }
+        }
+        Self::General { tag, parts }
+    }
+
+    fn matches(
+        &self,
+        engine: &Engine,
+        tag_name: &str,
+        attributes: &HashMap<String, String>,
+        sib: SiblingContext,
+    ) -> bool {
+        match self {
+            Self::Universal => true,
+            Self::Root => tag_name.eq_ignore_ascii_case("html"),
+            Self::IdOnly(id) => attributes.get("id").is_some_and(|el_id| el_id == id),
+            Self::ClassesOnly(classes) => attributes.get("class").is_some_and(|el_class| {
+                classes.iter().all(|c| el_class.split_whitespace().any(|e| e == c))
+            }),
+            Self::General { tag, parts } => {
+                if !tag.is_empty() && !tag.eq_ignore_ascii_case(tag_name) {
+                    return false;
+                }
+                parts.iter().all(|part| match part {
+                    SubjectPart::Class(class) => attributes
+                        .get("class")
+                        .is_some_and(|el_class| el_class.split_whitespace().any(|c| c == class)),
+                    SubjectPart::Id(id) => attributes.get("id") == Some(id),
+                    SubjectPart::Attr(attr) => engine.match_attribute_selector(attr, attributes),
+                    SubjectPart::Pseudo(name, arg) => {
+                        engine.match_pseudo_class(name, arg.as_deref(), tag_name, sib, attributes)
+                    }
+                })
+            }
+        }
+    }
 }
 
 /// An earlier sibling as `+` / `~` see it: tag, classes, id, and the form
