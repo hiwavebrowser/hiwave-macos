@@ -67,8 +67,11 @@ partitioning, the referrer policy) and give the user clear controls.
 
 ## Finish line (ratified 2026-09-27)
 
-- RustKit is the default renderer on macOS and Windows, with no borrowed
-  webview underneath. Linux follows.
+- **macOS first (Pete, 2026-09-28).** RustKit is the default renderer on
+  macOS, with no borrowed webview underneath. This finish line is measured
+  on macOS. Windows and Linux follow downstream and race for second. Linux
+  is likely the nearer target. Neither one slows macOS: they sync from
+  hiwave-macos on their own schedule and carry their own platform patches.
 - **Parity:** the real-site board reaches **40 of the scorable points**, and
   the wide board reaches **75%**. Scorable excludes sites that block the
   reference Chrome itself.
