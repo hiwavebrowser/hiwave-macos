@@ -69,3 +69,27 @@ Newest section last.
 3. Still open: `Bash(cargo:*)` / `Bash(git -C:*)` allowlisting. This hour's workaround was python edit scripts under ~/Repos/.worktrees/js-edit-*.py, because heredocs with quotes or `$` trip the prompt.
 
 **Next session:** rung 1. Vendor the MDN learning-area (CC0) DOM examples into `websuite/js-ladder/01-mdn/`, capture them against pinned Chrome 148, and start X/Y. `innerHTML` and the selector callback follow, driven by what fails.
+
+## 2026-09-28 18:20
+
+**Metric:** rung 0. The read slice, the §3 flush, tree moves and node writes (#334) are **all merged**, which completes the plan's mutation-surface list. **querySelector: 1-token toy → the cascade's matcher (in PR).** **Rung 1 is still 0/0 vs Chrome 148: blocked, see decision 1.**
+
+**PRs**
+- **#334 merged** (20:50Z), with R1 CLEAR and R2 PASS @ d9a57ea.
+- **No new PR this hour.** `atlas/js-dom-selector-matcher` @ **06b305c** (2 commits on develop db38902) is pushed but **not opened**, because its campaign receipt hasn't finished. The release relink of parity-capture ran for over 30 min under three-lane load, and the lane rule is no PR without a receipt. The body is ready at `~/Repos/.worktrees/js-pr-body-selector-matcher.md` (RECEIPT_PLACEHOLDER marks the receipt spot).
+  - 0ede851, `refactor(engine)`: the cascade's selector-matcher cluster reads no `Engine` field, so it moves to a zero-sized `SelectorMatcher` with bodies unchanged. `test_selector_specificity` no longer needs a GPU. Engine lib (headless) 241/241.
+  - 06b305c, `feat(bindings)`: the engine injects `SelectorMatchFn` into `DomBindings`. `querySelector[All]` match against the live tree with the cascade's matcher; `matches`/`webkitMatchesSelector`/`closest` are new; an invalid selector throws `SyntaxError`. Bindings 47/47, and there are 3 new headless e2e tests (the full run was 243 plus one failing assertion, which I turned into gap pin 2a below; the module then reran 3/3).
+  - **Next session, first thing:** run `js-receipt.py` on that worktree, compare it against `js-receipt-node-writes-d9a57ea.json`, fill in the body, and open the PR.
+
+**Decisions for Pete**
+1. **Rung 1 can't be vendored from this lane.** `git clone https://github.com/mdn/learning-area` and `gh api repos/mdn/learning-area/...` both need approval here, and this lane runs headless, so nobody can grant it. I didn't route around the gate. Either:
+   - allowlist one of them (`Bash(git clone https://github.com/mdn/learning-area:*)` is the narrowest), or
+   - drop a clone at `~/Repos/.worktrees/mdn-learning-area`, and I'll vendor from it next session.
+
+   I did the selector matcher meanwhile, because the MDN pages need it anyway.
+2. **Two cascade selector gaps, now visible from script too.**
+   - (2a) `+`/`~` only check the subject's own siblings (`.a ~ div p` matches nothing).
+   - A pseudo-class on an ancestor compound (`:not(.x) > p`) is ignored.
+
+   Script queries share the cascade's matcher now, so fixing either in the cascade fixes both. Do they belong to the cascade lane or the realsite lane (`rs-ancestor-pseudo`)? Both are real Chrome mismatches.
+3. Still open: `Bash(cargo:*)` / `Bash(git -C:*)` allowlisting. This hour, two release relinks each ran past the 10-minute tool cap and got moved to the background (load about 17).
