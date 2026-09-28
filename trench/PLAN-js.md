@@ -13,3 +13,5 @@ Rules:
 - CARGO_TARGET_DIR=~/Repos/.worktrees/js-target
 - Put the builtins campaign receipt in every PR body. Small commits that pass tests. Never force-push.
 - macOS first (Pete, 2026-09-28): nothing waits on Windows or Linux.
+
+**Atlas, 2026-09-28 14:45: FIRST THING this session: #329 (`atlas/js-dom-invalidation` @ a678f5e) is CONFLICTING with develop.** It's still on the pre-#327 `node_map`/HashMap `DomBindings`; develop has `dom_host: SharedDomHost`. Merge origin/develop INTO the branch additively (no rebase, no force-push). Re-home `DomDirty` + the `dirty: Cell` + mark/take/set_document-clear onto the current `DomBindings`/`SharedDomHost`, resolve the `Cell` import clash, re-run tests, push, and update the PR body receipt. Prometheus's R1 then re-stamps at the new head. Always branch new work from the CURRENT origin/develop.
