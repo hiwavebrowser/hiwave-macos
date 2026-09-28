@@ -12732,3 +12732,68 @@ probe and there are no survivors.
   receipt measured nothing on all four conditions. That is not 0/26 — it is a
   receipt that did not run"* and exited 1. The instrument built on night 6 held
   against a seat that wanted a number tonight.
+
+### Addendum — the macOS receipt for #316, and a control that was unfit
+
+CI green on `5e3a926`: 14 check runs, 11 success, 3 skipped (nightly-only and
+`commit-gate`). R1 DESIGN **CLEAR** (COMMENT, Pete-authored seat), no fix asks,
+and it ruled the rem-gap deferral *"Correctly out of scope, not a HOLD"*.
+**R2-STAMP PASS** @ `5e3a926`, checks green, merge CLEAN, gates 1–7 ok. The PR
+waits on a person; this seat does not merge.
+
+[Run 36383716836](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/36383716836),
+`macos-14`:
+
+```
+  metric:     3/26 cases pass all four conditions
+    geometry   14/26 green, 26/26 measured
+    paint       3/26 green, 26/26 measured
+    stability  26/26 green, 26/26 measured
+    discrete   26/26 green, 26/26 measured
+  settings: geo_fails=252 paint=0.95069 discrete=0
+```
+
+**Metric and all four columns unchanged** from 09-27's receipt on #298 — 3/26,
+14/26, 3/26, 26/26, 26/26.
+
+**No macOS case regressed.** Against the nearest control
+([run 36380571693](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/36380571693),
+`atlas/n65-control-border-none` `c1f0a4d`, 43 minutes earlier, without this
+change) 22 of the 23 absolutely-red cases are identical on both `geo_fails` and
+`paint`, and the three green cases are green in both. `settings` paint is
+0.95069 either way, exactly as the Linux A/B said it had to be.
+
+**And the one row that differs is NOT attributable — the control is unfit.**
+The control reads `settings: geo_fails=254` against this PR's **252**. That is
+the right direction, and it would mean macOS sees this fix where my seat's count
+could not (my A/B said 2582 → 2582). I still cannot claim it:
+
+- the control's merge-base with this branch is `5472087` (#310), so it **lacks
+  #311–#314** which this branch's base carries;
+- the control **itself edits `crates/rustkit-layout/src/lib.rs`** (+36/−4);
+- `parity.yml` passes no `ref:` to `actions/checkout@v4`, so the PR lane builds
+  the **merge ref** — this run measured *this fix + develop `38cb30b2`*, and a
+  fit control would be develop `38cb30b2` alone. No such run exists.
+
+Recorded as **no regression measured, improvement not established.** 09-27
+nearly banked a +1 of base drift as its own regression and a comparison run
+saved it; tonight the comparison run is the thing that does not hold, which is
+the same lesson one level up: *a control is only a control if its base matches.*
+I checked that this time only because last night's entry told me to, and my
+first instinct on seeing 254 vs 252 was to write up a −2.
+
+**Third night the artifact host has decided a question.** `gate-a.json`'s
+per-element deltas would say in one read whether those two failures are
+`#closeBtn`'s `width` and `x` crossing the 0.5px bar. Denied at CONNECT. That
+is decision 2 of this entry, and its cost is now specific rather than general:
+it is the difference between "no regression" and a measured win on the platform
+the metric is defined on.
+
+**Reading caution banked.** `geo_fails` and Gate A green are different
+conditions: `geo_fails` counts geometry-kind failures only, while a case is
+green only with zero failures of ANY kind, join failures included. Hence `shelf`
+reading `geo_fails=0` in the ratchet block and `geometry=RED` in the finish-line
+receipt **on the same run**. Neither script is wrong; the two blocks sit a few
+lines apart in the job summary and invite the wrong subtraction. Posted on the
+PR as well, since a future night will read that summary before it reads this
+file.
