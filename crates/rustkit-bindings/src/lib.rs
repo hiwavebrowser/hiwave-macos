@@ -22,7 +22,7 @@ pub use events::{
 
 use rustkit_dom::{Document, NodeId};
 use rustkit_js::{JsError, JsRuntime, JsValue};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
@@ -420,6 +420,28 @@ pub enum LifecycleTarget {
     Document,
 }
 
+/// What script's writes to the Rust DOM have invalidated since the last
+/// flush (the DOM-bindings rung-0 pin §3 buckets). A later variant covers
+/// the earlier ones' work, so marks combine by `max`.
+///
+/// - structure insert/remove/move, and style-affecting attributes
+///   (`style`, `class`, `id`) → `Style`;
+/// - a text content change → `Layout`;
+/// - nothing written → `Clean`.
+///
+/// Script sets the bucket as it writes. The engine takes it once after the
+/// script settles and relayouts if it isn't `Clean`, so a burst of writes
+/// costs one relayout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum DomDirty {
+    #[default]
+    Clean,
+    /// Boxes must be rebuilt, but no element's computed style changed.
+    Layout,
+    /// Styles must be recomputed, then layout.
+    Style,
+}
+
 /// DOM bindings context.
 pub struct DomBindings {
     runtime: RefCell<JsRuntime>,
@@ -429,6 +451,9 @@ pub struct DomBindings {
     dom_host: dom::SharedDomHost,
     /// Queue of IPC messages from JavaScript
     _ipc_queue: RefCell<Vec<IpcMessage>>,
+    /// Pending invalidation from script DOM writes (see `DomDirty`).
+    /// Shared with the tree-write host functions, which mark it.
+    dirty: Rc<Cell<DomDirty>>,
 }
 
 impl DomBindings {
@@ -439,7 +464,8 @@ impl DomBindings {
         // Inject global objects
         Self::inject_globals(&mut runtime)?;
         let dom_host = dom::SharedDomHost::default();
-        dom::install(&mut runtime, &dom_host)?;
+        let dirty = Rc::new(Cell::new(DomDirty::Clean));
+        dom::install(&mut runtime, &dom_host, &dirty)?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
@@ -447,7 +473,20 @@ impl DomBindings {
             event_listeners: RefCell::new(Vec::new()),
             dom_host,
             _ipc_queue: RefCell::new(Vec::new()),
+            dirty,
         })
+    }
+
+    /// Record that script invalidated `bucket`. Marks combine: the pending
+    /// bucket only grows until `take_dirty`.
+    pub fn mark_dirty(&self, bucket: DomDirty) {
+        self.dirty.set(self.dirty.get().max(bucket));
+    }
+
+    /// The invalidation pending since the last call, which is reset to
+    /// `Clean`. The engine calls this once when script settles.
+    pub fn take_dirty(&self) -> DomDirty {
+        self.dirty.replace(DomDirty::Clean)
     }
 
     /// Inject global JavaScript objects.
@@ -891,8 +930,10 @@ impl DomBindings {
 
     /// Set the document.
     pub fn set_document(&self, document: Rc<Document>) -> Result<(), BindingError> {
-        // Update state
+        // Update state. Marks against the previous document are moot: the
+        // new one gets a full layout of its own.
         self.window.borrow_mut().document = Some(document.clone());
+        self.dirty.set(DomDirty::Clean);
 
         // Sync to JS
         let title = document.title().unwrap_or_default();
@@ -1536,6 +1577,26 @@ mod tests {
         assert_eq!(bindings.run_timers(120_000, 1_000).unwrap(), 1);
     }
 
+    // Pin §3.4: marks coalesce into one pending bucket, taken once.
+    #[test]
+    fn dirty_marks_coalesce_until_taken() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        assert_eq!(bindings.take_dirty(), DomDirty::Clean);
+
+        bindings.mark_dirty(DomDirty::Layout);
+        bindings.mark_dirty(DomDirty::Style);
+        bindings.mark_dirty(DomDirty::Layout);
+        assert_eq!(bindings.take_dirty(), DomDirty::Style, "the widest bucket wins");
+        assert_eq!(bindings.take_dirty(), DomDirty::Clean, "taking resets it");
+
+        // A new document drops marks made against the old one.
+        bindings.mark_dirty(DomDirty::Layout);
+        bindings
+            .set_document(Rc::new(Document::parse_html("<p>x</p>").unwrap()))
+            .unwrap();
+        assert_eq!(bindings.take_dirty(), DomDirty::Clean);
+    }
+
     fn bound(html: &str) -> DomBindings {
         let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
         bindings
@@ -1661,5 +1722,354 @@ mod tests {
             "document.body === null && document.getElementById('x') === null && \
              document.querySelectorAll('p').length === 0"
         ));
+    }
+
+    // Tree moves write the Rust tree, keep wrapper identity, and mark the
+    // §3 bucket the engine flushes.
+    #[test]
+    fn append_child_moves_the_rust_node_and_marks_style() {
+        let b = bound(PAGE);
+        assert_eq!(b.take_dirty(), DomDirty::Clean);
+        assert!(eval_bool(
+            &b,
+            "var m = document.getElementById('main'), o = document.getElementById('outside'); \
+             m.appendChild(o) === o && o.parentNode === m && m.lastChild === o && \
+             m.querySelectorAll('.x').length === 3 && m.textContent === 'Hello, world!TwoOut'"
+        ));
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+        // The move is in the Rust tree, not a JS-side overlay.
+        let doc = b.window.borrow().document.clone().unwrap();
+        let main = doc.get_element_by_id("main").unwrap();
+        assert_eq!(
+            main.last_child().unwrap().get_attribute("id"),
+            Some("outside")
+        );
+        assert_eq!(main.text_content(), "Hello, world!TwoOut");
+    }
+
+    #[test]
+    fn insert_before_orders_children() {
+        let b = bound(PAGE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var m = document.getElementById('main'), o = document.getElementById('outside'); \
+                 m.insertBefore(o, m.firstChild); var a = m.textContent; \
+                 m.insertBefore(o, null); var z = m.textContent; \
+                 m.insertBefore(o, o); [a, z, m.lastChild === o].join('|')"
+            ),
+            "OutHello, world!Two|Hello, world!TwoOut|true"
+        );
+    }
+
+    #[test]
+    fn removed_nodes_are_detached_but_their_wrappers_still_read() {
+        let b = bound(PAGE);
+        assert!(eval_bool(
+            &b,
+            "var o = document.getElementById('outside'); \
+             document.body.removeChild(o) === o && o.parentNode === null && \
+             o.textContent === 'Out' && document.getElementById('outside') === null && \
+             document.querySelectorAll('#outside').length === 0 && \
+             document.body.appendChild(o) === o && document.getElementById('outside') === o"
+        ));
+        assert!(eval_bool(
+            &b,
+            "var p = document.querySelector('.x'); p.remove(); p.remove(); \
+             p.parentNode === null && document.querySelectorAll('.x').length === 2"
+        ));
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+    }
+
+    // DOM §4.2.3 validity: the DOMException named, and the tree untouched.
+    #[test]
+    fn invalid_tree_writes_throw_and_change_nothing() {
+        let b = bound(PAGE);
+        let threw = |script: &str| {
+            eval_string(
+                &b,
+                &format!(
+                    "(function () {{ try {{ {script}; return 'no throw'; }} \
+                          catch (e) {{ return e.name + '/' + (e instanceof DOMException); }} }})()"
+                ),
+            )
+        };
+        let m = "document.getElementById('main')";
+        assert_eq!(
+            threw(&format!("{m}.firstChild.appendChild({m})")),
+            "HierarchyRequestError/true"
+        );
+        assert_eq!(
+            threw(&format!("{m}.appendChild({m})")),
+            "HierarchyRequestError/true"
+        );
+        assert_eq!(
+            threw(&format!("{m}.firstChild.firstChild.appendChild({m})")),
+            "HierarchyRequestError/true"
+        );
+        assert_eq!(
+            threw(&format!("{m}.appendChild(document)")),
+            "HierarchyRequestError/true"
+        );
+        assert_eq!(
+            threw(&format!("document.appendChild({m})")),
+            "HierarchyRequestError/true"
+        );
+        assert_eq!(
+            threw(&format!("{m}.removeChild(document.body)")),
+            "NotFoundError/true"
+        );
+        assert_eq!(
+            threw(&format!(
+                "{m}.insertBefore(document.body.lastChild, document.body)"
+            )),
+            "NotFoundError/true"
+        );
+        assert_eq!(threw(&format!("{m}.appendChild({{}})")), "TypeError/false");
+        assert_eq!(
+            threw(&format!("{m}.insertBefore({m}.firstChild)")),
+            "TypeError/false"
+        );
+        assert_eq!(
+            b.take_dirty(),
+            DomDirty::Clean,
+            "a failed write marks nothing"
+        );
+        assert_eq!(
+            eval_string(&b, &format!("{m}.textContent")),
+            "Hello, world!Two"
+        );
+    }
+
+    // Pin (d) for writes: a wrapper from the previous document never names
+    // a node of the next one.
+    #[test]
+    fn old_wrappers_cannot_write_the_next_document() {
+        let b = bound(PAGE);
+        b.evaluate("var old = document.getElementById('outside');")
+            .unwrap();
+        b.set_document(Rc::new(
+            Document::parse_html("<html><body><div id='main'>New</div></body></html>").unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(
+            eval_string(
+                &b,
+                "var r = []; \
+                 try { document.body.appendChild(old); } catch (e) { r.push(e.name); } \
+                 try { old.appendChild(document.body); } catch (e) { r.push(e.name); } \
+                 try { document.body.insertBefore(document.getElementById('main'), old); } \
+                 catch (e) { r.push(e.name); } r.join(',')"
+            ),
+            "NotFoundError,NotFoundError,NotFoundError"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Clean);
+    }
+
+    // Writes to a node's own data go through replace-on-write in the Rust
+    // DOM: same NodeId, so the wrapper and every identity path are kept.
+    #[test]
+    fn set_attribute_writes_the_rust_node_and_keeps_identity() {
+        let b = bound(PAGE);
+        assert!(eval_bool(
+            &b,
+            "var m = document.getElementById('main'); \
+             m.setAttribute('data-k', 'v'); m.setAttribute('TITLE', 't'); \
+             m.getAttribute('data-k') === 'v' && m.getAttribute('title') === 't' && \
+             document.getElementById('main') === m && \
+             document.querySelector('#main') === m && \
+             m.firstChild.parentNode === m && m.textContent === 'Hello, world!Two'"
+        ));
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+        let doc = b.window.borrow().document.clone().unwrap();
+        let main = doc.get_element_by_id("main").unwrap();
+        assert_eq!(main.get_attribute("data-k"), Some("v"));
+        assert_eq!(main.get_attribute("title"), Some("t"));
+    }
+
+    #[test]
+    fn remove_and_toggle_attribute() {
+        let b = bound(PAGE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var m = document.getElementById('main'); var r = []; \
+                 m.removeAttribute('class'); r.push(m.hasAttribute('class')); \
+                 r.push(m.toggleAttribute('hidden'), m.getAttribute('hidden')); \
+                 r.push(m.toggleAttribute('hidden'), m.hasAttribute('hidden')); \
+                 r.push(m.toggleAttribute('hidden', false)); r.join(',')"
+            ),
+            "false,true,,false,false,false"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_attribute_write_marks_nothing() {
+        let b = bound(PAGE);
+        b.evaluate("document.getElementById('main').setAttribute('class', 'box'); \
+                    document.getElementById('main').removeAttribute('nope');")
+            .unwrap();
+        assert_eq!(b.take_dirty(), DomDirty::Clean);
+    }
+
+    #[test]
+    fn id_and_class_name_setters_move_the_lookups() {
+        let b = bound(PAGE);
+        assert!(eval_bool(
+            &b,
+            "var m = document.getElementById('main'); m.id = 'renamed'; m.className = 'a b'; \
+             document.getElementById('main') === null && \
+             document.getElementById('renamed') === m && m.id === 'renamed' && \
+             document.getElementsByClassName('b')[0] === m && \
+             document.querySelector('.a') === m"
+        ));
+    }
+
+    #[test]
+    fn class_list_edits_the_class_attribute() {
+        let b = bound(PAGE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var m = document.getElementById('main'), c = m.classList, r = []; \
+                 c.add('a', 'b', 'a'); r.push(m.className, c.length, c.contains('b')); \
+                 c.remove('box'); r.push(m.className); \
+                 r.push(c.toggle('z'), c.toggle('z'), c.toggle('a', true)); \
+                 r.push(c.replace('a', 'q'), c.value, c.item(0), String(c.item(9))); \
+                 r.push(m.classList === c, document.querySelector('.q') === m); \
+                 try { c.add(''); } catch (e) { r.push(e.name); } \
+                 try { c.add('x y'); } catch (e) { r.push(e.name); } \
+                 r.join('|')"
+            ),
+            "box a b|3|true|a b|true|false|true|true|q b|q|null|true|true|SyntaxError|InvalidCharacterError"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+    }
+
+    #[test]
+    fn text_content_setter_replaces_an_elements_children() {
+        let b = bound(PAGE);
+        assert!(eval_bool(
+            &b,
+            "var m = document.getElementById('main'), p = m.firstChild; \
+             m.textContent = 'plain'; \
+             m.childNodes.length === 1 && m.firstChild.nodeType === 3 && \
+             m.textContent === 'plain' && p.parentNode === null && \
+             document.querySelectorAll('.x').length === 1"
+        ));
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+        let doc = b.window.borrow().document.clone().unwrap();
+        assert_eq!(doc.get_element_by_id("main").unwrap().text_content(), "plain");
+        assert!(eval_bool(
+            &b,
+            "var m = document.getElementById('main'); m.textContent = ''; \
+             var a = m.firstChild === null; m.textContent = null; \
+             a && m.childNodes.length === 0 && m.textContent === ''"
+        ));
+    }
+
+    #[test]
+    fn character_data_setters_keep_the_text_node() {
+        let b = bound(PAGE);
+        assert!(eval_bool(
+            &b,
+            "var o = document.getElementById('outside'), t = o.firstChild; \
+             t.data = 'Changed'; var a = o.textContent === 'Changed' && o.firstChild === t; \
+             t.nodeValue = 'Again'; t.textContent = 'Last'; \
+             a && t.data === 'Last' && t.length === 4 && o.textContent === 'Last'"
+        ));
+        assert_eq!(b.take_dirty(), DomDirty::Layout);
+    }
+
+    #[test]
+    fn created_nodes_are_detached_until_inserted() {
+        let b = bound(PAGE);
+        assert!(eval_bool(
+            &b,
+            "var li = document.createElement('LI'); \
+             var ok = li.tagName === 'LI' && li.localName === 'li' && li.parentNode === null && \
+                      li instanceof HTMLElement && li.ownerDocument === document; \
+             li.className = 'item'; li.appendChild(document.createTextNode('new')); \
+             li.appendChild(document.createComment('c')); \
+             ok && li.textContent === 'new' && li.childNodes.length === 2 && \
+             document.querySelector('.item') === null"
+        ));
+        assert_eq!(
+            b.take_dirty(),
+            DomDirty::Style,
+            "writes to a detached node are marked but harmless"
+        );
+        assert!(eval_bool(
+            &b,
+            "document.body.appendChild(li) === li && \
+             document.querySelector('.item') === li && \
+             document.body.lastChild === li && document.body.textContent.slice(-3) === 'new'"
+        ));
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+    }
+
+    #[test]
+    fn invalid_names_throw_invalid_character_error() {
+        let b = bound(PAGE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var r = []; \
+                 try { document.createElement(''); } catch (e) { r.push(e.name); } \
+                 try { document.createElement('a b'); } catch (e) { r.push(e.name); } \
+                 try { document.body.setAttribute('a=b', 'x'); } catch (e) { r.push(e.name); } \
+                 try { document.body.setAttribute('x'); } catch (e) { r.push(e.name); } \
+                 r.join(',')"
+            ),
+            "InvalidCharacterError,InvalidCharacterError,InvalidCharacterError,TypeError"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Clean);
+    }
+
+    #[test]
+    fn old_wrappers_cannot_write_data_in_the_next_document() {
+        let b = bound(PAGE);
+        b.evaluate("var old = document.getElementById('main');").unwrap();
+        b.set_document(Rc::new(
+            Document::parse_html("<html><body><div id='main'>New</div></body></html>").unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(
+            eval_string(
+                &b,
+                "var r = []; \
+                 try { old.setAttribute('class', 'x'); } catch (e) { r.push(e.name); } \
+                 try { old.textContent = 'x'; } catch (e) { r.push(e.name); } \
+                 r.push(document.getElementById('main').textContent); r.join(',')"
+            ),
+            "NotFoundError,NotFoundError,New"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Clean);
+    }
+
+    #[test]
+    fn style_reads_and_writes_the_style_attribute() {
+        let b = bound(
+            "<html><body><div id='d' style='color: red; margin-top:4px !important'>x</div></body></html>",
+        );
+        assert_eq!(
+            eval_string(
+                &b,
+                "var d = document.getElementById('d'), s = d.style, r = []; \
+                 r.push(s.color, s.marginTop, s.getPropertyValue('margin-top'), \
+                        s.getPropertyPriority('margin-top'), s.length, s[0], s.fontSize === ''); \
+                 s.backgroundColor = 'blue'; s.color = ''; s.setProperty('float', 'left'); \
+                 r.push(d.getAttribute('style'), s.cssFloat, d.style === s); \
+                 s.cssText = 'width: 10px'; r.push(s.width, s.length); \
+                 d.style = 'height: 5px'; r.push(d.getAttribute('style'), s.removeProperty('height'), s.length); \
+                 r.join('|')"
+            ),
+            "red|4px|4px|important|2|color|true|\
+             margin-top: 4px !important; background-color: blue; float: left;|left|true|\
+             10px|1|height: 5px|5px|0"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+        let doc = b.window.borrow().document.clone().unwrap();
+        assert_eq!(doc.get_element_by_id("d").unwrap().get_attribute("style"), Some(""));
     }
 }

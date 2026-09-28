@@ -15,7 +15,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use rustkit_bindings::DomBindings;
+use rustkit_bindings::{DomBindings, DomDirty};
 // Re-export IpcMessage for external use
 pub use rustkit_bindings::IpcMessage;
 use rustkit_compositor::Compositor;
@@ -150,7 +150,7 @@ pub(crate) mod test_gpu {
     }
 }
 use rustkit_core::{LoadEvent, NavigationRequest, NavigationStateMachine};
-use rustkit_css::{css_ident, parse_display, ComputedStyle, Rule, Stylesheet};
+use rustkit_css::{css_ident, parse_display, ComputedStyle, CustomProperties, Rule, Stylesheet};
 use rustkit_dom::{Document, Node, NodeType};
 use rustkit_image::ImageManager;
 use rustkit_js::JsRuntime;
@@ -2273,6 +2273,7 @@ impl Engine {
                 debug!(?id, %url, "Navigation abandoned after page scripts");
                 return Ok(());
             }
+            self.flush_script_dom_writes(id)?;
         }
 
         // Finish navigation
@@ -4929,7 +4930,7 @@ impl Engine {
         // custom properties.
         let inherited_vars = match parent_style {
             Some(p) => p.custom_properties.clone(),
-            None => Arc::new(css_vars.clone()),
+            None => Arc::new(CustomProperties::from_map(css_vars.clone())),
         };
         let inline_style = attributes.get("style");
         let mut declared_vars: Vec<(&str, Option<&str>)> = Vec::new();
@@ -4966,7 +4967,7 @@ impl Engine {
             }
         }
         let vars = Self::element_custom_properties(&inherited_vars, &declared_vars);
-        let css_vars: &HashMap<String, String> = &vars;
+        let css_vars: &CustomProperties = &vars;
 
         // Provenance is recorded from INSIDE this loop rather than by a
         // separate pass, so "which rule won" is answered by the same code
@@ -5100,7 +5101,7 @@ impl Engine {
     fn record_inline_style(
         &self,
         style_attr: &str,
-        css_vars: &HashMap<String, String>,
+        css_vars: &dyn VarSource,
         records: &mut Vec<DeclarationRecord>,
         order: &mut usize,
         important_pass: bool,
@@ -5193,7 +5194,7 @@ impl Engine {
         style: &mut ComputedStyle,
         parent_style: Option<&ComputedStyle>,
         style_attr: &str,
-        css_vars: &HashMap<String, String>,
+        css_vars: &dyn VarSource,
         ch_pending: &mut ChPending,
         important_pass: bool,
     ) {
@@ -7638,7 +7639,7 @@ impl Engine {
     /// the first style pass. Fallbacks are delimited by balanced parentheses,
     /// and the expanded length is capped so fan-out chains cannot grow without
     /// bound.
-    fn resolve_css_variables(&self, value: &str, css_vars: &HashMap<String, String>) -> String {
+    fn resolve_css_variables(&self, value: &str, css_vars: &dyn VarSource) -> String {
         if !value.contains("var(") {
             return value.to_string();
         }
@@ -7658,9 +7659,9 @@ impl Engine {
     /// resolved value actually differs from it: Tailwind sets ~30 `--tw-*`
     /// on every element via `*`, and those must not copy the map each time.
     fn element_custom_properties(
-        inherited: &Arc<HashMap<String, String>>,
+        inherited: &Arc<CustomProperties>,
         declared: &[(&str, Option<&str>)],
-    ) -> Arc<HashMap<String, String>> {
+    ) -> Arc<CustomProperties> {
         if declared.is_empty() {
             return inherited.clone();
         }
@@ -7680,52 +7681,40 @@ impl Engine {
         }
         // `initial` names are hidden from the inherited layer while
         // resolving the others.
-        let mut visible = inherited.as_ref();
-        let masked;
-        if !unset.is_empty() {
-            let mut m = inherited.as_ref().clone();
-            for n in &unset {
-                m.remove(*n);
-            }
-            masked = m;
-            visible = &masked;
-        }
+        let visible = MaskedVars {
+            vars: inherited,
+            hidden: &unset,
+        };
         let mut resolved: Vec<(String, Option<String>)> = Vec::with_capacity(own.len());
         for (name, raw) in &own {
             let value = if raw.contains("var(") {
                 let mut stack: Vec<&str> = vec![name.as_str()];
                 let mut budget = VAR_EXPANSION_BUDGET;
                 let mut cycle = false;
-                let v = substitute_css_vars(raw, &[&own, visible], &mut stack, &mut budget, &mut cycle);
+                let v = substitute_css_vars(raw, &[&own, &visible], &mut stack, &mut budget, &mut cycle);
                 (!cycle).then_some(v)
             } else {
                 Some(raw.clone())
             };
             resolved.push((name.clone(), value));
         }
-        let changes = unset.iter().any(|n| inherited.contains_key(*n))
-            || resolved
-                .iter()
-                .any(|(n, v)| inherited.get(n).map(String::as_str) != v.as_deref());
-        if !changes {
-            return inherited.clone();
-        }
-        let mut map = inherited.clone();
-        let m = Arc::make_mut(&mut map);
+        // Only what differs from the inherited set goes on this element's
+        // layer; `None` hides the inherited value.
+        let mut layer: HashMap<String, Option<String>> = HashMap::new();
         for n in unset {
-            m.remove(n);
-        }
-        for (n, v) in resolved {
-            match v {
-                Some(v) => {
-                    m.insert(n, v);
-                }
-                None => {
-                    m.remove(&n);
-                }
+            if inherited.contains_key(n) {
+                layer.insert(n.to_string(), None);
             }
         }
-        map
+        for (n, v) in resolved {
+            if inherited.get(&n) != v.as_deref() {
+                layer.insert(n, v);
+            }
+        }
+        if layer.is_empty() {
+            return inherited.clone();
+        }
+        Arc::new(CustomProperties::over(inherited, layer))
     }
 
     /// Check if a selector matches an element.
@@ -10019,11 +10008,30 @@ impl Engine {
             .as_ref()
             .ok_or(EngineError::JsError("JavaScript not initialized".into()))?;
 
-        let result = bindings
-            .evaluate(script)
-            .map_err(|e| EngineError::JsError(e.to_string()))?;
+        // A script that threw may still have written to the DOM before it
+        // did, so the flush runs either way.
+        let result = bindings.evaluate(script);
+        self.flush_script_dom_writes(id)?;
+        let result = result.map_err(|e| EngineError::JsError(e.to_string()))?;
 
         Ok(format!("{:?}", result))
+    }
+
+    /// Apply what script's DOM writes invalidated (the DOM-bindings pin §3
+    /// flush): one relayout for however many writes the script made. Runs
+    /// once when script settles; `relayout` rebuilds style and layout in
+    /// full, so both `DomDirty` buckets take the same path for now.
+    fn flush_script_dom_writes(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+        let dirty = self
+            .views
+            .get(&id)
+            .and_then(|view| view.bindings.as_ref())
+            .map_or(DomDirty::Clean, |bindings| bindings.take_dirty());
+        if dirty == DomDirty::Clean {
+            return Ok(());
+        }
+        debug!(?id, ?dirty, "Script wrote to the DOM; relayout");
+        self.relayout(id)
     }
 
     /// Get the current URL of a view.
@@ -20707,14 +20715,63 @@ mod windows_a_leg_pins {
         // element; that must not copy the map per element.
         let mut parent = HashMap::new();
         parent.insert("--tw".to_string(), "0".to_string());
-        let parent = Arc::new(parent);
+        let parent = Arc::new(CustomProperties::from_map(parent));
         let same = Engine::element_custom_properties(&parent, &[("--tw", Some("0"))]);
         assert!(Arc::ptr_eq(&parent, &same));
         let changed = Engine::element_custom_properties(&parent, &[("--tw", Some("1"))]);
         assert!(!Arc::ptr_eq(&parent, &changed));
-        assert_eq!(changed.get("--tw").map(String::as_str), Some("1"));
+        assert_eq!(changed.get("--tw"), Some("1"));
         let unset = Engine::element_custom_properties(&parent, &[("--tw", None)]);
         assert!(unset.get("--tw").is_none(), "`initial` removes the property");
+    }
+
+    #[test]
+    fn layered_custom_properties_match_a_flat_map_at_every_depth() {
+        // Each element's layer holds only its changes over the parent's
+        // `Arc`; past the depth cap the chain is flattened. Walk a 20-deep
+        // chain against a plain map that copies at every step.
+        let mut root = HashMap::new();
+        root.insert("--base".to_string(), "1px".to_string());
+        root.insert("--keep".to_string(), "k".to_string());
+        let mut flat = root.clone();
+        let mut vars = Arc::new(CustomProperties::from_map(root));
+        for i in 0..20 {
+            let own = format!("--d{i}");
+            let val = format!("var(--base) {i}");
+            let mut declared: Vec<(&str, Option<&str>)> =
+                vec![(own.as_str(), Some(val.as_str()))];
+            if i == 7 {
+                declared.push(("--keep", None));
+            }
+            if i == 9 {
+                declared.push(("--base", Some("2px")));
+            }
+            if i == 13 {
+                declared.push(("--keep", Some("again")));
+            }
+            let next = Engine::element_custom_properties(&vars, &declared);
+            if i == 9 {
+                flat.insert("--base".into(), "2px".into());
+            }
+            let base = flat["--base"].clone();
+            flat.insert(own.clone(), format!("{base} {i}"));
+            match i {
+                7 => {
+                    flat.remove("--keep");
+                }
+                13 => {
+                    flat.insert("--keep".into(), "again".into());
+                }
+                _ => {}
+            }
+            assert_eq!(next.to_map(), flat, "depth {i}");
+            for (k, v) in &flat {
+                assert_eq!(next.get(k), Some(v.as_str()), "depth {i} {k}");
+            }
+            assert_eq!(next.get("--keep").is_some(), !(7..13).contains(&i), "depth {i}");
+            assert_eq!(*next, CustomProperties::from_map(flat.clone()));
+            vars = next;
+        }
     }
 
     #[test]
@@ -21019,6 +21076,38 @@ fn matching_close_paren(s: &str) -> Option<usize> {
     None
 }
 
+/// Where `var()` looks a custom property up: `(name as stored, value)`.
+trait VarSource {
+    fn var(&self, name: &str) -> Option<(&str, &str)>;
+}
+
+impl VarSource for HashMap<String, String> {
+    fn var(&self, name: &str) -> Option<(&str, &str)> {
+        self.get_key_value(name).map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+}
+
+impl VarSource for CustomProperties {
+    fn var(&self, name: &str) -> Option<(&str, &str)> {
+        self.get_key_value(name)
+    }
+}
+
+/// An inherited set with some names hidden (`initial`), without copying it.
+struct MaskedVars<'a> {
+    vars: &'a CustomProperties,
+    hidden: &'a [&'a str],
+}
+
+impl VarSource for MaskedVars<'_> {
+    fn var(&self, name: &str) -> Option<(&str, &str)> {
+        if self.hidden.contains(&name) {
+            return None;
+        }
+        self.vars.get_key_value(name)
+    }
+}
+
 /// Left-to-right `var()` substitution. The text a substitution produces is
 /// already fully resolved, so it is appended and never re-scanned; `stack`
 /// holds the variables being resolved (cycle detection). Every byte written
@@ -21030,7 +21119,7 @@ fn matching_close_paren(s: &str) -> Option<usize> {
 /// because its variable was already on the stack.
 fn substitute_css_vars<'a>(
     value: &str,
-    layers: &[&'a HashMap<String, String>],
+    layers: &[&'a dyn VarSource],
     stack: &mut Vec<&'a str>,
     budget: &mut usize,
     cycle: &mut bool,
@@ -21066,10 +21155,10 @@ fn substitute_css_vars<'a>(
             Some(i) => (content[..i].trim(), Some(content[i + 1..].trim())),
             None => (content.trim(), None),
         };
-        let found = layers.iter().find_map(|l| l.get_key_value(name));
+        let found = layers.iter().find_map(|l| l.var(name));
         let piece = match found {
-            Some((key, raw)) if !stack.contains(&key.as_str()) => {
-                stack.push(key.as_str());
+            Some((key, raw)) if !stack.contains(&key) => {
+                stack.push(key);
                 let r = substitute_css_vars(raw, layers, stack, budget, cycle);
                 stack.pop();
                 r
@@ -21569,6 +21658,155 @@ mod grid_template_areas_tests {
     }
 }
 
+#[cfg(all(test, feature = "headless"))]
+mod script_dom_flush_tests {
+    use super::*;
+
+    fn painted_text(engine: &Engine, view: EngineViewId) -> String {
+        let list = engine.views[&view].display_list.as_ref().expect("display list");
+        list.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                rustkit_layout::DisplayCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn loaded(html: &str) -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+        (engine, view)
+    }
+
+    // Pin §3: a DOM write marked during script reaches the display list
+    // when the script settles.
+    #[test]
+    fn a_marked_dom_write_is_relaid_out_when_the_script_settles() {
+        let (mut engine, view) =
+            loaded("<html><body><p id='gone'>alpha</p><p>omega</p></body></html>");
+        assert!(painted_text(&engine, view).contains("alpha"));
+
+        // Stand in for the mutation surface: detach a node from Rust and
+        // mark the bucket the way a script's removeChild will.
+        let document = engine.views[&view].document.clone().unwrap();
+        document.get_element_by_id("gone").unwrap().remove_from_parent();
+        engine.views[&view]
+            .bindings
+            .as_ref()
+            .unwrap()
+            .mark_dirty(DomDirty::Style);
+
+        engine.execute_script(view, "1").unwrap();
+        let text = painted_text(&engine, view);
+        assert!(!text.contains("alpha") && text.contains("omega"), "painted: {text}");
+    }
+
+    // The mutation surface end to end: script tree moves mark the bucket
+    // themselves and the settle flush paints them.
+    #[test]
+    fn script_tree_moves_are_painted_when_the_script_settles() {
+        let (mut engine, view) = loaded(
+            "<html><body><p id='a'>alpha</p><p id='b'>beta</p><p id='c'>gamma</p></body></html>",
+        );
+        assert_eq!(painted_text(&engine, view), "alpha beta gamma");
+
+        engine
+            .execute_script(view, "document.body.removeChild(document.getElementById('b'))")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "alpha gamma");
+
+        engine
+            .execute_script(
+                view,
+                "var a = document.getElementById('a'); document.body.appendChild(a); \
+                 document.body.insertBefore(document.getElementById('c'), a)",
+            )
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "gamma alpha");
+    }
+
+    // Writes to a node's own data (replace-on-write, same NodeId) and new
+    // nodes reach the display list through the same settle flush.
+    #[test]
+    fn script_data_writes_and_new_nodes_are_painted_when_the_script_settles() {
+        let (mut engine, view) = loaded(
+            "<html><head><style>.off { display: none }</style></head>\
+             <body><p id='a'>alpha</p><p id='b'>beta</p></body></html>",
+        );
+        assert_eq!(painted_text(&engine, view), "alpha beta");
+
+        engine
+            .execute_script(view, "document.getElementById('a').textContent = 'ALPHA'")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "ALPHA beta");
+
+        engine
+            .execute_script(view, "document.getElementById('b').firstChild.data = 'BETA'")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "ALPHA BETA");
+
+        // A class write restyles: the element's style now matches `.off`.
+        engine
+            .execute_script(view, "document.getElementById('a').classList.add('off')")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "BETA");
+        engine
+            .execute_script(view, "document.getElementById('a').removeAttribute('class')")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "ALPHA BETA");
+        // An inline style write reaches the cascade through the attribute.
+        engine
+            .execute_script(view, "document.getElementById('b').style.display = 'none'")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "ALPHA");
+        engine
+            .execute_script(view, "document.getElementById('b').style.removeProperty('display')")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "ALPHA BETA");
+
+        engine
+            .execute_script(
+                view,
+                "var p = document.createElement('p'); \
+                 p.appendChild(document.createTextNode('gamma')); document.body.appendChild(p)",
+            )
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "ALPHA BETA gamma");
+    }
+
+    // Pin §3.1: script that writes nothing costs no relayout.
+    #[test]
+    fn a_clean_script_does_not_relayout() {
+        let (mut engine, view) = loaded("<html><body><p>alpha</p></body></html>");
+        engine.views.get_mut(&view).unwrap().display_list = None;
+        engine.execute_script(view, "document.title").unwrap();
+        assert!(engine.views[&view].display_list.is_none());
+    }
+
+    // A script that throws after writing still gets its writes flushed.
+    #[test]
+    fn a_script_that_throws_still_flushes() {
+        let (mut engine, view) = loaded("<html><body><p>alpha</p></body></html>");
+        engine.views.get_mut(&view).unwrap().display_list = None;
+        engine.views[&view]
+            .bindings
+            .as_ref()
+            .unwrap()
+            .mark_dirty(DomDirty::Layout);
+        assert!(engine.execute_script(view, "throw new Error('x')").is_err());
+        assert!(engine.views[&view].display_list.is_some());
+        assert_eq!(
+            engine.views[&view].bindings.as_ref().unwrap().take_dirty(),
+            DomDirty::Clean
+        );
+    }
+}
+
 #[cfg(test)]
 mod blockify_tests {
     use super::*;
@@ -21654,6 +21892,85 @@ mod blockify_tests {
             assert_eq!(d("g"), rustkit_css::Display::Grid);
             assert_eq!(d("b"), rustkit_css::Display::Block);
             assert_eq!(d("out"), rustkit_css::Display::InlineBlock, "only flex/grid items");
+        }
+    }
+}
+
+#[cfg(test)]
+mod grid_relative_size_contribution_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    /// Laid out through both entry points: `layout()` and
+    /// `layout_with_collapse` (what `relayout` runs for the page).
+    fn laid_out(html: &str) -> Vec<LayoutBox> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 0.0),
+            ..Default::default()
+        };
+        let mut plain = e.build_layout_from_document(&d, &[]);
+        plain.layout(&cb);
+        let mut engine_path = e.build_layout_from_document(&d, &[]);
+        engine_path.layout_with_collapse(
+            &cb,
+            &mut rustkit_layout::MarginCollapseContext::new(),
+            &mut rustkit_layout::FloatContext::new(),
+        );
+        vec![plain, engine_path]
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    fn rect(root: &LayoutBox, id: &str) -> Rect {
+        by_id(root, id).unwrap_or_else(|| panic!("no box #{id}")).dimensions.border_box()
+    }
+
+    #[test]
+    fn a_rem_width_sizes_a_min_content_column() {
+        // wikipedia's page shell: a `min-content` column holding a
+        // `width: 12.25rem` nav. 12.25rem = 196px, so the 1fr column gets 804.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0;font:14px Arial"><div style="display:grid;width:1000px;"#,
+            r#"grid-template-columns:1fr min-content">"#,
+            r#"<div id="a">Article</div><nav id="n" style="width:12.25rem">Appearance</nav>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "a").width, 804.0);
+            assert_eq!(rect(&root, "n").x, 804.0);
+            assert_eq!(rect(&root, "n").width, 196.0);
+        }
+    }
+
+    #[test]
+    fn an_em_min_width_floors_a_min_content_column() {
+        // 10em at 14px = 140px.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0;font:14px Arial"><div style="display:grid;width:1000px;"#,
+            r#"grid-template-columns:1fr min-content">"#,
+            r#"<div id="a">Article</div><div id="n" style="min-width:10em">x</div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "n").x, 860.0);
+        }
+    }
+
+    #[test]
+    fn a_rem_height_sizes_a_min_content_row() {
+        // 3rem = 48px, so the second row starts at 48.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:grid;width:400px;"#,
+            r#"grid-template-rows:min-content min-content">"#,
+            r#"<div id="a" style="height:3rem"></div><div id="b">below</div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "b").y, 48.0);
         }
     }
 }
