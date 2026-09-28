@@ -15,7 +15,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use rustkit_bindings::DomBindings;
+use rustkit_bindings::{DomBindings, DomDirty};
 // Re-export IpcMessage for external use
 pub use rustkit_bindings::IpcMessage;
 use rustkit_compositor::Compositor;
@@ -2273,6 +2273,7 @@ impl Engine {
                 debug!(?id, %url, "Navigation abandoned after page scripts");
                 return Ok(());
             }
+            self.flush_script_dom_writes(id)?;
         }
 
         // Finish navigation
@@ -10019,11 +10020,30 @@ impl Engine {
             .as_ref()
             .ok_or(EngineError::JsError("JavaScript not initialized".into()))?;
 
-        let result = bindings
-            .evaluate(script)
-            .map_err(|e| EngineError::JsError(e.to_string()))?;
+        // A script that threw may still have written to the DOM before it
+        // did, so the flush runs either way.
+        let result = bindings.evaluate(script);
+        self.flush_script_dom_writes(id)?;
+        let result = result.map_err(|e| EngineError::JsError(e.to_string()))?;
 
         Ok(format!("{:?}", result))
+    }
+
+    /// Apply what script's DOM writes invalidated (the DOM-bindings pin §3
+    /// flush): one relayout for however many writes the script made. Runs
+    /// once when script settles; `relayout` rebuilds style and layout in
+    /// full, so both `DomDirty` buckets take the same path for now.
+    fn flush_script_dom_writes(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+        let dirty = self
+            .views
+            .get(&id)
+            .and_then(|view| view.bindings.as_ref())
+            .map_or(DomDirty::Clean, |bindings| bindings.take_dirty());
+        if dirty == DomDirty::Clean {
+            return Ok(());
+        }
+        debug!(?id, ?dirty, "Script wrote to the DOM; relayout");
+        self.relayout(id)
     }
 
     /// Get the current URL of a view.
@@ -21566,6 +21586,82 @@ mod grid_template_areas_tests {
         e.apply_style_property(&mut s, "grid-template", "none");
         assert!(s.grid_template_areas.is_none());
         assert!(s.grid_template_rows.tracks.is_empty());
+    }
+}
+
+#[cfg(all(test, feature = "headless"))]
+mod script_dom_flush_tests {
+    use super::*;
+
+    fn painted_text(engine: &Engine, view: EngineViewId) -> String {
+        let list = engine.views[&view].display_list.as_ref().expect("display list");
+        list.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                rustkit_layout::DisplayCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn loaded(html: &str) -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+        (engine, view)
+    }
+
+    // Pin §3: a DOM write marked during script reaches the display list
+    // when the script settles.
+    #[test]
+    fn a_marked_dom_write_is_relaid_out_when_the_script_settles() {
+        let (mut engine, view) =
+            loaded("<html><body><p id='gone'>alpha</p><p>omega</p></body></html>");
+        assert!(painted_text(&engine, view).contains("alpha"));
+
+        // Stand in for the mutation surface: detach a node from Rust and
+        // mark the bucket the way a script's removeChild will.
+        let document = engine.views[&view].document.clone().unwrap();
+        document.get_element_by_id("gone").unwrap().remove_from_parent();
+        engine.views[&view]
+            .bindings
+            .as_ref()
+            .unwrap()
+            .mark_dirty(DomDirty::Style);
+
+        engine.execute_script(view, "1").unwrap();
+        let text = painted_text(&engine, view);
+        assert!(!text.contains("alpha") && text.contains("omega"), "painted: {text}");
+    }
+
+    // Pin §3.1: script that writes nothing costs no relayout.
+    #[test]
+    fn a_clean_script_does_not_relayout() {
+        let (mut engine, view) = loaded("<html><body><p>alpha</p></body></html>");
+        engine.views.get_mut(&view).unwrap().display_list = None;
+        engine.execute_script(view, "document.title").unwrap();
+        assert!(engine.views[&view].display_list.is_none());
+    }
+
+    // A script that throws after writing still gets its writes flushed.
+    #[test]
+    fn a_script_that_throws_still_flushes() {
+        let (mut engine, view) = loaded("<html><body><p>alpha</p></body></html>");
+        engine.views.get_mut(&view).unwrap().display_list = None;
+        engine.views[&view]
+            .bindings
+            .as_ref()
+            .unwrap()
+            .mark_dirty(DomDirty::Layout);
+        assert!(engine.execute_script(view, "throw new Error('x')").is_err());
+        assert!(engine.views[&view].display_list.is_some());
+        assert_eq!(
+            engine.views[&view].bindings.as_ref().unwrap().take_dirty(),
+            DomDirty::Clean
+        );
     }
 }
 
