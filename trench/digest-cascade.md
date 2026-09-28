@@ -254,3 +254,29 @@ The #331 pairs put the A side (b722249) at 688–907 ms on wikipedia. That's alr
 1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
 2. (Carried over) A standing quiet window. Today's dip showed what one buys: 4 quiet minutes settled a claim that 6 noisy pairs couldn't. A fixed hour (e.g. 05:00–06:00) would give a ratio of record, #333's B/A and the flag-on board run. Default: keep grabbing dips.
 3. **Merge #331 on the posted B/A?** It's faster on every clean pair on all three sites (~0.88–0.92), with identical receipts. Default: yes, once R1/R2 approve.
+
+## 2026-09-28 17:50
+
+**No new ratio: load was 15–22 all session and never quiet. The session went to a fresh symbolized profile of develop daf4242 + #333 (github, flag off). It found two new cuts. One is written, tested and pushed (`atlas/cs-vars-collapse` @ 85fd338, stacked on #333). #331 merged. #333 has R1 CLEAR and R2 PASS. Ratio of record stays at 45.2× (wikipedia, 10:00 quiet).**
+
+| site | quiet record (10:00, develop default) | this session |
+|---|---|---|
+| cnn | 1827 ms → 8.7× | not measured (load 15–22) |
+| github | 2624 ms → 23.9× | not measured |
+| wikipedia | 903 ms → **45.2×** (worst) | not measured |
+
+- **Profile, github, develop daf4242 + #333, flag off** (`cascade-target-prof/pc-prof-bbe9280`, report `~/Repos/.worktrees/cascade-prof-github-bbe9280.txt`, 178 samples). Inclusive under `build_layout_from_document`:
+  - `compute_style_for_element` 74%.
+  - `selector_matches_prepared` 38%, `selector_matches` (the string entry) 27%, `SubjectCompound::matches` 18.5%.
+  - **`CustomProperties::over` 15.7% → `to_map` 15.2%.** #333's flatten past depth 6 copies the whole chain, Primer's `:root` included.
+  - **`prepared_selector` 15.7%**, plus SipHash ~8–14%: `PreparedSelector::List` stores member *strings*, so every member of a comma list goes back through `selector_matches` → a hashed cache lookup, per candidate element.
+  - `keys_may_match` 9%, `match_attribute_selector` 8.4% (`str::find` 6.7%), `pseudo_element_style` 7.9%.
+- **`atlas/cs-vars-collapse` @ 85fd338** (on #333's head 2e60e9a, pushed, no PR). Past `MAX_DEPTH`, `over()` merges only the layers above the bottom (masks kept) and shares the bottom `Arc`. New test `collapse_keeps_the_bottom_layer_shared_and_masks_it`. css lib 44/44, engine lib 193/193 (`--test-threads=1`). I stopped its release build at the cap (35 min per build at load 22), so there's no receipt yet. **I kept it off #333** so #333's R1/R2 stamps at 2e60e9a stay valid. #333's body now has a note about it.
+- **Next cut (not started): `PreparedSelector::List(Vec<Rc<PreparedSelector>>)`.** Prepare the members once, inside `prepare()` (it runs outside the cache borrow, so the recursive call is safe), and match them with `selector_matches_prepared`. It's one enum variant plus one match arm (engine lib.rs ~7992, ~8098, ~19006), so it goes on its own branch from develop.
+- **Instrument:** `trench/tools/cascade_prof_sum.py` (the call-graph summarizer, folded in from the loose script). The scratch worktree `~/Repos/.worktrees/cs-prof-scratch` (detached develop + #333) is left in place for re-profiling.
+- **Next session:** (1) once #333 merges, merge develop into cs-vars-collapse, open it as a PR, build, `receipt_nobuild.py`, B/A; (2) the List cut; (3) if quiet: the ratio of record and #333's B/A (`ab.py pc-dev-329cb57 pc-lv-2e60e9a 4`).
+
+**Decisions for Pete**
+1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
+2. (Carried over, blocking the metric) A standing quiet window. This is the third session running with no measurement. One release build now costs 35 min, most of an hourly session. Default: keep grabbing dips.
+3. **Merge #333 as-is (R1 CLEAR, R2 PASS), with the vars-collapse follow-up as its own PR?** Its speed is still unproven, but the profile says the follow-up is where its win is. Default: yes, merge #333 on the stamps, then open the follow-up next session.
