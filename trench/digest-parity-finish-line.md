@@ -12797,3 +12797,46 @@ receipt **on the same run**. Neither script is wrong; the two blocks sit a few
 lines apart in the job summary and invite the wrong subtraction. Posted on the
 PR as well, since a future night will read that summary before it reads this
 file.
+
+### Addendum — #316 MERGED (2026-09-28 06:09 UTC), `develop daa41d0`
+
+The night's P-item is on the mainline. Verified from the repository rather than
+from the webhook: `5e3a926` is an ancestor of `origin/develop`, and the merge
+commit `daa41d0`'s diff against its first parent is **+365 / −14 across exactly
+two files** (`crates/rustkit-layout/src/grid.rs`,
+`crates/rustkit-layout/src/lib.rs`) — bit-for-bit the PR's diffstat, so nothing
+was lost or re-resolved on the way in. R1 DESIGN CLEAR and R2-STAMP PASS both at
+`5e3a926`, `mergeable_state: clean`, label `r2-pass`, all 14 check runs green or
+skipped. Check-in cancelled; watch released.
+
+**State at end of night, for whoever reads this next:**
+
+- Metric **3/26** on macOS, measured on this PR's own lane
+  ([run 36383716836](https://github.com/hiwavebrowser/hiwave-macos/actions/runs/36383716836)):
+  geometry 14/26, paint 3/26, stability 26/26, discrete 26/26. Unchanged.
+- **No macOS case regressed** (22 of 23 red cases identical to the digit against
+  the nearest control; three green cases green in both). The `settings`
+  254 → 252 row is **not attributable** — the control lacks #311–#314, edits
+  `rustkit-layout/src/lib.rs` itself, and the PR lane builds the merge ref. Do
+  not bank that −2 without a base-matched control.
+- **Recorded next unit: the rem-gap hole in `own_max_content_width`.** A rem/em
+  `gap` reads as `0.0` there (`match style.column_gap { Length::Px(g) => g, _ =>
+  0.0 }`) while layout resolves it properly, so every rem-gapped flex
+  container's max-content contribution is short by its gaps. Measured tonight
+  and **deliberately not landed**: 9 axes better, 11 WORSE, sum|delta| −14.94.
+  It is decision 1 of this entry — it probably wants to land WITH the P4 advance
+  work, because on `settings` the container deficit and the text
+  over-measurement are entangled and each one alone moves numbers without
+  moving the truth.
+- **New instrument, on this branch:** `trench/tools/n68_control_intrinsic_probe.{mjs,html}`.
+  Chrome-vs-Chrome, ~2 seconds, answers "does this control's intrinsic min
+  differ from its max, and by what rule". Run it before writing any intrinsic
+  sizing arm. Resolves `playwright` and `deterministic.mjs` by path out of
+  `tools/parity_oracle`, so it runs from the repo root.
+- Decisions 1–3 of this entry are open. Decision 2 (the artifact host) cost the
+  attribution above, which is the third night running it has decided something.
+- Seat facts worth not rediscovering: `cargo test -p rustkit-engine --lib` needs
+  `VK_ICD_FILENAMES=/opt/pw-browsers/chromium-1194/chrome-linux/vk_swiftshader_icd.json`
+  (146/0 with it, 53 red GPU-adapter failures without); `cargo fmt -p
+  rustkit-layout` rewrites 11 files and ~1550 pre-existing lines, so it cannot
+  be run before a commit as CLAUDE.md advertises.
