@@ -103,3 +103,29 @@ The ratio of record is still **80.6×**, with no quiet run yet. The projection i
 1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
 2. (Carried over) One quiet slot for an absolute reading. Four sessions have now all run at load 13–19, so the only ratio of record is the 22:25 baseline.
 3. **Plan re-order:** "compiled selectors per rule" goes ahead of the ancestor Bloom filter, and "layered var map" is added as fix 5. The profile says matching on strings is 58% and the Bloom filter alone only prunes part of it. Default: proceed in this order unless you say otherwise.
+
+## 2026-09-28 06:35
+
+**First quiet ratio of record since the baseline: 80.6× → 52.3× (develop), then 48.2× with #320, which is merged. #321 (stacked follow-up) is open with a clean receipt, projected ~43.6×. The real-site lane went quiet around 05:35 (load 1.6–6), so this session has absolute numbers.**
+
+| site | baseline (f262568, 09-27 22:25) | develop 7197fc5, quiet 06:00 | #320 f96882c, quiet 06:03 (**merged**) | #321 d677ee6, B/A vs #320 (4 pairs) → projected |
+|---|---|---|---|---|
+| cnn | 5852 ms → 27.9× | 2617 ms → 12.5× | 2175 ms → **10.4×** | 0.88 → ~9.1× |
+| github | 7441 ms → 67.6× | 3241 ms → 29.5× | 2793 ms → **25.4×** | 0.94 → ~23.9× |
+| wikipedia | 1613 ms → **80.6×** | 1045 ms → **52.3×** | 964 ms → **48.2×** (worst) | 0.90 → **~43.6×** (worst) |
+
+The quiet columns are the median of 5 at load 1.6–3.2. wikipedia `parse_ms` read 5.4 against 5.5 quiet, so these are clean. An earlier reading at 05:36 (load 6→3) gave the same develop picture: 12.1× / 29.7× / 50.7×. The last session's projection (~51×) held up.
+
+- **PR #320** `atlas/cs-compiled-selectors` @ **f96882c**, **merged** as 7cf99c3. Each prepared selector compiles its subject compound once into `SubjectCompound`: tag, decoded classes/ids, raw attribute selectors, pre-parsed pseudo-classes. `selector_matches` then stops re-scanning the string on every candidate. The parse mirrors `simple_selector_matches_with_pseudo` quirk for quirk, and a new equivalence test (43 selectors × 7 elements × 2 sibling contexts) pins them together. A/B vs develop (4 pairs, load 4–5): cnn 0.85, github 0.89, wikipedia 0.92. Receipt: builtins 5/5 avg 1.9%, campaign 26/26 avg 1.2%. I re-ran the campaign back to back with the develop binary, and **every case's diff_pct was identical**. lib 170/170.
+- **PR #321** `atlas/cs-prepared-per-rule` @ **d677ee6**, open, stacked on #320 (now merged, so the diff is one commit). `RuleIndex::prepared` stores each rule's `Rc<PreparedSelector>`, and the indexed cascade calls a new `selector_matches_prepared`. That removes the per-candidate SipHash into the prepared cache (~10% `hash_one` in the post-#320 github profile). A/B vs #320: cnn 0.88, github 0.94, wikipedia 0.90. Receipt: builtins 5/5 avg 1.9% (06:33), campaign 26/26 avg 1.2%, every case identical to #320's. lib 171/171.
+- **Profile, github at f96882c** (`cascade-target-prof/pc-prof-f96882c`, report `~/Repos/.worktrees/cascade-prof-github-f96882c.txt`). Only 72 samples this time, so treat the shares as rough: `selector_matches` 47% (was 58%), `match_pseudo_class` 12.5%, `any_compound_in_list_matches` 11%, **HashMap clone (var map) 11%**, SipHash ~10% (#321 targets this), `keys_may_match` 8%.
+- **Instrument:** `cascade_profile.py` now attaches with `sample -wait`, because a ~1 s wikipedia load finished before the pid attach. It still only catches ~20 ms of a wikipedia load (`sample` startup), so profile github and apply the result to wikipedia. The summarizer I used is `~/Repos/.worktrees/cascade-tools-s5-sum.py` (inclusive % under `build_layout_from_document`). Fold it into `trench/tools` next session.
+- **Noise note:** wikipedia's first build sometimes comes out light (83 ms vs ~172; seen in the baseline too). It moves single runs by ~25%, so use the median of 5 or ≥4 pairs.
+- **Found, out of scope:** `parse_pseudo_class` panics on an unclosed paren (`div:not(`: `paren_end + 1` is past the end). Sheets are screened by `selector_list_is_valid` first, so it can't reach the cascade today, but the panic is latent. Noted in #320's body.
+- **Fmt trap:** `cargo fmt -p rustkit-engine` reformats ~1,400 lines of develop (develop isn't fmt-clean). I reverted it and kept the diff to my lines. Don't run fmt in this lane.
+- **Next (by profile):** (1) compile `:is`/`:not`/`:where` argument lists once, the `any_compound_in_list_matches` + `match_pseudo_class` pair at ~20%; (2) layered custom-property map (11%); (3) plan item 4, cascade once per load. Wikipedia's builds 2 and 3 are each ~2.5× build 1, and together they're 80% of its time, so skipping or incremental-restyling the re-cascades is the biggest remaining lever on the worst site.
+
+**Decisions for Pete**
+1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
+2. **Re-cascade per relayout (plan item 4) is now the biggest lever on wikipedia**, ~80% of its cascade time is builds 2 and 3. It's also the riskiest item for parity, since it needs dirty-subtree invalidation. OK to start it next session behind an env flag, with a parity A/B as the gate? Default: yes, flag-off by default.
+3. Decision 2 from the last digest (a quiet slot) is resolved for now: the real-site lane was idle 05:35–06:35. No action needed unless you want a standing quiet window.
