@@ -8442,7 +8442,10 @@ impl Engine {
             // Find matching closing paren
             let paren_start = name_end + 1;
             let mut depth = 1;
-            let mut paren_end = paren_start;
+            // CSS Syntax §5.4.8: EOF closes an unclosed block. Without a
+            // `)`, the argument runs to the end and all of `rest` is
+            // consumed; `paren_end + 1` would point past it (`div:not(`).
+            let mut close = None;
             // `i` must be a byte offset: it slices `rest` below.
             for (i, c) in rest[paren_start..].char_indices() {
                 match c {
@@ -8450,15 +8453,19 @@ impl Engine {
                     ')' => {
                         depth -= 1;
                         if depth == 0 {
-                            paren_end = paren_start + i;
+                            close = Some(paren_start + i);
                             break;
                         }
                     }
                     _ => {}
                 }
             }
+            let (paren_end, consumed) = match close {
+                Some(end) => (end, end + 1),
+                None => (rest.len(), rest.len()),
+            };
             let arg = rest[paren_start..paren_end].to_string();
-            (name, Some(arg), paren_end + 1)
+            (name, Some(arg), consumed)
         } else {
             (name, None, name_end)
         }
@@ -18221,6 +18228,20 @@ mod cascade_wire_tests {
         static ENGINE_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _init_guard = ENGINE_INIT.lock().unwrap_or_else(|e| e.into_inner());
         Engine::new(EngineConfig::default()).expect("engine")
+    }
+
+    #[test]
+    fn an_unclosed_pseudo_class_paren_closes_at_the_end() {
+        let e = engine();
+        assert_eq!(e.parse_pseudo_class("not("), ("not".into(), Some(String::new()), 4));
+        assert_eq!(e.parse_pseudo_class("not(.a"), ("not".into(), Some(".a".into()), 6));
+        assert_eq!(e.parse_pseudo_class("is(a, b(c)"), ("is".into(), Some("a, b(c)".into()), 10));
+        assert_eq!(e.parse_pseudo_class("not(.a) b"), ("not".into(), Some(".a".into()), 7));
+        // Through the matchers too: no panic, and no match to invent.
+        let attrs = HashMap::new();
+        for sel in ["div:not(", "div:not(.a", ":is(div"] {
+            let _ = e.selector_matches(sel, "div", &attrs, &[], &[], SiblingContext::SOLE);
+        }
     }
 
     fn find<'a>(b: &'a LayoutBox, pred: &dyn Fn(&LayoutBox) -> bool) -> Option<&'a LayoutBox> {
