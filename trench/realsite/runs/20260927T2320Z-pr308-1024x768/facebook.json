@@ -1,0 +1,99 @@
+{
+  "id": "facebook",
+  "url": "https://www.facebook.com/",
+  "chrome": [
+    {
+      "url": "https://www.facebook.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.facebook.com/",
+      "title": "Facebook",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T2320Z-pr308-1024x768/facebook/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260927T2320Z-pr308-1024x768/facebook/chrome-a.png",
+      "elapsed_ms": 14984
+    },
+    {
+      "url": "https://www.facebook.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.facebook.com/",
+      "title": "Facebook",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260927T2320Z-pr308-1024x768/facebook/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260927T2320Z-pr308-1024x768/facebook/chrome-b.png",
+      "elapsed_ms": 14645
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.facebook.com/",
+    "width": 1024,
+    "height": 768,
+    "frame_path": "trench/realsite/runs/20260927T2320Z-pr308-1024x768/facebook/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260927T2320Z-pr308-1024x768/facebook/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 47,
+      "threw": 2,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 7426,
+      "elapsed_ms": 1
+    },
+    "elapsed_ms": 11925,
+    "error": null,
+    "wall_ms": 12009,
+    "non_background_fraction": 0.0525
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 26,
+    "rustkit_words": 14,
+    "ratio": 0.3462,
+    "missing_sample": [
+      "brasil",
+      "email",
+      "english",
+      "espa\u00f1ol",
+      "france",
+      "fran\u00e7ais",
+      "italiano",
+      "languages",
+      "mobile",
+      "more",
+      "number",
+      "or",
+      "portugu\u00eas",
+      "us",
+      "\u0627\u0644\u0639\u0631\u0628\u064a\u0629",
+      "\u4e2d\u6587",
+      "\u7b80\u4f53"
+    ]
+  },
+  "looks_right": {
+    "pass": true,
+    "chrome_self_diff": 0,
+    "diff": 9.794998168945312
+  },
+  "points": 2
+}

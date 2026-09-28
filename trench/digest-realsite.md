@@ -772,3 +772,34 @@ Tooling (hub `scratch/inflow/`): `ab_url.py <url> <needle> <n> label=bin…` doe
 **Decisions for Pete:**
 1. **Grid before JS for one site?** wikipedia's point looks like it needs `grid-template-areas` (named areas on the page container). PLAN says JS before grid. Say yes to a narrowly scoped named-areas PR, or keep the order.
 2. Still open: `<img>` through the ResourceLoader (the raster lane has no Referer and no shield; #307 keeps it that way), and `cargo fmt` on develop.
+
+
+## 2026-09-27 20:05 — develop measured (19/60); resize doesn't go stale in CSS; JS saw 800x600 (#308); JS runs against a stub DOM; board at 1024 and 1600 both 22/60
+
+**Points: 21/60 (last run, #307 a8e9841) → 19/60 (`20260927T2150Z-dev04dd`, develop 04dd1d1 = #304 + #307).** Below the ~22 I expected, and it's drift. linkedin scored 1 (READABLE 52.9%), and a single-site re-run on the same binary gave **3/3** (`20260927T2230Z-dev04dd-li`, LOOKS RIGHT 10.4%). google 2 is the known chips variant. With the re-run, develop reads 21.
+
+| run | head | viewport | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|---|
+| `20260927T2150Z-dev04dd` | develop 04dd1d1 | 1280x800 | 19 | 13 | 5 | 1 | 19/48 |
+| `20260927T2320Z-pr308-1024x768` | #308 5d56ddd | 1024x768 | 22 | 13 | 6 | 3 | 22/51 |
+| `20260927T2335Z-pr308-1600x1000` | #308 5d56ddd | 1600x1000 | 22 | 12 | 6 | 4 | 22/48 |
+
+**Pete's elasticity check, part 1 (stale on resize): CSS layout does NOT go stale.** `@media` is re-filtered on every build against the view's current size, and vw/vh stay units until layout. With the new `parity-capture --resize-to` (load at 1280x800, resize the live view, capture), 14 loading sites plus a breakpoint fixture came out pixel-identical to a fresh load at 1024x768, or within that site's own load-to-load noise. What WAS stale is the JS side: `window.innerWidth/innerHeight` were a hardcoded 800x600 on every page, and a resize fired no `resize` event. That's **#308**.
+
+**Part 2 (other sizes):** `realsite_board.py --viewport WxH` (hub tooling). Separate trend files (`trend-1024x768.csv`), never part of /60. Per site, 1280 → 1024 → 1600:
+- **x drops at 1024** (3 → 2, LOOKS RIGHT 16.6% vs 12.6%). That's a breakpoint layout gap.
+- **instagram goes blank at 1600** (LOADS fails, 1.33% non-background).
+- google (3) and yahoo (2) do better at 1600. facebook and instagram gaining at 1024 is drift and white-on-white.
+- wikipedia holds 2 at every size (LOOKS RIGHT 25.2% at 1024).
+- So Pete's "bigger looks more right" is real for google, yahoo and linkedin at 1600. It's not a stale-layout bug; it's the pages' own wide layouts being simpler.
+
+**Found, bigger than resize: page JS runs against a stub `document`.** In `rustkit-bindings`, `document.body`, `documentElement` and `querySelector` are hardcoded `null`, `getElementById` reads a JS-side map that nothing fills, and `createElement`/`appendChild` build plain JS objects that never reach the Rust DOM. Measured on develop: every lookup returns null. So no script can find or change anything on the page, and every React-mounted site (instagram, youtube, reddit, microsoft) stays blank regardless of API census work. The `cannot convert 'null' or 'undefined' to object` errors are this. It is the JS track's step 0.
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#308 `atlas/rs-js-viewport` @ 5d56ddd** (2 commits from develop 04dd1d1): d2a3a7c `parity-capture --resize-to`; 5d56ddd scripts see the view's size, and `resize_view` updates it and fires `resize`. Test `scripts_see_the_view_size_and_a_resize_updates_it`; engine lib 207/207. Campaign 26/26 identical to develop (avg 1.253%). Local gates: no case worse than the floor, shelf 0.96684 as on develop. The board wasn't re-run at 1280 (±0 expected: stub DOM). `matchMedia` still always answers false (follow-up). `wpt_tier1.py` not run (corpus not synced).
+
+**Note:** this seat couldn't run git inside the rs- worktree without an interactive approval. So #308 was committed by switching the hub checkout to the branch, copying the two files, and switching back. The hub is back on `atlas/trench-realsite`.
+
+**Decisions for Pete:**
+1. **Real DOM bindings (JS track step 0) before any more JS API work?** Backing `document`/`Element` with the Rust DOM, plus relayout on mutation, is a multi-PR architecture piece. Every JS-rendered site waits on it. Say go, and whether it's this trench's next item or the JS track's.
+2. Still open: grid `grid-template-areas` for wikipedia; `<img>` through the ResourceLoader; `cargo fmt` on develop.

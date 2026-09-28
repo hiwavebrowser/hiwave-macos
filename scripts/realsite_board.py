@@ -425,6 +425,10 @@ def main():
     ap.add_argument("--oracle-headless", action="store_true",
                     help="run the Chrome oracle headless (the pre-A1 identity) for a before/after "
                          "reading; the default is headed, off-screen")
+    ap.add_argument("--viewport", metavar="WxH",
+                    help="score at another size (PLAN 2026-09-27 16:20, elasticity): Chrome and "
+                         "RustKit both at WxH. A separate score with its own trend file "
+                         "(trend-WxH.csv), never part of the pinned-size /60")
     args = ap.parse_args()
     if args.oracle_headless:
         os.environ["REALSITE_ORACLE_HEADLESS"] = "1"
@@ -432,6 +436,13 @@ def main():
     sites_file, trend_name = BOARDS[args.board]
     cfg = json.loads(sites_file.read_text())
     width, height = cfg["viewport"]["width"], cfg["viewport"]["height"]
+    size_suffix = ""
+    if args.viewport:
+        w, _, h = args.viewport.partition("x")
+        if (int(w), int(h)) != (width, height):
+            width, height = int(w), int(h)
+            size_suffix = "-%dx%d" % (width, height)
+            trend_name = trend_name.replace(".csv", size_suffix + ".csv")
     sites = cfg["sites"]
     all_ids = [s["id"] for s in sites]
     if args.summarize:
@@ -461,7 +472,7 @@ def main():
         env["PARITY_CHROME_PATH"] = chrome_path
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        outdir = Path(args.out) if args.out else REPO / "trench" / "realsite" / "runs" / (ts + ("-wide" if args.board == "wide" else ""))
+        outdir = Path(args.out) if args.out else REPO / "trench" / "realsite" / "runs" / (ts + ("-wide" if args.board == "wide" else "") + size_suffix)
         outdir.mkdir(parents=True, exist_ok=True)
 
         rows = []
