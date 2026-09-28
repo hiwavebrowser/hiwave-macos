@@ -1445,27 +1445,51 @@ pub struct GridTemplateAreas {
 }
 
 impl GridTemplateAreas {
-    /// Parse grid-template-areas value.
+    /// Parse a `grid-template-areas` value: one quoted string per row.
+    ///
+    /// Rows are the strings, not source lines. Stylesheets arrive minified
+    /// (`'a a' 'b c'` on one line), and splitting by line read that as a single
+    /// row whose cells kept their quotes. Returns `None` for an invalid value
+    /// (css-grid-1 §7.3): anything outside the strings, rows of unequal
+    /// length, or an area that isn't a filled rectangle. The declaration is
+    /// then ignored, as Chrome ignores it.
     pub fn parse(value: &str) -> Option<Self> {
         let mut rows = Vec::new();
+        let mut chars = value.trim().chars();
 
-        for line in value.lines() {
-            let line = line.trim();
-            if line.is_empty() {
+        while let Some(c) = chars.next() {
+            if c.is_whitespace() {
                 continue;
             }
-            // Remove quotes if present
-            let line = line.trim_matches('"').trim_matches('\'');
-
-            let cells: Vec<Option<String>> = line
+            if c != '"' && c != '\'' {
+                return None;
+            }
+            let mut row = String::new();
+            loop {
+                match chars.next() {
+                    Some(ch) if ch == c => break,
+                    Some(ch) => row.push(ch),
+                    None => return None,
+                }
+            }
+            // A run of one or more `.` is a null cell token.
+            let cells: Vec<Option<String>> = row
                 .split_whitespace()
-                .map(|s| if s == "." { None } else { Some(s.to_string()) })
+                .map(|s| {
+                    if s.chars().all(|ch| ch == '.') {
+                        None
+                    } else {
+                        Some(s.to_string())
+                    }
+                })
                 .collect();
-
+            if cells.is_empty() {
+                return None;
+            }
             rows.push(cells);
         }
 
-        if rows.is_empty() {
+        if rows.is_empty() || rows.iter().any(|r| r.len() != rows[0].len()) {
             return None;
         }
 
@@ -1480,6 +1504,19 @@ impl GridTemplateAreas {
                         // Find extent of this area
                         let (row_end, col_end) =
                             Self::find_area_extent(&rows, row_idx, col_idx, name);
+                        // Rectangular: the name fills its bounding box and
+                        // appears nowhere else.
+                        let in_box = |r: usize, c: usize| {
+                            (row_idx..row_end).contains(&r) && (col_idx..col_end).contains(&c)
+                        };
+                        let rectangular = rows.iter().enumerate().all(|(r, row)| {
+                            row.iter().enumerate().all(|(c, cell)| {
+                                (cell.as_deref() == Some(name.as_str())) == in_box(r, c)
+                            })
+                        });
+                        if !rectangular {
+                            return None;
+                        }
                         areas.push(GridArea {
                             name: name.clone(),
                             row_start: row_idx as i32 + 1,

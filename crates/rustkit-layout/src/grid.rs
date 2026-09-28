@@ -2252,15 +2252,21 @@ pub fn layout_grid_container(
         let mut row_shrinkable: Vec<bool> = grid
             .rows
             .iter()
+            // `auto` and `min-content` rows (any track whose MIN sizing
+            // function is min-content): a block's min-content height is its
+            // laid-out height, so the real figure is the row. wikipedia's
+            // title rows are `min-content`; left grow-only, they kept an
+            // estimate that charged a line per link of a 145-link menu.
             .map(|t| {
                 t.is_min_content
-                    && t.is_max_content
                     && !t.is_flexible
                     && t.percent.is_none()
                     && t.max_percent.is_none()
                     && t.fit_content_limit.is_none()
             })
             .collect();
+        // Items spanning a flexible row: (rows, outer height needed).
+        let mut flex_spanners: Vec<(std::ops::Range<usize>, f32)> = Vec::new();
         {
             let mut idx = 0usize;
             for child in container.children.iter() {
@@ -2273,9 +2279,28 @@ pub fn layout_grid_container(
                     // contribution was spread over its rows by track sizing
                     // and this pass cannot re-derive it, so those rows stay
                     // grow-only.
+                    //
+                    // Except an item that crosses a flexible row: the
+                    // flexible row (unbounded) absorbs it, so the others are
+                    // free to shrink, and the flexible row is topped up below
+                    // if the item then needs more.
                     if r1 > r0 + 1 {
-                        for r in r0..r1.min(grid.rows.len()) {
-                            row_shrinkable[r] = false;
+                        let rows_spanned = r0..r1.min(grid.rows.len());
+                        if rows_spanned.clone().any(|r| grid.rows[r].is_flexible) {
+                            let pb = child.dimensions.padding.top
+                                + child.dimensions.padding.bottom
+                                + child.dimensions.border.top
+                                + child.dimensions.border.bottom;
+                            if let Some(Some(real_h)) = real_heights.get(idx) {
+                                flex_spanners.push((
+                                    rows_spanned,
+                                    real_h + pb + vertical_margins(&child.style),
+                                ));
+                            }
+                        } else {
+                            for r in rows_spanned {
+                                row_shrinkable[r] = false;
+                            }
                         }
                     }
                     if r1 <= r0 + 1 && r0 < grid.rows.len() {
@@ -2369,7 +2394,7 @@ pub fn layout_grid_container(
         // Per row: the change to apply. Growth wherever the items need
         // more; shrinkage only where the track is intrinsic and every item
         // in it reported a real height.
-        let row_delta: Vec<f32> = grid
+        let mut row_delta: Vec<f32> = grid
             .rows
             .iter()
             .enumerate()
@@ -2385,6 +2410,21 @@ pub fn layout_grid_container(
                 None => 0.0,
             })
             .collect();
+        // A flexible-row spanner still gets its full height: whatever the
+        // re-sized rows leave short goes to its first flexible row.
+        for (rows_spanned, needed) in &flex_spanners {
+            let gaps = row_gap * (rows_spanned.len().saturating_sub(1)) as f32;
+            let span: f32 = rows_spanned
+                .clone()
+                .map(|r| grid.rows[r].size + row_delta[r])
+                .sum::<f32>()
+                + gaps;
+            if needed - span > 0.5 {
+                if let Some(r) = rows_spanned.clone().find(|&r| grid.rows[r].is_flexible) {
+                    row_delta[r] += needed - span;
+                }
+            }
+        }
 
         if row_delta.iter().any(|g| *g != 0.0) {
             let old_positions: Vec<f32> = grid.rows.iter().map(|t| t.position).collect();
@@ -2407,8 +2447,9 @@ pub fn layout_grid_container(
                 if child.style.display == Display::None {
                     continue;
                 }
-                if let Some(&(r0, _)) = row_spans.get(idx) {
+                if let Some(&(r0, r1)) = row_spans.get(idx) {
                     if r0 < grid.rows.len() {
+                        let r1 = r1.clamp(r0 + 1, grid.rows.len());
                         let dy = grid.rows[r0].position - old_positions[r0];
                         if dy.abs() > 0.01 {
                             crate::flex::translate_subtree(child, 0.0, dy);
@@ -2426,9 +2467,14 @@ pub fn layout_grid_container(
                                 + child.dimensions.padding.bottom
                                 + child.dimensions.border.top
                                 + child.dimensions.border.bottom;
-                            let target = grid.rows[r0].size - vertical_margins(&child.style) - pb;
+                            // The whole area: a spanning item stretches over
+                            // every row it spans, not just its first.
+                            let area = grid.rows[r1 - 1].position + grid.rows[r1 - 1].size
+                                - grid.rows[r0].position;
+                            let target = area - vertical_margins(&child.style) - pb;
+                            let shrunk = row_delta[r0..r1].iter().any(|d| *d < 0.0);
                             if child.dimensions.content.height < target
-                                || (row_delta[r0] < 0.0 && child.dimensions.content.height > target)
+                                || (shrunk && child.dimensions.content.height > target)
                             {
                                 child.dimensions.content.height = target;
                             }

@@ -6301,6 +6301,28 @@ impl Engine {
                     style.grid_template_rows = template;
                 }
             }
+            "grid-template-areas" => {
+                if value.trim() == "none" {
+                    style.grid_template_areas = None;
+                } else if let Some(areas) = rustkit_css::GridTemplateAreas::parse(value) {
+                    style.grid_template_areas = Some(areas);
+                }
+            }
+            "grid-template" => {
+                if let Some((rows, columns, areas)) = parse_grid_template_shorthand(value) {
+                    style.grid_template_rows = rows;
+                    style.grid_template_columns = columns;
+                    style.grid_template_areas = areas;
+                }
+            }
+            "grid-area" => {
+                if let Some((row_start, col_start, row_end, col_end)) = parse_grid_area(value) {
+                    style.grid_row_start = row_start;
+                    style.grid_column_start = col_start;
+                    style.grid_row_end = row_end;
+                    style.grid_column_end = col_end;
+                }
+            }
             "grid-column" => {
                 // Shorthand: grid-column: start / end
                 if let Some((start, end)) = parse_grid_line_shorthand(value) {
@@ -12074,7 +12096,27 @@ fn parse_track_size(value: &str) -> Option<rustkit_css::TrackSize> {
         }
     }
 
-    None
+    // Any other fixed length. A unitless `0` and `rem` were dropped here, so
+    // wikipedia's `minmax(0,1fr)` and `12.25rem` columns never parsed. `rem`
+    // assumes the 16px root, as `fit-content()` and `flex-basis` do.
+    match parse_length(value)? {
+        rustkit_css::Length::Zero => Some(rustkit_css::TrackSize::Px(0.0)),
+        rustkit_css::Length::Rem(rem) => Some(rustkit_css::TrackSize::Px(rem * 16.0)),
+        _ => None,
+    }
+}
+
+/// A `<custom-ident>` usable as a grid line or area name.
+fn is_grid_ident(value: &str) -> bool {
+    let mut chars = value.chars();
+    let starts_ok = chars
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '-');
+    starts_ok
+        && value
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        && !matches!(value, "auto" | "span" | "-")
 }
 
 /// Parse a grid line value (e.g., "1", "span 2", "auto").
@@ -12085,11 +12127,14 @@ fn parse_grid_line(value: &str) -> Option<rustkit_css::GridLine> {
         return Some(rustkit_css::GridLine::Auto);
     }
 
-    // Check for "span N"
-    if let Some(span_str) = value.strip_prefix("span") {
+    // Check for "span N" / "span <name>"
+    if let Some(span_str) = value.strip_prefix("span ") {
         let span_str = span_str.trim();
         if let Ok(span) = span_str.parse::<u32>() {
             return Some(rustkit_css::GridLine::Span(span));
+        }
+        if is_grid_ident(span_str) {
+            return Some(rustkit_css::GridLine::SpanName(span_str.to_string()));
         }
     }
 
@@ -12098,8 +12143,172 @@ fn parse_grid_line(value: &str) -> Option<rustkit_css::GridLine> {
         return Some(rustkit_css::GridLine::Number(num));
     }
 
-    // Could be a named line (just use auto for now)
+    // A named line or area. Layout resolves it against the container's
+    // line names and `grid-template-areas`; an unknown name auto-places.
+    if is_grid_ident(value) {
+        return Some(rustkit_css::GridLine::Name(value.to_string()));
+    }
+
+    // Anything else (`<integer> <name>` and friends): auto, as before.
     Some(rustkit_css::GridLine::Auto)
+}
+
+/// A custom-ident line copies itself into an omitted end slot; anything else
+/// leaves the slot `auto` (css-grid-1 §8.4).
+fn grid_line_or_auto_copy(line: &rustkit_css::GridLine) -> rustkit_css::GridLine {
+    match line {
+        rustkit_css::GridLine::Name(_) => line.clone(),
+        _ => rustkit_css::GridLine::Auto,
+    }
+}
+
+/// `grid-area: <line> [/ <line>]{0,3}` → (row-start, column-start, row-end,
+/// column-end). `grid-area: header` names the area on all four sides.
+fn parse_grid_area(
+    value: &str,
+) -> Option<(
+    rustkit_css::GridLine,
+    rustkit_css::GridLine,
+    rustkit_css::GridLine,
+    rustkit_css::GridLine,
+)> {
+    let parts: Vec<&str> = value.split('/').map(str::trim).collect();
+    if parts.len() > 4 || parts.iter().any(|p| p.is_empty()) {
+        return None;
+    }
+    let lines = parts
+        .iter()
+        .map(|p| parse_grid_line(p))
+        .collect::<Option<Vec<_>>>()?;
+    let row_start = lines[0].clone();
+    let col_start = lines
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| grid_line_or_auto_copy(&row_start));
+    let row_end = lines
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| grid_line_or_auto_copy(&row_start));
+    let col_end = lines
+        .get(3)
+        .cloned()
+        .unwrap_or_else(|| grid_line_or_auto_copy(&col_start));
+    Some((row_start, col_start, row_end, col_end))
+}
+
+/// `grid-template` (css-grid-1 §7.4) → (rows, columns, areas).
+///
+/// - `none` resets all three.
+/// - `<rows> / <columns>` sets the two track lists and clears the areas.
+/// - `[names]? "<string>" <track-size>? [names]? ... / <columns>` sets the
+///   areas from the strings, each string's row from the size after it
+///   (`auto` when omitted).
+fn parse_grid_template_shorthand(
+    value: &str,
+) -> Option<(
+    rustkit_css::GridTemplate,
+    rustkit_css::GridTemplate,
+    Option<rustkit_css::GridTemplateAreas>,
+)> {
+    let value = value.trim();
+    if value == "none" {
+        return Some((
+            rustkit_css::GridTemplate::none(),
+            rustkit_css::GridTemplate::none(),
+            None,
+        ));
+    }
+
+    // The top-level `/`, outside strings and brackets.
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut slash = None;
+    for (i, ch) in value.char_indices() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(ch),
+            (None, '(' | '[') => depth += 1,
+            (None, ')' | ']') => depth -= 1,
+            (None, '/') if depth == 0 => {
+                slash = Some(i);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let slash = slash?;
+    let (rows_part, cols_part) = (value[..slash].trim(), value[slash + 1..].trim());
+    let columns = parse_grid_template(cols_part)?;
+
+    if !rows_part.contains(['"', '\'']) {
+        return Some((parse_grid_template(rows_part)?, columns, None));
+    }
+
+    // Strings form: walk strings, bracketed names and sizes in order.
+    let mut strings = String::new();
+    let mut tracks: Vec<rustkit_css::TrackDefinition> = Vec::new();
+    let mut pending_names: Vec<String> = Vec::new();
+    let mut rest = rows_part;
+    loop {
+        rest = rest.trim_start();
+        let Some(first) = rest.chars().next() else {
+            break;
+        };
+        if first == '"' || first == '\'' {
+            let close = rest[1..].find(first)? + 1;
+            strings.push_str(&rest[..=close]);
+            strings.push(' ');
+            tracks.push(rustkit_css::TrackDefinition {
+                size: rustkit_css::TrackSize::Auto,
+                line_names: std::mem::take(&mut pending_names),
+            });
+            rest = &rest[close + 1..];
+            continue;
+        }
+        // The next token ends at whitespace or a string (brackets and
+        // functions kept whole).
+        let token_end = {
+            let mut depth = 0i32;
+            let mut end = rest.len();
+            for (i, ch) in rest.char_indices() {
+                match ch {
+                    '(' | '[' => depth += 1,
+                    ')' | ']' => depth -= 1,
+                    '"' | '\'' if depth == 0 => {
+                        end = i;
+                        break;
+                    }
+                    c if c.is_whitespace() && depth == 0 => {
+                        end = i;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            end
+        };
+        let token = &rest[..token_end];
+        rest = &rest[token_end..];
+        if let Some(names) = token.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
+            pending_names.extend(names.split_whitespace().map(str::to_string));
+            continue;
+        }
+        // A size belongs to the string just before it, and only once.
+        let last = tracks.last_mut()?;
+        if last.size != rustkit_css::TrackSize::Auto || !pending_names.is_empty() {
+            return None;
+        }
+        last.size = parse_track_size(token)?;
+    }
+
+    let areas = rustkit_css::GridTemplateAreas::parse(&strings)?;
+    let rows = rustkit_css::GridTemplate {
+        tracks,
+        repeats: Vec::new(),
+        final_line_names: pending_names,
+    };
+    Some((rows, columns, Some(areas)))
 }
 
 /// Parse a grid-column or grid-row shorthand (e.g., "1 / 3", "span 2").
@@ -12119,9 +12328,10 @@ fn parse_grid_line_shorthand(
         return Some((start, end));
     }
 
-    // Single value - applies to start, end is auto
+    // Single value: the end is auto, or the same name (`grid-column: nav`).
     let start = parse_grid_line(value)?;
-    Some((start, rustkit_css::GridLine::Auto))
+    let end = grid_line_or_auto_copy(&start);
+    Some((start, end))
 }
 
 /// Compose two page-space affines: `outer ∘ inner`.
@@ -20811,5 +21021,216 @@ mod svg_content_type_tests {
         let doc = engine.svg_cache.get(&typed).expect("image/svg+xml img must land in the SVG cache");
         assert_eq!(doc.get_size(0.0, 0.0), (40.0, 20.0));
         assert!(!engine.svg_cache.contains_key(&untyped), "SVG is never sniffed from bytes");
+    }
+}
+
+// ── grid-template-areas / grid-area / grid-template (wikipedia's page grid).
+//    Layout resolved named areas already, but no arm parsed any of the three
+//    properties, named lines parsed as `auto`, and `minmax(0,1fr)` / `rem`
+//    tracks were dropped, so every Vector 2022 grid stacked as one column. ──
+#[cfg(test)]
+mod grid_template_areas_tests {
+    use super::*;
+    use rustkit_css::{GridLine, TrackSize};
+    use rustkit_layout::{Dimensions, Rect};
+
+    /// Both layout entry points, as in `float_clear_tests`.
+    fn laid_out(html: &str) -> Vec<LayoutBox> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 0.0),
+            ..Default::default()
+        };
+        let mut plain = e.build_layout_from_document(&d, &[]);
+        plain.layout(&cb);
+        let mut engine_path = e.build_layout_from_document(&d, &[]);
+        engine_path.layout_with_collapse(
+            &cb,
+            &mut rustkit_layout::MarginCollapseContext::new(),
+            &mut rustkit_layout::FloatContext::new(),
+        );
+        vec![plain, engine_path]
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    fn rect(root: &LayoutBox, id: &str) -> (f32, f32, f32, f32) {
+        let b = by_id(root, id).unwrap_or_else(|| panic!("no box #{id}"));
+        let r = b.dimensions.border_box();
+        (r.x, r.y, r.width, r.height)
+    }
+
+    #[test]
+    fn a_three_by_three_areas_layout_places_each_item_in_its_area() {
+        // Items in reverse order, so auto-placement would put them elsewhere.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:grid;width:600px;"#,
+            r#"grid-template-columns:100px 1fr 100px;grid-template-rows:20px 50px 30px;"#,
+            r#"grid-template-areas:'head head head' 'nav main main' 'foot foot foot'">"#,
+            r#"<div id="f" style="grid-area:foot;font-size:8px">f</div>"#,
+            r#"<div id="m" style="grid-area:main;font-size:8px">m</div>"#,
+            r#"<div id="n" style="grid-area:nav;font-size:8px">n</div>"#,
+            r#"<div id="h" style="grid-area:head;font-size:8px">h</div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "h"), (0.0, 0.0, 600.0, 20.0), "head spans the top row");
+            assert_eq!(rect(&root, "n"), (0.0, 20.0, 100.0, 50.0), "nav is column 1, row 2");
+            assert_eq!(rect(&root, "m"), (100.0, 20.0, 500.0, 50.0), "main spans columns 2-3");
+            assert_eq!(rect(&root, "f"), (0.0, 70.0, 600.0, 30.0), "foot spans the bottom row");
+        }
+    }
+
+    #[test]
+    fn the_grid_template_shorthand_with_areas_places_items() {
+        // wikipedia's .mw-page-container-inner at 1120px+, in miniature.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:grid;width:700px;column-gap:24px;"#,
+            r#"grid-template:min-content 1fr min-content / 12.25rem minmax(0,1fr);"#,
+            r#"grid-template-areas:'siteNotice siteNotice' 'columnStart pageContent' 'footer footer'">"#,
+            r#"<div id="n" style="grid-area:siteNotice;height:10px"></div>"#,
+            r#"<div id="s" style="grid-area:columnStart;height:40px"></div>"#,
+            r#"<div id="c" style="grid-area:pageContent;height:40px"></div>"#,
+            r#"<div id="f" style="grid-area:footer;height:10px"></div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "s"), (0.0, 10.0, 196.0, 40.0), "the 12.25rem column");
+            assert_eq!(rect(&root, "c"), (220.0, 10.0, 480.0, 40.0), "minmax(0,1fr) after a 24px gap");
+            assert_eq!(rect(&root, "f").1, 50.0, "footer is the third row");
+        }
+    }
+
+    #[test]
+    fn an_item_spanning_the_fr_row_grows_only_that_row() {
+        // wikipedia's .mw-body: the column-end sidebar spans two min-content
+        // rows and the 1fr row. Its height goes to the 1fr row; the
+        // min-content rows stay at their own content.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:grid;width:300px;"#,
+            r#"grid-template:min-content min-content 1fr / 200px 100px;"#,
+            r#"grid-template-areas:'t .' 'b side' 'c side'">"#,
+            r#"<div id="t" style="grid-area:t;height:10px"></div>"#,
+            r#"<div id="b" style="grid-area:b;height:10px"></div>"#,
+            r#"<div id="c" style="grid-area:c;height:10px"></div>"#,
+            r#"<div id="side" style="grid-area:side;height:500px"></div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "b").1, 10.0, "row 2 starts after row 1's 10px");
+            assert_eq!(rect(&root, "c").1, 20.0, "row 2 keeps its own 10px");
+            assert_eq!(rect(&root, "side"), (200.0, 10.0, 100.0, 500.0));
+        }
+    }
+
+    #[test]
+    fn a_min_content_row_is_its_items_real_height_not_the_estimate() {
+        // wikipedia's titlebar: one line holding many text nodes. The
+        // pre-layout estimate charges a line per text node (20 x 10px); the
+        // row is the laid-out 10px, and the spanning sidebar still fits.
+        let spans = "<span>ab</span>".repeat(20);
+        let html = format!(
+            concat!(
+                r#"<body style="margin:0"><div style="display:grid;width:600px;"#,
+                r#"font-size:8px;line-height:10px;"#,
+                r#"grid-template:min-content min-content 1fr / 500px 100px;"#,
+                r#"grid-template-areas:'t side' 'b side' 'c side'">"#,
+                r#"<div id="t" style="grid-area:t;display:flex">{}</div>"#,
+                r#"<div id="b" style="grid-area:b;height:10px"></div>"#,
+                r#"<div id="c" style="grid-area:c;height:10px"></div>"#,
+                r#"<div id="side" style="grid-area:side;height:300px"></div>"#,
+                r#"</div></body>"#,
+            ),
+            spans
+        );
+        for root in laid_out(&html) {
+            assert_eq!(rect(&root, "t").3, 10.0, "the title row is one 10px line");
+            assert_eq!(rect(&root, "b").1, 10.0, "row 2 follows the real row 1");
+            assert_eq!(rect(&root, "c").1, 20.0);
+            assert_eq!(rect(&root, "side"), (500.0, 0.0, 100.0, 300.0));
+        }
+    }
+
+    #[test]
+    fn an_unknown_area_name_auto_places() {
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:grid;width:200px;"#,
+            r#"grid-template-columns:100px 100px;grid-template-areas:'a b'">"#,
+            r#"<div id="x" style="grid-area:nope;height:10px"></div>"#,
+            r#"<div id="y" style="grid-area:a;height:10px"></div>"#,
+            r#"</div></body>"#,
+        )) {
+            // `y` claims area a (column 1); `nope` auto-places into the
+            // first free cell, column 2.
+            assert_eq!(rect(&root, "y").0, 0.0);
+            assert_eq!(rect(&root, "x").0, 100.0);
+        }
+    }
+
+    #[test]
+    fn a_non_rectangular_areas_value_is_ignored() {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let mut s = ComputedStyle::new();
+        e.apply_style_property(&mut s, "grid-template-areas", "'a a' 'b c'");
+        assert!(s.grid_template_areas.is_some());
+        // L-shaped `a`: invalid, so the earlier value stands.
+        e.apply_style_property(&mut s, "grid-template-areas", "'a a' 'a b'");
+        assert!(s.grid_template_areas.as_ref().unwrap().get_area("c").is_some());
+        // Disjoint `a` and ragged rows are invalid too.
+        assert!(rustkit_css::GridTemplateAreas::parse("'a b a'").is_none());
+        assert!(rustkit_css::GridTemplateAreas::parse("'a b' 'c'").is_none());
+        e.apply_style_property(&mut s, "grid-template-areas", "none");
+        assert!(s.grid_template_areas.is_none());
+    }
+
+    #[test]
+    fn grid_area_and_line_names_parse() {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let mut s = ComputedStyle::new();
+        e.apply_style_property(&mut s, "grid-area", "main");
+        let main = GridLine::Name("main".into());
+        assert_eq!(
+            (&s.grid_row_start, &s.grid_column_start, &s.grid_row_end, &s.grid_column_end),
+            (&main, &main, &main, &main)
+        );
+        e.apply_style_property(&mut s, "grid-area", "1 / 2 / 3");
+        assert_eq!(s.grid_row_start, GridLine::Number(1));
+        assert_eq!(s.grid_column_start, GridLine::Number(2));
+        assert_eq!(s.grid_row_end, GridLine::Number(3));
+        assert_eq!(s.grid_column_end, GridLine::Auto);
+        e.apply_style_property(&mut s, "grid-column", "nav");
+        assert_eq!(s.grid_column_end, GridLine::Name("nav".into()));
+        e.apply_style_property(&mut s, "grid-row", "span hdr / 2");
+        assert_eq!(s.grid_row_start, GridLine::SpanName("hdr".into()));
+    }
+
+    #[test]
+    fn grid_template_shorthand_forms() {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let mut s = ComputedStyle::new();
+        e.apply_style_property(&mut s, "grid-template", "auto / 15.5rem minmax(0,1fr)");
+        assert_eq!(s.grid_template_rows.tracks.len(), 1);
+        assert_eq!(s.grid_template_columns.tracks[0].size, TrackSize::Px(248.0));
+        assert_eq!(
+            s.grid_template_columns.tracks[1].size,
+            TrackSize::MinMax(Box::new(TrackSize::Px(0.0)), Box::new(TrackSize::Fr(1.0)))
+        );
+        assert!(s.grid_template_areas.is_none());
+
+        e.apply_style_property(&mut s, "grid-template", "[top] 'a a' 40px [mid] 'b c' / 1fr 2fr");
+        let areas = s.grid_template_areas.as_ref().expect("areas from the strings");
+        assert_eq!(areas.get_area("c").unwrap().column_start, 2);
+        let rows = &s.grid_template_rows.tracks;
+        assert_eq!(rows[0].size, TrackSize::Px(40.0));
+        assert_eq!(rows[0].line_names, vec!["top".to_string()]);
+        assert_eq!(rows[1].size, TrackSize::Auto, "a string with no size is an auto row");
+        assert_eq!(rows[1].line_names, vec!["mid".to_string()]);
+
+        e.apply_style_property(&mut s, "grid-template", "none");
+        assert!(s.grid_template_areas.is_none());
+        assert!(s.grid_template_rows.tracks.is_empty());
     }
 }
