@@ -109,6 +109,8 @@ Respect `<meta name="referrer">` and the `Referrer-Policy` header if cheap. appl
 2. **Weaker support at other breakpoints.** Narrower widths switch sites into tablet/mobile layouts (hamburger menus, stacked grids, different `@media` blocks). Add `--viewport WxH` to `realsite_board.py` and run the board at 1024×768 and 1600×1000 as extra, separate scores (not part of /60). Report which sites drop at which size.
 Do (1) before (2): a stale-on-resize bug hits every user the moment they resize.
 
+**2026-09-27 20:05: elasticity done.** (1) CSS doesn't go stale on resize. The JS viewport was stale (800x600 hardcoded); that's #308, which also adds `parity-capture --resize-to`. (2) `realsite_board.py --viewport WxH`: 1024x768 and 1600x1000 both 22/60 (x drops at 1024; instagram blank at 1600). **Found:** page JS runs against a stub `document` (rustkit-bindings: body/querySelector are null, and createElement never reaches the Rust DOM). No JS-rendered site can paint until real DOM bindings land. Decision 1 for Pete in the digest. Until he answers: SVG evenodd, `flex: 1 1 0` (267 vs 275), then x's 1024 breakpoint diff.
+
 **Board tooling you may do (no scoring-rule change):**
 - A2: detect `oracle_blocked` and report `n/scorable` alongside `/60`.
 - A6: append a row to `trench/realsite/trend.csv` every full run.
