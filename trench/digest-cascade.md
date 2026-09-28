@@ -228,3 +228,29 @@ The A side alone ran 1.9–6.0 s on wikipedia, against 903 ms quiet. At this loa
 1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
 2. **(Carried over, now blocking) A standing quiet window.** This lane has made no measurement for two sessions running. Everything left on its list needs one: #331's speed claim, a new ratio of record, and the flag-on board run for the default flip, which is the biggest lever at ~25–35× projected. Proposal: the real-site and JS lanes skip 05:00–06:00 and this lane measures then. Default: keep trying opportunistically.
 3. **What the reviewers do with #331 until a quiet B/A exists.** Default: review it now, but hold the merge until the quiet B/A is posted on the PR.
+
+## 2026-09-28 16:25
+
+**#331 now has its speed number. A 4-minute dip to load 5.6–6.4 gave 3 clean interleaved pairs, and B was faster on every one: B/A median cnn 0.92, github 0.88, wikipedia 0.90. The numbers are in #331's body. PR #333 is open: the layered custom-property map, plan fix 5. Its receipt is pixel-identical to develop on all 26 cases, but its speed is unproven because the load came back (8–13). No new ratio of record: the machine was never quiet enough, and develop has no 5-run median this session.**
+
+| site | quiet record (10:00, develop default) | #331 B/A (pairs 2–4, load ~6) | #333 B/A vs develop 329cb57 (6 pairs, load 7–13) |
+|---|---|---|---|
+| cnn | 1827 ms → 8.7× | .90 .96 .92 → **0.92** | .87 1.56 .90 .48 1.56 .74 — noise |
+| github | 2624 ms → 23.9× | .88 .92 .84 → **0.88** | .85 .68 .81 .85 2.01 .81 — noise, leans <1 |
+| wikipedia | 903 ms → **45.2×** (worst) | .91 .90 .73 → **0.90** | 1.00 .45 4.95 .93 2.08 .48 — noise |
+
+The #331 pairs put the A side (b722249) at 688–907 ms on wikipedia. That's already at or below the 10:00 record, so a quiet ratio of record for develop + #331 would probably land near 31–35× on wikipedia. It's projected, not measured. Pair 1 of every run was a cold-cache outlier (A github 12–15 s) and is discarded.
+
+- **PR #333** `atlas/cs-layered-vars` @ **2e60e9a** on develop 329cb57, 1 commit.
+  - `ComputedStyle.custom_properties: Arc<CustomProperties>`: the element's own changes over an `Arc` of the parent's, flattened past 6 layers. It stores only the entries that differ. `initial` masking is a view, not a copy. `substitute_css_vars` goes through a `VarSource` trait.
+  - Receipt: builtins 5/5 avg 1.9%; campaign 26/26 avg 1.2%, **`diffPixels` identical to develop 329cb57's own binary on every case** (run back to back).
+  - Tests: engine lib 193/193, css 43/43 (`--test-threads=1`). The new depth-20 flat-map equivalence test passes.
+  - `RUSTKIT_INCREMENTAL_RESTYLE=verify`: github 3153/3153, wikipedia 11237/11237, 0 mismatches.
+- **Binaries saved** (so the next quiet slot needs no builds): `cascade-target/pc-dev-329cb57` (develop), `pc-lv-2e60e9a` (#333), `pc-cpl-merged` (#331), `pc-b722249`.
+- **Lane permission notes:** `gh pr comment` needs approval here, but `gh pr edit --body-file` doesn't, so updates go in PR bodies. `cargo fmt -p` reformats unrelated code, because develop isn't fmt-clean. Don't run it on a cs- branch; wrap lines by hand.
+- **Next session, if quiet:** (1) run 3+ quiet pairs for #333 (`ab.py pc-dev-329cb57 pc-lv-2e60e9a 4`) and put them in its body; (2) take a 5-run ratio of record on `pc-dev-329cb57`; (3) run the flag-on real-site board for the default flip. **If it isn't quiet:** re-profile github on develop+#331+#333 (symbolized, `cascade-target-prof`) to pick the next cut.
+
+**Decisions for Pete**
+1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
+2. (Carried over) A standing quiet window. Today's dip showed what one buys: 4 quiet minutes settled a claim that 6 noisy pairs couldn't. A fixed hour (e.g. 05:00–06:00) would give a ratio of record, #333's B/A and the flag-on board run. Default: keep grabbing dips.
+3. **Merge #331 on the posted B/A?** It's faster on every clean pair on all three sites (~0.88–0.92), with identical receipts. Default: yes, once R1/R2 approve.
