@@ -5511,20 +5511,12 @@ impl Engine {
                 }
             }
             "flex-basis" => {
-                if value == "auto" {
-                    style.flex_basis = rustkit_css::FlexBasis::Auto;
-                } else if value == "content" {
-                    style.flex_basis = rustkit_css::FlexBasis::Content;
-                } else if let Some(length) = parse_length(value) {
-                    match length {
-                        rustkit_css::Length::Px(px) => {
-                            style.flex_basis = rustkit_css::FlexBasis::Length(px)
-                        }
-                        rustkit_css::Length::Percent(pct) => {
-                            style.flex_basis = rustkit_css::FlexBasis::Percent(pct)
-                        }
-                        _ => {}
-                    }
+                // A value parse_flex_basis can't place (it answers Auto for
+                // anything but an explicit `auto`) leaves the basis as it was.
+                let v = value.trim();
+                match parse_flex_basis(v) {
+                    rustkit_css::FlexBasis::Auto if !v.eq_ignore_ascii_case("auto") => {}
+                    basis => style.flex_basis = basis,
                 }
             }
             "flex" => {
@@ -11380,6 +11372,12 @@ fn parse_flex_basis(value: &str) -> rustkit_css::FlexBasis {
     match parse_length(v) {
         Some(rustkit_css::Length::Px(px)) => rustkit_css::FlexBasis::Length(px),
         Some(rustkit_css::Length::Percent(pct)) => rustkit_css::FlexBasis::Percent(pct),
+        // A unitless `0` is a length (`flex: 1 1 0`, `flex-basis: 0`).
+        // Falling to Auto sized the item to its content, so two basis-0
+        // siblings split the free space unevenly.
+        Some(rustkit_css::Length::Zero) => rustkit_css::FlexBasis::Length(0.0),
+        // Same 16px root the rest of the cascade assumes for rem.
+        Some(rustkit_css::Length::Rem(rem)) => rustkit_css::FlexBasis::Length(rem * 16.0),
         _ => rustkit_css::FlexBasis::Auto,
     }
 }
@@ -17608,6 +17606,32 @@ mod cascade_wire_tests {
             rustkit_css::FlexBasis::Length(0.0),
             "flex: 1 must zero the basis or the container is not divided"
         );
+    }
+
+    #[test]
+    fn a_unitless_zero_basis_is_a_length_not_auto() {
+        // `flex: 1 1 0` (scratch/basis/b-zero.html): Chrome splits two such
+        // items evenly; as Auto they sized to content and split unevenly.
+        let e = engine();
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "flex", "1 1 0");
+        assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(0.0));
+
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "flex-basis", "0");
+        assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(0.0));
+
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "flex", "0 0 2.5rem");
+        assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(40.0));
+        e.apply_style_property(&mut s, "flex-basis", "1rem");
+        assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(16.0));
+
+        // An explicit auto still resets; garbage leaves the basis alone.
+        e.apply_style_property(&mut s, "flex-basis", "bogus");
+        assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(16.0));
+        e.apply_style_property(&mut s, "flex-basis", "auto");
+        assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Auto);
     }
 
     #[test]
