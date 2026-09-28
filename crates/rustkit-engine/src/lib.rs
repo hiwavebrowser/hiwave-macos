@@ -390,6 +390,13 @@ impl EngineConfig {
     }
 }
 
+/// `RUSTKIT_CASCADE_TIMING=1` logs a "Cascade timing" line per layout build
+/// (the cascade-speed trench's instrument). Read once; off by default.
+fn cascade_timing_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RUSTKIT_CASCADE_TIMING").is_some_and(|v| v != "0"))
+}
+
 /// css-text §4.1 "document white space": the characters that collapse under
 /// `white-space: normal`. NOT `char::is_whitespace` — that also says yes to
 /// U+00A0 NO-BREAK SPACE, a rendered, non-collapsible character.
@@ -2816,8 +2823,14 @@ impl Engine {
         document: &Document,
         external_stylesheets: &[Stylesheet],
     ) -> LayoutBox {
+        let parse_started = cascade_timing_enabled().then(std::time::Instant::now);
+
         // Extract stylesheets from <style> elements
         let mut stylesheets = self.extract_stylesheets(document);
+
+        // Everything from here to the finished box tree is what Chrome's
+        // `UpdateLayoutTree` covers; stylesheet parsing above is its `parse`.
+        let cascade_started = parse_started.map(|t| (t.elapsed(), std::time::Instant::now()));
 
         // Add external stylesheets (loaded from <link> elements)
         stylesheets.extend(external_stylesheets.iter().cloned());
@@ -2971,6 +2984,14 @@ impl Engine {
         }
 
         info!(total_children = root_box.children.len(), "Root box built");
+        if let Some((parse, started)) = cascade_started {
+            let cascade = started.elapsed();
+            info!(
+                parse_ms = parse.as_secs_f64() * 1000.0,
+                cascade_ms = cascade.as_secs_f64() * 1000.0,
+                "Cascade timing"
+            );
+        }
         root_box
     }
 
