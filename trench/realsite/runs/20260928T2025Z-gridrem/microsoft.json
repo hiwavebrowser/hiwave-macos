@@ -1,0 +1,108 @@
+{
+  "id": "microsoft",
+  "url": "https://www.microsoft.com/en-us",
+  "chrome": [
+    {
+      "url": "https://www.microsoft.com/en-us",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.microsoft.com/en-us",
+      "title": "Microsoft \u2013 AI, Cloud, Productivity, Computing, Gaming & Apps",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/microsoft/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/microsoft/chrome-a.png",
+      "elapsed_ms": 81313
+    },
+    {
+      "url": "https://www.microsoft.com/en-us",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.microsoft.com/en-us",
+      "title": "Microsoft \u2013 AI, Cloud, Productivity, Computing, Gaming & Apps",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/microsoft/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/microsoft/chrome-b.png",
+      "elapsed_ms": 57033
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.microsoft.com/en-us",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/microsoft/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/microsoft/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 0,
+      "threw": 0,
+      "skipped": 204,
+      "fetch_failed": 0,
+      "over_budget": 52,
+      "bytes": 394258,
+      "elapsed_ms": 0
+    },
+    "elapsed_ms": 13420,
+    "error": null,
+    "wall_ms": 13692,
+    "non_background_fraction": 0.0108
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": false,
+    "why": "blank frame (1.08% non-background)"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 39,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "365",
+      "a",
+      "account",
+      "ai",
+      "all",
+      "azure",
+      "business",
+      "choose",
+      "content",
+      "copilot",
+      "deals",
+      "faster",
+      "find",
+      "help",
+      "hi",
+      "in",
+      "main",
+      "me",
+      "microsoft",
+      "my",
+      "need",
+      "pc",
+      "personal",
+      "powered",
+      "sign"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 55.5548828125,
+    "why": "chrome-vs-chrome 55.6% > 15% (unstable, 0 points)",
+    "unstable": true
+  },
+  "points": 0
+}

@@ -1,0 +1,101 @@
+{
+  "id": "yahoo",
+  "url": "https://www.yahoo.com/",
+  "chrome": [
+    {
+      "url": "https://www.yahoo.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.yahoo.com/",
+      "title": "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/yahoo/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/yahoo/chrome-a.png",
+      "elapsed_ms": 87059
+    },
+    {
+      "url": "https://www.yahoo.com/",
+      "status": "error",
+      "error": "page.screenshot: Timeout 30000ms exceeded.",
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "elapsed_ms": 76101
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.yahoo.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/yahoo/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/yahoo/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 147,
+      "threw": 3,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 2854304,
+      "elapsed_ms": 1374
+    },
+    "elapsed_ms": 6145,
+    "error": null,
+    "wall_ms": 6278,
+    "non_background_fraction": 0.2174
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 154,
+    "rustkit_words": 44,
+    "ratio": 0.2792,
+    "missing_sample": [
+      "00",
+      "10",
+      "15",
+      "2026",
+      "28",
+      "2k",
+      "52",
+      "55",
+      "6",
+      "a",
+      "accuweather",
+      "action",
+      "ad",
+      "adventure",
+      "age",
+      "all",
+      "as",
+      "at",
+      "boch",
+      "body",
+      "but",
+      "by",
+      "car",
+      "cbs",
+      "center"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "diff": 27.1
+  },
+  "points": 1
+}

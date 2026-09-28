@@ -1,0 +1,104 @@
+{
+  "id": "youtube",
+  "url": "https://www.youtube.com/",
+  "chrome": [
+    {
+      "url": "https://www.youtube.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.youtube.com/",
+      "title": "YouTube",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/youtube/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/youtube/chrome-a.png",
+      "elapsed_ms": 21291
+    },
+    {
+      "url": "https://www.youtube.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.youtube.com/",
+      "title": "YouTube",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/youtube/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/youtube/chrome-b.png",
+      "elapsed_ms": 32607
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.youtube.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/youtube/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/youtube/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 39,
+      "threw": 2,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 11861721,
+      "elapsed_ms": 216
+    },
+    "elapsed_ms": 4745,
+    "error": null,
+    "wall_ms": 4883,
+    "non_background_fraction": 0.0025
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": false,
+    "why": "blank frame (0.25% non-background)"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 22,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "a",
+      "build",
+      "feed",
+      "get",
+      "help",
+      "home",
+      "in",
+      "ll",
+      "love",
+      "of",
+      "searching",
+      "shorts",
+      "sign",
+      "start",
+      "started",
+      "subscriptions",
+      "to",
+      "try",
+      "us",
+      "videos",
+      "watching",
+      "you"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0.26962890625,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

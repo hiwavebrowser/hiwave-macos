@@ -1,0 +1,107 @@
+{
+  "id": "reddit",
+  "url": "https://www.reddit.com/",
+  "chrome": [
+    {
+      "url": "https://www.reddit.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.reddit.com/?solution=455d4d347471b2ec455d4d347471b2ec&js_challenge=1&jsc_token=2824be10929bdc604753c70a67a1c33137541a6fdb3b462a2d6840781e01b8cd&jsc_orig_r=",
+      "title": "Reddit - The heart of the internet",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/reddit/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/reddit/chrome-a.png",
+      "elapsed_ms": 30001
+    },
+    {
+      "url": "https://www.reddit.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.reddit.com/?solution=6192bdd18fb5ea0c6192bdd18fb5ea0c&js_challenge=1&jsc_token=2824be10929bdc604753c70a67a1c331aa32c131f86b2e38cada009c33b7c3a6&jsc_orig_r=",
+      "title": "Reddit - The heart of the internet",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/reddit/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/reddit/chrome-b.png",
+      "elapsed_ms": 30698
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.reddit.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/reddit/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/reddit/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 1,
+      "threw": 0,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 420,
+      "elapsed_ms": 1
+    },
+    "elapsed_ms": 357,
+    "error": null,
+    "wall_ms": 397,
+    "non_background_fraction": 0.0119
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": false,
+    "why": "blank frame (1.19% non-background)"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 100,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "19",
+      "2026",
+      "246",
+      "324",
+      "376",
+      "478",
+      "5",
+      "534",
+      "555",
+      "6",
+      "663",
+      "695",
+      "7",
+      "758",
+      "782",
+      "about",
+      "accessibility",
+      "acknowledge",
+      "ad",
+      "advertisement",
+      "ago",
+      "agree",
+      "agreement",
+      "all",
+      "and"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0.16298828125,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}
