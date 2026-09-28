@@ -129,3 +129,26 @@ The quiet columns are the median of 5 at load 1.6–3.2. wikipedia `parse_ms` re
 1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
 2. **Re-cascade per relayout (plan item 4) is now the biggest lever on wikipedia**, ~80% of its cascade time is builds 2 and 3. It's also the riskiest item for parity, since it needs dirty-subtree invalidation. OK to start it next session behind an env flag, with a parity A/B as the gate? Default: yes, flag-off by default.
 3. Decision 2 from the last digest (a quiet slot) is resolved for now: the real-site lane was idle 05:35–06:35. No action needed unless you want a standing quiet window.
+
+## 2026-09-28 08:50
+
+**Plan item 4, first cut: PR #322 is open. The images relayout replays the sheets relayout's per-element cascade, behind `RUSTKIT_INCREMENTAL_RESTYLE`, off by default. On the pinned sites it's correct by two receipts: verify mode found 0 mismatches over 1155 + 3841 memoized styles, and frames are byte-identical flag on vs off. B/A: github ~0.68, wikipedia ~0.78, projected worst ~35×. Load was 14–18 all session (the real-site lane was building), so there's no absolute ratio.**
+
+| site | quiet ratio of record (06:03, #320) | #321 merged, projected (B/A vs #320) | #322 flag on, B/A vs off (4 pairs, load 14–18) → projected |
+|---|---|---|---|
+| cnn | 2175 ms → 10.4× | ~9.1× | noise (2 builds per load, the flag can't apply) → ~9.1× |
+| github | 2793 ms → 25.4× | ~23.9× | .68 .36 .78 .68, median **~0.68** → ~16× |
+| wikipedia | 964 ms → **48.2×** | **~43.6×** | .81 .53 .76 .88, median **~0.78** → **~35×** (worst) |
+
+The ratio of record is still 48.2× (06:03, quiet). The projections chain B/A medians taken at high load, so treat ~35× as a direction, not a number.
+
+- **PR #322** `atlas/cs-incremental-restyle` @ **c7190b3** on develop ec43308 (#320 and #321 both merged). `load_subresources` arms a thread-local style memo around its two relayouts. Build 2 records `compute_style_for_element` by NodeId. Build 3 replays it when the key (view, document pointer, external sheet count, viewport, focus) is equal. Dropping the scope discards the memo, so nothing after page script can read it; that's why no DOM-mutation tracking is needed yet. `=verify` recomputes every style and diffs it against the memo. 5 new tests, lib 176/176, layout pass. Receipt: builtins 5/5 avg 1.9%, campaign 26/26 avg 1.2%, **every case identical to #321's**. Real-site verify: 0 mismatches (github 1155/1155, wikipedia 3841/3841). `flag_frames.py`: off/on 0.0000% on all three sites, with the off/off control also 0.0000%.
+- **Why cnn is flat:** its load does 2 builds, so there is no images relayout to replay. cnn isn't the worst site; leave it.
+- **Build 3 with the flag is still ~0.2× (github) and ~0.44× (wikipedia) of itself.** What's left is box construction, the `::before`/`::after` cascade, and the per-build `build_rule_index` + `extract_css_variables` + sheet clones. Next cuts, all under the same flag: (1) on a full replay, skip building the rule index and `:root` vars; (2) memoize pseudo-element styles; (3) then the layered var map (11% of github in the last profile).
+- **Instrument:** `cascade_bench.py --env NAME=VALUE`, `ab.py --b-env NAME=VALUE` (flag A/B on one binary, so there's no second 12-min build) and `flag_frames.py` (pixel receipt: off / on / off control). The lane's permissions block shell env prefixes and `ln -s`. For that reason, this session's receipt build went into the branch worktree's own `./target`: a cold release build, 40 min at load 18.
+- **Found:** parity receipts (`--html-file`, `load_html`) never reach `load_subresources`, so they can't see anything that happens in the sheets or images relayouts. Any flag in that path needs URL-load evidence. The PR body says so.
+
+**Decisions for Pete**
+1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
+2. **Flipping `RUSTKIT_INCREMENTAL_RESTYLE` on by default** (the separate PR the plan requires) needs a real-site board run with the flag on. That board is the other lane's tool, on live URLs. OK for this lane to run it once in a quiet slot, or would you rather the real-site lane run it? Default: this lane runs it next quiet session, then opens the flip PR.
+3. Allow `ln -s` into `~/Repos/.worktrees/cs-*/target` (or `CARGO_TARGET_DIR=` prefixes) for this lane. Each receipt currently costs a second cold release build: 40 min at today's load, a third of a session.
