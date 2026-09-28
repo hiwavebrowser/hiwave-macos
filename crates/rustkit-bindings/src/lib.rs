@@ -21,7 +21,7 @@ pub use events::{
 
 use rustkit_dom::{Document, Node, NodeId};
 use rustkit_js::{JsError, JsRuntime, JsValue};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -420,6 +420,28 @@ pub enum LifecycleTarget {
     Document,
 }
 
+/// What script's writes to the Rust DOM have invalidated since the last
+/// flush (the DOM-bindings rung-0 pin §3 buckets). A later variant covers
+/// the earlier ones' work, so marks combine by `max`.
+///
+/// - structure insert/remove/move, and style-affecting attributes
+///   (`style`, `class`, `id`) → `Style`;
+/// - a text content change → `Layout`;
+/// - nothing written → `Clean`.
+///
+/// Script sets the bucket as it writes. The engine takes it once after the
+/// script settles and relayouts if it isn't `Clean`, so a burst of writes
+/// costs one relayout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum DomDirty {
+    #[default]
+    Clean,
+    /// Boxes must be rebuilt, but no element's computed style changed.
+    Layout,
+    /// Styles must be recomputed, then layout.
+    Style,
+}
+
 /// DOM bindings context.
 pub struct DomBindings {
     runtime: RefCell<JsRuntime>,
@@ -428,6 +450,8 @@ pub struct DomBindings {
     node_map: RefCell<HashMap<u64, Rc<Node>>>,
     /// Queue of IPC messages from JavaScript
     _ipc_queue: RefCell<Vec<IpcMessage>>,
+    /// Pending invalidation from script DOM writes (see `DomDirty`).
+    dirty: Cell<DomDirty>,
 }
 
 impl DomBindings {
@@ -444,7 +468,20 @@ impl DomBindings {
             event_listeners: RefCell::new(Vec::new()),
             node_map: RefCell::new(HashMap::new()),
             _ipc_queue: RefCell::new(Vec::new()),
+            dirty: Cell::new(DomDirty::Clean),
         })
+    }
+
+    /// Record that script invalidated `bucket`. Marks combine: the pending
+    /// bucket only grows until `take_dirty`.
+    pub fn mark_dirty(&self, bucket: DomDirty) {
+        self.dirty.set(self.dirty.get().max(bucket));
+    }
+
+    /// The invalidation pending since the last call, which is reset to
+    /// `Clean`. The engine calls this once when script settles.
+    pub fn take_dirty(&self) -> DomDirty {
+        self.dirty.replace(DomDirty::Clean)
     }
 
     /// Inject global JavaScript objects.
@@ -909,8 +946,10 @@ impl DomBindings {
 
     /// Set the document.
     pub fn set_document(&self, document: Rc<Document>) -> Result<(), BindingError> {
-        // Update state
+        // Update state. Marks against the previous document are moot: the
+        // new one gets a full layout of its own.
         self.window.borrow_mut().document = Some(document.clone());
+        self.dirty.set(DomDirty::Clean);
 
         // Sync to JS
         let title = document.title().unwrap_or_default();
@@ -1557,5 +1596,25 @@ mod tests {
         // Past the horizon stays queued.
         assert_eq!(eval_string(&bindings, "order.join(',')"), "a0,i1,b200,i2");
         assert_eq!(bindings.run_timers(120_000, 1_000).unwrap(), 1);
+    }
+
+    // Pin §3.4: marks coalesce into one pending bucket, taken once.
+    #[test]
+    fn dirty_marks_coalesce_until_taken() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        assert_eq!(bindings.take_dirty(), DomDirty::Clean);
+
+        bindings.mark_dirty(DomDirty::Layout);
+        bindings.mark_dirty(DomDirty::Style);
+        bindings.mark_dirty(DomDirty::Layout);
+        assert_eq!(bindings.take_dirty(), DomDirty::Style, "the widest bucket wins");
+        assert_eq!(bindings.take_dirty(), DomDirty::Clean, "taking resets it");
+
+        // A new document drops marks made against the old one.
+        bindings.mark_dirty(DomDirty::Layout);
+        bindings
+            .set_document(Rc::new(Document::parse_html("<p>x</p>").unwrap()))
+            .unwrap();
+        assert_eq!(bindings.take_dirty(), DomDirty::Clean);
     }
 }
