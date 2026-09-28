@@ -10,6 +10,8 @@
 //! 4. **Extensibility**: Easy to add new APIs
 
 mod dom;
+
+pub use dom::SelectorMatchFn;
 pub mod events;
 
 pub use events::{
@@ -928,6 +930,14 @@ impl DomBindings {
         Ok(())
     }
 
+    /// Install the selector matcher `querySelector`, `querySelectorAll`,
+    /// `matches` and `closest` use. The engine owns the real one (the
+    /// cascade's), and this crate can't depend on the engine; without one
+    /// they fall back to rustkit-dom's single tag/`#id`/`.class` matcher.
+    pub fn set_selector_matcher(&self, matcher: SelectorMatchFn) {
+        self.dom_host.borrow_mut().matcher = Some(matcher);
+    }
+
     /// Set the document.
     pub fn set_document(&self, document: Rc<Document>) -> Result<(), BindingError> {
         // Update state. Marks against the previous document are moot: the
@@ -1615,6 +1625,43 @@ mod tests {
     const PAGE: &str = r#"<!DOCTYPE html><html><head><title>T</title></head>
 <body><div id="main" class="box"><p class="x">Hello, <b>world</b>!</p><!--c--><p class="x">Two</p></div>
 <p id="outside" class="x">Out</p></body></html>"#;
+
+    // The injected matcher decides querySelector/All, matches and closest,
+    // and its `None` (an invalid selector) throws SyntaxError. The stand-in
+    // here matches on the tag name alone; "!" is its invalid selector.
+    #[test]
+    fn an_injected_selector_matcher_answers_queries_matches_and_closest() {
+        let b = bound(PAGE);
+        b.set_selector_matcher(Rc::new(|node, selector| {
+            (selector != "!").then(|| node.tag_name() == Some(selector))
+        }));
+        assert!(eval_bool(&b, "document.querySelectorAll('p').length === 3"));
+        assert!(eval_bool(
+            &b,
+            "document.getElementById('main').querySelectorAll('p').length === 2 && \
+             document.getElementById('main').querySelector('b').textContent === 'world'"
+        ));
+        assert!(eval_bool(
+            &b,
+            "var w = document.querySelector('b'); \
+             w.matches('b') && !w.matches('p') && w.webkitMatchesSelector('b') && \
+             w.closest('p') === w.parentNode && w.closest('div').id === 'main' && \
+             w.closest('b') === w && w.closest('table') === null"
+        ));
+        for call in [
+            "document.querySelector('!')",
+            "document.querySelectorAll('!')",
+            "document.body.querySelector('!')",
+            "document.body.matches('!')",
+            "document.body.closest('!')",
+        ] {
+            assert_eq!(
+                eval_string(&b, &format!("try {{ {call}; 'no throw' }} catch (e) {{ e.name }}")),
+                "SyntaxError",
+                "{call}"
+            );
+        }
+    }
 
     // Pin (a): one wrapper per node, whatever the entry point.
     #[test]

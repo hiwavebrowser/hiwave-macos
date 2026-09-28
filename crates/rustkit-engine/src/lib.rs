@@ -2181,6 +2181,9 @@ impl Engine {
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
+            bindings.set_selector_matcher(Rc::new(|node, selector| {
+                SelectorMatcher.node_matches(node, selector)
+            }));
 
             bindings
                 .set_document(document.clone())
@@ -2398,6 +2401,9 @@ impl Engine {
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
+            bindings.set_selector_matcher(Rc::new(|node, selector| {
+                SelectorMatcher.node_matches(node, selector)
+            }));
 
             bindings
                 .set_document(document.clone())
@@ -7963,6 +7969,78 @@ impl Engine {
 pub(crate) struct SelectorMatcher;
 
 impl SelectorMatcher {
+    /// Does the element `node` match `selector`, read from the live DOM?
+    /// `None` when the selector list is invalid (script throws
+    /// `SyntaxError`). This is the DOM bindings' `querySelector`/`matches`
+    /// matcher: it builds the same ancestor, sibling and position context
+    /// the cascade threads down, from the node's current place in the tree,
+    /// so a script query and the style that paints agree on what matches.
+    pub(crate) fn node_matches(&self, node: &Rc<Node>, selector: &str) -> Option<bool> {
+        let selector = selector.trim();
+        if selector.is_empty() || !Self::selector_list_is_valid(selector) {
+            return None;
+        }
+        let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
+            return Some(false);
+        };
+        let tag = tag_name.to_lowercase();
+        let classes = |attributes: &HashMap<String, String>| -> Vec<String> {
+            attributes
+                .get("class")
+                .map(|c| c.split_whitespace().map(str::to_string).collect())
+                .unwrap_or_default()
+        };
+
+        // ancestors[0] is the parent, as in the cascade.
+        let mut ancestors = Vec::new();
+        let mut current = node.parent();
+        while let Some(n) = current {
+            let NodeType::Element { tag_name, attributes, .. } = &n.node_type else {
+                break;
+            };
+            ancestors.push((tag_name.to_lowercase(), classes(attributes), attributes.get("id").cloned()));
+            current = n.parent();
+        }
+
+        let has_children = Engine::node_has_children(node);
+        let mut siblings_before: Vec<SiblingKey> = Vec::new();
+        let sib = match node.parent() {
+            None => SiblingContext::SOLE.with_children(has_children),
+            Some(parent) => {
+                let (mut count, mut type_index, mut type_count) = (0, 0, 0);
+                let mut before = true;
+                for c in parent.children() {
+                    let NodeType::Element { tag_name, attributes, .. } = &c.node_type else {
+                        continue;
+                    };
+                    let t = tag_name.to_lowercase();
+                    count += 1;
+                    if c.id == node.id {
+                        before = false;
+                    }
+                    if t == tag {
+                        type_count += 1;
+                        if before {
+                            type_index += 1;
+                        }
+                    }
+                    if before {
+                        let state = ElementState::of(&t, attributes);
+                        siblings_before.push((t, classes(attributes), attributes.get("id").cloned(), state));
+                    }
+                }
+                SiblingContext {
+                    index: siblings_before.len(),
+                    count,
+                    type_index,
+                    type_count,
+                    has_children,
+                }
+            }
+        };
+        Some(self.selector_matches(selector, &tag, attributes, &ancestors, &siblings_before, sib))
+    }
+
     fn selector_matches(
         &self,
         selector: &str,
@@ -21775,6 +21853,107 @@ mod script_dom_flush_tests {
             engine.views[&view].bindings.as_ref().unwrap().take_dirty(),
             DomDirty::Clean
         );
+    }
+}
+
+#[cfg(all(test, feature = "headless"))]
+mod script_selector_tests {
+    use super::*;
+
+    fn painted_text(engine: &Engine, view: EngineViewId) -> String {
+        let list = engine.views[&view].display_list.as_ref().expect("display list");
+        list.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                rustkit_layout::DisplayCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn loaded(html: &str) -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 200 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+        (engine, view)
+    }
+
+    /// Evaluate `script` and read its completion value as JS `String()` does
+    /// (`execute_script` answers with the value's `Debug` form).
+    fn eval(engine: &mut Engine, view: EngineViewId, script: &str) -> String {
+        let out = engine
+            .execute_script(view, &format!("String(eval({script:?}))"))
+            .unwrap();
+        out.strip_prefix("String(\"")
+            .and_then(|s| s.strip_suffix("\")"))
+            .unwrap_or_else(|| panic!("{script} evaluated to {out}"))
+            .to_string()
+    }
+
+    const CARDS: &str = "<html><body>\
+        <div class='card featured'><p>a</p><p class='x'>b</p></div>\
+        <div class='card'><span><p id='deep'>c</p></span></div>\
+        </body></html>";
+
+    // querySelector runs the cascade's matcher over the live tree: compound,
+    // descendant, child, sibling and structural selectors that rustkit-dom's
+    // one-token matcher answered wrongly (or with nothing).
+    #[test]
+    fn query_selector_uses_the_cascade_matcher() {
+        let (mut engine, view) = loaded(CARDS);
+        let mut js = |s: &str| eval(&mut engine, view, s);
+        assert_eq!(js("document.querySelectorAll('.card p').length"), "3");
+        assert_eq!(js("document.querySelectorAll('.card > p').length"), "2");
+        assert_eq!(js("document.querySelector('div.card.featured p.x').textContent"), "b");
+        assert_eq!(js("document.querySelector('p:first-child').textContent"), "a");
+        assert_eq!(js("document.querySelector('p:last-child').textContent"), "b");
+        assert_eq!(js("document.querySelectorAll('p + p').length"), "1");
+        assert_eq!(js("document.querySelector('.featured ~ div').className"), "card");
+        // Known gap, shared with the cascade: `+`/`~` are only checked against
+        // the subject's own siblings, so `.featured ~ div span p` (a sibling
+        // combinator up the ancestor chain) matches nothing. Chrome finds #deep.
+        assert_eq!(js("document.querySelectorAll('.featured ~ div span p').length"), "0");
+        assert_eq!(js("document.querySelectorAll('.card, #deep').length"), "3");
+        assert_eq!(js("document.querySelectorAll('p:not(.x)').length"), "2");
+        // Scoped queries still match against the whole tree: `div p` finds
+        // #deep under the second card, whose `div` is the scope itself.
+        assert_eq!(js("document.querySelectorAll('.card')[1].querySelectorAll('div p').length"), "1");
+        assert_eq!(js("document.querySelectorAll('.card')[1].querySelectorAll('.featured p').length"), "0");
+    }
+
+    #[test]
+    fn matches_and_closest_use_the_cascade_matcher() {
+        let (mut engine, view) = loaded(CARDS);
+        let mut js = |s: &str| eval(&mut engine, view, s);
+        assert_eq!(js("document.getElementById('deep').matches('.card span > p')"), "true");
+        assert_eq!(js("document.getElementById('deep').matches('.featured p')"), "false");
+        assert_eq!(
+            js("document.getElementById('deep').closest('.card') === document.querySelectorAll('.card')[1]"),
+            "true"
+        );
+        assert_eq!(js("document.getElementById('deep').closest('.featured')"), "null");
+        assert_eq!(
+            js("try { document.querySelector('p:frobnicate'); 'no throw' } catch (e) { e.name }"),
+            "SyntaxError"
+        );
+    }
+
+    // The matcher reads the tree as it is now: script moves and class writes
+    // change what matches, and writes through a query result are painted.
+    #[test]
+    fn queries_see_script_writes() {
+        let (mut engine, view) = loaded(CARDS);
+        let mut js = |s: &str| eval(&mut engine, view, s);
+        js("document.querySelector('.card:not(.featured)').classList.add('featured')");
+        assert_eq!(js("document.querySelectorAll('.featured p').length"), "3");
+        js("document.body.appendChild(document.getElementById('deep'))");
+        assert_eq!(js("document.querySelector('body > p').id"), "deep");
+        assert_eq!(js("document.querySelectorAll('.card p').length"), "2");
+        js("document.querySelector('.card > p.x').textContent = 'B'");
+        assert_eq!(painted_text(&engine, view), "a B c");
     }
 }
 
