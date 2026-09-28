@@ -20746,6 +20746,55 @@ mod grid_template_areas_tests {
     }
 
     #[test]
+    fn an_item_spanning_the_fr_row_grows_only_that_row() {
+        // wikipedia's .mw-body: the column-end sidebar spans two min-content
+        // rows and the 1fr row. Its height goes to the 1fr row; the
+        // min-content rows stay at their own content.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:grid;width:300px;"#,
+            r#"grid-template:min-content min-content 1fr / 200px 100px;"#,
+            r#"grid-template-areas:'t .' 'b side' 'c side'">"#,
+            r#"<div id="t" style="grid-area:t;height:10px"></div>"#,
+            r#"<div id="b" style="grid-area:b;height:10px"></div>"#,
+            r#"<div id="c" style="grid-area:c;height:10px"></div>"#,
+            r#"<div id="side" style="grid-area:side;height:500px"></div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "b").1, 10.0, "row 2 starts after row 1's 10px");
+            assert_eq!(rect(&root, "c").1, 20.0, "row 2 keeps its own 10px");
+            assert_eq!(rect(&root, "side"), (200.0, 10.0, 100.0, 500.0));
+        }
+    }
+
+    #[test]
+    fn a_min_content_row_is_its_items_real_height_not_the_estimate() {
+        // wikipedia's titlebar: one line holding many text nodes. The
+        // pre-layout estimate charges a line per text node (20 x 10px); the
+        // row is the laid-out 10px, and the spanning sidebar still fits.
+        let spans = "<span>ab</span>".repeat(20);
+        let html = format!(
+            concat!(
+                r#"<body style="margin:0"><div style="display:grid;width:600px;"#,
+                r#"font-size:8px;line-height:10px;"#,
+                r#"grid-template:min-content min-content 1fr / 500px 100px;"#,
+                r#"grid-template-areas:'t side' 'b side' 'c side'">"#,
+                r#"<div id="t" style="grid-area:t;display:flex">{}</div>"#,
+                r#"<div id="b" style="grid-area:b;height:10px"></div>"#,
+                r#"<div id="c" style="grid-area:c;height:10px"></div>"#,
+                r#"<div id="side" style="grid-area:side;height:300px"></div>"#,
+                r#"</div></body>"#,
+            ),
+            spans
+        );
+        for root in laid_out(&html) {
+            assert_eq!(rect(&root, "t").3, 10.0, "the title row is one 10px line");
+            assert_eq!(rect(&root, "b").1, 10.0, "row 2 follows the real row 1");
+            assert_eq!(rect(&root, "c").1, 20.0);
+            assert_eq!(rect(&root, "side"), (500.0, 0.0, 100.0, 300.0));
+        }
+    }
+
+    #[test]
     fn an_unknown_area_name_auto_places() {
         for root in laid_out(concat!(
             r#"<body style="margin:0"><div style="display:grid;width:200px;"#,
