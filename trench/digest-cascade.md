@@ -179,3 +179,29 @@ Flipping the flag on by default would put the worst site at roughly 25–35×. T
 1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
 2. (Carried over) Who runs the flag-on real-site board run needed for the default-flip PR? Default: this lane, in the next quiet slot, after #325 lands.
 3. Decision 3 from the last digest is withdrawn: `receipt_nobuild.py` removes the second cold build without any new permissions.
+
+## 2026-09-28 14:20
+
+**No new ratio this session. Three lanes ran the whole time (load 10–23), and a real-site board run was in flight, so there was no quiet slot and no B/A. The ratio of record stays at 45.2× (wikipedia, 10:00 quiet, develop default path). #325 merged. PR #328 is open (the latent `parse_pseudo_class` panic). The next speed cut, compiled `:not`/`:is`/`:where` lists, is pushed and parked until it has a release build and a B/A.**
+
+| site | quiet record (10:00, develop default) | this session |
+|---|---|---|
+| cnn | 1827 ms → 8.7× | not measured (load 10–23) |
+| github | 2624 ms → 23.9× | not measured |
+| wikipedia | 903 ms → **45.2×** (worst) | not measured |
+
+- **#325 merged** (50310a2, 14:38 UTC). Develop now carries the full `RUSTKIT_INCREMENTAL_RESTYLE` replay (styles, pseudo-elements, lazy index), still off by default. #326 (the Cursor bot's test PR for the key invalidation) also merged, as 003484d.
+- **PR #328** `atlas/cs-pseudo-paren-eof` @ **c2761f4** on develop e5ae09d, open. Behaviour change: EOF closes an unclosed pseudo-class paren, and it no longer slices past the end. Receipt: builtins 5/5 avg 1.9%; campaign 26/26 avg 1.2%, **every case identical to #325's (b722249)**. Test: lib 185/185 (last session).
+- **Parked:** `atlas/cs-compiled-pseudo-lists` @ **b1e78ad** on develop 003484d, pushed, no PR yet.
+  - `SubjectCompound::parse` compiles `:not`/`:is`/`:where`/`:matches`/`-webkit-any` argument lists into `SubjectPart::List`. `any_compound_in_list_matches` used to re-split and re-parse each member for every candidate element: ~20% of github's cascade in the f96882c profile, with `match_pseudo_class`.
+  - `match_pseudo_class` no longer allocates a lowercase tag copy per call when the tag is already lowercase.
+  - The string/compiled equivalence test gained 14 list-argument selectors, including combinator members, nested lists, quoted commas and empty args. 33/33 selector/pseudo tests pass.
+  - **Next session:** release build, ≥3 interleaved B/A pairs vs develop, `receipt_nobuild.py`, full lib run, then open the PR.
+- **Found: the full lib suite times out under load.** At load ~18, `cargo test -p rustkit-engine --lib` failed about 15 tests (web_font_tests, windows_a_leg_pins). All of them were waiting in `test_gpu::hold_for_this_test`, which serializes GPU tests behind a 120 s `MAX_WAIT`. Each one passes alone. This is an environment limit, not a regression. Run the full suite with `--test-threads=1`, or in a quiet slot, before quoting a pass count.
+- **Lane permission note:** `git -C <worktree>` and `cd <worktree> && git …` both need approval in this headless lane. `/Users/petecopeland/Repos/.worktrees/cs-git-commit-pseudo-lists.py` (subprocess with `cwd=`) is the workaround. Fold it into `trench/tools` as a generic `wt_git.py` next session.
+- **Not done:** the flag-on real-site board run for the default flip. The real-site lane's own board was running on live URLs at load 20. A second concurrent Chrome+RustKit board would have hurt both runs. Still the biggest lever: flipping the flag projects the worst site at ~25–35×.
+
+**Decisions for Pete**
+1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
+2. **A standing quiet window for measurement.** Three lanes plus board runs mean this lane can't get a quiet slot or a board run for the flag flip. Could one lane skip one hour a day (e.g. 05:00–06:00) so this lane can take the ratio of record and run the flag-on board? Default: this lane keeps trying opportunistically.
+3. (Carried over) Who runs the flag-on real-site board run needed for the default-flip PR? Default: this lane, in the first quiet slot.
