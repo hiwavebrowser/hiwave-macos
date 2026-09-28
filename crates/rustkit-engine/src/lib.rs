@@ -15,7 +15,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use rustkit_bindings::DomBindings;
+use rustkit_bindings::{DomBindings, DomDirty};
 // Re-export IpcMessage for external use
 pub use rustkit_bindings::IpcMessage;
 use rustkit_compositor::Compositor;
@@ -2273,6 +2273,7 @@ impl Engine {
                 debug!(?id, %url, "Navigation abandoned after page scripts");
                 return Ok(());
             }
+            self.flush_script_dom_writes(id)?;
         }
 
         // Finish navigation
@@ -8725,8 +8726,13 @@ impl Engine {
         sib: SiblingContext,
         attributes: &HashMap<String, String>,
     ) -> bool {
-        let tag = tag_name.to_ascii_lowercase();
-        let tag = tag.as_str();
+        // DOM tag names are already lowercase; allocate only when not.
+        let tag: std::borrow::Cow<str> = if tag_name.bytes().any(|b| b.is_ascii_uppercase()) {
+            tag_name.to_ascii_lowercase().into()
+        } else {
+            tag_name.into()
+        };
+        let tag = tag.as_ref();
         let is_control = Self::is_form_control_tag(tag);
         let value_is_empty = attributes.get("value").map_or(true, |v| v.is_empty());
         match name {
@@ -10002,11 +10008,30 @@ impl Engine {
             .as_ref()
             .ok_or(EngineError::JsError("JavaScript not initialized".into()))?;
 
-        let result = bindings
-            .evaluate(script)
-            .map_err(|e| EngineError::JsError(e.to_string()))?;
+        // A script that threw may still have written to the DOM before it
+        // did, so the flush runs either way.
+        let result = bindings.evaluate(script);
+        self.flush_script_dom_writes(id)?;
+        let result = result.map_err(|e| EngineError::JsError(e.to_string()))?;
 
         Ok(format!("{:?}", result))
+    }
+
+    /// Apply what script's DOM writes invalidated (the DOM-bindings pin §3
+    /// flush): one relayout for however many writes the script made. Runs
+    /// once when script settles; `relayout` rebuilds style and layout in
+    /// full, so both `DomDirty` buckets take the same path for now.
+    fn flush_script_dom_writes(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+        let dirty = self
+            .views
+            .get(&id)
+            .and_then(|view| view.bindings.as_ref())
+            .map_or(DomDirty::Clean, |bindings| bindings.take_dirty());
+        if dirty == DomDirty::Clean {
+            return Ok(());
+        }
+        debug!(?id, ?dirty, "Script wrote to the DOM; relayout");
+        self.relayout(id)
     }
 
     /// Get the current URL of a view.
@@ -17689,6 +17714,20 @@ mod rule_prefilter_tests {
             "div:nth-child(1)",
             "div:nth-child(2n+1 of .card)",
             ":not(:is(.a, .b))",
+            // Selector-list arguments, compiled once into `SubjectPart::List`.
+            ":not()",
+            ":is()",
+            ":not(.card, #main)",
+            ":not( .nope ,  .t )",
+            ":is(div > .card, .card)",
+            ":is(div .card)",
+            ":not(div .card)",
+            ":where(:not(.card), html)",
+            "div:is(:first-child):not(:empty)",
+            ":-webkit-any(span, p)",
+            ":matches(DIV.card)",
+            ":is(div[data-x=\"a,b\"], p)",
+            ":has(.card)",
             ":",
             "div:",
             "*.card",
@@ -19000,6 +19039,11 @@ enum SubjectPart {
     Id(String),
     Attr(String),
     Pseudo(String, Option<String>),
+    /// `:not(list)` (`negate`) or `:is`/`:where`/`:matches`/`-webkit-any`
+    /// with its members compiled once, which `any_compound_in_list_matches`
+    /// re-split and re-parsed for every candidate element. A member with a
+    /// combinator is `None`: it never matches, as there.
+    List { negate: bool, members: Vec<Option<SubjectCompound>> },
 }
 
 impl SubjectCompound {
@@ -19043,7 +19087,26 @@ impl SubjectCompound {
                 remaining = if end < rest.len() { &rest[end + 1..] } else { "" };
             } else if let Some(rest) = remaining.strip_prefix(':') {
                 let (name, arg, consumed) = engine.parse_pseudo_class(rest);
-                parts.push(SubjectPart::Pseudo(name, arg));
+                let negate = name == "not";
+                parts.push(match arg {
+                    Some(list)
+                        if negate
+                            || matches!(
+                                name.as_str(),
+                                "is" | "where" | "matches" | "-webkit-any"
+                            ) =>
+                    {
+                        let members = Engine::split_top_level_commas(&list)
+                            .into_iter()
+                            .map(|m| {
+                                (!Engine::selector_has_combinator(m))
+                                    .then(|| SubjectCompound::parse(engine, m))
+                            })
+                            .collect();
+                        SubjectPart::List { negate, members }
+                    }
+                    arg => SubjectPart::Pseudo(name, arg),
+                });
                 remaining = &rest[consumed..];
             } else {
                 break;
@@ -19078,6 +19141,10 @@ impl SubjectCompound {
                     SubjectPart::Attr(attr) => engine.match_attribute_selector(attr, attributes),
                     SubjectPart::Pseudo(name, arg) => {
                         engine.match_pseudo_class(name, arg.as_deref(), tag_name, sib, attributes)
+                    }
+                    SubjectPart::List { negate, members } => {
+                        members.iter().flatten().any(|m| m.matches(engine, tag_name, attributes, sib))
+                            != *negate
                     }
                 })
             }
@@ -21591,6 +21658,155 @@ mod grid_template_areas_tests {
     }
 }
 
+#[cfg(all(test, feature = "headless"))]
+mod script_dom_flush_tests {
+    use super::*;
+
+    fn painted_text(engine: &Engine, view: EngineViewId) -> String {
+        let list = engine.views[&view].display_list.as_ref().expect("display list");
+        list.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                rustkit_layout::DisplayCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn loaded(html: &str) -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+        (engine, view)
+    }
+
+    // Pin §3: a DOM write marked during script reaches the display list
+    // when the script settles.
+    #[test]
+    fn a_marked_dom_write_is_relaid_out_when_the_script_settles() {
+        let (mut engine, view) =
+            loaded("<html><body><p id='gone'>alpha</p><p>omega</p></body></html>");
+        assert!(painted_text(&engine, view).contains("alpha"));
+
+        // Stand in for the mutation surface: detach a node from Rust and
+        // mark the bucket the way a script's removeChild will.
+        let document = engine.views[&view].document.clone().unwrap();
+        document.get_element_by_id("gone").unwrap().remove_from_parent();
+        engine.views[&view]
+            .bindings
+            .as_ref()
+            .unwrap()
+            .mark_dirty(DomDirty::Style);
+
+        engine.execute_script(view, "1").unwrap();
+        let text = painted_text(&engine, view);
+        assert!(!text.contains("alpha") && text.contains("omega"), "painted: {text}");
+    }
+
+    // The mutation surface end to end: script tree moves mark the bucket
+    // themselves and the settle flush paints them.
+    #[test]
+    fn script_tree_moves_are_painted_when_the_script_settles() {
+        let (mut engine, view) = loaded(
+            "<html><body><p id='a'>alpha</p><p id='b'>beta</p><p id='c'>gamma</p></body></html>",
+        );
+        assert_eq!(painted_text(&engine, view), "alpha beta gamma");
+
+        engine
+            .execute_script(view, "document.body.removeChild(document.getElementById('b'))")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "alpha gamma");
+
+        engine
+            .execute_script(
+                view,
+                "var a = document.getElementById('a'); document.body.appendChild(a); \
+                 document.body.insertBefore(document.getElementById('c'), a)",
+            )
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "gamma alpha");
+    }
+
+    // Writes to a node's own data (replace-on-write, same NodeId) and new
+    // nodes reach the display list through the same settle flush.
+    #[test]
+    fn script_data_writes_and_new_nodes_are_painted_when_the_script_settles() {
+        let (mut engine, view) = loaded(
+            "<html><head><style>.off { display: none }</style></head>\
+             <body><p id='a'>alpha</p><p id='b'>beta</p></body></html>",
+        );
+        assert_eq!(painted_text(&engine, view), "alpha beta");
+
+        engine
+            .execute_script(view, "document.getElementById('a').textContent = 'ALPHA'")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "ALPHA beta");
+
+        engine
+            .execute_script(view, "document.getElementById('b').firstChild.data = 'BETA'")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "ALPHA BETA");
+
+        // A class write restyles: the element's style now matches `.off`.
+        engine
+            .execute_script(view, "document.getElementById('a').classList.add('off')")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "BETA");
+        engine
+            .execute_script(view, "document.getElementById('a').removeAttribute('class')")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "ALPHA BETA");
+        // An inline style write reaches the cascade through the attribute.
+        engine
+            .execute_script(view, "document.getElementById('b').style.display = 'none'")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "ALPHA");
+        engine
+            .execute_script(view, "document.getElementById('b').style.removeProperty('display')")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "ALPHA BETA");
+
+        engine
+            .execute_script(
+                view,
+                "var p = document.createElement('p'); \
+                 p.appendChild(document.createTextNode('gamma')); document.body.appendChild(p)",
+            )
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "ALPHA BETA gamma");
+    }
+
+    // Pin §3.1: script that writes nothing costs no relayout.
+    #[test]
+    fn a_clean_script_does_not_relayout() {
+        let (mut engine, view) = loaded("<html><body><p>alpha</p></body></html>");
+        engine.views.get_mut(&view).unwrap().display_list = None;
+        engine.execute_script(view, "document.title").unwrap();
+        assert!(engine.views[&view].display_list.is_none());
+    }
+
+    // A script that throws after writing still gets its writes flushed.
+    #[test]
+    fn a_script_that_throws_still_flushes() {
+        let (mut engine, view) = loaded("<html><body><p>alpha</p></body></html>");
+        engine.views.get_mut(&view).unwrap().display_list = None;
+        engine.views[&view]
+            .bindings
+            .as_ref()
+            .unwrap()
+            .mark_dirty(DomDirty::Layout);
+        assert!(engine.execute_script(view, "throw new Error('x')").is_err());
+        assert!(engine.views[&view].display_list.is_some());
+        assert_eq!(
+            engine.views[&view].bindings.as_ref().unwrap().take_dirty(),
+            DomDirty::Clean
+        );
+    }
+}
+
 #[cfg(test)]
 mod blockify_tests {
     use super::*;
@@ -21676,6 +21892,85 @@ mod blockify_tests {
             assert_eq!(d("g"), rustkit_css::Display::Grid);
             assert_eq!(d("b"), rustkit_css::Display::Block);
             assert_eq!(d("out"), rustkit_css::Display::InlineBlock, "only flex/grid items");
+        }
+    }
+}
+
+#[cfg(test)]
+mod grid_relative_size_contribution_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    /// Laid out through both entry points: `layout()` and
+    /// `layout_with_collapse` (what `relayout` runs for the page).
+    fn laid_out(html: &str) -> Vec<LayoutBox> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 0.0),
+            ..Default::default()
+        };
+        let mut plain = e.build_layout_from_document(&d, &[]);
+        plain.layout(&cb);
+        let mut engine_path = e.build_layout_from_document(&d, &[]);
+        engine_path.layout_with_collapse(
+            &cb,
+            &mut rustkit_layout::MarginCollapseContext::new(),
+            &mut rustkit_layout::FloatContext::new(),
+        );
+        vec![plain, engine_path]
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    fn rect(root: &LayoutBox, id: &str) -> Rect {
+        by_id(root, id).unwrap_or_else(|| panic!("no box #{id}")).dimensions.border_box()
+    }
+
+    #[test]
+    fn a_rem_width_sizes_a_min_content_column() {
+        // wikipedia's page shell: a `min-content` column holding a
+        // `width: 12.25rem` nav. 12.25rem = 196px, so the 1fr column gets 804.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0;font:14px Arial"><div style="display:grid;width:1000px;"#,
+            r#"grid-template-columns:1fr min-content">"#,
+            r#"<div id="a">Article</div><nav id="n" style="width:12.25rem">Appearance</nav>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "a").width, 804.0);
+            assert_eq!(rect(&root, "n").x, 804.0);
+            assert_eq!(rect(&root, "n").width, 196.0);
+        }
+    }
+
+    #[test]
+    fn an_em_min_width_floors_a_min_content_column() {
+        // 10em at 14px = 140px.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0;font:14px Arial"><div style="display:grid;width:1000px;"#,
+            r#"grid-template-columns:1fr min-content">"#,
+            r#"<div id="a">Article</div><div id="n" style="min-width:10em">x</div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "n").x, 860.0);
+        }
+    }
+
+    #[test]
+    fn a_rem_height_sizes_a_min_content_row() {
+        // 3rem = 48px, so the second row starts at 48.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:grid;width:400px;"#,
+            r#"grid-template-rows:min-content min-content">"#,
+            r#"<div id="a" style="height:3rem"></div><div id="b">below</div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "b").y, 48.0);
         }
     }
 }
