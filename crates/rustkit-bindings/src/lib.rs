@@ -452,7 +452,8 @@ pub struct DomBindings {
     /// Queue of IPC messages from JavaScript
     _ipc_queue: RefCell<Vec<IpcMessage>>,
     /// Pending invalidation from script DOM writes (see `DomDirty`).
-    dirty: Cell<DomDirty>,
+    /// Shared with the tree-write host functions, which mark it.
+    dirty: Rc<Cell<DomDirty>>,
 }
 
 impl DomBindings {
@@ -463,7 +464,8 @@ impl DomBindings {
         // Inject global objects
         Self::inject_globals(&mut runtime)?;
         let dom_host = dom::SharedDomHost::default();
-        dom::install(&mut runtime, &dom_host)?;
+        let dirty = Rc::new(Cell::new(DomDirty::Clean));
+        dom::install(&mut runtime, &dom_host, &dirty)?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
@@ -471,7 +473,7 @@ impl DomBindings {
             event_listeners: RefCell::new(Vec::new()),
             dom_host,
             _ipc_queue: RefCell::new(Vec::new()),
-            dirty: Cell::new(DomDirty::Clean),
+            dirty,
         })
     }
 
@@ -1720,5 +1722,147 @@ mod tests {
             "document.body === null && document.getElementById('x') === null && \
              document.querySelectorAll('p').length === 0"
         ));
+    }
+
+    // Tree moves write the Rust tree, keep wrapper identity, and mark the
+    // §3 bucket the engine flushes.
+    #[test]
+    fn append_child_moves_the_rust_node_and_marks_style() {
+        let b = bound(PAGE);
+        assert_eq!(b.take_dirty(), DomDirty::Clean);
+        assert!(eval_bool(
+            &b,
+            "var m = document.getElementById('main'), o = document.getElementById('outside'); \
+             m.appendChild(o) === o && o.parentNode === m && m.lastChild === o && \
+             m.querySelectorAll('.x').length === 3 && m.textContent === 'Hello, world!TwoOut'"
+        ));
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+        // The move is in the Rust tree, not a JS-side overlay.
+        let doc = b.window.borrow().document.clone().unwrap();
+        let main = doc.get_element_by_id("main").unwrap();
+        assert_eq!(
+            main.last_child().unwrap().get_attribute("id"),
+            Some("outside")
+        );
+        assert_eq!(main.text_content(), "Hello, world!TwoOut");
+    }
+
+    #[test]
+    fn insert_before_orders_children() {
+        let b = bound(PAGE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var m = document.getElementById('main'), o = document.getElementById('outside'); \
+                 m.insertBefore(o, m.firstChild); var a = m.textContent; \
+                 m.insertBefore(o, null); var z = m.textContent; \
+                 m.insertBefore(o, o); [a, z, m.lastChild === o].join('|')"
+            ),
+            "OutHello, world!Two|Hello, world!TwoOut|true"
+        );
+    }
+
+    #[test]
+    fn removed_nodes_are_detached_but_their_wrappers_still_read() {
+        let b = bound(PAGE);
+        assert!(eval_bool(
+            &b,
+            "var o = document.getElementById('outside'); \
+             document.body.removeChild(o) === o && o.parentNode === null && \
+             o.textContent === 'Out' && document.getElementById('outside') === null && \
+             document.querySelectorAll('#outside').length === 0 && \
+             document.body.appendChild(o) === o && document.getElementById('outside') === o"
+        ));
+        assert!(eval_bool(
+            &b,
+            "var p = document.querySelector('.x'); p.remove(); p.remove(); \
+             p.parentNode === null && document.querySelectorAll('.x').length === 2"
+        ));
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+    }
+
+    // DOM §4.2.3 validity: the DOMException named, and the tree untouched.
+    #[test]
+    fn invalid_tree_writes_throw_and_change_nothing() {
+        let b = bound(PAGE);
+        let threw = |script: &str| {
+            eval_string(
+                &b,
+                &format!(
+                    "(function () {{ try {{ {script}; return 'no throw'; }} \
+                          catch (e) {{ return e.name + '/' + (e instanceof DOMException); }} }})()"
+                ),
+            )
+        };
+        let m = "document.getElementById('main')";
+        assert_eq!(
+            threw(&format!("{m}.firstChild.appendChild({m})")),
+            "HierarchyRequestError/true"
+        );
+        assert_eq!(
+            threw(&format!("{m}.appendChild({m})")),
+            "HierarchyRequestError/true"
+        );
+        assert_eq!(
+            threw(&format!("{m}.firstChild.firstChild.appendChild({m})")),
+            "HierarchyRequestError/true"
+        );
+        assert_eq!(
+            threw(&format!("{m}.appendChild(document)")),
+            "HierarchyRequestError/true"
+        );
+        assert_eq!(
+            threw(&format!("document.appendChild({m})")),
+            "HierarchyRequestError/true"
+        );
+        assert_eq!(
+            threw(&format!("{m}.removeChild(document.body)")),
+            "NotFoundError/true"
+        );
+        assert_eq!(
+            threw(&format!(
+                "{m}.insertBefore(document.body.lastChild, document.body)"
+            )),
+            "NotFoundError/true"
+        );
+        assert_eq!(threw(&format!("{m}.appendChild({{}})")), "TypeError/false");
+        assert_eq!(
+            threw(&format!("{m}.insertBefore({m}.firstChild)")),
+            "TypeError/false"
+        );
+        assert_eq!(
+            b.take_dirty(),
+            DomDirty::Clean,
+            "a failed write marks nothing"
+        );
+        assert_eq!(
+            eval_string(&b, &format!("{m}.textContent")),
+            "Hello, world!Two"
+        );
+    }
+
+    // Pin (d) for writes: a wrapper from the previous document never names
+    // a node of the next one.
+    #[test]
+    fn old_wrappers_cannot_write_the_next_document() {
+        let b = bound(PAGE);
+        b.evaluate("var old = document.getElementById('outside');")
+            .unwrap();
+        b.set_document(Rc::new(
+            Document::parse_html("<html><body><div id='main'>New</div></body></html>").unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(
+            eval_string(
+                &b,
+                "var r = []; \
+                 try { document.body.appendChild(old); } catch (e) { r.push(e.name); } \
+                 try { old.appendChild(document.body); } catch (e) { r.push(e.name); } \
+                 try { document.body.insertBefore(document.getElementById('main'), old); } \
+                 catch (e) { r.push(e.name); } r.join(',')"
+            ),
+            "NotFoundError,NotFoundError,NotFoundError"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Clean);
     }
 }
