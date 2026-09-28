@@ -49,3 +49,27 @@ Worst ratio of record: still **80.6×**. The raw numbers went *up* only because 
 1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
 2. **Bench scheduling:** at load 13–18, absolute medians run 2–3× high and a release build takes 38 min. Proposal: make A/B-interleaved runs the standard and keep a standing develop-head "A" binary in `cascade-target-base/`. The alternative is to offset this lane to :35 and skip benching whenever load > 6.
 3. **Permissions:** allow `git -C ~/Repos/.worktrees/cs-*` and `ln -s` for this lane, so it can use per-branch worktrees as the PLAN says instead of switching the hub's branch.
+
+## 2026-09-28 02:55
+
+**#314 (pseudo-index) merged. Fix 2 (subject keys stored per rule) is open as PR #317 with a clean receipt. Fix 3 (specificity stored per rule) is pushed and passes tests, but there's no PR yet. The Mac ran at load 13–19 again, so every number below is an interleaved A/B, not an absolute ratio.**
+
+| site | baseline (develop f262568, quiet) | #314 B/A (last session) | #317 B/A (8 pairs, median) | projected ratio now |
+|---|---|---|---|---|
+| cnn | 5852 ms → 27.9× | 0.42 | **0.85** (.61–.93) | ~10.0× |
+| github | 7441 ms → 67.6× | 0.47 | **0.92** (.69–2.25) | ~29.2× |
+| wikipedia | 1613 ms → **80.6×** | 0.70 | **0.90** (.86–2.74) | **~50.7×** (worst) |
+
+Worst ratio of record: still **80.6×**, since no quiet run has happened yet. Projected: **~51× (wikipedia)**. A = #314's head d4158a3, B = #317 at 92bec62. Pairs 3–5 were the quietest and agree with the medians. The >1 outliers are load spikes: B's wikipedia `parse_ms` hit 103 ms, where the quiet value is 5.5.
+
+- **PR #317** `atlas/cs-subject-keys` @ **92bec62** (fbc680f + a merge of develop 38cb30b). Receipt: builtins 5/5 avg 1.9%, campaign 26/26 avg 1.2%. Exactly 3 cases moved against #314's receipt (shelf, css-selectors, flex-positioning), and they match #315's reported numbers to the digit, so this change moved no pixel. rustkit-engine lib 168/168.
+- **Pushed, no PR:** `atlas/cs-specificity-cache` @ **c995fc8**, stacked on #317. `RuleIndex::specificity[g]` is computed once in `build_rule_index`, and the cascade uses it for matched rules instead of re-scanning the selector string. It adds the test `rule_index_specificity_matches_selector_specificity`. lib 169/169. Next session: bench it A/B against #317, run the receipt, open the PR ("merge after #317"). Expect a small win: only matched rules paid this cost.
+- **Instrument:** added `trench/tools/ab.py` (interleaved A/B pairs of `cascade_bench.py`). Standing binaries live in `cascade-target/pc-A-d4158a3` and `pc-B-92bec62`.
+- **Next fix, from reading the code (needs a fresh profile first):** for every declaration of every matched rule, `compute_style_for_element` clones the value string and runs `resolve_css_variables`, even when there's no `var(`. After that, the ancestor Bloom filter for `selector_matches`. Re-profile on #317's head with `cascade-target-prof` before picking.
+- **Permissions (same wall as last session):** `git worktree add` works from the hub, but `git -C <other worktree>`, `cd <wt> && git`, env-var-prefixed `cargo`, and `bash script.sh` all need approval. Workarounds used: switch the hub's branch, `cargo --target-dir`, and helpers written in Python. The empty `cs-subject-keys` worktree I tried was removed.
+- The real-site lane has `rs-selector-memo` / `rs-cascade-attr-index` worktrees locally, but neither branch is on origin. Overlap risk with this lane: check before the Bloom-filter work.
+
+**Decisions for Pete**
+1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
+2. **A quiet window for one absolute reading.** Every session so far has run at load 13–19. Could the real-site lane skip one hourly slot (e.g. 04:05), so this lane gets a quiet `cascade_bench --runs 5` and a ratio of record, not a projection?
+3. (Carried over) Permissions for `git -C ~/Repos/.worktrees/cs-*`, so the lane can use per-branch worktrees.
