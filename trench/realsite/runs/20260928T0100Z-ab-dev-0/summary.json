@@ -1,0 +1,29 @@
+{
+  "ts": "20260928T010050Z",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "sites": 4,
+  "points": 8,
+  "max_points": 12,
+  "loads": 4,
+  "readable": 2,
+  "looks_right": 2,
+  "looks_right_unstable": [],
+  "readable_unscored": [],
+  "oracle_failed": [],
+  "oracle_blocked": {},
+  "blocked": {},
+  "per_site": {
+    "x": 3,
+    "linkedin": 3,
+    "yahoo": 1,
+    "weather": 1
+  },
+  "scorable_sites": 4,
+  "scorable_points": 8,
+  "scorable_max": 12,
+  "full_run": false
+}

@@ -1,0 +1,107 @@
+{
+  "id": "cnn",
+  "url": "https://www.cnn.com/",
+  "chrome": [
+    {
+      "url": "https://www.cnn.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.cnn.com/",
+      "title": "Breaking News, Latest News and Videos | CNN",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/cnn/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/cnn/chrome-a.png",
+      "elapsed_ms": 34896
+    },
+    {
+      "url": "https://www.cnn.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.cnn.com/",
+      "title": "Breaking News, Latest News and Videos | CNN",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/cnn/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/cnn/chrome-b.png",
+      "elapsed_ms": 33975
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.cnn.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/cnn/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/cnn/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 5,
+      "threw": 6,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 2972435,
+      "elapsed_ms": 2109
+    },
+    "elapsed_ms": 22738,
+    "error": null,
+    "wall_ms": 22929,
+    "non_background_fraction": 0.0604
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 121,
+    "rustkit_words": 89,
+    "ratio": 0.4132,
+    "missing_sample": [
+      "1",
+      "22",
+      "a",
+      "accepting",
+      "agree",
+      "browser",
+      "business",
+      "catch",
+      "center",
+      "choices",
+      "clicking",
+      "collection",
+      "contact",
+      "content",
+      "cookies",
+      "different",
+      "digital",
+      "does",
+      "doesn",
+      "drm",
+      "entertainment",
+      "forth",
+      "have",
+      "headlines",
+      "health"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 2.5974609374999997,
+    "diff": 54.57177734375001
+  },
+  "points": 1
+}

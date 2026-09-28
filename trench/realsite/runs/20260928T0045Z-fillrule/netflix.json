@@ -1,0 +1,86 @@
+{
+  "id": "netflix",
+  "url": "https://www.netflix.com/",
+  "chrome": [
+    {
+      "url": "https://www.netflix.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.netflix.com/",
+      "title": "Netflix - Watch TV Shows Online, Watch Movies Online",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/netflix/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/netflix/chrome-a.png",
+      "elapsed_ms": 38008
+    },
+    {
+      "url": "https://www.netflix.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.netflix.com/",
+      "title": "Netflix - Watch TV Shows Online, Watch Movies Online",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/netflix/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/netflix/chrome-b.png",
+      "elapsed_ms": 38620
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.netflix.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/netflix/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/netflix/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 7,
+      "threw": 3,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 4300263,
+      "elapsed_ms": 3728
+    },
+    "elapsed_ms": 11847,
+    "error": null,
+    "wall_ms": 12076,
+    "non_background_fraction": 0.6114
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 34,
+    "rustkit_words": 40,
+    "ratio": 0.8824,
+    "missing_sample": [
+      "arrivals",
+      "endless",
+      "new",
+      "weekly"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 6.67568359375,
+    "diff": 52.97548828125001
+  },
+  "points": 2
+}

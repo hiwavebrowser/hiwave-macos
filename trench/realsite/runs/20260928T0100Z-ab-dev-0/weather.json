@@ -1,0 +1,107 @@
+{
+  "id": "weather",
+  "url": "https://weather.com/",
+  "chrome": [
+    {
+      "url": "https://weather.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://weather.com/",
+      "title": "National and Local Weather Radar, Daily Forecast, Hurricane and information from The Weather Channel and weather.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260928T0100Z-ab-dev-0/weather/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260928T0100Z-ab-dev-0/weather/chrome-a.png",
+      "elapsed_ms": 87104
+    },
+    {
+      "url": "https://weather.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://weather.com/",
+      "title": "National and Local Weather Radar, Daily Forecast, Hurricane and information from The Weather Channel and weather.com",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260928T0100Z-ab-dev-0/weather/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260928T0100Z-ab-dev-0/weather/chrome-b.png",
+      "elapsed_ms": 72282
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://weather.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260928T0100Z-ab-dev-0/weather/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260928T0100Z-ab-dev-0/weather/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 135,
+      "threw": 2,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 3118382,
+      "elapsed_ms": 1904
+    },
+    "elapsed_ms": 6838,
+    "error": null,
+    "wall_ms": 6985,
+    "non_background_fraction": 0.1697
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 68,
+    "rustkit_words": 8,
+    "ratio": 0.1176,
+    "missing_sample": [
+      "0",
+      "10",
+      "22",
+      "36s",
+      "3m",
+      "4",
+      "53",
+      "55",
+      "56",
+      "57",
+      "58",
+      "59",
+      "8",
+      "a",
+      "advertisement",
+      "air",
+      "allergies",
+      "as",
+      "category",
+      "chance",
+      "cloudy",
+      "cold",
+      "day",
+      "easter",
+      "edt"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 5.9517578124999995,
+    "diff": 37.98779296875
+  },
+  "points": 1
+}

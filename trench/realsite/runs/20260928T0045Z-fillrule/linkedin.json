@@ -1,0 +1,86 @@
+{
+  "id": "linkedin",
+  "url": "https://www.linkedin.com/",
+  "chrome": [
+    {
+      "url": "https://www.linkedin.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.linkedin.com/",
+      "title": "LinkedIn: Log In or Sign Up",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/linkedin/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/linkedin/chrome-a.png",
+      "elapsed_ms": 18253
+    },
+    {
+      "url": "https://www.linkedin.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.linkedin.com/",
+      "title": "LinkedIn: Log In or Sign Up",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/linkedin/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/linkedin/chrome-b.png",
+      "elapsed_ms": 16715
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.linkedin.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/linkedin/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/linkedin/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 4,
+      "threw": 2,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 830599,
+      "elapsed_ms": 1193
+    },
+    "elapsed_ms": 3665,
+    "error": null,
+    "wall_ms": 3741,
+    "non_background_fraction": 0.2748
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": true,
+    "chrome_words": 37,
+    "rustkit_words": 50,
+    "ratio": 0.8919,
+    "missing_sample": [
+      "community",
+      "google",
+      "professional",
+      "welcome"
+    ]
+  },
+  "looks_right": {
+    "pass": true,
+    "chrome_self_diff": 4.7918945312500005,
+    "diff": 9.369921875
+  },
+  "points": 3
+}

@@ -1,0 +1,96 @@
+{
+  "id": "chatgpt",
+  "url": "https://chatgpt.com/",
+  "chrome": [
+    {
+      "url": "https://chatgpt.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://chatgpt.com/",
+      "title": "ChatGPT: Chat, Work, Create & Code with AI",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/chatgpt/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/chatgpt/chrome-a.png",
+      "elapsed_ms": 29028
+    },
+    {
+      "url": "https://chatgpt.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://chatgpt.com/",
+      "title": "ChatGPT: Chat, Work, Create & Code with AI",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/chatgpt/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T0045Z-fillrule/chatgpt/chrome-b.png",
+      "elapsed_ms": 23023
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "error",
+    "html_file": null,
+    "url": "https://chatgpt.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": null,
+    "layout_path": null,
+    "layout_stats": null,
+    "elapsed_ms": 2653,
+    "error": "Failed to load URL: NavigationError(\"HTTP error\")",
+    "wall_ms": 2706
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": false,
+    "why": "Failed to load URL: NavigationError(\"HTTP error\")"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 59,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "agree",
+      "ai",
+      "and",
+      "answers",
+      "based",
+      "be",
+      "begin",
+      "by",
+      "can",
+      "chat",
+      "chatgpt",
+      "chats",
+      "create",
+      "deep",
+      "do",
+      "files",
+      "for",
+      "free",
+      "get",
+      "help",
+      "images",
+      "improve",
+      "in",
+      "is",
+      "it"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 0,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

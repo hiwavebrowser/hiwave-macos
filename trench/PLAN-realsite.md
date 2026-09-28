@@ -111,6 +111,8 @@ Do (1) before (2): a stale-on-resize bug hits every user the moment they resize.
 
 **2026-09-27 20:05: elasticity done.** (1) CSS doesn't go stale on resize. The JS viewport was stale (800x600 hardcoded); that's #308, which also adds `parity-capture --resize-to`. (2) `realsite_board.py --viewport WxH`: 1024x768 and 1600x1000 both 22/60 (x drops at 1024; instagram blank at 1600). **Found:** page JS runs against a stub `document` (rustkit-bindings: body/querySelector are null, and createElement never reaches the Rust DOM). No JS-rendered site can paint until real DOM bindings land. Decision 1 for Pete in the digest. Until he answers: SVG evenodd, `flex: 1 1 0` (267 vs 275), then x's 1024 breakpoint diff.
 
+**2026-09-27 22:05: done.** SVG fills are #309: one shape per path under `fill-rule`, instead of a triangle fan per subpath. Concave shapes and holes were wrong everywhere. `flex: 1 1 0` is #310 (a unitless 0 basis was `auto`). Board 22/60 (drift-inclusive; no check flipped by either fix). NEXT: SVG `<g>` style inheritance (linkedin's logo and nav icons), then x's 1024 breakpoint, then `em`/`vw` flex-basis.
+
 **Board tooling you may do (no scoring-rule change):**
 - A2: detect `oracle_blocked` and report `n/scorable` alongside `/60`.
 - A6: append a row to `trench/realsite/trend.csv` every full run.

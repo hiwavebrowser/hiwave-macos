@@ -803,3 +803,29 @@ Tooling (hub `scratch/inflow/`): `ab_url.py <url> <needle> <n> label=bin…` doe
 **Decisions for Pete:**
 1. **Real DOM bindings (JS track step 0) before any more JS API work?** Backing `document`/`Element` with the Rust DOM, plus relayout on mutation, is a multi-PR architecture piece. Every JS-rendered site waits on it. Say go, and whether it's this trench's next item or the JS track's.
 2. Still open: grid `grid-template-areas` for wikipedia; `<img>` through the ResourceLoader; `cargo fmt` on develop.
+
+
+## 2026-09-27 22:05 — SVG fills were one triangle fan per subpath (#309); unitless `flex-basis: 0` was `auto` (#310); board 22/60
+
+**Points: 19/60 (develop 04dd1d1, `20260927T2150Z-dev04dd`; 21 with its linkedin re-run) → 22/60 (`20260928T0045Z-fillrule`, #309 60f57f3).** Not claimed as #309's gain. google's +1 is its chips variant, and linkedin's +2 is the develop run's variant drift. The fix itself moves LOOKS RIGHT a little on x, yahoo and linkedin, and flips no check.
+
+| run | head | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|
+| `20260927T2150Z-dev04dd` | develop 04dd1d1 | 19 | 13 | 5 | 1 | 19/48 |
+| `20260928T0045Z-fillrule` | #309 60f57f3 | **22** | 13 | 6 | 3 | 22/51 |
+
+Passing all 3: google, x, linkedin. RustKit blocked: amazon, ebay, nytimes. chatgpt fails with an HTTP error. Blank: youtube, reddit, microsoft. Oracle blocked: nytimes (HTTP 403).
+
+**Found (bigger than the evenodd item on the list):** the renderer fills `FillPolygon` as a triangle fan, which is exact only for one convex polygon, and rustkit-svg emitted one per subpath. So every concave SVG shape painted its notches, every hole painted solid, and `fill-rule` was never parsed. That's why weather's logo was a solid blue square and its nav icons were black blobs.
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#309 `atlas/rs-svg-fill-rule` @ 60f57f3** (1 commit from develop 04dd1d1). `fill_contours` sweeps a path's subpaths as one shape into convex trapezoids (bands split at vertices and edge crossings) under nonzero/evenodd. A lone convex contour is unchanged, and the renderer and `DisplayCommand` are untouched. Four failing-first tests (ring, reversed hole, concave dart, pentagram), each confirmed failing on the old path. Campaign 26/26, identical to develop; local gates identical to develop. A/B on the same binaries back to back: x 11.5 → 10.5%, yahoo 23.8 → 22.1%. weather 38.0 → 43.7% is on the Chrome side: its RustKit frames differ in 0.07% of pixels, all in the logo box, which now shows the lettering (receipt `scratch/weather-logo-ab.png`).
+- **#310 `atlas/rs-flex-basis-zero` @ 4f23d96** (1 commit from develop f262568). `parse_flex_basis` turned `Length::Zero` (and `rem`) into `Auto`, so `flex: 1 1 0` sized items to content. The `b-zero` repro box goes 567 → **575 = Chrome**. The longhand now uses the same parser. Test fails without the fix. Campaign identical, gates identical. A/B: x and github RustKit frames pixel-identical, and netflix's frame differs only by its own headline copy A/B. ±0 on the board, as expected.
+
+**Seat notes:** `git -C`, `cd && git`, `git apply` and `cargo clippy` all need interactive approval here. This session's Bash cwd moved into the rs- worktree, so plain `git` worked there. #310 was built in the same worktree dir (`~/Repos/.worktrees/rs-svg-fill-rule`, now on `atlas/rs-flex-basis-zero`). Clippy wasn't run on either PR, and both bodies say so.
+
+**Next:** (1) SVG `<g>` inheritance: `fill`/`fill-rule`/`stroke` on a group never reach its children (`SvgStyle::inherit_from` carries only opacity and `currentColor`). linkedin's missing logo and nav icons are the likely case. (2) x's 1024 breakpoint diff. (3) `em`/`vw` flex-basis via the `ch` replay path.
+
+**Decisions for Pete:**
+1. Still open from 20:05: **real DOM bindings (JS track step 0)**. Every JS-rendered site (youtube, reddit, microsoft, instagram) stays blank until `document`/`Element` are backed by the Rust DOM.
+2. Still open: grid `grid-template-areas` for wikipedia; `<img>` through the ResourceLoader; `cargo fmt` on develop.
