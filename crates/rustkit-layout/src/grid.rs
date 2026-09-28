@@ -2640,8 +2640,8 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
 
     let padding_border = horizontal_padding_border(style);
 
-    // An explicit pixel width fixes the contribution regardless of content.
-    if let Length::Px(w) = style.width {
+    // An explicit absolute width fixes the contribution regardless of content.
+    if let Some(w) = fixed_width_px(style) {
         return match style.box_sizing {
             BoxSizing::BorderBox => w,
             BoxSizing::ContentBox => w + padding_border,
@@ -2885,7 +2885,7 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
 
     let padding_border = horizontal_padding_border(style);
 
-    if let Length::Px(w) = style.width {
+    if let Some(w) = fixed_width_px(style) {
         return match style.box_sizing {
             BoxSizing::BorderBox => w,
             BoxSizing::ContentBox => w + padding_border,
@@ -3001,6 +3001,21 @@ fn intrinsic_len_px(l: &Length, font_size: f32) -> f32 {
     match l {
         Length::Percent(_) => 0.0,
         other => other.to_px_with_viewport(font_size, 16.0, 0.0, 800.0, 600.0),
+    }
+}
+
+/// An explicit `width` that fixes an intrinsic contribution: px, and the
+/// font-relative units, which need no containing block. Only `Px` used to
+/// count, so wikipedia's `.vector-column-end { width: 12.25rem }` answered its
+/// content (75px) and its `min-content` grid column came out 120px narrow.
+/// Percentages and viewport units stay content-sized, as before.
+fn fixed_width_px(style: &ComputedStyle) -> Option<f32> {
+    match style.width {
+        Length::Px(w) => Some(w),
+        Length::Em(_) | Length::Rem(_) => {
+            Some(intrinsic_len_px(&style.width, style_font_size_px(style)))
+        }
+        _ => None,
     }
 }
 

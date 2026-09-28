@@ -21067,6 +21067,28 @@ mod grid_template_areas_tests {
     }
 
     #[test]
+    fn a_min_content_column_takes_an_items_rem_and_em_width() {
+        // wikipedia's .mw-body: `minmax(0,59.25rem) min-content`, with
+        // `.vector-column-end { width: 12.25rem }` in the second column.
+        for (width, px) in [("12.25rem", 196.0), ("10em", 120.0), ("196px", 196.0)] {
+            for root in laid_out(&format!(
+                concat!(
+                    r#"<body style="margin:0"><div style="display:grid;width:1000px;column-gap:24px;"#,
+                    r#"font-size:12px;grid-template-columns:minmax(0,59.25rem) min-content">"#,
+                    r#"<div id="c" style="height:10px">article</div>"#,
+                    r#"<div id="e" style="width:{};height:10px">Appearance</div>"#,
+                    r#"</div></body>"#,
+                ),
+                width
+            )) {
+                assert_eq!(rect(&root, "e").2, px, "width:{width}");
+                assert_eq!(rect(&root, "e").0, 1000.0 - px, "width:{width} column starts after 1fr");
+                assert_eq!(rect(&root, "c").2, 1000.0 - 24.0 - px, "width:{width}");
+            }
+        }
+    }
+
+    #[test]
     fn a_three_by_three_areas_layout_places_each_item_in_its_area() {
         // Items in reverse order, so auto-placement would put them elsewhere.
         for root in laid_out(concat!(
