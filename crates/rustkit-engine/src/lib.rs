@@ -3468,6 +3468,22 @@ impl Engine {
                     return LayoutBox::new(BoxType::Block, ComputedStyle::new());
                 }
 
+                // CSS Display 3 §2.7: the children of a flex or grid
+                // container are blockified — `display` computes to its
+                // block-level equivalent. A `<span>` flex item left Inline
+                // took the inline-box height path, the font's content area
+                // (Arial 8px: 8.9375) with line-height ignored.
+                if parent_style.is_some_and(|p| p.display.is_flex() || p.display.is_grid()) {
+                    style.display = match style.display {
+                        rustkit_css::Display::Inline | rustkit_css::Display::InlineBlock => {
+                            rustkit_css::Display::Block
+                        }
+                        rustkit_css::Display::InlineFlex => rustkit_css::Display::Flex,
+                        rustkit_css::Display::InlineGrid => rustkit_css::Display::Grid,
+                        other => other,
+                    };
+                }
+
                 // Handle replaced elements (images)
                 if tag_lower == "img" {
                     // SAME selection rule as discover_images, or the loader
@@ -14267,7 +14283,9 @@ mod tests {
         let mut boxes = Vec::new();
         collect(&layout, &mut boxes);
         let px = |w: f32, h: f32| (rustkit_css::Length::Px(w), rustkit_css::Length::Px(h), rustkit_css::Display::InlineBlock);
-        assert!(boxes.contains(&px(14.0, 14.0)), "svg width=/height= box missing: {:?}", boxes);
+        // The first svg is a flex item, so it is blockified (Display 3 §2.7).
+        let flex_item = (rustkit_css::Length::Px(14.0), rustkit_css::Length::Px(14.0), rustkit_css::Display::Block);
+        assert!(boxes.contains(&flex_item), "svg width=/height= box missing: {:?}", boxes);
         assert!(boxes.contains(&px(300.0, 150.0)), "attribute-less svg must fall back to 300x150: {:?}", boxes);
         assert!(boxes.contains(&px(20.0, 40.0)), "author CSS width must win over width=: {:?}", boxes);
 
@@ -21501,5 +21519,94 @@ mod grid_template_areas_tests {
         e.apply_style_property(&mut s, "grid-template", "none");
         assert!(s.grid_template_areas.is_none());
         assert!(s.grid_template_rows.tracks.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod blockify_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    /// Laid out through both entry points: `layout()` and
+    /// `layout_with_collapse` (what `relayout` runs for the page).
+    fn laid_out(html: &str) -> Vec<LayoutBox> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 0.0),
+            ..Default::default()
+        };
+        let mut plain = e.build_layout_from_document(&d, &[]);
+        plain.layout(&cb);
+        let mut engine_path = e.build_layout_from_document(&d, &[]);
+        engine_path.layout_with_collapse(
+            &cb,
+            &mut rustkit_layout::MarginCollapseContext::new(),
+            &mut rustkit_layout::FloatContext::new(),
+        );
+        vec![plain, engine_path]
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    fn height(root: &LayoutBox, id: &str) -> f32 {
+        let b = by_id(root, id).unwrap_or_else(|| panic!("no box #{id}"));
+        b.dimensions.border_box().height
+    }
+
+    #[test]
+    fn a_span_flex_item_is_its_line_height_tall_not_the_fonts_content_area() {
+        // Athena's repro (#419): as an inline box the span took Arial's
+        // content area, 8.9375px at 8px.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:flex;font:8px/8px Arial">"#,
+            r#"<span id="s">x</span></div></body>"#,
+        )) {
+            assert_eq!(height(&root, "s"), 8.0);
+        }
+    }
+
+    #[test]
+    fn a_span_flex_item_honours_a_small_line_height() {
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:flex;font:8px Arial;line-height:5px">"#,
+            r#"<span id="s">x</span></div></body>"#,
+        )) {
+            assert_eq!(height(&root, "s"), 5.0);
+        }
+    }
+
+    #[test]
+    fn a_span_grid_item_is_blockified() {
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:grid;font:8px/8px Arial">"#,
+            r#"<span id="s">x</span></div></body>"#,
+        )) {
+            let s = by_id(&root, "s").expect("span");
+            assert_eq!(s.style.display, rustkit_css::Display::Block);
+            assert_eq!(height(&root, "s"), 8.0);
+        }
+    }
+
+    #[test]
+    fn inline_level_items_compute_to_their_block_level_equivalent() {
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:inline-flex">"#,
+            r#"<span id="f" style="display:inline-flex">a</span>"#,
+            r#"<span id="g" style="display:inline-grid">b</span>"#,
+            r#"<span id="b" style="display:inline-block">c</span>"#,
+            r#"</div><span id="out" style="display:inline-block">d</span></body>"#,
+        )) {
+            let d = |id| by_id(&root, id).expect(id).style.display;
+            assert_eq!(d("f"), rustkit_css::Display::Flex);
+            assert_eq!(d("g"), rustkit_css::Display::Grid);
+            assert_eq!(d("b"), rustkit_css::Display::Block);
+            assert_eq!(d("out"), rustkit_css::Display::InlineBlock, "only flex/grid items");
+        }
     }
 }
