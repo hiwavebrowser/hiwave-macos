@@ -2181,6 +2181,9 @@ impl Engine {
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
+            bindings.set_selector_matcher(Rc::new(|node, selector| {
+                SelectorMatcher.node_matches(node, selector)
+            }));
 
             bindings
                 .set_document(document.clone())
@@ -2398,6 +2401,9 @@ impl Engine {
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
+            bindings.set_selector_matcher(Rc::new(|node, selector| {
+                SelectorMatcher.node_matches(node, selector)
+            }));
 
             bindings
                 .set_document(document.clone())
@@ -4389,7 +4395,7 @@ impl Engine {
                                 self.rule_may_match(base_selector.trim(), tag_name, attributes)
                             }
                         })
-                        && self.selector_matches(
+                        && SelectorMatcher.selector_matches(
                         base_selector.trim(),
                         tag_name,
                         attributes,
@@ -4397,7 +4403,7 @@ impl Engine {
                         siblings_before,
                         sib,
                     ) {
-                        let specificity = self.selector_specificity(selector);
+                        let specificity = SelectorMatcher.selector_specificity(selector);
                         matching_rules.push((specificity, rule));
                     }
                 }
@@ -4890,7 +4896,7 @@ impl Engine {
             };
             let matches = may_match
                 && match index.as_ref() {
-                    Some(ix) => self.selector_matches_prepared(
+                    Some(ix) => SelectorMatcher.selector_matches_prepared(
                         &ix.prepared[rule_index],
                         tag_name,
                         attributes,
@@ -4898,7 +4904,7 @@ impl Engine {
                         siblings_before,
                         sib,
                     ),
-                    None => self.selector_matches(
+                    None => SelectorMatcher.selector_matches(
                         &rule.selector,
                         tag_name,
                         attributes,
@@ -4910,7 +4916,7 @@ impl Engine {
             if matches {
                 let specificity = match index.as_ref() {
                     Some(ix) => ix.specificity[rule_index],
-                    None => self.selector_specificity(&rule.selector),
+                    None => SelectorMatcher.selector_specificity(&rule.selector),
                 };
                 matching_rules.push((rule, specificity, rule_index));
             }
@@ -7760,8 +7766,8 @@ impl Engine {
                     ix.main.file(key, g);
                 }
                 ix.keys.push(keys);
-                ix.specificity.push(self.selector_specificity(&rule.selector));
-                ix.prepared.push(self.prepared_selector(rule.selector.trim()));
+                ix.specificity.push(SelectorMatcher.selector_specificity(&rule.selector));
+                ix.prepared.push(SelectorMatcher.prepared_selector(rule.selector.trim()));
                 let mut pseudo_keys = None;
                 // Same test as create_pseudo_element's (the single-colon
                 // form covers the double-colon one). Filed under the keys of
@@ -7880,19 +7886,19 @@ impl Engine {
                 // The matcher's first check after the tag: the element must
                 // carry the attribute match_attribute_selector looks up.
                 let end = r.find(']').unwrap_or(r.len());
-                key.attr = Some(Engine::attr_selector_name(&r[..end]).to_string());
+                key.attr = Some(SelectorMatcher::attr_selector_name(&r[..end]).to_string());
             } else if key.tag.is_none() {
                 if let Some(r) = rest.strip_prefix(':') {
                     // The matcher's first check: this pseudo-class.
-                    let (name, arg, _) = engine.parse_pseudo_class(r);
+                    let (name, arg, _) = SelectorMatcher.parse_pseudo_class(r);
                     match (name.as_str(), arg) {
                         ("root" | "scope", _) => key.tag = Some("html".to_string()),
                         ("is" | "where" | "matches" | "-webkit-any", Some(arg)) => {
                             // Some member compound must match the element
                             // (any_compound_in_list_matches); members with
                             // a combinator never do.
-                            for member in Engine::split_top_level_commas(&arg) {
-                                if !Engine::selector_has_combinator(member) {
+                            for member in SelectorMatcher::split_top_level_commas(&arg) {
+                                if !SelectorMatcher::selector_has_combinator(member) {
                                     keys_for_compound(engine, member, out);
                                 }
                             }
@@ -7907,11 +7913,11 @@ impl Engine {
 
         fn keys_for(engine: &Engine, selector: &str, out: &mut Vec<SubjectKey>) {
             let selector = selector.trim();
-            if !Engine::selector_list_is_valid(selector) {
+            if !SelectorMatcher::selector_list_is_valid(selector) {
                 return;
             }
             if selector.contains(',') {
-                let members = Engine::split_top_level_commas(selector);
+                let members = SelectorMatcher::split_top_level_commas(selector);
                 if members.len() != 1 || members[0] != selector {
                     for m in members {
                         keys_for(engine, m, out);
@@ -7927,7 +7933,7 @@ impl Engine {
             {
                 return;
             }
-            let tokens = engine.tokenize_selector(selector);
+            let tokens = SelectorMatcher.tokenize_selector(selector);
             match tokens.last() {
                 Some((compound, combinator)) if combinator.is_empty() => {
                     keys_for_compound(engine, compound, out)
@@ -7953,6 +7959,87 @@ impl Engine {
             v
         })
     }
+}
+
+/// The selector matcher. It reads no `Engine` state (its caches are
+/// thread-locals), so it is a zero-sized type: the cascade reaches it
+/// through `Engine`'s `Deref`, and the DOM bindings hold a copy for
+/// `querySelector`/`matches`/`closest` without borrowing the `Engine`.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SelectorMatcher;
+
+impl SelectorMatcher {
+    /// Does the element `node` match `selector`, read from the live DOM?
+    /// `None` when the selector list is invalid (script throws
+    /// `SyntaxError`). This is the DOM bindings' `querySelector`/`matches`
+    /// matcher: it builds the same ancestor, sibling and position context
+    /// the cascade threads down, from the node's current place in the tree,
+    /// so a script query and the style that paints agree on what matches.
+    pub(crate) fn node_matches(&self, node: &Rc<Node>, selector: &str) -> Option<bool> {
+        let selector = selector.trim();
+        if selector.is_empty() || !Self::selector_list_is_valid(selector) {
+            return None;
+        }
+        let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
+            return Some(false);
+        };
+        let tag = tag_name.to_lowercase();
+        let classes = |attributes: &HashMap<String, String>| -> Vec<String> {
+            attributes
+                .get("class")
+                .map(|c| c.split_whitespace().map(str::to_string).collect())
+                .unwrap_or_default()
+        };
+
+        // ancestors[0] is the parent, as in the cascade.
+        let mut ancestors = Vec::new();
+        let mut current = node.parent();
+        while let Some(n) = current {
+            let NodeType::Element { tag_name, attributes, .. } = &n.node_type else {
+                break;
+            };
+            ancestors.push((tag_name.to_lowercase(), classes(attributes), attributes.get("id").cloned()));
+            current = n.parent();
+        }
+
+        let has_children = Engine::node_has_children(node);
+        let mut siblings_before: Vec<SiblingKey> = Vec::new();
+        let sib = match node.parent() {
+            None => SiblingContext::SOLE.with_children(has_children),
+            Some(parent) => {
+                let (mut count, mut type_index, mut type_count) = (0, 0, 0);
+                let mut before = true;
+                for c in parent.children() {
+                    let NodeType::Element { tag_name, attributes, .. } = &c.node_type else {
+                        continue;
+                    };
+                    let t = tag_name.to_lowercase();
+                    count += 1;
+                    if c.id == node.id {
+                        before = false;
+                    }
+                    if t == tag {
+                        type_count += 1;
+                        if before {
+                            type_index += 1;
+                        }
+                    }
+                    if before {
+                        let state = ElementState::of(&t, attributes);
+                        siblings_before.push((t, classes(attributes), attributes.get("id").cloned(), state));
+                    }
+                }
+                SiblingContext {
+                    index: siblings_before.len(),
+                    count,
+                    type_index,
+                    type_count,
+                    has_children,
+                }
+            }
+        };
+        Some(self.selector_matches(selector, &tag, attributes, &ancestors, &siblings_before, sib))
+    }
 
     fn selector_matches(
         &self,
@@ -7963,8 +8050,8 @@ impl Engine {
         siblings_before: &[SiblingKey],
         sib: SiblingContext,
     ) -> bool {
-        let prepared = self.prepared_selector(selector.trim());
-        self.selector_matches_prepared(
+        let prepared = SelectorMatcher.prepared_selector(selector.trim());
+        SelectorMatcher.selector_matches_prepared(
             &prepared,
             tag_name,
             attributes,
@@ -7991,7 +8078,7 @@ impl Engine {
             PreparedSelector::Never => return false,
             PreparedSelector::List(members) => {
                 return members.iter().any(|s| {
-                    self.selector_matches(s, tag_name, attributes, ancestors, siblings_before, sib)
+                    SelectorMatcher.selector_matches(s, tag_name, attributes, ancestors, siblings_before, sib)
                 });
             }
             PreparedSelector::Complex { tokens, compounds, subject } => {
@@ -8086,14 +8173,14 @@ impl Engine {
             // invalid as a whole and the rule is dropped — `.a:frobnicate, .b {}`
             // styles NOTHING, not `.b`. An unknown pseudo-class used to fall to
             // the matcher's `_ => true` arm and match every element instead.
-            if !Self::selector_list_is_valid(selector) {
+            if !SelectorMatcher::selector_list_is_valid(selector) {
                 return PreparedSelector::Never;
             }
 
             // Handle multiple selectors (comma-separated at the top level —
             // `:is(a, b)` is one member).
             if selector.contains(',') {
-                let members = Self::split_top_level_commas(selector);
+                let members = SelectorMatcher::split_top_level_commas(selector);
                 if members.len() != 1 || members[0] != selector {
                     return PreparedSelector::List(
                         members.into_iter().map(str::to_string).collect(),
@@ -8118,7 +8205,7 @@ impl Engine {
             }
 
             // Tokenize selector into parts and combinators
-            let tokens = self.tokenize_selector(selector);
+            let tokens = SelectorMatcher.tokenize_selector(selector);
             // The last token must be the subject, with no combinator after it.
             match tokens.last() {
                 Some((_, combinator)) if combinator.is_empty() => {}
@@ -8354,15 +8441,15 @@ impl Engine {
                     ""
                 };
 
-                if !self.match_attribute_selector(attr_selector, attributes) {
+                if !SelectorMatcher.match_attribute_selector(attr_selector, attributes) {
                     return false;
                 }
             } else if let Some(rest) = remaining.strip_prefix(':') {
                 // Pseudo-class
-                let (pseudo_name, pseudo_arg, consumed) = self.parse_pseudo_class(rest);
+                let (pseudo_name, pseudo_arg, consumed) = SelectorMatcher.parse_pseudo_class(rest);
                 remaining = &rest[consumed..];
 
-                if !self.match_pseudo_class(
+                if !SelectorMatcher.match_pseudo_class(
                     &pseudo_name,
                     pseudo_arg.as_deref(),
                     tag_name,
@@ -8386,7 +8473,7 @@ impl Engine {
         attr_selector: &str,
         attributes: &HashMap<String, String>,
     ) -> bool {
-        let attr_name = Self::attr_selector_name(attr_selector);
+        let attr_name = SelectorMatcher::attr_selector_name(attr_selector);
         for op in &Self::ATTR_OPERATORS {
             if let Some(pos) = attr_selector.find(op) {
                 let mut attr_value = attr_selector[pos + op.len()..].trim();
@@ -8498,7 +8585,7 @@ impl Engine {
     /// Pseudo-classes the matcher can decide. Anything else makes the
     /// selector invalid (see `selector_list_is_valid`).
     fn pseudo_class_is_supported(name: &str) -> bool {
-        Self::pseudo_class_is_static_false(name)
+        SelectorMatcher::pseudo_class_is_static_false(name)
             || matches!(
                 name,
                 "root"
@@ -8611,7 +8698,7 @@ impl Engine {
                     // Legacy single-colon pseudo-elements are valid selectors
                     // (they style a generated box; the host guard above
                     // keeps them off the element itself).
-                    let known = Self::pseudo_class_is_supported(&name_l)
+                    let known = SelectorMatcher::pseudo_class_is_supported(&name_l)
                         || matches!(name_l.as_str(), "before" | "after");
                     if !known && forgiving_depth == 0 {
                         return false;
@@ -8687,11 +8774,11 @@ impl Engine {
         attributes: &HashMap<String, String>,
         sib: SiblingContext,
     ) -> bool {
-        Self::split_top_level_commas(list).into_iter().any(|member| {
-            if Self::selector_has_combinator(member) {
+        SelectorMatcher::split_top_level_commas(list).into_iter().any(|member| {
+            if SelectorMatcher::selector_has_combinator(member) {
                 return false;
             }
-            self.simple_selector_matches_with_pseudo(member, tag_name, attributes, sib)
+            SelectorMatcher.simple_selector_matches_with_pseudo(member, tag_name, attributes, sib)
         })
     }
 
@@ -8733,14 +8820,14 @@ impl Engine {
             tag_name.into()
         };
         let tag = tag.as_ref();
-        let is_control = Self::is_form_control_tag(tag);
+        let is_control = SelectorMatcher::is_form_control_tag(tag);
         let value_is_empty = attributes.get("value").map_or(true, |v| v.is_empty());
         match name {
             "first-child" => sib.index == 0,
             "last-child" => sib.index == sib.count.saturating_sub(1),
             "only-child" => sib.count == 1,
-            "nth-child" => arg.is_some_and(|a| self.match_nth(a, sib.index + 1)),
-            "nth-last-child" => arg.is_some_and(|a| self.match_nth(a, sib.count - sib.index)),
+            "nth-child" => arg.is_some_and(|a| SelectorMatcher.match_nth(a, sib.index + 1)),
+            "nth-last-child" => arg.is_some_and(|a| SelectorMatcher.match_nth(a, sib.count - sib.index)),
             // Typed variants (Selectors 4 §14.4): position among siblings
             // that share the element's tag. These used to fall to the
             // catch-all and match EVERY element — `h2:first-of-type` styled
@@ -8748,19 +8835,19 @@ impl Engine {
             "first-of-type" => sib.type_index == 0,
             "last-of-type" => sib.type_index == sib.type_count.saturating_sub(1),
             "only-of-type" => sib.type_count == 1,
-            "nth-of-type" => arg.is_some_and(|a| self.match_nth(a, sib.type_index + 1)),
+            "nth-of-type" => arg.is_some_and(|a| SelectorMatcher.match_nth(a, sib.type_index + 1)),
             "nth-last-of-type" => {
-                arg.is_some_and(|a| self.match_nth(a, sib.type_count - sib.type_index))
+                arg.is_some_and(|a| SelectorMatcher.match_nth(a, sib.type_count - sib.type_index))
             }
             // :not() takes a selector list; none of the members may match.
             "not" => arg.map_or(true, |a| {
-                !self.any_compound_in_list_matches(a, tag_name, attributes, sib)
+                !SelectorMatcher.any_compound_in_list_matches(a, tag_name, attributes, sib)
             }),
             // :is()/:where() select exactly their arguments. They used to
             // match everything, so `:where(ul, ol) { padding: 0 }` (every
             // modern reset) zeroed padding on every element.
             "is" | "where" | "matches" | "-webkit-any" => arg.is_some_and(|a| {
-                self.any_compound_in_list_matches(a, tag_name, attributes, sib)
+                SelectorMatcher.any_compound_in_list_matches(a, tag_name, attributes, sib)
             }),
             // Relational: needs the subtree; under-match rather than style
             // every element. Ledgered.
@@ -8770,7 +8857,7 @@ impl Engine {
             // and `focus-visible` used to fall to the catch-all below and
             // MATCH EVERYTHING, so `.wrapper:focus-within .icon { color }`
             // styled every icon as if its input were focused.
-            n if Self::pseudo_class_is_static_false(n) => false,
+            n if SelectorMatcher::pseudo_class_is_static_false(n) => false,
             // Link pseudo-classes: an <a>/<area> with an href.
             "link" | "any-link" => matches!(tag, "a" | "area") && attributes.contains_key("href"),
             // One definition with the sibling path (`ElementState`).
@@ -8794,7 +8881,7 @@ impl Engine {
                         .get("contenteditable")
                         .is_some_and(|v| v.is_empty() || v.eq_ignore_ascii_case("true"))
             }
-            "read-only" => !self.match_pseudo_class("read-write", None, tag_name, sib, attributes),
+            "read-only" => !SelectorMatcher.match_pseudo_class("read-write", None, tag_name, sib, attributes),
             // A text control showing its placeholder: has one and no value.
             "placeholder-shown" => {
                 attributes.get("placeholder").is_some_and(|p| !p.is_empty())
@@ -8922,7 +9009,7 @@ impl Engine {
         if selector.contains(',') {
             let mut max_spec = (0, 0, 0);
             for part in selector.split(',') {
-                let spec = self.selector_specificity(part.trim());
+                let spec = SelectorMatcher.selector_specificity(part.trim());
                 if spec > max_spec {
                     max_spec = spec;
                 }
@@ -9020,7 +9107,7 @@ impl Engine {
                                     }
                                     let arg: String =
                                         chars[arg_start..i.saturating_sub(1)].iter().collect();
-                                    let (a, b, c) = self.selector_specificity(&arg);
+                                    let (a, b, c) = SelectorMatcher.selector_specificity(&arg);
                                     ids += a;
                                     classes += b;
                                     tags += c;
@@ -9080,7 +9167,9 @@ impl Engine {
 
         (ids, classes, tags)
     }
+}
 
+impl Engine {
     /// Render a view (public API for continuous rendering).
     pub fn render_view(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         self.render(id)
@@ -13286,16 +13375,16 @@ mod tests {
 
     #[test]
     fn test_selector_list_validity_and_top_level_commas() {
-        assert!(Engine::selector_list_is_valid(
+        assert!(SelectorMatcher::selector_list_is_valid(
             ".a:hover, li:nth-child(2n+1) > a"
         ));
-        assert!(Engine::selector_list_is_valid(":is(.a, :frobnicate) .b"));
-        assert!(Engine::selector_list_is_valid("a[title=\":x\"]::after"));
-        assert!(!Engine::selector_list_is_valid(".a:frobnicate, .b"));
-        assert!(!Engine::selector_list_is_valid(".a:not(:frobnicate)"));
-        assert!(!Engine::selector_list_is_valid("input:-moz-focusring"));
+        assert!(SelectorMatcher::selector_list_is_valid(":is(.a, :frobnicate) .b"));
+        assert!(SelectorMatcher::selector_list_is_valid("a[title=\":x\"]::after"));
+        assert!(!SelectorMatcher::selector_list_is_valid(".a:frobnicate, .b"));
+        assert!(!SelectorMatcher::selector_list_is_valid(".a:not(:frobnicate)"));
+        assert!(!SelectorMatcher::selector_list_is_valid("input:-moz-focusring"));
         assert_eq!(
-            Engine::split_top_level_commas(":is(a, b) c, d[x=\"1,2\"], e"),
+            SelectorMatcher::split_top_level_commas(":is(a, b) c, d[x=\"1,2\"], e"),
             vec![":is(a, b) c", "d[x=\"1,2\"]", "e"]
         );
     }
@@ -14898,84 +14987,54 @@ mod tests {
 
     #[test]
     fn test_selector_specificity() {
-        // Create a minimal engine for testing
-        let compositor = match crate::test_compositor() {
-            Ok(c) => c,
-            Err(_) => {
-                eprintln!("Skipping test: GPU not available");
-                return;
-            }
-        };
-
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let engine = Engine {
-            config: EngineConfig::default(),
-            views: HashMap::new(),
-            
-            font_loader: Arc::new(FontLoader::new()),viewhost: ViewHost::new(),
-            compositor,
-            renderer: None,
-            loader: Arc::new(
-                ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
-            ),
-            image_manager: Arc::new(ImageManager::new()),
-            event_tx,
-            event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            render_failing: std::collections::HashSet::new(),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
-        };
-
         // Test type selector: (0, 0, 1)
-        assert_eq!(engine.selector_specificity("div"), (0, 0, 1));
-        assert_eq!(engine.selector_specificity("p"), (0, 0, 1));
+        assert_eq!(SelectorMatcher.selector_specificity("div"), (0, 0, 1));
+        assert_eq!(SelectorMatcher.selector_specificity("p"), (0, 0, 1));
 
         // Test class selector: (0, 1, 0)
-        assert_eq!(engine.selector_specificity(".class"), (0, 1, 0));
-        assert_eq!(engine.selector_specificity(".a.b"), (0, 2, 0));
+        assert_eq!(SelectorMatcher.selector_specificity(".class"), (0, 1, 0));
+        assert_eq!(SelectorMatcher.selector_specificity(".a.b"), (0, 2, 0));
 
         // Test ID selector: (1, 0, 0)
-        assert_eq!(engine.selector_specificity("#id"), (1, 0, 0));
+        assert_eq!(SelectorMatcher.selector_specificity("#id"), (1, 0, 0));
 
         // Test combined selectors
-        assert_eq!(engine.selector_specificity("div.class"), (0, 1, 1));
-        assert_eq!(engine.selector_specificity("div#id"), (1, 0, 1));
-        assert_eq!(engine.selector_specificity("#id.class"), (1, 1, 0));
+        assert_eq!(SelectorMatcher.selector_specificity("div.class"), (0, 1, 1));
+        assert_eq!(SelectorMatcher.selector_specificity("div#id"), (1, 0, 1));
+        assert_eq!(SelectorMatcher.selector_specificity("#id.class"), (1, 1, 0));
 
         // Test pseudo-classes: (0, 1, 0) each
-        assert_eq!(engine.selector_specificity(":hover"), (0, 1, 0));
-        assert_eq!(engine.selector_specificity(":first-child"), (0, 1, 0));
-        assert_eq!(engine.selector_specificity("div:first-child"), (0, 1, 1));
+        assert_eq!(SelectorMatcher.selector_specificity(":hover"), (0, 1, 0));
+        assert_eq!(SelectorMatcher.selector_specificity(":first-child"), (0, 1, 0));
+        assert_eq!(SelectorMatcher.selector_specificity("div:first-child"), (0, 1, 1));
 
         // Test pseudo-elements: (0, 0, 1) each
-        assert_eq!(engine.selector_specificity("::before"), (0, 0, 1));
-        assert_eq!(engine.selector_specificity("div::before"), (0, 0, 2));
+        assert_eq!(SelectorMatcher.selector_specificity("::before"), (0, 0, 1));
+        assert_eq!(SelectorMatcher.selector_specificity("div::before"), (0, 0, 2));
 
         // Test attribute selectors: (0, 1, 0) each
-        assert_eq!(engine.selector_specificity("[type]"), (0, 1, 0));
-        assert_eq!(engine.selector_specificity("[type=text]"), (0, 1, 0));
-        assert_eq!(engine.selector_specificity("input[type=text]"), (0, 1, 1));
+        assert_eq!(SelectorMatcher.selector_specificity("[type]"), (0, 1, 0));
+        assert_eq!(SelectorMatcher.selector_specificity("[type=text]"), (0, 1, 0));
+        assert_eq!(SelectorMatcher.selector_specificity("input[type=text]"), (0, 1, 1));
 
         // Test descendant selectors
-        assert_eq!(engine.selector_specificity("body div"), (0, 0, 2));
-        assert_eq!(engine.selector_specificity("body .class"), (0, 1, 1));
-        assert_eq!(engine.selector_specificity("#id .class div"), (1, 1, 1));
+        assert_eq!(SelectorMatcher.selector_specificity("body div"), (0, 0, 2));
+        assert_eq!(SelectorMatcher.selector_specificity("body .class"), (0, 1, 1));
+        assert_eq!(SelectorMatcher.selector_specificity("#id .class div"), (1, 1, 1));
 
         // Test :not() - adds specificity of argument
-        assert_eq!(engine.selector_specificity(":not(.class)"), (0, 1, 0));
-        assert_eq!(engine.selector_specificity("div:not(.class)"), (0, 1, 1));
+        assert_eq!(SelectorMatcher.selector_specificity(":not(.class)"), (0, 1, 0));
+        assert_eq!(SelectorMatcher.selector_specificity("div:not(.class)"), (0, 1, 1));
 
         // Test universal selector: (0, 0, 0)
-        assert_eq!(engine.selector_specificity("*"), (0, 0, 0));
+        assert_eq!(SelectorMatcher.selector_specificity("*"), (0, 0, 0));
 
         // Test complex selectors
-        assert_eq!(engine.selector_specificity("div.a.b#id:hover"), (1, 3, 1));
+        assert_eq!(SelectorMatcher.selector_specificity("div.a.b#id:hover"), (1, 3, 1));
 
         // Test ID beats multiple classes
-        let id_spec = engine.selector_specificity("#test");
-        let multi_class_spec = engine.selector_specificity(".a.b.c.d.e");
+        let id_spec = SelectorMatcher.selector_specificity("#test");
+        let multi_class_spec = SelectorMatcher.selector_specificity(".a.b.c.d.e");
         assert!(
             id_spec > multi_class_spec,
             "ID should beat multiple classes"
@@ -17530,12 +17589,11 @@ mod rule_prefilter_tests {
         // After the rule index, github's cascade was still 11 s: every
         // candidate re-validated and re-tokenized its selector string for
         // every element, and re-parsed each compound for every ancestor.
-        let engine = Engine::new(EngineConfig::default()).expect("engine");
         let ancestors: Vec<_> = (0..30).map(|_| ancestor("div", &["x"], None)).collect();
         let selector = "main.page section .card > .title";
         SELECTOR_TOKENIZATIONS.with(|n| n.set(0));
         for _ in 0..200 {
-            assert!(!engine.selector_matches(
+            assert!(!SelectorMatcher.selector_matches(
                 selector,
                 "h2",
                 &attrs(&[("class", "title")]),
@@ -17556,7 +17614,6 @@ mod rule_prefilter_tests {
         // wikipedia's dropdowns: `.dd .checkbox:checked ~ .content { display:
         // block }`. The sibling compound was matched by tag/class/id only,
         // so `:checked` was ignored and every closed menu painted open.
-        let engine = Engine::new(EngineConfig::default()).expect("engine");
         let sibling = |attributes: &[(&str, &str)]| -> Vec<SiblingKey> {
             let a = attrs(attributes);
             vec![("input".to_string(), vec!["cb".to_string()], None, ElementState::of("input", &a))]
@@ -17577,7 +17634,7 @@ mod rule_prefilter_tests {
             (".cb:first-child ~ .content", &unchecked, true),
         ];
         for (selector, siblings, want) in cases {
-            let got = engine.selector_matches(
+            let got = SelectorMatcher.selector_matches(
                 selector,
                 "div",
                 &attrs(&[("class", "content")]),
@@ -17596,7 +17653,6 @@ mod rule_prefilter_tests {
         // `customElements.define`, so under the spec rule they never upgrade
         // and the page paints blank. Showing the un-upgraded content is the
         // closer match to Chrome after script.
-        let engine = Engine::new(EngineConfig::default()).expect("engine");
         let cases: &[(&str, &str, bool)] = &[
             (":defined", "div", true),
             (":not(:defined)", "div", false),
@@ -17605,14 +17661,13 @@ mod rule_prefilter_tests {
             ("ms-header:not(:defined)", "ms-header", false),
         ];
         for (selector, tag, want) in cases {
-            let got = engine.selector_matches(selector, tag, &attrs(&[]), &[], &[], SiblingContext::SOLE);
+            let got = SelectorMatcher.selector_matches(selector, tag, &attrs(&[]), &[], &[], SiblingContext::SOLE);
             assert_eq!(got, *want, "{selector} on <{tag}>");
         }
     }
 
     #[test]
     fn prepared_selectors_match_like_the_string_matcher_did() {
-        let engine = Engine::new(EngineConfig::default()).expect("engine");
         let chain = vec![
             ancestor("section", &["card", "wide"], Some("main")),
             ancestor("body", &[], None),
@@ -17647,7 +17702,7 @@ mod rule_prefilter_tests {
             for _ in 0..2 {
                 // Second pass is served from the cache.
                 assert_eq!(
-                    engine.selector_matches(
+                    SelectorMatcher.selector_matches(
                         selector,
                         "div",
                         &attrs(&[("class", "t")]),
@@ -17661,7 +17716,7 @@ mod rule_prefilter_tests {
             }
         }
         let accented = vec![ancestor("div", &["café"], None)];
-        assert!(engine.selector_matches(
+        assert!(SelectorMatcher.selector_matches(
             ".café .t",
             "div",
             &attrs(&[("class", "t")]),
@@ -17675,7 +17730,6 @@ mod rule_prefilter_tests {
     /// replaced on every (selector, element) pair, quirks included.
     #[test]
     fn compiled_subject_matches_like_the_string_matcher() {
-        let engine = Engine::new(EngineConfig::default()).expect("engine");
         let escaped_class = rustkit_css::encode_selector_escapes(".sm\\:flex").into_owned();
         let escaped_id = rustkit_css::encode_selector_escapes("#a\\.b").into_owned();
         let mut selectors: Vec<&str> = vec![
@@ -17748,12 +17802,12 @@ mod rule_prefilter_tests {
         ];
         let sibs = [SiblingContext::SOLE, SiblingContext::SOLE.with_children(true)];
         for selector in &selectors {
-            let subject = SubjectCompound::parse(&engine, selector);
+            let subject = SubjectCompound::parse(&SelectorMatcher, selector);
             for (tag, attributes) in &elements {
                 for sib in sibs {
                     assert_eq!(
-                        subject.matches(&engine, tag, attributes, sib),
-                        engine.simple_selector_matches_with_pseudo(selector, tag, attributes, sib),
+                        subject.matches(&SelectorMatcher, tag, attributes, sib),
+                        SelectorMatcher.simple_selector_matches_with_pseudo(selector, tag, attributes, sib),
                         "{selector:?} on {tag} {attributes:?}"
                     );
                 }
@@ -17889,7 +17943,7 @@ mod rule_prefilter_tests {
         for (g, rule) in sheet.rules.iter().enumerate() {
             assert_eq!(
                 ix.specificity[g],
-                engine.selector_specificity(&rule.selector),
+                SelectorMatcher.selector_specificity(&rule.selector),
                 "{}",
                 rule.selector
             );
@@ -17923,7 +17977,7 @@ mod rule_prefilter_tests {
         for (g, rule) in sheet.rules.iter().enumerate() {
             for (tag, attributes) in &elements {
                 assert_eq!(
-                    engine.selector_matches_prepared(
+                    SelectorMatcher.selector_matches_prepared(
                         &ix.prepared[g],
                         tag,
                         attributes,
@@ -17931,7 +17985,7 @@ mod rule_prefilter_tests {
                         &[],
                         SiblingContext::SOLE,
                     ),
-                    engine.selector_matches(
+                    SelectorMatcher.selector_matches(
                         &rule.selector,
                         tag,
                         attributes,
@@ -18235,7 +18289,7 @@ mod rule_prefilter_tests {
         let siblings = vec![("section".to_string(), vec![], None, ElementState::default())];
         for sel in selectors {
             for (tag, a) in &elements {
-                let full = engine.selector_matches(
+                let full = SelectorMatcher.selector_matches(
                     sel,
                     tag,
                     a,
@@ -18277,15 +18331,14 @@ mod cascade_wire_tests {
 
     #[test]
     fn an_unclosed_pseudo_class_paren_closes_at_the_end() {
-        let e = engine();
-        assert_eq!(e.parse_pseudo_class("not("), ("not".into(), Some(String::new()), 4));
-        assert_eq!(e.parse_pseudo_class("not(.a"), ("not".into(), Some(".a".into()), 6));
-        assert_eq!(e.parse_pseudo_class("is(a, b(c)"), ("is".into(), Some("a, b(c)".into()), 10));
-        assert_eq!(e.parse_pseudo_class("not(.a) b"), ("not".into(), Some(".a".into()), 7));
+        assert_eq!(SelectorMatcher.parse_pseudo_class("not("), ("not".into(), Some(String::new()), 4));
+        assert_eq!(SelectorMatcher.parse_pseudo_class("not(.a"), ("not".into(), Some(".a".into()), 6));
+        assert_eq!(SelectorMatcher.parse_pseudo_class("is(a, b(c)"), ("is".into(), Some("a, b(c)".into()), 10));
+        assert_eq!(SelectorMatcher.parse_pseudo_class("not(.a) b"), ("not".into(), Some(".a".into()), 7));
         // Through the matchers too: no panic, and no match to invent.
         let attrs = HashMap::new();
         for sel in ["div:not(", "div:not(.a", ":is(div"] {
-            let _ = e.selector_matches(sel, "div", &attrs, &[], &[], SiblingContext::SOLE);
+            let _ = SelectorMatcher.selector_matches(sel, "div", &attrs, &[], &[], SiblingContext::SOLE);
         }
     }
 
@@ -19047,7 +19100,7 @@ enum SubjectPart {
 }
 
 impl SubjectCompound {
-    fn parse(engine: &Engine, selector: &str) -> Self {
+    fn parse(engine: &SelectorMatcher, selector: &str) -> Self {
         if selector == "*" {
             return Self::Universal;
         }
@@ -19086,7 +19139,7 @@ impl SubjectCompound {
                 parts.push(SubjectPart::Attr(rest[..end].to_string()));
                 remaining = if end < rest.len() { &rest[end + 1..] } else { "" };
             } else if let Some(rest) = remaining.strip_prefix(':') {
-                let (name, arg, consumed) = engine.parse_pseudo_class(rest);
+                let (name, arg, consumed) = SelectorMatcher.parse_pseudo_class(rest);
                 let negate = name == "not";
                 parts.push(match arg {
                     Some(list)
@@ -19096,10 +19149,10 @@ impl SubjectCompound {
                                 "is" | "where" | "matches" | "-webkit-any"
                             ) =>
                     {
-                        let members = Engine::split_top_level_commas(&list)
+                        let members = SelectorMatcher::split_top_level_commas(&list)
                             .into_iter()
                             .map(|m| {
-                                (!Engine::selector_has_combinator(m))
+                                (!SelectorMatcher::selector_has_combinator(m))
                                     .then(|| SubjectCompound::parse(engine, m))
                             })
                             .collect();
@@ -19117,7 +19170,7 @@ impl SubjectCompound {
 
     fn matches(
         &self,
-        engine: &Engine,
+        engine: &SelectorMatcher,
         tag_name: &str,
         attributes: &HashMap<String, String>,
         sib: SiblingContext,
@@ -19138,9 +19191,9 @@ impl SubjectCompound {
                         .get("class")
                         .is_some_and(|el_class| el_class.split_whitespace().any(|c| c == class)),
                     SubjectPart::Id(id) => attributes.get("id") == Some(id),
-                    SubjectPart::Attr(attr) => engine.match_attribute_selector(attr, attributes),
+                    SubjectPart::Attr(attr) => SelectorMatcher.match_attribute_selector(attr, attributes),
                     SubjectPart::Pseudo(name, arg) => {
-                        engine.match_pseudo_class(name, arg.as_deref(), tag_name, sib, attributes)
+                        SelectorMatcher.match_pseudo_class(name, arg.as_deref(), tag_name, sib, attributes)
                     }
                     SubjectPart::List { negate, members } => {
                         members.iter().flatten().any(|m| m.matches(engine, tag_name, attributes, sib))
@@ -19175,7 +19228,7 @@ impl ElementState {
                 && matches!(input_type.as_deref(), Some("checkbox" | "radio"))
                 && attributes.contains_key("checked"))
                 || (tag_lower == "option" && attributes.contains_key("selected")),
-            control: Engine::is_form_control_tag(tag_lower),
+            control: SelectorMatcher::is_form_control_tag(tag_lower),
             disabled: attributes.contains_key("disabled"),
         }
     }
@@ -19304,9 +19357,9 @@ impl AncestorCompound {
                             ("enabled", None) => out.state.push(StatePseudo::Enabled),
                             ("is" | "where" | "matches" | "-webkit-any", Some(a)) => {
                                 out.any_of.push(
-                                    Engine::split_top_level_commas(a)
+                                    SelectorMatcher::split_top_level_commas(a)
                                         .into_iter()
-                                        .filter(|m| !Engine::selector_has_combinator(m))
+                                        .filter(|m| !SelectorMatcher::selector_has_combinator(m))
                                         .map(AncestorCompound::parse)
                                         .collect(),
                                 );
@@ -19314,7 +19367,7 @@ impl AncestorCompound {
                             // Relational: the subject path under-matches it
                             // too.
                             ("has", _) => out.never = true,
-                            (n, _) if Engine::pseudo_class_is_static_false(n) => out.never = true,
+                            (n, _) if SelectorMatcher::pseudo_class_is_static_false(n) => out.never = true,
                             // Structural and the rest need context the tuple
                             // does not carry: permissive.
                             _ => {}
@@ -20252,45 +20305,41 @@ mod windows_engine_pins {
 
     #[test]
     fn a_descendant_selector_requires_the_ancestor() {
-        let e = engine();
         let attrs = HashMap::new();
         let inside = [anc("div", "hero")];
         let outside: [(String, Vec<String>, Option<String>); 0] = [];
-        assert!(e.selector_matches(".hero p", "p", &attrs, &inside, &[], SiblingContext::SOLE));
+        assert!(SelectorMatcher.selector_matches(".hero p", "p", &attrs, &inside, &[], SiblingContext::SOLE));
         assert!(
-            !e.selector_matches(".hero p", "p", &attrs, &outside, &[], SiblingContext::SOLE),
+            !SelectorMatcher.selector_matches(".hero p", "p", &attrs, &outside, &[], SiblingContext::SOLE),
             "a bare <p> outside .hero must not match (the over-match that leaked \
              text-align:center onto cards)"
         );
         assert!(
-            !e.selector_matches(".hero p", "span", &attrs, &inside, &[], SiblingContext::SOLE),
+            !SelectorMatcher.selector_matches(".hero p", "span", &attrs, &inside, &[], SiblingContext::SOLE),
             "the subject still has to match the element itself"
         );
     }
 
     #[test]
     fn a_descendant_selector_sums_the_specificity_of_its_compounds() {
-        let e = engine();
         // `.hero p` = one class + one type; a bare `p` is one type.
-        assert_eq!(e.selector_specificity(".hero p"), (0, 1, 1));
-        assert_eq!(e.selector_specificity("p"), (0, 0, 1));
+        assert_eq!(SelectorMatcher.selector_specificity(".hero p"), (0, 1, 1));
+        assert_eq!(SelectorMatcher.selector_specificity("p"), (0, 0, 1));
     }
 
     #[test]
     fn a_descendant_matches_a_non_adjacent_ancestor() {
-        let e = engine();
         let attrs = HashMap::new();
         let chain = [anc("div", "hero"), anc("section", "")];
-        assert!(e.selector_matches(".hero p", "p", &attrs, &chain, &[], SiblingContext::SOLE));
+        assert!(SelectorMatcher.selector_matches(".hero p", "p", &attrs, &chain, &[], SiblingContext::SOLE));
     }
 
     #[test]
     fn a_malformed_group_does_not_kill_its_valid_siblings() {
-        let e = engine();
         let attrs = HashMap::new();
         let ancestors = [anc("ul", "nav")];
         assert!(
-            e.selector_matches("> broken, .nav > li", "li", &attrs, &ancestors, &[], SiblingContext::SOLE),
+            SelectorMatcher.selector_matches("> broken, .nav > li", "li", &attrs, &ancestors, &[], SiblingContext::SOLE),
             "a valid group must still match alongside a malformed one"
         );
     }
@@ -21804,6 +21853,107 @@ mod script_dom_flush_tests {
             engine.views[&view].bindings.as_ref().unwrap().take_dirty(),
             DomDirty::Clean
         );
+    }
+}
+
+#[cfg(all(test, feature = "headless"))]
+mod script_selector_tests {
+    use super::*;
+
+    fn painted_text(engine: &Engine, view: EngineViewId) -> String {
+        let list = engine.views[&view].display_list.as_ref().expect("display list");
+        list.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                rustkit_layout::DisplayCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn loaded(html: &str) -> (Engine, EngineViewId) {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 200 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+        (engine, view)
+    }
+
+    /// Evaluate `script` and read its completion value as JS `String()` does
+    /// (`execute_script` answers with the value's `Debug` form).
+    fn eval(engine: &mut Engine, view: EngineViewId, script: &str) -> String {
+        let out = engine
+            .execute_script(view, &format!("String(eval({script:?}))"))
+            .unwrap();
+        out.strip_prefix("String(\"")
+            .and_then(|s| s.strip_suffix("\")"))
+            .unwrap_or_else(|| panic!("{script} evaluated to {out}"))
+            .to_string()
+    }
+
+    const CARDS: &str = "<html><body>\
+        <div class='card featured'><p>a</p><p class='x'>b</p></div>\
+        <div class='card'><span><p id='deep'>c</p></span></div>\
+        </body></html>";
+
+    // querySelector runs the cascade's matcher over the live tree: compound,
+    // descendant, child, sibling and structural selectors that rustkit-dom's
+    // one-token matcher answered wrongly (or with nothing).
+    #[test]
+    fn query_selector_uses_the_cascade_matcher() {
+        let (mut engine, view) = loaded(CARDS);
+        let mut js = |s: &str| eval(&mut engine, view, s);
+        assert_eq!(js("document.querySelectorAll('.card p').length"), "3");
+        assert_eq!(js("document.querySelectorAll('.card > p').length"), "2");
+        assert_eq!(js("document.querySelector('div.card.featured p.x').textContent"), "b");
+        assert_eq!(js("document.querySelector('p:first-child').textContent"), "a");
+        assert_eq!(js("document.querySelector('p:last-child').textContent"), "b");
+        assert_eq!(js("document.querySelectorAll('p + p').length"), "1");
+        assert_eq!(js("document.querySelector('.featured ~ div').className"), "card");
+        // Known gap, shared with the cascade: `+`/`~` are only checked against
+        // the subject's own siblings, so `.featured ~ div span p` (a sibling
+        // combinator up the ancestor chain) matches nothing. Chrome finds #deep.
+        assert_eq!(js("document.querySelectorAll('.featured ~ div span p').length"), "0");
+        assert_eq!(js("document.querySelectorAll('.card, #deep').length"), "3");
+        assert_eq!(js("document.querySelectorAll('p:not(.x)').length"), "2");
+        // Scoped queries still match against the whole tree: `div p` finds
+        // #deep under the second card, whose `div` is the scope itself.
+        assert_eq!(js("document.querySelectorAll('.card')[1].querySelectorAll('div p').length"), "1");
+        assert_eq!(js("document.querySelectorAll('.card')[1].querySelectorAll('.featured p').length"), "0");
+    }
+
+    #[test]
+    fn matches_and_closest_use_the_cascade_matcher() {
+        let (mut engine, view) = loaded(CARDS);
+        let mut js = |s: &str| eval(&mut engine, view, s);
+        assert_eq!(js("document.getElementById('deep').matches('.card span > p')"), "true");
+        assert_eq!(js("document.getElementById('deep').matches('.featured p')"), "false");
+        assert_eq!(
+            js("document.getElementById('deep').closest('.card') === document.querySelectorAll('.card')[1]"),
+            "true"
+        );
+        assert_eq!(js("document.getElementById('deep').closest('.featured')"), "null");
+        assert_eq!(
+            js("try { document.querySelector('p:frobnicate'); 'no throw' } catch (e) { e.name }"),
+            "SyntaxError"
+        );
+    }
+
+    // The matcher reads the tree as it is now: script moves and class writes
+    // change what matches, and writes through a query result are painted.
+    #[test]
+    fn queries_see_script_writes() {
+        let (mut engine, view) = loaded(CARDS);
+        let mut js = |s: &str| eval(&mut engine, view, s);
+        js("document.querySelector('.card:not(.featured)').classList.add('featured')");
+        assert_eq!(js("document.querySelectorAll('.featured p').length"), "3");
+        js("document.body.appendChild(document.getElementById('deep'))");
+        assert_eq!(js("document.querySelector('body > p').id"), "deep");
+        assert_eq!(js("document.querySelectorAll('.card p').length"), "2");
+        js("document.querySelector('.card > p.x').textContent = 'B'");
+        assert_eq!(painted_text(&engine, view), "a B c");
     }
 }
 

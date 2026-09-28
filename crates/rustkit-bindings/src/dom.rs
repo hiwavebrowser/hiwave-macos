@@ -27,11 +27,17 @@ use rustkit_js::{JsError, JsRuntime, JsValue};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+/// Does this element match this selector list? `None` means the list is
+/// invalid, and script throws `SyntaxError`.
+pub type SelectorMatchFn = Rc<dyn Fn(&Rc<Node>, &str) -> Option<bool>>;
+
 /// The document the host functions read, and its generation.
 #[derive(Default)]
 pub(crate) struct DomHost {
     document: Option<Rc<Document>>,
     generation: u32,
+    /// The injected selector matcher (`DomBindings::set_selector_matcher`).
+    pub(crate) matcher: Option<SelectorMatchFn>,
 }
 
 pub(crate) type SharedDomHost = Rc<RefCell<DomHost>>;
@@ -65,6 +71,16 @@ impl DomHost {
             }
             _ => None,
         }
+    }
+}
+
+/// The elements under `scope` in document order, `scope` excluded.
+fn descendant_elements(scope: &Rc<Node>, out: &mut Vec<Rc<Node>>) {
+    for child in scope.children() {
+        if child.is_element() {
+            out.push(child.clone());
+        }
+        descendant_elements(&child, out);
     }
 }
 
@@ -401,6 +417,19 @@ pub(crate) fn install(
                 return JsValue::Null;
             };
             let arg = string_arg(args, 3).unwrap_or("");
+            if let (Some("selector"), Some(matcher)) = (string_arg(args, 2), host.matcher.as_ref())
+            {
+                // The scope itself decides validity, so an invalid selector
+                // throws even where nothing could match. Matching reads each
+                // element's whole ancestor chain, so `.outer p` scoped to
+                // an inner element still sees `.outer` above the scope.
+                if matcher(&scope, arg).is_none() {
+                    return JsValue::Boolean(false);
+                }
+                let mut all = Vec::new();
+                descendant_elements(&scope, &mut all);
+                return id_list(all.into_iter().filter(|n| matcher(n, arg) == Some(true)));
+            }
             let found = match string_arg(args, 2) {
                 Some("tag") if arg == "*" => {
                     let mut all = Vec::new();
@@ -421,6 +450,33 @@ pub(crate) fn install(
                 id_list(found.into_iter().filter(|n| is_connected(n, document)))
             } else {
                 id_list(found.into_iter().filter(|n| is_descendant(n, &scope)))
+            }
+        }),
+    )?;
+
+    // matches(gen, id, selector): a boolean, null for a stale node, or
+    // "SyntaxError" for an invalid selector.
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_matches",
+        3,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let (Some(node), Some(selector)) = (host.node(args), string_arg(args, 2)) else {
+                return JsValue::Null;
+            };
+            let matched = match (&host.matcher, &host.document) {
+                (Some(matcher), _) => matcher(&node, selector),
+                (None, Some(document)) => Some(
+                    QuerySelector::select(document, selector)
+                        .iter()
+                        .any(|n| n.id == node.id),
+                ),
+                (None, None) => return JsValue::Null,
+            };
+            match matched {
+                Some(b) => JsValue::Boolean(b),
+                None => JsValue::String("SyntaxError".to_string()),
             }
         }),
     )?;
@@ -501,9 +557,9 @@ const WRAPPERS_JS: &str = r#"
         root: __rustkit_dom_root, byId: __rustkit_dom_by_id,
         collect: __rustkit_dom_collect, info: __rustkit_dom_info,
         attr: __rustkit_dom_attr, mutate: __rustkit_dom_mutate,
-        write: __rustkit_dom_write
+        write: __rustkit_dom_write, matches: __rustkit_dom_matches
     };
-    ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write'].forEach(function (n) {
+    ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
 
@@ -877,13 +933,21 @@ const WRAPPERS_JS: &str = r#"
 
     // querySelector/All, getElementsBy* on both Document and Element. The
     // collections are static snapshots (pin §4: live HTMLCollection later).
+    function select(o, sel, method) {
+        var ids = collect(o, 'selector', sel);
+        if (ids === false) {
+            throw new DOMException("Failed to execute '" + method + "': '" + sel +
+                "' is not a valid selector.", 'SyntaxError');
+        }
+        return ids;
+    }
     var queries = {
         querySelector: function (sel) {
-            var ids = collect(this, 'selector', sel);
+            var ids = select(this, sel, 'querySelector');
             return ids ? wrap(Number(ids.split(' ')[0])) : null;
         },
         querySelectorAll: function (sel) {
-            return list(NodeList.prototype, collect(this, 'selector', sel), false);
+            return list(NodeList.prototype, select(this, sel, 'querySelectorAll'), false);
         },
         getElementsByTagName: function (tag) {
             return list(HTMLCollection.prototype, collect(this, 'tag', tag), false);
@@ -896,6 +960,26 @@ const WRAPPERS_JS: &str = r#"
         Element.prototype[k] = queries[k];
         Document.prototype[k] = queries[k];
     });
+    function matches(el, sel, method) {
+        var s = slotOf(el);
+        if (s.gen !== gen) return false;
+        var r = N.matches(s.gen, s.id, String(sel));
+        if (r === 'SyntaxError') {
+            throw new DOMException("Failed to execute '" + method + "' on 'Element': '" +
+                sel + "' is not a valid selector.", 'SyntaxError');
+        }
+        return r === true;
+    }
+    Element.prototype.matches = function (sel) { return matches(this, sel, 'matches'); };
+    Element.prototype.webkitMatchesSelector = function (sel) {
+        return matches(this, sel, 'webkitMatchesSelector');
+    };
+    Element.prototype.closest = function (sel) {
+        for (var el = this; el; el = el.parentElement) {
+            if (matches(el, sel, 'closest')) return el;
+        }
+        return null;
+    };
     Document.prototype.createElement = function (tag) {
         tag = String(tag);
         // Form controls keep their JS stubs for now: their editing state
