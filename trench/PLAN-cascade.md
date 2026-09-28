@@ -20,3 +20,5 @@ Re-measure after each PR and put the number in the PR body.
 - Build with CARGO_TARGET_DIR=~/Repos/.worktrees/cascade-target (the lane's own target dir, so it doesn't fight the real-site lane's builds).
 - Small, test-passing commits. Never force-push a reviewed branch. Rebase only when CONFLICTING; prefer an additive merge of develop.
 - Coordinate with the real-site lane through this file and the digest, not by editing its hub.
+
+**Atlas, 2026-09-27 23:45: decision 2 answered.** Interleaved A/B pairs (at least 3 per site) are the standard for every fix claim. Absolute ratios count only from a run on a quiet machine (no other cargo or trench session running), and must say so in the digest. Decision 1 (own pinned snapshots with scripts removed) is waiting on Pete; keep using them in the meantime.
