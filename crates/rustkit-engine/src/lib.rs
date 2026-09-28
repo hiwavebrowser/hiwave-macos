@@ -21974,3 +21974,84 @@ mod grid_relative_size_contribution_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod flex_relative_length_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    /// Laid out through both entry points: `layout()` and
+    /// `layout_with_collapse` (what `relayout` runs for the page), with the
+    /// 1280x800 viewport the engine gives a view's root box.
+    fn laid_out(html: &str) -> Vec<LayoutBox> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 0.0),
+            ..Default::default()
+        };
+        let mut plain = e.build_layout_from_document(&d, &[]);
+        plain.set_viewport(1280.0, 800.0);
+        plain.layout(&cb);
+        let mut engine_path = e.build_layout_from_document(&d, &[]);
+        engine_path.set_viewport(1280.0, 800.0);
+        engine_path.layout_with_collapse(
+            &cb,
+            &mut rustkit_layout::MarginCollapseContext::new(),
+            &mut rustkit_layout::FloatContext::new(),
+        );
+        vec![plain, engine_path]
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    fn rect(root: &LayoutBox, id: &str) -> Rect {
+        by_id(root, id).unwrap_or_else(|| panic!("no box #{id}")).dimensions.border_box()
+    }
+
+    #[test]
+    fn a_flex_items_em_margin_and_width_use_its_own_font_size() {
+        // At font-size 20px: margin-left 2em = 40, width 3em = 60 (not 32/48).
+        for root in laid_out(concat!(
+            r#"<body style="margin:0;font:20px Arial"><div style="display:flex">"#,
+            r#"<div id="i" style="margin-left:2em;width:3em;height:10px"></div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "i").x, 40.0);
+            assert_eq!(rect(&root, "i").width, 60.0);
+        }
+    }
+
+    #[test]
+    fn a_flex_items_vw_width_uses_the_real_viewport() {
+        // 25vw of a 1280 viewport is 320, not 25% of a fixed 800.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:flex">"#,
+            r#"<div id="i" style="width:25vw;height:10px"></div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "i").width, 320.0);
+        }
+    }
+
+    #[test]
+    fn an_em_gap_uses_the_containers_font_size() {
+        // column-gap 1em at 20px is 20, not 16. Flex: 10 + 20.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0;font:20px Arial"><div style="display:flex;column-gap:1em">"#,
+            r#"<div style="width:10px;height:10px"></div><div id="b" style="width:10px;height:10px"></div>"#,
+            r#"</div>"#,
+            r#"<div style="display:grid;grid-template-columns:30px 30px;column-gap:1em">"#,
+            r#"<div style="height:10px">a</div><div id="g" style="height:10px">b</div></div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "b").x, 30.0);
+            // Grid: 30 + 20.
+            assert_eq!(rect(&root, "g").x, 50.0);
+        }
+    }
+}
