@@ -190,6 +190,37 @@ pub(crate) fn aspect_ratio_content_height(
     })
 }
 
+/// Compose a button's BORDER-box width from an advance measured out of its
+/// label: the author's horizontal padding+border when there is any, else the
+/// UA well (24px) the bare-control calibration uses.
+///
+/// This exists as one function because a button has TWO intrinsic widths and
+/// they differ only in which advance goes in — the whole label for
+/// max-content, the widest word for min-content (`grid::form_control_min_content_width`).
+/// Written as two copies of the composition, a later change to the padding
+/// rule would land on one of them; `settings` is on the board tonight because
+/// a flex container and `own_max_content_width` held two copies of one rule
+/// and only one of them had been fixed.
+pub(crate) fn button_border_box_width(
+    style: &ComputedStyle,
+    font_size: f32,
+    label_advance: f32,
+) -> f32 {
+    let px = |l: &Length| match l {
+        Length::Percent(_) | Length::Auto => 0.0,
+        other => other.to_px(font_size, 16.0, 0.0),
+    };
+    let author_pb_h = px(&style.padding_left)
+        + px(&style.padding_right)
+        + px(&style.border_left_width)
+        + px(&style.border_right_width);
+    if author_pb_h > 0.0 {
+        label_advance + author_pb_h
+    } else {
+        label_advance + 24.0
+    }
+}
+
 /// Intrinsic BORDER-box size of a form control: the bare-control calibration,
 /// or the control's content line composed with author padding/border. Block
 /// flow (`layout_form_control`) and flex items (`flex::get_intrinsic_*`) both
@@ -290,20 +321,10 @@ pub(crate) fn form_control_intrinsic_size(
                 style.font_style,
             )
             .width;
-            let px = |l: &Length| match l {
-                Length::Percent(_) | Length::Auto => 0.0,
-                other => other.to_px(font_size, 16.0, 0.0),
-            };
-            let author_pb_h = px(&style.padding_left)
-                + px(&style.padding_right)
-                + px(&style.border_left_width)
-                + px(&style.border_right_width);
-            let width = if author_pb_h > 0.0 {
-                label_width + author_pb_h
-            } else {
-                label_width + 24.0
-            };
-            (width, single_line_box(19.0 * ua_scale))
+            (
+                button_border_box_width(style, font_size, label_width),
+                single_line_box(19.0 * ua_scale),
+            )
         }
         FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
             // Fixed size for checkboxes and radios
@@ -11723,6 +11744,264 @@ mod tests {
             got > padding_only + 1.0,
             "the labels must be inside the sum ({got} vs the padding-only {padding_only})"
         );
+    }
+
+    // ---- a form control's MIN-content contribution (n68) -----------------
+    //
+    // n67 gave `own_max_content_width` a FormControl arm and left
+    // `own_min_content_width` without one, so a control's min-content was its
+    // padding box alone. Min-content is used as a FLOOR — css-flexbox-1 §4.5
+    // automatic minimum size, and shrink-to-fit — so the effect was not a
+    // too-small preferred width but a control allowed to shrink past its own
+    // text. Chrome 148, measured on this seat:
+    //
+    //   button "Save Changes", padding 8px 16px + 1px border
+    //     min-content 90.031  = widest word "Changes" 56.047 + 34
+    //     max-content 125.844 = whole label        91.844 + 34
+    //   an inline-block <span> with the same padding and label: IDENTICAL.
+    //   two such buttons in a `display: flex; width: 120px` line:
+    //     Chrome floors them at 90.031 / 77.594 and OVERFLOWS the line.
+    //
+    // The span row is the load-bearing one: it says a button's min-content is
+    // the ordinary text rule, so these guards assert against a measured word
+    // advance rather than against a number copied out of Chrome.
+
+    /// A button with the author padding+border of `settings`' `.btn` (34px),
+    /// big enough that the padding box ALONE still looks like a plausible
+    /// width — a bare control could not tell the defect from the fix.
+    fn n68_button(label: &str) -> LayoutBox {
+        let mut s = ComputedStyle::new();
+        s.box_sizing = BoxSizing::BorderBox;
+        s.font_size = Length::Px(13.6);
+        s.padding_left = Length::Px(16.0);
+        s.padding_right = Length::Px(16.0);
+        s.border_left_width = Length::Px(1.0);
+        s.border_right_width = Length::Px(1.0);
+        LayoutBox::new(
+            BoxType::FormControl(FormControlType::Button {
+                label: label.to_string(),
+                button_type: "button".to_string(),
+            }),
+            s,
+        )
+    }
+
+    /// The advance of `word` in a box's own font — the quantity Chrome's
+    /// min-content rule is stated in, measured with the same shaper layout
+    /// uses so the guard does not hardcode this seat's font stack.
+    fn n68_advance(b: &LayoutBox, word: &str) -> f32 {
+        let font_size = match b.style.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        crate::measure_text_advanced(
+            word,
+            &b.style.font_family,
+            font_size,
+            b.style.font_weight,
+            b.style.font_style,
+        )
+        .width
+    }
+
+    #[test]
+    fn a_buttons_min_content_is_its_widest_word_not_its_whole_label() {
+        let b = n68_button("Save Changes");
+        let padding_border = crate::grid::horizontal_padding_border(&b.style);
+        let widest_word = n68_advance(&b, "Changes");
+        let whole_label = n68_advance(&b, "Save Changes");
+        // Fixture integrity: the three candidate answers must be distinct, or
+        // the assert below cannot tell the rule from either wrong answer.
+        assert!(
+            widest_word > 1.0 && whole_label > widest_word + 1.0,
+            "fixture: the label must have a strictly widest word \
+             (word {widest_word}, label {whole_label})"
+        );
+        let got = crate::grid::own_min_content_width(&b);
+        assert!(
+            (got - (widest_word + padding_border)).abs() < 0.01,
+            "a button's min-content is its widest word plus padding+border \
+             ({} = {widest_word} + {padding_border}), got {got} \
+             (the whole label would be {}, the padding box alone {padding_border})",
+            widest_word + padding_border,
+            whole_label + padding_border
+        );
+    }
+
+    #[test]
+    fn a_buttons_min_content_is_strictly_narrower_than_its_max_content() {
+        // Stated as its own claim because it is the PROPERTY the floor needs:
+        // a min-content that merely equals max-content still floors, but at
+        // the wrong place, and an assert on one number alone cannot see that.
+        let b = n68_button("Save Changes");
+        let min = crate::grid::own_min_content_width(&b);
+        let max = crate::grid::own_max_content_width(&b);
+        assert!(
+            min < max - 1.0 && min > crate::grid::horizontal_padding_border(&b.style) + 1.0,
+            "a two-word button sits strictly between its padding box and its \
+             whole label (min {min}, max {max})"
+        );
+    }
+
+    #[test]
+    fn a_single_word_button_has_the_same_min_and_max_content() {
+        // "Cancel" has no soft-wrap opportunity, so Chrome gives 77.594 for
+        // both. A rule that always subtracted "the last word" would fail here.
+        let b = n68_button("Cancel");
+        let min = crate::grid::own_min_content_width(&b);
+        let max = crate::grid::own_max_content_width(&b);
+        assert!(
+            (min - max).abs() < 0.01,
+            "a one-word button cannot wrap, so min == max (min {min}, max {max})"
+        );
+    }
+
+    #[test]
+    fn a_nowrap_button_carries_its_whole_label_into_min_content() {
+        // `white-space: nowrap` removes the wrap opportunity, so the widest
+        // unbreakable unit is the entire label. This is what makes the button
+        // arm a TEXT rule rather than a "strip the last word" rule.
+        let mut b = n68_button("Save Changes");
+        b.style.white_space = rustkit_css::WhiteSpace::Nowrap;
+        let min = crate::grid::own_min_content_width(&b);
+        let max = crate::grid::own_max_content_width(&b);
+        assert!(
+            (min - max).abs() < 0.01,
+            "under nowrap a button's min-content is its whole label \
+             (min {min}, max {max})"
+        );
+    }
+
+    #[test]
+    fn a_bare_buttons_min_content_keeps_the_ua_well() {
+        // With no author padding the composition falls back to the 24px UA
+        // well, and it must still be there under min-content — otherwise a
+        // bare button floors at its bare text and paints over its own border.
+        let mut b = n68_button("Save Changes");
+        b.style.padding_left = Length::Px(0.0);
+        b.style.padding_right = Length::Px(0.0);
+        b.style.border_left_width = Length::Px(0.0);
+        b.style.border_right_width = Length::Px(0.0);
+        let widest_word = n68_advance(&b, "Changes");
+        let got = crate::grid::own_min_content_width(&b);
+        assert!(
+            (got - (widest_word + 24.0)).abs() < 0.01,
+            "a bare button's min-content is its widest word plus the 24px UA \
+             well ({}), got {got}",
+            widest_word + 24.0
+        );
+    }
+
+    #[test]
+    fn controls_that_cannot_wrap_have_min_content_equal_to_max_content() {
+        // Chrome on this seat: input 185/185, padded input 215/215, select
+        // 137/137, textarea 182/182, checkbox 13, range 129. None of them has
+        // a soft-wrap opportunity, so delegating is the rule and not a
+        // shortcut — and the delegation must take the WIDTH, not the height.
+        let mut s = ComputedStyle::new();
+        s.box_sizing = BoxSizing::BorderBox;
+        s.font_size = Length::Px(13.6);
+        let controls = [
+            FormControlType::TextInput {
+                input_type: "text".to_string(),
+                value: String::new(),
+                placeholder: String::new(),
+            },
+            FormControlType::Select {
+                size: 1,
+                options: vec!["A longer option text".to_string(), "Short".to_string()],
+                selected_index: None,
+            },
+            FormControlType::TextArea {
+                rows: 2,
+                cols: 20,
+                value: String::new(),
+                placeholder: String::new(),
+            },
+            FormControlType::Checkbox { checked: false },
+        ];
+        for control in controls {
+            let b = LayoutBox::new(BoxType::FormControl(control.clone()), s.clone());
+            let intrinsic = crate::form_control_intrinsic_size(&b.style, &control);
+            let min = crate::grid::own_min_content_width(&b);
+            assert!(
+                (min - intrinsic.0).abs() < 0.01,
+                "{control:?}: min-content is the control's intrinsic WIDTH \
+                 {} (its height is {}), got {min}",
+                intrinsic.0,
+                intrinsic.1
+            );
+            assert!(
+                (min - crate::grid::own_max_content_width(&b)).abs() < 0.01,
+                "{control:?}: min-content == max-content, got {min}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_pixel_width_wins_over_a_buttons_min_content() {
+        // The arm sits BELOW the `width: Px` check. Moving it above would
+        // re-size every explicitly sized control from its text — and this is
+        // the guard n67's M4 probe proved can be left green by a mutation
+        // aimed at the wrong one of two textually identical blocks.
+        let mut b = n68_button("Save Changes");
+        b.style.width = Length::Px(40.0);
+        let got = crate::grid::own_min_content_width(&b);
+        assert!(
+            (got - 40.0).abs() < 0.01,
+            "a specified border-box width is the min-content contribution, got {got}"
+        );
+    }
+
+    #[test]
+    fn a_flex_items_automatic_minimum_floors_a_button_at_its_widest_word() {
+        // The consumer-level claim, and the one the defect was actually about:
+        // css-flexbox-1 §4.5 floors a `min-width: auto` item at its
+        // min-content size. Chrome overflows a 120px line rather than shrink
+        // two buttons below 90.031 and 77.594; RustKit gave 72.17 and 39.84
+        // because the floor it consulted was the padding box.
+        //
+        // Asserted by LAYING THE LINE OUT rather than by calling
+        // `own_min_content_width` a fourth time, so an arm that satisfies the
+        // sizing guards but is never reached from the floor still fails here.
+        let (save, cancel) = (n68_button("Save Changes"), n68_button("Cancel"));
+        let want_save =
+            n68_advance(&save, "Changes") + crate::grid::horizontal_padding_border(&save.style);
+        let want_cancel =
+            n68_advance(&cancel, "Cancel") + crate::grid::horizontal_padding_border(&cancel.style);
+        // Fixture integrity: the line must be narrower than the two floors, or
+        // flex never shrinks and the guard passes without exercising anything.
+        let line = 120.0;
+        assert!(
+            want_save + want_cancel > line + 1.0,
+            "fixture: the floors ({want_save} + {want_cancel}) must overflow the \
+             {line}px line"
+        );
+
+        let mut cs = ComputedStyle::new();
+        cs.display = rustkit_css::Display::Flex;
+        cs.box_sizing = BoxSizing::BorderBox;
+        let mut container = LayoutBox::new(BoxType::Block, cs);
+        container.children.push(save);
+        container.children.push(cancel);
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, line, 40.0),
+            ..Default::default()
+        };
+        crate::flex::layout_flex_container(&mut container, &containing);
+
+        for (item, want, name) in [
+            (&container.children[0], want_save, "Save Changes"),
+            (&container.children[1], want_cancel, "Cancel"),
+        ] {
+            let got = item.dimensions.border_box().width;
+            assert!(
+                (got - want).abs() < 0.01,
+                "flex must not shrink the {name:?} button below its min-content \
+                 {want}; got {got} (the padding box alone is {})",
+                crate::grid::horizontal_padding_border(&item.style)
+            );
+        }
     }
 
     #[test]
