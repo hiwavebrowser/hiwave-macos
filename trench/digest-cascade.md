@@ -280,3 +280,27 @@ The #331 pairs put the A side (b722249) at 688–907 ms on wikipedia. That's alr
 1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
 2. (Carried over, blocking the metric) A standing quiet window. This is the third session running with no measurement. One release build now costs 35 min, most of an hourly session. Default: keep grabbing dips.
 3. **Merge #333 as-is (R1 CLEAR, R2 PASS), with the vars-collapse follow-up as its own PR?** Its speed is still unproven, but the profile says the follow-up is where its win is. Default: yes, merge #333 on the stamps, then open the follow-up next session.
+
+## 2026-09-28 19:35
+
+**New ratio of record: 24.0× (wikipedia), down from 45.2×.** Develop 8567760 (with #331 + #333), 5 runs back to back at load ~4.5, no cargo running. Two PRs opened: **#338** (vars-collapse, github B/A ~0.90) and **#340** (list members prepared once, github B faster on 5/5 pairs). Both receipts are pixel-identical to develop on all 26 cases.
+
+| site | quiet record 10:00 (develop b722249-era) | **record 18:55 (develop 8567760)**, median of 5 | raw |
+|---|---|---|---|
+| cnn | 1827 ms → 8.7× | **1291 ms → 6.1×** | 1276, 1330, 1291, 1297, 1274 |
+| github | 2624 ms → 23.9× | **1996 ms → 18.1×** | 1996, 2001, 1971, 2650, 1827 |
+| wikipedia | 903 ms → 45.2× | **480 ms → 24.0×** (worst) | 479, 491, 506, 458, 480 |
+
+Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, the same binary put wikipedia at 594–626 ms (~30×). A 5-run of develop 329cb57 at load 4–6 also read 934 ms, while the pairs 2 minutes before it read ~650 ms. So even at a low load average the machine drifts 1.3–1.4× between minutes. 24.0× is the tightest 5-run so far (raw spread 458–506). The honest band is **24–30×**.
+
+- **#333's quiet B/A** (owed from last session; A = develop 329cb57, B = 2e60e9a, 2 clean pairs at load ~5): cnn 1.00/1.02, **github 1.07/1.19**, wikipedia 0.97/1.00. On its own it was flat to slower on github, which is the `to_map` flatten the profile flagged. #338 is the fix.
+- **PR #338** `atlas/cs-vars-collapse` @ **948e0f0** (85fd338 plus an additive merge of develop 8567760). css 44/44, engine 196/196. Receipt: 26/26 avg 1.2%, builtins 5/5, **diffPixels identical to develop 8567760 on all 26**. B/A (4 pairs, load 13→4.5): github .81 .96 .85 .98 (**~0.90**), cnn ~0.89, wikipedia ~1.02 (flat, expected).
+- **PR #340** `atlas/cs-prepared-list-members` @ **70641a3** (from develop 8567760). `PreparedSelector::List(Vec<Rc<PreparedSelector>>)`: members are prepared once in `prepare()`, and no longer string-rehashed per element. engine 197/197 (new test `a_selector_list_holds_its_members_prepared`). Receipt: 26/26, **diffPixels identical to develop 8567760 on all 26**. B/A at load 10–16: github .69 .85 .94 .85 .72 (5/5 faster); cnn and wikipedia were noise past pair 2. The PR body marks the speed as provisional.
+- **Instrument:** `trench/tools/cs_cargo.py <worktree> <cargo args>`, this lane's cargo runner with CARGO_TARGET_DIR=cascade-target. Bare `cargo`, `cd && cargo` and `--manifest-path` all need approval in this lane. Release builds took 5 min at load ~5 and 14 min at load 15.
+- **Saved binaries:** `cascade-target/pc-dev-8567760` (develop), `pc-vc-948e0f0` (#338), `pc-pl-head` (#340 @ 70641a3).
+- **Next session:** (1) a quiet B/A for #340 (`ab.py pc-dev-8567760 pc-pl-head 4`) → PR body; (2) once #338 and #340 land, re-profile github (it's now the biggest absolute cost; `keys_may_match` 9%, `match_attribute_selector` 8.4%, `pseudo_element_style` 7.9% are the next candidates); (3) the flag-on real-site board for the `RUSTKIT_INCREMENTAL_RESTYLE` default flip, which is still the biggest lever.
+
+**Decisions for Pete**
+1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
+2. **Accept 24.0× as the ratio of record, with a stated 24–30× band?** Even at a low load average, the machine drifts ~1.3× minute to minute, so any single 5-run is optimistic or pessimistic by that much. Default: record 24.0× (tightest raw spread yet), and require every later record to be a 5-run with interleaved pairs of the prior record binary in the same window.
+3. **Merge order for #338 / #340?** They're independent (css vs engine) and both are pixel-identical to develop. Default: whichever R1/R2 clears first; neither needs a rebase on the other.
