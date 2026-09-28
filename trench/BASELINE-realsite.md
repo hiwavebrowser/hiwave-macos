@@ -62,6 +62,8 @@ Whichever comes first:
 
 ## Changes
 
+- 2026-09-28 (Pete's OK): swapped out chatgpt (Cloudflare 403), ebay (Akamai 403) nytimes (DataDome 403) and amazon (AWS WAF 202, blank frame). All four refuse RustKit at the network layer, so they score 0 no matter what the engine does. Replacements from the wide board, chosen for structure, loading today, with a working Chrome oracle: walmart (product grids), shopify (marketing and commerce layout, 96% readable), squarespace (design-heavy editorial layout), lyft (marketing layout, 100% readable). The board stays at 20 sites / 60 points. Scores before and after this date are NOT comparable. The trend restarts here.
+
 - 2026-09-23 — board defined. Baseline 0/60 pending instrument.
 - 2026-09-23 — instrument built (`parity-capture --url`, `scripts/realsite_board.py`,
   `tools/parity_oracle/realsite.mjs`); measured baseline **12/60**. How the
