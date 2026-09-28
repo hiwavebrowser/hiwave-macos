@@ -2988,6 +2988,18 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
     max_contribution + padding_border
 }
 
+/// A length that is definite at track-sizing time without a containing block:
+/// font-relative (`em`, `rem`) or viewport-relative. An item's
+/// `width: 12.25rem` is as explicit as `196px`, but the contribution arms only
+/// matched `Px`, so it fell through to the content estimate and a
+/// `min-content` track (wikipedia's page-tools column) came out too narrow.
+fn is_font_or_viewport_relative(l: &Length) -> bool {
+    matches!(
+        l,
+        Length::Em(_) | Length::Rem(_) | Length::Vw(_) | Length::Vh(_) | Length::Vmin(_) | Length::Vmax(_)
+    )
+}
+
 /// Resolve a length used in an intrinsic-size contribution to px.
 ///
 /// These used to be `if let Length::Px(v) = l { v } else { 0.0 }`, which
@@ -3005,18 +3017,6 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
 /// containing block, which is not available at intrinsic-sizing time. That is
 /// a real remaining gap, left explicit here rather than hidden behind the
 /// same silent fallback that caused this bug.
-/// A length that is definite at track-sizing time without a containing block:
-/// font-relative (`em`, `rem`) or viewport-relative. An item's
-/// `width: 12.25rem` is as explicit as `196px`, but the contribution arms only
-/// matched `Px`, so it fell through to the content estimate and a
-/// `min-content` track (wikipedia's page-tools column) came out too narrow.
-fn is_font_or_viewport_relative(l: &Length) -> bool {
-    matches!(
-        l,
-        Length::Em(_) | Length::Rem(_) | Length::Vw(_) | Length::Vh(_) | Length::Vmin(_) | Length::Vmax(_)
-    )
-}
-
 fn intrinsic_len_px(l: &Length, font_size: f32) -> f32 {
     match l {
         Length::Percent(_) => 0.0,
