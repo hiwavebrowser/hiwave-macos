@@ -4162,17 +4162,21 @@ impl Engine {
         // attribute names or tag (by their base selector), plus the universal
         // ones: github's ~1,000 `::before`/`::after` rules were walked in full
         // for every element, half of all cascade time.
-        let rules: Box<dyn Iterator<Item = &Rule>> = match (index.as_ref(), indexed) {
-            (Some(ix), Some(buckets)) => Box::new(
-                buckets
-                    .candidates(tag_name, attributes)
-                    .into_iter()
-                    .map(|g| ix.rule(stylesheets, g)),
-            ),
-            _ => Box::new(stylesheets.iter().flat_map(|s| s.rules.iter())),
-        };
+        let rules: Box<dyn Iterator<Item = (Option<&[SubjectKey]>, &Rule)>> =
+            match (index.as_ref(), indexed) {
+                (Some(ix), Some(buckets)) => Box::new(
+                    buckets
+                        .candidates(tag_name, attributes)
+                        .into_iter()
+                        .map(move |g| {
+                            let keys = ix.pseudo_keys[g as usize].as_deref().map(Vec::as_slice);
+                            (keys, ix.rule(stylesheets, g))
+                        }),
+                ),
+                _ => Box::new(stylesheets.iter().flat_map(|s| s.rules.iter()).map(|r| (None, r))),
+            };
 
-        for rule in rules {
+        for (indexed_keys, rule) in rules {
             {
                 let selector = &rule.selector;
 
@@ -4188,7 +4192,12 @@ impl Engine {
                     // subject prefilter first, exactly as the cascade does.
                     // A bare `::before` has no subject to prefilter on.
                     if (base_selector.trim().is_empty()
-                        || self.rule_may_match(base_selector.trim(), tag_name, attributes))
+                        || match indexed_keys {
+                            Some(keys) => Self::keys_may_match(keys, tag_name, attributes),
+                            None => {
+                                self.rule_may_match(base_selector.trim(), tag_name, attributes)
+                            }
+                        })
                         && self.selector_matches(
                         base_selector.trim(),
                         tag_name,
@@ -4676,7 +4685,12 @@ impl Engine {
         };
 
         for (rule_index, rule) in rules {
-            if self.rule_may_match(&rule.selector, tag_name, attributes)
+            // With an index, `rule_index` is the global index `g`.
+            let may_match = match index.as_ref() {
+                Some(ix) => Self::keys_may_match(&ix.keys[rule_index], tag_name, attributes),
+                None => self.rule_may_match(&rule.selector, tag_name, attributes),
+            };
+            if may_match
                 && self.selector_matches(
                     &rule.selector,
                     tag_name,
@@ -7502,6 +7516,8 @@ impl Engine {
         let mut ix = RuleIndex {
             source: RuleIndex::source_of(stylesheets),
             rules: Vec::new(),
+            keys: Vec::new(),
+            pseudo_keys: Vec::new(),
             main: RuleBuckets::default(),
             before: RuleBuckets::default(),
             after: RuleBuckets::default(),
@@ -7510,9 +7526,12 @@ impl Engine {
             for (r, rule) in sheet.rules.iter().enumerate() {
                 let g = ix.rules.len() as u32;
                 ix.rules.push((s as u32, r as u32));
-                for key in self.subject_keys(&rule.selector).iter() {
+                let keys = self.subject_keys(&rule.selector);
+                for key in keys.iter() {
                     ix.main.file(key, g);
                 }
+                ix.keys.push(keys);
+                let mut pseudo_keys = None;
                 // Same test as create_pseudo_element's (the single-colon
                 // form covers the double-colon one). Filed under the keys of
                 // the BASE selector, the one create_pseudo_element prefilters:
@@ -7529,11 +7548,15 @@ impl Engine {
                     if base.is_empty() {
                         buckets.universal.push(g);
                     } else {
-                        for key in self.subject_keys(base).iter() {
+                        // create_pseudo_element prefilters the TRIMMED base.
+                        let keys = self.subject_keys(base.trim());
+                        for key in keys.iter() {
                             buckets.file(key, g);
                         }
+                        pseudo_keys = Some(keys);
                     }
                 }
+                ix.pseudo_keys.push(pseudo_keys);
             }
         }
         ix
@@ -7545,9 +7568,19 @@ impl Engine {
         tag_name: &str,
         attributes: &HashMap<String, String>,
     ) -> bool {
+        Self::keys_may_match(&self.subject_keys(selector), tag_name, attributes)
+    }
+
+    /// `rule_may_match` with the subject keys already in hand (the rule
+    /// index stores them per rule).
+    fn keys_may_match(
+        keys: &[SubjectKey],
+        tag_name: &str,
+        attributes: &HashMap<String, String>,
+    ) -> bool {
         #[cfg(test)]
         PREFILTER_VISITS.with(|n| n.set(n.get() + 1));
-        self.subject_keys(selector).iter().any(|k| {
+        keys.iter().any(|k| {
             k.id.as_deref()
                 .map_or(true, |id| attributes.get("id").map(String::as_str) == Some(id))
                 && k.tag
@@ -18580,6 +18613,12 @@ struct RuleIndex {
     source: (usize, usize, usize),
     /// Global rule index -> (sheet, rule within sheet).
     rules: Vec<(u32, u32)>,
+    /// Global rule index -> the subject keys of its selector, and (for a
+    /// `:before`/`:after` rule with a non-empty base) of its base selector.
+    /// Computed once here so `rule_may_match` doesn't re-hash the selector
+    /// string for every candidate of every element (24% of github's cascade).
+    keys: Vec<Rc<Vec<SubjectKey>>>,
+    pseudo_keys: Vec<Option<Rc<Vec<SubjectKey>>>>,
     /// Every rule, by its subject keys.
     main: RuleBuckets,
     /// Rules whose selector ends in `:before`/`::before` (resp. after), the
