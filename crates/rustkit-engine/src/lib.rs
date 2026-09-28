@@ -19506,9 +19506,12 @@ enum Pseudo {
 struct StyleMemo {
     verify: bool,
     key: Option<StyleMemoKey>,
-    styles: HashMap<rustkit_dom::NodeId, ComputedStyle>,
+    /// Boxed: a `ComputedStyle` is ~1.5 KB, and unboxed tables of them cost
+    /// the recording build more in fresh pages and rehash copies than the
+    /// replay saves (wikipedia: ~11k entries).
+    styles: HashMap<rustkit_dom::NodeId, Box<ComputedStyle>>,
     /// `::before`/`::after` cascades; None records that no rule matched.
-    pseudos: HashMap<(rustkit_dom::NodeId, Pseudo), Option<ComputedStyle>>,
+    pseudos: HashMap<(rustkit_dom::NodeId, Pseudo), Option<Box<ComputedStyle>>>,
     in_build: Option<MemoUse>,
     hits: usize,
     /// Replay lookups the recording did not cover. Each one cascades in
@@ -19642,7 +19645,14 @@ fn memoized_style(
     node: rustkit_dom::NodeId,
     compute: impl FnOnce() -> ComputedStyle,
 ) -> ComputedStyle {
-    through_memo(|m| &mut m.styles, node, same_computed_style, compute)
+    through_memo(
+        |m| &mut m.styles,
+        node,
+        |s| Box::new(s.clone()),
+        |b| (**b).clone(),
+        |b, s| same_computed_style(b, s),
+        compute,
+    )
 }
 
 /// The `::before`/`::after` cascade for `node`, through the memo like
@@ -19655,9 +19665,11 @@ fn memoized_pseudo_style(
     through_memo(
         |m| &mut m.pseudos,
         (node, pseudo),
-        |a, b| match (a, b) {
+        |s| s.as_ref().map(|s| Box::new(s.clone())),
+        |b| b.as_deref().cloned(),
+        |b, s| match (b, s) {
             (None, None) => true,
-            (Some(a), Some(b)) => same_computed_style(a, b),
+            (Some(b), Some(s)) => same_computed_style(b, s),
             _ => false,
         },
         compute,
@@ -19665,12 +19677,15 @@ fn memoized_pseudo_style(
 }
 
 /// Record, replay or verify one memo entry, per the build in progress.
-fn through_memo<K: std::hash::Hash + Eq + std::fmt::Debug, V: Clone>(
-    table: fn(&mut StyleMemo) -> &mut HashMap<K, V>,
+/// Values are stored as `S` (`store`) and handed back as `T` (`load`).
+fn through_memo<K: std::hash::Hash + Eq + std::fmt::Debug, T, S>(
+    table: fn(&mut StyleMemo) -> &mut HashMap<K, S>,
     key: K,
-    same: fn(&V, &V) -> bool,
-    compute: impl FnOnce() -> V,
-) -> V {
+    store: fn(&T) -> S,
+    load: fn(&S) -> T,
+    same: fn(&S, &T) -> bool,
+    compute: impl FnOnce() -> T,
+) -> T {
     let use_ = STYLE_MEMO.with(|m| m.borrow().as_ref().and_then(|memo| memo.in_build));
     match use_ {
         None => compute(),
@@ -19678,7 +19693,7 @@ fn through_memo<K: std::hash::Hash + Eq + std::fmt::Debug, V: Clone>(
             let value = compute();
             STYLE_MEMO.with(|m| {
                 if let Some(memo) = m.borrow_mut().as_mut() {
-                    table(memo).insert(key, value.clone());
+                    table(memo).insert(key, store(&value));
                 }
             });
             value
@@ -19687,7 +19702,7 @@ fn through_memo<K: std::hash::Hash + Eq + std::fmt::Debug, V: Clone>(
             let hit = STYLE_MEMO.with(|m| {
                 let mut slot = m.borrow_mut();
                 let memo = slot.as_mut()?;
-                let value = table(memo).get(&key).cloned();
+                let value = table(memo).get(&key).map(load);
                 match value.is_some() {
                     true => memo.hits += 1,
                     false => memo.misses += 1,
