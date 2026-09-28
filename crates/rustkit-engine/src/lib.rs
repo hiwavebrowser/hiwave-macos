@@ -2965,21 +2965,9 @@ impl Engine {
 
         let css_vars = self.extract_css_variables(&stylesheets);
 
-        // Every element's cascade below consults this; it is dropped (and
-        // uninstalled) when the build returns.
-        let _rule_index = RuleIndexScope::install(self.build_rule_index(&stylesheets));
-
-        // A trace describes ONE build. Keeping entries from the previous
-        // page would let `hiwave_style` answer with a stale element that no
-        // longer exists — the same class of lie as a gate reading a stale
-        // snapshot.
-        if let Some(trace) = self.style_trace.borrow_mut().as_mut() {
-            trace.clear();
-        }
-
         // A replayed style records no trace entries, so a traced build
         // always cascades in full.
-        let _style_memo = self
+        let style_memo = self
             .style_trace
             .borrow()
             .is_none()
@@ -2993,6 +2981,23 @@ impl Engine {
                 })
             })
             .flatten();
+
+        // Every element's cascade below consults this; it is dropped (and
+        // uninstalled) when the build returns. A replaying build takes its
+        // styles from the memo and skips building it; a node the recording
+        // missed still cascades correctly, by the unindexed scan.
+        let _rule_index = match style_memo.as_ref().is_some_and(StyleMemoBuild::replays) {
+            true => None,
+            false => Some(RuleIndexScope::install(self.build_rule_index(&stylesheets))),
+        };
+
+        // A trace describes ONE build. Keeping entries from the previous
+        // page would let `hiwave_style` answer with a stale element that no
+        // longer exists — the same class of lie as a gate reading a stale
+        // snapshot.
+        if let Some(trace) = self.style_trace.borrow_mut().as_mut() {
+            trace.clear();
+        }
 
         info!(
             inline_count = stylesheets.len() - external_stylesheets.len(),
@@ -3946,16 +3951,19 @@ impl Engine {
                 child_ancestors.extend(ancestors.iter().cloned());
 
                 // Check for ::before pseudo-element
-                if let Some(before_box) = self.create_pseudo_element(
-                    &tag_lower,
-                    attributes,
-                    stylesheets,
-                    css_vars,
-                    ancestors,
-                    siblings_before,
-                    sib,
-                    "::before",
-                ) {
+                if let Some(before_box) = memoized_pseudo_style(node.id, Pseudo::Before, || {
+                    self.pseudo_element_style(
+                        &tag_lower,
+                        attributes,
+                        stylesheets,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                        "::before",
+                    )
+                })
+                .and_then(Self::pseudo_element_box)
+                {
                     layout_box.children.push(before_box);
                 }
 
@@ -4056,16 +4064,19 @@ impl Engine {
                 }
 
                 // Check for ::after pseudo-element
-                if let Some(after_box) = self.create_pseudo_element(
-                    &tag_lower,
-                    attributes,
-                    stylesheets,
-                    css_vars,
-                    ancestors,
-                    siblings_before,
-                    sib,
-                    "::after",
-                ) {
+                if let Some(after_box) = memoized_pseudo_style(node.id, Pseudo::After, || {
+                    self.pseudo_element_style(
+                        &tag_lower,
+                        attributes,
+                        stylesheets,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                        "::after",
+                    )
+                })
+                .and_then(Self::pseudo_element_box)
+                {
                     layout_box.children.push(after_box);
                 }
 
@@ -4265,7 +4276,9 @@ impl Engine {
         }
     }
 
-    /// Create a pseudo-element (::before or ::after) if applicable.
+    /// Create a pseudo-element (::before or ::after) if applicable. The
+    /// layout build calls the two halves itself, through the style memo.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn create_pseudo_element(
         &self,
@@ -4278,6 +4291,31 @@ impl Engine {
         sib: SiblingContext,
         pseudo: &str,
     ) -> Option<LayoutBox> {
+        let style = self.pseudo_element_style(
+            tag_name,
+            attributes,
+            stylesheets,
+            ancestors,
+            siblings_before,
+            sib,
+            pseudo,
+        )?;
+        Self::pseudo_element_box(style)
+    }
+
+    /// The cascade half of `create_pseudo_element`: the pseudo-element's
+    /// style, or None when no rule matches it.
+    #[allow(clippy::too_many_arguments)]
+    fn pseudo_element_style(
+        &self,
+        tag_name: &str,
+        attributes: &std::collections::HashMap<String, String>,
+        stylesheets: &[Stylesheet],
+        ancestors: &[(String, Vec<String>, Option<String>)],
+        siblings_before: &[SiblingKey],
+        sib: SiblingContext,
+        pseudo: &str,
+    ) -> Option<ComputedStyle> {
         // Compute style for the pseudo-element by matching selectors with the pseudo suffix
         let mut pseudo_style = ComputedStyle::new();
 
@@ -4378,6 +4416,11 @@ impl Engine {
             }
         }
 
+        Some(pseudo_style)
+    }
+
+    /// The box half of `create_pseudo_element`, from the cascaded style.
+    fn pseudo_element_box(pseudo_style: ComputedStyle) -> Option<LayoutBox> {
         // Only create pseudo-element if content property is set
         let content = pseudo_style.content.as_ref()?;
 
@@ -19451,15 +19494,33 @@ enum MemoUse {
     Verify,
 }
 
+/// Which of an element's two generated boxes a memoized pseudo style is for.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Pseudo {
+    Before,
+    After,
+}
+
 /// Per-element cascade results from one build, for the next build of the
 /// same page to replay. `key` is None until a build has recorded into it.
 struct StyleMemo {
     verify: bool,
     key: Option<StyleMemoKey>,
     styles: HashMap<rustkit_dom::NodeId, ComputedStyle>,
+    /// `::before`/`::after` cascades; None records that no rule matched.
+    pseudos: HashMap<(rustkit_dom::NodeId, Pseudo), Option<ComputedStyle>>,
     in_build: Option<MemoUse>,
     hits: usize,
+    /// Replay lookups the recording did not cover. Each one cascades in
+    /// full, without a rule index (a replaying build does not build one).
+    misses: usize,
     mismatches: usize,
+}
+
+impl StyleMemo {
+    fn memoized(&self) -> usize {
+        self.styles.len() + self.pseudos.len()
+    }
 }
 
 thread_local! {
@@ -19472,6 +19533,11 @@ thread_local! {
 /// build records, a later one with an equal key replays. Dropping it (also on
 /// an early `?` return) discards the memo, so no build outside that span —
 /// in particular none after page script has run — can read it.
+///
+/// The memo is thread-local and the span crosses `load_images(..).await`.
+/// That is sound on the engine's `current_thread` runtime. Were the task ever
+/// to resume on another thread, its builds would find no memo there and
+/// cascade in full: a lost speedup, never a wrong replay.
 struct StyleMemoScope;
 
 impl StyleMemoScope {
@@ -19488,8 +19554,10 @@ impl StyleMemoScope {
                 verify: mode == RestyleMode::Verify,
                 key: None,
                 styles: HashMap::new(),
+                pseudos: HashMap::new(),
                 in_build: None,
                 hits: 0,
+                misses: 0,
                 mismatches: 0,
             })
         });
@@ -19505,7 +19573,17 @@ impl Drop for StyleMemoScope {
 
 /// One build's use of the memo, decided from its key at build start.
 /// Dropping it ends the build: a recording becomes replayable.
-struct StyleMemoBuild;
+struct StyleMemoBuild {
+    use_: MemoUse,
+}
+
+impl StyleMemoBuild {
+    /// True when this build takes its styles from the recording, so it has
+    /// no use for a rule index.
+    fn replays(&self) -> bool {
+        self.use_ == MemoUse::Replay
+    }
+}
 
 impl StyleMemoBuild {
     fn begin(key: StyleMemoKey) -> Option<Self> {
@@ -19530,8 +19608,9 @@ impl StyleMemoBuild {
             };
             memo.in_build = Some(use_);
             memo.hits = 0;
+            memo.misses = 0;
             memo.mismatches = 0;
-            Some(StyleMemoBuild)
+            Some(StyleMemoBuild { use_ })
         })
     }
 }
@@ -19545,8 +19624,9 @@ impl Drop for StyleMemoBuild {
                         info!(
                             ?use_,
                             hits = memo.hits,
+                            misses = memo.misses,
                             mismatches = memo.mismatches,
-                            memoized = memo.styles.len(),
+                            memoized = memo.memoized(),
                             "Incremental restyle"
                         );
                     }
@@ -19562,25 +19642,57 @@ fn memoized_style(
     node: rustkit_dom::NodeId,
     compute: impl FnOnce() -> ComputedStyle,
 ) -> ComputedStyle {
+    through_memo(|m| &mut m.styles, node, same_computed_style, compute)
+}
+
+/// The `::before`/`::after` cascade for `node`, through the memo like
+/// `memoized_style`.
+fn memoized_pseudo_style(
+    node: rustkit_dom::NodeId,
+    pseudo: Pseudo,
+    compute: impl FnOnce() -> Option<ComputedStyle>,
+) -> Option<ComputedStyle> {
+    through_memo(
+        |m| &mut m.pseudos,
+        (node, pseudo),
+        |a, b| match (a, b) {
+            (None, None) => true,
+            (Some(a), Some(b)) => same_computed_style(a, b),
+            _ => false,
+        },
+        compute,
+    )
+}
+
+/// Record, replay or verify one memo entry, per the build in progress.
+fn through_memo<K: std::hash::Hash + Eq + std::fmt::Debug, V: Clone>(
+    table: fn(&mut StyleMemo) -> &mut HashMap<K, V>,
+    key: K,
+    same: fn(&V, &V) -> bool,
+    compute: impl FnOnce() -> V,
+) -> V {
     let use_ = STYLE_MEMO.with(|m| m.borrow().as_ref().and_then(|memo| memo.in_build));
     match use_ {
         None => compute(),
         Some(MemoUse::Record) => {
-            let style = compute();
+            let value = compute();
             STYLE_MEMO.with(|m| {
                 if let Some(memo) = m.borrow_mut().as_mut() {
-                    memo.styles.insert(node, style.clone());
+                    table(memo).insert(key, value.clone());
                 }
             });
-            style
+            value
         }
         Some(MemoUse::Replay) => {
             let hit = STYLE_MEMO.with(|m| {
                 let mut slot = m.borrow_mut();
                 let memo = slot.as_mut()?;
-                let style = memo.styles.get(&node).cloned();
-                memo.hits += style.is_some() as usize;
-                style
+                let value = table(memo).get(&key).cloned();
+                match value.is_some() {
+                    true => memo.hits += 1,
+                    false => memo.misses += 1,
+                }
+                value
             });
             hit.unwrap_or_else(compute)
         }
@@ -19588,11 +19700,12 @@ fn memoized_style(
             let fresh = compute();
             STYLE_MEMO.with(|m| {
                 if let Some(memo) = m.borrow_mut().as_mut() {
-                    if let Some(recorded) = memo.styles.get(&node) {
+                    let differs = table(memo).get(&key).map(|recorded| !same(recorded, &fresh));
+                    if let Some(differs) = differs {
                         memo.hits += 1;
-                        if !same_computed_style(recorded, &fresh) {
+                        if differs {
                             memo.mismatches += 1;
-                            warn!(?node, "Incremental restyle: memoized style differs from a fresh cascade");
+                            warn!(?key, "Incremental restyle: memoized style differs from a fresh cascade");
                         }
                     }
                 }
@@ -19660,7 +19773,7 @@ mod incremental_restyle_tests {
         STYLE_MEMO.with(|m| {
             m.borrow()
                 .as_ref()
-                .map(|memo| (memo.hits, memo.mismatches, memo.styles.len()))
+                .map(|memo| (memo.hits, memo.mismatches, memo.memoized()))
         })
     }
 
@@ -19732,6 +19845,55 @@ mod incremental_restyle_tests {
         assert_eq!(replayed.z_index, 42);
         let fresh = memoized_style(fresh_node, ComputedStyle::new);
         assert_eq!(fresh.z_index, ComputedStyle::new().z_index);
+    }
+
+    #[test]
+    fn pseudo_element_styles_replay_including_no_match() {
+        let e = engine();
+        let d = Document::parse_html(PAGE).expect("parse");
+        let _scope = StyleMemoScope::arm_with(RestyleMode::Reuse).expect("armed");
+        paint(&e, &d);
+        let (pseudos, some) = STYLE_MEMO.with(|m| {
+            let m = m.borrow();
+            let memo = m.as_ref().expect("memo");
+            (memo.pseudos.len(), memo.pseudos.values().filter(|s| s.is_some()).count())
+        });
+        // Both pseudos of every element, whether or not a rule matched.
+        assert!(pseudos > 2 * some, "{pseudos} pseudo entries, {some} matched");
+        assert!(some >= 1, "`.tag::before` matched");
+
+        let key = STYLE_MEMO.with(|m| m.borrow().as_ref().and_then(|memo| memo.key.clone()));
+        let _build = StyleMemoBuild::begin(key.expect("recorded")).expect("replays");
+        let before = memoized_pseudo_style(rustkit_dom::NodeId::new(usize::MAX), Pseudo::Before, || None);
+        assert!(before.is_none(), "an unrecorded pseudo still computes");
+    }
+
+    #[test]
+    fn a_replay_the_recording_does_not_cover_cascades_without_an_index() {
+        let e = engine();
+        let d = Document::parse_html(PAGE).expect("parse");
+        let full = paint(&e, &d);
+
+        let _scope = StyleMemoScope::arm_with(RestyleMode::Reuse).expect("armed");
+        {
+            // An empty recording with this build's key: every lookup misses.
+            let _build = StyleMemoBuild::begin(StyleMemoKey {
+                view: None,
+                document: &d as *const Document,
+                external_sheets: 0,
+                viewport: None,
+                focus: None,
+            })
+            .expect("records");
+        }
+        assert_eq!(paint(&e, &d), full);
+        let (hits, misses) = STYLE_MEMO.with(|m| {
+            let m = m.borrow();
+            let memo = m.as_ref().expect("memo");
+            (memo.hits, memo.misses)
+        });
+        assert_eq!(hits, 0);
+        assert!(misses > 10, "{misses} lookups cascaded by the unindexed scan");
     }
 
     #[test]
