@@ -1197,6 +1197,38 @@ impl Engine {
             self.relayout(id)?;
         }
 
+        // The page's scripts see the new size, then get `resize` at
+        // `window`, as a browser window resize does. Listener exceptions go
+        // to the script log like the lifecycle events' do.
+        if let Some(view) = self.views.get_mut(&id) {
+            if let Some(bindings) = view.bindings.as_ref() {
+                let fired = bindings
+                    .set_dimensions(bounds.width as f64, bounds.height as f64)
+                    .and_then(|()| {
+                        bindings.fire_lifecycle_event(
+                            rustkit_bindings::LifecycleTarget::Window,
+                            "resize",
+                        )
+                    });
+                if let Err(e) = fired {
+                    view.script_log.push(ScriptRecord {
+                        source: "event:resize".into(),
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::Threw(e.to_string()),
+                    });
+                }
+                for message in bindings.take_reported_errors() {
+                    view.script_log.push(ScriptRecord {
+                        source: "event:resize".into(),
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::Threw(message),
+                    });
+                }
+            }
+        }
+
         // Emit event
         let _ = self.event_tx.send(EngineEvent::ViewResized {
             view_id: id,
@@ -2037,6 +2069,14 @@ impl Engine {
                 .set_location(&url)
                 .map_err(|e| EngineError::JsError(e.to_string()))?;
 
+            // `window.innerWidth/innerHeight` are this view's size, not the
+            // bindings' 800x600 placeholder: pages pick layouts from them.
+            if let Some((width, height)) = self.view_viewport(id) {
+                bindings
+                    .set_dimensions(width as f64, height as f64)
+                    .map_err(|e| EngineError::JsError(e.to_string()))?;
+            }
+
             let view = self
                 .views
                 .get_mut(&id)
@@ -2244,6 +2284,14 @@ impl Engine {
             bindings
                 .set_location(&url)
                 .map_err(|e| EngineError::JsError(e.to_string()))?;
+
+            // `window.innerWidth/innerHeight` are this view's size, not the
+            // bindings' 800x600 placeholder: pages pick layouts from them.
+            if let Some((width, height)) = self.view_viewport(id) {
+                bindings
+                    .set_dimensions(width as f64, height as f64)
+                    .map_err(|e| EngineError::JsError(e.to_string()))?;
+            }
 
             let view = self
                 .views
@@ -17914,6 +17962,30 @@ mod page_script_tests {
         rt.block_on(engine.load_url(view, url)).expect("load_url");
         let took = started.elapsed();
         (engine, view, took)
+    }
+
+    /// Scripts see the view's size, and a resize updates it and fires
+    /// `resize` at `window` (the page's layout choice must not stay frozen
+    /// at the load size).
+    #[test]
+    fn scripts_see_the_view_size_and_a_resize_updates_it() {
+        let page = r#"<html><head><script>
+var seen = [window.innerWidth + 'x' + window.innerHeight];
+window.addEventListener('resize', function () {
+    seen.push('resize:' + window.innerWidth + 'x' + window.innerHeight);
+});
+</script></head><body>hi</body></html>"#;
+        let port = serve(vec![("/", "text/html", page.to_string())]);
+        let (mut engine, view) = load(EngineConfig::default(), port);
+
+        let seen = engine.execute_script(view, "seen.join(',')").unwrap();
+        assert_eq!(seen, r#"String("200x100")"#);
+
+        engine
+            .resize_view(view, Bounds { x: 0, y: 0, width: 640, height: 480 })
+            .expect("resize");
+        let seen = engine.execute_script(view, "seen.join(',')").unwrap();
+        assert_eq!(seen, r#"String("200x100,resize:640x480")"#);
     }
 
     #[test]
