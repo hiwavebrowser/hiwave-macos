@@ -4804,16 +4804,26 @@ impl Engine {
                 Some(ix) => Self::keys_may_match(&ix.keys[rule_index], tag_name, attributes),
                 None => self.rule_may_match(&rule.selector, tag_name, attributes),
             };
-            if may_match
-                && self.selector_matches(
-                    &rule.selector,
-                    tag_name,
-                    attributes,
-                    ancestors,
-                    siblings_before,
-                    sib,
-                )
-            {
+            let matches = may_match
+                && match index.as_ref() {
+                    Some(ix) => self.selector_matches_prepared(
+                        &ix.prepared[rule_index],
+                        tag_name,
+                        attributes,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                    ),
+                    None => self.selector_matches(
+                        &rule.selector,
+                        tag_name,
+                        attributes,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                    ),
+                };
+            if matches {
                 let specificity = match index.as_ref() {
                     Some(ix) => ix.specificity[rule_index],
                     None => self.selector_specificity(&rule.selector),
@@ -7636,6 +7646,7 @@ impl Engine {
             keys: Vec::new(),
             pseudo_keys: Vec::new(),
             specificity: Vec::new(),
+            prepared: Vec::new(),
             main: RuleBuckets::default(),
             before: RuleBuckets::default(),
             after: RuleBuckets::default(),
@@ -7650,6 +7661,7 @@ impl Engine {
                 }
                 ix.keys.push(keys);
                 ix.specificity.push(self.selector_specificity(&rule.selector));
+                ix.prepared.push(self.prepared_selector(rule.selector.trim()));
                 let mut pseudo_keys = None;
                 // Same test as create_pseudo_element's (the single-colon
                 // form covers the double-colon one). Filed under the keys of
@@ -7851,10 +7863,31 @@ impl Engine {
         siblings_before: &[SiblingKey],
         sib: SiblingContext,
     ) -> bool {
+        let prepared = self.prepared_selector(selector.trim());
+        self.selector_matches_prepared(
+            &prepared,
+            tag_name,
+            attributes,
+            ancestors,
+            siblings_before,
+            sib,
+        )
+    }
+
+    /// `selector_matches` for an already-prepared selector (the rule index
+    /// keeps one per rule).
+    fn selector_matches_prepared(
+        &self,
+        prepared: &PreparedSelector,
+        tag_name: &str,
+        attributes: &HashMap<String, String>,
+        ancestors: &[(String, Vec<String>, Option<String>)],
+        siblings_before: &[SiblingKey],
+        sib: SiblingContext,
+    ) -> bool {
         #[cfg(test)]
         FULL_SELECTOR_MATCHES.with(|n| n.set(n.get() + 1));
-        let prepared = self.prepared_selector(selector.trim());
-        let (tokens, compounds) = match &*prepared {
+        let (tokens, compounds) = match prepared {
             PreparedSelector::Never => return false,
             PreparedSelector::List(members) => {
                 return members.iter().any(|s| {
@@ -17529,6 +17562,56 @@ mod rule_prefilter_tests {
     }
 
     #[test]
+    fn rule_index_prepared_selectors_match_like_the_string_path() {
+        // The indexed cascade matches through the index's stored prepared
+        // selector; it must agree with `selector_matches` on the string.
+        let css = "div {} .a {} #b {} div.a > p:first-child {} a:not(.x) {} \
+                   :where(#y) span {} ul li + li {} [data-z] {} .c::before {} \
+                   h1, #d .e {} * {} section .a {} .a.b {}";
+        let sheet = Stylesheet::parse(css).expect("css");
+        let sheets = std::slice::from_ref(&sheet);
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let ix = engine.build_rule_index(sheets);
+        assert_eq!(ix.prepared.len(), sheet.rules.len());
+        let chain = vec![
+            ancestor("section", &["a"], Some("d")),
+            ancestor("body", &[], None),
+            ancestor("html", &[], None),
+        ];
+        let elements = [
+            ("div", attrs(&[("class", "a b")])),
+            ("span", attrs(&[("class", "e"), ("data-z", "1")])),
+            ("a", attrs(&[("class", "x")])),
+            ("h1", attrs(&[("id", "b")])),
+            ("p", attrs(&[])),
+        ];
+        for (g, rule) in sheet.rules.iter().enumerate() {
+            for (tag, attributes) in &elements {
+                assert_eq!(
+                    engine.selector_matches_prepared(
+                        &ix.prepared[g],
+                        tag,
+                        attributes,
+                        &chain,
+                        &[],
+                        SiblingContext::SOLE,
+                    ),
+                    engine.selector_matches(
+                        &rule.selector,
+                        tag,
+                        attributes,
+                        &chain,
+                        &[],
+                        SiblingContext::SOLE,
+                    ),
+                    "{} on {tag}",
+                    rule.selector
+                );
+            }
+        }
+    }
+
+    #[test]
     fn pseudo_rules_filed_under_other_subjects_are_never_visited() {
         // github: ~1,000 `::before`/`::after` rules, every one prefiltered
         // (selector hashed, suffix trimmed) for every element, twice: half
@@ -18951,6 +19034,10 @@ struct RuleIndex {
     /// Global rule index -> `selector_specificity` of its selector, so a
     /// matched rule doesn't re-scan its selector string on every element.
     specificity: Vec<(usize, usize, usize)>,
+    /// Global rule index -> its prepared selector, so the cascade doesn't
+    /// SipHash the selector string into the prepared cache on every
+    /// candidate of every element.
+    prepared: Vec<Rc<PreparedSelector>>,
     /// Every rule, by its subject keys.
     main: RuleBuckets,
     /// Rules whose selector ends in `:before`/`::before` (resp. after), the
