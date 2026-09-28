@@ -829,3 +829,29 @@ Passing all 3: google, x, linkedin. RustKit blocked: amazon, ebay, nytimes. chat
 **Decisions for Pete:**
 1. Still open from 20:05: **real DOM bindings (JS track step 0)**. Every JS-rendered site (youtube, reddit, microsoft, instagram) stays blank until `document`/`Element` are backed by the Rust DOM.
 2. Still open: grid `grid-template-areas` for wikipedia; `<img>` through the ResourceLoader; `cargo fmt` on develop.
+
+
+## 2026-09-28 09:35 — wikipedia's page grid lands (#323); board 21/60
+
+**Points: 22/60 (`20260928T0045Z-fillrule`) → 21/60 (`20260928T1305Z-pr323`, #323 cd1e854 on develop ec43308).** ±1 is noise (ANALYSIS noise bound). google's oracle failed this run (both Chrome captures timed out), and that alone costs its 2 non-LOADS points. No RustKit check regressed.
+
+| run | head | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|
+| `20260928T0045Z-fillrule` | #309 60f57f3 | 22 | 13 | 6 | 3 | 22/51 |
+| `20260928T1305Z-pr323` | #323 cd1e854 | **21** | 13 | 5 | 3 | 21/51 |
+
+Passing all 3: x, linkedin. Oracle failed: google, yahoo. Unstable: youtube. RustKit blocked: amazon, ebay, nytimes. chatgpt: HTTP error.
+
+**What shipped: wikipedia's Vector 2022 grid now lays out like Chrome.** Layout could already place items by named area, but the cascade never fed it. No arm parsed `grid-template-areas`, `grid-area` or `grid-template`. Names parsed as `auto`. The areas parser split rows by source line, so minified CSS became one row. And `minmax(0,1fr)` / `12.25rem` tracks were dropped. Once areas worked, wikipedia went **blank**: its `min-content` title row kept a pre-layout estimate of one line per text node (a 145-link language menu, so ~2,700px). Phase 9.5's real-height correction only shrank `auto` rows; it now shrinks `min-content` rows too. Same-session A/B on wikipedia: develop 2/3 at 20.8% → #323 2/3 at **20.2%**. The article now starts at x=264 beside the left column, with Appearance in the right column, as in Chrome. Before, everything was one column at x=44.
+
+**Why no point yet (next):** `.mw-body`'s `min-content` second column resolves to 91px (Chrome ~164px), so the article column runs 100px too wide and every line wraps differently. Then the gray toolbar band, and the Contents column that Chrome shows.
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#323 `atlas/rs-grid-template-areas` @ cd1e854** (2 commits from develop ec43308: 21b642a parsing, cd1e854 min-content rows). 8 new tests through both layout entry points. The min-content pin was verified failing without cd1e854. Engine 179/179 and layout 554/554 when run alone. Campaign 26/26, avg 1.2% (= develop); builtins identical to #321's receipt. Local gates: none worse than the floor. Not run: wpt_tier1, clippy, or a ratchet diff against develop.
+
+**Seat note:** a test run during the cascade lane's build (load 14–18) showed a dozen timing-sensitive engine test failures. They all passed alone. If CI shows flakes on #323, that's the likely cause.
+
+**Next:** (1) grid `min-content` column sizing for `.mw-body` (wikipedia's likely point). (2) SVG `<g>` style inheritance (linkedin icons). (3) DOM-binding rung-0 read slice (DESIGN-dom-bindings-rung0.md §5).
+
+**Decisions for Pete:**
+1. None new. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.
