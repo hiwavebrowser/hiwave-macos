@@ -1,0 +1,90 @@
+{
+  "id": "ebay",
+  "url": "https://www.ebay.com/",
+  "chrome": [
+    {
+      "url": "https://www.ebay.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.ebay.com/",
+      "title": "Electronics, Cars, Fashion, Collectibles & More | eBay",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260928T1710Z-blockify/ebay/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260928T1710Z-blockify/ebay/chrome-a.png",
+      "elapsed_ms": 88327
+    },
+    {
+      "url": "https://www.ebay.com/",
+      "status": "error",
+      "error": "page.screenshot: Timeout 30000ms exceeded.",
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "oracle_headless": false,
+      "http_status": 200,
+      "elapsed_ms": 88620
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "error",
+    "html_file": null,
+    "url": "https://www.ebay.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": null,
+    "layout_path": null,
+    "layout_stats": null,
+    "elapsed_ms": 735,
+    "error": "Failed to load URL: NavigationError(\"HTTP error\")",
+    "wall_ms": 794
+  },
+  "access": {
+    "status": 403,
+    "vendor": "akamai",
+    "blocked": true
+  },
+  "loads": {
+    "pass": false,
+    "why": "blocked:akamai (HTTP 403) \u2014 Failed to load URL: NavigationError(\"HTTP error\")"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 72,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "107",
+      "119",
+      "128",
+      "151",
+      "197",
+      "60",
+      "accessories",
+      "adidas",
+      "advanced",
+      "all",
+      "amp",
+      "and",
+      "at",
+      "brand",
+      "brands",
+      "by",
+      "cars",
+      "cart",
+      "category",
+      "clothing",
+      "collectibles",
+      "contact",
+      "content",
+      "curated",
+      "deals"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}

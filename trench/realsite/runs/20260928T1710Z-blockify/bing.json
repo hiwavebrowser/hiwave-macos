@@ -1,0 +1,101 @@
+{
+  "id": "bing",
+  "url": "https://www.bing.com/",
+  "chrome": [
+    {
+      "url": "https://www.bing.com/",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.bing.com/",
+      "title": "Search - Microsoft Bing",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260928T1710Z-blockify/bing/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260928T1710Z-blockify/bing/chrome-a.png",
+      "elapsed_ms": 51523
+    },
+    {
+      "url": "https://www.bing.com/",
+      "status": "error",
+      "error": "page.screenshot: Timeout 30000ms exceeded.",
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "elapsed_ms": 73791
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.bing.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260928T1710Z-blockify/bing/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260928T1710Z-blockify/bing/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 9,
+      "threw": 2,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 118261,
+      "elapsed_ms": 1521
+    },
+    "elapsed_ms": 5186,
+    "error": null,
+    "wall_ms": 5272,
+    "non_background_fraction": 0.3614
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 40,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "1981",
+      "a",
+      "aew",
+      "approves",
+      "attend",
+      "base",
+      "creator",
+      "dies",
+      "dinner",
+      "discover",
+      "emergency",
+      "fuel",
+      "history",
+      "image",
+      "images",
+      "in",
+      "jumper",
+      "landing",
+      "makes",
+      "maps",
+      "mobile",
+      "news",
+      "rewards",
+      "rules",
+      "satterley"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "diff": 89.61005859375
+  },
+  "points": 1
+}

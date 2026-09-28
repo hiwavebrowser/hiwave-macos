@@ -855,3 +855,27 @@ Passing all 3: x, linkedin. Oracle failed: google, yahoo. Unstable: youtube. Rus
 
 **Decisions for Pete:**
 1. None new. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.
+
+
+## 2026-09-28 15:40 — blockify is #330 (merged); grid em/rem contributions pushed; board 18/60 under load (±0 for the fix)
+
+**Points: 21/60 (`20260928T1305Z-pr323`) → 18/60 (`20260928T1710Z-blockify`, c39a4e6).** The −3 is machine load, not the change. The other two lanes were building (load 15–25). Six Chrome oracle captures timed out, and RustKit hit its 30 s limit on netflix, github and cnn. Back-to-back A/B at load ~14 ties the binaries: netflix 25.0/22.1 s, github 54.1/54.1 s, cnn 33.9/34.4 s. The frames for weather, wikipedia, apple, bing and linkedin are pixel-identical between the two binaries. linkedin's one 29.8% pair was its served-variant drift; two reverse-order repeats were identical. facebook's −1 is oracle drift: its RustKit frame is pixel-identical to #323's.
+
+| run | head | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|
+| `20260928T1305Z-pr323` | #323 cd1e854 | 21 | 13 | 5 | 3 | 21/51 |
+| `20260928T1710Z-blockify` | #330 c39a4e6 | **18** | 10 | 5 | 3 | 18/51 |
+
+Passing all 3: google, x, linkedin. RustKit blocked: amazon, ebay, nytimes. chatgpt: HTTP error. Blank: youtube, reddit, microsoft. Oracle failed: reddit, yahoo, chatgpt, netflix, github, weather.
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#330 `atlas/rs-blockify-flex-items` @ c39a4e6: MERGED** (develop 329cb57) within the session. Display 3 §2.7: flex/grid items compute block-level `display`. Four failing-first tests through both entry points, engine 188/188. Campaign 26/26, avg 1.1756% vs 1.1782%. about improves, and card-grid gets +0.008 from sub-pixel pill edges (the tag moves y 695.875 → 695.80, where Chrome is 695.78). Ratchet vs #323: about paint up, settings geo_fails 252 → 250, none worse than the floor.
+- **`atlas/rs-grid-rem-width` @ 2378f50, pushed, NO PR yet** (from develop 329cb57). Grid track sizing only read `Px`/`Percent` widths, so `width:12.25rem` (wikipedia's page-tools nav) fell to the content estimate. The same gap was in min-width, height and min-height. Three engine tests through both entry points, each verified failing without the fix (924.5 vs 804, 993 vs 860, 0 vs 48). Engine 195/195. Layout 553/554: `text::font_resolve_tests::a_new_web_font_set_invalidates_the_cache` failed in the combined run. It's in text.rs, which this diff doesn't touch; the isolated re-run was cut off at the cap. **Next session:** re-run that test alone and on develop, run the campaign + ratchet receipt, A/B wikipedia (`scratch/gta/mincol.html`: nav 75.5px, should be 196), then open the PR.
+
+**Seat notes:** `git apply`, env-prefixed commands and heredocs need approval. Use Edit for patches. New hub helpers: `scratch/same_oracle.py` (score two runs' RustKit frames against one Chrome capture), `scratch/ab_frames_now.py [--reverse]` (back-to-back binaries A/B plus frame diff), `scratch/frame_moves.py`, `scratch/site_detail.py`, `scratch/log_phases.py`.
+
+**Next:** (1) finish rs-grid-rem-width (above). (2) SVG `<g>` style inheritance (linkedin icons). (3) Board runs need a quiet machine: three lanes at load 15–25 time out Chrome and RustKit alike.
+
+**Decisions for Pete:**
+1. **Board runs and the other two lanes' builds collide.** Today's full board lost 6 oracles and 3 RustKit loads to load 15–25. Should the lanes stagger (e.g. the real-site board gets a no-build window), or should the board retry timeouts once? A retry would be a scorer change, so it needs your OK.
+2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.
