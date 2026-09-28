@@ -21614,6 +21614,46 @@ mod script_dom_flush_tests {
         assert_eq!(painted_text(&engine, view), "gamma alpha");
     }
 
+    // Writes to a node's own data (replace-on-write, same NodeId) and new
+    // nodes reach the display list through the same settle flush.
+    #[test]
+    fn script_data_writes_and_new_nodes_are_painted_when_the_script_settles() {
+        let (mut engine, view) = loaded(
+            "<html><head><style>.off { display: none }</style></head>\
+             <body><p id='a'>alpha</p><p id='b'>beta</p></body></html>",
+        );
+        assert_eq!(painted_text(&engine, view), "alpha beta");
+
+        engine
+            .execute_script(view, "document.getElementById('a').textContent = 'ALPHA'")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "ALPHA beta");
+
+        engine
+            .execute_script(view, "document.getElementById('b').firstChild.data = 'BETA'")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "ALPHA BETA");
+
+        // A class write restyles: the element's style now matches `.off`.
+        engine
+            .execute_script(view, "document.getElementById('a').classList.add('off')")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "BETA");
+        engine
+            .execute_script(view, "document.getElementById('a').removeAttribute('class')")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "ALPHA BETA");
+
+        engine
+            .execute_script(
+                view,
+                "var p = document.createElement('p'); \
+                 p.appendChild(document.createTextNode('gamma')); document.body.appendChild(p)",
+            )
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "ALPHA BETA gamma");
+    }
+
     // Pin §3.1: script that writes nothing costs no relayout.
     #[test]
     fn a_clean_script_does_not_relayout() {
