@@ -152,3 +152,30 @@ The ratio of record is still 48.2× (06:03, quiet). The projections chain B/A me
 1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
 2. **Flipping `RUSTKIT_INCREMENTAL_RESTYLE` on by default** (the separate PR the plan requires) needs a real-site board run with the flag on. That board is the other lane's tool, on live URLs. OK for this lane to run it once in a quiet slot, or would you rather the real-site lane run it? Default: this lane runs it next quiet session, then opens the flip PR.
 3. Allow `ln -s` into `~/Repos/.worktrees/cs-*/target` (or `CARGO_TARGET_DIR=` prefixes) for this lane. Each receipt currently costs a second cold release build: 40 min at today's load, a third of a session.
+
+## 2026-09-28 10:55
+
+**#322 merged. PR #325 is open: under `RUSTKIT_INCREMENTAL_RESTYLE`, pseudo-element styles replay too, and a replaying build skips the rule index. The replay build 3 is down to ~0.31× (wikipedia) and ~0.09× (github) of its flag-off self; with #322 it was ~0.47× and ~0.2×. New quiet ratio of record for develop's default path: worst 45.2× (wikipedia), from 48.2×. Receipts no longer need a second cold build (`trench/tools/receipt_nobuild.py`).**
+
+| site | quiet record (06:03, #320) | **quiet record 10:00 (load 2.3–3.0, 179f92c flag off = develop default), median of 5** | flag on, 5 runs right after (machine drifted quieter: an upper bound, not a record) |
+|---|---|---|---|
+| cnn | 2175 ms → 10.4× | 1827 ms → **8.7×** (1980, 1827, 1717, 1956, 1658) | 9.3× (2 builds per load, so the flag can't apply) |
+| github | 2793 ms → 25.4× | 2624 ms → **23.9×** (2791, 2624, 2496, 2601, 2640) | 9.4× |
+| wikipedia | 964 ms → 48.2× | 903 ms → **45.2×** (654, 880, 903, 936, 962) | **25.0×** (worst) |
+
+Flipping the flag on by default would put the worst site at roughly 25–35×. The 25× reading is from 179f92c, before the recording-cost fixes, taken on a drifting machine. Interleaved B/A at head b722249 (load 9–16, clean pairs only): github 0.60 and 0.57, wikipedia 0.68 and 0.90.
+
+- **PR #325** `atlas/cs-replay-lazy-index` @ **b722249** on develop e5ae09d, 3 commits, open, waiting on R1/R2.
+  - 179f92c: the pseudo memo keyed `(NodeId, Before|After)` via one `through_memo` helper; a Replay build doesn't build the rule index (a miss cascades by the unindexed scan, counted as `misses`); R1's thread-local/await comment.
+  - 1f5c40e: memo values boxed.
+  - b722249: a content-less pseudo memoizes as None.
+  - Receipts at the head: builtins 5/5 avg 1.9%; campaign 26/26 avg 1.2% with **every case identical to #321's**; verify github 3153/3153 and wikipedia 11237/11237 with 0 mismatches and 0 misses; flag frames off/on 0.0000% on all three sites (control 0.0000%). lib 186/186.
+- **Lesson worth keeping.** 179f92c alone made the *recording* build slower on wikipedia (+60–100 ms, where #322 cost +15–20), which cancelled its build-3 gain there. `ComputedStyle` is 1480 bytes, and a universal `*::before, *::after` rule made every pseudo `Some`, so every one was deep-cloned. Boxing took it to about +45 ms; returning None when there's no `content` took it to about ±0. Always read per-build numbers, not only the total.
+- **Parked:** `atlas/cs-pseudo-paren-eof` @ **c2761f4** is pushed, but no PR yet. It's the `parse_pseudo_class` unclosed-paren panic: EOF now closes the block, per CSS Syntax. Test added, lib 185/185. I stopped its receipt build at the cap (load 23). Next session: build it, run `receipt_nobuild.py`, open the PR.
+- **Instrument:** `trench/tools/receipt_nobuild.py <worktree> [parity_test args]` runs `scripts/parity_test.py` unmodified except for its `cargo build` step, using the binary you put at `<worktree>/target/release/parity-capture` (build with `cargo build --release --target-dir …/cascade-target`, then `cp`). Receipts went from 40 min to about 5. `cargo --target-dir` also stands in for the blocked `CARGO_TARGET_DIR=` prefix.
+- **Next cuts:** build 2 is now ~all of the flag-on cost on github (~930 of ~1030 ms) and ~55% on wikipedia. The remaining levers are the layered custom-property map (11% of github), compiling `:is`/`:not` argument lists, and the default-flip PR once a real-site board run is in.
+
+**Decisions for Pete**
+1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
+2. (Carried over) Who runs the flag-on real-site board run needed for the default-flip PR? Default: this lane, in the next quiet slot, after #325 lands.
+3. Decision 3 from the last digest is withdrawn: `receipt_nobuild.py` removes the second cold build without any new permissions.
