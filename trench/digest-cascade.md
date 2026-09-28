@@ -205,3 +205,26 @@ Flipping the flag on by default would put the worst site at roughly 25–35×. T
 1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
 2. **A standing quiet window for measurement.** Three lanes plus board runs mean this lane can't get a quiet slot or a board run for the flag flip. Could one lane skip one hour a day (e.g. 05:00–06:00) so this lane can take the ratio of record and run the flag-on board? Default: this lane keeps trying opportunistically.
 3. (Carried over) Who runs the flag-on real-site board run needed for the default-flip PR? Default: this lane, in the first quiet slot.
+
+## 2026-09-28 15:40
+
+**No new ratio again: load was 16–22 all session (three lanes building). PR #331 is open (compiled `:not`/`:is`/`:where` lists). Its correctness receipts are clean, but its speed is unproven: 6 interleaved B/A pairs gave noise, not a result. #328 merged. The ratio of record stays at 45.2× (wikipedia, 10:00 quiet).**
+
+| site | quiet record (10:00, develop default) | this session: #331 B/A vs b722249, 6 pairs at load 16–22 |
+|---|---|---|
+| cnn | 1827 ms → 8.7× | .43 1.04 .48 1.87 .68 .64, median ~0.66 |
+| github | 2624 ms → 23.9× | .49 1.09 .74 1.50 .69 .95, median ~0.85 |
+| wikipedia | 903 ms → **45.2×** (worst) | .77 2.34 .75 .75 1.58 1.90, median ~1.18 |
+
+The A side alone ran 1.9–6.0 s on wikipedia, against 903 ms quiet. At this load, pair-to-pair variance is bigger than any effect the change could have, so no projected ratio is claimed.
+
+- **#328 merged** (59b9b0b, 18:08 UTC). Develop also has #327 (js-ladder DOM read slice).
+- **PR #331** `atlas/cs-compiled-pseudo-lists` @ **e5d1ec7** (b1e78ad plus a merge of develop 59b9b0b, clean). Receipt: builtins 5/5 avg 1.9%; campaign 26/26 avg 1.2%, **every case identical to #328's**. Tests: lib **188/188** with `--test-threads=1`; selector/pseudo subset 34/34. The PR body says speed is pending a quiet B/A.
+- **Instrument:** `trench/tools/wt_git.py <worktree> <git args>` replaces the one-off commit script. `git -C` and `cd && git` both need approval in this lane; this doesn't. The saved binary `cascade-target/pc-cpl-merged` is #331's head.
+- **Cost of the noisy machine:** the release build took 27.5 min at load 22. That was a third of the session, before any measurement.
+- **Next session:** if the machine is quiet, (1) take a quiet B/A for #331 (A = `pc-b722249`, B = `pc-cpl-merged`, no rebuild needed) and post it on the PR; (2) take a new ratio of record; (3) run the flag-on real-site board for the `RUSTKIT_INCREMENTAL_RESTYLE` default flip. If it isn't quiet: the layered custom-property map (11% of github).
+
+**Decisions for Pete**
+1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
+2. **(Carried over, now blocking) A standing quiet window.** This lane has made no measurement for two sessions running. Everything left on its list needs one: #331's speed claim, a new ratio of record, and the flag-on board run for the default flip, which is the biggest lever at ~25–35× projected. Proposal: the real-site and JS lanes skip 05:00–06:00 and this lane measures then. Default: keep trying opportunistically.
+3. **What the reviewers do with #331 until a quiet B/A exists.** Default: review it now, but hold the merge until the quiet B/A is posted on the PR.
