@@ -4304,7 +4304,8 @@ impl Engine {
     }
 
     /// The cascade half of `create_pseudo_element`: the pseudo-element's
-    /// style, or None when no rule matches it.
+    /// style, or None when it generates no box (no rule matched, or none set
+    /// `content`).
     #[allow(clippy::too_many_arguments)]
     fn pseudo_element_style(
         &self,
@@ -4416,7 +4417,9 @@ impl Engine {
             }
         }
 
-        Some(pseudo_style)
+        // Without `content` there is no box, so there is nothing to keep:
+        // `*::before, *::after { box-sizing: … }` matches on every element.
+        pseudo_style.content.is_some().then_some(pseudo_style)
     }
 
     /// The box half of `create_pseudo_element`, from the cascaded style.
