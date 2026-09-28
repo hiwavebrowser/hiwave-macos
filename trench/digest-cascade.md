@@ -236,7 +236,7 @@ The A side alone ran 1.9–6.0 s on wikipedia, against 903 ms quiet. At this loa
 | site | quiet record (10:00, develop default) | #331 B/A (pairs 2–4, load ~6) | #333 B/A vs develop 329cb57 (6 pairs, load 7–13) |
 |---|---|---|---|
 | cnn | 1827 ms → 8.7× | .90 .96 .92 → **0.92** | .87 1.56 .90 .48 1.56 .74 — noise |
-| github | 2624 ms → 23.9× | .88 .92 .84 → **0.88** | .85 .68 .81 .85 2.01 .81 — noise, leans <1 |
+| github | 2624 ms → 23.9× | .88 .92 .84 → **0.88** | .85 .68 3.24 .85 2.01 .81 — noise |
 | wikipedia | 903 ms → **45.2×** (worst) | .91 .90 .73 → **0.90** | 1.00 .45 4.95 .93 2.08 .48 — noise |
 
 The #331 pairs put the A side (b722249) at 688–907 ms on wikipedia. That's already at or below the 10:00 record, so a quiet ratio of record for develop + #331 would probably land near 31–35× on wikipedia. It's projected, not measured. Pair 1 of every run was a cold-cache outlier (A github 12–15 s) and is discarded.
