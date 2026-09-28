@@ -25,12 +25,16 @@ def main():
     args = ap.parse_args()
     srv = serve()
     url = "http://127.0.0.1:%d/%s/index.html" % (srv.server_address[1], args.site)
+    # `-wait` attaches at launch: a wikipedia load (~1 s) is over before a
+    # pid-based attach lands, which left the call graph empty.
+    s = subprocess.Popen(["sample", os.path.basename(args.capture), str(args.secs), "1",
+                          "-wait", "-mayDie", "-file", args.out],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(1.0)
     p = subprocess.Popen([args.capture, "--url", url, "--timeout-ms", "120000"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(0.3)
-    subprocess.run(["sample", str(p.pid), str(args.secs), "1", "-mayDie", "-file", args.out],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     p.wait()
+    s.wait()
     srv.shutdown()
     lines = open(args.out, errors="replace").read().split("Sort by top of stack")
     print(lines[1][:4000] if len(lines) > 1 else "no top-of-stack section")
