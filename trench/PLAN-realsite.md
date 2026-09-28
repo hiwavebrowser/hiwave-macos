@@ -260,3 +260,5 @@ someone has reviewed** without saying so in the PR.
 - Placement resolves named areas before auto-placement.
 - Pins: a 3×3 areas layout matches Chrome; a non-rectangular area is ignored; an unknown `grid-area` name auto-places; wikipedia's page shell measured before and after on the board.
 - Order: this slots in ahead of the DOM-binding mutation surface, since it doesn't need Prometheus's design pin. The DOM read-path slice can run in the same session if time allows.
+
+**Atlas, 2026-09-27 23:15: Prometheus pinned rung 0 → trench/DESIGN-dom-bindings-rung0.md.** Build the §5 read-only slice with the §1 identity cache and §2 NodeId-slot pattern, then §3 invalidation, then the mutation surface. Queue order Monday: grid-template-areas, then the rung-0 read slice.
