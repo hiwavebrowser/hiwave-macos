@@ -56,9 +56,10 @@ def timings(stderr):
     return out
 
 
-def run_once(capture, url, timeout_ms, log_path=None):
+def run_once(capture, url, timeout_ms, log_path=None, extra_env=None):
     env = dict(os.environ, RUSTKIT_CASCADE_TIMING="1",
                RUST_LOG="warn,rustkit_engine=info", NO_COLOR="1")
+    env.update(extra_env or {})
     p = subprocess.run([capture, "--url", url, "--width", "1280", "--height", "800",
                         "--timeout-ms", str(timeout_ms)],
                        env=env, capture_output=True, text=True, errors="replace")
@@ -83,7 +84,10 @@ def main():
     ap.add_argument("--timeout-ms", type=int, default=120000)
     ap.add_argument("--json")
     ap.add_argument("--logs", help="directory to keep each run's stderr")
+    ap.add_argument("--env", action="append", default=[], metavar="NAME=VALUE",
+                    help="extra env for the capture (an engine flag A/B); repeatable")
     args = ap.parse_args()
+    extra_env = dict(kv.split("=", 1) for kv in args.env)
 
     if args.logs:
         os.makedirs(args.logs, exist_ok=True)
@@ -95,7 +99,7 @@ def main():
         runs = []
         for i in range(args.runs):
             log = os.path.join(args.logs, "%s-%d.log" % (site, i + 1)) if args.logs else None
-            r = run_once(args.capture, url, args.timeout_ms, log)
+            r = run_once(args.capture, url, args.timeout_ms, log, extra_env)
             runs.append(r)
             print("  %-10s run %d: exit %d builds %d cascade %8.1f ms parse %7.1f ms  per-build %s" % (
                 site, i + 1, r["exit"], r["builds"], r["cascade_ms"], r["parse_ms"], r["per_build_ms"]),
