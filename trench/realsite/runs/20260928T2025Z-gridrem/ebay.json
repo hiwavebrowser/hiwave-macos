@@ -1,0 +1,58 @@
+{
+  "id": "ebay",
+  "url": "https://www.ebay.com/",
+  "chrome": [
+    {
+      "url": "https://www.ebay.com/",
+      "status": "error",
+      "error": "page.screenshot: Timeout 30000ms exceeded.",
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "oracle_headless": false,
+      "http_status": 200,
+      "elapsed_ms": 91839
+    },
+    {
+      "url": "https://www.ebay.com/",
+      "status": "error",
+      "error": "page.screenshot: Timeout 30000ms exceeded.",
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "oracle_headless": false,
+      "http_status": 200,
+      "elapsed_ms": 102627
+    }
+  ],
+  "oracle_capture": null,
+  "rustkit": {
+    "status": "error",
+    "html_file": null,
+    "url": "https://www.ebay.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": null,
+    "layout_path": null,
+    "layout_stats": null,
+    "elapsed_ms": 972,
+    "error": "Failed to load URL: NavigationError(\"HTTP error\")",
+    "wall_ms": 1034
+  },
+  "access": {
+    "status": 403,
+    "vendor": "akamai",
+    "blocked": true
+  },
+  "loads": {
+    "pass": false,
+    "why": "blocked:akamai (HTTP 403) \u2014 Failed to load URL: NavigationError(\"HTTP error\")"
+  },
+  "readable": {
+    "pass": false,
+    "why": "chrome capture failed: page.screenshot: Timeout 30000ms exceeded.",
+    "oracle_failed": true
+  },
+  "looks_right": {
+    "pass": false,
+    "why": "chrome capture failed",
+    "oracle_failed": true
+  },
+  "points": 0
+}

@@ -28,3 +28,4 @@ ts,run,points,max,loads,readable,looks_right,scorable_points,scorable_max,blocke
 20260928T003501Z,20260928T0045Z-fillrule,22,60,13,6,3,22,51,amazon|ebay|nytimes,nytimes
 20260928T125820Z,20260928T1305Z-pr323,21,60,13,5,3,21,51,amazon|ebay|nytimes,
 20260928T1710Z-blockify,20260928T1710Z-blockify,18,60,10,5,3,18,51,amazon|ebay|nytimes,
+20260928T202133Z,20260928T2025Z-gridrem,19,60,11,5,3,19,48,amazon|chatgpt|ebay|nytimes,

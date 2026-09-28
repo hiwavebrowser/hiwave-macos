@@ -1,0 +1,109 @@
+{
+  "id": "wikipedia",
+  "url": "https://en.wikipedia.org/wiki/Web_browser",
+  "chrome": [
+    {
+      "url": "https://en.wikipedia.org/wiki/Web_browser",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://en.wikipedia.org/wiki/Web_browser",
+      "title": "Web browser - Wikipedia",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/wikipedia/chrome-a-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/wikipedia/chrome-a.png",
+      "elapsed_ms": 24413
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Web_browser",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://en.wikipedia.org/wiki/Web_browser",
+      "title": "Web browser - Wikipedia",
+      "browser_version": "148.0.7778.216",
+      "text_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/wikipedia/chrome-b-text.json",
+      "png_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/wikipedia/chrome-b.png",
+      "elapsed_ms": 22834
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://en.wikipedia.org/wiki/Web_browser",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/wikipedia/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "/Users/petecopeland/Repos/.worktrees/trench-realsite/trench/realsite/runs/20260928T2025Z-gridrem/wikipedia/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 3,
+      "threw": 1,
+      "skipped": 0,
+      "fetch_failed": 0,
+      "over_budget": 0,
+      "bytes": 77150,
+      "elapsed_ms": 60
+    },
+    "elapsed_ms": 4379,
+    "error": null,
+    "wall_ms": 4453,
+    "non_background_fraction": 0.1437
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 228,
+    "rustkit_words": 197,
+    "ratio": 0.2895,
+    "missing_sample": [
+      "100",
+      "13",
+      "15",
+      "25",
+      "250",
+      "28",
+      "50",
+      "500",
+      "75",
+      "ads",
+      "agreeing",
+      "already",
+      "amount",
+      "around",
+      "asked",
+      "asking",
+      "at",
+      "attention",
+      "available",
+      "average",
+      "banks",
+      "be",
+      "behind",
+      "but",
+      "by"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 42.523730468749996,
+    "diff": 42.20205078125,
+    "unstable": true,
+    "why": "chrome-vs-chrome 42.5% > 15% (unstable, 0 points)"
+  },
+  "points": 1
+}
