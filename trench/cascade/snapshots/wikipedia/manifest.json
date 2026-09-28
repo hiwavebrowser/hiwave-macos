@@ -1,0 +1,20 @@
+{
+ "site": "wikipedia",
+ "url": "https://en.wikipedia.org/wiki/Web_browser",
+ "final_url": "https://en.wikipedia.org/wiki/Web_browser",
+ "fetched": "2026-09-28T02:22:32Z",
+ "html_bytes": 406719,
+ "scripts_removed": 5,
+ "sheets": [
+  {
+   "src": "https://en.wikipedia.org/w/load.php?lang=en&modules=ext.cite.parsoid.styles%7Cext.cite.styles%7Cext.tmh.player.styles%7Cext.uls.interlanguage%7Cext.visualEditor.desktopArticleTarget.noscript%7Cext.wikimediamessages.styles%7Cjquery.makeCollapsible.styles%7Cjquery.tablesorter.styles%7Cmediawiki.skinning.content.parsoid%7Cskins.vector.icons%2Cstyles%7Cskins.vector.search.codex.styles%7Cwikibase.client.init&only=styles&skin=vector-2022",
+   "file": "css/00.css",
+   "bytes": 213924
+  },
+  {
+   "src": "https://en.wikipedia.org/w/load.php?lang=en&modules=site.styles&only=styles&skin=vector-2022",
+   "file": "css/01.css",
+   "bytes": 6851
+  }
+ ]
+}

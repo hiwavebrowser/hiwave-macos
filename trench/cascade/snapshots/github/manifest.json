@@ -1,0 +1,220 @@
+{
+ "site": "github",
+ "url": "https://github.com/",
+ "final_url": "https://github.com/",
+ "fetched": "2026-09-28T02:22:31Z",
+ "html_bytes": 436415,
+ "scripts_removed": 16,
+ "sheets": [
+  {
+   "src": "https://github.githubassets.com/assets/light-99f877e9ddfc0e51.css",
+   "file": "css/00.css",
+   "bytes": 87305
+  },
+  {
+   "src": "https://github.githubassets.com/assets/light_high_contrast-48fdd0811afbab3c.css",
+   "file": "css/01.css",
+   "bytes": 87975
+  },
+  {
+   "src": "https://github.githubassets.com/assets/dark-79ad2ace604703b3.css",
+   "file": "css/02.css",
+   "bytes": 87137
+  },
+  {
+   "src": "https://github.githubassets.com/assets/dark_high_contrast-24484a076f02295f.css",
+   "file": "css/03.css",
+   "bytes": 87869
+  },
+  {
+   "src": "https://github.githubassets.com/assets/light-99f877e9ddfc0e51.css",
+   "file": "css/00.css",
+   "bytes": 87305
+  },
+  {
+   "src": "https://github.githubassets.com/assets/light_high_contrast-48fdd0811afbab3c.css",
+   "file": "css/01.css",
+   "bytes": 87975
+  },
+  {
+   "src": "https://github.githubassets.com/assets/light_colorblind-f4bf1142976e4bbf.css",
+   "file": "css/06.css",
+   "bytes": 86925
+  },
+  {
+   "src": "https://github.githubassets.com/assets/light_colorblind_high_contrast-f661b49995ba0bd8.css",
+   "file": "css/07.css",
+   "bytes": 87741
+  },
+  {
+   "src": "https://github.githubassets.com/assets/light_tritanopia-0b38d22346321c92.css",
+   "file": "css/08.css",
+   "bytes": 86933
+  },
+  {
+   "src": "https://github.githubassets.com/assets/light_tritanopia_high_contrast-f1c62c9e70259b9f.css",
+   "file": "css/09.css",
+   "bytes": 87737
+  },
+  {
+   "src": "https://github.githubassets.com/assets/dark-79ad2ace604703b3.css",
+   "file": "css/02.css",
+   "bytes": 87137
+  },
+  {
+   "src": "https://github.githubassets.com/assets/dark_high_contrast-24484a076f02295f.css",
+   "file": "css/03.css",
+   "bytes": 87869
+  },
+  {
+   "src": "https://github.githubassets.com/assets/dark_colorblind-f50cacf0a86b9929.css",
+   "file": "css/12.css",
+   "bytes": 86629
+  },
+  {
+   "src": "https://github.githubassets.com/assets/dark_colorblind_high_contrast-e61d4f4ca17852c2.css",
+   "file": "css/13.css",
+   "bytes": 87587
+  },
+  {
+   "src": "https://github.githubassets.com/assets/dark_tritanopia-39c10993d5603fac.css",
+   "file": "css/14.css",
+   "bytes": 86609
+  },
+  {
+   "src": "https://github.githubassets.com/assets/dark_tritanopia_high_contrast-73236c840c0c7d90.css",
+   "file": "css/15.css",
+   "bytes": 87619
+  },
+  {
+   "src": "https://github.githubassets.com/assets/dark_dimmed-0de76f07cc035b10.css",
+   "file": "css/16.css",
+   "bytes": 86829
+  },
+  {
+   "src": "https://github.githubassets.com/assets/dark_dimmed_high_contrast-fd1500c8744e40d6.css",
+   "file": "css/17.css",
+   "bytes": 88029
+  },
+  {
+   "src": "https://github.githubassets.com/assets/primer-primitives-ed9ca172356fd545.css",
+   "file": "css/18.css",
+   "bytes": 11008
+  },
+  {
+   "src": "https://github.githubassets.com/assets/primer-1d2c7f7b52a6068b.css",
+   "file": "css/19.css",
+   "bytes": 411519
+  },
+  {
+   "src": "https://github.githubassets.com/assets/global-54ba76e934a49d7c.css",
+   "file": "css/20.css",
+   "bytes": 297872
+  },
+  {
+   "src": "https://github.githubassets.com/assets/github-456bd5deb85c7ecd.css",
+   "file": "css/21.css",
+   "bytes": 126751
+  },
+  {
+   "src": "https://github.githubassets.com/assets/marketing-c6c574a5b2679474.css",
+   "file": "css/22.css",
+   "bytes": 7353
+  },
+  {
+   "src": "https://github.githubassets.com/assets/home-4589777a4968936a.css",
+   "file": "css/23.css",
+   "bytes": 41146
+  },
+  {
+   "src": "https://github.githubassets.com/assets/app-runtime.19d34abf60f22685.module.css",
+   "file": "css/24.css",
+   "bytes": 4448
+  },
+  {
+   "src": "https://github.githubassets.com/assets/react-core.83cecac4ceaa4904.module.css",
+   "file": "css/25.css",
+   "bytes": 446
+  },
+  {
+   "src": "https://github.githubassets.com/assets/primer-react-css.76a197f9dce25e3c.module.css",
+   "file": "css/26.css",
+   "bytes": 302820
+  },
+  {
+   "src": "https://github.githubassets.com/assets/primer-react-brand-css.6a01c236ff527e7e.module.css",
+   "file": "css/27.css",
+   "bytes": 701288
+  },
+  {
+   "src": "https://github.githubassets.com/assets/landing-pages.6ca4dbabeeae2862.module.css",
+   "file": "css/28.css",
+   "bytes": 135729
+  },
+  {
+   "src": "https://github.githubassets.com/assets/primer-react-css.76a197f9dce25e3c.module.css",
+   "file": "css/26.css",
+   "bytes": 302820
+  },
+  {
+   "src": "https://github.githubassets.com/assets/keyboard-shortcuts-dialog.c07079ffb88d27aa.module.css",
+   "file": "css/30.css",
+   "bytes": 331
+  },
+  {
+   "src": "https://github.githubassets.com/assets/primer-react-css.76a197f9dce25e3c.module.css",
+   "file": "css/26.css",
+   "bytes": 302820
+  },
+  {
+   "src": "https://github.githubassets.com/assets/primer-react-brand-css.6a01c236ff527e7e.module.css",
+   "file": "css/27.css",
+   "bytes": 701288
+  },
+  {
+   "src": "https://github.githubassets.com/assets/marketing-global-banner.a8ba1d4eb1473e99.module.css",
+   "file": "css/33.css",
+   "bytes": 5356
+  },
+  {
+   "src": "https://github.githubassets.com/assets/primer-react-css.76a197f9dce25e3c.module.css",
+   "file": "css/26.css",
+   "bytes": 302820
+  },
+  {
+   "src": "https://github.githubassets.com/assets/app-install-banner-partial.8a43e3c615c449d7.module.css",
+   "file": "css/35.css",
+   "bytes": 446
+  },
+  {
+   "src": "https://github.githubassets.com/assets/primer-react-css.76a197f9dce25e3c.module.css",
+   "file": "css/26.css",
+   "bytes": 302820
+  },
+  {
+   "src": "https://github.githubassets.com/assets/primer-react-brand-css.6a01c236ff527e7e.module.css",
+   "file": "css/27.css",
+   "bytes": 701288
+  },
+  {
+   "src": "https://github.githubassets.com/assets/t1.2c9e83c78bbeb6bd.module.css",
+   "file": "css/38.css",
+   "bytes": 17365
+  },
+  {
+   "src": "https://github.githubassets.com/assets/primer-react-css.76a197f9dce25e3c.module.css",
+   "file": "css/26.css",
+   "bytes": 302820
+  },
+  {
+   "src": "https://github.githubassets.com/assets/primer-react-brand-css.6a01c236ff527e7e.module.css",
+   "file": "css/27.css",
+   "bytes": 701288
+  },
+  {
+   "src": "https://github.githubassets.com/assets/marketing-footer.99e527e38abbc4e2.module.css",
+   "file": "css/41.css",
+   "bytes": 6854
+  }
+ ]
+}

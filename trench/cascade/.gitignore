@@ -1,0 +1,3 @@
+# Third-party page bodies stay local (public repo); PINS.sha256 pins them.
+snapshots/*/index.html
+snapshots/*/css/
