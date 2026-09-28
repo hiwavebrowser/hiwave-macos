@@ -1,0 +1,11 @@
+<!doctype html>
+<html><body>
+<script>
+var seen = ['load:' + window.innerWidth + 'x' + window.innerHeight];
+window.addEventListener('resize', function () {
+  seen.push('resize:' + window.innerWidth + 'x' + window.innerHeight);
+  throw new Error(seen.join(','));
+});
+throw new Error(seen.join(','));
+</script>
+</body></html>
