@@ -879,3 +879,30 @@ Passing all 3: google, x, linkedin. RustKit blocked: amazon, ebay, nytimes. chat
 **Decisions for Pete:**
 1. **Board runs and the other two lanes' builds collide.** Today's full board lost 6 oracles and 3 RustKit loads to load 15–25. Should the lanes stagger (e.g. the real-site board gets a no-build window), or should the board retry timeouts once? A retry would be a scorer change, so it needs your OK.
 2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.
+
+
+## 2026-09-28 18:20 — grid rem sizes are #335; flex em/vw lengths pushed (Talos bug 3); board 19/60 under load
+
+**Points: 18/60 (`20260928T1710Z-blockify`) → 19/60 (`20260928T2025Z-gridrem`, #335 dacbce0).** This is noise, not the fix. Every RustKit frame is pixel-identical to the blockify run, or within served-content drift (yahoo 2.3%, linkedin 1.7%). Load was 11–21 with the other lanes building. The oracle failed on github, ebay, cnn and weather, and RustKit hit its 30 s limit on github and cnn. wikipedia lost READABLE (81% → 29%) on the oracle side: Chrome showed a fundraising banner, while RustKit's frame and its 197 words didn't change.
+
+| run | head | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|
+| `20260928T1710Z-blockify` | #330 c39a4e6 | 18 | 10 | 5 | 3 | 18/51 |
+| `20260928T2025Z-gridrem` | #335 dacbce0 | **19** | 11 | 5 | 3 | 19/48 |
+
+Passing all 3: google, x, linkedin. RustKit blocked: amazon, chatgpt, ebay, nytimes. Blank: youtube, reddit, microsoft. Oracle failed: github, ebay, cnn, weather.
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#335 `atlas/rs-grid-rem-width` @ dacbce0** (2 commits from develop 329cb57). Grid item width/min-width/height/min-height in em/rem/vw/vh now count in track sizing. wikipedia's `12.25rem` page-tools nav was 75.5px in its `min-content` column; now it's 196px at x=804 (= Chrome). Three failing-first engine pins through both entry points. Engine 195/195. The layout font-cache test that failed last session is a shared-counter flake: it passes alone and serially. Campaign 26/26, avg 1.1756% (identical to #330). Ratchet: none worse than the floor. It's ±0 on the board, because wikipedia's live first viewport doesn't show that column at 1280. The PR body says so.
+- **`atlas/rs-flex-relative-lengths` @ c888ff8, pushed, NO PR yet** (from develop 6caadcb). This is Talos bug 3, and it's worse than reported. flex.rs `resolve_length` used a 16px em AND an **800x600 viewport** for every flex item's margins, width/height, min/max and cross size, and for the gaps. So `width:25vw` was 200 instead of 320 at 1280, and `margin-left:2em` at 20px was 32 instead of 40. It now uses `LayoutBox::length_to_px`, like block layout; the engine sets the root's viewport at engine lib.rs:2534. Grid gaps are fixed too. Three pins through both entry points, each verified failing without the fix (32/40, 200/320, gap 26/30 flex and 46/50 grid). Engine 195/195, layout 554/554 serial. **Next session:** campaign + ratchet receipt, A/B with `scratch/flexrel/ab.py` (base = the gridrem binary), then open the PR. The release build was still queued behind load 28 at the cap.
+
+**Found:**
+- Talos bugs 1 and 2 (`ComputedStyle::inherit_from` defaults and `webkit_text_fill_color`) have **no production caller on macOS**. Only one layout test calls it; the engine cascade has its own inheritance. They're worth fixing for the Linux port, but they won't move this board.
+- A grid track with a fixed size grows to fit its content: `grid-template-columns:10px 10px` with the text "a" gives a first track of 11.12px. Chrome keeps it at 10 and lets the text overflow. This is a separate grid bug, queued.
+- bing is a steady 1/3 (0 RustKit words, ~90% diff). The hero image and the nav/placeholder text are missing. That isn't a one-fix point.
+
+**Next:** (1) finish rs-flex-relative-lengths (above). (2) Talos bug 4, an authored zero width on a flex item (flex.rs `explicit_size == 0.0` treats `0` as auto). Stack it on (1), since it's the same lines. (3) fixed grid tracks growing to content. (4) SVG `<g>` style inheritance (linkedin icons).
+
+**Decisions for Pete:**
+1. Still open from 15:40: **board runs vs the other lanes' builds.** This session hit it again: load 11–28, 4 oracle failures, 2 RustKit timeouts, and one release build that didn't finish inside the cap. A no-build window for the board, or a one-retry-on-timeout scorer change (which needs your OK)?
+2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.
