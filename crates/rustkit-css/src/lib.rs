@@ -2294,6 +2294,113 @@ impl BorderStyle {
     }
 }
 
+/// The custom properties (`--*`) in effect on one element, as a chain of
+/// layers: the element's own changes over an `Arc` of its parent's set.
+/// Primer declares hundreds of `--*` on `:root`, and an element that
+/// overrode one of them used to copy every one of them (~11% of github's
+/// cascade). A lookup walks the chain, first layer that names the property
+/// wins; past `MAX_DEPTH` layers the chain is flattened into one, so lookups
+/// stay bounded.
+#[derive(Clone, Default)]
+pub struct CustomProperties {
+    /// `None` hides an inherited value (`initial`, or a reference cycle).
+    own: std::collections::HashMap<String, Option<String>>,
+    parent: Option<std::sync::Arc<CustomProperties>>,
+    depth: u32,
+}
+
+impl CustomProperties {
+    const MAX_DEPTH: u32 = 6;
+
+    /// One flat layer.
+    pub fn from_map(map: std::collections::HashMap<String, String>) -> Self {
+        Self {
+            own: map.into_iter().map(|(k, v)| (k, Some(v))).collect(),
+            parent: None,
+            depth: 0,
+        }
+    }
+
+    /// `own` over `parent` (`None` removes the property).
+    pub fn over(
+        parent: &std::sync::Arc<Self>,
+        own: std::collections::HashMap<String, Option<String>>,
+    ) -> Self {
+        if parent.depth + 1 < Self::MAX_DEPTH {
+            return Self {
+                own,
+                parent: Some(parent.clone()),
+                depth: parent.depth + 1,
+            };
+        }
+        let mut flat = parent.to_map();
+        for (k, v) in own {
+            match v {
+                Some(v) => {
+                    flat.insert(k, v);
+                }
+                None => {
+                    flat.remove(&k);
+                }
+            }
+        }
+        Self::from_map(flat)
+    }
+
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.get_key_value(name).map(|(_, v)| v)
+    }
+
+    pub fn get_key_value(&self, name: &str) -> Option<(&str, &str)> {
+        let mut layer = self;
+        loop {
+            if let Some((k, v)) = layer.own.get_key_value(name) {
+                return v.as_deref().map(|v| (k.as_str(), v));
+            }
+            layer = layer.parent.as_deref()?;
+        }
+    }
+
+    pub fn contains_key(&self, name: &str) -> bool {
+        self.get(name).is_some()
+    }
+
+    /// Every property in effect, flattened.
+    pub fn to_map(&self) -> std::collections::HashMap<String, String> {
+        let mut chain = vec![self];
+        while let Some(p) = chain.last().and_then(|l| l.parent.as_deref()) {
+            chain.push(p);
+        }
+        let mut map = std::collections::HashMap::new();
+        for layer in chain.into_iter().rev() {
+            for (k, v) in &layer.own {
+                match v {
+                    Some(v) => {
+                        map.insert(k.clone(), v.clone());
+                    }
+                    None => {
+                        map.remove(k);
+                    }
+                }
+            }
+        }
+        map
+    }
+}
+
+impl PartialEq for CustomProperties {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other) || self.to_map() == other.to_map()
+    }
+}
+
+impl std::fmt::Debug for CustomProperties {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sorted: std::collections::BTreeMap<_, _> = self.to_map().into_iter().collect();
+        f.debug_map().entries(sorted).finish()
+    }
+}
+
 /// Computed style for an element.
 #[derive(Debug, Clone, Default)]
 pub struct ComputedStyle {
@@ -2487,8 +2594,9 @@ pub struct ComputedStyle {
     /// Custom properties (`--*`) in effect on this element, with `var()`
     /// already substituted (CSS Variables 1 §2: they inherit, and resolve at
     /// computed-value time on the element that declares them). Shared with
-    /// the parent until this element declares a `--*` whose value differs.
-    pub custom_properties: std::sync::Arc<std::collections::HashMap<String, String>>,
+    /// the parent until this element declares a `--*` whose value differs,
+    /// and then only the differing ones are stored on this element's layer.
+    pub custom_properties: std::sync::Arc<CustomProperties>,
 }
 
 impl ComputedStyle {

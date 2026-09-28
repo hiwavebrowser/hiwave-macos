@@ -150,7 +150,7 @@ pub(crate) mod test_gpu {
     }
 }
 use rustkit_core::{LoadEvent, NavigationRequest, NavigationStateMachine};
-use rustkit_css::{css_ident, parse_display, ComputedStyle, Rule, Stylesheet};
+use rustkit_css::{css_ident, parse_display, ComputedStyle, CustomProperties, Rule, Stylesheet};
 use rustkit_dom::{Document, Node, NodeType};
 use rustkit_image::ImageManager;
 use rustkit_js::JsRuntime;
@@ -4929,7 +4929,7 @@ impl Engine {
         // custom properties.
         let inherited_vars = match parent_style {
             Some(p) => p.custom_properties.clone(),
-            None => Arc::new(css_vars.clone()),
+            None => Arc::new(CustomProperties::from_map(css_vars.clone())),
         };
         let inline_style = attributes.get("style");
         let mut declared_vars: Vec<(&str, Option<&str>)> = Vec::new();
@@ -4966,7 +4966,7 @@ impl Engine {
             }
         }
         let vars = Self::element_custom_properties(&inherited_vars, &declared_vars);
-        let css_vars: &HashMap<String, String> = &vars;
+        let css_vars: &CustomProperties = &vars;
 
         // Provenance is recorded from INSIDE this loop rather than by a
         // separate pass, so "which rule won" is answered by the same code
@@ -5100,7 +5100,7 @@ impl Engine {
     fn record_inline_style(
         &self,
         style_attr: &str,
-        css_vars: &HashMap<String, String>,
+        css_vars: &dyn VarSource,
         records: &mut Vec<DeclarationRecord>,
         order: &mut usize,
         important_pass: bool,
@@ -5193,7 +5193,7 @@ impl Engine {
         style: &mut ComputedStyle,
         parent_style: Option<&ComputedStyle>,
         style_attr: &str,
-        css_vars: &HashMap<String, String>,
+        css_vars: &dyn VarSource,
         ch_pending: &mut ChPending,
         important_pass: bool,
     ) {
@@ -7638,7 +7638,7 @@ impl Engine {
     /// the first style pass. Fallbacks are delimited by balanced parentheses,
     /// and the expanded length is capped so fan-out chains cannot grow without
     /// bound.
-    fn resolve_css_variables(&self, value: &str, css_vars: &HashMap<String, String>) -> String {
+    fn resolve_css_variables(&self, value: &str, css_vars: &dyn VarSource) -> String {
         if !value.contains("var(") {
             return value.to_string();
         }
@@ -7658,9 +7658,9 @@ impl Engine {
     /// resolved value actually differs from it: Tailwind sets ~30 `--tw-*`
     /// on every element via `*`, and those must not copy the map each time.
     fn element_custom_properties(
-        inherited: &Arc<HashMap<String, String>>,
+        inherited: &Arc<CustomProperties>,
         declared: &[(&str, Option<&str>)],
-    ) -> Arc<HashMap<String, String>> {
+    ) -> Arc<CustomProperties> {
         if declared.is_empty() {
             return inherited.clone();
         }
@@ -7680,52 +7680,40 @@ impl Engine {
         }
         // `initial` names are hidden from the inherited layer while
         // resolving the others.
-        let mut visible = inherited.as_ref();
-        let masked;
-        if !unset.is_empty() {
-            let mut m = inherited.as_ref().clone();
-            for n in &unset {
-                m.remove(*n);
-            }
-            masked = m;
-            visible = &masked;
-        }
+        let visible = MaskedVars {
+            vars: inherited,
+            hidden: &unset,
+        };
         let mut resolved: Vec<(String, Option<String>)> = Vec::with_capacity(own.len());
         for (name, raw) in &own {
             let value = if raw.contains("var(") {
                 let mut stack: Vec<&str> = vec![name.as_str()];
                 let mut budget = VAR_EXPANSION_BUDGET;
                 let mut cycle = false;
-                let v = substitute_css_vars(raw, &[&own, visible], &mut stack, &mut budget, &mut cycle);
+                let v = substitute_css_vars(raw, &[&own, &visible], &mut stack, &mut budget, &mut cycle);
                 (!cycle).then_some(v)
             } else {
                 Some(raw.clone())
             };
             resolved.push((name.clone(), value));
         }
-        let changes = unset.iter().any(|n| inherited.contains_key(*n))
-            || resolved
-                .iter()
-                .any(|(n, v)| inherited.get(n).map(String::as_str) != v.as_deref());
-        if !changes {
-            return inherited.clone();
-        }
-        let mut map = inherited.clone();
-        let m = Arc::make_mut(&mut map);
+        // Only what differs from the inherited set goes on this element's
+        // layer; `None` hides the inherited value.
+        let mut layer: HashMap<String, Option<String>> = HashMap::new();
         for n in unset {
-            m.remove(n);
-        }
-        for (n, v) in resolved {
-            match v {
-                Some(v) => {
-                    m.insert(n, v);
-                }
-                None => {
-                    m.remove(&n);
-                }
+            if inherited.contains_key(n) {
+                layer.insert(n.to_string(), None);
             }
         }
-        map
+        for (n, v) in resolved {
+            if inherited.get(&n) != v.as_deref() {
+                layer.insert(n, v);
+            }
+        }
+        if layer.is_empty() {
+            return inherited.clone();
+        }
+        Arc::new(CustomProperties::over(inherited, layer))
     }
 
     /// Check if a selector matches an element.
@@ -20660,14 +20648,63 @@ mod windows_a_leg_pins {
         // element; that must not copy the map per element.
         let mut parent = HashMap::new();
         parent.insert("--tw".to_string(), "0".to_string());
-        let parent = Arc::new(parent);
+        let parent = Arc::new(CustomProperties::from_map(parent));
         let same = Engine::element_custom_properties(&parent, &[("--tw", Some("0"))]);
         assert!(Arc::ptr_eq(&parent, &same));
         let changed = Engine::element_custom_properties(&parent, &[("--tw", Some("1"))]);
         assert!(!Arc::ptr_eq(&parent, &changed));
-        assert_eq!(changed.get("--tw").map(String::as_str), Some("1"));
+        assert_eq!(changed.get("--tw"), Some("1"));
         let unset = Engine::element_custom_properties(&parent, &[("--tw", None)]);
         assert!(unset.get("--tw").is_none(), "`initial` removes the property");
+    }
+
+    #[test]
+    fn layered_custom_properties_match_a_flat_map_at_every_depth() {
+        // Each element's layer holds only its changes over the parent's
+        // `Arc`; past the depth cap the chain is flattened. Walk a 20-deep
+        // chain against a plain map that copies at every step.
+        let mut root = HashMap::new();
+        root.insert("--base".to_string(), "1px".to_string());
+        root.insert("--keep".to_string(), "k".to_string());
+        let mut flat = root.clone();
+        let mut vars = Arc::new(CustomProperties::from_map(root));
+        for i in 0..20 {
+            let own = format!("--d{i}");
+            let val = format!("var(--base) {i}");
+            let mut declared: Vec<(&str, Option<&str>)> =
+                vec![(own.as_str(), Some(val.as_str()))];
+            if i == 7 {
+                declared.push(("--keep", None));
+            }
+            if i == 9 {
+                declared.push(("--base", Some("2px")));
+            }
+            if i == 13 {
+                declared.push(("--keep", Some("again")));
+            }
+            let next = Engine::element_custom_properties(&vars, &declared);
+            if i == 9 {
+                flat.insert("--base".into(), "2px".into());
+            }
+            let base = flat["--base"].clone();
+            flat.insert(own.clone(), format!("{base} {i}"));
+            match i {
+                7 => {
+                    flat.remove("--keep");
+                }
+                13 => {
+                    flat.insert("--keep".into(), "again".into());
+                }
+                _ => {}
+            }
+            assert_eq!(next.to_map(), flat, "depth {i}");
+            for (k, v) in &flat {
+                assert_eq!(next.get(k), Some(v.as_str()), "depth {i} {k}");
+            }
+            assert_eq!(next.get("--keep").is_some(), !(7..13).contains(&i), "depth {i}");
+            assert_eq!(*next, CustomProperties::from_map(flat.clone()));
+            vars = next;
+        }
     }
 
     #[test]
@@ -20972,6 +21009,38 @@ fn matching_close_paren(s: &str) -> Option<usize> {
     None
 }
 
+/// Where `var()` looks a custom property up: `(name as stored, value)`.
+trait VarSource {
+    fn var(&self, name: &str) -> Option<(&str, &str)>;
+}
+
+impl VarSource for HashMap<String, String> {
+    fn var(&self, name: &str) -> Option<(&str, &str)> {
+        self.get_key_value(name).map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+}
+
+impl VarSource for CustomProperties {
+    fn var(&self, name: &str) -> Option<(&str, &str)> {
+        self.get_key_value(name)
+    }
+}
+
+/// An inherited set with some names hidden (`initial`), without copying it.
+struct MaskedVars<'a> {
+    vars: &'a CustomProperties,
+    hidden: &'a [&'a str],
+}
+
+impl VarSource for MaskedVars<'_> {
+    fn var(&self, name: &str) -> Option<(&str, &str)> {
+        if self.hidden.contains(&name) {
+            return None;
+        }
+        self.vars.get_key_value(name)
+    }
+}
+
 /// Left-to-right `var()` substitution. The text a substitution produces is
 /// already fully resolved, so it is appended and never re-scanned; `stack`
 /// holds the variables being resolved (cycle detection). Every byte written
@@ -20983,7 +21052,7 @@ fn matching_close_paren(s: &str) -> Option<usize> {
 /// because its variable was already on the stack.
 fn substitute_css_vars<'a>(
     value: &str,
-    layers: &[&'a HashMap<String, String>],
+    layers: &[&'a dyn VarSource],
     stack: &mut Vec<&'a str>,
     budget: &mut usize,
     cycle: &mut bool,
@@ -21019,10 +21088,10 @@ fn substitute_css_vars<'a>(
             Some(i) => (content[..i].trim(), Some(content[i + 1..].trim())),
             None => (content.trim(), None),
         };
-        let found = layers.iter().find_map(|l| l.get_key_value(name));
+        let found = layers.iter().find_map(|l| l.var(name));
         let piece = match found {
-            Some((key, raw)) if !stack.contains(&key.as_str()) => {
-                stack.push(key.as_str());
+            Some((key, raw)) if !stack.contains(&key) => {
+                stack.push(key);
                 let r = substitute_css_vars(raw, layers, stack, budget, cycle);
                 stack.pop();
                 r
