@@ -781,6 +781,100 @@ const WRAPPERS_JS: &str = r#"
         return l;
     });
 
+    // style: a CSSStyleDeclaration over the style attribute, one per
+    // element. Reads parse the attribute; writes reserialize it, so the
+    // cascade sees them through the attribute (and the write marks Style).
+    // A `;` inside a string or url() is not yet split correctly.
+    var CSSStyleDeclaration = iface('CSSStyleDeclaration');
+    var OWNER = Symbol('rustkit.styleOwner');
+    function decls(st) {
+        var out = [];
+        (st[OWNER].getAttribute('style') || '').split(';').forEach(function (d) {
+            var i = d.indexOf(':');
+            if (i < 0) return;
+            var name = d.slice(0, i).trim().toLowerCase(), value = d.slice(i + 1).trim();
+            var important = /!\s*important$/i.test(value);
+            if (important) value = value.replace(/\s*!\s*important$/i, '');
+            if (!name || !value) return;
+            out = out.filter(function (x) { return x.name !== name; });
+            out.push({ name: name, value: value, important: important });
+        });
+        return out;
+    }
+    function storeDecls(st, ds) {
+        st[OWNER].setAttribute('style', ds.map(function (d) {
+            return d.name + ': ' + d.value + (d.important ? ' !important' : '') + ';';
+        }).join(' '));
+    }
+    function cssName(prop) {
+        if (prop === 'cssFloat') return 'float';
+        if (prop.indexOf('-') >= 0) return prop.toLowerCase();
+        return prop.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); })
+                   .replace(/^(webkit|moz|ms)-/, '-$1-');
+    }
+    var styleMethods = {
+        getPropertyValue: function (name) {
+            name = String(name).trim().toLowerCase();
+            var d = decls(this).filter(function (x) { return x.name === name; })[0];
+            return d ? d.value : '';
+        },
+        getPropertyPriority: function (name) {
+            name = String(name).trim().toLowerCase();
+            var d = decls(this).filter(function (x) { return x.name === name; })[0];
+            return d && d.important ? 'important' : '';
+        },
+        setProperty: function (name, value, priority) {
+            name = String(name).trim().toLowerCase();
+            value = value == null ? '' : String(value).trim();
+            if (value === '') { this.removeProperty(name); return; }
+            var ds = decls(this), d = ds.filter(function (x) { return x.name === name; })[0];
+            var important = String(priority || '').toLowerCase() === 'important';
+            if (d) { d.value = value; d.important = important; }
+            else ds.push({ name: name, value: value, important: important });
+            storeDecls(this, ds);
+        },
+        removeProperty: function (name) {
+            name = String(name).trim().toLowerCase();
+            var ds = decls(this), old = this.getPropertyValue(name);
+            var kept = ds.filter(function (x) { return x.name !== name; });
+            if (kept.length !== ds.length) storeDecls(this, kept);
+            return old;
+        },
+        item: function (i) { var ds = decls(this); i = i >>> 0; return i < ds.length ? ds[i].name : ''; }
+    };
+    Object.keys(styleMethods).forEach(function (k) { CSSStyleDeclaration.prototype[k] = styleMethods[k]; });
+    getter(CSSStyleDeclaration.prototype, 'length', function () { return decls(this).length; });
+    accessor(CSSStyleDeclaration.prototype, 'cssText', function () {
+        return this[OWNER].getAttribute('style') ? decls(this).map(function (d) {
+            return d.name + ': ' + d.value + (d.important ? ' !important' : '') + ';';
+        }).join(' ') : '';
+    }, function (v) { this[OWNER].setAttribute('style', v == null ? '' : String(v)); });
+    // Property names (el.style.backgroundColor) go through a Proxy, so any
+    // CSS property reads and writes without a per-property table.
+    var styles = new WeakMap();
+    function styleFor(el) {
+        var st = styles.get(el);
+        if (st) return st;
+        var target = Object.create(CSSStyleDeclaration.prototype);
+        Object.defineProperty(target, OWNER, { value: el });
+        st = new Proxy(target, {
+            get: function (t, p) {
+                if (typeof p !== 'string' || p in t) return Reflect.get(t, p, st);
+                if (/^\d+$/.test(p)) return t.item(Number(p)) || undefined;
+                return t.getPropertyValue(cssName(p));
+            },
+            set: function (t, p, v) {
+                if (typeof p !== 'string' || p in t) return Reflect.set(t, p, v, st);
+                t.setProperty(cssName(p), v);
+                return true;
+            }
+        });
+        styles.set(el, st);
+        return st;
+    }
+    accessor(Element.prototype, 'style', function () { slotOf(this); return styleFor(this); },
+        function (v) { this.style.cssText = v; });
+
     // querySelector/All, getElementsBy* on both Document and Element. The
     // collections are static snapshots (pin §4: live HTMLCollection later).
     var queries = {

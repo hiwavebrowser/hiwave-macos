@@ -2046,4 +2046,30 @@ mod tests {
         );
         assert_eq!(b.take_dirty(), DomDirty::Clean);
     }
+
+    #[test]
+    fn style_reads_and_writes_the_style_attribute() {
+        let b = bound(
+            "<html><body><div id='d' style='color: red; margin-top:4px !important'>x</div></body></html>",
+        );
+        assert_eq!(
+            eval_string(
+                &b,
+                "var d = document.getElementById('d'), s = d.style, r = []; \
+                 r.push(s.color, s.marginTop, s.getPropertyValue('margin-top'), \
+                        s.getPropertyPriority('margin-top'), s.length, s[0], s.fontSize === ''); \
+                 s.backgroundColor = 'blue'; s.color = ''; s.setProperty('float', 'left'); \
+                 r.push(d.getAttribute('style'), s.cssFloat, d.style === s); \
+                 s.cssText = 'width: 10px'; r.push(s.width, s.length); \
+                 d.style = 'height: 5px'; r.push(d.getAttribute('style'), s.removeProperty('height'), s.length); \
+                 r.join('|')"
+            ),
+            "red|4px|4px|important|2|color|true|\
+             margin-top: 4px !important; background-color: blue; float: left;|left|true|\
+             10px|1|height: 5px|5px|0"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+        let doc = b.window.borrow().document.clone().unwrap();
+        assert_eq!(doc.get_element_by_id("d").unwrap().get_attribute("style"), Some(""));
+    }
 }

@@ -21643,6 +21643,15 @@ mod script_dom_flush_tests {
             .execute_script(view, "document.getElementById('a').removeAttribute('class')")
             .unwrap();
         assert_eq!(painted_text(&engine, view), "ALPHA BETA");
+        // An inline style write reaches the cascade through the attribute.
+        engine
+            .execute_script(view, "document.getElementById('b').style.display = 'none'")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "ALPHA");
+        engine
+            .execute_script(view, "document.getElementById('b').style.removeProperty('display')")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "ALPHA BETA");
 
         engine
             .execute_script(
