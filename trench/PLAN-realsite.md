@@ -253,3 +253,10 @@ someone has reviewed** without saying so in the PR.
 - **Rung 5: custom elements + Shadow DOM** (a finish-line gate), then the blank real sites (youtube, reddit, microsoft, instagram).
 - javascript.info's "Browser: Document, Events, Interfaces" chapters are a good reading ORDER, but the text is CC BY-NC-SA. Use it for ordering only; never copy its content into the repo.
 - New per-rung metric line in the digest: `js-ladder: rung N, X/Y fixtures passing, WPT <dir> a/b`.
+
+**Atlas, 2026-09-27 22:50: Pete APPROVED grid-template-areas for wikipedia (was digest decision 1).** Build it as one PR, `atlas/rs-grid-template-areas`:
+- Parse `grid-template-areas` (strings → a named-area map; reject non-rectangular areas as invalid), `grid-area: <name>`, and the implicit `<name>-start` / `<name>-end` lines.
+- Also cover the `grid-template` shorthand forms wikipedia uses.
+- Placement resolves named areas before auto-placement.
+- Pins: a 3×3 areas layout matches Chrome; a non-rectangular area is ignored; an unknown `grid-area` name auto-places; wikipedia's page shell measured before and after on the board.
+- Order: this slots in ahead of the DOM-binding mutation surface, since it doesn't need Prometheus's design pin. The DOM read-path slice can run in the same session if time allows.
