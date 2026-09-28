@@ -2299,8 +2299,8 @@ impl BorderStyle {
 /// Primer declares hundreds of `--*` on `:root`, and an element that
 /// overrode one of them used to copy every one of them (~11% of github's
 /// cascade). A lookup walks the chain, first layer that names the property
-/// wins; past `MAX_DEPTH` layers the chain is flattened into one, so lookups
-/// stay bounded.
+/// wins; past `MAX_DEPTH` layers everything above the bottom layer is
+/// collapsed into one, so lookups stay bounded.
 #[derive(Clone, Default)]
 pub struct CustomProperties {
     /// `None` hides an inherited value (`initial`, or a reference cycle).
@@ -2333,18 +2333,29 @@ impl CustomProperties {
                 depth: parent.depth + 1,
             };
         }
-        let mut flat = parent.to_map();
-        for (k, v) in own {
-            match v {
-                Some(v) => {
-                    flat.insert(k, v);
-                }
-                None => {
-                    flat.remove(&k);
-                }
+        // Collapse the layers above the bottom one and keep the bottom shared.
+        // The bottom is usually `:root` with hundreds of entries (Primer);
+        // copying it at every sixth layer was ~15% of github's cascade. The
+        // upper layers are small, and a `None` in them still has to mask the
+        // bottom, so masks are kept.
+        let mut above = vec![parent];
+        while let Some(p) = above.last().and_then(|l| l.parent.as_ref()) {
+            above.push(p);
+        }
+        let bottom = above.pop().expect("chain has a parent").clone();
+        let mut merged: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        for layer in above.into_iter().rev() {
+            for (k, v) in &layer.own {
+                merged.insert(k.clone(), v.clone());
             }
         }
-        Self::from_map(flat)
+        merged.extend(own);
+        Self {
+            own: merged,
+            depth: bottom.depth + 1,
+            parent: Some(bottom),
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<&str> {
@@ -3884,6 +3895,50 @@ mod object_fit_initial_value_tests {
     #[test]
     fn object_fit_initial_value_is_fill() {
         assert_eq!(ComputedStyle::new().object_fit, "fill");
+    }
+}
+
+#[cfg(test)]
+mod custom_properties_collapse_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn layer(pairs: &[(&str, Option<&str>)]) -> HashMap<String, Option<String>> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.map(str::to_string))).collect()
+    }
+
+    /// Past `MAX_DEPTH` the upper layers collapse, but the bottom (`:root`)
+    /// layer is shared, not copied, and masks in the upper layers still hide
+    /// the bottom's values.
+    #[test]
+    fn collapse_keeps_the_bottom_layer_shared_and_masks_it() {
+        let root: HashMap<String, String> = (0..300)
+            .map(|i| (format!("--r{i}"), format!("{i}")))
+            .collect();
+        let bottom = Arc::new(CustomProperties::from_map(root));
+        let mut cur = bottom.clone();
+        cur = Arc::new(CustomProperties::over(&cur, layer(&[("--r1", None)])));
+        cur = Arc::new(CustomProperties::over(&cur, layer(&[("--r2", Some("x"))])));
+        let mut depth = 2;
+        while depth + 1 < CustomProperties::MAX_DEPTH {
+            cur = Arc::new(CustomProperties::over(&cur, layer(&[("--a", Some("a"))])));
+            depth += 1;
+        }
+        let expected = {
+            let mut m = cur.to_map();
+            m.insert("--b".into(), "b".into());
+            m
+        };
+        let collapsed = CustomProperties::over(&cur, layer(&[("--b", Some("b"))]));
+
+        assert!(Arc::ptr_eq(collapsed.parent.as_ref().unwrap(), &bottom));
+        assert_eq!(collapsed.depth, 1);
+        assert_eq!(collapsed.get("--r1"), None, "the mask survives the collapse");
+        assert_eq!(collapsed.get("--r2"), Some("x"));
+        assert_eq!(collapsed.get("--r3"), Some("3"));
+        assert_eq!(collapsed.to_map(), expected);
+        assert!(collapsed.own.len() < 10, "only the upper layers were copied");
     }
 }
 
