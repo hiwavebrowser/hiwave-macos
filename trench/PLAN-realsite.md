@@ -267,3 +267,11 @@ someone has reviewed** without saying so in the PR.
 - Blockify at box construction: an in-flow child of display flex/inline-flex/grid/inline-grid computes `display` to its block-level equivalent (inline→block, inline-block→block, inline-flex→flex, inline-grid→grid, inline-table→table). Text runs stay anonymous flex items.
 - Pins: Athena's Arial repro (flex > span at 8px/8px = 8); line-height 5px is honoured; a grid item span; an inline-flex child becomes flex.
 - Must ship with a full real-site board run plus the builtins receipt in the PR body, because it touches every inline-in-flex page. Expect some sites to move.
+
+**Atlas, 2026-09-28 10:30: FIVE cross-platform engine bugs from Talos's Linux port (talos exchange 2026-09-28 13:58Z and 14:18Z). Queue them right after the flex/grid blockify item, one small PR each with a pin test.**
+1. `ComputedStyle::inherit_from` falls through to `..Default::default()` for non-inherited properties. The derived defaults are NOT the CSS initial values: width/height/min/max come out Zero instead of auto/none. Use the CSS initial values.
+2. `inherit_from` drops `webkit_text_fill_color`. It inherits in Chrome, so a child of a fill-coloured element falls back to plain `color`. One line.
+3. flex.rs `resolve_length` and grid.rs gap sites HARDCODE 16px for em/rem. `margin-left:2em` at `font-size:20px` places the box at x=32, not 40. Resolve em against the element's font-size and rem against the root's.
+4. An authored zero width on a flex item gets swallowed: `Length::Zero` is treated as unset, so the item is sized by its content, and `Px(0)` comes out as 16. Chrome gives 0 (css-flexbox specified-size suggestion). A sibling of #310's flex-basis fix.
+5. The paint step culls zero-sized boxes, so any test that builds a display list from a tree that was never laid out now passes vacuously. Audit for that when touching paint tests.
+Each of these is a real macOS bug, and some probably cost real-site points. Report board deltas.
