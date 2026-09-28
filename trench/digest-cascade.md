@@ -73,3 +73,33 @@ Worst ratio of record: still **80.6×**, since no quiet run has happened yet. Pr
 1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
 2. **A quiet window for one absolute reading.** Every session so far has run at load 13–19. Could the real-site lane skip one hourly slot (e.g. 04:05), so this lane gets a quiet `cascade_bench --runs 5` and a ratio of record, not a projection?
 3. (Carried over) Permissions for `git -C ~/Repos/.worktrees/cs-*`, so the lane can use per-branch worktrees.
+
+## 2026-09-28 04:50
+
+**#317 (subject keys) merged. Fix 3 (specificity stored per rule) opened as PR #318 with a clean receipt, and it's already merged. The A/B is within noise, as predicted. The real output of this session is the first symbolized profile of the post-#317 cascade, which re-orders the plan (below). The Mac was at load 14–16 the whole session, so again there's no absolute ratio.**
+
+| site | baseline (develop f262568, quiet) | #318 B/A vs #317 (pairs 3, 4) | projected ratio now |
+|---|---|---|---|
+| cnn | 5852 ms → 27.9× | 0.98, 0.89 (noise) | ~10× |
+| github | 7441 ms → 67.6× | 1.08, 0.80* (noise) | ~29× |
+| wikipedia | 1613 ms → **80.6×** | 0.96, 0.84 (noise) | **~51×** (worst) |
+
+The ratio of record is still **80.6×**, with no quiet run yet. The projection is unchanged at ~51× (wikipedia), since #318 is too small to move it. \*In pair 4, B's github load did 2 layout builds, not 3, so the number of builds per load isn't deterministic. Watch this: it moves the metric by a whole build.
+
+- **PR #318** `atlas/cs-specificity-cache` @ **fc7efb0** (c995fc8 + a merge of develop f83865c), **merged**. Receipt: builtins 5/5 avg 1.9%, campaign 26/26 avg 1.2%, every case identical to #317's. lib 169/169. The receipt reused the bench binary (same commit, same profile) instead of a second 12-min build.
+- **Profile (github, 25 s `sample`, symbolized release at fc7efb0, `cascade-target-prof/pc-prof-fc7efb0`, report in `~/Repos/.worktrees/cascade-prof-github-fc7efb0.txt`).** Inclusive time under `build_layout_from_document`:
+  - `compute_style_for_element` 78%. Inside it, `selector_matches` takes **58%**: `simple_selector_matches_with_pseudo` 34%, `match_pseudo_class` 15%, `any_compound_in_list_matches` 11%, `parse_pseudo_class` 4%, `selector_has_combinator` 3.5%. Matching still works on selector *strings* at match time: pseudo-classes are re-parsed and `str::find`/`trim` run per candidate.
+  - **`HashMap::clone` from `element_custom_properties` (lib.rs:4875): 10.7%.** It's already copy-on-write, so this is real copying: every github element that overrides one `--*` var clones Primer's whole inherited map (hundreds of `:root` vars).
+  - `prepared_selector(selector.trim())` SipHashes the selector string on every `selector_matches` call: ~4%.
+  - Dropping the `[Stylesheet]` slice at the end of each build: 3.9%, since sheets are cloned per build. `create_pseudo_element` is down to 6.1%, from 48% before #314.
+- **Next fixes, by measured share (this replaces the plan's Bloom-first order; Bloom is a subset of the first item):**
+  1. **Compiled selectors per rule in the `RuleIndex`**: store the `PreparedSelector` (tokens and compounds, pseudo-classes pre-parsed into an enum) next to `keys`, and match against that instead of the string. This removes the SipHash lookup (4%) and the per-match pseudo parsing, and it attacks the 58%. It's the biggest lever. Do it as 2–3 small PRs: store the prepared selector per rule; pre-parse pseudo-classes; then an ancestor Bloom filter on the compiled combinators.
+  2. **Layered custom-property map**: a child layer of its own overrides plus an `Arc` to the parent, flattened when the chain gets deep, in place of CoW-clone-the-whole-map. That's 10.7% on github. The type change touches `ComputedStyle.custom_properties` and `substitute_css_vars`.
+  3. Share stylesheets across builds with `Arc<[Stylesheet]>`: ~4%.
+- **Instrument notes:** a symbolized build needs no env var. `cargo build --release --config 'profile.release.debug="line-tables-only"' --config profile.release.strip=false --target-dir …/cascade-target-prof` works under this lane's permissions (4m45s incremental). The default release binary is stripped (`???` frames). Release builds took 12 min at load 15.
+- Aleph worked this session (`aleph_search`/`aleph_expand`/`aleph_callers`), but its index predates #317/#318, so it showed stale bodies. Line numbers came from `git show <sha>:lib.rs`.
+
+**Decisions for Pete**
+1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
+2. (Carried over) One quiet slot for an absolute reading. Four sessions have now all run at load 13–19, so the only ratio of record is the 22:25 baseline.
+3. **Plan re-order:** "compiled selectors per rule" goes ahead of the ancestor Bloom filter, and "layered var map" is added as fix 5. The profile says matching on strings is 58% and the Bloom filter alone only prunes part of it. Default: proceed in this order unless you say otherwise.
