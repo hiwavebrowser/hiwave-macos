@@ -15,12 +15,15 @@
 //!   with a stale `gen` answers null, so old wrappers fail soft instead of
 //!   reading the new page's nodes.
 //!
-//! Nothing here mutates the tree: the mutation surface waits on the §3
-//! dirty-bit flush.
+//! Tree moves (`appendChild`/`insertBefore`/`removeChild`/`remove`) write
+//! the Rust tree and mark the §3 `DomDirty` bucket, which the engine flushes
+//! with one relayout when the script settles. Writes that change a node's
+//! own data (attributes, text, new nodes) wait on a writable rustkit-dom.
 
+use crate::DomDirty;
 use rustkit_dom::{Document, Node, NodeId, NodeType, QuerySelector};
 use rustkit_js::{JsError, JsRuntime, JsValue};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 /// The document the host functions read, and its generation.
@@ -49,13 +52,103 @@ impl DomHost {
 
     /// The node named by `args[0]` (generation) and `args[1]` (NodeId).
     fn node(&self, args: &[JsValue]) -> Option<Rc<Node>> {
+        self.node_at(args, 1)
+    }
+
+    /// The node whose NodeId is `args[index]`, in the generation `args[0]`.
+    fn node_at(&self, args: &[JsValue], index: usize) -> Option<Rc<Node>> {
         let document = self.document_for(args.first()?)?;
-        match args.get(1)? {
+        match args.get(index)? {
             JsValue::Number(n) if *n >= 0.0 && n.fract() == 0.0 => {
                 document.get_node(NodeId::new(*n as usize))
             }
             _ => None,
         }
+    }
+}
+
+/// Is `node` in `document`'s tree? Removed nodes stay in the Document's
+/// node table (their wrappers keep working), so tables that predate the
+/// removal, like the id index, need this check.
+fn is_connected(node: &Rc<Node>, document: &Document) -> bool {
+    let root = document.root().id;
+    let mut current = Some(node.clone());
+    while let Some(n) = current {
+        if n.id == root {
+            return true;
+        }
+        current = n.parent();
+    }
+    false
+}
+
+/// Is `ancestor` `node` or one of its ancestors?
+fn is_inclusive_ancestor(ancestor: &Rc<Node>, node: &Rc<Node>) -> bool {
+    ancestor.id == node.id || is_descendant(node, ancestor)
+}
+
+fn is_child_of(node: &Rc<Node>, parent: &Rc<Node>) -> bool {
+    node.parent().is_some_and(|p| p.id == parent.id)
+}
+
+/// DOM §4.2.3 "pre-insert" `node` into `parent` before `child` (`None`
+/// appends). Returns the DOMException name on a failed validity check,
+/// before anything is touched.
+fn pre_insert(
+    parent: &Rc<Node>,
+    node: &Rc<Node>,
+    child: Option<Rc<Node>>,
+) -> Result<(), &'static str> {
+    // Only elements take children here; a Document's one-element rules and
+    // DocumentFragment come with a later rung.
+    if !parent.is_element() {
+        return Err("HierarchyRequestError");
+    }
+    if is_inclusive_ancestor(node, parent) {
+        return Err("HierarchyRequestError");
+    }
+    if child.as_ref().is_some_and(|c| !is_child_of(c, parent)) {
+        return Err("NotFoundError");
+    }
+    if matches!(
+        node.node_type,
+        NodeType::Document | NodeType::DocumentType { .. }
+    ) {
+        return Err("HierarchyRequestError");
+    }
+    // Inserting a node before itself inserts it before its next sibling.
+    let child = match child {
+        Some(c) if c.id == node.id => node.next_sibling(),
+        other => other,
+    };
+    node.remove_from_parent();
+    match child {
+        Some(c) => parent.insert_before(node.clone(), c),
+        None => parent.append_child(node.clone()),
+    }
+    Ok(())
+}
+
+/// `mutate(gen, op, parentId, nodeId, childId)`: one tree write. Answers
+/// null on success, else the DOMException name to throw.
+fn mutate(host: &DomHost, args: &[JsValue]) -> Result<(), &'static str> {
+    let (Some(parent), Some(node)) = (host.node_at(args, 2), host.node_at(args, 3)) else {
+        return Err("NotFoundError");
+    };
+    match string_arg(args, 1) {
+        Some("insert") => {
+            let child = match args.get(4) {
+                None | Some(JsValue::Null) | Some(JsValue::Undefined) => None,
+                Some(_) => Some(host.node_at(args, 4).ok_or("NotFoundError")?),
+            };
+            pre_insert(&parent, &node, child)
+        }
+        Some("remove") if is_child_of(&node, &parent) => {
+            node.remove_from_parent();
+            Ok(())
+        }
+        Some("remove") => Err("NotFoundError"),
+        _ => Err("NotSupportedError"),
     }
 }
 
@@ -138,8 +231,13 @@ fn node_info(node: &Rc<Node>, field: &str) -> JsValue {
 }
 
 /// Register the host functions and install the wrapper layer over the
-/// stub `document`. Call after the stub globals exist.
-pub(crate) fn install(runtime: &mut JsRuntime, host: &SharedDomHost) -> Result<(), JsError> {
+/// stub `document`. Call after the stub globals exist. Tree writes mark
+/// `dirty`.
+pub(crate) fn install(
+    runtime: &mut JsRuntime,
+    host: &SharedDomHost,
+    dirty: &Rc<Cell<DomDirty>>,
+) -> Result<(), JsError> {
     let h = host.clone();
     runtime.register_host_function(
         "__rustkit_dom_root",
@@ -169,7 +267,11 @@ pub(crate) fn install(runtime: &mut JsRuntime, host: &SharedDomHost) -> Result<(
                 args.first().and_then(|g| host.document_for(g)),
                 string_arg(args, 1),
             ) {
-                (Some(document), Some(id)) => node_id(document.get_element_by_id(id)),
+                (Some(document), Some(id)) => node_id(
+                    document
+                        .get_element_by_id(id)
+                        .filter(|n| is_connected(n, document)),
+                ),
                 _ => JsValue::Null,
             }
         }),
@@ -206,7 +308,8 @@ pub(crate) fn install(runtime: &mut JsRuntime, host: &SharedDomHost) -> Result<(
                 _ => return JsValue::Null,
             };
             if scope.id == document.root().id {
-                id_list(found)
+                // `#id` selectors read the id table, which keeps removed nodes.
+                id_list(found.into_iter().filter(|n| is_connected(n, document)))
             } else {
                 id_list(found.into_iter().filter(|n| is_descendant(n, &scope)))
             }
@@ -246,6 +349,21 @@ pub(crate) fn install(runtime: &mut JsRuntime, host: &SharedDomHost) -> Result<(
         }),
     )?;
 
+    let h = host.clone();
+    let d = dirty.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_mutate",
+        5,
+        Box::new(move |args| match mutate(&h.borrow(), args) {
+            Ok(()) => {
+                // Pin §3.3: a structure insert/remove/move restyles.
+                d.set(d.get().max(DomDirty::Style));
+                JsValue::Null
+            }
+            Err(name) => JsValue::String(name.to_string()),
+        }),
+    )?;
+
     runtime.evaluate_script(WRAPPERS_JS)?;
     Ok(())
 }
@@ -257,11 +375,23 @@ const WRAPPERS_JS: &str = r#"
     var N = {
         root: __rustkit_dom_root, byId: __rustkit_dom_by_id,
         collect: __rustkit_dom_collect, info: __rustkit_dom_info,
-        attr: __rustkit_dom_attr
+        attr: __rustkit_dom_attr, mutate: __rustkit_dom_mutate
     };
-    ['root', 'by_id', 'collect', 'info', 'attr'].forEach(function (n) {
+    ['root', 'by_id', 'collect', 'info', 'attr', 'mutate'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
+
+    if (typeof g.DOMException !== 'function') {
+        g.DOMException = function DOMException(message, name) {
+            if (!(this instanceof DOMException)) illegal();
+            this.message = message === undefined ? '' : String(message);
+            this.name = name === undefined ? 'Error' : String(name);
+        };
+        g.DOMException.prototype = Object.create(Error.prototype, {
+            constructor: { value: g.DOMException, writable: true, configurable: true }
+        });
+    }
+    var DOMException = g.DOMException;
 
     var SLOT = Symbol('rustkit.node');
     var gen = 0;
@@ -358,6 +488,45 @@ const WRAPPERS_JS: &str = r#"
         return info(this, 'type') === 9 ? null : g.document;
     });
     Node.prototype.hasChildNodes = function () { return this.firstChild !== null; };
+
+    // Tree moves. Each is one host write; a failed validity check throws
+    // the DOMException the host names and leaves the tree untouched.
+    function nodeArg(o, method) {
+        if (o == null || !o[SLOT]) {
+            throw new TypeError("Failed to execute '" + method +
+                "' on 'Node': parameter 1 is not of type 'Node'.");
+        }
+        return o[SLOT];
+    }
+    function write(op, parent, node, child, method) {
+        // A wrapper from an older document names no node here: -1 makes
+        // the host answer NotFoundError instead of reusing its bare id.
+        function here(s) { return s.gen === gen ? s.id : -1; }
+        var p = slotOf(parent), n = nodeArg(node, method);
+        var c = child == null ? null : here(nodeArg(child, method));
+        var err = N.mutate(gen, op, here(p), here(n), c);
+        if (err) throw new DOMException("Failed to execute '" + method + "' on 'Node'.", err);
+        return node;
+    }
+    Node.prototype.appendChild = function (node) {
+        return write('insert', this, node, null, 'appendChild');
+    };
+    Node.prototype.insertBefore = function (node, child) {
+        if (arguments.length < 2) {
+            throw new TypeError("Failed to execute 'insertBefore' on 'Node': 2 arguments required.");
+        }
+        return write('insert', this, node, child, 'insertBefore');
+    };
+    Node.prototype.removeChild = function (child) {
+        return write('remove', this, child, null, 'removeChild');
+    };
+    // ChildNode.remove(): a no-op for a node without a parent.
+    [Element, CharacterData].forEach(function (C) {
+        C.prototype.remove = function () {
+            var p = this.parentNode;
+            if (p) p.removeChild(this);
+        };
+    });
     Node.prototype.contains = function (other) {
         for (var n = other; n; n = n.parentNode) if (n === this) return true;
         return false;

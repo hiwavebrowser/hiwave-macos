@@ -21637,6 +21637,30 @@ mod script_dom_flush_tests {
         assert!(!text.contains("alpha") && text.contains("omega"), "painted: {text}");
     }
 
+    // The mutation surface end to end: script tree moves mark the bucket
+    // themselves and the settle flush paints them.
+    #[test]
+    fn script_tree_moves_are_painted_when_the_script_settles() {
+        let (mut engine, view) = loaded(
+            "<html><body><p id='a'>alpha</p><p id='b'>beta</p><p id='c'>gamma</p></body></html>",
+        );
+        assert_eq!(painted_text(&engine, view), "alpha beta gamma");
+
+        engine
+            .execute_script(view, "document.body.removeChild(document.getElementById('b'))")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "alpha gamma");
+
+        engine
+            .execute_script(
+                view,
+                "var a = document.getElementById('a'); document.body.appendChild(a); \
+                 document.body.insertBefore(document.getElementById('c'), a)",
+            )
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "gamma alpha");
+    }
+
     // Pin §3.1: script that writes nothing costs no relayout.
     #[test]
     fn a_clean_script_does_not_relayout() {
