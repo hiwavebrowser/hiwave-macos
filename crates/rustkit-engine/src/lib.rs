@@ -19840,6 +19840,39 @@ mod incremental_restyle_tests {
     }
 
     #[test]
+    fn every_style_relevant_key_change_discards_the_memo() {
+        fn assert_discards(name: &str, mutate: impl FnOnce(&mut StyleMemoKey)) {
+            let original = StyleMemoKey {
+                view: None,
+                document: std::ptr::null(),
+                external_sheets: 0,
+                viewport: None,
+                focus: None,
+            };
+            let mut changed = original.clone();
+            mutate(&mut changed);
+            assert_ne!(changed, original, "{name} must change the key");
+
+            let _scope = StyleMemoScope::arm_with(RestyleMode::Reuse).expect("armed");
+            {
+                let _build = StyleMemoBuild::begin(original).expect("records");
+            }
+            assert!(
+                StyleMemoBuild::begin(changed).is_none(),
+                "{name} must not replay stale styles"
+            );
+            assert!(memo_counts().is_none(), "{name} must drop the recording");
+        }
+
+        assert_discards("view", |key| key.view = Some(EngineViewId::new()));
+        assert_discards("external sheets", |key| key.external_sheets = 1);
+        assert_discards("viewport", |key| key.viewport = Some((800.0, 600.0)));
+        assert_discards("focus", |key| {
+            key.focus = Some(rustkit_dom::NodeId::new(1))
+        });
+    }
+
+    #[test]
     fn replay_skips_the_cascade_and_an_unrecorded_node_still_cascades() {
         let key = StyleMemoKey {
             view: None,
