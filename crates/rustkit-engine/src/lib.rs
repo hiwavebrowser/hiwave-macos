@@ -4366,16 +4366,14 @@ impl Engine {
             // Every rule in these buckets ends in the pseudo, and the index
             // holds its prepared base selector, base keys and specificity:
             // the same tests as the string path below, computed once.
-            for g in buckets.candidates(tag_name, attributes) {
-                let gi = g as usize;
+            let matches = |gi: usize| {
                 let Some(prepared) = ix.pseudo_prepared[gi].as_deref() else {
-                    continue;
+                    return false;
                 };
                 // No base keys means an empty base, which admits any element.
-                let admitted = ix.pseudo_keys[gi]
+                ix.pseudo_keys[gi]
                     .as_deref()
-                    .is_none_or(|keys| Self::keys_may_match(keys, tag_name, attributes));
-                if admitted
+                    .is_none_or(|keys| Self::keys_may_match(keys, tag_name, attributes))
                     && SelectorMatcher.selector_matches_prepared(
                         prepared,
                         tag_name,
@@ -4384,7 +4382,36 @@ impl Engine {
                         siblings_before,
                         sib,
                     )
-                {
+            };
+            let candidates = buckets.candidates(tag_name, attributes);
+            // No box without `content`, and only a rule that declares it can
+            // set it (it isn't inherited and starts as None). Most candidates
+            // don't (46-66% of the pinned sites' pseudo rules, e.g. every
+            // `*::before, *::after { box-sizing }` reset), and most elements
+            // match none that do: they stop here, the rest never matched.
+            // Read from the rule itself, not the index: the index is shared
+            // across builds whose sheets have the same selectors but may
+            // have different declarations (`shared_rule_index`).
+            // The same test `apply_style_property` dispatches on.
+            let sets_content = |gi: usize| {
+                ix.rule(stylesheets, gi as u32)
+                    .declarations
+                    .iter()
+                    .any(|d| d.property == "content")
+            };
+            let first = candidates
+                .iter()
+                .position(|&g| sets_content(g as usize) && matches(g as usize))?;
+            // A box: cascade every matching candidate, in candidate order.
+            // Before `first` no `content` rule matched; `first` did.
+            for (i, &g) in candidates.iter().enumerate() {
+                let gi = g as usize;
+                let hit = match i.cmp(&first) {
+                    std::cmp::Ordering::Less => !sets_content(gi) && matches(gi),
+                    std::cmp::Ordering::Equal => true,
+                    std::cmp::Ordering::Greater => matches(gi),
+                };
+                if hit {
                     matching_rules.push((ix.specificity[gi], ix.rule(stylesheets, g)));
                 }
             }
@@ -18081,6 +18108,98 @@ mod rule_prefilter_tests {
         for (p, i) in plain.iter().zip(&indexed) {
             assert_eq!(p, i);
         }
+    }
+
+    #[test]
+    fn the_pseudo_content_gate_changes_no_style() {
+        // The indexed path stops when no candidate that declares `content`
+        // matches, and otherwise reuses those answers: styles, and the
+        // order of equal-specificity rules around the first `content` hit,
+        // must be the string path's.
+        let css = "*::before, *::after { box-sizing: border-box }\n\
+                   .g::after { color: red }\n\
+                   .g::after { content: \"x\"; color: blue }\n\
+                   .g::after { color: green }\n\
+                   .h::after { color: red }\n\
+                   div.h::after { margin-left: 3px }\n\
+                   .n::before { content: \"n\" }\n\
+                   .n.m::before { content: none }\n\
+                   .k::before { color: red }\n\
+                   .k::before { content: \"\" }\n\
+                   .k::before { content: \"k\"; color: blue }\n\
+                   .k::before { color: green }\n\
+                   ul .k::before { content: \"deep\" }\n";
+        let sheet = Stylesheet::parse(css).expect("css");
+        let sheets = std::slice::from_ref(&sheet);
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let elements = [
+            ("div", attrs(&[("class", "g")])),
+            ("div", attrs(&[("class", "h")])),
+            ("div", attrs(&[("class", "n")])),
+            ("div", attrs(&[("class", "n m")])),
+            ("li", attrs(&[("class", "k")])),
+            ("li", attrs(&[("class", "k g h")])),
+            ("span", attrs(&[])),
+        ];
+        let ancestors_sets: [Vec<(String, Vec<String>, Option<String>)>; 2] =
+            [vec![], vec![("ul".to_string(), vec![], None)]];
+        let styles = |indexed: bool| {
+            let _scope = indexed.then(|| RuleIndexScope::install(engine.build_rule_index(sheets)));
+            let mut out = Vec::new();
+            for (tag, a) in &elements {
+                for ancestors in &ancestors_sets {
+                    for pseudo in ["::before", "::after"] {
+                        out.push(format!(
+                            "{tag} {a:?} {ancestors:?} {pseudo}: {:?}",
+                            engine.pseudo_element_style(
+                                tag,
+                                a,
+                                sheets,
+                                ancestors,
+                                &[],
+                                SiblingContext::SOLE,
+                                pseudo,
+                            )
+                        ));
+                    }
+                }
+            }
+            out
+        };
+        let (plain, indexed) = (styles(false), styles(true));
+        assert!(plain.iter().any(|s| s.contains("Some(")), "the fixture must generate boxes");
+        assert!(plain.iter().any(|s| s.ends_with("None")), "and elements without one");
+        for (p, i) in plain.iter().zip(&indexed) {
+            assert_eq!(p, i);
+        }
+    }
+
+    #[test]
+    fn the_pseudo_content_gate_reads_a_reused_index_sheets_declarations() {
+        // A relayout reuses the index over the same selectors even when the
+        // declarations changed, so which rules set `content` can't come from
+        // the index: here only the second build's rule does.
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let parse = |css: &str| vec![Stylesheet::parse(css).expect("css")];
+        let first = parse(".a::before { color: red }");
+        let again = parse(".a::before { content: \"a\"; color: red }");
+        let ix = engine.shared_rule_index(&first);
+        assert!(Rc::ptr_eq(&ix, &engine.shared_rule_index(&again)));
+        let div = attrs(&[("class", "a")]);
+        let style = |sheets: &[Stylesheet]| {
+            let _scope = RuleIndexScope::install_for(RuleIndex::source_of(sheets), ix.clone());
+            engine.pseudo_element_style(
+                "div",
+                &div,
+                sheets,
+                &[],
+                &[],
+                SiblingContext::SOLE,
+                "::before",
+            )
+        };
+        assert!(style(&first).is_none());
+        assert!(style(&again).is_some_and(|s| s.content.is_some()));
     }
 
     #[test]
