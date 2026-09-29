@@ -638,3 +638,26 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **Retire the 24.0× record and use 33.4× (quiet develop 35fe782, 14:45 today) as the ratio of record.** The same binary that set 24.0× reads 1.8× slower in today's quiet window, so 24.0× reflected a machine state, not the engine. Default: yes. From now on, records are same-window only.
 2. **The flag-on real-site board run for the `RUSTKIT_INCREMENTAL_RESTYLE` default flip** (carried over). It's worth ~15% on wikipedia and ~30% on github, measured quietly today. Default: this lane runs the board itself in the next quiet window.
 3. (Carried over) Approve the pinned-snapshot method change.
+
+## 2026-09-29 17:45
+
+**No ratio (load 15–25 all session) and no PR. #363 (defer first layout) merged as 9f49a40, so 0 cs PRs are open. What the session produced: a fresh symbolized wikipedia profile of develop 9f49a40, which names a bigger cut than anything left in the plan, and a clean `verify` read for the `RUSTKIT_INCREMENTAL_RESTYLE` flip.**
+
+| site | quiet develop 35fe782 (14:45, ratio of record) | this session |
+|---|---|---|
+| cnn | 1030 ms → 4.9× | not measured (load 15–25) |
+| github | 1679 ms → 15.3× | not measured |
+| wikipedia | 667 ms → **33.4×** (worst) | not measured. #363 landed (quiet B/A .79 → ≈ 26× projected, unconfirmed) |
+
+- **Profile, wikipedia, develop 9f49a40** (`cascade-target-prof/pc-prof-9f49a40`, reports `~/Repos/.worktrees/cascade-prof-wikipedia-9f49a40-{1..20}.txt`, 7,146 pooled samples under `build_layout_from_document`). Run 19 holds 4,754 of them, so treat the shares as rough. Inclusive: `compute_style_for_element` 43%, `selector_matches_prepared` 17% (`matched_specificity`'s 15% is just its wrapper), `pseudo_element_style` 13%, `SubjectCompound::matches` 9%, `keys_may_match` 7%, `RuleBuckets::candidates` 6%, `ComputedStyle::new` 5%.
+- **New cut, the biggest visible: 26.8% of samples are malloc/free/memmove/clone/format work whose innermost engine frame is `build_layout_from_parent_style_and_path` itself**, not the matcher. The main source, from reading the code: `lib.rs:4014-4020` (at 9f49a40) builds `child_ancestors` for every element by **deep-cloning the whole ancestor chain** (`ancestors.iter().cloned()`: per ancestor, a tag `String`, a classes `Vec<String>` and an id). That's O(depth) heap allocations per element on a deep page. Smaller costs in the same loop: classes re-split per child (`:4101`), `to_lowercase` three times per child (`type_totals`/`type_seen`/`child_sib`), `child_selector_path` string building, and `push_child_hoisting_line_breaks` at 3.3%.
+  **Design (exact, no parity risk):** share the entries instead of copying them, e.g. `Rc` entries so building a child's chain costs a pointer copy per level. Lowercase and split each element's tag and classes once, and reuse them for `preceding_siblings`. The matcher's `ancestors[0] = parent` contract stays. The type change touches every `&[(String, Vec<String>, Option<String>)]` signature in the matcher, so it's mechanical but wide. Branch `atlas/cs-wiki-sheets` (worktree `~/Repos/.worktrees/cs-wiki-sheets`, at develop 9f49a40, no commits yet) is ready for it.
+- **`RUSTKIT_INCREMENTAL_RESTYLE=verify` on develop 9f49a40 (with #363):** github **hits 3153, mismatches 0**. Wikipedia **hits 11237, mismatches 0**. cnn records no memo (it has no sheets relayout). That's the style-level half of the default-flip receipt. The real-site board run is still owed and needs a quiet window (`scripts/realsite_board.py --capture-bin …` with the env set; the script passes `os.environ` through).
+- **Saved binaries:** `cascade-target-prof/pc-prof-9f49a40` (develop, symbolized; same code as a stripped build, so it can be the A for the next A/B).
+- **Open cs PRs:** 0, cap 3.
+- **Next session:** (1) build the ancestor-sharing cut on `atlas/cs-wiki-sheets`, then run engine tests with `--features headless`, the receipt, a B/A vs `pc-prof-9f49a40`, and open a PR. (2) If quiet: a 5-run absolute read of develop 9f49a40 (the first with #363), then the flag-on board run for the flip.
+
+**Decisions for Pete**
+1. **Retire 24.0× and use 33.4× (quiet develop 35fe782) as the ratio of record** (carried over from 15:53). Default: yes.
+2. **Flip `RUSTKIT_INCREMENTAL_RESTYLE` on by default after one flag-on board run.** Verify mode shows 0 style mismatches on github and wikipedia today, and the measured gain is ~15% on wikipedia and ~30% on github. Default: this lane runs the board in the next quiet window and opens the flip PR.
+3. (Carried over) Approve the pinned-snapshot method change.
