@@ -304,3 +304,25 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
 2. **Accept 24.0× as the ratio of record, with a stated 24–30× band?** Even at a low load average, the machine drifts ~1.3× minute to minute, so any single 5-run is optimistic or pessimistic by that much. Default: record 24.0× (tightest raw spread yet), and require every later record to be a 5-run with interleaved pairs of the prior record binary in the same window.
 3. **Merge order for #338 / #340?** They're independent (css vs engine) and both are pixel-identical to develop. Default: whichever R1/R2 clears first; neither needs a rebase on the other.
+
+## 2026-09-28 20:45
+
+**No new ratio: load was 10–26 all session (two other lanes running plus this lane's builds). The ratio of record stays 24.0× (wikipedia, 18:55, develop 8567760), band 24–30×. A pooled 6-load profile of github on develop + #340 found a new cut: ~38% of build time goes to rebuilding the rule index on every relayout. PR #341 reuses it. Its receipt is pixel-identical on all 26 cases; its speed is unproven because of the load. #338 merged 19:17. #340 has R1 CLEAR.**
+
+| site | record (18:55, develop 8567760), median of 5 | this session |
+|---|---|---|
+| cnn | 1291 ms → 6.1× | not measured (load 10–26) |
+| github | 1996 ms → 18.1× | not measured |
+| wikipedia | 480 ms → **24.0×** (worst) | not measured |
+
+- **Profile, github, develop 9292dc0 + #340, flag off** (`cascade-target-prof/pc-prof-4d2be12`, reports `~/Repos/.worktrees/cascade-prof-github-4d2be12-{1..6}.txt`, 2,675 pooled samples under `build_layout_from_document`). `compute_style_for_element` ~50%. **Separate roots with no per-element work, ~38% of samples:** `subject_keys` ~12% (a SipHash per selector into its cache, plus rehash), `prepared_selector` ~12% (thread-local lookup + `AncestorCompound::parse`), `selector_specificity` ~8% (re-scans every selector), `RuleBuckets::file` ~5%. That is `build_rule_index`, which runs on every build over a freshly extracted copy of the same sheets. Next, inside the element walk: `selector_matches_prepared` 24%, `SubjectCompound::matches` 15%, `CustomProperties::over` 10%, `keys_may_match` 7%, `match_attribute_selector` 6.5%.
+- **PR #341** `atlas/cs-rule-index-reuse` @ **c12e93a** (from develop 8920e24). `Engine::shared_rule_index` keeps the last index per thread with its selectors (per sheet) and returns it when every sheet holds the same selectors in order: one string compare per rule. `RuleIndexScope` now carries the slice it is installed *for*, so `active_rule_index` still only answers for the current slice. New test `a_relayout_over_the_same_selectors_reuses_the_index`. Engine lib **200/200** (`--test-threads=1`). Receipt: 26/26 avg 1.2%, builtins 5/5, **diffPixels identical to develop 8567760 and #338 on all 26**.
+  - Speed, noisy (load 17–22, per-build split vs `pc-vc-948e0f0`): cnn build 2 at 0.84 and 0.86, wikipedia build 3 at 0.72 and 0.62, github build 3 flat (1.03, 1.07). github's builds 2 and 3 do see the same 29 sheets, so build 3 takes the reuse path. github's build 2 is a miss by construction (build 1 had 1 sheet), so this cut only pays on the builds after the sheets settle. The quiet B/A is owed in the PR body.
+- **Instrument:** `trench/tools/cascade_prof_pool.py` pools N `sample` loads (a single `-wait` attach caught as few as 15 samples). `build_split.py` prints per-build cascade_ms for interleaved binaries. `receipt_diff.py` compares two parity receipts case by case.
+- **Saved binaries:** `cascade-target/pc-dev-8920e24` (develop, the A for #341), `pc-rir-B` (#341 @ c12e93a), `pc-pl-head` (#340), `pc-dev-8567760`.
+- **Next session:** (1) if quiet: `ab.py pc-dev-8920e24 pc-rir-B 4` → #341 body; `ab.py pc-dev-8567760 pc-pl-head 4` → #340 body; the ratio of record on develop. (2) If not quiet: github's build 2 (the miss) is now most of its cost. The next cut is in the element walk (`SubjectCompound::matches` / `keys_may_match` → an ancestor Bloom filter, plan item 1), or making build 1 cheap enough to skip until the sheets arrive.
+
+**Decisions for Pete**
+1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
+2. (Carried over, still blocking the metric) A standing quiet window. This session saw load 26, and one github build took 46 s against ~1 s quiet. #340 and #341 both wait on a quiet B/A. Default: keep grabbing dips.
+3. **Merge #340 on R1 CLEAR + receipt before its quiet B/A?** Its 2 clean pairs at load 10–16 were 0.69–0.85 on github, and B was faster on 5/5. Default: yes once R2 passes; the B/A follows in its body.
