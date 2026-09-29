@@ -146,9 +146,9 @@ fn pre_insert(
     node: &Rc<Node>,
     child: Option<Rc<Node>>,
 ) -> Result<(), &'static str> {
-    // Only elements take children here; a Document's one-element rules and
-    // DocumentFragment come with a later rung.
-    if !parent.is_element() {
+    // Only elements and fragments take children here; a Document's
+    // one-element rules come with a later rung.
+    if !parent.is_element() && !is_fragment(parent) {
         return Err("HierarchyRequestError");
     }
     if is_inclusive_ancestor(node, parent) {
@@ -168,12 +168,24 @@ fn pre_insert(
         Some(c) if c.id == node.id => node.next_sibling(),
         other => other,
     };
-    node.remove_from_parent();
-    match child {
-        Some(c) => parent.insert_before(node.clone(), c),
-        None => parent.append_child(node.clone()),
+    // Inserting a fragment inserts its children, in order, and empties it.
+    let nodes = if is_fragment(node) {
+        node.children()
+    } else {
+        vec![node.clone()]
+    };
+    for node in nodes {
+        node.remove_from_parent();
+        match &child {
+            Some(c) => parent.insert_before(node, c.clone()),
+            None => parent.append_child(node),
+        }
     }
     Ok(())
+}
+
+fn is_fragment(node: &Node) -> bool {
+    matches!(node.node_type, NodeType::DocumentFragment)
 }
 
 /// `mutate(gen, op, parentId, nodeId, childId)`: one tree write. Answers
@@ -230,6 +242,7 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             "element" => return Err("InvalidCharacterError"),
             "text" => NodeType::Text(data),
             "comment" => NodeType::Comment(data),
+            "fragment" => NodeType::DocumentFragment,
             _ => return Err("NotSupportedError"),
         };
         // A detached node is in no tree, so nothing needs a restyle yet.
@@ -289,9 +302,9 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             // Pin §3.3: a text change relayouts.
             Ok((JsValue::Null, DomDirty::Layout))
         }
-        // DOM §4.4 textContent setter on an element: replace all children
-        // with one Text node (none for the empty string).
-        ("setText", NodeType::Element { .. }) => {
+        // DOM §4.4 textContent setter on an element or fragment: replace
+        // all children with one Text node (none for the empty string).
+        ("setText", NodeType::Element { .. } | NodeType::DocumentFragment) => {
             for child in node.children() {
                 child.remove_from_parent();
             }
@@ -496,7 +509,7 @@ fn serialize_node(node: &Rc<Node>, out: &mut String) {
             out.push_str(name);
             out.push('>');
         }
-        NodeType::Document => serialize_children(node, out),
+        NodeType::Document | NodeType::DocumentFragment => serialize_children(node, out),
     }
 }
 
@@ -532,6 +545,7 @@ fn node_info(node: &Rc<Node>, field: &str) -> JsValue {
             NodeType::Comment(_) => 8.0,
             NodeType::Document => 9.0,
             NodeType::DocumentType { .. } => 10.0,
+            NodeType::DocumentFragment => 11.0,
         }),
         "name" => JsValue::String(match &node.node_type {
             NodeType::Element { tag_name, .. } if is_html_element(node) => {
@@ -543,6 +557,7 @@ fn node_info(node: &Rc<Node>, field: &str) -> JsValue {
             NodeType::Document => "#document".to_string(),
             NodeType::DocumentType { name, .. } => name.clone(),
             NodeType::ProcessingInstruction { target, .. } => target.clone(),
+            NodeType::DocumentFragment => "#document-fragment".to_string(),
         }),
         "local" => match &node.node_type {
             NodeType::Element { tag_name, .. } => JsValue::String(tag_name.clone()),
@@ -555,7 +570,9 @@ fn node_info(node: &Rc<Node>, field: &str) -> JsValue {
             NodeType::Document | NodeType::DocumentType { .. } => JsValue::Null,
             NodeType::Text(data) | NodeType::Comment(data) => JsValue::String(data.clone()),
             NodeType::ProcessingInstruction { data, .. } => JsValue::String(data.clone()),
-            NodeType::Element { .. } => JsValue::String(node.text_content()),
+            NodeType::Element { .. } | NodeType::DocumentFragment => {
+                JsValue::String(node.text_content())
+            }
         },
         "parent" => node_id(node.parent()),
         "first" => node_id(node.first_child()),
@@ -853,11 +870,13 @@ const WRAPPERS_JS: &str = r#"
     var HTMLFormElement = iface('HTMLFormElement', HTMLElement);
     var elementProtos = { input: HTMLInputElement.prototype,
                           textarea: HTMLTextAreaElement.prototype, form: HTMLFormElement.prototype };
+    var DocumentFragment = iface('DocumentFragment', Node);
     var NodeList = iface('NodeList');
     var HTMLCollection = iface('HTMLCollection');
 
     var types = { ELEMENT_NODE: 1, TEXT_NODE: 3, PROCESSING_INSTRUCTION_NODE: 7,
-                  COMMENT_NODE: 8, DOCUMENT_NODE: 9, DOCUMENT_TYPE_NODE: 10 };
+                  COMMENT_NODE: 8, DOCUMENT_NODE: 9, DOCUMENT_TYPE_NODE: 10,
+                  DOCUMENT_FRAGMENT_NODE: 11 };
     Object.keys(types).forEach(function (k) { Node[k] = Node.prototype[k] = types[k]; });
 
     function slotOf(o) {
@@ -872,7 +891,8 @@ const WRAPPERS_JS: &str = r#"
         var t = N.info(gen, id, 'type');
         var proto = t === 1 ? elementProtos[N.info(gen, id, 'local')] || HTMLElement.prototype
                   : t === 3 ? Text.prototype
-                  : t === 8 ? Comment.prototype : Node.prototype;
+                  : t === 8 ? Comment.prototype : t === 11 ? DocumentFragment.prototype
+                  : Node.prototype;
         w = Object.create(proto);
         Object.defineProperty(w, SLOT, { value: { id: id, gen: gen } });
         cache.set(id, w);
@@ -1030,18 +1050,20 @@ const WRAPPERS_JS: &str = r#"
         while (s && nodes.indexOf(s) >= 0) s = s[field];
         return s;
     }
-    Element.prototype.append = function () {
-        insertAll(this, toNodes(arguments), null, 'append');
-    };
-    Element.prototype.prepend = function () {
-        var nodes = toNodes(arguments);
-        insertAll(this, nodes, this.firstChild, 'prepend');
-    };
-    Element.prototype.replaceChildren = function () {
-        var nodes = toNodes(arguments);
-        while (this.firstChild) this.removeChild(this.firstChild);
-        insertAll(this, nodes, null, 'replaceChildren');
-    };
+    [Element, DocumentFragment].forEach(function (C) {
+        C.prototype.append = function () {
+            insertAll(this, toNodes(arguments), null, 'append');
+        };
+        C.prototype.prepend = function () {
+            var nodes = toNodes(arguments);
+            insertAll(this, nodes, this.firstChild, 'prepend');
+        };
+        C.prototype.replaceChildren = function () {
+            var nodes = toNodes(arguments);
+            while (this.firstChild) this.removeChild(this.firstChild);
+            insertAll(this, nodes, null, 'replaceChildren');
+        };
+    });
     [Element, CharacterData].forEach(function (C) {
         C.prototype.before = function () {
             var p = this.parentNode;
@@ -1181,16 +1203,18 @@ const WRAPPERS_JS: &str = r#"
         while (n && n.nodeType !== 1) n = n[field];
         return n;
     }
-    [Element, Document].forEach(function (C) {
+    [Element, Document, DocumentFragment].forEach(function (C) {
         getter(C.prototype, 'firstElementChild', function () { return elementChildren(this)[0] || null; });
         getter(C.prototype, 'lastElementChild', function () {
             var c = elementChildren(this); return c[c.length - 1] || null;
         });
         getter(C.prototype, 'childElementCount', function () { return elementChildren(this).length; });
     });
-    getter(Document.prototype, 'children', function () {
-        var s = slotOf(this);
-        return list(HTMLCollection.prototype, s.gen === gen ? N.info(s.gen, s.id, 'children') : '', true);
+    [Document, DocumentFragment].forEach(function (C) {
+        getter(C.prototype, 'children', function () {
+            var s = slotOf(this);
+            return list(HTMLCollection.prototype, s.gen === gen ? N.info(s.gen, s.id, 'children') : '', true);
+        });
     });
     [Element, CharacterData].forEach(function (C) {
         getter(C.prototype, 'nextElementSibling', function () { return elementSibling(this, 'nextSibling'); });
@@ -1660,6 +1684,23 @@ const WRAPPERS_JS: &str = r#"
         Element.prototype[k] = queries[k];
         Document.prototype[k] = queries[k];
     });
+    DocumentFragment.prototype.querySelector = queries.querySelector;
+    DocumentFragment.prototype.querySelectorAll = queries.querySelectorAll;
+    // NonElementParentNode on a fragment: the id table only knows the
+    // document, so walk the fragment's own subtree.
+    DocumentFragment.prototype.getElementById = function (id) {
+        id = String(id);
+        function find(n) {
+            for (var c = n.firstChild; c; c = c.nextSibling) {
+                if (c.nodeType !== 1) continue;
+                if (id !== '' && c.getAttribute('id') === id) return c;
+                var hit = find(c);
+                if (hit) return hit;
+            }
+            return null;
+        }
+        return find(this);
+    };
     function matches(el, sel, method) {
         var s = slotOf(el);
         if (s.gen !== gen) return false;
@@ -1689,6 +1730,9 @@ const WRAPPERS_JS: &str = r#"
     };
     Document.prototype.createComment = function (data) {
         return create('comment', String(data), 'createComment');
+    };
+    Document.prototype.createDocumentFragment = function () {
+        return create('fragment', '', 'createDocumentFragment');
     };
     Document.prototype.getElementById = function (id) {
         var s = slotOf(this);
@@ -1841,6 +1885,7 @@ const WRAPPERS_JS: &str = r#"
     // The stub's own factories would shadow the Rust-backed ones.
     delete doc.createElement;
     delete doc.createTextNode;
+    delete doc.createDocumentFragment;
     // Document and window trade the lifecycle's per-object listener lists
     // for the shared EventTarget, so element events bubble up to them.
     ['addEventListener', 'removeEventListener', 'dispatchEvent'].forEach(function (k) {

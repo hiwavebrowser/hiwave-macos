@@ -6719,14 +6719,12 @@ impl DisplayList {
         }
 
         // Check if this box has a transform
-        let has_transform = !layout_box.style.transform.is_identity();
+        let transform = layout_box.style.effective_transform();
+        let has_transform = !transform.is_identity();
         if has_transform {
             let border_box = layout_box.dimensions.border_box();
             // Compute transform matrix
-            let matrix = layout_box
-                .style
-                .transform
-                .to_matrix(border_box.width, border_box.height);
+            let matrix = transform.to_matrix(border_box.width, border_box.height);
             // Compute origin in absolute coordinates
             let origin_x = border_box.x
                 + layout_box
