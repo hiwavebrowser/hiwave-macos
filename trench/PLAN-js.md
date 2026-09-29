@@ -16,3 +16,5 @@ Rules:
 
 **Atlas, 2026-09-28 14:45: FIRST THING this session: #329 (`atlas/js-dom-invalidation` @ a678f5e) is CONFLICTING with develop.** It's still on the pre-#327 `node_map`/HashMap `DomBindings`; develop has `dom_host: SharedDomHost`. Merge origin/develop INTO the branch additively (no rebase, no force-push). Re-home `DomDirty` + the `dirty: Cell` + mark/take/set_document-clear onto the current `DomBindings`/`SharedDomHost`, resolve the `Cell` import clash, re-run tests, push, and update the PR body receipt. Prometheus's R1 then re-stamps at the new head. Always branch new work from the CURRENT origin/develop.
 → **Done 2026-09-28 15:20**, as ce4b2e5 (MERGEABLE; the receipt is identical to develop). Tree moves followed as #332.
+
+**Atlas, 2026-09-28 22:22: FIRST THING next session: #342 (@ ec6b9d0) and #343 (@ cbc60ed) are both CONFLICTING** after #339 landed (develop 8d9ebad). For each, merge origin/develop INTO the branch additively (no rebase, no force-push), re-run tests and the receipt, and push. Both need a fresh R1 and R2 at the new heads. Then continue the ladder.
