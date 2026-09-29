@@ -1622,6 +1622,55 @@ mod tests {
         }
     }
 
+    const MIXED: &str = "<html><body><ul id='u'> <li id='a'>1</li> <!--c--> <li id='b' \
+         data-item-id='7' title='t' hidden>2</li> </ul></body></html>";
+
+    #[test]
+    fn element_traversal_skips_text_and_comments() {
+        let b = bound(MIXED);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var u = document.getElementById('u'), a = document.getElementById('a'), \
+                     bb = document.getElementById('b'), r = []; \
+                 r.push(u.firstElementChild === a, u.lastElementChild === bb, u.childElementCount, \
+                        a.nextElementSibling === bb, bb.previousElementSibling === a, \
+                        bb.nextElementSibling, a.previousElementSibling, \
+                        u.firstChild.nextElementSibling === a, \
+                        document.firstElementChild === document.documentElement, \
+                        document.children.length, document.childElementCount); \
+                 var p = document.createElement('p'); \
+                 r.push(a.isConnected, p.isConnected, document.isConnected); \
+                 u.appendChild(p); r.push(p.isConnected, u.lastElementChild === p); \
+                 p.remove(); r.push(p.isConnected, p.firstElementChild, p.childElementCount); \
+                 r.join(',')"
+            ),
+            "true,true,2,true,true,,,true,true,1,1,true,false,true,true,true,false,,0"
+        );
+    }
+
+    #[test]
+    fn reflected_attributes_and_dataset() {
+        let b = bound(MIXED);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var a = document.getElementById('a'), bb = document.getElementById('b'), r = []; \
+                 r.push(bb.dataset.itemId, bb.title, bb.hidden, a.hidden, a.title === '', \
+                        'itemId' in bb.dataset, 'nope' in bb.dataset, a.dataset.x); \
+                 a.dataset.fooBar = 3; a.hidden = true; a.lang = 'en'; bb.hidden = false; \
+                 delete bb.dataset.itemId; \
+                 r.push(a.getAttribute('data-foo-bar'), a.hasAttribute('hidden'), a.getAttribute('lang'), \
+                        bb.hasAttribute('hidden'), bb.getAttribute('data-item-id'), \
+                        a.dataset === a.dataset); \
+                 try { a.dataset['a-b'] = 1; } catch (e) { r.push(e.name); } \
+                 r.join(',')"
+            ),
+            "7,t,true,false,true,true,false,,3,true,en,false,,true,SyntaxError"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+    }
+
     const PAGE: &str = r#"<!DOCTYPE html><html><head><title>T</title></head>
 <body><div id="main" class="box"><p class="x">Hello, <b>world</b>!</p><!--c--><p class="x">Two</p></div>
 <p id="outside" class="x">Out</p></body></html>"#;
@@ -2118,5 +2167,146 @@ mod tests {
         assert_eq!(b.take_dirty(), DomDirty::Style);
         let doc = b.window.borrow().document.clone().unwrap();
         assert_eq!(doc.get_element_by_id("d").unwrap().get_attribute("style"), Some(""));
+    }
+
+    const ROW: &str =
+        "<html><body><div id='r'><i id='a'>a</i><i id='b'>b</i><i id='c'>c</i></div><i id='x'>x</i></body></html>";
+
+    /// Each step's children of #r: element ids, and Text data in quotes.
+    const ORDER: &str = "var r = document.getElementById('r'), out = []; \
+         function $(id) { return document.getElementById(id); } var a = $('a'); \
+         function order() { return Array.prototype.map.call(r.childNodes, function (n) { \
+             return n.nodeType === 1 ? n.id : \"'\" + n.data + \"'\"; }).join(''); }";
+
+    #[test]
+    fn parent_node_append_prepend_and_replace_children() {
+        let b = bound(ROW);
+        assert_eq!(
+            eval_string(
+                &b,
+                &[ORDER, " \
+                     r.append($('x'), 's'); out.push(order()); \
+                     r.prepend('p', $('c')); out.push(order()); \
+                     r.append(); out.push(order()); \
+                     r.replaceChildren($('b'), 'n'); out.push(order(), a.parentNode === null); \
+                     out.join('|')"]
+                .concat()
+            ),
+            "abcx's'|'p'cabx's'|'p'cabx's'|b'n'|true"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+        let doc = b.window.borrow().document.clone().unwrap();
+        assert_eq!(doc.get_element_by_id("r").unwrap().text_content(), "bn");
+    }
+
+    #[test]
+    fn child_node_before_after_and_replace_with() {
+        let b = bound(ROW);
+        assert_eq!(
+            eval_string(
+                &b,
+                &[ORDER, " \
+                     $('b').before($('x'), 't'); out.push(order()); \
+                     $('b').after($('a')); out.push(order()); \
+                     $('b').before($('b')); out.push(order()); \
+                     $('x').after($('x'), $('c')); out.push(order()); \
+                     $('b').replaceWith('B', $('b')); out.push(order()); \
+                     $('a').replaceWith('A'); out.push(order(), a.parentNode === null); \
+                     var lone = document.createElement('p'); lone.before('q'); lone.replaceWith('q'); \
+                     out.push(lone.parentNode === null); \
+                     out.join('|')"]
+                .concat()
+            ),
+            "ax't'bc|x't'bac|x't'bac|xc't'ba|xc't''B'ba|xc't''B'b'A'|true|true"
+        );
+    }
+
+    #[test]
+    fn replace_child_swaps_and_validates_first() {
+        let b = bound(ROW);
+        assert_eq!(
+            eval_string(
+                &b,
+                &[ORDER, " \
+                     var old = $('b'); out.push(r.replaceChild($('x'), old) === old, old.parentNode === null); \
+                     out.push(order()); \
+                     out.push(r.replaceChild($('a'), $('a')) === $('a'), order()); \
+                     r.replaceChild($('c'), $('a')); out.push(order()); \
+                     try { r.replaceChild(document.createElement('p'), old); } catch (e) { out.push(e.name); } \
+                     try { $('x').replaceChild(r, $('x').firstChild); } catch (e) { out.push(e.name); } \
+                     try { r.replaceChild('s', $('x')); } catch (e) { out.push(e.name); } \
+                     out.push(order()); out.join('|')"]
+                .concat()
+            ),
+            "true|true|axc|true|axc|cx|NotFoundError|HierarchyRequestError|TypeError|cx"
+        );
+    }
+
+    #[test]
+    fn inner_and_outer_html_serialize_the_rust_tree() {
+        let b = bound(PAGE);
+        assert_eq!(
+            eval_string(&b, "document.getElementById('main').innerHTML"),
+            "<p class=\"x\">Hello, <b>world</b>!</p><!--c--><p class=\"x\">Two</p>"
+        );
+        assert_eq!(
+            eval_string(&b, "document.getElementById('outside').outerHTML"),
+            "<p class=\"x\" id=\"outside\">Out</p>"
+        );
+        // Escaping: text escapes & < > and NBSP; attributes also escape ".
+        // Void elements have no end tag; raw-text elements are not escaped.
+        let b = bound(
+            "<html><body><div id=d title='a\"&lt;b'>1 &amp; 2 &lt;3&gt;&nbsp;<br><img src=x.png></div>\
+             <style id=s>a > b { }</style></body></html>",
+        );
+        assert_eq!(
+            eval_string(&b, "document.getElementById('d').outerHTML"),
+            "<div id=\"d\" title=\"a&quot;&lt;b\">1 &amp; 2 &lt;3&gt;&nbsp;<br><img src=\"x.png\"></div>"
+        );
+        assert_eq!(eval_string(&b, "document.getElementById('s').innerHTML"), "a > b { }");
+        assert_eq!(b.take_dirty(), DomDirty::Clean, "reads mark nothing");
+    }
+
+    #[test]
+    fn inner_html_setter_parses_and_replaces_the_children() {
+        let b = bound(PAGE);
+        // `</li>` is written out: rustkit-html has no implied end tags for
+        // `li` yet (in document parses too).
+        assert!(eval_bool(
+            &b,
+            "var m = document.getElementById('main'), old = m.firstChild; \
+             m.innerHTML = '<ul id=\"l\"><li class=\"i\">one</li><li class=\"i\">two <b>2</b></li></ul>tail'; \
+             var l = document.getElementById('l'); \
+             old.parentNode === null && m.childNodes.length === 2 && l.parentNode === m && \
+             l.children.length === 2 && document.querySelectorAll('.i').length === 2 && \
+             l.children[1].lastChild.tagName === 'B' && m.lastChild.data === 'tail' && \
+             m.innerHTML === '<ul id=\"l\"><li class=\"i\">one</li><li class=\"i\">two <b>2</b></li></ul>tail'"
+        ));
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+        // The Rust DOM holds the parsed nodes (the cascade and layout read it).
+        let doc = b.window.borrow().document.clone().unwrap();
+        assert_eq!(doc.get_element_by_id("main").unwrap().text_content(), "onetwo 2tail");
+        // Empty and null clear the element.
+        assert!(eval_bool(
+            &b,
+            "var m = document.getElementById('main'); m.innerHTML = ''; \
+             var a = m.firstChild === null; m.innerHTML = '<i>x</i>'; m.innerHTML = null; \
+             a && m.childNodes.length === 0 && m.innerHTML === ''"
+        ));
+    }
+
+    #[test]
+    fn get_element_by_id_finds_an_id_reused_by_new_content() {
+        let b = bound(PAGE);
+        assert!(eval_bool(
+            &b,
+            "var main = document.getElementById('main'); \
+             document.body.innerHTML = '<span id=\"main\">again</span>'; \
+             var now = document.getElementById('main'); \
+             main.parentNode === null && now !== main && now.tagName === 'SPAN' && \
+             now.parentNode === document.body && \
+             document.getElementById('outside') === null && \
+             document.getElementById('') === null"
+        ));
     }
 }

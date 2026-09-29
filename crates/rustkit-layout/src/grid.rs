@@ -2930,10 +2930,30 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
     // narrow, then flex-shrink smashed every link to ~2px on re-layout.
     if style.display.is_flex() {
         let is_row = style.flex_direction.is_row();
-        let main_gap = match style.column_gap {
-            Length::Px(g) => g,
-            _ => 0.0,
-        };
+        // Resolved the way LAYOUT resolves it, not matched for `Px`. The old
+        // `match { Length::Px(g) => g, _ => 0.0 }` read a `rem`, `em` or
+        // viewport gap as ZERO here while `layout_grid` and `layout_flex`
+        // resolve the same declaration properly, so a relatively-gapped flex
+        // container's max-content contribution was short by every gap it has
+        // and the two readings of one declaration disagreed. On `settings`,
+        // `.btn-group { gap: 0.5rem }` measured 8px narrow with two buttons,
+        // and a container short of its own items becomes spurious flex shrink
+        // on the items inside it.
+        //
+        // A PERCENTAGE gap resolves against zero: css-sizing-3 §4.1 resolves
+        // percentages against zero when computing an intrinsic size
+        // contribution, and there is no definite container size here to
+        // resolve against in any case — reaching for the box's own used width
+        // would make a contribution depend on the layout it is an input to.
+        // Viewport units are definite and resolve normally.
+        //
+        // Chrome 148 ground truth for the `(n-1) * gap` term, measured on the
+        // corpus pages by `trench/tools/n69_gap_contribution_probe.mjs`: on
+        // every `settings` container whose items are inflexible the sum closes
+        // exactly — `.checkbox-group` 309.719 = 293.719 + 16, `.clear-options`
+        // 377.469 = 353.469 + 24, `.btn-group` 195.375 = 187.375 + 8 and
+        // 346.688 = 330.688 + 16. Those gaps are authored in `rem`.
+        let main_gap = layout_box.length_to_px(&style.column_gap, 0.0);
         let mut sum = 0.0f32;
         let mut widest = 0.0f32;
         let mut item_count = 0usize;

@@ -99,6 +99,17 @@ fn is_connected(node: &Rc<Node>, document: &Document) -> bool {
     false
 }
 
+/// The first element in tree order whose id is `id`.
+fn first_with_id(document: &Document, id: &str) -> Option<Rc<Node>> {
+    let mut found = None;
+    document.traverse(|n| {
+        if found.is_none() && n.get_attribute("id") == Some(id) {
+            found = Some(n.clone());
+        }
+    });
+    found
+}
+
 /// Is `ancestor` `node` or one of its ancestors?
 fn is_inclusive_ancestor(ancestor: &Rc<Node>, node: &Rc<Node>) -> bool {
     ancestor.id == node.id || is_descendant(node, ancestor)
@@ -273,6 +284,21 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         }
         // Documents and doctypes ignore textContent writes.
         ("setText", _) => Ok((JsValue::Null, DomDirty::Clean)),
+        // HTML §8.5 innerHTML setter: parse as the element's contents (the
+        // fragment parsing algorithm), then replace all children with it.
+        ("setHTML", NodeType::Element { tag_name, .. }) => {
+            let html = string_arg(args, 3).unwrap_or("");
+            let nodes = document
+                .parse_fragment(html, tag_name)
+                .map_err(|_| "SyntaxError")?;
+            for child in node.children() {
+                child.remove_from_parent();
+            }
+            for child in nodes {
+                node.append_child(child);
+            }
+            Ok((JsValue::Null, DomDirty::Style))
+        }
         _ => Err("NotSupportedError"),
     }
 }
@@ -308,6 +334,100 @@ fn is_descendant(node: &Rc<Node>, scope: &Rc<Node>) -> bool {
         current = parent.parent();
     }
     false
+}
+
+/// HTML void elements: serialized with no end tag and no children.
+const VOID_ELEMENTS: &[&str] = &[
+    "area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "img", "input",
+    "keygen", "link", "meta", "param", "source", "track", "wbr",
+];
+
+/// Elements whose Text children serialize unescaped.
+const RAW_TEXT_ELEMENTS: &[&str] = &[
+    "style", "script", "xmp", "iframe", "noembed", "noframes", "plaintext",
+];
+
+/// HTML §13.3 "serializing HTML fragments" for one node (`outerHTML`).
+/// Attributes come out sorted by name: rustkit-dom keeps them in a
+/// HashMap, so source order is gone.
+fn serialize_node(node: &Rc<Node>, out: &mut String) {
+    match &node.node_type {
+        NodeType::Element {
+            tag_name,
+            attributes,
+            ..
+        } => {
+            out.push('<');
+            out.push_str(tag_name);
+            let mut names: Vec<&String> = attributes.keys().collect();
+            names.sort();
+            for name in names {
+                out.push(' ');
+                out.push_str(name);
+                out.push_str("=\"");
+                escape_into(&attributes[name], true, out);
+                out.push('"');
+            }
+            out.push('>');
+            if !VOID_ELEMENTS.contains(&tag_name.as_str()) {
+                serialize_children(node, out);
+                out.push_str("</");
+                out.push_str(tag_name);
+                out.push('>');
+            }
+        }
+        NodeType::Text(data) => {
+            let raw = node
+                .parent()
+                .and_then(|p| p.tag_name().map(|t| RAW_TEXT_ELEMENTS.contains(&t)))
+                .unwrap_or(false);
+            if raw {
+                out.push_str(data);
+            } else {
+                escape_into(data, false, out);
+            }
+        }
+        NodeType::Comment(data) => {
+            out.push_str("<!--");
+            out.push_str(data);
+            out.push_str("-->");
+        }
+        NodeType::ProcessingInstruction { target, data } => {
+            out.push_str("<?");
+            out.push_str(target);
+            out.push(' ');
+            out.push_str(data);
+            out.push('>');
+        }
+        NodeType::DocumentType { name, .. } => {
+            out.push_str("<!DOCTYPE ");
+            out.push_str(name);
+            out.push('>');
+        }
+        NodeType::Document => serialize_children(node, out),
+    }
+}
+
+/// The children of `node`, serialized (`innerHTML`).
+fn serialize_children(node: &Rc<Node>, out: &mut String) {
+    for child in node.children() {
+        serialize_node(&child, out);
+    }
+}
+
+/// HTML §13.3 "escaping a string": `&`, NBSP, `<` and `>` always, and `"`
+/// in attribute mode. (`<`/`>` in attribute values too, as Chrome 138+ does.)
+fn escape_into(s: &str, attribute: bool, out: &mut String) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '\u{a0}' => out.push_str("&nbsp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' if attribute => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+    }
 }
 
 /// `info(gen, id, field)`: one read of one node.
@@ -351,6 +471,16 @@ fn node_info(node: &Rc<Node>, field: &str) -> JsValue {
         "next" => node_id(node.next_sibling()),
         "prev" => node_id(node.previous_sibling()),
         "children" => id_list(node.children()),
+        "innerHTML" => {
+            let mut out = String::new();
+            serialize_children(node, &mut out);
+            JsValue::String(out)
+        }
+        "outerHTML" => {
+            let mut out = String::new();
+            serialize_node(node, &mut out);
+            JsValue::String(out)
+        }
         _ => JsValue::Undefined,
     }
 }
@@ -392,10 +522,16 @@ pub(crate) fn install(
                 args.first().and_then(|g| host.document_for(g)),
                 string_arg(args, 1),
             ) {
-                (Some(document), Some(id)) => node_id(
+                // The id table is first-come and keeps removed nodes, so a
+                // stale entry (say, content replaced by innerHTML that
+                // reuses the id) falls back to the first match in tree order.
+                // A connected hit is trusted: with duplicate ids (invalid
+                // HTML) it may not be the first in tree order.
+                (Some(document), Some(id)) if !id.is_empty() => node_id(
                     document
                         .get_element_by_id(id)
-                        .filter(|n| is_connected(n, document)),
+                        .filter(|n| is_connected(n, document))
+                        .or_else(|| first_with_id(document, id)),
                 ),
                 _ => JsValue::Null,
             }
@@ -732,6 +868,87 @@ const WRAPPERS_JS: &str = r#"
             if (p) p.removeChild(this);
         };
     });
+    // DOM §4.2.3 replace: validate by inserting `node` first (insertBefore
+    // throws before touching the tree), then take `child` out.
+    Node.prototype.replaceChild = function (node, child) {
+        if (arguments.length < 2) {
+            throw new TypeError("Failed to execute 'replaceChild' on 'Node': 2 arguments required.");
+        }
+        nodeArg(node, 'replaceChild');
+        nodeArg(child, 'replaceChild');
+        if (node === child) {
+            if (child.parentNode !== this) {
+                throw new DOMException("Failed to execute 'replaceChild' on 'Node'.", 'NotFoundError');
+            }
+            return child;
+        }
+        write('insert', this, node, child, 'replaceChild');
+        return write('remove', this, child, null, 'replaceChild');
+    };
+
+    // ParentNode.append/prepend and ChildNode.before/after/replaceWith
+    // (DOM §4.2.6, §4.2.8) take nodes or strings; a string becomes a Text
+    // node. DOM gathers them into a DocumentFragment; there are no
+    // fragments yet, so the nodes are detached first and then inserted one
+    // by one at the same reference point, which gives the same tree. A
+    // failed validity check part-way leaves the earlier nodes inserted.
+    function toNodes(args) {
+        var nodes = Array.prototype.map.call(args, function (a) {
+            return a != null && a[SLOT] ? a : g.document.createTextNode(String(a));
+        });
+        nodes.forEach(function (n) { var p = n.parentNode; if (p) p.removeChild(n); });
+        return nodes;
+    }
+    function insertAll(parent, nodes, ref, method) {
+        nodes.forEach(function (n) { write('insert', parent, n, ref, method); });
+    }
+    function viableSibling(node, field, nodes) {
+        var s = node[field];
+        while (s && nodes.indexOf(s) >= 0) s = s[field];
+        return s;
+    }
+    Element.prototype.append = function () {
+        insertAll(this, toNodes(arguments), null, 'append');
+    };
+    Element.prototype.prepend = function () {
+        var nodes = toNodes(arguments);
+        insertAll(this, nodes, this.firstChild, 'prepend');
+    };
+    Element.prototype.replaceChildren = function () {
+        var nodes = toNodes(arguments);
+        while (this.firstChild) this.removeChild(this.firstChild);
+        insertAll(this, nodes, null, 'replaceChildren');
+    };
+    [Element, CharacterData].forEach(function (C) {
+        C.prototype.before = function () {
+            var p = this.parentNode;
+            if (!p) return;
+            var args = Array.prototype.slice.call(arguments);
+            var prev = viableSibling(this, 'previousSibling', args);
+            var nodes = toNodes(args);
+            insertAll(p, nodes, prev ? prev.nextSibling : p.firstChild, 'before');
+        };
+        C.prototype.after = function () {
+            var p = this.parentNode;
+            if (!p) return;
+            var args = Array.prototype.slice.call(arguments);
+            var next = viableSibling(this, 'nextSibling', args);
+            insertAll(p, toNodes(args), next, 'after');
+        };
+        C.prototype.replaceWith = function () {
+            var p = this.parentNode;
+            if (!p) return;
+            var args = Array.prototype.slice.call(arguments);
+            var next = viableSibling(this, 'nextSibling', args);
+            var nodes = toNodes(args);
+            if (this.parentNode === p) {
+                insertAll(p, nodes, this, 'replaceWith');
+                p.removeChild(this);
+            } else {
+                insertAll(p, nodes, next, 'replaceWith');
+            }
+        };
+    });
     Node.prototype.contains = function (other) {
         for (var n = other; n; n = n.parentNode) if (n === this) return true;
         return false;
@@ -743,6 +960,9 @@ const WRAPPERS_JS: &str = r#"
     getter(CharacterData.prototype, 'length', function () { return (info(this, 'text') || '').length; });
 
     getter(Element.prototype, 'tagName', function () { return info(this, 'name'); });
+    accessor(Element.prototype, 'innerHTML', function () { return info(this, 'innerHTML'); },
+        function (v) { setData(this, 'setHTML', text(v), null, 'innerHTML'); });
+    getter(Element.prototype, 'outerHTML', function () { return info(this, 'outerHTML'); });
     getter(Element.prototype, 'localName', function () { return info(this, 'local'); });
     [['id', 'id'], ['className', 'class']].forEach(function (p) {
         accessor(Element.prototype, p[0], function () { return this.getAttribute(p[1]) || ''; },
@@ -752,6 +972,85 @@ const WRAPPERS_JS: &str = r#"
         var s = slotOf(this);
         return list(HTMLCollection.prototype, s.gen === gen ? N.info(s.gen, s.id, 'children') : '', true);
     });
+
+    // ParentNode / NonDocumentTypeChildNode element traversal (DOM §4.2.6,
+    // §4.2.7), over the same tree reads as childNodes and the siblings.
+    function elementChildren(o) {
+        return Array.prototype.filter.call(o.childNodes, function (n) { return n.nodeType === 1; });
+    }
+    function elementSibling(o, field) {
+        var n = o[field];
+        while (n && n.nodeType !== 1) n = n[field];
+        return n;
+    }
+    [Element, Document].forEach(function (C) {
+        getter(C.prototype, 'firstElementChild', function () { return elementChildren(this)[0] || null; });
+        getter(C.prototype, 'lastElementChild', function () {
+            var c = elementChildren(this); return c[c.length - 1] || null;
+        });
+        getter(C.prototype, 'childElementCount', function () { return elementChildren(this).length; });
+    });
+    getter(Document.prototype, 'children', function () {
+        var s = slotOf(this);
+        return list(HTMLCollection.prototype, s.gen === gen ? N.info(s.gen, s.id, 'children') : '', true);
+    });
+    [Element, CharacterData].forEach(function (C) {
+        getter(C.prototype, 'nextElementSibling', function () { return elementSibling(this, 'nextSibling'); });
+        getter(C.prototype, 'previousElementSibling', function () {
+            return elementSibling(this, 'previousSibling');
+        });
+    });
+    // A node is connected when its root is the current document; an old
+    // document's wrappers have no parent and are never connected.
+    getter(Node.prototype, 'isConnected', function () {
+        var n = this;
+        while (n.parentNode) n = n.parentNode;
+        return n === g.document && slotOf(n).gen === gen;
+    });
+
+    // HTMLElement reflected attributes (HTML §3.2.6) and dataset (§3.2.6.6).
+    ['title', 'lang', 'dir'].forEach(function (k) {
+        accessor(HTMLElement.prototype, k, function () { return this.getAttribute(k) || ''; },
+            function (v) { this.setAttribute(k, v); });
+    });
+    accessor(HTMLElement.prototype, 'hidden', function () { return this.hasAttribute('hidden'); },
+        function (v) { this.toggleAttribute('hidden', !!v); });
+    var datasets = new WeakMap();
+    function dataAttr(p) {
+        if (typeof p !== 'string' || /-[a-z]/.test(p)) return null;
+        return 'data-' + p.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); });
+    }
+    getter(HTMLElement.prototype, 'dataset', function () {
+        slotOf(this);
+        var el = this, d = datasets.get(el);
+        if (d) return d;
+        d = new Proxy({}, {
+            get: function (t, p) {
+                var a = dataAttr(p);
+                if (!a) return undefined;
+                var v = el.getAttribute(a);
+                return v === null ? undefined : v;
+            },
+            set: function (t, p, v) {
+                var a = dataAttr(p);
+                if (!a) {
+                    throw new DOMException("Failed to set a named property on 'DOMStringMap': '" +
+                        String(p) + "' is not a valid property name.", 'SyntaxError');
+                }
+                el.setAttribute(a, String(v));
+                return true;
+            },
+            has: function (t, p) { var a = dataAttr(p); return !!a && el.hasAttribute(a); },
+            deleteProperty: function (t, p) {
+                var a = dataAttr(p);
+                if (a) el.removeAttribute(a);
+                return true;
+            }
+        });
+        datasets.set(el, d);
+        return d;
+    });
+
     Element.prototype.getAttribute = function (name) {
         var s = slotOf(this); return N.attr(s.gen, s.id, String(name));
     };
