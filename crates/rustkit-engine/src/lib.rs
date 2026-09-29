@@ -2995,7 +2995,10 @@ impl Engine {
         // missed still cascades correctly, by the unindexed scan.
         let _rule_index = match style_memo.as_ref().is_some_and(StyleMemoBuild::replays) {
             true => None,
-            false => Some(RuleIndexScope::install(self.build_rule_index(&stylesheets))),
+            false => Some(RuleIndexScope::install_for(
+                RuleIndex::source_of(&stylesheets),
+                self.shared_rule_index(&stylesheets),
+            )),
         };
 
         // A trace describes ONE build. Keeping entries from the previous
@@ -7799,6 +7802,42 @@ impl Engine {
         ix
     }
 
+    /// `build_rule_index`, reused while the selectors don't change. A page
+    /// load lays out 2-3 times over a freshly extracted copy of the same
+    /// sheets, and rebuilding the index each time was ~38% of github's
+    /// cascade. The index is a function of the selectors alone (their
+    /// keys, specificity and prepared form are pure, and rules are found
+    /// by position), so the same selectors in the same sheets in the same
+    /// order get the same index. Comparing them is a memcmp per rule.
+    fn shared_rule_index(&self, stylesheets: &[Stylesheet]) -> Rc<RuleIndex> {
+        let same = |built: &[Vec<String>]| {
+            built.len() == stylesheets.len()
+                && built.iter().zip(stylesheets).all(|(selectors, sheet)| {
+                    selectors.len() == sheet.rules.len()
+                        && selectors
+                            .iter()
+                            .zip(&sheet.rules)
+                            .all(|(s, rule)| *s == rule.selector)
+                })
+        };
+        let reused = LAST_RULE_INDEX.with(|c| {
+            c.borrow()
+                .as_ref()
+                .filter(|(built, _)| same(built))
+                .map(|(_, ix)| ix.clone())
+        });
+        if let Some(ix) = reused {
+            return ix;
+        }
+        let ix = Rc::new(self.build_rule_index(stylesheets));
+        let built = stylesheets
+            .iter()
+            .map(|sheet| sheet.rules.iter().map(|r| r.selector.clone()).collect())
+            .collect();
+        LAST_RULE_INDEX.with(|c| *c.borrow_mut() = Some((built, ix.clone())));
+        ix
+    }
+
     fn rule_may_match(
         &self,
         selector: &str,
@@ -8077,8 +8116,15 @@ impl SelectorMatcher {
         let (tokens, compounds) = match prepared {
             PreparedSelector::Never => return false,
             PreparedSelector::List(members) => {
-                return members.iter().any(|s| {
-                    SelectorMatcher.selector_matches(s, tag_name, attributes, ancestors, siblings_before, sib)
+                return members.iter().any(|m| {
+                    self.selector_matches_prepared(
+                        m,
+                        tag_name,
+                        attributes,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                    )
                 });
             }
             PreparedSelector::Complex { tokens, compounds, subject } => {
@@ -8182,8 +8228,15 @@ impl SelectorMatcher {
             if selector.contains(',') {
                 let members = SelectorMatcher::split_top_level_commas(selector);
                 if members.len() != 1 || members[0] != selector {
+                    // Prepare the members here, once. Matching them by string
+                    // re-hashed each member into this cache per candidate
+                    // element (~15% of github's cascade). No cache borrow is
+                    // held while `prepare` runs, so the recursion is safe.
                     return PreparedSelector::List(
-                        members.into_iter().map(str::to_string).collect(),
+                        members
+                            .into_iter()
+                            .map(|m| self.prepared_selector(m.trim()))
+                            .collect(),
                     );
                 }
             }
@@ -17610,6 +17663,27 @@ mod rule_prefilter_tests {
     }
 
     #[test]
+    fn a_selector_list_holds_its_members_prepared() {
+        // github's comma lists: each member used to be matched by string,
+        // i.e. hashed back into the prepared cache per candidate element.
+        let m = SelectorMatcher;
+        let list = m.prepared_selector(".a .x,  main .t , .nope");
+        let PreparedSelector::List(members) = &*list else {
+            panic!("a comma list prepares as a List");
+        };
+        assert_eq!(members.len(), 3);
+        assert!(members.iter().all(|m| matches!(**m, PreparedSelector::Complex { .. })));
+        assert!(
+            Rc::ptr_eq(&members[1], &m.prepared_selector("main .t")),
+            "members are trimmed and shared with the cache"
+        );
+        let main = vec![ancestor("main", &[], None)];
+        let t = attrs(&[("class", "t")]);
+        assert!(m.selector_matches_prepared(&list, "div", &t, &main, &[], SiblingContext::SOLE));
+        assert!(!m.selector_matches_prepared(&list, "div", &t, &[], &[], SiblingContext::SOLE));
+    }
+
+    #[test]
     fn a_sibling_compound_checks_the_siblings_form_state() {
         // wikipedia's dropdowns: `.dd .checkbox:checked ~ .content { display:
         // block }`. The sibling compound was matched by tag/class/id only,
@@ -18157,6 +18231,38 @@ mod rule_prefilter_tests {
         assert_eq!(indexed, unindexed);
         // The scope uninstalls itself.
         assert!(active_rule_index(sheets).is_none());
+    }
+
+    #[test]
+    fn a_relayout_over_the_same_selectors_reuses_the_index() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
+        let parse = |css: &str| vec![Stylesheet::parse(css).expect("css")];
+        // Each build extracts a fresh copy of the sheets: same selectors,
+        // different allocation (and possibly different declarations).
+        let first = parse(".a { color: red } #b > p { color: blue }");
+        let again = parse(".a { color: green } #b > p { color: blue }");
+        let ix = engine.shared_rule_index(&first);
+        assert!(Rc::ptr_eq(&ix, &engine.shared_rule_index(&again)));
+
+        // It is installed for the slice at hand, not the one it was built from.
+        {
+            let _scope = RuleIndexScope::install_for(RuleIndex::source_of(&again), ix.clone());
+            assert!(active_rule_index(&again).is_some());
+            assert!(active_rule_index(&first).is_none());
+        }
+
+        // A changed selector, a dropped rule or a moved sheet boundary rebuilds.
+        for css in [
+            vec![".a { color: red } #b p { color: blue }"],
+            vec![".a { color: red }"],
+            vec![".a { color: red }", "#b > p { color: blue }"],
+        ] {
+            let sheets: Vec<Stylesheet> =
+                css.iter().map(|c| Stylesheet::parse(c).expect("css")).collect();
+            let rebuilt = engine.shared_rule_index(&sheets);
+            assert!(!Rc::ptr_eq(&ix, &rebuilt), "{css:?} reused a stale index");
+            assert_eq!(rebuilt.rules.len(), sheets.iter().map(|s| s.rules.len()).sum::<usize>());
+        }
     }
 
     #[test]
@@ -19056,7 +19162,7 @@ enum PreparedSelector {
     /// Invalid, a pseudo-element selector, or no subject: matches nothing.
     Never,
     /// A top-level selector list; matches if any member does.
-    List(Vec<String>),
+    List(Vec<Rc<PreparedSelector>>),
     /// One complex selector: `(compound, following combinator)` tokens, the
     /// subject last, and each token's compound parsed for the ancestor and
     /// sibling walk (same index).
@@ -19569,21 +19675,35 @@ impl RuleIndex {
     }
 }
 
+/// An installed index and the identity (`RuleIndex::source_of`) of the
+/// stylesheet slice it is installed for.
+type InstalledRuleIndex = ((usize, usize, usize), Rc<RuleIndex>);
+
 thread_local! {
     /// The index for the layout build in progress on this thread; set and
     /// cleared by `RuleIndexScope`.
-    static RULE_INDEX: std::cell::RefCell<Option<Rc<RuleIndex>>> =
+    static RULE_INDEX: std::cell::RefCell<Option<InstalledRuleIndex>> =
+        const { std::cell::RefCell::new(None) };
+    /// The last index `shared_rule_index` built on this thread, with the
+    /// selectors it was built from (one list per sheet, in order).
+    static LAST_RULE_INDEX: std::cell::RefCell<Option<(Vec<Vec<String>>, Rc<RuleIndex>)>> =
         const { std::cell::RefCell::new(None) };
 }
 
 /// Installs a rule index for the duration of one layout build. Dropping it
 /// (also on unwind) restores the previous one, so an index can never outlive
 /// the stylesheet slice it describes.
-struct RuleIndexScope(Option<Rc<RuleIndex>>);
+struct RuleIndexScope(Option<InstalledRuleIndex>);
 
 impl RuleIndexScope {
     fn install(index: RuleIndex) -> Self {
-        RuleIndexScope(RULE_INDEX.with(|c| c.replace(Some(Rc::new(index)))))
+        Self::install_for(index.source, Rc::new(index))
+    }
+
+    /// Install `index` for the slice whose `source_of` is `source`. The index
+    /// must have been built from the same selectors in the same sheets.
+    fn install_for(source: (usize, usize, usize), index: Rc<RuleIndex>) -> Self {
+        RuleIndexScope(RULE_INDEX.with(|c| c.replace(Some((source, index)))))
     }
 }
 
@@ -19599,8 +19719,8 @@ fn active_rule_index(stylesheets: &[Stylesheet]) -> Option<Rc<RuleIndex>> {
     RULE_INDEX.with(|c| {
         c.borrow()
             .as_ref()
-            .filter(|ix| ix.source == RuleIndex::source_of(stylesheets))
-            .cloned()
+            .filter(|(source, _)| *source == RuleIndex::source_of(stylesheets))
+            .map(|(_, ix)| ix.clone())
     })
 }
 
@@ -21846,6 +21966,31 @@ mod script_dom_flush_tests {
             )
             .unwrap();
         assert_eq!(painted_text(&engine, view), "beta delta gamma");
+    }
+
+    // innerHTML parses into the Rust DOM, so the cascade styles the new
+    // elements (class and tag rules both) and the settle flush paints them.
+    #[test]
+    fn inner_html_writes_are_styled_and_painted_when_the_script_settles() {
+        let (mut engine, view) = loaded(
+            "<html><head><style>.off { display: none } em { display: none }</style></head>\
+             <body><div id='d'><p>alpha</p></div><p>omega</p></body></html>",
+        );
+        assert_eq!(painted_text(&engine, view), "alpha omega");
+
+        engine
+            .execute_script(
+                view,
+                "document.getElementById('d').innerHTML = \
+                 '<p>beta</p><p class=\"off\">hidden</p><span>gamma <em>no</em></span>'",
+            )
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "beta gamma omega");
+
+        engine
+            .execute_script(view, "document.getElementById('d').innerHTML = ''")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "omega");
     }
 
     // Pin §3.1: script that writes nothing costs no relayout.
