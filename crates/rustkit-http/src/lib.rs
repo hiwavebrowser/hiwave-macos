@@ -140,8 +140,41 @@ pub struct Client {
     config: ClientConfig2,
     #[cfg(not(feature = "native-tls"))]
     tls_connector: TlsConnector,
+    /// http/1.1-only offer for the negotiated downgrade in `connect_tls`.
+    /// Built once here, not per connection.
+    #[cfg(not(feature = "native-tls"))]
+    h1_connector: TlsConnector,
     #[cfg(feature = "native-tls")]
     tls_connector: tokio_native_tls::TlsConnector,
+}
+
+/// The platform root store, loaded once per process. `load_native_certs`
+/// walks the macOS keychain's trust settings and costs seconds: loaded per
+/// `Client` it added ~5 s to every engine start (two clients), and loaded
+/// per h2-selecting connection it added ~2.5 s to every request to reddit,
+/// google, x and most large origins, pushing them past the 30 s load budget.
+#[cfg(not(feature = "native-tls"))]
+static ROOT_LOADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(not(feature = "native-tls"))]
+fn platform_roots() -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpError> {
+    static ROOTS: std::sync::OnceLock<Arc<tokio_rustls::rustls::RootCertStore>> =
+        std::sync::OnceLock::new();
+    let roots = ROOTS.get_or_init(|| {
+        ROOT_LOADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+        for cert in rustls_native_certs::load_native_certs().certs {
+            // A single unparseable platform cert must not kill the store.
+            let _ = roots.add(cert);
+        }
+        Arc::new(roots)
+    });
+    if roots.is_empty() {
+        return Err(HttpError::TlsError(
+            "no usable platform root certificates".into(),
+        ));
+    }
+    Ok(roots.clone())
 }
 
 impl Client {
@@ -196,20 +229,10 @@ impl Client {
         // currently keep speaking HTTP/1.1 only when the peer permits it —
         // see `connect_tls`, which records the negotiated protocol so the
         // caller can refuse mismatches loudly instead of desyncing.
-        let mut roots = tokio_rustls::rustls::RootCertStore::empty();
-        let native = rustls_native_certs::load_native_certs();
-        for cert in native.certs {
-            // A single unparseable platform cert must not kill the store.
-            let _ = roots.add(cert);
-        }
-        if roots.is_empty() {
-            return Err(HttpError::TlsError(
-                "no usable platform root certificates".into(),
-            ));
-        }
+        let roots = platform_roots()?;
 
         let mut tls_config = tokio_rustls::rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
+            .with_root_certificates(roots.clone())
             .with_no_client_auth();
         // Browser-typical ALPN advertisement. http/1.1 first would be a lie
         // about preference; browsers prefer h2. Until this client SPEAKS h2,
@@ -220,9 +243,16 @@ impl Client {
 
         let tls_connector = TlsConnector::from(Arc::new(tls_config));
 
+        let mut h1_only = tokio_rustls::rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        h1_only.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let h1_connector = TlsConnector::from(Arc::new(h1_only));
+
         Ok(Self {
             config,
             tls_connector,
+            h1_connector,
         })
     }
 
@@ -255,19 +285,11 @@ impl Client {
             // Peer picked h2; we cannot speak it yet. Re-handshake offering
             // only http/1.1 so the protocol on the wire matches the bytes we
             // send. Costs one extra round trip on h2-capable origins.
-            let mut roots = tokio_rustls::rustls::RootCertStore::empty();
-            for cert in rustls_native_certs::load_native_certs().certs {
-                let _ = roots.add(cert);
-            }
-            let mut h1_only = tokio_rustls::rustls::ClientConfig::builder()
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-            h1_only.alpn_protocols = vec![b"http/1.1".to_vec()];
-            let connector = TlsConnector::from(Arc::new(h1_only));
             let fresh = tokio::net::TcpStream::connect(addr)
                 .await
                 .map_err(|e| HttpError::ConnectionFailed(e.to_string()))?;
-            return connector
+            return self
+                .h1_connector
                 .connect(server_name, fresh)
                 .await
                 .map_err(|e| HttpError::TlsError(e.to_string()));
@@ -1193,6 +1215,16 @@ mod tests {
         // Never advertised: left alone.
         assert_eq!(&decode("br", b"xyz".to_vec()).unwrap()[..], b"xyz");
         assert!(decode("gzip", b"not gzip".to_vec()).is_err());
+    }
+
+    #[cfg(not(feature = "native-tls"))]
+    #[test]
+    fn the_platform_root_store_is_loaded_once_per_process() {
+        // Every Client, and every h2 -> http/1.1 downgrade, shares one load.
+        let clients: Vec<Client> = (0..3).map(|_| Client::new().expect("client")).collect();
+        assert_eq!(clients.len(), 3);
+        assert!(Arc::ptr_eq(&platform_roots().unwrap(), &platform_roots().unwrap()));
+        assert_eq!(ROOT_LOADS.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[test]
