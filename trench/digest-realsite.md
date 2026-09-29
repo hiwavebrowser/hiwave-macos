@@ -1062,3 +1062,31 @@ Run dirs: `trench/realsite/runs/20260929T1420Z-tls346-{dev,pr346}` (chunks 0–1
 **Decisions for Pete:**
 1. **#346 merged without its board receipt** (my #535 condition), and it costs about 9 points on the 10 sites measured. Revert #346 until `rs-tls-roots-once` lands, or fast-track the fix? The fix is small and keeps Talos's design. Talos should also know that the h2 → http/1.1 re-handshake still costs an extra TCP+TLS round trip per connection to h2 origins.
 2. Still open: a fixed ~06:00 board slot before the lanes start; `<img>` through the ResourceLoader; `cargo fmt` on develop.
+
+## 2026-09-29 14:10 — #361 opened (TLS root store once per process); #358 un-DIRTY'd; wikipedia's LOADS back on the fix
+
+**Points: 26 → no full board this session** (load 12–18 throughout; the Chrome oracle itself timed out on most captures). The last quiet develop board is still 26/60 @ 8f44204. Develop 35fe782 carries #346's slowdown until #361 lands.
+
+Board chunk, arms alternated (`trench/realsite/runs/20260929T1740Z-tls361-{dev,fix}`, load 15–18). Only LOADS is comparable, because the oracle failed on most captures:
+
+| site | develop 35fe782 | #361 011ea43 |
+|---|---|---|
+| wikipedia | >30 s, LOADS fail | 20.2 s, LOADS pass |
+| x | 18.4 s | 16.4 s |
+| yahoo | 19.2 s | 19.4 s |
+| facebook | >30 s | >30 s |
+
+Per-check on these 4 sites: develop loads 2 · readable 0 · looks-right 0; #361 loads 3 · readable 1 · looks-right 1. x's 3/3 on #361 is the only site where the oracle succeeded.
+
+`parity-capture --url` timing (`scratch/tf0929/time_arms.py`, 2 rounds, alternating, load ~12): reddit dev 8.5/8.3 vs fix 5.2/4.0 s; google 20.8/22.4 vs 15.5/16.3; x 14.2/10.5 vs 11.0/10.2; wikipedia 17.6/15.7 vs 14.0/12.9. **Pre-#346 (062f73a) does reddit in 1.2/1.0 s**, so ~3.5 s per process is still lost to the one remaining keychain walk.
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#361 `atlas/rs-tls-roots-once` @ 011ea43** (new). `load_native_certs()` runs once per process (`OnceLock<Arc<RootCertStore>>`), where #346 ran it per `Client`. #355 (merged since) already deleted the per-connection h2 re-handshake, so the merge kept #355's `connect_tls` and dropped my h1-connector half. Pin: 3 clients → 1 load. rustkit-http 11/11, rustkit-net 46/46. Campaign 26/26, **identical case for case** to develop 35fe782 (avg 1.1756%); ratchet output byte-identical (both exit 2, develop's state).
+- **#358 `atlas/rs-individual-transforms` @ 4850eb7**: merged develop in additively. The conflict was its test module against #347's, both appended at the same spot, and both are kept. Its 10 pins pass serially. One of 3 parallel runs failed a pure-style pin. The likely cause is the GPU test guard's 120 s wait expiring at load ~12, but I didn't capture that panic. **A lesson in passing:** I added a per-module `ENGINE_INIT` mutex, and it deadlocked against the existing per-thread `hold_for_this_test` guard (4 failures). Reverted; don't layer a second engine lock in engine tests.
+- #345, #351, #352, #353: no longer open (merged).
+
+**Next:** (1) A quiet full develop board once #361 lands. (2) facebook's second flex cause, then the `rs-flex-basis-indefinite` PR. (3) shopify's header nav. (4) Talos 5 audit.
+
+**Decisions for Pete:**
+1. **The rest of #346's cost: ~3.5 s per page load** (one keychain walk to load every platform root). The browser-grade fix is to verify through the platform per connection (Security.framework, e.g. `rustls-platform-verifier`) instead of bulk-loading roots. That's a network-lane design change for Talos/Prometheus, so I left it out of #361.
+2. Still open: a fixed ~06:00 board slot before the lanes start. Every board today ran at load 12–18, and the Chrome oracle itself times out at that load, so today's afternoon numbers can't be trusted. Also still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.
