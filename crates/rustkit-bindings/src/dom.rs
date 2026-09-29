@@ -21,7 +21,7 @@
 //! (attributes, text) go through `Document::replace_node_data`, which keeps
 //! the NodeId, so wrappers and the identity cache are untouched by them.
 
-use crate::DomDirty;
+use crate::{inner_text, DomDirty};
 use rustkit_dom::{Document, Node, NodeId, NodeType, QuerySelector};
 use rustkit_js::{JsError, JsRuntime, JsValue};
 use std::cell::{Cell, RefCell};
@@ -309,6 +309,10 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
             }
             Ok((JsValue::Null, DomDirty::Style))
         }
+        ("setInnerText", NodeType::Element { .. }) => {
+            inner_text::set_inner_text(document, &node, string_arg(args, 3).unwrap_or(""));
+            Ok((JsValue::Null, DomDirty::Style))
+        }
         _ => Err("NotSupportedError"),
     }
 }
@@ -513,6 +517,7 @@ fn node_info(node: &Rc<Node>, field: &str) -> JsValue {
             serialize_node(node, &mut out);
             JsValue::String(out)
         }
+        "innerText" if node.is_element() => JsValue::String(inner_text::inner_text(node)),
         _ => JsValue::Undefined,
     }
 }
@@ -1070,6 +1075,8 @@ const WRAPPERS_JS: &str = r#"
         function (v) { setData(this, 'setHTML', text(v), null, 'innerHTML'); });
     getter(Element.prototype, 'outerHTML', function () { return info(this, 'outerHTML'); });
     getter(Element.prototype, 'localName', function () { return info(this, 'local'); });
+    accessor(HTMLElement.prototype, 'innerText', function () { return info(this, 'innerText'); },
+        function (v) { setData(this, 'setInnerText', text(v), null, 'innerText'); });
     [['id', 'id'], ['className', 'class']].forEach(function (p) {
         accessor(Element.prototype, p[0], function () { return this.getAttribute(p[1]) || ''; },
             function (v) { this.setAttribute(p[1], v); });

@@ -22477,6 +22477,26 @@ mod script_dom_flush_tests {
         assert_eq!(painted_text(&engine, view), "omega");
     }
 
+    // innerText writes Text nodes and <br>s into the Rust DOM, painted by
+    // the settle flush; its getter leaves out UA-hidden content.
+    #[test]
+    fn inner_text_writes_are_painted_when_the_script_settles() {
+        let (mut engine, view) = loaded(
+            "<html><head><style>p { margin: 0 }</style></head>\
+             <body><p id='src'>alpha <script>var x;</script>beta</p>\
+             <p id='d'><b>old</b></p></body></html>",
+        );
+        assert_eq!(painted_text(&engine, view), "alpha beta old");
+        engine
+            .execute_script(
+                view,
+                "var d = document.getElementById('d'); \
+                 d.innerText = document.getElementById('src').innerText + '\\ngamma'",
+            )
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "alpha beta alpha beta gamma");
+    }
+
     // Pin §3.1: script that writes nothing costs no relayout.
     #[test]
     fn a_clean_script_does_not_relayout() {
