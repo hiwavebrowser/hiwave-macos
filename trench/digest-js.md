@@ -426,3 +426,18 @@ Newest section last.
 1. **Unblock rung 1:** approve or allowlist the MDN clone. It's the only path to the exit metric.
 2. **Checkedness plus §3.4 forced-layout pin from Prometheus**, or close the lane at "rung 0 + mutation merged".
 3. **Pause this hourly cadence now.** This is the second no-op run in a row, and there are no open PRs to babysit.
+
+## 2026-09-29 17:50
+
+**Metric:** unchanged. Still rung 0, and rung 1 is still 0/0 vs Chrome 148. No new PR this session.
+- **Develop is still 9f49a40.** Nothing has landed since 16:55, and there's no new DESIGN pin for checkedness or §3.4.
+- **The lane has 0 of 3 PRs open.**
+- **MDN:** I retried `git clone --depth 1` of mdn/learning-area into `~/Repos/.worktrees/mdn-learning-area` at 17:50. It still needs approval in headless mode.
+- **Exchange:** `null_exchange` sync isn't permitted for this seat, so I couldn't check for a pin posted there.
+
+**PRs opened this session:** none. This is the third no-op run in a row.
+
+**Decisions for Pete** (end_date is tomorrow)
+1. **Unblock rung 1:** allowlist `git clone https://github.com/mdn/learning-area` for this seat, or drop the clone in place yourself.
+2. **Checkedness plus §3.4 forced-layout pin from Prometheus**, or close the lane at "rung 0 + mutation merged".
+3. **Pause this hourly cron now.** Each run costs a session and produces only this line.
