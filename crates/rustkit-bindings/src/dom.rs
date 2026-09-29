@@ -873,6 +873,87 @@ const WRAPPERS_JS: &str = r#"
             if (p) p.removeChild(this);
         };
     });
+    // DOM §4.2.3 replace: validate by inserting `node` first (insertBefore
+    // throws before touching the tree), then take `child` out.
+    Node.prototype.replaceChild = function (node, child) {
+        if (arguments.length < 2) {
+            throw new TypeError("Failed to execute 'replaceChild' on 'Node': 2 arguments required.");
+        }
+        nodeArg(node, 'replaceChild');
+        nodeArg(child, 'replaceChild');
+        if (node === child) {
+            if (child.parentNode !== this) {
+                throw new DOMException("Failed to execute 'replaceChild' on 'Node'.", 'NotFoundError');
+            }
+            return child;
+        }
+        write('insert', this, node, child, 'replaceChild');
+        return write('remove', this, child, null, 'replaceChild');
+    };
+
+    // ParentNode.append/prepend and ChildNode.before/after/replaceWith
+    // (DOM §4.2.6, §4.2.8) take nodes or strings; a string becomes a Text
+    // node. DOM gathers them into a DocumentFragment; there are no
+    // fragments yet, so the nodes are detached first and then inserted one
+    // by one at the same reference point, which gives the same tree. A
+    // failed validity check part-way leaves the earlier nodes inserted.
+    function toNodes(args) {
+        var nodes = Array.prototype.map.call(args, function (a) {
+            return a != null && a[SLOT] ? a : g.document.createTextNode(String(a));
+        });
+        nodes.forEach(function (n) { var p = n.parentNode; if (p) p.removeChild(n); });
+        return nodes;
+    }
+    function insertAll(parent, nodes, ref, method) {
+        nodes.forEach(function (n) { write('insert', parent, n, ref, method); });
+    }
+    function viableSibling(node, field, nodes) {
+        var s = node[field];
+        while (s && nodes.indexOf(s) >= 0) s = s[field];
+        return s;
+    }
+    Element.prototype.append = function () {
+        insertAll(this, toNodes(arguments), null, 'append');
+    };
+    Element.prototype.prepend = function () {
+        var nodes = toNodes(arguments);
+        insertAll(this, nodes, this.firstChild, 'prepend');
+    };
+    Element.prototype.replaceChildren = function () {
+        var nodes = toNodes(arguments);
+        while (this.firstChild) this.removeChild(this.firstChild);
+        insertAll(this, nodes, null, 'replaceChildren');
+    };
+    [Element, CharacterData].forEach(function (C) {
+        C.prototype.before = function () {
+            var p = this.parentNode;
+            if (!p) return;
+            var args = Array.prototype.slice.call(arguments);
+            var prev = viableSibling(this, 'previousSibling', args);
+            var nodes = toNodes(args);
+            insertAll(p, nodes, prev ? prev.nextSibling : p.firstChild, 'before');
+        };
+        C.prototype.after = function () {
+            var p = this.parentNode;
+            if (!p) return;
+            var args = Array.prototype.slice.call(arguments);
+            var next = viableSibling(this, 'nextSibling', args);
+            insertAll(p, toNodes(args), next, 'after');
+        };
+        C.prototype.replaceWith = function () {
+            var p = this.parentNode;
+            if (!p) return;
+            var args = Array.prototype.slice.call(arguments);
+            var next = viableSibling(this, 'nextSibling', args);
+            var nodes = toNodes(args);
+            if (this.parentNode === p) {
+                insertAll(p, nodes, this, 'replaceWith');
+                p.removeChild(this);
+            } else {
+                insertAll(p, nodes, next, 'replaceWith');
+            }
+        };
+    });
     Node.prototype.contains = function (other) {
         for (var n = other; n; n = n.parentNode) if (n === this) return true;
         return false;
@@ -898,6 +979,85 @@ const WRAPPERS_JS: &str = r#"
         var s = slotOf(this);
         return list(HTMLCollection.prototype, s.gen === gen ? N.info(s.gen, s.id, 'children') : '', true);
     });
+
+    // ParentNode / NonDocumentTypeChildNode element traversal (DOM §4.2.6,
+    // §4.2.7), over the same tree reads as childNodes and the siblings.
+    function elementChildren(o) {
+        return Array.prototype.filter.call(o.childNodes, function (n) { return n.nodeType === 1; });
+    }
+    function elementSibling(o, field) {
+        var n = o[field];
+        while (n && n.nodeType !== 1) n = n[field];
+        return n;
+    }
+    [Element, Document].forEach(function (C) {
+        getter(C.prototype, 'firstElementChild', function () { return elementChildren(this)[0] || null; });
+        getter(C.prototype, 'lastElementChild', function () {
+            var c = elementChildren(this); return c[c.length - 1] || null;
+        });
+        getter(C.prototype, 'childElementCount', function () { return elementChildren(this).length; });
+    });
+    getter(Document.prototype, 'children', function () {
+        var s = slotOf(this);
+        return list(HTMLCollection.prototype, s.gen === gen ? N.info(s.gen, s.id, 'children') : '', true);
+    });
+    [Element, CharacterData].forEach(function (C) {
+        getter(C.prototype, 'nextElementSibling', function () { return elementSibling(this, 'nextSibling'); });
+        getter(C.prototype, 'previousElementSibling', function () {
+            return elementSibling(this, 'previousSibling');
+        });
+    });
+    // A node is connected when its root is the current document; an old
+    // document's wrappers have no parent and are never connected.
+    getter(Node.prototype, 'isConnected', function () {
+        var n = this;
+        while (n.parentNode) n = n.parentNode;
+        return n === g.document && slotOf(n).gen === gen;
+    });
+
+    // HTMLElement reflected attributes (HTML §3.2.6) and dataset (§3.2.6.6).
+    ['title', 'lang', 'dir'].forEach(function (k) {
+        accessor(HTMLElement.prototype, k, function () { return this.getAttribute(k) || ''; },
+            function (v) { this.setAttribute(k, v); });
+    });
+    accessor(HTMLElement.prototype, 'hidden', function () { return this.hasAttribute('hidden'); },
+        function (v) { this.toggleAttribute('hidden', !!v); });
+    var datasets = new WeakMap();
+    function dataAttr(p) {
+        if (typeof p !== 'string' || /-[a-z]/.test(p)) return null;
+        return 'data-' + p.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); });
+    }
+    getter(HTMLElement.prototype, 'dataset', function () {
+        slotOf(this);
+        var el = this, d = datasets.get(el);
+        if (d) return d;
+        d = new Proxy({}, {
+            get: function (t, p) {
+                var a = dataAttr(p);
+                if (!a) return undefined;
+                var v = el.getAttribute(a);
+                return v === null ? undefined : v;
+            },
+            set: function (t, p, v) {
+                var a = dataAttr(p);
+                if (!a) {
+                    throw new DOMException("Failed to set a named property on 'DOMStringMap': '" +
+                        String(p) + "' is not a valid property name.", 'SyntaxError');
+                }
+                el.setAttribute(a, String(v));
+                return true;
+            },
+            has: function (t, p) { var a = dataAttr(p); return !!a && el.hasAttribute(a); },
+            deleteProperty: function (t, p) {
+                var a = dataAttr(p);
+                if (a) el.removeAttribute(a);
+                return true;
+            }
+        });
+        datasets.set(el, d);
+        return d;
+    });
+
     Element.prototype.getAttribute = function (name) {
         var s = slotOf(this); return N.attr(s.gen, s.id, String(name));
     };
