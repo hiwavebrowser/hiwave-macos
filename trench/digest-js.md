@@ -192,3 +192,27 @@ Newest section last.
 1. **Rung 1 is still blocked (fifth digest running).** `git clone https://github.com/mdn/learning-area` still needs approval in this headless lane. Allowlist it, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`. The lane has now built most of the DOM API surface the MDN examples use, without being able to score a single fixture. This lane's end_date is Wednesday, so if the clone doesn't land by then, rung 1's 80% exit metric can't be met.
 2. **Raise max_open_prs to 4 (asked at 21:50, still open)?** One receipted branch is idle behind the cap again, and R2 is now the bottleneck: #342 has had R1 CLEAR since 00:06.
 3. **Is `getAttributeNames` returning sorted names acceptable for now?** rustkit-dom keeps attributes in a HashMap, so source order is lost, which also affects outerHTML. Chrome returns source order. Switching rustkit-dom to an ordered map (IndexMap) would fix both, but it's a cross-crate change I kept out of this lane.
+
+## 2026-09-29 02:58
+
+**Metric:** unchanged at rung 0, but the rung 0 surface grew. **`HTMLElement.innerText`: absent (an inert JS own-property; writes never reached the Rust DOM) → a Rust-backed getter and setter.** It's banked on a branch, not in a PR, because the lane is at max_open_prs. **Rung 1 is still 0/0 vs Chrome 148, and fetching MDN is still blocked (decision 1).** I retried `git clone` at 01:52 and it still needs approval. I didn't route around the gate. Receipt on a verified relink: **26/26 passed, 0 changed**, builtins 5/5.
+
+**PRs** (3 open, at max_open_prs; none merged since 00:20)
+- **#342** @ 6343239, **#343** @ 89eca75 and **#348** @ 17ea713 all have **R1 CLEAR at their current heads** now (#348 since 00:18), and all are MERGEABLE.
+  - The only R2 on #342 and #343 is a stale **FAIL "gate 2: DIRTY"** at their pre-merge heads (ec6b9d0, cbc60ed), from 22:26.
+  - None of the three has an R2 at its current head. **R2 is the whole bottleneck.** I didn't push empty commits to re-fire it, because that would void the R1 stamps.
+- **Banked, no PR (lane cap):**
+  - `atlas/js-dom-node-clone` @ 971689b (from 01:35, unchanged). Body: `~/Repos/.worktrees/js-pr-body-node-clone.md`.
+  - **`atlas/js-dom-inner-text` @ 7dd53ed (new)**, from develop 8f44204:
+    - 93c4202 (bindings): the setter follows HTML "set the inner text" exactly (Text nodes plus `<br>`, marks §3 Style). The getter runs the rendered-text collection steps using **UA-default display per tag plus `[hidden]`**. Author CSS isn't seen, because pin §3.4 defers the forced style flush. A detached or hidden element answers its textContent.
+    - 7dd53ed is the engine settle-paint pin.
+    - Tests: bindings 54/54 (4 new, in their own `inner_text.rs` module), engine headless 254/254.
+    - Its hunks are clear of all four other lane branches.
+    - Receipt: 26/26, 0 changed vs 971689b and 17ea713. The relink took 33m20s at load ~19, which was most of the session.
+    - Body: `~/Repos/.worktrees/js-pr-body-inner-text.md`.
+  - Open order when slots free: node-clone, then inner-text.
+
+**Decisions for Pete**
+1. **Rung 1 is still blocked (sixth digest running).** Allowlist `Bash(git clone https://github.com/mdn/learning-area:*)`, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`. end_date is Wednesday. Without fixtures, the rung 1 80% exit can't be scored at all. What's left in the no-fixture surface is layout reads (`getBoundingClientRect`, `offset*`), and those need the §3.4 forced-layout design before the lane can build them.
+2. **Re-fire R2 on #342, #343 and #348?** All three have R1 CLEAR at head and green CI. Their last R2s are stale DIRTY FAILs, or missing. Whoever owns the Cursor automation can re-trigger it without a push, which would keep the R1 stamps valid. After that, raising max_open_prs to 4 matters less.
+3. **UA stylesheet gap (for realsite or cascade, not this lane):** the engine has **no `[hidden] { display: none }`** rule. I confirmed it with an engine paint probe: `<span hidden>no</span>` is painted. The `hidden` attribute is common on real pages (collapsed menus, templates, modals), so this is real parity debt. It's probably a one-line UA rule. Which lane takes it?
