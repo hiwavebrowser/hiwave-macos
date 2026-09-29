@@ -8116,8 +8116,15 @@ impl SelectorMatcher {
         let (tokens, compounds) = match prepared {
             PreparedSelector::Never => return false,
             PreparedSelector::List(members) => {
-                return members.iter().any(|s| {
-                    SelectorMatcher.selector_matches(s, tag_name, attributes, ancestors, siblings_before, sib)
+                return members.iter().any(|m| {
+                    self.selector_matches_prepared(
+                        m,
+                        tag_name,
+                        attributes,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                    )
                 });
             }
             PreparedSelector::Complex { tokens, compounds, subject } => {
@@ -8221,8 +8228,15 @@ impl SelectorMatcher {
             if selector.contains(',') {
                 let members = SelectorMatcher::split_top_level_commas(selector);
                 if members.len() != 1 || members[0] != selector {
+                    // Prepare the members here, once. Matching them by string
+                    // re-hashed each member into this cache per candidate
+                    // element (~15% of github's cascade). No cache borrow is
+                    // held while `prepare` runs, so the recursion is safe.
                     return PreparedSelector::List(
-                        members.into_iter().map(str::to_string).collect(),
+                        members
+                            .into_iter()
+                            .map(|m| self.prepared_selector(m.trim()))
+                            .collect(),
                     );
                 }
             }
@@ -17649,6 +17663,27 @@ mod rule_prefilter_tests {
     }
 
     #[test]
+    fn a_selector_list_holds_its_members_prepared() {
+        // github's comma lists: each member used to be matched by string,
+        // i.e. hashed back into the prepared cache per candidate element.
+        let m = SelectorMatcher;
+        let list = m.prepared_selector(".a .x,  main .t , .nope");
+        let PreparedSelector::List(members) = &*list else {
+            panic!("a comma list prepares as a List");
+        };
+        assert_eq!(members.len(), 3);
+        assert!(members.iter().all(|m| matches!(**m, PreparedSelector::Complex { .. })));
+        assert!(
+            Rc::ptr_eq(&members[1], &m.prepared_selector("main .t")),
+            "members are trimmed and shared with the cache"
+        );
+        let main = vec![ancestor("main", &[], None)];
+        let t = attrs(&[("class", "t")]);
+        assert!(m.selector_matches_prepared(&list, "div", &t, &main, &[], SiblingContext::SOLE));
+        assert!(!m.selector_matches_prepared(&list, "div", &t, &[], &[], SiblingContext::SOLE));
+    }
+
+    #[test]
     fn a_sibling_compound_checks_the_siblings_form_state() {
         // wikipedia's dropdowns: `.dd .checkbox:checked ~ .content { display:
         // block }`. The sibling compound was matched by tag/class/id only,
@@ -19127,7 +19162,7 @@ enum PreparedSelector {
     /// Invalid, a pseudo-element selector, or no subject: matches nothing.
     Never,
     /// A top-level selector list; matches if any member does.
-    List(Vec<String>),
+    List(Vec<Rc<PreparedSelector>>),
     /// One complex selector: `(compound, following combinator)` tokens, the
     /// subject last, and each token's compound parsed for the ancestor and
     /// sibling walk (same index).
