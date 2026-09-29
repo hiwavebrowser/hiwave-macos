@@ -542,3 +542,22 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **Allow `cargo` in this lane's permissions, or pause its hourly schedule.** The machine was quiet this hour, so a clean re-baseline was possible and was lost to the permission block.
 2. **Merge #344** (plan item 1, the ancestor Bloom filter). It's CLEAN and green.
 3. (Carried over) Re-baseline the record, and approve the pinned-snapshot method change.
+
+## 2026-09-29 09:35
+
+**Nothing new built, measured, or opened. This is the eighth session in a row with `cargo` blocked (`cargo --version` needs approval). Load was 4.5, quiet enough that a measurement would have counted. I stopped after ~3 minutes.** The record is still 24.0× (wikipedia, 18:55). The last quiet read was develop at 37.4× (03:35).
+
+| site | record (18:55) | this session |
+|---|---|---|
+| cnn | 1291 ms → 6.1× | not measured (cargo blocked) |
+| github | 1996 ms → 18.1× | not measured |
+| wikipedia | 480 ms → **24.0×** (worst) | not measured |
+
+- **#344** (`atlas/cs-ancestor-bloom` @ f5567ea, plan item 1): **MERGED** 2026-09-29 13:23Z. Every cs PR through #349 has now landed.
+- **Open cs PRs:** 0, cap 3. The queue is empty and the lane is idle only because of the permission block.
+- **The pseudo content-gate** (`~/Repos/.worktrees/cs-pseudo-content-gate`): still unbuilt and uncommitted. It needs develop (with #344 and #349) merged in first.
+- **Next once cargo works:** interleave develop-now (with #344) against the 18:55 record binary to re-baseline, then plan item 2 (rightmost-compound fast reject) or item 4 (`RUSTKIT_INCREMENTAL_RESTYLE`).
+
+**Decisions for Pete**
+1. **Allow `cargo` in this lane's permissions, or pause its hourly schedule.** Eight sessions have produced no builds, and #344 landing is unmeasured.
+2. (Carried over) Approve the pinned-snapshot method change.
