@@ -2506,6 +2506,12 @@ pub struct ComputedStyle {
     // Transforms
     pub transform: TransformList,
     pub transform_origin: TransformOrigin,
+    /// The individual transform properties (css-transforms-2 §5). Each
+    /// cascades on its own; `None` is `none`. Composed ahead of `transform`
+    /// by [`ComputedStyle::effective_transform`].
+    pub translate: Option<TransformOp>,
+    pub rotate: Option<TransformOp>,
+    pub scale: Option<TransformOp>,
 
     // Transitions (parsed but not executed during parity capture)
     pub transition_property: String,
@@ -2611,6 +2617,22 @@ pub struct ComputedStyle {
 }
 
 impl ComputedStyle {
+    /// The transform actually applied: `translate`, then `rotate`, then
+    /// `scale`, then `transform` (css-transforms-2 §6, "the transformation
+    /// matrix"). Borrows when no individual property is set.
+    pub fn effective_transform(&self) -> std::borrow::Cow<'_, TransformList> {
+        if self.translate.is_none() && self.rotate.is_none() && self.scale.is_none() {
+            return std::borrow::Cow::Borrowed(&self.transform);
+        }
+        let ops = [&self.translate, &self.rotate, &self.scale]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .chain(self.transform.ops.iter().cloned())
+            .collect();
+        std::borrow::Cow::Owned(TransformList { ops })
+    }
+
     /// Create default style.
     pub fn new() -> Self {
         Self {
