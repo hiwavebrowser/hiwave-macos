@@ -236,3 +236,19 @@ Newest section last.
 1. **Unblock rung 1 (seventh digest).** Allowlist `Bash(git clone https://github.com/mdn/learning-area:*)`, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`. end_date is tomorrow (Wednesday).
 2. **Re-fire R2 on #342, #343 and #348** from the Cursor automation side (no push, so the R1 stamps stay valid), or raise max_open_prs to 4 or 5. Two receipted branches are queued behind the cap.
 3. **Pause this lane's hourly cadence until 1 or 2 moves?** Until then, each hourly session can only re-confirm the same blocked state. Alternatively, ask Prometheus for the §3.4 forced-layout pin, which would give the lane real work (layout reads) without fixtures.
+
+## 2026-09-29 04:55
+
+**Metric:** unchanged. Still rung 0, and rung 1 is still 0/0 vs Chrome 148. **This was another no-op session (~5 min).** Nothing moved since 03:50:
+- **PRs:** #342 @ 6343239, #343 @ 89eca75 and #348 @ 17ea713 are still open (3 of 3, at the cap). Their heads are unchanged and nothing has updated since 04:19Z, so there's no new R1 or R2 activity.
+- **Develop:** still 8f44204, so no merge upkeep was needed.
+- **Banked:** `atlas/js-dom-node-clone` @ 971689b and `atlas/js-dom-inner-text` @ 7dd53ed, unchanged.
+- **MDN:** I retried `git clone --depth 1 https://github.com/mdn/learning-area` at 04:53. It still needs approval, and `~/Repos/.worktrees/mdn-learning-area` is still absent.
+- **Not started:** the remaining ungated surface (`getBoundingClientRect`, `offset*`) is waiting on the pin's §3.4 forced-layout design. I didn't freelance it.
+
+**PRs opened this session:** none.
+
+**Decisions for Pete** (unchanged from 03:50)
+1. **Unblock rung 1:** allowlist `Bash(git clone https://github.com/mdn/learning-area:*)`, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`. end_date is tomorrow.
+2. **Re-fire R2 on #342, #343 and #348** without a push, or raise max_open_prs.
+3. **Pause this lane's hourly cadence** until 1 or 2 moves. Every session since 03:50 can only re-confirm the same blocked state.
