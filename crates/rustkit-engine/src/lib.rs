@@ -22946,3 +22946,93 @@ mod flex_zero_size_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod grid_fixed_track_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    /// Laid out through both entry points: `layout()` and
+    /// `layout_with_collapse` (what `relayout` runs for the page).
+    fn laid_out(html: &str) -> Vec<LayoutBox> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 0.0),
+            ..Default::default()
+        };
+        let mut plain = e.build_layout_from_document(&d, &[]);
+        plain.set_viewport(1280.0, 800.0);
+        plain.layout(&cb);
+        let mut engine_path = e.build_layout_from_document(&d, &[]);
+        engine_path.set_viewport(1280.0, 800.0);
+        engine_path.layout_with_collapse(
+            &cb,
+            &mut rustkit_layout::MarginCollapseContext::new(),
+            &mut rustkit_layout::FloatContext::new(),
+        );
+        vec![plain, engine_path]
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    fn rect(root: &LayoutBox, id: &str) -> Rect {
+        by_id(root, id).unwrap_or_else(|| panic!("no box #{id}")).dimensions.border_box()
+    }
+
+    #[test]
+    fn a_fixed_column_does_not_grow_to_fit_its_text() {
+        // css-grid-1 §12.5: items size intrinsic tracks only. "Wide" (~36px)
+        // overflows its 10px track; the second item starts at x=10.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0;font:16px Arial"><div style="display:grid;"#,
+            r#"grid-template-columns:10px 10px"><div id="a">Wide</div><div id="b">b</div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "a").width, 10.0);
+            assert_eq!(rect(&root, "b").x, 10.0);
+        }
+    }
+
+    #[test]
+    fn a_fixed_row_does_not_grow_to_fit_a_taller_item() {
+        // A 20px row holding a 50px item stays 20; the next row starts at 20.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:grid;width:100px;"#,
+            r#"grid-template-rows:20px 20px"><div style="height:50px"></div><div id="n" style="height:5px"></div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "n").y, 20.0);
+        }
+    }
+
+    #[test]
+    fn a_spanning_item_over_fixed_tracks_leaves_them_alone() {
+        // span 2 over 30px + 30px (gap 0) with a 100px item: still 30 + 30.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:grid;grid-template-columns:30px 30px">"#,
+            r#"<div style="grid-column:span 2;width:100px;height:5px"></div>"#,
+            r#"<div style="height:5px"></div><div id="c" style="height:5px"></div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "c").x, 30.0);
+        }
+    }
+
+    #[test]
+    fn an_auto_column_still_grows_to_its_content() {
+        // Guard: `auto` is intrinsic and must keep taking the item's width.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:grid;width:500px;"#,
+            r#"grid-template-columns:auto 1fr"><div style="width:120px;height:5px"></div>"#,
+            r#"<div id="f" style="height:5px"></div></div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "f").x, 120.0);
+        }
+    }
+}
