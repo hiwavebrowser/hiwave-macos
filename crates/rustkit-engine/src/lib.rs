@@ -21826,6 +21826,12 @@ fn substitute_css_vars<'a>(
             *budget = 0;
         }
     }
+    /// Would these two neighbouring characters run together into one token
+    /// (ident, number, dimension, percentage, hash)?
+    fn fuses(before: Option<char>, after: Option<char>) -> bool {
+        let word = |c: char| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '%' | '#');
+        matches!((before, after), (Some(b), Some(a)) if word(b) && word(a))
+    }
     let mut out = String::with_capacity(value.len().min(*budget));
     let mut rest = value;
     while let Some(start) = rest.find("var(") {
@@ -21873,9 +21879,21 @@ fn substitute_css_vars<'a>(
                 String::new()
             }
         };
-        // The nested call already charged its bytes; appending is free.
-        out.push_str(&piece);
+        // Substitution is token-level (CSS Variables 1 §3): a substituted
+        // value never fuses with the text beside it. Tailwind v4 writes
+        // `translate:var(--tw-translate-x)var(--tw-translate-y)`; spliced as
+        // text, `0` and `-200%` became the single invalid `0-200%`.
         rest = &after[end + 1..];
+        if !piece.is_empty() {
+            if fuses(out.chars().next_back(), piece.chars().next()) {
+                out.push(' ');
+            }
+            // The nested call already charged its bytes; appending is free.
+            out.push_str(&piece);
+            if fuses(piece.chars().next_back(), rest.chars().next()) {
+                out.push(' ');
+            }
+        }
     }
     push(&mut out, rest, budget);
     out
@@ -23039,6 +23057,19 @@ mod individual_transform_tests {
         b.children.iter().find_map(|c| by_id(c, id))
     }
 
+    /// `#t`'s page-space transform after a full style + layout pass.
+    fn transform_of_t(html: &str) -> Option<[f32; 6]> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        root.set_viewport(1280.0, 800.0);
+        root.layout(&rustkit_layout::Dimensions {
+            content: rustkit_layout::Rect::new(0.0, 0.0, 1280.0, 0.0),
+            ..Default::default()
+        });
+        own_transform_affine(by_id(&root, "t").expect("#t"))
+    }
+
     #[test]
     fn translate_rotate_and_scale_parse_as_their_own_properties() {
         let s = styled(&[("translate", "10px 20%"), ("rotate", "90deg"), ("scale", "50%")]);
@@ -23091,22 +23122,45 @@ mod individual_transform_tests {
     }
 
     #[test]
+    fn adjacent_var_substitutions_stay_separate_tokens() {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let vars: HashMap<String, String> = [("--x", "0"), ("--y", "-200%"), ("--n", "5")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let r = |v: &str| e.resolve_css_variables(v, &vars);
+        assert_eq!(r("var(--x)var(--y)"), "0 -200%");
+        // No space where the neighbours could not fuse anyway.
+        assert_eq!(r("calc(var(--n)*2px)"), "calc(5*2px)");
+        assert_eq!(r("rgb(var(--n),var(--n),var(--n))"), "rgb(5,5,5)");
+        assert_eq!(r("var(--x) var(--y)"), "0 -200%");
+    }
+
+    #[test]
+    fn tailwind_v4_translate_utilities_move_the_box() {
+        // Tailwind v4's exact shape: the defaults from its `@supports`
+        // fallback layer, the utility writing `translate` through two vars
+        // with no space between them.
+        let m = transform_of_t(concat!(
+            "<html><head><style>",
+            "*,:before,:after{--tw-translate-x:0;--tw-translate-y:0}",
+            r".up{--tw-translate-y:-200%;translate:var(--tw-translate-x)var(--tw-translate-y)}",
+            r#"</style></head><body style="margin:0"><div id="t" class="up" style="height:20px"></div>"#,
+            "</body></html>",
+        ))
+        .expect("a transform");
+        assert_eq!((m[4], m[5]), (0.0, -40.0));
+    }
+
+    #[test]
     fn a_translated_box_is_moved_by_its_own_height_percentage() {
         // shopify's skip link: `translate: 0 -200%` on a 20px-tall box puts
         // it 40px up, off the top of the page.
-        let e = Engine::new(EngineConfig::default()).expect("engine");
-        let d = Document::parse_html(concat!(
+        let m = transform_of_t(concat!(
             r#"<body style="margin:0"><div id="t" style="width:50px;height:20px;"#,
             r#"translate:0 -200%"></div></body>"#,
         ))
-        .expect("parse");
-        let mut root = e.build_layout_from_document(&d, &[]);
-        root.set_viewport(1280.0, 800.0);
-        root.layout(&rustkit_layout::Dimensions {
-            content: rustkit_layout::Rect::new(0.0, 0.0, 1280.0, 0.0),
-            ..Default::default()
-        });
-        let m = own_transform_affine(by_id(&root, "t").expect("#t")).expect("a transform");
+        .expect("a transform");
         assert_eq!((m[4], m[5]), (0.0, -40.0));
     }
 }
