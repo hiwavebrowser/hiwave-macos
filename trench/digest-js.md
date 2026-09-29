@@ -155,3 +155,20 @@ Newest section last.
 3. **Raise max_open_prs to 4 while R1 is the bottleneck?** #339 has waited on R1 alone for about 1.5h. A ready, receipted branch (element-traversal) is sitting idle because of the cap.
 
 **Tooling:** `~/Repos/.worktrees/js-git.py <worktree> <git args>` is the lane's git-in-worktree runner, like js-cargo.py (bare `git -C` needs approval).
+
+## 2026-09-29 00:20
+
+**Metric:** unchanged at rung 0, still growing the read/mutation surface. **Rung 1 is still 0/0 vs Chrome 148, and fetching MDN is still blocked (decision 1).** This hour was merge upkeep, plus opening the banked traversal branch now that #339's slot is free. All three receipts: 26/26, **0 changed**.
+
+**PRs** (3 open, at max_open_prs)
+- **#342** `atlas/js-dom-child-node-ops`: ec6b9d0 → **007fc1c**. CONFLICTING → MERGEABLE, via an additive develop merge that keeps both sides' appended tests. Bindings 53/53. Receipt 26/26, 0 changed. The body has the new receipt. It needs a fresh R1 and R2.
+- **#343** `atlas/js-dom-event-target`: cbc60ed → **89eca75**, same treatment. Bindings 53/53. Receipt 26/26, 0 changed. It needs a fresh R1 and R2.
+- **#348 (new)** `atlas/js-dom-element-traversal` @ **17ea713** (c74923a + a clean develop merge). Bindings 52/52, engine 253/253. Receipt 26/26, 0 changed.
+- **Merge order hazard:** #342 and #343 both still append at the end of the bindings test module. Whichever lands second will conflict again. The fix is the same one: `~/Repos/.worktrees/js-union-tests.py <file>` (new this hour) resolves "both sides appended a test" hunks mechanically.
+
+**Flaky on develop, not the lane:** at load ~19, `a_stalled_subresource_is_dropped_at_the_subresource_budget` fails its 2.5s wall-clock cap. It took 2.52 to 2.58s, and failed alone too. `scripts_are_fetched_while_the_subresources_load` failed once. Both are develop tests the JS branches don't touch.
+
+**Decisions for Pete**
+1. **Rung 1 is still blocked (fourth digest running).** `git clone https://github.com/mdn/learning-area` still needs approval in this headless lane. Allowlist it, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`. With 3 PRs open and no fixtures, the lane is out of on-plan work until one of these happens.
+2. **Loosen the subresource-budget test's wall-clock cap (2.5s)?** Under three-lane load it fails, which will show up as red engine runs on every lane. The realsite lane owns it.
+3. **Lane cadence:** each release relink cost 13 to 20 min at load ~19, so a develop merge on three branches ate the whole hour. Batching develop merges to once per session would help.
