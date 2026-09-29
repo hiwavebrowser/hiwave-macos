@@ -6476,6 +6476,23 @@ impl Engine {
                     style.transform_origin = origin;
                 }
             }
+            // css-transforms-2 §5. Tailwind v4 writes every translate/rotate/
+            // scale utility through these, not through `transform`.
+            "translate" => {
+                if let Some(op) = parse_individual_translate(value) {
+                    style.translate = op;
+                }
+            }
+            "rotate" => {
+                if let Some(op) = parse_individual_rotate(value) {
+                    style.rotate = op;
+                }
+            }
+            "scale" => {
+                if let Some(op) = parse_individual_scale(value) {
+                    style.scale = op;
+                }
+            }
             // ==================== Transitions (parsed, not executed) ====================
             "transition" => {
                 // Shorthand: property duration timing-function delay
@@ -12050,6 +12067,80 @@ fn parse_transform(value: &str) -> Option<rustkit_css::TransformList> {
     }
 }
 
+/// `translate: none | <length-percentage> [<length-percentage> <length>?]?`.
+/// `Some(None)` is `none`; `None` is invalid. A nonzero z is 3D, which the
+/// 2D painter can't honour, so the declaration is dropped rather than
+/// painted flat.
+fn parse_individual_translate(value: &str) -> Option<Option<rustkit_css::TransformOp>> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("none") {
+        return Some(None);
+    }
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.is_empty() || parts.len() > 3 {
+        return None;
+    }
+    let x = parse_length(parts[0])?;
+    let y = match parts.get(1) {
+        Some(p) => parse_length(p)?,
+        None => rustkit_css::Length::Zero,
+    };
+    if let Some(z) = parts.get(2) {
+        match parse_length(z)? {
+            rustkit_css::Length::Zero => {}
+            rustkit_css::Length::Px(v) if v == 0.0 => {}
+            _ => return None,
+        }
+    }
+    Some(Some(rustkit_css::TransformOp::Translate(x, y)))
+}
+
+/// `rotate: none | <angle> | z <angle>` (the 2D forms). Other axes are 3D
+/// and dropped.
+fn parse_individual_rotate(value: &str) -> Option<Option<rustkit_css::TransformOp>> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("none") {
+        return Some(None);
+    }
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    let angle = match parts.as_slice() {
+        [a] => parse_angle(a)?,
+        [axis, a] | [a, axis] if axis.eq_ignore_ascii_case("z") => parse_angle(a)?,
+        _ => return None,
+    };
+    Some(Some(rustkit_css::TransformOp::Rotate(angle)))
+}
+
+/// `scale: none | [<number> | <percentage>]{1,3}`. One value scales both
+/// axes; a z other than 1 is 3D and dropped.
+fn parse_individual_scale(value: &str) -> Option<Option<rustkit_css::TransformOp>> {
+    fn factor(s: &str) -> Option<f32> {
+        match s.strip_suffix('%') {
+            Some(p) => p.trim().parse::<f32>().ok().map(|v| v / 100.0),
+            None => s.parse::<f32>().ok(),
+        }
+    }
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("none") {
+        return Some(None);
+    }
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.is_empty() || parts.len() > 3 {
+        return None;
+    }
+    let sx = factor(parts[0])?;
+    let sy = match parts.get(1) {
+        Some(p) => factor(p)?,
+        None => sx,
+    };
+    if let Some(z) = parts.get(2) {
+        if factor(z)? != 1.0 {
+            return None;
+        }
+    }
+    Some(Some(rustkit_css::TransformOp::Scale(sx, sy)))
+}
+
 /// Parse a single transform operation.
 fn parse_transform_op(func: &str, args: &str) -> Option<rustkit_css::TransformOp> {
     let args = args.trim();
@@ -12687,14 +12778,12 @@ fn compose_affine(outer: [f32; 6], inner: [f32; 6]) -> [f32; 6] {
 /// A transform applies about its origin, so the page-space affine is
 /// `T(origin) · M · T(-origin)`.
 fn own_transform_affine(layout_box: &LayoutBox) -> Option<[f32; 6]> {
-    if layout_box.style.transform.is_identity() {
+    let transform = layout_box.style.effective_transform();
+    if transform.is_identity() {
         return None;
     }
     let border_box = layout_box.dimensions.border_box();
-    let m = layout_box
-        .style
-        .transform
-        .to_matrix(border_box.width, border_box.height);
+    let m = transform.to_matrix(border_box.width, border_box.height);
     let ox = border_box.x
         + layout_box
             .style
@@ -22922,5 +23011,102 @@ mod flex_zero_size_tests {
         )) {
             assert_eq!(rect(&root, "p").height, 30.0);
         }
+    }
+}
+
+// css-transforms-2 §5/§6: `translate`, `rotate` and `scale` are properties
+// of their own, applied in that order ahead of `transform`. RustKit dropped
+// all three, and Tailwind v4 writes every translate/rotate/scale utility
+// through them (shopify's skip link, `translate: 0 -200%`, painted top-left).
+#[cfg(test)]
+mod individual_transform_tests {
+    use super::*;
+    use rustkit_css::{Length, TransformOp};
+
+    fn styled(decls: &[(&str, &str)]) -> ComputedStyle {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let mut style = ComputedStyle::default();
+        for (p, v) in decls {
+            e.apply_style_property(&mut style, p, v);
+        }
+        style
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    #[test]
+    fn translate_rotate_and_scale_parse_as_their_own_properties() {
+        let s = styled(&[("translate", "10px 20%"), ("rotate", "90deg"), ("scale", "50%")]);
+        assert_eq!(
+            s.translate,
+            Some(TransformOp::Translate(Length::Px(10.0), Length::Percent(20.0)))
+        );
+        assert_eq!(s.rotate, Some(TransformOp::Rotate(90.0)));
+        assert_eq!(s.scale, Some(TransformOp::Scale(0.5, 0.5)));
+        assert_eq!(
+            styled(&[("translate", "5px")]).translate,
+            Some(TransformOp::Translate(Length::Px(5.0), Length::Zero))
+        );
+        assert_eq!(styled(&[("scale", "2 3")]).scale, Some(TransformOp::Scale(2.0, 3.0)));
+        assert_eq!(styled(&[("rotate", "z 45deg")]).rotate, Some(TransformOp::Rotate(45.0)));
+    }
+
+    #[test]
+    fn none_resets_and_invalid_or_3d_values_are_dropped() {
+        let s = styled(&[("translate", "4px"), ("translate", "none")]);
+        assert_eq!(s.translate, None);
+        // Invalid and 3D values leave the previous value alone.
+        let s = styled(&[("scale", "2"), ("scale", "bogus"), ("scale", "2 2 3")]);
+        assert_eq!(s.scale, Some(TransformOp::Scale(2.0, 2.0)));
+        let s = styled(&[("rotate", "10deg"), ("rotate", "x 45deg"), ("translate", "1px 2px 3px")]);
+        assert_eq!(s.rotate, Some(TransformOp::Rotate(10.0)));
+        assert_eq!(s.translate, None);
+    }
+
+    #[test]
+    fn they_compose_translate_rotate_scale_then_transform() {
+        let s = styled(&[
+            ("transform", "translateX(1px)"),
+            ("scale", "2"),
+            ("rotate", "90deg"),
+            ("translate", "10px 0"),
+        ]);
+        assert_eq!(
+            s.effective_transform().ops,
+            vec![
+                TransformOp::Translate(Length::Px(10.0), Length::Zero),
+                TransformOp::Rotate(90.0),
+                TransformOp::Scale(2.0, 2.0),
+                TransformOp::TranslateX(Length::Px(1.0)),
+            ]
+        );
+        // No individual property: `transform` alone, unchanged.
+        let s = styled(&[("transform", "scale(3)")]);
+        assert_eq!(s.effective_transform().ops, vec![TransformOp::Scale(3.0, 3.0)]);
+    }
+
+    #[test]
+    fn a_translated_box_is_moved_by_its_own_height_percentage() {
+        // shopify's skip link: `translate: 0 -200%` on a 20px-tall box puts
+        // it 40px up, off the top of the page.
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(concat!(
+            r#"<body style="margin:0"><div id="t" style="width:50px;height:20px;"#,
+            r#"translate:0 -200%"></div></body>"#,
+        ))
+        .expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        root.set_viewport(1280.0, 800.0);
+        root.layout(&rustkit_layout::Dimensions {
+            content: rustkit_layout::Rect::new(0.0, 0.0, 1280.0, 0.0),
+            ..Default::default()
+        });
+        let m = own_transform_affine(by_id(&root, "t").expect("#t")).expect("a transform");
+        assert_eq!((m[4], m[5]), (0.0, -40.0));
     }
 }
