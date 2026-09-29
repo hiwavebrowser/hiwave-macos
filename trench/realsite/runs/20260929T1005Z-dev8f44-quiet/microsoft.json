@@ -1,0 +1,107 @@
+{
+  "id": "microsoft",
+  "url": "https://www.microsoft.com/en-us",
+  "chrome": [
+    {
+      "url": "https://www.microsoft.com/en-us",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.microsoft.com/en-us",
+      "title": "Microsoft \u2013 AI, Cloud, Productivity, Computing, Gaming & Apps",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260929T1005Z-dev8f44-quiet/microsoft/chrome-a-text.json",
+      "png_path": "trench/realsite/runs/20260929T1005Z-dev8f44-quiet/microsoft/chrome-a.png",
+      "elapsed_ms": 34447
+    },
+    {
+      "url": "https://www.microsoft.com/en-us",
+      "status": "ok",
+      "error": null,
+      "nav_error": null,
+      "oracle_headless": false,
+      "http_status": 200,
+      "final_url": "https://www.microsoft.com/en-us",
+      "title": "Microsoft \u2013 AI, Cloud, Productivity, Computing, Gaming & Apps",
+      "browser_version": "148.0.7778.216",
+      "text_path": "trench/realsite/runs/20260929T1005Z-dev8f44-quiet/microsoft/chrome-b-text.json",
+      "png_path": "trench/realsite/runs/20260929T1005Z-dev8f44-quiet/microsoft/chrome-b.png",
+      "elapsed_ms": 33543
+    }
+  ],
+  "oracle_capture": "a",
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.microsoft.com/en-us",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260929T1005Z-dev8f44-quiet/microsoft/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260929T1005Z-dev8f44-quiet/microsoft/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 0,
+      "threw": 0,
+      "skipped": 204,
+      "fetch_failed": 0,
+      "over_budget": 52,
+      "bytes": 2899715,
+      "elapsed_ms": 0
+    },
+    "elapsed_ms": 7366,
+    "error": null,
+    "wall_ms": 7449,
+    "non_background_fraction": 0.0108
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": false,
+    "why": "blank frame (1.08% non-background)"
+  },
+  "readable": {
+    "pass": false,
+    "chrome_words": 53,
+    "rustkit_words": 0,
+    "ratio": 0.0,
+    "missing_sample": [
+      "24",
+      "365",
+      "7",
+      "a",
+      "account",
+      "ai",
+      "all",
+      "assistant",
+      "available",
+      "azure",
+      "business",
+      "can",
+      "chat",
+      "choose",
+      "content",
+      "copilot",
+      "deals",
+      "faster",
+      "find",
+      "help",
+      "hi",
+      "in",
+      "is",
+      "let",
+      "main"
+    ]
+  },
+  "looks_right": {
+    "pass": false,
+    "chrome_self_diff": 5.6486328125,
+    "why": "rustkit did not load"
+  },
+  "points": 0
+}
