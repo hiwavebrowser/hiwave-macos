@@ -1671,6 +1671,62 @@ mod tests {
         assert_eq!(b.take_dirty(), DomDirty::Style);
     }
 
+    // The list-building pattern: fill a detached fragment, insert it once.
+    #[test]
+    fn document_fragment_children_move_in_on_insert() {
+        let b = bound(MIXED);
+        b.set_selector_matcher(Rc::new(|node, selector| {
+            (selector != "!").then(|| node.tag_name() == Some(selector))
+        }));
+        assert_eq!(
+            eval_string(
+                &b,
+                "var f = document.createDocumentFragment(), r = []; \
+                 r.push(f instanceof DocumentFragment, f instanceof Node, f.nodeType, f.nodeName, \
+                        Node.DOCUMENT_FRAGMENT_NODE, f.parentNode, f.isConnected); \
+                 ['x', 'y'].forEach(function (t) { \
+                     var li = document.createElement('li'); li.textContent = t; li.id = t; \
+                     r.push(f.appendChild(li) === li); \
+                 }); \
+                 f.append('!'); \
+                 r.push(f.childNodes.length, f.children.length, f.firstElementChild.id, \
+                        f.childElementCount, f.textContent, f.querySelectorAll('li').length, \
+                        f.getElementById('y') === f.lastElementChild, f.getElementById('b'), \
+                        f.firstChild.parentNode === f, f.firstChild.isConnected); \
+                 var u = document.getElementById('u'), first = f.firstChild; \
+                 r.push(u.insertBefore(f, document.getElementById('a')) === f, \
+                        f.childNodes.length, first.parentNode === u, first.isConnected, \
+                        u.firstElementChild.id, document.getElementById('x') === first, \
+                        u.childElementCount); \
+                 r.join(',')"
+            ),
+            "true,true,11,#document-fragment,11,,false,true,true,3,2,x,2,xy!,2,true,,true,false,\
+             true,0,true,true,x,true,4"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+        // The fragment's children landed, in order, before #a.
+        assert_eq!(
+            eval_string(&b, "document.getElementById('u').textContent.replace(/\\s+/g, '')"),
+            "xy!12"
+        );
+        assert_eq!(
+            eval_string(
+                &b,
+                "var f = document.createDocumentFragment(), r = []; \
+                 f.textContent = 'abc'; r.push(f.childNodes.length, f.firstChild.data); \
+                 f.replaceChildren(document.createElement('i')); r.push(f.firstChild.nodeName); \
+                 try { f.appendChild(f); } catch (e) { r.push(e.name); } \
+                 var g = document.createDocumentFragment(); g.appendChild(f); \
+                 r.push(g.childNodes.length, f.childNodes.length, g.firstChild.nodeName); \
+                 var p = document.createElement('p'); p.append(g, 'z'); \
+                 r.push(p.innerHTML, g.childNodes.length, \
+                        Object.prototype.toString.call(g)); \
+                 r.join(',')"
+            ),
+            "1,abc,I,HierarchyRequestError,1,0,I,<i></i>z,0,[object DocumentFragment]"
+        );
+    }
+
     const PAGE: &str = r#"<!DOCTYPE html><html><head><title>T</title></head>
 <body><div id="main" class="box"><p class="x">Hello, <b>world</b>!</p><!--c--><p class="x">Two</p></div>
 <p id="outside" class="x">Out</p></body></html>"#;
