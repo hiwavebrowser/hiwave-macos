@@ -134,6 +134,11 @@ pub struct FlexItem<'a> {
     /// non-replaced item with `min-height: auto` and `overflow-y: visible`.
     /// The number needs laid-out children, so step 11d applies it.
     pub auto_min_main: bool,
+
+    /// The item's definite main size (`width`/`height`), border-box, or
+    /// `None` when it is `auto`. §4.5's specified size suggestion: it caps
+    /// the automatic minimum on both axes.
+    pub specified_main: Option<f32>,
 }
 
 impl<'a> FlexItem<'a> {
@@ -465,6 +470,13 @@ fn layout_flex_container_at(
         None
     };
 
+    // A row's inner width is always definite. A column's height is definite
+    // only when style (or the caller's used size) says so; otherwise
+    // `container_main_size` is the content stack, and an item's percentage
+    // main size has nothing to resolve against (css-sizing-3 §5.1).
+    let main_is_definite =
+        main_axis == Axis::Horizontal || style_definite_inner_main.is_some() || inset_used_main.is_some();
+
     // 2. Collect flex items (skip absolutely positioned)
     let mut items: Vec<FlexItem> = Vec::new();
     for child in &mut container.children {
@@ -489,6 +501,7 @@ fn layout_flex_container_at(
             child,
             main_axis,
             container_main_size,
+            main_is_definite,
             container_cross_size,
             definite_inner_cross,
         );
@@ -938,8 +951,8 @@ fn layout_flex_container_at(
                 }
                 let mut auto_min = content_border_height(item.layout_box);
                 // Specified size suggestion: a definite height caps it.
-                if let Length::Px(h) = item.layout_box.style.height {
-                    auto_min = auto_min.min(spec_height_to_border_box(item.layout_box, h));
+                if let Some(h) = item.specified_main {
+                    auto_min = auto_min.min(h);
                 }
                 let auto_min = auto_min.min(item.max_main_size);
                 if auto_min > item.min_main_size + 0.01 {
@@ -1318,6 +1331,7 @@ fn create_flex_item<'a>(
     layout_box: &'a mut LayoutBox,
     main_axis: Axis,
     container_main: f32,
+    main_is_definite: bool,
     container_cross: f32,
     definite_inner_cross: Option<f32>,
 ) -> FlexItem<'a> {
@@ -1383,17 +1397,18 @@ fn create_flex_item<'a>(
     let flex_basis = match flex_basis_value {
         FlexBasis::Auto => {
             // Use main size property, or intrinsic size for replaced elements
-            let explicit_size = match main_axis {
-                Axis::Horizontal => {
-                    resolve_length(layout_box, &layout_box.style.width, container_main)
-                }
-                Axis::Vertical => {
-                    resolve_length(layout_box, &layout_box.style.height, container_main)
-                }
+            let main_length = match main_axis {
+                Axis::Horizontal => &layout_box.style.width,
+                Axis::Vertical => &layout_box.style.height,
             };
+            let explicit_size = resolve_length(layout_box, main_length, container_main);
 
-            // If explicit size is 0 (auto), check for intrinsic sizing
-            if explicit_size == 0.0 {
+            // `auto` sizes from content. So does a percentage that resolved
+            // to 0 (it had no definite container size to resolve against).
+            // An authored `0`/`0px` is a size: css-flexbox's specified size
+            // suggestion makes that item 0 wide, and treating it as `auto`
+            // gave empty boxes 18px and text boxes their text width.
+            if main_size_is_auto(main_length, explicit_size, main_is_definite) {
                 // Get intrinsic size for replaced elements (form controls, images)
                 main_size_from_content = content_sized_box;
                 get_intrinsic_main_size(layout_box, main_axis) + main_pb
@@ -1472,17 +1487,28 @@ fn create_flex_item<'a>(
         rustkit_css::Overflow::Visible
     );
 
+    // §4.5's specified size suggestion: a definite main size caps the
+    // content-based minimum (`width:0` with text inside stays 0 wide).
+    let specified_main = {
+        let main_length = match main_axis {
+            Axis::Horizontal => &layout_box.style.width,
+            Axis::Vertical => &layout_box.style.height,
+        };
+        let v = resolve_length(layout_box, main_length, container_main);
+        (!main_size_is_auto(main_length, v, main_is_definite)).then(|| spec_main_to_border_box(v))
+    };
     let min_main = if css_min_main > 0.0 {
         spec_main_to_border_box(css_min_main)
     } else if specified_min_is_auto && main_overflow_is_visible {
-        match main_axis {
+        let content_min = match main_axis {
             Axis::Horizontal => crate::grid::estimate_min_content_width(layout_box),
             // No min-content HEIGHT estimator exists yet. Returning 0.0 keeps
             // the previous behaviour on the vertical main axis rather than
             // inventing a number — stated so the gap is visible instead of
             // looking like the rule is implemented on both axes.
             Axis::Vertical => 0.0,
-        }
+        };
+        specified_main.map_or(content_min, |s| content_min.min(s))
     } else {
         0.0
     };
@@ -1582,6 +1608,7 @@ fn create_flex_item<'a>(
         cross_pb_end,
         main_size_from_content,
         auto_min_main,
+        specified_main,
     }
 }
 
@@ -2663,6 +2690,20 @@ fn get_intrinsic_cross_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f
 /// `50vw` item was 400 wide in a 1280 window.
 fn resolve_length(b: &LayoutBox, length: &Length, container_size: f32) -> f32 {
     b.length_to_px(length, container_size)
+}
+
+/// Whether an item's `width`/`height` behaves as `auto` for flex sizing:
+/// `auto`/`fit-content`, or a percentage-bearing length when the container's
+/// main size is indefinite (or it resolved to 0 against it, the pre-existing
+/// behaviour for percent-in-calc). An authored `0` in an absolute unit is a
+/// real size.
+fn main_size_is_auto(length: &Length, resolved: f32, main_is_definite: bool) -> bool {
+    match length {
+        Length::Auto | Length::FitContent => true,
+        Length::Percent(_) => !main_is_definite || resolved == 0.0,
+        Length::Calc(_) | Length::Min(_) | Length::Max(_) | Length::Clamp(_) => resolved == 0.0,
+        _ => false,
+    }
 }
 
 /// Resolve a max Length (returns f32::INFINITY for Auto).

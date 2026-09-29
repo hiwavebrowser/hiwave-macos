@@ -1622,6 +1622,55 @@ mod tests {
         }
     }
 
+    const MIXED: &str = "<html><body><ul id='u'> <li id='a'>1</li> <!--c--> <li id='b' \
+         data-item-id='7' title='t' hidden>2</li> </ul></body></html>";
+
+    #[test]
+    fn element_traversal_skips_text_and_comments() {
+        let b = bound(MIXED);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var u = document.getElementById('u'), a = document.getElementById('a'), \
+                     bb = document.getElementById('b'), r = []; \
+                 r.push(u.firstElementChild === a, u.lastElementChild === bb, u.childElementCount, \
+                        a.nextElementSibling === bb, bb.previousElementSibling === a, \
+                        bb.nextElementSibling, a.previousElementSibling, \
+                        u.firstChild.nextElementSibling === a, \
+                        document.firstElementChild === document.documentElement, \
+                        document.children.length, document.childElementCount); \
+                 var p = document.createElement('p'); \
+                 r.push(a.isConnected, p.isConnected, document.isConnected); \
+                 u.appendChild(p); r.push(p.isConnected, u.lastElementChild === p); \
+                 p.remove(); r.push(p.isConnected, p.firstElementChild, p.childElementCount); \
+                 r.join(',')"
+            ),
+            "true,true,2,true,true,,,true,true,1,1,true,false,true,true,true,false,,0"
+        );
+    }
+
+    #[test]
+    fn reflected_attributes_and_dataset() {
+        let b = bound(MIXED);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var a = document.getElementById('a'), bb = document.getElementById('b'), r = []; \
+                 r.push(bb.dataset.itemId, bb.title, bb.hidden, a.hidden, a.title === '', \
+                        'itemId' in bb.dataset, 'nope' in bb.dataset, a.dataset.x); \
+                 a.dataset.fooBar = 3; a.hidden = true; a.lang = 'en'; bb.hidden = false; \
+                 delete bb.dataset.itemId; \
+                 r.push(a.getAttribute('data-foo-bar'), a.hasAttribute('hidden'), a.getAttribute('lang'), \
+                        bb.hasAttribute('hidden'), bb.getAttribute('data-item-id'), \
+                        a.dataset === a.dataset); \
+                 try { a.dataset['a-b'] = 1; } catch (e) { r.push(e.name); } \
+                 r.join(',')"
+            ),
+            "7,t,true,false,true,true,false,,3,true,en,false,,true,SyntaxError"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+    }
+
     const PAGE: &str = r#"<!DOCTYPE html><html><head><title>T</title></head>
 <body><div id="main" class="box"><p class="x">Hello, <b>world</b>!</p><!--c--><p class="x">Two</p></div>
 <p id="outside" class="x">Out</p></body></html>"#;
@@ -2118,6 +2167,79 @@ mod tests {
         assert_eq!(b.take_dirty(), DomDirty::Style);
         let doc = b.window.borrow().document.clone().unwrap();
         assert_eq!(doc.get_element_by_id("d").unwrap().get_attribute("style"), Some(""));
+    }
+
+    const ROW: &str =
+        "<html><body><div id='r'><i id='a'>a</i><i id='b'>b</i><i id='c'>c</i></div><i id='x'>x</i></body></html>";
+
+    /// Each step's children of #r: element ids, and Text data in quotes.
+    const ORDER: &str = "var r = document.getElementById('r'), out = []; \
+         function $(id) { return document.getElementById(id); } var a = $('a'); \
+         function order() { return Array.prototype.map.call(r.childNodes, function (n) { \
+             return n.nodeType === 1 ? n.id : \"'\" + n.data + \"'\"; }).join(''); }";
+
+    #[test]
+    fn parent_node_append_prepend_and_replace_children() {
+        let b = bound(ROW);
+        assert_eq!(
+            eval_string(
+                &b,
+                &[ORDER, " \
+                     r.append($('x'), 's'); out.push(order()); \
+                     r.prepend('p', $('c')); out.push(order()); \
+                     r.append(); out.push(order()); \
+                     r.replaceChildren($('b'), 'n'); out.push(order(), a.parentNode === null); \
+                     out.join('|')"]
+                .concat()
+            ),
+            "abcx's'|'p'cabx's'|'p'cabx's'|b'n'|true"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+        let doc = b.window.borrow().document.clone().unwrap();
+        assert_eq!(doc.get_element_by_id("r").unwrap().text_content(), "bn");
+    }
+
+    #[test]
+    fn child_node_before_after_and_replace_with() {
+        let b = bound(ROW);
+        assert_eq!(
+            eval_string(
+                &b,
+                &[ORDER, " \
+                     $('b').before($('x'), 't'); out.push(order()); \
+                     $('b').after($('a')); out.push(order()); \
+                     $('b').before($('b')); out.push(order()); \
+                     $('x').after($('x'), $('c')); out.push(order()); \
+                     $('b').replaceWith('B', $('b')); out.push(order()); \
+                     $('a').replaceWith('A'); out.push(order(), a.parentNode === null); \
+                     var lone = document.createElement('p'); lone.before('q'); lone.replaceWith('q'); \
+                     out.push(lone.parentNode === null); \
+                     out.join('|')"]
+                .concat()
+            ),
+            "ax't'bc|x't'bac|x't'bac|xc't'ba|xc't''B'ba|xc't''B'b'A'|true|true"
+        );
+    }
+
+    #[test]
+    fn replace_child_swaps_and_validates_first() {
+        let b = bound(ROW);
+        assert_eq!(
+            eval_string(
+                &b,
+                &[ORDER, " \
+                     var old = $('b'); out.push(r.replaceChild($('x'), old) === old, old.parentNode === null); \
+                     out.push(order()); \
+                     out.push(r.replaceChild($('a'), $('a')) === $('a'), order()); \
+                     r.replaceChild($('c'), $('a')); out.push(order()); \
+                     try { r.replaceChild(document.createElement('p'), old); } catch (e) { out.push(e.name); } \
+                     try { $('x').replaceChild(r, $('x').firstChild); } catch (e) { out.push(e.name); } \
+                     try { r.replaceChild('s', $('x')); } catch (e) { out.push(e.name); } \
+                     out.push(order()); out.join('|')"]
+                .concat()
+            ),
+            "true|true|axc|true|axc|cx|NotFoundError|HierarchyRequestError|TypeError|cx"
+        );
     }
 
     #[test]
