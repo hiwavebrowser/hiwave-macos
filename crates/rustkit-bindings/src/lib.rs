@@ -2119,4 +2119,81 @@ mod tests {
         let doc = b.window.borrow().document.clone().unwrap();
         assert_eq!(doc.get_element_by_id("d").unwrap().get_attribute("style"), Some(""));
     }
+
+    const TREE: &str = "<html><body><div id='o'><p id='i'>x</p></div></body></html>";
+
+    #[test]
+    fn element_events_run_capture_target_and_bubble_phases() {
+        let b = bound(TREE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var o = document.getElementById('o'), i = document.getElementById('i'), log = []; \
+                 function on(t, name, capture) { t.addEventListener('ping', function (e) { \
+                     log.push(name + e.eventPhase + (e.currentTarget === t) + (e.target === i)); }, capture); } \
+                 on(window, 'w', true); on(document, 'd', false); on(window, 'W', false); \
+                 on(o, 'oc', true); on(o, 'ob', false); on(i, 'ib', false); on(i, 'ic', { capture: true }); \
+                 i.onping = function () { log.push('handler'); }; \
+                 var e = new Event('ping', { bubbles: true }); \
+                 log.push(i.dispatchEvent(e), e.eventPhase, e.currentTarget === null); \
+                 i.dispatchEvent(new CustomEvent('ping')); \
+                 log.join(',')"
+            ),
+            "w1truetrue,oc1truetrue,ic2truetrue,ib2truetrue,handler,ob3truetrue,d3truetrue,W3truetrue,true,0,true,\
+             w1truetrue,oc1truetrue,ic2truetrue,ib2truetrue,handler"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Clean);
+    }
+
+    #[test]
+    fn listeners_stop_once_dedupe_and_prevent_default() {
+        let b = bound(TREE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var o = document.getElementById('o'), i = document.getElementById('i'), log = []; \
+                 function f() { log.push('f'); } \
+                 i.addEventListener('a', f); i.addEventListener('a', f); \
+                 i.addEventListener('a', function () { log.push('once'); }, { once: true }); \
+                 i.dispatchEvent(new Event('a')); i.dispatchEvent(new Event('a')); \
+                 i.removeEventListener('a', f); i.dispatchEvent(new Event('a')); log.push('|'); \
+                 i.addEventListener('b', function (e) { e.stopPropagation(); log.push('i1'); }); \
+                 i.addEventListener('b', function () { log.push('i2'); }); \
+                 o.addEventListener('b', function () { log.push('o'); }); \
+                 i.dispatchEvent(new Event('b', { bubbles: true })); log.push('|'); \
+                 i.addEventListener('c', function (e) { e.stopImmediatePropagation(); log.push('c1'); }); \
+                 i.addEventListener('c', function () { log.push('c2'); }); \
+                 i.dispatchEvent(new Event('c')); log.push('|'); \
+                 o.onclick = function () { return false; }; \
+                 var c = new Event('click', { bubbles: true, cancelable: true }); \
+                 log.push(i.dispatchEvent(c), c.defaultPrevented); \
+                 var n = new Event('click', { bubbles: true }); \
+                 log.push(i.dispatchEvent(n), n.defaultPrevented); \
+                 log.join(',')"
+            ),
+            "f,once,f,|,i1,i2,|,c1,|,false,true,true,false"
+        );
+    }
+
+    #[test]
+    fn listener_errors_are_logged_and_click_dispatches() {
+        let b = bound(TREE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var i = document.getElementById('i'), log = []; \
+                 i.addEventListener('click', function () { missingFunction(); }); \
+                 i.addEventListener('click', { handleEvent: function (e) { log.push(e.type, e.bubbles); } }); \
+                 document.body.addEventListener('click', function (e) { log.push(e.target === i); }); \
+                 i.click(); \
+                 log.push(window.__rustkit_errors.length, /missingFunction/.test(window.__rustkit_errors[0])); \
+                 try { i.dispatchEvent('click'); } catch (e) { log.push(e instanceof TypeError); } \
+                 try { Event('x'); } catch (e) { log.push(e instanceof TypeError); } \
+                 log.push(i instanceof EventTarget, document instanceof EventTarget, \
+                          Object.prototype.toString.call(new Event('x'))); \
+                 log.join(',')"
+            ),
+            "click,true,true,1,true,true,true,true,true,[object Event]"
+        );
+    }
 }
