@@ -752,6 +752,85 @@ const WRAPPERS_JS: &str = r#"
         var s = slotOf(this);
         return list(HTMLCollection.prototype, s.gen === gen ? N.info(s.gen, s.id, 'children') : '', true);
     });
+
+    // ParentNode / NonDocumentTypeChildNode element traversal (DOM §4.2.6,
+    // §4.2.7), over the same tree reads as childNodes and the siblings.
+    function elementChildren(o) {
+        return Array.prototype.filter.call(o.childNodes, function (n) { return n.nodeType === 1; });
+    }
+    function elementSibling(o, field) {
+        var n = o[field];
+        while (n && n.nodeType !== 1) n = n[field];
+        return n;
+    }
+    [Element, Document].forEach(function (C) {
+        getter(C.prototype, 'firstElementChild', function () { return elementChildren(this)[0] || null; });
+        getter(C.prototype, 'lastElementChild', function () {
+            var c = elementChildren(this); return c[c.length - 1] || null;
+        });
+        getter(C.prototype, 'childElementCount', function () { return elementChildren(this).length; });
+    });
+    getter(Document.prototype, 'children', function () {
+        var s = slotOf(this);
+        return list(HTMLCollection.prototype, s.gen === gen ? N.info(s.gen, s.id, 'children') : '', true);
+    });
+    [Element, CharacterData].forEach(function (C) {
+        getter(C.prototype, 'nextElementSibling', function () { return elementSibling(this, 'nextSibling'); });
+        getter(C.prototype, 'previousElementSibling', function () {
+            return elementSibling(this, 'previousSibling');
+        });
+    });
+    // A node is connected when its root is the current document; an old
+    // document's wrappers have no parent and are never connected.
+    getter(Node.prototype, 'isConnected', function () {
+        var n = this;
+        while (n.parentNode) n = n.parentNode;
+        return n === g.document && slotOf(n).gen === gen;
+    });
+
+    // HTMLElement reflected attributes (HTML §3.2.6) and dataset (§3.2.6.6).
+    ['title', 'lang', 'dir'].forEach(function (k) {
+        accessor(HTMLElement.prototype, k, function () { return this.getAttribute(k) || ''; },
+            function (v) { this.setAttribute(k, v); });
+    });
+    accessor(HTMLElement.prototype, 'hidden', function () { return this.hasAttribute('hidden'); },
+        function (v) { this.toggleAttribute('hidden', !!v); });
+    var datasets = new WeakMap();
+    function dataAttr(p) {
+        if (typeof p !== 'string' || /-[a-z]/.test(p)) return null;
+        return 'data-' + p.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); });
+    }
+    getter(HTMLElement.prototype, 'dataset', function () {
+        slotOf(this);
+        var el = this, d = datasets.get(el);
+        if (d) return d;
+        d = new Proxy({}, {
+            get: function (t, p) {
+                var a = dataAttr(p);
+                if (!a) return undefined;
+                var v = el.getAttribute(a);
+                return v === null ? undefined : v;
+            },
+            set: function (t, p, v) {
+                var a = dataAttr(p);
+                if (!a) {
+                    throw new DOMException("Failed to set a named property on 'DOMStringMap': '" +
+                        String(p) + "' is not a valid property name.", 'SyntaxError');
+                }
+                el.setAttribute(a, String(v));
+                return true;
+            },
+            has: function (t, p) { var a = dataAttr(p); return !!a && el.hasAttribute(a); },
+            deleteProperty: function (t, p) {
+                var a = dataAttr(p);
+                if (a) el.removeAttribute(a);
+                return true;
+            }
+        });
+        datasets.set(el, d);
+        return d;
+    });
+
     Element.prototype.getAttribute = function (name) {
         var s = slotOf(this); return N.attr(s.gen, s.id, String(name));
     };
