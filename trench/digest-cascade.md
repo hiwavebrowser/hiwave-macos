@@ -396,3 +396,25 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
 2. **Allow `gh run view --log-failed` and `gh api …/actions/jobs/*` in this lane's permissions.** Right now a red CI check on my own PR is a dead end headless. #344's f1 failure has sat since 00:04 and I can't read why. Default: I reproduce locally, which costs 10–40 min per attempt at this load.
 3. (Carried over) **A standing quiet window.** Tonight's was 3 minutes long (load 3 at 00:36, 28 by 01:36). Default: B/A as the proof, records opportunistically.
+
+## 2026-09-29 02:55
+
+**No ratio, no new PR, no engine change. This session's permissions block `cargo` entirely (even `cargo --version`), all git in other worktrees, and `gh run view`/`gh run rerun`/`gh api`. So there was no build, no f1 repro and no fix branch. The record stays 24.0× (wikipedia, 18:55). What did get done: a second interleaved A/B for #349 (median B/A cnn .92, github .88, wikipedia .87, 4 pairs at load 14–20), posted in its body. A new A/B tool. And evidence for the next wikipedia cut: roughly half to two-thirds of pseudo rules never set `content`.**
+
+| site | record (18:55, develop 8567760) | this session |
+|---|---|---|
+| cnn | 1291 ms → 6.1× | not measured (load 14–20, times 3–5× inflated) |
+| github | 1996 ms → 18.1× | not measured |
+| wikipedia | 480 ms → **24.0×** (worst) | not measured |
+
+- **#349** `atlas/cs-pseudo-element-prepared` @ 090120b, unchanged. The A/B was A = `pc-dev-8f44204`, B = `pc-pep-090120b`, 4 interleaved pairs, 02:40–02:55. cnn .91/.91/.93/.99 (median **.92**), github .85/.90/1.40/.54 (**.88**), wikipedia .85/.95/.89/.72 (**.87**). No cnn or wikipedia pair went above 1.0. It agrees with the 01:07 round. The PR body now has this table, and still says a quiet B/A is owed.
+- **#344** @ f5567ea: `f1-test-compile` is still red, and I still can't read it. A static check of the diff against `cargo test --workspace` (which unifies the `headless` feature into rustkit-engine): there are only 3 `PreparedSelector::Complex` sites, all updated. The new items (`AncestorFilter*`, `ancestor_*` fns, a `#[cfg(test)]` thread-local) collide with no name in any `#[cfg(feature = "headless")]` test module. The only `#[cfg(test)]` use sits inside a `#[cfg(test)]` static. I found no compile-time reason for it. It's still unsettled: CI flake, or something the log would show.
+- **New tool `trench/tools/cascade_ab.py`:** interleaved A/B pairs (A then B per site per pair) with the load average per pair and the median B/A. It reuses `cascade_bench.run_once`. It's now the standard way to prove a fix.
+- **Next wikipedia cut, sized from the pinned CSS** (`::before`/`::after` selectors by subject kind, and whether the rule declares `content`). Content-free: **wikipedia 80/174 (46%), github 676/1028 (66%), cnn 1282/2060 (62%)**. That includes the bare `::before`/`::after` rules that are a candidate for every element (2–5 per site, none with `content`). **Design (exact, no parity risk):** build time stores a per-rule `pseudo_sets_content: Vec<bool>` in `RuleIndex`. In `pseudo_element_style`'s indexed path, match only the content-bearing candidates first. If none matched, return `None` right away. That's what happens today anyway, since `content` isn't inherited and starts as `None` in `ComputedStyle::new()`. Only when a content rule matched, match the rest and cascade as now. Most elements generate no pseudo box, so this skips the matcher on roughly 50–65% of their pseudo candidates. It also skips `ComputedStyle::new` and the sort (the next-session item 4 from 01:40). The test is the same "identical with and without" shape as #349's.
+- **Open cs PRs:** 2 (#344, #349), cap 3.
+- **Next session (with cargo):** (1) branch `atlas/cs-pseudo-content-gate` from develop (or stacked on #349 if it hasn't merged; it touches the same loop), and build the design above. (2) #344 f1: reproduce with `cargo test --workspace --no-run` *including* hiwave-app (the 01:40 local check used `--exclude hiwave-app`), or read the log. (3) `subject_keys` caching (github 18%).
+
+**Decisions for Pete**
+1. **Restore this lane's tool permissions.** This session needed approval for `cargo`, `git -C <lane worktree>`, `gh run view --log-failed`/`gh run rerun`, and writes to /tmp. Headless, each of those is a hard stop. Earlier sessions built and profiled, so something changed between 01:40 and 02:35. Default: the next session will hit the same wall, and all it can do is measure and design.
+2. (Carried over) **#344's red f1:** someone with log access should read run 36519959112, job 109250429637, or re-run it. If it's a flake, #344 is ready for re-stamps.
+3. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
