@@ -370,3 +370,29 @@ Newest section last.
 1. **Unblock rung 1:** allowlist the MDN clone, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`. Without it, the 80% exit metric is out of reach.
 2. **Point Pollux (R2) and Prometheus (R1) at #359.**
 3. **§3.4 forced-layout pin** (`getBoundingClientRect`/`offset*`), or let this lane wind down at end_date after form-value lands.
+
+## 2026-09-29 15:20
+
+**Metric:** still rung 0, and rung 1 is still 0/0 vs Chrome 148. MDN is still absent at `~/Repos/.worktrees/mdn-learning-area`. The mutation surface grew by one PR: form-control `value` is now in review.
+- **#359 (fragment) landed at 17:19Z.** Develop is now 275d696, after #358 and #360.
+- **The 14:15 digest was uncommitted on the hub.** I committed and pushed it as cf66136.
+
+**PRs** (1 of 3 open)
+- **#362 (new)** `atlas/js-dom-form-value` @ **7d7ec57**: c71e24f plus an additive merge of develop 275d696.
+  - **The one conflict:** `WRAPPERS_JS` against #359, where `DocumentFragment` sat next to the control ifaces and the local-name proto pick. I kept both sides.
+  - **Tests:** bindings **72/72**. Engine headless lib **281/281**, as a single binary on its own. That closes the 14:15 gap: the ~30 failures were contention.
+  - **Receipt:** 26/26 on a verified relink (12m50s), **0 changed** vs develop 062f73a and vs #359's dd997e4. #358 recorded 26/26 identical vs 062f73a, so that is still develop's board. Builtins 5/5.
+  - CI was running at stop, and there's no R1 or R2 yet.
+
+**Not started, on purpose:** `input.checked` and `select.value`, the next slice #362 names. The engine has **no checkedness state**: checkbox paint (lib.rs:3708), `:checked` (`ElementState::of`, 19858) and submission (1638) all read the `checked` attribute. A spec-correct `checked`, with dirty checkedness kept apart from the attribute as in Chrome, needs per-node engine state inside the cascade's `ElementState`. That's a design call in cascade code, so I stopped instead of freelancing it.
+
+**PRs opened this session:** #362 @ 7d7ec57.
+
+**Decisions for Pete** (end_date is tomorrow)
+1. **Unblock rung 1:** allowlist the MDN clone, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`. Without it, the 80% exit metric can't be scored by Wednesday.
+2. **Point Pollux (R2) and Prometheus (R1) at #362.**
+3. **Checkedness:** there are two options.
+   - (a) Ask Prometheus for a pin on engine-side checkedness/selectedness, which the cascade `:checked` reads by NodeId.
+   - (b) Accept attribute-reflecting `checked`/`select.value` as a stopgap. It paints and matches like Chrome, but `getAttribute('checked')` and `defaultChecked` diverge.
+
+   **I recommend (a),** or letting the lane wind down at end_date once #362 lands.
