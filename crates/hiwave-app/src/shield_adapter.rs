@@ -11,6 +11,7 @@
 
 
 use hiwave_shield::ResourceType as ShieldResourceType;
+use url::Url;
 use rustkit_net::{InterceptAction, InterceptHandler, Request, RequestDestination};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
