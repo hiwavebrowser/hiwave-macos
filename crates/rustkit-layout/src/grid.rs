@@ -1363,8 +1363,10 @@ pub fn layout_grid_container(
     );
 
     // Compute gaps
-    let column_gap = style.column_gap.to_px(16.0, 16.0, container_width);
-    let row_gap = style.row_gap.to_px(16.0, 16.0, container_height);
+    // Against the container's own font size and viewport, not a fixed 16px:
+    // `column-gap: 1em` at 20px is 20.
+    let column_gap = container.length_to_px(&style.column_gap, container_width);
+    let row_gap = container.length_to_px(&style.row_gap, container_height);
 
     // Create grid layout
     let mut grid = GridLayout::new(

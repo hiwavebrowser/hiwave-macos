@@ -448,12 +448,12 @@ fn layout_flex_container_at(
 
     // Get gap values
     let main_gap = match main_axis {
-        Axis::Horizontal => resolve_length(&style.column_gap, container_main_size),
-        Axis::Vertical => resolve_length(&style.row_gap, container_main_size),
+        Axis::Horizontal => resolve_length(container, &style.column_gap, container_main_size),
+        Axis::Vertical => resolve_length(container, &style.row_gap, container_main_size),
     };
     let cross_gap = match cross_axis {
-        Axis::Horizontal => resolve_length(&style.column_gap, container_cross_size),
-        Axis::Vertical => resolve_length(&style.row_gap, container_cross_size),
+        Axis::Horizontal => resolve_length(container, &style.column_gap, container_cross_size),
+        Axis::Vertical => resolve_length(container, &style.row_gap, container_cross_size),
     };
 
     // Step 11d re-derives the container's main size once the items are laid
@@ -1127,6 +1127,7 @@ fn layout_flex_container_at(
                     if sum.percent == 0.0 || container_box.content.height > 0.0 =>
                 {
                     Some(resolve_length(
+                        container,
                         &container.style.height,
                         container_box.content.height,
                     ))
@@ -1331,16 +1332,16 @@ fn create_flex_item<'a>(
     let (main_margin_start, main_margin_end, cross_margin_start, cross_margin_end) = match main_axis
     {
         Axis::Horizontal => (
-            resolve_length(&layout_box.style.margin_left, container_main),
-            resolve_length(&layout_box.style.margin_right, container_main),
-            resolve_length(&layout_box.style.margin_top, container_cross),
-            resolve_length(&layout_box.style.margin_bottom, container_cross),
+            resolve_length(layout_box, &layout_box.style.margin_left, container_main),
+            resolve_length(layout_box, &layout_box.style.margin_right, container_main),
+            resolve_length(layout_box, &layout_box.style.margin_top, container_cross),
+            resolve_length(layout_box, &layout_box.style.margin_bottom, container_cross),
         ),
         Axis::Vertical => (
-            resolve_length(&layout_box.style.margin_top, container_main),
-            resolve_length(&layout_box.style.margin_bottom, container_main),
-            resolve_length(&layout_box.style.margin_left, container_cross),
-            resolve_length(&layout_box.style.margin_right, container_cross),
+            resolve_length(layout_box, &layout_box.style.margin_top, container_main),
+            resolve_length(layout_box, &layout_box.style.margin_bottom, container_main),
+            resolve_length(layout_box, &layout_box.style.margin_left, container_cross),
+            resolve_length(layout_box, &layout_box.style.margin_right, container_cross),
         ),
     };
 
@@ -1383,8 +1384,12 @@ fn create_flex_item<'a>(
         FlexBasis::Auto => {
             // Use main size property, or intrinsic size for replaced elements
             let explicit_size = match main_axis {
-                Axis::Horizontal => resolve_length(&layout_box.style.width, container_main),
-                Axis::Vertical => resolve_length(&layout_box.style.height, container_main),
+                Axis::Horizontal => {
+                    resolve_length(layout_box, &layout_box.style.width, container_main)
+                }
+                Axis::Vertical => {
+                    resolve_length(layout_box, &layout_box.style.height, container_main)
+                }
             };
 
             // If explicit size is 0 (auto), check for intrinsic sizing
@@ -1408,16 +1413,16 @@ fn create_flex_item<'a>(
     // Get min/max constraints from CSS
     let (css_min_main, max_main, css_min_cross, max_cross) = match main_axis {
         Axis::Horizontal => (
-            resolve_length(&layout_box.style.min_width, container_main),
-            resolve_max_length(&layout_box.style.max_width, container_main),
-            resolve_length(&layout_box.style.min_height, container_cross),
-            resolve_max_length(&layout_box.style.max_height, container_cross),
+            resolve_length(layout_box, &layout_box.style.min_width, container_main),
+            resolve_max_length(layout_box, &layout_box.style.max_width, container_main),
+            resolve_length(layout_box, &layout_box.style.min_height, container_cross),
+            resolve_max_length(layout_box, &layout_box.style.max_height, container_cross),
         ),
         Axis::Vertical => (
-            resolve_length(&layout_box.style.min_height, container_main),
-            resolve_max_length(&layout_box.style.max_height, container_main),
-            resolve_length(&layout_box.style.min_width, container_cross),
-            resolve_max_length(&layout_box.style.max_width, container_cross),
+            resolve_length(layout_box, &layout_box.style.min_height, container_main),
+            resolve_max_length(layout_box, &layout_box.style.max_height, container_main),
+            resolve_length(layout_box, &layout_box.style.min_width, container_cross),
+            resolve_max_length(layout_box, &layout_box.style.max_width, container_cross),
         ),
     };
 
@@ -1516,7 +1521,11 @@ fn create_flex_item<'a>(
         rustkit_css::Length::Percent(pct) => {
             definite_inner_cross.map(|basis| spec_cross_to_border_box(pct / 100.0 * basis))
         }
-        l => Some(spec_cross_to_border_box(resolve_length(l, container_cross))),
+        l => Some(spec_cross_to_border_box(resolve_length(
+            layout_box,
+            l,
+            container_cross,
+        ))),
     };
     let has_explicit_cross_size = !matches!(explicit_cross_length, rustkit_css::Length::Auto);
 
@@ -2468,7 +2477,7 @@ fn content_border_height(b: &LayoutBox) -> f32 {
         let outer = |c: &LayoutBox| content_border_height(c) + c.dimensions.margin.vertical();
         if !b.style.flex_direction.is_row() {
             let kids: Vec<f32> = b.children.iter().filter(in_flow).map(outer).collect();
-            let gap = resolve_length(&b.style.row_gap, 0.0);
+            let gap = resolve_length(b, &b.style.row_gap, 0.0);
             kids.iter().sum::<f32>() + gap * kids.len().saturating_sub(1) as f32
         } else if b.style.flex_wrap == FlexWrap::NoWrap {
             b.children
@@ -2647,17 +2656,20 @@ fn get_intrinsic_cross_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f
     }
 }
 
-/// Resolve a Length to pixels.
-fn resolve_length(length: &Length, container_size: f32) -> f32 {
-    // Use the Length's built-in resolution with default viewport size
-    length.to_px_with_viewport(16.0, 16.0, container_size, 800.0, 600.0)
+/// Resolve one of `b`'s own lengths to pixels: `em` against `b`'s font size
+/// and viewport units against `b`'s viewport. This used to resolve every
+/// length at a fixed 16px font size and an 800x600 viewport, so
+/// `margin-left: 2em` on a 20px flex item came out 32 instead of 40, and a
+/// `50vw` item was 400 wide in a 1280 window.
+fn resolve_length(b: &LayoutBox, length: &Length, container_size: f32) -> f32 {
+    b.length_to_px(length, container_size)
 }
 
 /// Resolve a max Length (returns f32::INFINITY for Auto).
-fn resolve_max_length(length: &Length, container_size: f32) -> f32 {
+fn resolve_max_length(b: &LayoutBox, length: &Length, container_size: f32) -> f32 {
     match length {
         Length::Auto => f32::INFINITY,
-        _ => resolve_length(length, container_size),
+        _ => resolve_length(b, length, container_size),
     }
 }
 
