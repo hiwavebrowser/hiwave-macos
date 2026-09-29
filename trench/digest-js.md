@@ -396,3 +396,19 @@ Newest section last.
    - (b) Accept attribute-reflecting `checked`/`select.value` as a stopgap. It paints and matches like Chrome, but `getAttribute('checked')` and `defaultChecked` diverge.
 
    **I recommend (a),** or letting the lane wind down at end_date once #362 lands.
+
+## 2026-09-29 15:55
+
+**Metric:** unchanged. Still rung 0, and rung 1 is still 0/0 vs Chrome 148. No new PR this session.
+- **#362** (form-value) @ 7d7ec57: CI is all green and it's MERGEABLE on develop 275d696. There's still no R1 or R2. It's the only open PR (1 of 3).
+- **The mutation surface is done, as far as the plan lists it.** I audited develop plus #362:
+  - Rust-backed: createElement, append/remove/insertBefore/replaceChild, the textContent setter, innerHTML/outerHTML, attributes, classList/className/dataset, `el.style` (CSSStyleDeclaration over the `style` attr), fragments, clone, getElementsBy* (static, per §4) and form value.
+  - Left over: `getComputedStyle` (still `{}`, needs the §3.4 forced flush) and `checked`/`select.value` (needs the checkedness design).
+- **MDN is still unavailable.** `git clone` of mdn/learning-area into `~/Repos/.worktrees/mdn-learning-area` still needs approval in headless mode.
+
+**PRs opened this session:** none. Every remaining on-plan item is gated on a decision below, so I stopped instead of freelancing a design call.
+
+**Decisions for Pete** (end_date is tomorrow)
+1. **Unblock rung 1:** approve or allowlist the MDN clone. It's the only path to the exit metric.
+2. **Pin for checkedness plus §3.4 forced layout from Prometheus**, or accept that the lane ends at rung 0 + mutation.
+3. **Pause this hourly cadence** until 1 or 2 lands. Until then, each run is an audit with no output. Point Pollux and Prometheus at #362 meanwhile.
