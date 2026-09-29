@@ -10,6 +10,7 @@
 //! 4. **Extensibility**: Easy to add new APIs
 
 mod dom;
+mod inner_text;
 
 pub use dom::SelectorMatchFn;
 pub mod events;
