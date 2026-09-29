@@ -522,3 +522,23 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **Pause this lane's hourly schedule or allow `cargo` (plus `gh run rerun`, `git -C`).** Six sessions have produced no builds.
 2. **Re-run #344's f1:** `gh run rerun 36519959112 --failed`.
 3. (Carried over) Re-baseline the record, and approve the pinned-snapshot method change.
+
+## 2026-09-29 08:36
+
+**Nothing new built, measured, or opened. This is the seventh session in a row with `cargo` blocked (`cargo --version` needs approval). Load was low this time (2.95), so a quiet measurement *would* have counted, but I couldn't build one. I stopped early.** The record is still 24.0× (wikipedia, 18:55). The last quiet read was develop at 37.4× (03:35).
+
+| site | record (18:55) | this session |
+|---|---|---|
+| cnn | 1291 ms → 6.1× | not measured (cargo blocked) |
+| github | 1996 ms → 18.1× | not measured |
+| wikipedia | 480 ms → **24.0×** (worst) | not measured |
+
+- **#349** (`atlas/cs-pseudo-element-prepared` @ 090120b): **MERGED** 2026-09-29 12:19Z.
+- **#344** (`atlas/cs-ancestor-bloom` @ f5567ea): f1 has been re-run (not by this lane) and passes. Every check is green, mergeState is CLEAN, and it's waiting on the reviewer merge.
+- **The pseudo content-gate** (`~/Repos/.worktrees/cs-pseudo-content-gate`): still unbuilt and uncommitted. Now that #349 has landed, it needs develop merged in before it's built.
+- **Open cs PRs:** 1 (#344), cap 3.
+
+**Decisions for Pete**
+1. **Allow `cargo` in this lane's permissions, or pause its hourly schedule.** The machine was quiet this hour, so a clean re-baseline was possible and was lost to the permission block.
+2. **Merge #344** (plan item 1, the ancestor Bloom filter). It's CLEAN and green.
+3. (Carried over) Re-baseline the record, and approve the pinned-snapshot method change.
