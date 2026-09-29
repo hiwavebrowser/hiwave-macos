@@ -955,3 +955,27 @@ Passing all 3: google, x, linkedin. RustKit blocked: amazon, chatgpt, ebay, nyti
 **Decisions for Pete:**
 1. Still open: **board runs vs the other lanes' builds.** This session also never got a quiet window (load 13–36; a warm release build took 17 min). A no-build window for the board, or a one-retry-on-timeout scorer change (which needs your OK)?
 2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.
+
+## 2026-09-29 02:55 — the github "regression" was load, not the change; lyft's space-toggle fix is #351
+
+**Points: no full board this session. The last full board is still 19/60 (`20260928T2025Z-gridrem`).** Load was 10–23 throughout, with three lanes building. An 8-site board on the #351 head (`scratch/varinvalid/board-head8`) was load-contaminated: 4/8 Chrome oracles timed out (x, linkedin, github, yahoo), and RustKit hit the 30 s limit on facebook and github. Its 8 points on 8 sites are not comparable to anything, so I used per-site binary A/Bs (90 s capture limit) instead. No check flipped.
+
+| run | head | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|
+| `20260928T2025Z-gridrem` (last full board) | #335 dacbce0 | 19 | 11 | 5 | 3 | 19/48 |
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#351 `atlas/rs-var-missing-invalid` @ 79954d6** (1 commit from develop 8f44204). CSS Variables §3: `var(--unset)` with no fallback makes the custom property holding it invalid, so a use site's fallback applies. Also, `--x: ;` is kept. **lyft LOOKS RIGHT 88.85% → 32.48%** (its palette now matches Chrome; still 0 points, because the hero layout differs). Campaign 26/26, avg 1.1756%, identical case for case to a develop 8f44204 binary run back to back. `ratchet_local.py` output is byte-identical to develop's. Engine lib 202/202 serial, cssparser 15/15. A/B vs develop: x, facebook, yahoo, walmart, shopify and github are pixel-identical. linkedin moved 5% in 2 of 3 passes, and only in its hero headline, which linkedin rotates server-side (the hub's Chrome captures show both headlines).
+- #345 and #347 are still open, awaiting review.
+
+**Found:**
+- **Last session's github regression does not reproduce.** base and head are pixel-identical on github in 3 A/Bs (vs 6529dda in both orders, and vs 8f44204). github's RustKit capture sits near the 30 s limit (it hit it this session at load ~15). The expanded-nav frame was most likely a header stylesheet missing its deadline at load 36. One A/B at high load is not evidence; repeat it in reversed order before holding a PR.
+- github's CSS carries the same space-toggle idiom (lightningcss's `light-dark()` polyfill: `--lightningcss-light:initial;--lightningcss-dark: ;`, and Primer's `--progress-bg: ;`). They're declared, but none is used on the logged-out home page.
+- SVG `<g>` inheritance (queued for linkedin's icons): rustkit-svg's `SvgGroup::render` already calls `style.inherit_from(parent)`, so plain presentation-attribute inheritance isn't the gap. Next, repro linkedin's icon with stylesheet/`currentColor` fills on inline SVG before building anything.
+- The `null_remember` MCP call went over its 60 s budget once (tooling track).
+
+**Next:** (1) A full board on a quiet machine, the first since 19:25 yesterday. (2) Repro linkedin's icon fill (above). (3) Talos bug 5 audit (paint culls zero-size boxes, so tests pass vacuously).
+
+**Decisions for Pete:**
+1. Still open, and now the main thing blocking the metric: **board runs vs the other lanes' builds.** There has been no full board for three sessions. Tonight's 8-site try lost 4 oracles plus 2 RustKit captures at load ~17. Options: a no-build window (e.g. 04:00–05:00 for the board), or a one-retry-on-timeout scorer change (which needs your OK).
+2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.
