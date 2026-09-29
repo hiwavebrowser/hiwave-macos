@@ -12840,3 +12840,243 @@ skipped. Check-in cancelled; watch released.
   (146/0 with it, 53 red GPU-adapter failures without); `cargo fmt -p
   rustkit-layout` rewrites 11 files and ~1550 pre-existing lines, so it cannot
   be run before a commit as CLAUDE.md advertises.
+
+## 2026-09-29
+
+**Metric: `3/26` on macOS, carried forward and NOT re-measured by me.** Last
+measured by run 36383716836 on 09-28 against `develop daa41d0` plus #316.
+`develop` is now `8f44204` — #317..#341 later, engine changes I did not read —
+so the carry-forward states what I know, not that the number is still 3.
+Tonight's PR (#350) carries Rust, so its own Parity Gate on `macos-14` measures
+it; that run is the check, not this entry.
+
+**P-item: the unit 09-28 recorded — the rem-gap hole in
+`own_max_content_width`. COMPLETE as a unit.** Branch
+`atlas/n69-remgap-max-content`, **PR #350** against `develop`.
+
+09-28 deliberately did not land this and made it decision 1: *does it wait for
+the P4 advance work, or land alone with the eleven regressions recorded as
+expected?* **I landed it**, and the reason is not that I chose a side — it is
+that the measurement dissolved the question. The eleven are not this change's
+regressions. Stated as my reading, not as a ratification; it is one revert away
+if Pete disagrees.
+
+### What the defect was
+
+One site. `grid::own_max_content_width` read a flex container's main-axis gap as
+
+```rust
+let main_gap = match style.column_gap { Length::Px(g) => g, _ => 0.0 };
+```
+
+while `layout_flex` (`resolve_length`) and `layout_grid` (`length_to_px`)
+resolve the same declaration properly. A `rem`, `em` or viewport gap therefore
+contributed **zero** to the container's max-content contribution, and the
+engine held two readings of one declaration that disagreed.
+
+I checked the other gap sites before assuming this was the only one:
+`multicol.rs` resolves correctly (and handles `column-gap: normal` as 1em),
+`flex.rs` resolves correctly on both axes, `grid.rs`'s layout path resolves
+correctly. The intrinsic path was the only Px-only read in the crate.
+
+**Corpus reach is two cases, and I measured that rather than assuming it.**
+Only `new_tab` and `settings` author a non-px gap anywhere in the 26 — all
+`rem`, no `em`, no `%`, no viewport units. So the percentage half of the fix is
+a correctness claim with no corpus evidence behind it, and it is guarded rather
+than measured. Said plainly because it is the half a reviewer cannot check
+against a number.
+
+### Chrome ground truth — new instrument
+
+`trench/tools/n69_gap_contribution_probe.mjs`. Chrome-vs-Chrome, ~2 seconds per
+page: for every row flex container with a resolved main-axis gap it sets
+`width: max-content` on the container and on each item and reads the boxes back,
+then checks whether `SUM(items) + (n-1)*gap + padding` is the container's own
+max-content. On `settings`, on every container whose items are inflexible, it
+closes **exactly**:
+
+| container | gap | n | Chrome max-content | items + gaps | residual |
+|---|---:|---:|---:|---:|---:|
+| `div.checkbox-group` | 16 | 2 | 309.719 | 293.719 + 16 | **0.000** |
+| `div.clear-options` | 12 | 3 | 377.469 | 353.469 + 24 | **0.000** |
+| `div.btn-group` | 8 | 2 | 195.375 | 187.375 + 8 | **0.000** |
+| `div.btn-group` | 8 | 3 | 346.688 | 330.688 + 16 | **0.000** |
+
+So `(n-1) * gap` is not a convention the engine picked. It is Chrome's number,
+and those gaps are authored in `rem`.
+
+The probe's first version counted only element children and reported `.shortcut`
+on `new_tab` as n=4 with a 109px residual. The container has **six** flex items:
+css-flexbox-1 §4 wraps each contiguous text run in an anonymous flex item, and
+`<kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>K</kbd>` has a `/` and a `+` between the
+kbds. RustKit's own walk counts its Text children, so the first version was
+comparing two different item counts and would have read the difference as an
+engine defect.
+
+### Commits
+
+- `c12a5b2` — the gap resolved through `LayoutBox::length_to_px`, and eight guards.
+- this commit — the digest entry and
+  `trench/tools/n69_{gap_contribution_probe.mjs,axis_ab.py,mutation_sweep.py}`.
+
+### Measured — Linux/SwiftShader, 26 cases. MECHANICS, NOT A RECEIPT
+
+```
+  geometry failures   2581 -> 2581      geometry-green   3/26 -> 3/26
+  join failures         15 -> 15
+  sum|delta|      40455.91 -> 40443.82  (-12.08, all of it `settings`)
+  axes improved 7   axes WORSENED 11   appeared 0   disappeared 0
+  Gate B: bit-identical on all 26 cases; the 26 frames are bit-identical too
+```
+
+`new_tab` authors rem gaps and **did not move on a single axis** — its flex
+containers are not sized by their own contribution. 25 of 26 cases are
+bit-identical in `layout.json`.
+
+Gate B cannot move here: `settings`' footer sits at y=2887 against a 768px
+capture and the checkbox sections are below the fold too, so not one moved box
+is in the frame. Stated again because "paint unchanged" without it reads as a
+coincidence rather than a property.
+
+**`appeared 0 / disappeared 0` is the line 09-28's report did not have, and it
+is the one that matters.** No axis crossed the 0.5px bar in either direction.
+Nothing became newly failing, no case lost a green, and the eleven were already
+failing before the change. "Eleven regressions" and "eleven already-failing
+boxes whose magnitude grew" are very different claims and only the second one
+is true.
+
+### Why the eleven are a cancellation being removed
+
+Every moved axis moves by an **exact whole number of its own container's gap** —
++8.000, +16.000, or 15.604/16.396 where a 1rem gap is followed by a second-order
+redistribution. The change does the gap arithmetic and nothing else.
+
+`.btn-group` is the box where ground truth is complete on both sides:
+
+```
+  after    198.400 = 122.400 (#saveBtn) + 68.000 (#closeBtn) + 8.000   zero shrink
+  Chrome   194.703 = 117.922            +  68.781            + 8.000   zero shrink
+  residual  +3.697 = (122.400-117.922) + (68.000-68.781)
+                   =      +4.478       +     -0.781
+```
+
+The container's whole remaining error is the sum of its two items' own
+label-advance errors. **The gap term contributes nothing.** There is no
+container-level defect left in that box.
+
+Before the change the group contributed `190.400 = 122.400 + 68.000 + 0`; the
+missing 8px became flex shrink, and since n68 froze `#closeBtn` at its
+min-content, all 8 came off `#saveBtn`: `114.400 = 122.400 - 8.000`, which
+reads as `-3.522`. **That -3.522 was never `#saveBtn`'s own error.** Its own
+error is +4.478 — the number 09-28 derived independently from ground-truth
+intrinsics, before this change existed and by a different route. It reappearing
+here as the post-fix residual is the strongest corroboration the night has.
+
+So the residuals are P4 text advance widths, and they are now **on** the board
+instead of hidden under a missing gap. Two nights running, the honest outcome
+has been a spec-correct fix that makes a number read further from Chrome.
+
+### Stop rule
+
+Checked **per box**, every axis, all 26 cases. The metric did not improve —
+3/26 -> 3/26, geometry failures 2581 -> 2581, Gate B bit-identical, discrete
+bit-identical — so the rule ("improves the metric while an oracle regresses")
+does not fire. As on 09-28 I want that stated as arithmetic rather than as a
+reading of the wording: no oracle improved, so there is no trade to revert.
+
+### Mutation-check results
+
+**10 probes, 10 RED, control green, every landing site asserted, no survivors.
+All eight guards load-bearing; five are killed by exactly one probe each.**
+
+| probe | caught by |
+|---|---|
+| M1 restore the Px-only match (the defect itself) | 5 guards |
+| M2 percentages resolve against the box's own used width | the percentage guard |
+| M3 every relative gap goes through the ROOT font size | the `em` guard |
+| M4 viewport units dropped (`to_px` for `length_to_px`) | the `em` + viewport guards |
+| M5 the main-axis gap is read from `row_gap` | 5 guards |
+| M6 one gap per ITEM instead of per boundary | 5 guards |
+| M7 the gap is added to a COLUMN container's width | the column-direction guard |
+| M8 a specified width stops winning over the flex arm | the explicit-width guard |
+| M9 exactly one gap, whatever the item count | the three-item guard |
+| M10 the main-axis gap is the LARGER of the two gaps | the `row_gap` guard |
+
+**The first sweep reported all seven probes as survivors, M1 included — and
+that was the sweep being broken, not the guards.** `cargo test --lib <name> --
+--exact` needs the full `tests::<name>` path; given the bare name it matches
+nothing, runs zero tests and **exits 0**. So every probe, up to deleting the fix
+outright, read as GREEN — SURVIVOR. The only reason I caught it is that M1
+surviving is impossible. `run_guards` now asserts that each guard actually ran
+(exactly one test passed or failed) and the sweep aborts if any did not.
+
+That is the third consecutive night whose sweep had a defect one level under the
+guards: 09-27 a mis-aimed probe, 09-28 guards that only died on M1, tonight a
+harness that ran nothing. The checklist item is now: **before trusting a sweep,
+check that the control ran the number of tests you think it ran, and that the
+probe you are most certain about does turn it red.** A sweep whose every probe
+survives is far more likely to be broken than to be reporting.
+
+M8, M9 and M10 were added because the first honest sweep of seven left three
+guards dying under nothing but M1. M8's own first run then reproduced 09-27's
+misaim exactly: the `width: Px` block is textually identical in
+`own_min_content_width`, so a first-occurrence replace landed in the sibling
+function and broke the build — at which point *every* guard reported as
+"caught". `aim=!!MISAIMED!! (2 occurrences) ran=0/8` is what the sweep printed,
+and both halves of that line were needed to tell it from a real result.
+
+### Tests
+
+`cargo test -p rustkit-layout --lib`: **547 passed, 3 failed**; the three are
+`a_long_first_run_keeps_its_last_line_open_for_the_next_sibling`,
+`bare_control_widths_match_chrome` and
+`justified_wrapped_lines_fill_the_container_except_the_last`, verified
+pre-existing by stashing the change and re-running (539 passed, the same three
+by name). `cargo test -p rustkit-engine --lib`: **174 passed, 0 failed** with
+the SwiftShader ICD. The added lines are fmt-stable and no clippy warning falls
+in the changed regions; the crate's ~3450 lines of pre-existing fmt debt are
+untouched, as on 09-28.
+
+### Decisions needed from Pete
+
+1. **I landed what 09-28 asked you about.** The evidence is the `.btn-group`
+   arithmetic closing to `+4.478 - 0.781`; if you would rather it had waited for
+   P4, #350 is one revert and I will record it as a mistake.
+2. Unchanged and cheap, fourth night running: allow `*.blob.core.windows.net`
+   so a night here can read the macOS `gate-a.json` and Gate C's board.
+   Tonight the cost is specific again — `gate-a.json` is the only thing that
+   would say whether macOS agrees that no axis crossed the bar.
+3. **This routine's stored prompt is thirteen weeks stale and actively
+   misleading.** It opens "The first unit is P0a-0: export element identity in
+   layout.json", which landed on night 1 (2026-08-04, PR #89), and it describes
+   the metric as UNMEASURABLE, which stopped being true on 08-09. A seat that
+   followed it literally would redo finished work; I only avoided that because
+   the digest exists. Should it be rewritten to point at the digest tail rather
+   than at a fixed first unit?
+
+### Surprises
+
+- **A broken mutation sweep is indistinguishable from a perfect one except by
+  the probe you are sure about.** Seven probes, seven survivors, and the summary
+  was formatted exactly like a real result. If I had written a probe set where
+  M1 was subtler I would have believed it.
+- **`new_tab` authors rem gaps in twelve flex containers and not one axis
+  moved.** I expected it to be the noisier of the two cases. Its flex containers
+  are not sized by their own max-content contribution, so the defect was
+  entirely latent there — a reminder that "the declaration is present" and "the
+  defect is observable" are different questions, and the census answers the
+  second.
+- **Chrome does NOT use the sum rule when the items are flexible, and RustKit
+  does.** The probe's own self-check made this fall out: `settings`'
+  `div.blocklist-add` reads a container max-content of 266.188 where its items
+  sum to 652, and `div.import-row` 379.531 against 660. Those containers hold
+  `flex: 1` items, so css-flexbox-1 §9.9 clamps each item's contribution by its
+  flex base size and factors — which `own_max_content_width` does not model at
+  all. **That is a 300-400px defect sitting next to tonight's 8px one**, and it
+  is entirely separate from the gap. Recorded, not touched: it is its own unit,
+  with its own guards and its own A/B, and it is the largest single geometry
+  claim I have seen on `settings`.
+- **The same misaim caught on 09-27 recurred on the first run of the probe
+  written to avoid it.** `own_min_content_width` and `own_max_content_width` are
+  textually identical for six lines, and that is now twice in three nights. It
+  is not a lesson that stays learned; it is a property of the file.
