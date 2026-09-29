@@ -21913,6 +21913,31 @@ mod script_dom_flush_tests {
         assert_eq!(painted_text(&engine, view), "ALPHA BETA gamma");
     }
 
+    // innerHTML parses into the Rust DOM, so the cascade styles the new
+    // elements (class and tag rules both) and the settle flush paints them.
+    #[test]
+    fn inner_html_writes_are_styled_and_painted_when_the_script_settles() {
+        let (mut engine, view) = loaded(
+            "<html><head><style>.off { display: none } em { display: none }</style></head>\
+             <body><div id='d'><p>alpha</p></div><p>omega</p></body></html>",
+        );
+        assert_eq!(painted_text(&engine, view), "alpha omega");
+
+        engine
+            .execute_script(
+                view,
+                "document.getElementById('d').innerHTML = \
+                 '<p>beta</p><p class=\"off\">hidden</p><span>gamma <em>no</em></span>'",
+            )
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "beta gamma omega");
+
+        engine
+            .execute_script(view, "document.getElementById('d').innerHTML = ''")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "omega");
+    }
+
     // Pin §3.1: script that writes nothing costs no relayout.
     #[test]
     fn a_clean_script_does_not_relayout() {
