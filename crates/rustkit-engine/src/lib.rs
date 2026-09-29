@@ -22370,3 +22370,115 @@ mod flex_relative_length_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod flex_zero_size_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    /// Laid out through both entry points: `layout()` and
+    /// `layout_with_collapse` (what `relayout` runs for the page).
+    fn laid_out(html: &str) -> Vec<LayoutBox> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 0.0),
+            ..Default::default()
+        };
+        let mut plain = e.build_layout_from_document(&d, &[]);
+        plain.set_viewport(1280.0, 800.0);
+        plain.layout(&cb);
+        let mut engine_path = e.build_layout_from_document(&d, &[]);
+        engine_path.set_viewport(1280.0, 800.0);
+        engine_path.layout_with_collapse(
+            &cb,
+            &mut rustkit_layout::MarginCollapseContext::new(),
+            &mut rustkit_layout::FloatContext::new(),
+        );
+        vec![plain, engine_path]
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    fn rect(root: &LayoutBox, id: &str) -> Rect {
+        by_id(root, id).unwrap_or_else(|| panic!("no box #{id}")).dimensions.border_box()
+    }
+
+    #[test]
+    fn an_authored_zero_width_flex_item_is_zero_wide() {
+        // `width:0` and `width:0px` are sizes, not `auto`: the item is 0
+        // wide and the next sibling starts at x=0.
+        for w in ["0", "0px"] {
+            let html = format!(
+                "<body style=\"margin:0\"><div style=\"display:flex\">\
+                 <div id=\"z\" style=\"width:{w};height:10px\"></div>\
+                 <div id=\"n\" style=\"width:10px;height:10px\"></div></div></body>"
+            );
+            for root in laid_out(&html) {
+                assert_eq!(rect(&root, "z").width, 0.0, "width:{w}");
+                assert_eq!(rect(&root, "n").x, 0.0, "width:{w}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_zero_width_flex_item_with_text_stays_zero_wide() {
+        // css-flexbox §4.5: the automatic minimum is the smaller of the
+        // specified size suggestion (0) and the content size, so the text
+        // overflows a 0-wide box instead of widening it.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0;font:16px Arial"><div style="display:flex">"#,
+            r#"<div id="z" style="width:0">Overflowing</div><div id="n" style="width:10px">b</div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "z").width, 0.0);
+            assert_eq!(rect(&root, "n").x, 0.0);
+        }
+    }
+
+    #[test]
+    fn a_specified_width_caps_the_automatic_minimum() {
+        // A 40px item holding a wider unbreakable word keeps its 40px when the
+        // row has room: min(specified 40, content) = 40, not the word's width.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0;font:16px Arial"><div style="display:flex;width:400px">"#,
+            r#"<div id="w" style="width:40px">Supercalifragilistic</div><div id="n">b</div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "w").width, 40.0);
+            assert_eq!(rect(&root, "n").x, 40.0);
+        }
+    }
+
+    #[test]
+    fn a_zero_height_column_item_with_content_stays_zero_tall() {
+        // The vertical axis: step 11d's automatic minimum is capped by the
+        // specified height, including an authored 0 (it only honoured Px).
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:flex;flex-direction:column;height:200px">"#,
+            r#"<div id="z" style="height:0"><div style="height:30px"></div></div>"#,
+            r#"<div id="n" style="height:10px"></div></div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "z").height, 0.0);
+            assert_eq!(rect(&root, "n").y, 0.0);
+        }
+    }
+
+    #[test]
+    fn a_percent_height_in_an_auto_height_column_still_behaves_as_auto() {
+        // Guard: `height:50%` against an indefinite column container has
+        // nothing to resolve against and must stay content-sized.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:flex;flex-direction:column">"#,
+            r#"<div id="p" style="height:50%"><div style="height:30px"></div></div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "p").height, 30.0);
+        }
+    }
+}
