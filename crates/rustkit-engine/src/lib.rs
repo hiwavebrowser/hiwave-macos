@@ -4887,6 +4887,26 @@ impl Engine {
             _ => {}
         }
 
+        // HTML §15.3.1's UA rules that hide by attribute: `[hidden]`,
+        // `dialog:not([open])`, `[popover]:not(:popover-open)` (nothing opens
+        // a popover without script) and `template`. Set before the author
+        // cascade, like every UA default above, so `[hidden]{display:flex}`
+        // style overrides still show the element. `hidden=until-found` is
+        // `content-visibility: hidden` in Chrome, not `display: none`, and is
+        // left alone.
+        let tag_is = |t: &str| tag_name.eq_ignore_ascii_case(t);
+        let hidden_attr = attributes
+            .get("hidden")
+            .is_some_and(|v| !v.eq_ignore_ascii_case("until-found"));
+        let open_dialog = tag_is("dialog") && attributes.contains_key("open");
+        if hidden_attr
+            || (tag_is("dialog") && !open_dialog)
+            || (attributes.contains_key("popover") && !open_dialog)
+            || tag_is("template")
+        {
+            style.display = rustkit_css::Display::None;
+        }
+
         // Collect matching rules with specificity for ordering
         let mut matching_rules: Vec<(&Rule, (usize, usize, usize), usize)> = Vec::new();
         // With a rule index installed, only the rules filed under this
@@ -22401,6 +22421,28 @@ mod script_dom_flush_tests {
         (engine, view)
     }
 
+    // A script that wires a listener goes on to its writes (it used to
+    // throw at addEventListener), and a handler's writes are painted when
+    // the script that fired it settles.
+    #[test]
+    fn a_script_that_wires_listeners_runs_on_and_is_painted() {
+        let (mut engine, view) =
+            loaded("<html><body><p id='b'>go</p><p id='out'>before</p></body></html>");
+        engine
+            .execute_script(
+                view,
+                "var b = document.getElementById('b'), out = document.getElementById('out'); \
+                 b.addEventListener('click', function () { out.textContent = 'clicked'; }); \
+                 out.textContent = 'wired'",
+            )
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "go wired");
+        engine
+            .execute_script(view, "document.getElementById('b').click()")
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "go clicked");
+    }
+
     // Pin §3: a DOM write marked during script reaches the display list
     // when the script settles.
     #[test]
@@ -22542,6 +22584,26 @@ mod script_dom_flush_tests {
         assert_eq!(painted_text(&engine, view), "omega");
     }
 
+    // innerText writes Text nodes and <br>s into the Rust DOM, painted by
+    // the settle flush; its getter leaves out UA-hidden content.
+    #[test]
+    fn inner_text_writes_are_painted_when_the_script_settles() {
+        let (mut engine, view) = loaded(
+            "<html><head><style>p { margin: 0 }</style></head>\
+             <body><p id='src'>alpha <script>var x;</script>beta</p>\
+             <p id='d'><b>old</b></p></body></html>",
+        );
+        assert_eq!(painted_text(&engine, view), "alpha beta old");
+        engine
+            .execute_script(
+                view,
+                "var d = document.getElementById('d'); \
+                 d.innerText = document.getElementById('src').innerText + '\\ngamma'",
+            )
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "alpha beta alpha beta gamma");
+    }
+
     // Pin §3.1: script that writes nothing costs no relayout.
     #[test]
     fn a_clean_script_does_not_relayout() {
@@ -22567,6 +22629,28 @@ mod script_dom_flush_tests {
             engine.views[&view].bindings.as_ref().unwrap().take_dirty(),
             DomDirty::Clean
         );
+    }
+
+    // A clone is styled like its original once inserted, and
+    // insertAdjacentHTML content is parsed into the Rust DOM and painted.
+    #[test]
+    fn clones_and_adjacent_html_are_painted_when_the_script_settles() {
+        let (mut engine, view) = loaded(
+            "<html><head><style>p { margin: 0 } .off { display: none }</style></head>\
+             <body><p id='a'>alpha</p><p id='z'>omega</p></body></html>",
+        );
+        assert_eq!(painted_text(&engine, view), "alpha omega");
+        engine
+            .execute_script(
+                view,
+                "var a = document.getElementById('a'), c = a.cloneNode(true); \
+                 c.id = 'c'; c.firstChild.data = 'beta'; \
+                 a.parentNode.insertBefore(c, a.nextSibling); \
+                 a.insertAdjacentHTML('afterend', '<p>gamma</p><p class=\"off\">no</p>'); \
+                 document.getElementById('z').insertAdjacentText('beforebegin', 'delta')",
+            )
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "alpha gamma beta delta omega");
     }
 }
 
@@ -22920,6 +23004,56 @@ mod flex_relative_length_tests {
     }
 }
 
+// HTML §15.3.1 (the rendering section's UA sheet): `[hidden]`, a closed
+// `<dialog>`, a popover that is not showing, and `<template>` generate no
+// box. RustKit painted all four (shopify's "Choose a region & language"
+// popover sat over its hero). They are UA rules, so author `display` wins.
+#[cfg(all(test, feature = "headless"))]
+mod ua_hidden_tests {
+    use super::*;
+
+    fn painted(html: &str) -> String {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+        let list = engine.views[&view].display_list.as_ref().expect("display list");
+        list.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                rustkit_layout::DisplayCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn hidden_closed_dialogs_closed_popovers_and_templates_are_not_painted() {
+        let text = painted(concat!(
+            "<html><body><p>shown</p><div hidden>attr</div><dialog>closed</dialog>",
+            "<div popover=auto>auto</div><div popover>bare</div>",
+            "<template><p>template</p></template></body></html>",
+        ));
+        assert_eq!(text, "shown");
+    }
+
+    #[test]
+    fn an_open_dialog_is_painted() {
+        assert_eq!(painted("<html><body><dialog open>open</dialog></body></html>"), "open");
+    }
+
+    #[test]
+    fn an_author_display_overrides_the_ua_hidden_rule() {
+        let text = painted(concat!(
+            "<html><head><style>.show{display:block}</style></head>",
+            "<body><div hidden class=show>author</div></body></html>",
+        ));
+        assert_eq!(text, "author");
+    }
+}
+
 #[cfg(test)]
 mod flex_zero_size_tests {
     use super::*;
@@ -23162,5 +23296,95 @@ mod individual_transform_tests {
         ))
         .expect("a transform");
         assert_eq!((m[4], m[5]), (0.0, -40.0));
+    }
+}
+
+#[cfg(test)]
+mod grid_fixed_track_tests {
+    use super::*;
+    use rustkit_layout::{Dimensions, Rect};
+
+    /// Laid out through both entry points: `layout()` and
+    /// `layout_with_collapse` (what `relayout` runs for the page).
+    fn laid_out(html: &str) -> Vec<LayoutBox> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 0.0),
+            ..Default::default()
+        };
+        let mut plain = e.build_layout_from_document(&d, &[]);
+        plain.set_viewport(1280.0, 800.0);
+        plain.layout(&cb);
+        let mut engine_path = e.build_layout_from_document(&d, &[]);
+        engine_path.set_viewport(1280.0, 800.0);
+        engine_path.layout_with_collapse(
+            &cb,
+            &mut rustkit_layout::MarginCollapseContext::new(),
+            &mut rustkit_layout::FloatContext::new(),
+        );
+        vec![plain, engine_path]
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+        if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| by_id(c, id))
+    }
+
+    fn rect(root: &LayoutBox, id: &str) -> Rect {
+        by_id(root, id).unwrap_or_else(|| panic!("no box #{id}")).dimensions.border_box()
+    }
+
+    #[test]
+    fn a_fixed_column_does_not_grow_to_fit_its_text() {
+        // css-grid-1 §12.5: items size intrinsic tracks only. "Wide" (~36px)
+        // overflows its 10px track; the second item starts at x=10.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0;font:16px Arial"><div style="display:grid;"#,
+            r#"grid-template-columns:10px 10px"><div id="a">Wide</div><div id="b">b</div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "a").width, 10.0);
+            assert_eq!(rect(&root, "b").x, 10.0);
+        }
+    }
+
+    #[test]
+    fn a_fixed_row_does_not_grow_to_fit_a_taller_item() {
+        // A 20px row holding a 50px item stays 20; the next row starts at 20.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:grid;width:100px;"#,
+            r#"grid-template-rows:20px 20px"><div style="height:50px"></div><div id="n" style="height:5px"></div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "n").y, 20.0);
+        }
+    }
+
+    #[test]
+    fn a_spanning_item_over_fixed_tracks_leaves_them_alone() {
+        // span 2 over 30px + 30px (gap 0) with a 100px item: still 30 + 30.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:grid;grid-template-columns:30px 30px">"#,
+            r#"<div style="grid-column:span 2;width:100px;height:5px"></div>"#,
+            r#"<div style="height:5px"></div><div id="c" style="height:5px"></div>"#,
+            r#"</div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "c").x, 30.0);
+        }
+    }
+
+    #[test]
+    fn an_auto_column_still_grows_to_its_content() {
+        // Guard: `auto` is intrinsic and must keep taking the item's width.
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><div style="display:grid;width:500px;"#,
+            r#"grid-template-columns:auto 1fr"><div style="width:120px;height:5px"></div>"#,
+            r#"<div id="f" style="height:5px"></div></div></body>"#,
+        )) {
+            assert_eq!(rect(&root, "f").x, 120.0);
+        }
     }
 }
