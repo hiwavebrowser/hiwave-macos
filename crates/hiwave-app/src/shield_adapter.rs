@@ -85,6 +85,9 @@ impl ShieldInterceptHandler {
 
     /// Create with a shared counter for tracking blocked requests.
     pub fn with_counter(blocked_count: Arc<AtomicU64>) -> Self {
+        // Production constructor (webview_rustkit path): start closing the
+        // pending window here too, not only in new().
+        let _ = shared_blocker();
         let blocked_domains: HashSet<String> = BLOCKED_DOMAINS
             .iter()
             .map(|s| s.to_string())
@@ -240,10 +243,19 @@ impl InterceptHandler for ShieldInterceptHandler {
         let blocked = match shared_blocker() {
             Some(engine) => engine.should_block(&request.url, source, dest_to_shield(dest)),
             None => {
-                // Engine still compiling/downloading: allow, and COUNT the
-                // window so it is a number on the census, not a secret.
+                // PENDING FLOOR (Prometheus R1 on this PR): while EasyList is
+                // still compiling/downloading, the interim domain list keeps
+                // blocking — the pre-PR tip protected from the FIRST
+                // subresource and this PR must never lower that, not even
+                // for a measured window (and a failed init-thread spawn must
+                // not mean permanent allow). The census still counts the
+                // window so the upgrade's coverage delta stays a number.
                 self.census.engine_pending.fetch_add(1, Ordering::Relaxed);
-                false
+                request
+                    .url
+                    .host_str()
+                    .map(|host| self.should_block_host(host))
+                    .unwrap_or(false)
             }
         };
 
@@ -399,6 +411,7 @@ mod tests {
             credentials: Default::default(),
             referrer: None,
             referrer_policy: Default::default(),
+            destination: RequestDestination::Other,
         }
     }
 
