@@ -930,3 +930,28 @@ Passing all 3: google, x, linkedin. RustKit blocked: amazon, chatgpt, ebay, nyti
 **Decisions for Pete:**
 1. Still open: **board runs vs the other lanes' builds.** This session never got a quiet enough window for a full board (load 13–22 throughout). A no-build window, or a one-retry-on-timeout scorer change (which needs your OK)?
 2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.
+
+## 2026-09-29 00:25 — flex zero sizes (#345) and grid fixed tracks (#347) opened with receipts; found lyft's "space toggle" bug, fix pushed but it regresses github
+
+**Points: no full board this session. The last full board is still 19/60 (`20260928T2025Z-gridrem`).** Load was 13–36 from 22:30 on (three lanes building), and a full board at that load loses oracles to timeouts. I ran per-site binary A/Bs instead. No check flipped.
+
+| run | head | points | loads | readable | looks-right | scorable |
+|---|---|---|---|---|---|---|
+| `20260928T2025Z-gridrem` (last full board) | #335 dacbce0 | 19 | 11 | 5 | 3 | 19/48 |
+
+**PRs to develop (Prometheus R1 + Cursor R2; not mine to merge):**
+- **#345 `atlas/rs-flex-zero-size` @ 6529dda** (Talos bug 4, an authored `width:0`/`height:0` on a flex item is a size, not `auto`). MERGEABLE. Campaign 26/26, avg 1.1755%, identical case for case to develop (8567760 binary, run back to back). Ratchet: none worse than the floor. Engine 204/204 and layout 554/554 serial. The parallel run at load ~15 threw ~20 timing flakes that each pass alone. Real-site A/B against its parent 62b05b0: pixel-identical on x, linkedin, facebook, instagram, yahoo, wikipedia, github, walmart and shopify. google moved only with drift (both arms flipped together in the reversed order). lyft shows a hero text column that was laid out invisible before, at 0 points either way.
+- **#347 `atlas/rs-grid-fixed-tracks` @ f277c67** (items never grow fixed tracks, §12.5). Campaign 26/26, avg 1.1756%, identical case for case. Ratchet: none worse than the floor. No real-site A/B (load); the body says so.
+
+**Pushed, NO PR, do NOT open as is: `atlas/rs-var-missing-invalid` @ 79954d6** (from develop 8f44204). CSS Variables §3: `var(--unset)` with no fallback makes the custom property holding it invalid, so a use site's fallback applies. RustKit substituted `""`. The parser also dropped empty custom properties (`--x: ;`, which is valid). lyft's whole theme is a "space toggle" (`--bg-dark: var(--core-ui-darkmode) #100f0f` with the toggle never set, used as `var(--bg-dark, var(--bg-light))`), so RustKit painted lyft near-black where Chrome paints white. It has two engine pins and one parser pin, each failing first. **lyft LOOKS RIGHT: 88.85% → 32.48%.** The palette now matches Chrome. BUT **github regresses badly**: its nav menu renders fully expanded over a dimmed page (99.7% of the frame moves; `scratch/varinvalid/github-3.png`). facebook, x, shopify and walmart are identical; yahoo moved 0.66%. linkedin's base arm glitched under load (19.7% vs its usual 8.25%), and the head arm scored 8.25%. **Next session, FIRST:** bisect which half breaks github (the parser keeping `--x: ;`, or the invalid-at-computed-time substitution). The likely suspect is that the parser now keeps an empty custom property that github then feeds into a `display`/visibility toggle, or a non-custom property that got `var(--unset)` and now resolves differently. Fix it on the same branch, then run the receipt plus a wider A/B.
+
+**Found:**
+- The "space toggle" pattern (`var(--toggle) value` with the toggle unset or set to empty) is a common theming idiom, and RustKit had it inverted. It probably affects more wide-board sites than lyft.
+- **Aleph hung for 30 min** on one `aleph_search` call (MCP idle timeout), and that cost this session a third of its time. Worth a look on the tooling track.
+- `cargo fmt -p rustkit-engine` rewrites ~2,300 lines of develop's lib.rs. It's still not fmt-clean (open decision 2).
+
+**Next:** (1) the github bisect on rs-var-missing-invalid (above), then its PR. (2) A full board on a quiet machine. (3) Talos bug 5 audit. (4) SVG `<g>` style inheritance.
+
+**Decisions for Pete:**
+1. Still open: **board runs vs the other lanes' builds.** This session also never got a quiet window (load 13–36; a warm release build took 17 min). A no-build window for the board, or a one-retry-on-timeout scorer change (which needs your OK)?
+2. Still open: `<img>` through the ResourceLoader; `cargo fmt` on develop.

@@ -1,0 +1,11 @@
+fix(css): var() of an unset custom property with no fallback is invalid, and `--x: ;` is kept
+
+CSS Variables 1 §2 and §3. A custom property whose value references an
+unset variable with no fallback is invalid at computed-value time, so a
+use site's fallback applies. RustKit substituted an empty string instead.
+The parser also dropped empty custom-property values, which are valid.
+Together they inverted "space toggles": lyft's
+`--bg-dark: var(--core-ui-darkmode) #100f0f` painted the page dark where
+Chrome paints it white.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

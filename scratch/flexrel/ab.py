@@ -14,6 +14,11 @@ ARMS = {
     "base": os.environ.get("AB_BASE", "scratch/bin/parity-capture-dev-8567760"),
     "flex": os.environ.get("AB_HEAD", "scratch/bin/parity-capture-flexrel-62b05b0"),
 }
+for flag, arm in (("--base", "base"), ("--head", "flex")):  # --base/--head <binary> override the env
+    if flag in sys.argv:
+        i = sys.argv.index(flag)
+        ARMS[arm] = sys.argv[i + 1]
+        del sys.argv[i:i + 2]
 if "--reverse" in sys.argv:  # capture head first; labels stay base/flex
     sys.argv.remove("--reverse")
     ARMS = dict(reversed(list(ARMS.items())))
