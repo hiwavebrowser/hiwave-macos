@@ -595,3 +595,23 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 **Decisions for Pete**
 1. **Allow `cargo` in this lane's permissions, or pause its hourly schedule.** Ten sessions in a row have produced no builds.
 2. (Carried over) Approve the pinned-snapshot method change.
+
+## 2026-09-29 14:05
+
+**The eleventh session built. `cargo` was never actually blocked: the lane's allowlisted wrapper `python3 trench/tools/cs_cargo.py <worktree> <args>` works. Sessions 1–10 of the block tried bare `cargo --version` and stopped there. Use the wrapper.** Load was 15–29 all session (builds took 22–35 min), so there's no absolute record. The numbers below are interleaved relative reads only.
+
+| site | record (18:55, 8567760) | develop 35fe782 vs record binary, 3 interleaved pairs (load 16–29) |
+|---|---|---|
+| cnn | 1291 ms → 6.1× | B/A .52, .56, .48 → **median .52** |
+| github | 1996 ms → 18.1× | B/A .82, .45, .56 → **median .56** |
+| wikipedia | 480 ms → **24.0×** (worst) | B/A .70, .64, .85 → **median .70** |
+
+- **develop-now (#344 + #349 landed) is ~.70× the record binary on wikipedia and ~.5× on cnn/github, measured interleaved.** Scaled onto the 18:55 record, that's ~17× on wikipedia. But it's a scaled number, not a record: it needs a quiet absolute run.
+- **Pseudo content-gate:** `atlas/cs-pseudo-content-gate` @ **b9bc8c8** (57508c3 is the change, plus an additive merge of develop 35fe782), **pushed, no PR yet**. `cargo test -p rustkit-engine --lib`: **217/217** (including both gate tests). The A/B against develop 35fe782 (3 pairs, load 15–25) was **inconclusive**: cnn .98/1.58/.96, github 1.05/.98/1.24, wikipedia 1.31/1.00/FAIL (A's run died in pair 3). At this load it's noise with no visible win. I'm not opening a PR without a clean B/A, and the receipt wasn't run either (cap reached).
+- **Saved binaries:** `cascade-target/pc-dev-35fe782` (develop), `pc-pcg-b9bc8c8` (gate).
+- **Open cs PRs:** 0, cap 3. Draft PR body: `~/Repos/.worktrees/cs-pseudo-content-gate-body.md`.
+- **Next session:** (1) a quiet A/B of `pc-pcg-b9bc8c8` vs `pc-dev-35fe782` (5 pairs). If wikipedia ≤ .95, copy the gate binary to the gate worktree's `target/release/` and run `receipt_nobuild.py … --scope all`, then open the PR. If it's ≥ .98, drop the gate. (2) A quiet absolute develop run to re-baseline. (3) `subject_keys` caching (github).
+
+**Decisions for Pete**
+1. **Re-baseline the record** (carried over): a record is develop's quiet median taken interleaved with the previous record binary. Today develop is .70× the record binary on wikipedia. Default: 24.0× stays on the books until a quiet run.
+2. (Carried over) Approve the pinned-snapshot method change.
