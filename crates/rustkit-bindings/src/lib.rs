@@ -1622,6 +1622,55 @@ mod tests {
         }
     }
 
+    const MIXED: &str = "<html><body><ul id='u'> <li id='a'>1</li> <!--c--> <li id='b' \
+         data-item-id='7' title='t' hidden>2</li> </ul></body></html>";
+
+    #[test]
+    fn element_traversal_skips_text_and_comments() {
+        let b = bound(MIXED);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var u = document.getElementById('u'), a = document.getElementById('a'), \
+                     bb = document.getElementById('b'), r = []; \
+                 r.push(u.firstElementChild === a, u.lastElementChild === bb, u.childElementCount, \
+                        a.nextElementSibling === bb, bb.previousElementSibling === a, \
+                        bb.nextElementSibling, a.previousElementSibling, \
+                        u.firstChild.nextElementSibling === a, \
+                        document.firstElementChild === document.documentElement, \
+                        document.children.length, document.childElementCount); \
+                 var p = document.createElement('p'); \
+                 r.push(a.isConnected, p.isConnected, document.isConnected); \
+                 u.appendChild(p); r.push(p.isConnected, u.lastElementChild === p); \
+                 p.remove(); r.push(p.isConnected, p.firstElementChild, p.childElementCount); \
+                 r.join(',')"
+            ),
+            "true,true,2,true,true,,,true,true,1,1,true,false,true,true,true,false,,0"
+        );
+    }
+
+    #[test]
+    fn reflected_attributes_and_dataset() {
+        let b = bound(MIXED);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var a = document.getElementById('a'), bb = document.getElementById('b'), r = []; \
+                 r.push(bb.dataset.itemId, bb.title, bb.hidden, a.hidden, a.title === '', \
+                        'itemId' in bb.dataset, 'nope' in bb.dataset, a.dataset.x); \
+                 a.dataset.fooBar = 3; a.hidden = true; a.lang = 'en'; bb.hidden = false; \
+                 delete bb.dataset.itemId; \
+                 r.push(a.getAttribute('data-foo-bar'), a.hasAttribute('hidden'), a.getAttribute('lang'), \
+                        bb.hasAttribute('hidden'), bb.getAttribute('data-item-id'), \
+                        a.dataset === a.dataset); \
+                 try { a.dataset['a-b'] = 1; } catch (e) { r.push(e.name); } \
+                 r.join(',')"
+            ),
+            "7,t,true,false,true,true,false,,3,true,en,false,,true,SyntaxError"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+    }
+
     const PAGE: &str = r#"<!DOCTYPE html><html><head><title>T</title></head>
 <body><div id="main" class="box"><p class="x">Hello, <b>world</b>!</p><!--c--><p class="x">Two</p></div>
 <p id="outside" class="x">Out</p></body></html>"#;
