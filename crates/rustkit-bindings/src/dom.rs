@@ -868,6 +868,87 @@ const WRAPPERS_JS: &str = r#"
             if (p) p.removeChild(this);
         };
     });
+    // DOM §4.2.3 replace: validate by inserting `node` first (insertBefore
+    // throws before touching the tree), then take `child` out.
+    Node.prototype.replaceChild = function (node, child) {
+        if (arguments.length < 2) {
+            throw new TypeError("Failed to execute 'replaceChild' on 'Node': 2 arguments required.");
+        }
+        nodeArg(node, 'replaceChild');
+        nodeArg(child, 'replaceChild');
+        if (node === child) {
+            if (child.parentNode !== this) {
+                throw new DOMException("Failed to execute 'replaceChild' on 'Node'.", 'NotFoundError');
+            }
+            return child;
+        }
+        write('insert', this, node, child, 'replaceChild');
+        return write('remove', this, child, null, 'replaceChild');
+    };
+
+    // ParentNode.append/prepend and ChildNode.before/after/replaceWith
+    // (DOM §4.2.6, §4.2.8) take nodes or strings; a string becomes a Text
+    // node. DOM gathers them into a DocumentFragment; there are no
+    // fragments yet, so the nodes are detached first and then inserted one
+    // by one at the same reference point, which gives the same tree. A
+    // failed validity check part-way leaves the earlier nodes inserted.
+    function toNodes(args) {
+        var nodes = Array.prototype.map.call(args, function (a) {
+            return a != null && a[SLOT] ? a : g.document.createTextNode(String(a));
+        });
+        nodes.forEach(function (n) { var p = n.parentNode; if (p) p.removeChild(n); });
+        return nodes;
+    }
+    function insertAll(parent, nodes, ref, method) {
+        nodes.forEach(function (n) { write('insert', parent, n, ref, method); });
+    }
+    function viableSibling(node, field, nodes) {
+        var s = node[field];
+        while (s && nodes.indexOf(s) >= 0) s = s[field];
+        return s;
+    }
+    Element.prototype.append = function () {
+        insertAll(this, toNodes(arguments), null, 'append');
+    };
+    Element.prototype.prepend = function () {
+        var nodes = toNodes(arguments);
+        insertAll(this, nodes, this.firstChild, 'prepend');
+    };
+    Element.prototype.replaceChildren = function () {
+        var nodes = toNodes(arguments);
+        while (this.firstChild) this.removeChild(this.firstChild);
+        insertAll(this, nodes, null, 'replaceChildren');
+    };
+    [Element, CharacterData].forEach(function (C) {
+        C.prototype.before = function () {
+            var p = this.parentNode;
+            if (!p) return;
+            var args = Array.prototype.slice.call(arguments);
+            var prev = viableSibling(this, 'previousSibling', args);
+            var nodes = toNodes(args);
+            insertAll(p, nodes, prev ? prev.nextSibling : p.firstChild, 'before');
+        };
+        C.prototype.after = function () {
+            var p = this.parentNode;
+            if (!p) return;
+            var args = Array.prototype.slice.call(arguments);
+            var next = viableSibling(this, 'nextSibling', args);
+            insertAll(p, toNodes(args), next, 'after');
+        };
+        C.prototype.replaceWith = function () {
+            var p = this.parentNode;
+            if (!p) return;
+            var args = Array.prototype.slice.call(arguments);
+            var next = viableSibling(this, 'nextSibling', args);
+            var nodes = toNodes(args);
+            if (this.parentNode === p) {
+                insertAll(p, nodes, this, 'replaceWith');
+                p.removeChild(this);
+            } else {
+                insertAll(p, nodes, next, 'replaceWith');
+            }
+        };
+    });
     Node.prototype.contains = function (other) {
         for (var n = other; n; n = n.parentNode) if (n === this) return true;
         return false;

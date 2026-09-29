@@ -2120,6 +2120,79 @@ mod tests {
         assert_eq!(doc.get_element_by_id("d").unwrap().get_attribute("style"), Some(""));
     }
 
+    const ROW: &str =
+        "<html><body><div id='r'><i id='a'>a</i><i id='b'>b</i><i id='c'>c</i></div><i id='x'>x</i></body></html>";
+
+    /// Each step's children of #r: element ids, and Text data in quotes.
+    const ORDER: &str = "var r = document.getElementById('r'), out = []; \
+         function $(id) { return document.getElementById(id); } var a = $('a'); \
+         function order() { return Array.prototype.map.call(r.childNodes, function (n) { \
+             return n.nodeType === 1 ? n.id : \"'\" + n.data + \"'\"; }).join(''); }";
+
+    #[test]
+    fn parent_node_append_prepend_and_replace_children() {
+        let b = bound(ROW);
+        assert_eq!(
+            eval_string(
+                &b,
+                &[ORDER, " \
+                     r.append($('x'), 's'); out.push(order()); \
+                     r.prepend('p', $('c')); out.push(order()); \
+                     r.append(); out.push(order()); \
+                     r.replaceChildren($('b'), 'n'); out.push(order(), a.parentNode === null); \
+                     out.join('|')"]
+                .concat()
+            ),
+            "abcx's'|'p'cabx's'|'p'cabx's'|b'n'|true"
+        );
+        assert_eq!(b.take_dirty(), DomDirty::Style);
+        let doc = b.window.borrow().document.clone().unwrap();
+        assert_eq!(doc.get_element_by_id("r").unwrap().text_content(), "bn");
+    }
+
+    #[test]
+    fn child_node_before_after_and_replace_with() {
+        let b = bound(ROW);
+        assert_eq!(
+            eval_string(
+                &b,
+                &[ORDER, " \
+                     $('b').before($('x'), 't'); out.push(order()); \
+                     $('b').after($('a')); out.push(order()); \
+                     $('b').before($('b')); out.push(order()); \
+                     $('x').after($('x'), $('c')); out.push(order()); \
+                     $('b').replaceWith('B', $('b')); out.push(order()); \
+                     $('a').replaceWith('A'); out.push(order(), a.parentNode === null); \
+                     var lone = document.createElement('p'); lone.before('q'); lone.replaceWith('q'); \
+                     out.push(lone.parentNode === null); \
+                     out.join('|')"]
+                .concat()
+            ),
+            "ax't'bc|x't'bac|x't'bac|xc't'ba|xc't''B'ba|xc't''B'b'A'|true|true"
+        );
+    }
+
+    #[test]
+    fn replace_child_swaps_and_validates_first() {
+        let b = bound(ROW);
+        assert_eq!(
+            eval_string(
+                &b,
+                &[ORDER, " \
+                     var old = $('b'); out.push(r.replaceChild($('x'), old) === old, old.parentNode === null); \
+                     out.push(order()); \
+                     out.push(r.replaceChild($('a'), $('a')) === $('a'), order()); \
+                     r.replaceChild($('c'), $('a')); out.push(order()); \
+                     try { r.replaceChild(document.createElement('p'), old); } catch (e) { out.push(e.name); } \
+                     try { $('x').replaceChild(r, $('x').firstChild); } catch (e) { out.push(e.name); } \
+                     try { r.replaceChild('s', $('x')); } catch (e) { out.push(e.name); } \
+                     out.push(order()); out.join('|')"]
+                .concat()
+            ),
+            "true|true|axc|true|axc|cx|NotFoundError|HierarchyRequestError|TypeError|cx"
+        );
+    }
+
     #[test]
     fn inner_and_outer_html_serialize_the_rust_tree() {
         let b = bound(PAGE);

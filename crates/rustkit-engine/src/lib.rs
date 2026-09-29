@@ -21948,6 +21948,26 @@ mod script_dom_flush_tests {
         assert_eq!(painted_text(&engine, view), "ALPHA BETA gamma");
     }
 
+    // The node-or-string convenience ops ride the same insert/remove host
+    // op, so they are painted by the same settle flush.
+    #[test]
+    fn child_node_convenience_ops_are_painted_when_the_script_settles() {
+        let (mut engine, view) = loaded(
+            "<html><body><p id='a'>alpha</p><p id='b'>beta</p></body></html>",
+        );
+        engine
+            .execute_script(
+                view,
+                "var a = document.getElementById('a'), b = document.getElementById('b'); \
+                 var p = document.createElement('p'); p.append('gamma'); \
+                 b.after(p); a.before(b); \
+                 var q = document.createElement('p'); q.append('delta'); \
+                 document.body.replaceChild(q, a)",
+            )
+            .unwrap();
+        assert_eq!(painted_text(&engine, view), "beta delta gamma");
+    }
+
     // innerHTML parses into the Rust DOM, so the cascade styles the new
     // elements (class and tag rules both) and the settle flush paints them.
     #[test]
