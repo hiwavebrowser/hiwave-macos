@@ -338,3 +338,35 @@ Newest section last.
 1. **Unblock rung 1:** allowlist the MDN clone, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`. Without it, the 80% exit metric is out of reach.
 2. **Point Pollux (the temporary R2) and Prometheus R1 at #356, #357 and #359.** None has a review yet, and the lane is at its cap.
 3. **§3.4 forced-layout pin**, or pause the cadence. With the mutation surface in review, layout reads are the last on-plan work that doesn't need fixtures.
+
+## 2026-09-29 14:15
+
+**Metric:** still rung 0, and rung 1 is still 0/0 vs Chrome 148. MDN is still absent. The mutation surface grew: the form-control value is now Rust-backed and banked.
+- **#356 and #357 landed at 15:30Z.** Develop is now 35fe782.
+- **#359** (fragment) @ dd997e4 is still open and MERGEABLE, with no R1 or R2 yet. It's the only open PR (1 of 3).
+
+**Banked (pushed, no PR yet):** `atlas/js-dom-form-value` @ **c71e24f**, from develop 35fe782.
+- **What it fixes:**
+  - a parsed `<input>` had no `value` (it read `undefined`);
+  - `createElement('input' | 'textarea' | 'form')` returned the legacy stub, which `appendChild` rejects;
+  - `input.focus()` threw.
+  All three sit on the MDN beginner path (shopping-list style).
+- **How:** the dirty value lives host-side, keyed by NodeId. A write queues a value and marks `Layout`. The existing settle flush copies it into `view.edit_states`, the same path layout already paints typed text from, and typed text syncs back to script.
+- **Also in it:** the Input, TextArea and Form interfaces, reflection, the selection and validity APIs ported from the stub, and `form.reset()`.
+- **Tests:**
+  - bindings 71/71;
+  - engine headless, targeted modules: `script_dom_flush_tests` 11/11, including the new paint/typing test, `form_typing_tests` 4/4, and `stop_navigation_tests` 6/6.
+- **Why it's banked and not a PR:**
+  - The full engine lib suite (275 tests) didn't finish inside the cap. My first run had 3 concurrent test binaries after a duplicate re-run, and ~30 tests failed from that contention. Those same modules then passed in isolation.
+  - The campaign receipt isn't run yet.
+  - **Next session:** full engine suite on its own → receipt → open the PR (body drafted at `~/Repos/.worktrees/js-pr-form-value.md`).
+
+**Tooling notes**
+- A headless engine test build in the lane target takes more than 10 minutes cold after a feature switch. Don't queue retries: each one launched another test binary, and they starved each other.
+
+**PRs opened this session:** none.
+
+**Decisions for Pete** (end_date is tomorrow)
+1. **Unblock rung 1:** allowlist the MDN clone, or drop a clone at `~/Repos/.worktrees/mdn-learning-area`. Without it, the 80% exit metric is out of reach.
+2. **Point Pollux (R2) and Prometheus (R1) at #359.**
+3. **§3.4 forced-layout pin** (`getBoundingClientRect`/`offset*`), or let this lane wind down at end_date after form-value lands.
