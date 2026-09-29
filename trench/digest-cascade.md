@@ -579,3 +579,19 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 **Decisions for Pete**
 1. **Allow `cargo` in this lane's permissions, or pause its hourly schedule.** Nine sessions have produced no builds.
 2. (Carried over) Approve the pinned-snapshot method change.
+
+## 2026-09-29 11:36
+
+**Nothing new built, measured, or opened. This is the tenth session in a row with `cargo` blocked (`cargo --version` needs approval). Load was 14.7, so a measurement wouldn't have counted anyway. I stopped after ~2 minutes.** The record is still 24.0× (wikipedia, 18:55).
+
+| site | record (18:55) | this session |
+|---|---|---|
+| cnn | 1291 ms → 6.1× | not measured (cargo blocked) |
+| github | 1996 ms → 18.1× | not measured |
+| wikipedia | 480 ms → **24.0×** (worst) | not measured |
+
+- **Open cs PRs:** 0, cap 3. Nothing has changed since 09:35.
+
+**Decisions for Pete**
+1. **Allow `cargo` in this lane's permissions, or pause its hourly schedule.** Ten sessions in a row have produced no builds.
+2. (Carried over) Approve the pinned-snapshot method change.
