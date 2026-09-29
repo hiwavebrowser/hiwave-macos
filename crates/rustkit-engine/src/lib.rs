@@ -159,7 +159,7 @@ use rustkit_layout::{
     BoxType, Dimensions, DisplayList, ElementIdentity, LayoutBox, Position, Rect,
 };
 use std::cell::Cell;
-use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, ResourceLoader};
+use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 use rustkit_renderer::Renderer;
 pub use rustkit_renderer::RenderStats;
 #[cfg(windows)]
@@ -280,7 +280,14 @@ struct SubresourceReferrer {
 impl SubresourceReferrer {
     /// A GET for `url` that carries this referrer and policy.
     fn get(&self, url: Url) -> Request {
-        let request = Request::get(url).referrer_policy(self.policy);
+        self.get_for(url, RequestDestination::Other)
+    }
+
+    /// Same, with the fetch destination the shield classifies by.
+    fn get_for(&self, url: Url, destination: RequestDestination) -> Request {
+        let request = Request::get(url)
+            .referrer_policy(self.policy)
+            .destination(destination);
         match &self.url {
             Some(referrer) => request.referrer(referrer.clone()),
             None => request,
@@ -1869,7 +1876,9 @@ impl Engine {
                         Ok((timing, Body::Inline(text))) => Ok((timing, text)),
                         Ok((timing, Body::External(url))) => {
                             let fetch = async {
-                                match loader.fetch(referrer.get(url)).await {
+                                match loader.fetch(
+                                    referrer.get_for(url, RequestDestination::Script),
+                                ).await {
                                     Ok(response) if response.ok() => match response.text().await {
                                         Ok(text) => Ok((timing, text)),
                                         Err(e) => Err(ScriptOutcome::FetchFailed(format!("{e}"))),
@@ -2102,7 +2111,7 @@ impl Engine {
         });
 
         // Fetch the URL
-        let request = Request::get(url.clone());
+        let request = Request::get(url.clone()).destination(RequestDestination::Document);
         let response = self.loader.fetch(request).await?;
 
         // First await boundary crossed — are we still the current navigation?
@@ -7202,7 +7211,7 @@ impl Engine {
             async move {
                 info!(%url, "Loading external stylesheet");
                 let load = async {
-                    match loader.fetch(referrer.get(url.clone())).await {
+                    match loader.fetch(referrer.get_for(url.clone(), RequestDestination::Style)).await {
                         Ok(response) => {
                             if response.ok() {
                                 match response.text().await {
@@ -7303,7 +7312,7 @@ impl Engine {
                     let loader = loader.clone();
                     async move {
                         info!(%url, "Loading SVG image");
-                        let fetched = tokio::time::timeout_at(deadline, loader.fetch(referrer.get(url.clone())))
+                        let fetched = tokio::time::timeout_at(deadline, loader.fetch(referrer.get_for(url.clone(), RequestDestination::Image)))
                             .await
                             .unwrap_or(Err(NetError::Timeout(budget)));
                         match fetched {
@@ -7646,7 +7655,7 @@ impl Engine {
         let fetched: Vec<_> = stream::iter(targets.into_iter().map(|(key, family, url)| async move {
             info!(%family, %url, "Loading web font");
             let load = async {
-                match loader.fetch(referrer.get(url.clone())).await {
+                match loader.fetch(referrer.get_for(url.clone(), RequestDestination::Font)).await {
                     Ok(response) if response.ok() => match response.bytes().await {
                         Ok(bytes) => Ok(bytes.to_vec()),
                         Err(e) => Err(format!("Failed to read web font body: {e:?}")),
