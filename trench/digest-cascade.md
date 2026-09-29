@@ -326,3 +326,26 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
 2. (Carried over, still blocking the metric) A standing quiet window. This session saw load 26, and one github build took 46 s against ~1 s quiet. #340 and #341 both wait on a quiet B/A. Default: keep grabbing dips.
 3. **Merge #340 on R1 CLEAR + receipt before its quiet B/A?** Its 2 clean pairs at load 10–16 were 0.69–0.85 on github, and B was faster on 5/5. Default: yes once R2 passes; the B/A follows in its body.
+
+## 2026-09-28 22:25
+
+**No new ratio of record. The 24.0× record (wikipedia, 18:55) stands, but this session's quiet 5-run could not reproduce it: develop 8920e24 read 42.7× at load 2–3. Interleaved pairs put that on the machine, not the code (the 24.0× record binary itself now reads 627–837 ms on wikipedia, not 480). #340 is unconflicted and has a clean B/A. #341 has its B/A. New PR #344 (plan item 1, the ancestor Bloom filter) is pixel-identical and ~0.6–0.85 on all three sites.**
+
+| site | record (18:55, develop 8567760), median of 5 | this session: develop 8920e24, 5 runs, 21:53, load 2–3 |
+|---|---|---|
+| cnn | 1291 ms → 6.1× | 1786 ms → 8.5× (1786, 1864, 1599, 1778, 1805) |
+| github | 1996 ms → 18.1× | 2476 ms → 22.5× (2477, 2495, 2465, 2461, 2476) |
+| wikipedia | 480 ms → **24.0×** (worst) | 854 ms → **42.7×** (845, 890, 854, 875, 852) |
+
+- **It's drift, not a regression.** Three interleaved pairs straight after, A = 8567760 (the record binary), B = 8920e24: wikipedia .78/1.02/1.32, github .81/.96/.96, cnn .96/1.26/1.08. That's flat. The same binary at a similar load average ran ~1.3–1.7× slower than at 18:55. So load average isn't the whole story, since something else slows this Mac too (thermal? memory pressure? GPU from the other lanes?). Under decision 2's rule, a record needs the prior record binary interleaved in the same window. 8920e24 isn't a new record.
+- **#340** `atlas/cs-prepared-list-members` → **55054c9**. An additive merge of develop (no rebase, no force-push). Develop had moved the matcher onto `impl SelectorMatcher`, so the List arm keeps the prepared recursion and the test calls `SelectorMatcher`. Engine 200/200. Receipt 26/26, builtins 5/5, **diffPixels identical to 70641a3 and to #341 on all 26**. Clean B/A (21:43, load 4–10): github .85/.67/.84, wikipedia .89/.80/.89, cnn .89/.93. GitHub shows MERGEABLE. It doesn't overlap #341 (#341 is one commit that doesn't touch `PreparedSelector::List`). Both bodies are updated.
+- **#341** quiet B/A (21:37, load 4–7, pairs 2–4): cnn .94/.96/.80, github .97/.96/.86, wikipedia 1.00/1.07/.99. A modest ~5–10% on cnn/github (the reusing build), flat on wikipedia. It's in the body.
+- **PR #344** `atlas/cs-ancestor-bloom` @ **e5d53a9** (from develop 8920e24). It builds a 1024-bit Bloom filter per styled element over the ancestors' tags/classes/ids, installed by `AncestorFilterScope` and keyed to that exact ancestor slice (ptr+len). `PreparedSelector::Complex.ancestor_keys` holds the hard tag/class/id requirements of every compound left of ` `/`>`. A missing key rejects before the subject check and the walk. It can only say no to what the walk would reject too. New test `the_ancestor_filter_rejects_only_what_the_walk_rejects`: 19 selectors × 3 chains give identical results with and without the filter. Engine 200/200. Receipt 26/26, builtins 5/5, **diffPixels identical on all 26**. B/A over 6 clean pairs: **cnn .51–.75, github .67–.86 (one 1.02), wikipedia .67–.85 (one 1.24)**. This is the biggest single cut since #331.
+- **Saved binaries:** `cascade-target/pc-pl-55054c9` (#340 merged), `pc-bloom-e5d53a9` (#344), plus `pc-dev-8920e24` (develop = the A for #341 and #344).
+- **The open cs PRs are at the cap (3):** #340, #341, #344. The next cut waits until one lands.
+- **Next session:** (1) once #340/#341/#344 land, take a record on develop with the 8567760 binary interleaved in the same window; (2) re-profile github on develop with all three (`cascade_prof_pool.py`) to see what's left after the filter (expected: `CustomProperties::over`, `match_attribute_selector`, `pseudo_element_style`); (3) the flag-on real-site board for the `RUSTKIT_INCREMENTAL_RESTYLE` default flip.
+
+**Decisions for Pete**
+1. (Carried over) Approve the pinned-snapshot method change in BASELINE Changes.
+2. **The absolute ratio isn't measurable on this Mac while three lanes share it.** The same binary drifted 1.3–1.7× between 18:55 and 21:53, even at load 2–3. Proposal: every PR proves itself by interleaved B/A (that works, see #344), and a record is taken only in a standing window with the other lanes paused. Default: keep B/A as the proof, and take records opportunistically with the prior record binary interleaved.
+3. **Merge order: #340 → #341 → #344?** All three are pixel-identical to develop and touch different parts of engine lib.rs (List arm / rule index scope / Complex + compute_style entry). #344 will need a trivial merge after #340 lands (both edit the `Complex` arm neighbourhood). Default: land in PR order. I'll merge develop into #344 additively once #340 lands.
