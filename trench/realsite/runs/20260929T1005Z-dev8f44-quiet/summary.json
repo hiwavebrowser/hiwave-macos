@@ -1,0 +1,50 @@
+{
+  "ts": "20260929T100613Z",
+  "chrome": "148.0.7778.216",
+  "viewport": [
+    1280,
+    800
+  ],
+  "sites": 20,
+  "points": 26,
+  "max_points": 60,
+  "loads": 15,
+  "readable": 8,
+  "looks_right": 3,
+  "looks_right_unstable": [
+    "wikipedia",
+    "walmart"
+  ],
+  "readable_unscored": [],
+  "oracle_failed": [
+    "weather"
+  ],
+  "oracle_blocked": {},
+  "blocked": {},
+  "per_site": {
+    "google": 3,
+    "youtube": 0,
+    "facebook": 1,
+    "instagram": 1,
+    "wikipedia": 2,
+    "lyft": 2,
+    "reddit": 0,
+    "x": 3,
+    "linkedin": 3,
+    "yahoo": 1,
+    "bing": 1,
+    "walmart": 1,
+    "microsoft": 0,
+    "apple": 2,
+    "netflix": 2,
+    "github": 1,
+    "shopify": 2,
+    "squarespace": 0,
+    "cnn": 0,
+    "weather": 1
+  },
+  "scorable_sites": 20,
+  "scorable_points": 26,
+  "scorable_max": 60,
+  "full_run": true
+}
