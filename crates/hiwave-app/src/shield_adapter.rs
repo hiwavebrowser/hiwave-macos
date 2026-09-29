@@ -68,7 +68,7 @@ impl ShieldInterceptHandler {
         // Kick the background engine build immediately so the
         // allow-until-ready window starts closing at construction, not at
         // the first request.
-        let _ = shared_blocker();
+        let _ = shield_worker();
         let blocked_domains: HashSet<String> = BLOCKED_DOMAINS
             .iter()
             .map(|s| s.to_string())
@@ -87,7 +87,7 @@ impl ShieldInterceptHandler {
     pub fn with_counter(blocked_count: Arc<AtomicU64>) -> Self {
         // Production constructor (webview_rustkit path): start closing the
         // pending window here too, not only in new().
-        let _ = shared_blocker();
+        let _ = shield_worker();
         let blocked_domains: HashSet<String> = BLOCKED_DOMAINS
             .iter()
             .map(|s| s.to_string())
@@ -240,8 +240,8 @@ impl InterceptHandler for ShieldInterceptHandler {
         // disables third-party-only rules rather than inventing a party.
         let source = request.referrer.as_ref().unwrap_or(&request.url);
 
-        let blocked = match shared_blocker() {
-            Some(engine) => engine.should_block(&request.url, source, dest_to_shield(dest)),
+        let blocked = match shared_block(&request.url, source, dest_to_shield(dest)) {
+            Some(verdict) => verdict,
             None => {
                 // PENDING FLOOR (Prometheus R1 on this PR): while EasyList is
                 // still compiling/downloading, the interim domain list keeps
@@ -274,33 +274,78 @@ impl InterceptHandler for ShieldInterceptHandler {
 }
 
 
-/// The ONE filter engine per process, built in the background.
+/// The ONE filter engine per process, owned by a dedicated worker thread.
 ///
-/// #346's scar applied in advance: AdBlocker::with_filter_lists() can
-/// DOWNLOAD EasyList synchronously when the 24h cache is stale, and
-/// compiling ~60k rules costs seconds — per handler that is the keychain
-/// bug again with a network dimension. So: one engine behind a OnceLock,
-/// built on a background thread the first time a handler exists, and
-/// intercept() answers Allow until it is ready. The unprotected window is
-/// MEASURED (census `engine_pending`), not hidden; the alternative —
-/// blocking first requests on a possible network fetch — trades a privacy
-/// gap of milliseconds-to-seconds for a startup hang, which is the wrong
-/// trade for a default-on shield. Flagged to Prometheus in the PR for the
-/// policy eye.
-fn shared_blocker() -> Option<&'static hiwave_shield::AdBlocker> {
-    static ENGINE: std::sync::OnceLock<hiwave_shield::AdBlocker> = std::sync::OnceLock::new();
-    static STARTED: std::sync::Once = std::sync::Once::new();
-    STARTED.call_once(|| {
-        std::thread::Builder::new()
-            .name("shield-filter-init".into())
-            .spawn(|| {
+/// Two constraints meet here. #346's scar: with_filter_lists() can DOWNLOAD
+/// EasyList on a stale cache and compiles ~60k rules — seconds, never on a
+/// request path, never per handler. And adblock-rust's inner resource
+/// backend is !Sync + !Send (caught by f1-test-compile on the Mac CI; this
+/// Linux seat cannot compile the app crate — the declared platform split),
+/// so no shared static can hold the engine at all. The engine therefore
+/// lives on ONE worker thread that answers queries over channels: a check
+/// is two channel hops (~µs) against a network fetch it may save. While the
+/// worker is still building — or if it ever dies — callers get None and use
+/// the pending FLOOR, so protection never drops below the pre-EasyList tip.
+struct ShieldQuery {
+    url: String,
+    source: String,
+    resource_type: hiwave_shield::ResourceType,
+    reply: std::sync::mpsc::Sender<bool>,
+}
+
+fn shield_worker() -> Option<std::sync::mpsc::Sender<ShieldQuery>> {
+    use std::sync::mpsc;
+    static WORKER: std::sync::OnceLock<Option<std::sync::Mutex<mpsc::Sender<ShieldQuery>>>> =
+        std::sync::OnceLock::new();
+    static READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    let slot = WORKER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<ShieldQuery>();
+        let spawned = std::thread::Builder::new()
+            .name("shield-filter-worker".into())
+            .spawn(move || {
                 let engine = hiwave_shield::AdBlocker::with_filter_lists();
-                let _ = ENGINE.set(engine);
+                READY.store(true, std::sync::atomic::Ordering::Release);
                 tracing::info!("shield filter engine ready");
+                while let Ok(q) = rx.recv() {
+                    let verdict = match (Url::parse(&q.url), Url::parse(&q.source)) {
+                        (Ok(url), Ok(source)) => {
+                            engine.should_block(&url, &source, q.resource_type)
+                        }
+                        _ => false,
+                    };
+                    let _ = q.reply.send(verdict);
+                }
             })
-            .ok();
+            .is_ok();
+        if spawned {
+            Some(std::sync::Mutex::new(tx))
+        } else {
+            None
+        }
     });
-    ENGINE.get()
+    // Not ready yet (still downloading/compiling) => None => pending floor.
+    if !READY.load(std::sync::atomic::Ordering::Acquire) {
+        return None;
+    }
+    slot.as_ref()
+        .and_then(|m| m.lock().ok().map(|tx| tx.clone()))
+}
+
+/// Ask the worker; None means "floor decides" (building, dead, or hop failed).
+fn shared_block(url: &Url, source: &Url, rt: hiwave_shield::ResourceType) -> Option<bool> {
+    let tx = shield_worker()?;
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    tx.send(ShieldQuery {
+        url: url.as_str().to_string(),
+        source: source.as_str().to_string(),
+        resource_type: rt,
+        reply: reply_tx,
+    })
+    .ok()?;
+    reply_rx
+        .recv_timeout(std::time::Duration::from_millis(250))
+        .ok()
 }
 
 /// Map the loader's fetch destination onto adblock-rust's resource type.
