@@ -1,0 +1,64 @@
+{
+  "id": "yahoo",
+  "url": "https://www.yahoo.com/",
+  "chrome": [
+    {
+      "status": "error",
+      "error": "killed after 120s"
+    },
+    {
+      "url": "https://www.yahoo.com/",
+      "status": "error",
+      "error": "page.screenshot: Timeout 30000ms exceeded.",
+      "nav_error": "page.goto: Timeout 30000ms exceeded.",
+      "oracle_headless": false,
+      "http_status": 200,
+      "elapsed_ms": 106041
+    }
+  ],
+  "oracle_capture": null,
+  "rustkit": {
+    "status": "ok",
+    "html_file": null,
+    "url": "https://www.yahoo.com/",
+    "width": 1280,
+    "height": 800,
+    "frame_path": "trench/realsite/runs/20260929T1930Z-dev275d/yahoo/rustkit.ppm",
+    "layout_path": null,
+    "display_list_path": "trench/realsite/runs/20260929T1930Z-dev275d/yahoo/rustkit-display-list.json",
+    "layout_stats": null,
+    "script_stats": {
+      "ran": 148,
+      "threw": 2,
+      "skipped": 1,
+      "fetch_failed": 0,
+      "over_budget": 7,
+      "bytes": 2857307,
+      "elapsed_ms": 4959
+    },
+    "elapsed_ms": 23395,
+    "error": null,
+    "wall_ms": 23811,
+    "non_background_fraction": 0.2158
+  },
+  "access": {
+    "status": 200,
+    "vendor": null,
+    "blocked": false
+  },
+  "loads": {
+    "pass": true,
+    "why": null
+  },
+  "readable": {
+    "pass": false,
+    "why": "chrome capture failed: killed after 120s",
+    "oracle_failed": true
+  },
+  "looks_right": {
+    "pass": false,
+    "why": "chrome capture failed",
+    "oracle_failed": true
+  },
+  "points": 1
+}
