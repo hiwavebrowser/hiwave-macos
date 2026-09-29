@@ -1541,6 +1541,12 @@ impl Engine {
         };
 
         let result = keyboard::handle_input_key(state, key_code, key, ctrl, shift, alt);
+        if matches!(result, KeyHandleResult::ValueChanged) {
+            // Script reads `value` from the bindings; keep it current.
+            if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+                bindings.sync_control_value(focused.raw(), state.value());
+            }
+        }
         matches!(
             result,
             KeyHandleResult::ValueChanged | KeyHandleResult::SelectionChanged
@@ -10286,11 +10292,25 @@ impl Engine {
     /// once when script settles; `relayout` rebuilds style and layout in
     /// full, so both `DomDirty` buckets take the same path for now.
     fn flush_script_dom_writes(&mut self, id: EngineViewId) -> Result<(), EngineError> {
-        let dirty = self
-            .views
-            .get(&id)
-            .and_then(|view| view.bindings.as_ref())
-            .map_or(DomDirty::Clean, |bindings| bindings.take_dirty());
+        let Some(view) = self.views.get_mut(&id) else {
+            return Ok(());
+        };
+        let Some(bindings) = view.bindings.as_ref() else {
+            return Ok(());
+        };
+        let dirty = bindings.take_dirty();
+        // Script-set control values reach layout through edit state, the
+        // same path typed text takes.
+        for (raw, value) in bindings.take_value_writes() {
+            match view.edit_states.get(&raw) {
+                Some(state) => state.set_value(value),
+                None => {
+                    let state = rustkit_dom::forms::TextEditState::with_value(value);
+                    state.move_to_end(false);
+                    view.edit_states.insert(raw, state);
+                }
+            }
+        }
         if dirty == DomDirty::Clean {
             return Ok(());
         }
@@ -22357,6 +22377,42 @@ mod script_dom_flush_tests {
         engine.execute_script(view, "1").unwrap();
         let text = painted_text(&engine, view);
         assert!(!text.contains("alpha") && text.contains("omega"), "painted: {text}");
+    }
+
+    // A script `value` write paints through edit state (the DOM attribute
+    // is the default and stays put), and typed text reads back in script.
+    #[test]
+    fn script_control_values_are_painted_and_typing_reads_back() {
+        fn input_value(b: &LayoutBox) -> Option<String> {
+            if let BoxType::FormControl(rustkit_layout::FormControlType::TextInput {
+                value, ..
+            }) = &b.box_type
+            {
+                return Some(value.clone());
+            }
+            b.children.iter().find_map(input_value)
+        }
+        let (mut engine, view) =
+            loaded("<html><body><input id='q' value='authored'></body></html>");
+        let layout_value = |e: &Engine| input_value(e.views[&view].layout.as_ref().unwrap());
+        assert_eq!(layout_value(&engine).as_deref(), Some("authored"));
+
+        engine
+            .execute_script(view, "document.getElementById('q').value = 'from script'")
+            .unwrap();
+        assert_eq!(layout_value(&engine).as_deref(), Some("from script"));
+        let document = engine.views[&view].document.clone().unwrap();
+        let q = document.get_element_by_id("q").unwrap();
+        assert_eq!(q.get_attribute("value"), Some("authored"));
+
+        engine.views.get_mut(&view).unwrap().focused_node = Some(q.id);
+        assert!(engine.handle_text_key(view, 0, "!", false, false, false));
+        assert_eq!(
+            engine
+                .execute_script(view, "document.getElementById('q').value")
+                .unwrap(),
+            r#"String("from script!")"#
+        );
     }
 
     // The mutation surface end to end: script tree moves mark the bucket

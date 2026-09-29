@@ -492,6 +492,19 @@ impl DomBindings {
         self.dirty.replace(DomDirty::Clean)
     }
 
+    /// The `<input>`/`<textarea>` values script set since the last call, as
+    /// (raw NodeId, value) in write order. The engine copies them into its
+    /// edit state, which layout paints from, when it flushes `take_dirty`.
+    pub fn take_value_writes(&self) -> Vec<(usize, String)> {
+        self.dom_host.borrow_mut().take_value_writes()
+    }
+
+    /// Tell script what the user typed into a control, so its `value`
+    /// reads the edit state's text rather than the default.
+    pub fn sync_control_value(&self, node: usize, value: String) {
+        self.dom_host.borrow_mut().sync_value(node, value);
+    }
+
     /// Inject global JavaScript objects.
     fn inject_globals(runtime: &mut JsRuntime) -> Result<(), BindingError> {
         // Window object stub. `window` IS the global object, as in every
@@ -1366,8 +1379,8 @@ mod tests {
 
     #[test]
     fn test_input_element_creation() {
-        let runtime = JsRuntime::new().unwrap();
-        let bindings = DomBindings::new(runtime).unwrap();
+        // Form controls are Rust-backed, so they need a document.
+        let bindings = bound("<html><body></body></html>");
 
         bindings
             .evaluate("var input = document.createElement('input')")
@@ -1382,8 +1395,8 @@ mod tests {
 
     #[test]
     fn test_input_element_value() {
-        let runtime = JsRuntime::new().unwrap();
-        let bindings = DomBindings::new(runtime).unwrap();
+        // Form controls are Rust-backed, so they need a document.
+        let bindings = bound("<html><body></body></html>");
 
         bindings
             .evaluate(
@@ -1400,8 +1413,8 @@ mod tests {
 
     #[test]
     fn test_input_element_selection() {
-        let runtime = JsRuntime::new().unwrap();
-        let bindings = DomBindings::new(runtime).unwrap();
+        // Form controls are Rust-backed, so they need a document.
+        let bindings = bound("<html><body></body></html>");
 
         bindings
             .evaluate(
@@ -1422,8 +1435,8 @@ mod tests {
 
     #[test]
     fn test_input_element_select_all() {
-        let runtime = JsRuntime::new().unwrap();
-        let bindings = DomBindings::new(runtime).unwrap();
+        // Form controls are Rust-backed, so they need a document.
+        let bindings = bound("<html><body></body></html>");
 
         bindings
             .evaluate(
@@ -1444,8 +1457,8 @@ mod tests {
 
     #[test]
     fn test_input_element_validation() {
-        let runtime = JsRuntime::new().unwrap();
-        let bindings = DomBindings::new(runtime).unwrap();
+        // Form controls are Rust-backed, so they need a document.
+        let bindings = bound("<html><body></body></html>");
 
         // Empty required field should be invalid
         bindings
@@ -1468,8 +1481,8 @@ mod tests {
 
     #[test]
     fn test_textarea_element() {
-        let runtime = JsRuntime::new().unwrap();
-        let bindings = DomBindings::new(runtime).unwrap();
+        // Form controls are Rust-backed, so they need a document.
+        let bindings = bound("<html><body></body></html>");
 
         bindings
             .evaluate(
