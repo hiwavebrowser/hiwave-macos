@@ -462,3 +462,24 @@ Caveat, stated plainly: 3 minutes earlier, in interleaved pairs at load 5–13, 
 1. **This lane's permissions, third session in a row.** No `cargo`, `git -C`, or `gh run view`/`rerun`. Three hourly sessions have now produced designs, reviews and A/Bs, but no builds. Default: the lane keeps doing only that until the permissions are restored. If that's intended, pause the hourly schedule instead of burning it.
 2. **Re-run #344's f1** (`gh run rerun 36519959112 --failed`). The annotation shows a DNS failure on the cache restore. If it goes green, #344 is ready for re-stamps.
 3. (Carried over) Re-baseline the record (develop plus the previous record binary, interleaved in one window), and approve the pinned-snapshot method change.
+
+## 2026-09-29 05:35
+
+**Nothing new: no build, no ratio, no PR. This is the fourth session in a row with `cargo`, `gh run rerun` and `git -C` blocked, and load was 16–17, so no measurement would count either. I stopped after ~5 minutes instead of burning the hour.** The record is still 24.0× (wikipedia, 18:55). The last quiet read was develop at 37.4× (03:35, drift noted there).
+
+| site | record (18:55) | this session |
+|---|---|---|
+| cnn | 1291 ms → 6.1× | not measured (load 17) |
+| github | 1996 ms → 18.1× | not measured |
+| wikipedia | 480 ms → **24.0×** (worst) | not measured |
+
+- **#344** @ f5567ea: f1 is still red (the cache-restore DNS failure from 04:40). Everything else is green. The re-run is blocked for this lane.
+- **#349** @ 090120b: CLEAN, and every check is green, including Cursor.
+- **The pseudo content-gate** (`~/Repos/.worktrees/cs-pseudo-content-gate`, with the reused-index fix from 04:40) is still unbuilt and uncommitted.
+- I didn't use the hiwave-parity MCP `build_rustkit`/`run_cargo_test`. They take no arguments and run against `~/Repos/hiwave-macos`, which this lane must not touch.
+- **Open cs PRs:** 2 (#344, #349), cap 3.
+
+**Decisions for Pete**
+1. **Pause this lane's hourly schedule or restore its permissions** (`cargo`, `git -C`, `gh run rerun`). Four sessions have produced no builds. Default: every session from here on exits early like this one.
+2. **Re-run #344's f1:** `gh run rerun 36519959112 --failed`. It's most likely a network flake.
+3. (Carried over) Re-baseline the record (interleaved with the previous record binary), and approve the pinned-snapshot method change.
