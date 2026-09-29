@@ -350,6 +350,11 @@ struct ViewState {
     max_scroll_offset: (f32, f32),
     /// External stylesheets loaded from <link> elements.
     external_stylesheets: Vec<Stylesheet>,
+    /// The load skipped its pre-stylesheet layout because the document has
+    /// `<link rel=stylesheet>` (render-blocking, as in Chrome): the layout
+    /// with no sheets was cascaded in full and then thrown away.
+    /// `load_subresources` takes this and lays out even if every sheet failed.
+    initial_layout_deferred: bool,
     /// Headless bounds (only set for headless views, None for window-based views).
     headless_bounds: Option<Bounds>,
     /// What the current document's scripts did on load (see [`ScriptRecord`]).
@@ -1113,6 +1118,7 @@ impl Engine {
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Vec::new(),
+            initial_layout_deferred: false,
             headless_bounds: None,
             script_log: Vec::new(),
             header_referrer_policy: None,
@@ -1171,6 +1177,7 @@ impl Engine {
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Vec::new(),
+            initial_layout_deferred: false,
             headless_bounds: None,
             script_log: Vec::new(),
             header_referrer_policy: None,
@@ -1238,6 +1245,7 @@ impl Engine {
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Vec::new(),
+            initial_layout_deferred: false,
             headless_bounds: Some(bounds),
             script_log: Vec::new(),
             header_referrer_policy: None,
@@ -2224,7 +2232,24 @@ impl Engine {
         // Initial layout and render (inline data:-sourced faces first; the
         // remote ones arrive with the other subresources below)
         self.load_local_web_fonts(id);
-        self.relayout(id)?;
+        // ...unless the document links stylesheets. Those block rendering
+        // (as in Chrome), so a layout now would cascade the whole page
+        // without its sheets only for the sheets relayout to redo it:
+        // the first of three full cascades per load on wikipedia.
+        let defer = self
+            .views
+            .get(&id)
+            .and_then(|v| {
+                let doc = v.document.as_ref()?;
+                Some(!self.discover_external_stylesheets(doc, v.url.as_ref()).is_empty())
+            })
+            .unwrap_or(false);
+        if let Some(view) = self.views.get_mut(&id) {
+            view.initial_layout_deferred = defer;
+        }
+        if !defer {
+            self.relayout(id)?;
+        }
 
         // Load external resources (stylesheets, images, fonts), and fetch
         // the page's scripts at the same time. Scripts still run after the
@@ -2249,6 +2274,18 @@ impl Engine {
         if let Err(e) = subresources {
             warn!(?e, "Failed to load some subresources");
             // Continue even if some resources fail to load
+        }
+        // Still deferred means load_subresources failed before laying out.
+        if !self.nav_superseded(id, generation)
+            && self
+                .views
+                .get(&id)
+                .is_some_and(|v| v.initial_layout_deferred)
+        {
+            if let Some(view) = self.views.get_mut(&id) {
+                view.initial_layout_deferred = false;
+            }
+            self.relayout(id)?;
         }
 
         // Subresource loading awaited the network too: a stop during a
@@ -7422,8 +7459,10 @@ impl Engine {
             .map(|v| !v.external_stylesheets.is_empty())
             .unwrap_or(false);
 
+        let mut deferred = false;
         if let Some(view) = self.views.get_mut(&id) {
             view.external_stylesheets = external_stylesheets;
+            deferred = std::mem::take(&mut view.initial_layout_deferred);
         }
 
         if count > 0 {
@@ -7445,7 +7484,8 @@ impl Engine {
         // the two builds.
         let _style_memo = StyleMemoScope::arm();
 
-        if count > 0 || had_previous || fonts_loaded > 0 {
+        // A deferred first layout happens here even if every sheet failed.
+        if count > 0 || had_previous || fonts_loaded > 0 || deferred {
             self.relayout(id)?;
         }
 
@@ -19512,6 +19552,37 @@ window.addEventListener('load', function () {
         );
         // The sheet that did arrive still applies.
         assert_eq!(engine.views[&view].external_stylesheets.len(), 1);
+    }
+
+    /// The first layout waits for linked sheets; when none of them arrives,
+    /// the page must still be laid out (the deferred layout is not skipped).
+    #[test]
+    fn a_page_whose_sheets_all_fail_is_still_laid_out() {
+        let page = r#"<html><head>
+<link rel="stylesheet" href="/missing.css">
+</head><body>hi</body></html>"#;
+        let port = serve(vec![("/", "text/html", page.to_string())]);
+        let (engine, view, _) = load_timed(EngineConfig::default(), port);
+        let state = &engine.views[&view];
+        assert!(state.external_stylesheets.is_empty());
+        assert!(!state.initial_layout_deferred);
+        assert!(state.layout.is_some(), "no layout after every sheet failed");
+    }
+
+    #[test]
+    fn a_page_with_linked_sheets_is_laid_out_with_them() {
+        let page = r#"<html><head>
+<link rel="stylesheet" href="/a.css">
+</head><body>hi</body></html>"#;
+        let port = serve(vec![
+            ("/", "text/html", page.to_string()),
+            ("/a.css", "text/css", "body { color: blue }".into()),
+        ]);
+        let (engine, view, _) = load_timed(EngineConfig::default(), port);
+        let state = &engine.views[&view];
+        assert_eq!(state.external_stylesheets.len(), 1);
+        assert!(!state.initial_layout_deferred);
+        assert!(state.layout.is_some());
     }
 
     #[test]
